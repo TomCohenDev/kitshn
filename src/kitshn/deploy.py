@@ -27,6 +27,7 @@ from .filesystem import (
 from .errors import KitshnError
 from .git_ops import checkout_recipe
 from .models import KEEP_ROOTS, Deployment, Recipe, Roots
+from .preview_limits import PreviewLimits
 from .runner import CommandRunner
 from .structured_log import last_deploy_entry
 
@@ -46,12 +47,16 @@ def deploy_recipe(
     params_file: Path,
     ref: str | None,
     environment: str,
+    limits: PreviewLimits | None = None,
     roots: Roots | None = None,
     runner: CommandRunner | None = None,
 ) -> DeployResult:
     runner = runner or CommandRunner()
     roots = roots or roots_from_env()
     deployment = Deployment.create(Recipe.parse(recipe_name), environment, roots)
+    if limits is not None and deployment.environment == "prod":
+        msg = "preview limits never apply to prod; deploy prod without --limit-cpus and --limit-memory"
+        raise KitshnError(msg)
 
     with _deploy_lock(roots, deployment, runner):
         ensure_deployment_paths(deployment)
@@ -64,7 +69,7 @@ def deploy_recipe(
             # step fails. The GitHub runner turns this line into an annotation.
             print(f"::warning title=KitSHn::{warning}", flush=True)
         atomic_copy_params(params_file, deployment)
-        changed_services = apply_compose(deployment, runner)
+        changed_services = apply_compose(deployment, runner, limits)
         changed_services.extend(
             recreate_dependent_services(deployment.recipe, deployment, deployment.roots, runner)
         )
@@ -160,12 +165,12 @@ def set_deployment_state(
     if not has_compose_file(deployment):
         return deployment
 
-    from .compose import compose_command
+    from .compose import compose_command, compose_env
 
     runner.run(
         compose_command(deployment, action),
         cwd=deployment.deployment_root,
-        env=deployment.runtime_env,
+        env=compose_env(deployment),
     )
     return deployment
 

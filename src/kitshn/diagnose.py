@@ -8,7 +8,7 @@ import stat
 from typing import Literal
 
 from .caddy import caddy_service_user, caddy_validate_command, redact_caddy_env
-from .compose import compose_command, compose_services, has_compose_file, render_compose_config
+from .compose import compose_command, compose_env, compose_services, has_compose_file, render_compose_config
 from .models import Deployment, Recipe, Roots
 from .runner import CommandRunner
 
@@ -55,7 +55,7 @@ def diagnose_deployment(
         )
     )
     if compose_exists:
-        checks.append(_command_check("compose ps", compose_command(deployment, "ps", "--format", "json"), runner, cwd=deployment.deployment_root, env=deployment.runtime_env))
+        checks.append(_command_check("compose ps", compose_command(deployment, "ps", "--format", "json"), runner, cwd=deployment.deployment_root, env=compose_env(deployment)))
         checks.extend(_socket_proxy_network_checks(deployment, runner))
 
     caddyfile = deployment.generated_caddyfile

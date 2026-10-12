@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-from .compose import compose_command, has_compose_file
+from .compose import compose_command, compose_env, has_compose_file
 from .errors import KitshnError
 from .filesystem import roots_from_env
 from .models import Deployment, Recipe, Roots
@@ -40,7 +40,7 @@ def show_logs(
         args.append("--follow")
     if service:
         args.append(service)
-    runner.run(compose_command(deployment, *args), cwd=deployment.deployment_root, env=deployment.runtime_env)
+    runner.run(compose_command(deployment, *args), cwd=deployment.deployment_root, env=compose_env(deployment))
 
 
 def _show_file_logs(root: Path, service: str | None, *, follow: bool, runner: CommandRunner) -> None:

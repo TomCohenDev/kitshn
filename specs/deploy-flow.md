@@ -6,7 +6,7 @@ One deploy operation. The whole operation runs under the host deploy lock, see b
 3. Use git in the checkout to determine current and target refs.
 4. Copy `--params-file` atomically into `/params/<owner>/<repo>/<environment>/params.env` with mode `600`.
 5. Clear and recreate `/deployments/<owner>/<repo>/<environment>/.kitshn/sockets` for runtime Unix socket leftovers. This runs after step 6 succeeds and just before step 7, so a failed pull or build keeps the running containers and their socket serving.
-6. Pull external images and build local images with Compose using `--env-file`.
+6. Pull external images and build local images with Compose using `--env-file`. With preview limits, KitSHn first applies them; see "Preview limits" below.
 7. Run Compose with `--env-file` when the recipe has Compose. Recipe services are applied with `docker compose up -d --remove-orphans --force-recreate` so services that bind Unix sockets are recreated after socket cleanup.
 8. Roll logs under `KITSHN_LOG_DIR` for each service that will be recreated: rename existing log files in the service's log subdirectory to `<name>.<timestamp>` before the service restarts.
 9. Recreate all services in this recipe.
@@ -31,6 +31,15 @@ Host deploy lock ([#11](https://github.com/Yarden-zamir/kitshn/issues/11)):
 - `--dry-run` does not take the lock.
 
 After `deploy` returns, the reusable workflow verifies the result from the GitHub runner: it requests the public URL inferred from `Caddyfile.j2` until it answers with a status below 500, writes the URL, status, and content type to the job summary, and attaches them to the GitHub deployment. A recipe without one concrete hostname skips the check. From the laptop, `kitshn track` performs the same verification plus a `kitshn status` check on the VPS; see [CLI](cli.md).
+
+Preview limits (`deploy --limit-cpus <n> --limit-memory <size>`, from the `limits` of a `pull_request` entry; see [CI Rules](ci.md)):
+
+- `deploy` fails at once when the environment is `prod`.
+- Every deploy first removes `.kitshn/compose.preview-limits.yml` from the checkout and renders the Compose config without it. A deploy without limits stops there, so its containers leave the slice when they are recreated.
+- With limits, KitSHn writes `/etc/systemd/system/kitshn-previews-<owner>-<repo>.slice` with `CPUQuota`, `MemoryMax`, and `MemorySwapMax=0`, and runs `systemctl daemon-reload` when the file changed. The owner and repo are lowercase, with `-` escaped as `\x2d`, so the slice sits under `kitshn-previews.slice`. All limited deployments of the recipe share the slice, and the last deploy sets its values.
+- It writes `.kitshn/compose.preview-limits.yml`, which sets `cgroup_parent` to the slice for each service. While that file exists, every Compose command of the deployment runs with `COMPOSE_FILE` set to the compose file and override file that Compose finds on its own, plus this file, and with `BUILDX_BUILDER` set to the recipe's preview builder.
+- The preview builder is the buildx builder `kitshn-previews.<owner>.<repo>` with the `docker-container` driver. KitSHn creates it when it is missing, starts it, and sets the memory, swap, and CPU limits of its container with `docker update` on every limited deploy. Build steps run inside that container. buildx ignores its `cgroup-parent` option with the systemd cgroup driver, so the builder does not join the slice.
+- `destroy` and `prune` do not remove the slice or the builder.
 
 `deploy` reads params from `--params-file`. CI builds this file from `KITSHN_*` vars/secrets and pushes it over SSH. The VPS does not call the GitHub API.
 

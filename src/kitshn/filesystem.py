@@ -9,6 +9,7 @@ import os
 from pathlib import Path, PurePosixPath
 import shutil
 import sys
+import tempfile
 import time
 
 from .errors import KitshnError
@@ -116,6 +117,23 @@ def atomic_copy_params(source: Path, deployment: Deployment) -> None:
         shutil.copyfileobj(src, dst)
     temp_path.chmod(0o600)
     os.replace(temp_path, deployment.params_file)
+
+
+def write_if_changed(path: Path, content: str, *, group: int | None = None, mode: int = 0o644) -> bool:
+    """Write `content` via rename when it differs, as root:`group` with `mode`. True when it wrote."""
+
+    if path.exists() and path.read_text(encoding="utf-8") == content:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    with os.fdopen(handle, "w", encoding="utf-8") as temp:
+        temp.write(content)
+    temp_path = Path(temp_name)
+    if group is not None:
+        os.chown(temp_path, 0, group)
+    temp_path.chmod(mode)
+    os.replace(temp_path, path)
+    return True
 
 
 def read_env_file(path: Path) -> dict[str, str]:

@@ -74,6 +74,7 @@ deploy:
         "ref=abcdef123456",
         "url=",
         "keep=",
+        "limits=",
     ]
 
 
@@ -106,6 +107,7 @@ deploy:
         "ref=head-sha",
         "url=",
         "keep=",
+        "limits=",
     ]
 
 

@@ -24,6 +24,7 @@ from .caddy_host import CaddyHostSettings
 from .errors import KitshnError, NoMatchingDeployment
 from .httpcheck import Fetch, HttpResponse, fetch_url
 from .models import Deployment, Recipe
+from .preview_limits import PreviewLimits, limits_output, parse_limits_output
 from .runner import CommandRunner
 from .resolve import DeployEvent, ResolveInput, keep_output, parse_keep, resolve_deployment
 
@@ -44,6 +45,7 @@ class ActionResolveResult:
     ref: str | None = None
     url: str | None = None
     keep: tuple[str, ...] | None = None
+    limits: PreviewLimits | None = None
 
     def output_lines(self) -> list[str]:
         lines = [f"matched={str(self.matched).lower()}"]
@@ -57,6 +59,7 @@ class ActionResolveResult:
             lines.append(f"ref={self.ref}")
         lines.append(f"url={self.url or ''}")
         lines.append(f"keep={keep_output(self.keep)}")
+        lines.append(f"limits={limits_output(self.limits)}")
         return lines
 
 
@@ -105,6 +108,7 @@ def resolve_github_action(config: Path = Path(".kitshn.yaml")) -> ActionResolveR
         ref=ref,
         url=_resolved_public_url(config.parent, result.env),
         keep=result.keep,
+        limits=result.limits,
     )
 
 
@@ -339,6 +343,7 @@ def deploy_over_ssh(params_file: Path) -> None:
                             ref,
                             "--environment",
                             environment,
+                            *deploy_limit_flags(),
                         ]
                     ),
                     shlex.join(["rm", "-f", remote_params]),
@@ -346,6 +351,13 @@ def deploy_over_ssh(params_file: Path) -> None:
             ]
         )
         _run(["ssh", *ssh_args, vps_host, remote_command])
+
+
+def deploy_limit_flags() -> list[str]:
+    """`deploy` flags for the matched entry's `limits`, from KITSHN_LIMITS. None when it is empty."""
+
+    limits = parse_limits_output(os.environ.get("KITSHN_LIMITS") or "")
+    return [] if limits is None else limits.deploy_flags()
 
 
 def bootstrap_over_ssh(caddy_host: CaddyHostSettings, *, kitshn_ref: str | None = None) -> None:

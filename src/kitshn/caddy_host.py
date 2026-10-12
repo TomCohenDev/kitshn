@@ -10,7 +10,6 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-import os
 import stat
 import sys
 import tempfile
@@ -27,7 +26,7 @@ from .caddy import (
     redact_caddy_env,
 )
 from .errors import KitshnError
-from .filesystem import read_env_file
+from .filesystem import read_env_file, write_if_changed
 from .runner import CommandRunner
 
 CADDY_BINARY = Path("/usr/bin/caddy")
@@ -185,8 +184,8 @@ def _apply(settings: CaddyHostSettings, built: Path | None, runner: CommandRunne
             # Only root and the Caddy service user read the token; validation runs as that user.
             group = caddy_group(runner)
             mode = 0o600 if group is None else 0o640
-            env_changed = _write_if_changed(CADDY_ENV_FILE, env, group=group, mode=mode)
-            drop_in_changed = _write_if_changed(SYSTEMD_DROP_IN, _drop_in())
+            env_changed = write_if_changed(CADDY_ENV_FILE, env, group=group, mode=mode)
+            drop_in_changed = write_if_changed(SYSTEMD_DROP_IN, _drop_in())
         options_changed = False
         if settings.acme_email or settings.dns_provider:
             if settings.dns_provider and not _env_file_has_values():
@@ -194,9 +193,9 @@ def _apply(settings: CaddyHostSettings, built: Path | None, runner: CommandRunne
                 msg = "--dns-provider needs the token in Caddy's environment: pass --caddy-env-file"
                 raise KitshnError(msg)
             options = _options(settings.acme_email, settings.dns_provider, settings.dns_zones)
-            options_changed = _write_if_changed(CADDY_OPTIONS_FILE, options)
+            options_changed = write_if_changed(CADDY_OPTIONS_FILE, options)
             base = CADDY_BASE_CONFIG.read_text(encoding="utf-8") if CADDY_BASE_CONFIG.exists() else ""
-            options_changed |= _write_if_changed(CADDY_BASE_CONFIG, with_options_import(base))
+            options_changed |= write_if_changed(CADDY_BASE_CONFIG, with_options_import(base))
         if not (binary_changed or env_changed or drop_in_changed or options_changed):
             return False
 
@@ -310,23 +309,6 @@ def _env_file_check() -> HostCheck:
     if not SYSTEMD_DROP_IN.exists():
         return HostCheck(name, "fail", f"missing {SYSTEMD_DROP_IN}; Caddy does not load the token")
     return HostCheck(name, "ok", str(CADDY_ENV_FILE))
-
-
-def _write_if_changed(path: Path, content: str, *, group: int | None = None, mode: int = 0o644) -> bool:
-    """Write `content` via rename when it differs, as root:`group` with `mode`. True when it wrote."""
-
-    if path.exists() and path.read_text(encoding="utf-8") == content:
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    with os.fdopen(handle, "w", encoding="utf-8") as temp:
-        temp.write(content)
-    temp_path = Path(temp_name)
-    if group is not None:
-        os.chown(temp_path, 0, group)
-    temp_path.chmod(mode)
-    os.replace(temp_path, path)
-    return True
 
 
 @dataclass(frozen=True, slots=True)

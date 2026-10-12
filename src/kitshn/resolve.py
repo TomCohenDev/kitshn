@@ -10,6 +10,7 @@ import yaml
 
 from .errors import KitshnError, NoMatchingDeployment
 from .models import KEEP_ROOTS, sanitize_environment_name
+from .preview_limits import PreviewLimits, limits_output, parse_limits
 
 DeployEvent = Literal["push", "pull_request", "workflow_dispatch"]
 
@@ -31,6 +32,8 @@ class ResolveResult:
     ephemeral: bool
     # Paths a teardown keeps, relative to the environment's data folders. None keeps all.
     keep: tuple[str, ...] | None = None
+    # CPU and memory limits for the deploy. Only pull_request entries set them.
+    limits: PreviewLimits | None = None
 
     def github_output_lines(self) -> list[str]:
         return [
@@ -38,6 +41,7 @@ class ResolveResult:
             f"action={self.action}",
             f"ephemeral={str(self.ephemeral).lower()}",
             f"keep={keep_output(self.keep)}",
+            f"limits={limits_output(self.limits)}",
         ]
 
 
@@ -92,7 +96,11 @@ def load_deploy_entries(config_path: Path) -> list[dict[str, Any]]:
         if not isinstance(entry, dict):
             msg = f"deploy entry {index} must be a mapping"
             raise KitshnError(msg)
-        normalized_entries.append(_normalize_yaml_mapping(entry))
+        normalized = _normalize_yaml_mapping(entry)
+        if "limits" in normalized and normalized.get("on") != "pull_request":
+            msg = f"deploy entry {index}: limits applies only to on: pull_request entries; production is never limited"
+            raise KitshnError(msg)
+        normalized_entries.append(normalized)
     return normalized_entries
 
 
@@ -123,6 +131,7 @@ def resolve_deployment(config_path: Path, event: ResolveInput) -> ResolveResult:
             action=action,
             ephemeral=bool(entry.get("ephemeral", False)),
             keep=parse_keep(entry.get("keep")),
+            limits=parse_limits(entry.get("limits")),
         )
 
     raise NoMatchingDeployment

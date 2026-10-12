@@ -139,6 +139,21 @@ less, list what stays in the entry:
 To clean up what closed previews kept, run
 `kitshn prune owner/repo --vps-host deploy@example.com`. It lists first; `--yes` deletes.
 
+Previews share the VPS with production. To cap what they use, add `limits` to the
+`pull_request` entry:
+
+```yaml
+- on: pull_request
+  name: pr-{pr}
+  ephemeral: true
+  limits: { cpus: 2, memory: 3g }   # memory takes m or g
+```
+
+All previews of the repo then share 2 CPUs and 3 GB. When they need more memory, the kernel
+stops a process in a preview, not in production. Preview image builds run in a builder of
+their own with the same caps, so the first build after you add `limits` has no cache. Production
+is never limited: `limits` on any other entry fails the resolve job.
+
 ### Try Before Pushing
 
 ```bash

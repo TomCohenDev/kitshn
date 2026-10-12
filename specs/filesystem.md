@@ -4,6 +4,8 @@ Canonical deployment-owned paths use `owner/repo/environment` ordering.
 ```text
 /deployments/<owner>/<repo>/<environment>
 /deployments/<owner>/<repo>/<environment>/.kitshn/sockets
+/deployments/<owner>/<repo>/<environment>/.kitshn/compose.preview-limits.yml
+/etc/systemd/system/kitshn-previews-<owner>-<repo>.slice
 /deployments/Caddyfile
 /deployments/.kitshn-deploy.lock
 /params/<owner>/<repo>/<environment>
@@ -17,6 +19,7 @@ Deployment root:
 - Contains generated deployment `Caddyfile` when public traffic is routed.
 - Contains `logs` symlink to `/logs/<owner>/<repo>/<environment>`.
 - Contains `.kitshn/sockets`, a runtime Unix socket directory cleared before each deploy.
+- Contains `.kitshn/compose.preview-limits.yml` only while the deployment has preview limits. See [Deploy Flow](deploy-flow.md).
 
 Caddy manifest:
 

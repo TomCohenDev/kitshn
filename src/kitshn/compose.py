@@ -9,7 +9,18 @@ from typing import Any, Iterable
 from .errors import KitshnError
 from .filesystem import reset_socket_paths, roll_service_logs, walk_deployments
 from .models import Deployment, Recipe, Roots
+from .preview_limits import PreviewLimits, apply_preview_limits, preview_builder
 from .runner import CommandRunner
+
+# The file names that Compose finds on its own, in its order of preference (compose-go
+# DefaultFileNames and DefaultOverrideFileNames). Revisit if Compose changes them.
+COMPOSE_FILE_NAMES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
+COMPOSE_OVERRIDE_NAMES = (
+    "compose.override.yml",
+    "compose.override.yaml",
+    "docker-compose.override.yml",
+    "docker-compose.override.yaml",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +46,7 @@ def render_compose_config(deployment: Deployment, runner: CommandRunner) -> dict
     result = runner.run(
         compose_command(deployment, "config", "--format", "json"),
         cwd=deployment.deployment_root,
-        env=deployment.runtime_env,
+        env=compose_env(deployment),
         capture=True,
     )
     try:
@@ -104,7 +115,13 @@ def ignored_dotenv_warning(recipe_dir: Path) -> str | None:
     )
 
 
-def apply_compose(deployment: Deployment, runner: CommandRunner) -> list[str]:
+def apply_compose(
+    deployment: Deployment, runner: CommandRunner, limits: PreviewLimits | None = None
+) -> list[str]:
+    # The override of the last deploy names that deploy's services. Remove it first: the config
+    # below is then the recipe's own, and a deploy without limits runs without them.
+    if not runner.dry_run:
+        deployment.preview_limits_file.unlink(missing_ok=True)
     config = render_compose_config(deployment, runner)
     services = compose_services(config)
     if not services:
@@ -112,6 +129,8 @@ def apply_compose(deployment: Deployment, runner: CommandRunner) -> list[str]:
         return []
 
     service_names = [service.name for service in services]
+    if limits is not None:
+        apply_preview_limits(deployment, service_names, limits, runner)
     external_services = [service for service in services if service.image and not service.has_build]
     build_services = [service for service in services if service.has_build]
 
@@ -119,13 +138,13 @@ def apply_compose(deployment: Deployment, runner: CommandRunner) -> list[str]:
         runner.run(
             compose_command(deployment, "pull", "--ignore-buildable", *[s.name for s in external_services]),
             cwd=deployment.deployment_root,
-            env=deployment.runtime_env,
+            env=compose_env(deployment),
         )
     if build_services:
         runner.run(
             compose_command(deployment, "build", *[s.name for s in build_services]),
             cwd=deployment.deployment_root,
-            env=deployment.runtime_env,
+            env=compose_env(deployment),
         )
 
     # Clear sockets only once images are ready: a failed pull or build keeps the running
@@ -135,7 +154,7 @@ def apply_compose(deployment: Deployment, runner: CommandRunner) -> list[str]:
     runner.run(
         compose_command(deployment, "up", "-d", "--remove-orphans", "--force-recreate"),
         cwd=deployment.deployment_root,
-        env=deployment.runtime_env,
+        env=compose_env(deployment),
     )
     wait_for_healthchecks(deployment, services, runner)
     return service_names
@@ -162,7 +181,7 @@ def recreate_dependent_services(
         runner.run(
             compose_command(deployment, "up", "-d", "--no-deps", "--force-recreate", *names),
             cwd=deployment.deployment_root,
-            env=deployment.runtime_env,
+            env=compose_env(deployment),
         )
         wait_for_healthchecks(deployment, dependent, runner)
         changed.extend(f"{deployment.identity}:{name}" for name in names)
@@ -191,7 +210,7 @@ def compose_service_status(deployment: Deployment, runner: CommandRunner) -> lis
     result = runner.run(
         compose_command(deployment, "ps", "--format", "json"),
         cwd=deployment.deployment_root,
-        env=deployment.runtime_env,
+        env=compose_env(deployment),
         capture=True,
         check=False,
     )
@@ -214,7 +233,7 @@ def run_compose_command(
     if not args:
         msg = "compose command requires docker compose arguments, for example: kitshn compose owner/repo -- ps"
         raise KitshnError(msg)
-    runner.run(compose_command(deployment, *args), cwd=deployment.deployment_root, env=deployment.runtime_env)
+    runner.run(compose_command(deployment, *args), cwd=deployment.deployment_root, env=compose_env(deployment))
 
 
 def wait_for_healthchecks(
@@ -250,7 +269,7 @@ def _service_health(deployment: Deployment, service_name: str, runner: CommandRu
     ps = runner.run(
         compose_command(deployment, "ps", "-q", service_name),
         cwd=deployment.deployment_root,
-        env=deployment.runtime_env,
+        env=compose_env(deployment),
         capture=True,
     )
     container_ids = [line.strip() for line in ps.stdout.splitlines() if line.strip()]
@@ -262,6 +281,30 @@ def _service_health(deployment: Deployment, service_name: str, runner: CommandRu
         capture=True,
     )
     return inspect.stdout.strip() or None
+
+
+def compose_env(deployment: Deployment) -> dict[str, str]:
+    """The environment of every Compose command of a deployment.
+
+    A limited deployment adds its override to the files that Compose finds on its own, and
+    selects the recipe's preview builder. So a later command, such as an `up` that rebuilds an
+    image with `pull_policy: build`, keeps the limits too.
+    """
+
+    if not deployment.preview_limits_file.exists():
+        return deployment.runtime_env
+    root = deployment.deployment_root
+    base = [root / name for name in COMPOSE_FILE_NAMES if (root / name).exists()][:1]
+    override = [root / name for name in COMPOSE_OVERRIDE_NAMES if (root / name).exists()][:1]
+    if not base:
+        msg = f"deployment has preview limits but no compose file: {deployment.identity}"
+        raise KitshnError(msg)
+    files = [*base, *override, deployment.preview_limits_file]
+    return {
+        **deployment.runtime_env,
+        "COMPOSE_FILE": ":".join(str(path) for path in files),
+        "BUILDX_BUILDER": preview_builder(deployment.recipe),
+    }
 
 
 def compose_command(deployment: Deployment, *args: str) -> list[str]:

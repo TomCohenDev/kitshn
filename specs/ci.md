@@ -32,6 +32,12 @@ Fields per entry:
   `logs`, stays inside it, and has no `..`; anything else fails the resolve job. Without `keep`,
   the teardown keeps both folders whole. With a list, it removes everything in them but the
   listed paths, so `keep: []` removes both. Named volumes and built images are removed either way.
+- `limits` — for `pull_request` entries only: `{cpus: <number>, memory: <whole number>m|g}`,
+  such as `{cpus: 2, memory: 3g}`. All deployments of the recipe that a limited entry deploys
+  share these CPU and memory caps, and their image builds get the same caps; see
+  [Deploy Flow](deploy-flow.md). Both keys are required. `limits` on any other entry, a value
+  that is not in this format, or another key fails the resolve job. Without `limits`, nothing is
+  limited. Production is never limited.
 
 First matching entry wins. No match means no auto-deploy.
 
@@ -77,8 +83,8 @@ The workflow YAML should stay declarative. Non-trivial logic belongs in KitSHn C
 
 Jobs:
 
-- `resolve` — no `environment:` binding. Runs `kitshn ci-resolve` and emits `matched`, `env`, `action`, `ephemeral`, `ref`, `url` (the public URL inferred from `Caddyfile.j2`, or empty), and `keep` (the matched entry's `keep` list as JSON, or empty when unset).
-- `deploy` — `environment: ${{ needs.resolve.outputs.env }}`, with `url` set to the resolved public URL. GitHub stores a deployment's `environment_url` from this setting, not from a posted status, so this gives each deployment its "View deployment" link. Runs `kitshn ci-preflight`, which fails before any SSH with the `kitshn recipe auth` command when `KITSHN_VPS_HOST` or `KITSHN_SSH_KEY` is missing; then `kitshn ci-write-params`; then `kitshn ci-deploy`, which scps params to the VPS and runs the hosted KitSHn CLI remotely through `uvx`; then `kitshn ci-verify`, which requests the public URL and records status, content type, and URL in the job summary and on the GitHub deployment. The summary also prints the `kitshn track` command for the run.
+- `resolve` — no `environment:` binding. Runs `kitshn ci-resolve` and emits `matched`, `env`, `action`, `ephemeral`, `ref`, `url` (the public URL inferred from `Caddyfile.j2`, or empty), `keep` (the matched entry's `keep` list as JSON, or empty when unset), and `limits` (the matched entry's `limits` as JSON, or empty when unset).
+- `deploy` — `environment: ${{ needs.resolve.outputs.env }}`, with `url` set to the resolved public URL. GitHub stores a deployment's `environment_url` from this setting, not from a posted status, so this gives each deployment its "View deployment" link. Runs `kitshn ci-preflight`, which fails before any SSH with the `kitshn recipe auth` command when `KITSHN_VPS_HOST` or `KITSHN_SSH_KEY` is missing; then `kitshn ci-write-params`; then `kitshn ci-deploy`, which scps params to the VPS and runs the hosted KitSHn CLI remotely through `uvx`, with `--limit-cpus` and `--limit-memory` only when `limits` is not empty; then `kitshn ci-verify`, which requests the public URL and records status, content type, and URL in the job summary and on the GitHub deployment. The summary also prints the `kitshn track` command for the run.
 - `teardown` — `environment: ${{ needs.resolve.outputs.env }}`. Runs `kitshn ci-preflight`, then `kitshn ci-destroy`, which runs the hosted KitSHn CLI remotely through `uvx` as `kitshn destroy ... --volumes`, plus `--purge` for `keep: []` or one `--keep` per listed path. When `ephemeral` is `true`, `kitshn ci-delete-environment` calls `DELETE /repos/{owner}/{repo}/environments/{name}`.
 
 `deploy` and `teardown` share a concurrency group per `<owner>/<repo>/<environment>` with `cancel-in-progress: false`, so they apply in push order. `ci-deploy` and `ci-destroy` pass `ServerAliveInterval=30` to `ssh`, so a long wait for the host deploy lock keeps the connection alive. With the optional variable `KITSHN_SSH_KNOWN_HOSTS` (a known_hosts line) in the workflow environment, `ci-deploy`, `ci-destroy`, and `ci-bootstrap` accept only that host key (`StrictHostKeyChecking=yes`); without it, they trust the first key (`accept-new`). The reusable `deploy.yml` does not pass the variable yet.

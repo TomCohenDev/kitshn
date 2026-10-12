@@ -146,3 +146,5 @@ file. All take `--environment` (default `prod`) and `--vps-host <vps>`.
   volume. `kitshn prune <owner/repo> --vps-host <vps>` lists and, with `--yes`, removes them.
 - Singleton stateful services should usually keep only `main -> prod`; previews need isolated
   state and DNS.
+- `limits: {cpus: 2, memory: 3g}` on the `pull_request` entry caps all previews of the repo
+  together, and their builds. A preview that needs more memory than that fails, not the host.

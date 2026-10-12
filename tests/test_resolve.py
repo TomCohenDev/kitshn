@@ -25,7 +25,7 @@ deploy:
 
     result = resolve_deployment(config, ResolveInput(event="push", branch="main", sha="abcdef123"))
 
-    assert result.github_output_lines() == ["env=prod", "action=deploy", "ephemeral=false", "keep="]
+    assert result.github_output_lines() == ["env=prod", "action=deploy", "ephemeral=false", "keep=", "limits="]
 
 
 def test_resolve_first_match_wins(tmp_path: Path) -> None:

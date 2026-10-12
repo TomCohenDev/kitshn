@@ -119,6 +119,12 @@ class Deployment:
         return self.deployment_root / ".kitshn" / "sockets"
 
     @property
+    def preview_limits_file(self) -> Path:
+        """Compose override that puts the services in the preview slice; present only when limited."""
+
+        return self.deployment_root / ".kitshn" / "compose.preview-limits.yml"
+
+    @property
     def default_socket(self) -> Path:
         return self.socket_root / "app.sock"
 

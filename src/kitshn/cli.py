@@ -42,6 +42,7 @@ from .installer_registry import installer_choices, load_installers
 from .logs import show_logs
 from .models import Deployment, Recipe
 from .params import param_summaries, param_value
+from .preview_limits import PreviewLimits
 from .prune import find_leftovers, remove_leftovers
 from .recipe_auth import authorize_recipe
 from .remote import forward_invocation_to_vps
@@ -496,15 +497,34 @@ def deploy(
     params_file: Annotated[Path, Parameter("--params-file", help="Opaque params.env file.")],
     ref: Annotated[str | None, Parameter("--ref", help="Branch, tag, or SHA to deploy.")] = None,
     environment: Annotated[str, Parameter("--environment", help="GitHub Environment name.")] = "prod",
+    limit_cpus: Annotated[
+        float | None,
+        Parameter(
+            "--limit-cpus",
+            help="Preview limit: CPUs that all limited deployments of the recipe share, and that its preview builds get. Needs --limit-memory.",
+        ),
+    ] = None,
+    limit_memory: Annotated[
+        str | None,
+        Parameter(
+            "--limit-memory",
+            help="Preview limit: memory, such as 512m or 3g, that all limited deployments of the recipe share, and that its preview builds get. Needs --limit-cpus.",
+        ),
+    ] = None,
     dry_run: Annotated[bool, Parameter("--dry-run", help="Print commands without running them.")] = False,
 ) -> None:
     """Deploy a recipe to an environment."""
 
+    if (limit_cpus is None) != (limit_memory is None):
+        msg = "pass --limit-cpus and --limit-memory together"
+        raise KitshnError(msg)
+    limits = None if limit_cpus is None else PreviewLimits.parse(limit_cpus, limit_memory)
     result = deploy_recipe(
         recipe,
         params_file=params_file,
         ref=ref,
         environment=environment,
+        limits=limits,
         runner=CommandRunner(dry_run=dry_run),
     )
     print(f"{ROCKET} deployed")

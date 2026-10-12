@@ -82,6 +82,8 @@ Exits non-zero when any step fails.
 
 - `deploy` requires `--params-file` pointing at a key/value file. The file is opaque: the
   `KITSHN_` selection and prefix-stripping happen in CI before the file is built.
+- `deploy --limit-cpus <n> --limit-memory <size>` applies preview limits; the two flags go
+  together, and they fail for `prod`. See [Deploy Flow](deploy-flow.md).
 - `destroy` removes the deployment's containers, networks, and locally built images by Compose
   project name, from the deployments root, where no compose file is. So it works when the
   checkout is gone or its compose file changed since the last deploy. Pulled images stay cached.

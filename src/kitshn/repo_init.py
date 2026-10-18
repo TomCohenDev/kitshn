@@ -59,7 +59,7 @@ def init_recipe_repo(
         files[Path("compose.yml")] = _compose_yml()
     if routing:
         files[Path("Caddyfile.j2")] = _caddyfile_j2()
-        files[Path(".gitignore")] = "Caddyfile\n"
+        files[Path(".gitignore")] = "/Caddyfile\n"
     if template == "static":
         resolved_hostname = hostname or PLACEHOLDER_HOSTNAME
         resolved_site_dir = (site_dir or DEFAULT_SITE_DIR).strip("/")
@@ -200,7 +200,7 @@ Caddyfile.j2
 *.md
 .DS_Store
 """,
-        Path(".gitignore"): "Caddyfile\n",
+        Path(".gitignore"): "/Caddyfile\n",
     }
 
 

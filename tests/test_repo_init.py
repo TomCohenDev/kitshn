@@ -87,7 +87,7 @@ def test_init_recipe_repo_adds_optional_docker_and_routing_files(tmp_path: Path)
     assert "# Caddyfiles support comments with #." in caddyfile
     assert "# Preview-safe hostname example." in caddyfile
     assert '# {{ host("app.example.com") }} {' in caddyfile
-    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "Caddyfile\n"
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "/Caddyfile\n"
 
 
 def test_init_recipe_repo_refuses_to_overwrite_without_force(tmp_path: Path) -> None:
@@ -185,6 +185,8 @@ def test_init_static_template_writes_a_complete_caddy_socket_recipe(tmp_path: Pa
     assert "encode zstd gzip {\n\t\tmatch {\n\t\t\theader Content-Type text/*" in container_caddyfile
     assert "stale socket" in container_caddyfile
     assert "socat" not in (tmp_path / "compose.yml").read_text(encoding="utf-8")
+    # A bare `Caddyfile` pattern also ignores container/Caddyfile, and the first image build fails.
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "/Caddyfile\n"
     compose = (tmp_path / "compose.yml").read_text(encoding="utf-8")
     assert "${KITSHN_SOCKET_DIR}:${KITSHN_SOCKET_DIR}" in compose
     assert 'test: ["CMD", "test", "-S", "${KITSHN_DEFAULT_SOCKET}"]' in compose

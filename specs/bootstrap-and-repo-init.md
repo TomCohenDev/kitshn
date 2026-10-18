@@ -68,7 +68,8 @@ Optional flags add optional contract examples:
 
 - `--docker` writes a commented `compose.yml` with KitSHn runtime env, Unix socket ingress, and label examples.
 - `--routing` writes a commented preview-safe `Caddyfile.j2` routing to `unix//{{ paths.default_socket }}`,
-  and a `.gitignore` for the generated `Caddyfile` artifact.
+  and a `.gitignore` with `/Caddyfile`. The pattern ignores only the generated root `Caddyfile`
+  artifact, not `container/Caddyfile` of the static template.
 - `--template static` writes a complete static-site recipe: `Dockerfile` (`caddy:2-alpine`
   copying `container/Caddyfile` and the `--site-dir`, default `site`), `container/Caddyfile`
   binding `unix/{$KITSHN_DEFAULT_SOCKET}|0666` with an explicit `encode` match block,

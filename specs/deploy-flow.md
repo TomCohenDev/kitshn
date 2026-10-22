@@ -6,7 +6,7 @@ One deploy operation. The whole operation runs under the host deploy lock, see b
 3. Use git in the checkout to determine current and target refs.
 4. Copy `--params-file` atomically into `/params/<owner>/<repo>/<environment>/params.env` with mode `600`.
 5. Clear and recreate `/deployments/<owner>/<repo>/<environment>/.kitshn/sockets` for runtime Unix socket leftovers. This runs after step 6 succeeds and just before step 7, so a failed pull or build keeps the running containers and their socket serving.
-6. Pull external images and build local images with Compose using `--env-file`. With preview limits, KitSHn first applies them; see "Preview limits" below.
+6. Pull external images and build local images with Compose using `--env-file`. With preview limits, KitSHn first applies them; see "Preview limits" below. Images build in a buildx builder at the lowest CPU weight; see "Builders" below.
 7. Run Compose with `--env-file` when the recipe has Compose. Recipe services are applied with `docker compose up -d --remove-orphans --force-recreate` so services that bind Unix sockets are recreated after socket cleanup.
 8. Roll logs under `KITSHN_LOG_DIR` for each service that will be recreated: rename existing log files in the service's log subdirectory to `<name>.<timestamp>` before the service restarts.
 9. Recreate all services in this recipe.
@@ -38,8 +38,16 @@ Preview limits (`deploy --limit-cpus <n> --limit-memory <size>`, from the `limit
 - Every deploy first removes `.kitshn/compose.preview-limits.yml` from the checkout and renders the Compose config without it. A deploy without limits stops there, so its containers leave the slice when they are recreated.
 - With limits, KitSHn writes `/etc/systemd/system/kitshn-previews-<owner>-<repo>.slice` with `CPUQuota`, `MemoryMax`, and `MemorySwapMax=0`, and runs `systemctl daemon-reload` when the file changed. The owner and repo are lowercase, with `-` escaped as `\x2d`, so the slice sits under `kitshn-previews.slice`. All limited deployments of the recipe share the slice, and the last deploy sets its values.
 - It writes `.kitshn/compose.preview-limits.yml`, which sets `cgroup_parent` to the slice for each service. While that file exists, every Compose command of the deployment runs with `COMPOSE_FILE` set to the compose file and override file that Compose finds on its own, plus this file, and with `BUILDX_BUILDER` set to the recipe's preview builder.
-- The preview builder is the buildx builder `kitshn-previews.<owner>.<repo>` with the `docker-container` driver. KitSHn creates it when it is missing, starts it, and sets the memory, swap, and CPU limits of its container with `docker update` on every limited deploy. Build steps run inside that container. buildx ignores its `cgroup-parent` option with the systemd cgroup driver, so the builder does not join the slice.
+- The preview builder is the buildx builder `kitshn-previews.<owner>.<repo>`. On every limited deploy, KitSHn sets the memory, swap, and CPU limits of its container, in addition to the CPU weight that every builder gets; see "Builders" below. buildx ignores its `cgroup-parent` option with the systemd cgroup driver, so the builder does not join the slice.
 - `destroy` and `prune` do not remove the slice or the builder.
+
+Builders:
+
+- A deploy without preview limits, such as every production deploy, builds in the host builder `kitshn-builds`. A limited deploy builds in its preview builder. Every Compose command of the deployment runs with `BUILDX_BUILDER` set to that builder.
+- Both builders use the `docker-container` driver, and build steps run inside the builder container. Before a build, KitSHn creates the builder when it is missing, starts it, and sets `--cpu-shares 2` on its container with `docker update`. Docker maps this value to cgroup `cpu.weight` 1, the lowest weight.
+- The weight is not a cap. A build uses all CPU that running services leave idle, and running services get the CPU first. Production builds have no CPU or memory cap.
+- The `docker` driver of the `default` builder runs build steps in cgroups that systemd does not manage, so KitSHn cannot give them a low weight. KitSHn does not use it for deploys.
+- `destroy` and `prune` do not remove the host builder.
 
 `deploy` reads params from `--params-file`. CI builds this file from `KITSHN_*` vars/secrets and pushes it over SSH. The VPS does not call the GitHub API.
 

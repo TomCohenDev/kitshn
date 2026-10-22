@@ -132,6 +132,9 @@ def try_recipe(
         if not services:
             msg = f"{compose_file} defines no services"
             raise KitshnError(msg)
+        # try builds in the default builder at normal CPU weight, also with --vps-host on the
+        # production host. It runs once, under watch. If try builds slow live services, build in
+        # builders.HOST_BUILDER as deploys do.
         runner.run(
             compose_command(deployment, "up", "-d", "--build", "--force-recreate"),
             cwd=deployment.deployment_root,

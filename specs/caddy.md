@@ -100,7 +100,8 @@ Recipe side:
 Host side, set by `bootstrap` flags and kept by later runs that pass the same flags:
 
 - `--caddy-module <path>@v<version>`, repeatable: builds the packaged Caddy version with the
-  modules in the `caddy:<version>-builder` image (xcaddy), limited to 2 CPUs. The packaged
+  modules in the `caddy:<version>-builder` image (xcaddy), limited to 2 CPUs at the lowest CPU
+  weight (`--cpu-shares 2`). The packaged
   version is the one of `/usr/bin/caddy.default` after the diversion, else of
   `/usr/bin/caddy`. It skips the build when `/usr/bin/caddy` reports that version with those
   module versions. The first install adds a `dpkg-divert` of `/usr/bin/caddy` to

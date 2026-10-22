@@ -15,6 +15,7 @@ import sys
 import tempfile
 from typing import Literal
 
+from .builders import BUILD_CPU_SHARES
 from .caddy import (
     CADDY_BASE_CONFIG,
     CADDY_ENV_FILE,
@@ -390,6 +391,8 @@ def _build(runner: CommandRunner, version: str, modules: list[CaddyModule], out:
             # The build shares the host with live sites; leave CPU for them.
             "--cpus",
             "2",
+            "--cpu-shares",
+            BUILD_CPU_SHARES,
             "--env",
             "CGO_ENABLED=0",
             "--volume",

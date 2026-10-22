@@ -2,7 +2,8 @@
 
 All limited deployments of one recipe share one systemd slice, so together they stay inside one
 budget. Their image builds run in a BuildKit container of the recipe with the same limits. A
-deploy without limits, such as every production deploy, uses neither.
+deploy without limits, such as every production deploy, uses neither and builds in the host
+builder.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from typing import cast
 
 import yaml
 
+from .builders import ensure_builder
 from .errors import KitshnError
 from .filesystem import write_if_changed
 from .models import Deployment, Recipe
@@ -159,14 +161,7 @@ def apply_preview_limits(
             runner.run(["systemctl", "daemon-reload"])
         write_if_changed(deployment.preview_limits_file, override)
 
-    builder = preview_builder(deployment.recipe)
-    if runner.run(["docker", "buildx", "inspect", builder], capture=True, check=False).returncode != 0:
-        runner.run(["docker", "buildx", "create", "--name", builder, "--driver", "docker-container"])
-    runner.run(["docker", "buildx", "inspect", "--bootstrap", builder], capture=True)
-    # buildx ignores its cgroup-parent option when Docker uses the systemd cgroup driver, so the
-    # builder cannot join the slice. Limit its container instead; build steps run inside it.
-    # buildx names that container buildx_buildkit_<builder>0. If buildx renames it, this
-    # command fails the deploy, and the name needs an update here.
     memory = str(limits.memory_bytes)
-    container = f"buildx_buildkit_{builder}0"
-    runner.run(["docker", "update", "--memory", memory, "--memory-swap", memory, "--cpus", limits.cpus, container])
+    ensure_builder(
+        preview_builder(deployment.recipe), runner, "--memory", memory, "--memory-swap", memory, "--cpus", limits.cpus
+    )

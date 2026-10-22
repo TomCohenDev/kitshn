@@ -6,6 +6,7 @@ import subprocess
 import pytest
 import yaml
 
+from kitshn.builders import BUILD_CPU_SHARES, HOST_BUILDER
 from kitshn.ci import deploy_over_ssh
 from kitshn.cli import app
 from kitshn.deploy import deploy_recipe
@@ -171,7 +172,11 @@ def test_a_limited_deploy_runs_in_the_slice_and_builds_in_the_limited_builder(
         ("docker", "buildx", "inspect", builder),
         ("docker", "buildx", "create", "--name", builder, "--driver", "docker-container"),
         ("docker", "buildx", "inspect", "--bootstrap", builder),
-        ("docker", "update", "--memory", str(3 * 1024**3), "--memory-swap", str(3 * 1024**3), "--cpus", "1.5", f"buildx_buildkit_{builder}0"),
+        (
+            "docker", "update", "--cpu-shares", BUILD_CPU_SHARES,
+            "--memory", str(3 * 1024**3), "--memory-swap", str(3 * 1024**3), "--cpus", "1.5",
+            f"buildx_buildkit_{builder}0",
+        ),
     ]
     for step in ("build", "up"):
         env = runner.env_of(step)
@@ -195,7 +200,7 @@ def test_the_limits_override_keeps_the_recipe_override_file(tmp_path: Path) -> N
     assert not any("create" in command for command in runner.host_commands())
 
 
-def test_a_deploy_without_limits_drops_them_and_touches_no_host_settings(tmp_path: Path) -> None:
+def test_a_deploy_without_limits_drops_them_and_builds_in_the_host_builder(tmp_path: Path) -> None:
     deployment, params = _deployment(tmp_path, "pr-7")
     _deploy(deployment, params, Recorder(), PreviewLimits.parse(2, "3g"))
     runner = Recorder()
@@ -203,22 +208,29 @@ def test_a_deploy_without_limits_drops_them_and_touches_no_host_settings(tmp_pat
     _deploy(deployment, params, runner, None)
 
     assert not deployment.preview_limits_file.exists()
-    assert runner.host_commands() == []
+    assert not any(command[0] == "systemctl" for command in runner.host_commands())
     for step in ("config", "build", "up"):
         assert "COMPOSE_FILE" not in runner.env_of(step)
-        assert "BUILDX_BUILDER" not in runner.env_of(step)
+        assert runner.env_of(step)["BUILDX_BUILDER"] == HOST_BUILDER
 
 
-def test_production_deploy_commands_do_not_change(tmp_path: Path, isolated_systemd_dir: Path) -> None:
+def test_production_builds_in_the_host_builder_at_low_cpu_weight_without_limits(
+    tmp_path: Path, isolated_systemd_dir: Path
+) -> None:
     deployment, params = _deployment(tmp_path, "prod")
     runner = Recorder()
 
     _deploy(deployment, params, runner, None)
 
-    assert runner.host_commands() == []
+    assert runner.host_commands() == [
+        ("docker", "buildx", "inspect", HOST_BUILDER),
+        ("docker", "buildx", "create", "--name", HOST_BUILDER, "--driver", "docker-container"),
+        ("docker", "buildx", "inspect", "--bootstrap", HOST_BUILDER),
+        ("docker", "update", "--cpu-shares", BUILD_CPU_SHARES, f"buildx_buildkit_{HOST_BUILDER}0"),
+    ]
     assert list(isolated_systemd_dir.iterdir()) == []
     compose_envs = [env for command, env in runner.calls if command[:2] == ("docker", "compose")]
-    assert compose_envs and all(env == deployment.runtime_env for env in compose_envs)
+    assert compose_envs and all(env == {**deployment.runtime_env, "BUILDX_BUILDER": HOST_BUILDER} for env in compose_envs)
 
 
 def test_limits_for_prod_fail_before_any_command(tmp_path: Path) -> None:

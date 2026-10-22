@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from .builders import HOST_BUILDER, ensure_builder
 from .errors import KitshnError
 from .filesystem import reset_socket_paths, roll_service_logs, walk_deployments
 from .models import Deployment, Recipe, Roots
@@ -141,6 +142,8 @@ def apply_compose(
             env=compose_env(deployment),
         )
     if build_services:
+        if limits is None:
+            ensure_builder(HOST_BUILDER, runner)
         runner.run(
             compose_command(deployment, "build", *[s.name for s in build_services]),
             cwd=deployment.deployment_root,
@@ -286,13 +289,13 @@ def _service_health(deployment: Deployment, service_name: str, runner: CommandRu
 def compose_env(deployment: Deployment) -> dict[str, str]:
     """The environment of every Compose command of a deployment.
 
-    A limited deployment adds its override to the files that Compose finds on its own, and
-    selects the recipe's preview builder. So a later command, such as an `up` that rebuilds an
+    A deployment without limits builds in the host builder. A limited deployment adds its
+    override to the files that Compose finds on its own, and selects the recipe's preview builder. So a later command, such as an `up` that rebuilds an
     image with `pull_policy: build`, keeps the limits too.
     """
 
     if not deployment.preview_limits_file.exists():
-        return deployment.runtime_env
+        return {**deployment.runtime_env, "BUILDX_BUILDER": HOST_BUILDER}
     root = deployment.deployment_root
     base = [root / name for name in COMPOSE_FILE_NAMES if (root / name).exists()][:1]
     override = [root / name for name in COMPOSE_OVERRIDE_NAMES if (root / name).exists()][:1]

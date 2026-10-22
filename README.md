@@ -154,6 +154,9 @@ stops a process in a preview, not in production. Preview image builds run in a b
 their own with the same caps, so the first build after you add `limits` has no cache. Production
 is never limited: `limits` on any other entry fails the resolve job.
 
+Every deploy build, also in production, runs at the lowest CPU weight. A build uses idle CPU, and
+running services get the CPU first.
+
 ### Try Before Pushing
 
 ```bash

@@ -1,5 +1,6 @@
 name: KitSHn Deploy
 
+# KitSHn 1 moved to Yarden-zamir/kitshn-1. Apps that call this workflow keep working through it.
 on:
   workflow_call:
 
@@ -8,123 +9,6 @@ permissions:
   deployments: write
 
 jobs:
-  resolve:
-    runs-on: ubuntu-latest
-    outputs:
-      matched: ${{ steps.resolve.outputs.matched }}
-      env: ${{ steps.resolve.outputs.env }}
-      action: ${{ steps.resolve.outputs.action }}
-      ephemeral: ${{ steps.resolve.outputs.ephemeral }}
-      ref: ${{ steps.resolve.outputs.ref }}
-      url: ${{ steps.resolve.outputs.url }}
-      keep: ${{ steps.resolve.outputs.keep }}
-      limits: ${{ steps.resolve.outputs.limits }}
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: false
-
-      - id: resolve
-        env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          GITHUB_REF_NAME: ${{ github.ref_name }}
-          GITHUB_SHA: ${{ github.sha }}
-          INPUT_ENVIRONMENT: ${{ github.event.inputs.environment }}
-          INPUT_REF: ${{ github.event.inputs.ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_ACTION: ${{ github.event.action }}
-          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: uvx --from git+https://github.com/Yarden-zamir/kitshn.git kitshn ci-resolve
-
-  deploy:
-    needs: resolve
-    if: >-
-      needs.resolve.outputs.matched == 'true' &&
-      needs.resolve.outputs.action == 'deploy' &&
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
-    # For deployments that Actions creates, GitHub takes environment_url from this setting and
-    # ignores the one in a posted status. Without it, deployments show no link to the site.
-    environment:
-      name: ${{ needs.resolve.outputs.env }}
-      url: ${{ needs.resolve.outputs.url }}
-    # Deploy and teardown of one deployment run in push order. GitHub keeps only the newest
-    # pending job per group, so a stale push never deploys after a newer one.
-    concurrency:
-      group: kitshn-${{ github.repository }}-${{ needs.resolve.outputs.env }}
-      cancel-in-progress: false
-    steps:
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: false
-
-      - name: Check deploy credentials
-        env:
-          KITSHN_VPS_HOST: ${{ vars.KITSHN_VPS_HOST }}
-          KITSHN_SSH_KEY: ${{ secrets.KITSHN_SSH_KEY }}
-        run: uvx --from git+https://github.com/Yarden-zamir/kitshn.git kitshn ci-preflight
-
-      - name: Build params file
-        env:
-          KITSHN_VARS_JSON: ${{ toJson(vars) }}
-          KITSHN_SECRETS_JSON: ${{ toJson(secrets) }}
-        run: uvx --from git+https://github.com/Yarden-zamir/kitshn.git kitshn ci-write-params --output params.env
-
-      - name: Deploy over SSH
-        env:
-          KITSHN_VPS_HOST: ${{ vars.KITSHN_VPS_HOST }}
-          KITSHN_SSH_KEY: ${{ secrets.KITSHN_SSH_KEY }}
-          KITSHN_ENVIRONMENT: ${{ needs.resolve.outputs.env }}
-          KITSHN_REF: ${{ needs.resolve.outputs.ref }}
-          KITSHN_LIMITS: ${{ needs.resolve.outputs.limits }}
-        run: uvx --from git+https://github.com/Yarden-zamir/kitshn.git kitshn ci-deploy --params-file params.env
-
-      - name: Verify public route
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          KITSHN_ENVIRONMENT: ${{ needs.resolve.outputs.env }}
-          KITSHN_REF: ${{ needs.resolve.outputs.ref }}
-          KITSHN_URL: ${{ needs.resolve.outputs.url }}
-        run: uvx --from git+https://github.com/Yarden-zamir/kitshn.git kitshn ci-verify
-
-  teardown:
-    needs: resolve
-    if: >-
-      needs.resolve.outputs.matched == 'true' &&
-      needs.resolve.outputs.action == 'destroy' &&
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
-    environment: ${{ needs.resolve.outputs.env }}
-    # Deploy and teardown of one deployment run in push order. GitHub keeps only the newest
-    # pending job per group, so a stale push never deploys after a newer one.
-    concurrency:
-      group: kitshn-${{ github.repository }}-${{ needs.resolve.outputs.env }}
-      cancel-in-progress: false
-    steps:
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: false
-
-      - name: Check deploy credentials
-        env:
-          KITSHN_VPS_HOST: ${{ vars.KITSHN_VPS_HOST }}
-          KITSHN_SSH_KEY: ${{ secrets.KITSHN_SSH_KEY }}
-        run: uvx --from git+https://github.com/Yarden-zamir/kitshn.git kitshn ci-preflight
-
-      - name: Destroy over SSH
-        env:
-          KITSHN_VPS_HOST: ${{ vars.KITSHN_VPS_HOST }}
-          KITSHN_SSH_KEY: ${{ secrets.KITSHN_SSH_KEY }}
-          KITSHN_ENVIRONMENT: ${{ needs.resolve.outputs.env }}
-          KITSHN_KEEP: ${{ needs.resolve.outputs.keep }}
-        run: uvx --from git+https://github.com/Yarden-zamir/kitshn.git kitshn ci-destroy
-
-      - name: Delete ephemeral GitHub Environment
-        if: needs.resolve.outputs.ephemeral == 'true'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          KITSHN_ENVIRONMENT: ${{ needs.resolve.outputs.env }}
-        run: uvx --from git+https://github.com/Yarden-zamir/kitshn.git kitshn ci-delete-environment
+  kitshn-1:
+    uses: Yarden-zamir/kitshn-1/.github/workflows/deploy.yml@main
+    secrets: inherit

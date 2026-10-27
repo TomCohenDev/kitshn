@@ -164,7 +164,7 @@ file, which an `EXIT` trap removes, and runs the hosted bootstrap at `--kitshn-r
 With `KITSHN_SSH_KNOWN_HOSTS` (a known_hosts line), every `ci-*` SSH call accepts only that
 host key; without it, SSH trusts the first key it sees.
 
-KitSHn's own repo has such a workflow, `.github/workflows/host.yml`, for the maintainer's VPS:
+`Yarden-zamir/kitshn-1` has such a workflow, `.github/workflows/host.yml`, for the maintainer's VPS:
 
 - It runs on `workflow_dispatch`, on a push to main that changes the file, and each Monday,
   so a package upgrade gets a matching build within a week.

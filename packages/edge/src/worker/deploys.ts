@@ -16,9 +16,18 @@ const id = (text: string) =>
  * similar names apart (my.site and my-site).
  */
 export function environmentNames(repoId: string, repo: string, environment: string) {
-  const slug = id(repo.split("/")[1] ?? repo).slice(0, 24);
-  const resourceId = id(`app-${slug}-${repoId}-${environment}`).slice(0, 56);
+  const slug = id(repo.split("/")[1] ?? repo).slice(0, 20);
+  const full = id(`app-${slug}-${repoId}-${environment}`);
+  // A long name keeps a hash of the environment instead of cutting it, so two environments never meet.
+  const resourceId = full.length <= 56 ? full : `app-${slug}-${repoId}-${fnv(environment)}`;
   return { resourceId, script: `kitshn-${resourceId}` };
+}
+
+/** FNV-1a, 32 bits, as 8 hex characters. */
+function fnv(text: string): string {
+  let hash = 0x811c9dc5;
+  for (const char of text) hash = Math.imul(hash ^ char.charCodeAt(0), 0x01000193) >>> 0;
+  return hash.toString(16).padStart(8, "0");
 }
 
 /**

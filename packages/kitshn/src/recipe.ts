@@ -74,6 +74,10 @@ export function plan(recipe: Recipe, repo: string, event: DeployEvent, zone: str
   if (!entry) return { kind: "skip", reason: `No deploy entry matches ${event.name} on ${event.branch}.` };
   if (event.name === "pull_request" && event.pr === null)
     return { kind: "skip", reason: "The pull request has no number." };
+  // A pull request touches only its own preview: the token's number names it, whatever the recipe says (K-811).
+  if (event.name === "pull_request" && entry.name !== "pr-{pr}") {
+    return { kind: "error", reason: `A pull_request entry must be named "pr-{pr}", not "${entry.name}".` };
+  }
   const environment = entry.name.replaceAll("{pr}", String(event.pr ?? ""));
   if (!LABEL.test(environment))
     return { kind: "error", reason: `The environment name "${environment}" is not a valid name.` };

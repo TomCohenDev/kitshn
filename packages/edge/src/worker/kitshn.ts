@@ -98,7 +98,7 @@ const SCHEMA = [
   "CREATE TABLE IF NOT EXISTS tunnel_objects (machine_id TEXT PRIMARY KEY, body TEXT NOT NULL, error TEXT)",
   `CREATE TABLE IF NOT EXISTS deploys (id TEXT PRIMARY KEY, repo TEXT NOT NULL, environment TEXT NOT NULL,
     resource_id TEXT NOT NULL, address TEXT NOT NULL, script TEXT NOT NULL, starts_in TEXT, kind TEXT NOT NULL,
-    sha TEXT NOT NULL, state TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
+    sha TEXT NOT NULL, state TEXT NOT NULL, expires_at INTEGER NOT NULL, branch TEXT NOT NULL DEFAULT '')`,
 ];
 
 /** What a WebSocket of this Durable Object belongs to. */
@@ -1256,10 +1256,23 @@ export class Kitshn extends DurableObject<Env> {
         }
       }
     }
+    // K-807: a push environment stays with the branch that made it, so another branch cannot deploy over prod.
+    if (event.name === "push") {
+      const [first] = this.sql<{ branch: string }>(
+        "SELECT branch FROM deploys WHERE resource_id = ? AND kind = 'deploy' AND state = 'done' AND branch != '' ORDER BY expires_at LIMIT 1",
+        resourceId,
+      );
+      if (first && first.branch !== event.branch) {
+        return Response.json(
+          { error: `${result.environment} deploys only from the branch ${first.branch}, not ${event.branch}.` },
+          { status: 403 },
+        );
+      }
+    }
     const deployId = crypto.randomUUID();
     this.sql(
-      `INSERT INTO deploys (id, repo, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?)`,
+      `INSERT INTO deploys (id, repo, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)`,
       deployId,
       deployer.repo,
       result.environment,
@@ -1270,6 +1283,7 @@ export class Kitshn extends DurableObject<Env> {
       result.kind,
       deployer.sha,
       Date.now() + DEPLOY_MS,
+      event.name === "push" ? event.branch : "",
     );
     return Response.json({ deployId, plan: result });
   }
@@ -1506,8 +1520,9 @@ export class Kitshn extends DurableObject<Env> {
         }
       }
       await this.withAccessLock(() =>
+        // The state can change while the daily compare waits, so the sync reads it inside the lock.
         syncAccess(
-          desired,
+          desiredAccess(this.state, Date.now()),
           this.accessStore(),
           api,
           this.env.CLOUDFLARE_ACCOUNT_ID,

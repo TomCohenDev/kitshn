@@ -18,6 +18,9 @@ describe("deploys (K-811, K-903)", () => {
   it("keeps repos with similar names apart", () => {
     expect(environmentNames("1", "me/my.site", "prod").script).not.toBe(environmentNames("2", "me/my-site", "prod").script);
     expect(environmentNames("1", "me/hello", "prod").script.length).toBeLessThanOrEqual(63);
+    const long = (env: string) => environmentNames("1061234567", "me/a-fairly-long-repository-name", env).resourceId;
+    expect(long("preview-branch-101")).not.toBe(long("preview-branch-102"));
+    expect(long("preview-branch-101").length).toBeLessThanOrEqual(56);
   });
 
   it("checks the asset manifest", () => {

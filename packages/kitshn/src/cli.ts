@@ -1,7 +1,7 @@
 // The kitshn CLI for app repos: `kitshn check` (K-802) and `kitshn deploy` (K-803, K-805, K-811).
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { extname, join, relative, resolve, sep } from "node:path";
 import { RecipeError, readRecipe } from "./parse.ts";
 import { type DeployEvent, decodeRecipe } from "./recipe.ts";
@@ -116,7 +116,10 @@ async function deploy(server: string, dir: string) {
     execFileSync("sh", ["-c", recipe.static.build], { cwd: dir, stdio: "inherit" });
   }
   const output = resolve(dir, recipe.static.output);
-  if (output !== resolve(dir) && !output.startsWith(resolve(dir) + sep)) {
+  // realpath follows a symlinked output folder, so a link cannot point outside the repo.
+  const real = existsSync(output) ? realpathSync(output) : output;
+  const root = realpathSync(dir);
+  if (real !== root && !real.startsWith(root + sep)) {
     fail(`the output folder ${recipe.static.output} is outside the repo.`);
   }
   if (!existsSync(output)) fail(`the output folder ${recipe.static.output} does not exist after the build.`);

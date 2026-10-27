@@ -81,4 +81,14 @@ describe("plan (K-807, K-901, K-904)", () => {
       plan(outside, "me/x", { name: "push", branch: "main", pr: null, action: null }, zone),
     ).toMatchObject({ kind: "error" });
   });
+
+  it("names a pull request environment only after the token's number", () => {
+    const sneaky = decodeRecipe({
+      static: { output: "site" },
+      deploy: [{ on: "pull_request", name: "prod", ephemeral: true }],
+    });
+    expect(plan(sneaky, "me/x", { name: "pull_request", branch: "x", pr: 3, action: "closed" }, "example.com")).toMatchObject({
+      kind: "error",
+    });
+  });
 });

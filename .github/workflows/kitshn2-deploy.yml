@@ -29,9 +29,9 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # One deploy at a time per pull request, and one for all pushes of a repo (they may share an environment).
+    # One deploy at a time per pull request and per branch; kitshn binds each push environment to one branch.
     concurrency:
-      group: kitshn-${{ github.repository }}-${{ github.event.pull_request.number || 'push' }}
+      group: kitshn-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

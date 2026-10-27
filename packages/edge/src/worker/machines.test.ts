@@ -49,7 +49,10 @@ describe("jobs (K-610)", () => {
     expect(parseCommand({ kind: "shell", script: " " })).toMatch(/script/);
     expect(parseCommand({ kind: "format-disk" })).toMatch(/no command/);
     // The sender cannot pick the version of an update; kitshn fills in its own release (K-617).
-    expect(parseCommand({ kind: "update", version: "deadbeefdead" })).toEqual({ kind: "update", version: "" });
+    expect(parseCommand({ kind: "update", version: "deadbeefdead" })).toEqual({
+      kind: "update",
+      version: "",
+    });
     expect(parseLabels(["Docker", "docker", "arm"])).toEqual(["docker", "arm"]);
     expect(parseLabels(["no spaces"])).toMatch(/label/);
     expect(machineIdFor("Oracle VPS!")).toMatch(/^oracle-vps-[0-9a-f]{6}$/);

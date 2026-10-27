@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import type { Edit } from "../core/changes.ts";
 import type { State } from "../core/model.ts";
 import type { ServerMessage, Snapshot } from "../core/protocol.ts";
+import { type Held, isNewer, settle } from "./held.ts";
 
 export type Connection = "connecting" | "live" | "offline" | "refused";
 
@@ -9,12 +10,14 @@ interface StoreState {
   readonly snapshot: Snapshot | null;
   readonly connection: Connection;
   readonly reason: string | null;
+  /** Edits shown before the server holds them (see held.ts). */
+  readonly held: ReadonlyArray<Held>;
 }
 
 type Result =
   { readonly ok: true; readonly revision: number | null } | { readonly ok: false; readonly error: string };
 
-let current: StoreState = { snapshot: null, connection: "connecting", reason: null };
+let current: StoreState = { snapshot: null, connection: "connecting", reason: null, held: [] };
 const listeners = new Set<() => void>();
 const waiting = new Map<string, (result: Result) => void>();
 let socket: WebSocket | null = null;
@@ -48,8 +51,10 @@ export function connect() {
   };
   ws.onmessage = (event) => {
     const message = JSON.parse(String(event.data)) as ServerMessage;
-    if (message.type === "snapshot") set({ snapshot: message.snapshot });
-    else if (message.type === "machine") {
+    if (message.type === "snapshot") {
+      if (!isNewer(message.snapshot.revision, current.snapshot?.revision ?? null)) return;
+      set({ snapshot: message.snapshot, held: settle(current.held, message.snapshot.revision) });
+    } else if (message.type === "machine") {
       const snapshot = current.snapshot;
       if (snapshot) {
         const machines = snapshot.machines.map((view) =>
@@ -83,11 +88,10 @@ export async function explainRefusal() {
   return body?.error ?? `kitshn answered ${response.status}.`;
 }
 
-function request(message: object): Promise<Result> {
+function request(message: object, requestId: string = crypto.randomUUID()): Promise<Result> {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     return Promise.resolve({ ok: false, error: "kitshn is not connected. Wait for the live sticker." });
   }
-  const requestId = crypto.randomUUID();
   socket.send(JSON.stringify({ ...message, requestId }));
   return new Promise((resolve) => waiting.set(requestId, resolve));
 }
@@ -113,7 +117,22 @@ export async function callApi<T>(
   return data;
 }
 
-export const applyEdits = (edits: ReadonlyArray<Edit>) => request({ type: "apply", edits });
+/**
+ * Sends edits and shows them at once: they stay on the map until a snapshot reaches the revision that
+ * saved them, and go only when the server refuses them (the caller shows the reason).
+ */
+export async function applyEdits(edits: ReadonlyArray<Edit>): Promise<Result> {
+  const requestId = crypto.randomUUID();
+  set({ held: [...current.held, { requestId, edits, revision: null }] });
+  const result = await request({ type: "apply", edits }, requestId);
+  const others = current.held.filter((item) => item.requestId !== requestId);
+  if (!result.ok || result.revision === null) set({ held: others });
+  else {
+    const saved: Held = { requestId, edits, revision: result.revision };
+    set({ held: settle([...others, saved], current.snapshot?.revision ?? 0) });
+  }
+  return result;
+}
 export const undoRevision = (revision: number) => request({ type: "undo", revision });
 
 export function toState(snapshot: Snapshot): State {

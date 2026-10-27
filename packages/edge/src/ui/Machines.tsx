@@ -202,7 +202,9 @@ export function MachinePanel(props: {
             title={`Install the daemon of release ${props.version}`}
             onClick={() => void run({ kind: "update", version: props.version })}
           >
-            {view.status && view.status.version !== props.version ? `Update daemon to ${props.version}` : "Update daemon"}
+            {view.status && view.status.version !== props.version
+              ? `Update daemon to ${props.version}`
+              : "Update daemon"}
           </button>
         ) : null}
       </div>

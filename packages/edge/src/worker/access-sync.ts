@@ -146,7 +146,9 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
 /** The policy ids in an application body. An empty body (cleared by the daily compare) has none. */
 const policyIds = (body: string) =>
   body
-    ? ((JSON.parse(body) as { policies?: ReadonlyArray<{ id: string }> }).policies?.map((policy) => policy.id) ?? [])
+    ? ((JSON.parse(body) as { policies?: ReadonlyArray<{ id: string }> }).policies?.map(
+        (policy) => policy.id,
+      ) ?? [])
     : [];
 
 const removesPolicy = (before: string, after: string) => {

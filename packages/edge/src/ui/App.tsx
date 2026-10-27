@@ -20,6 +20,7 @@ import type { JobView, MachineView, RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, MEMBER_ICONS } from "./kinds.ts";
 import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
 import { MapView, type Selection, type View } from "./Map.tsx";
+import { overlay } from "./held.ts";
 import { applyEdits, callApi, explainRefusal, toState, undoRevision, useStore } from "./store.ts";
 
 const VIEW_KEY = "kitshn.view";
@@ -71,7 +72,11 @@ export function App() {
   const toastTimer = useRef<number | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
 
-  const state = useMemo(() => (store.snapshot ? toState(store.snapshot) : null), [store.snapshot]);
+  // The map shows held edits on top of the server state, so a drop never jumps back (see held.ts).
+  const state = useMemo(
+    () => (store.snapshot ? overlay(toState(store.snapshot), store.held) : null),
+    [store.snapshot, store.held],
+  );
   const machines = useMemo(
     () => new Map((store.snapshot?.machines ?? []).map((view) => [view.machine.id, view])),
     [store.snapshot],

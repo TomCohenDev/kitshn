@@ -60,7 +60,12 @@ else
     echo "kitshn: the daemon does not match the SHA256SUMS of release $version." >&2
     exit 1
   fi
-  gzip -dc "$bin/kitshn.new" > "$bin/kitshn.unpacked" && mv "$bin/kitshn.unpacked" "$bin/kitshn.new"
+  if ! gzip -dc "$bin/kitshn.new" > "$bin/kitshn.unpacked"; then
+    rm -f "$bin/kitshn.new" "$bin/kitshn.unpacked"
+    echo "kitshn: could not unpack the daemon; this needs gzip." >&2
+    exit 1
+  fi
+  mv "$bin/kitshn.unpacked" "$bin/kitshn.new"
 fi
 chmod 755 "$bin/kitshn.new"
 mv "$bin/kitshn.new" "$bin/kitshn"

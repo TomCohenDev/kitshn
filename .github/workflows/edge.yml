@@ -104,7 +104,10 @@ jobs:
           for daemon in kitshn-linux-arm64 kitshn-linux-x64 kitshn-darwin-arm64 kitshn-darwin-x64; do
             gh release delete-asset edge "$daemon" --yes 2>/dev/null || true
           done
-          # K-617: a machine updates only to the release that the Worker names, so ten releases are plenty.
-          gh release list --limit 1000 --json tagName,createdAt \
-            --jq '[.[] | select(.tagName | startswith("edge-"))] | sort_by(.createdAt) | reverse | .[10:] | .[].tagName' |
-            while read -r tag; do gh release delete "$tag" --yes --cleanup-tag; done
+          # K-617: keep the ten newest edge releases, and always the one that the live Worker names.
+          live="edge-$(curl -fsS https://kit.yarden-zamir.com/deploy/version || true)"
+          gh release list --limit 1000 --json tagName,publishedAt \
+            --jq '[.[] | select(.tagName | startswith("edge-"))] | sort_by(.publishedAt) | reverse | .[10:] | .[].tagName' |
+            while read -r tag; do
+              [ "$tag" = "$live" ] || gh release delete "$tag" --yes --cleanup-tag
+            done

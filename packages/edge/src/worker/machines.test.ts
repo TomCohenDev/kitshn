@@ -94,6 +94,8 @@ describe("machine members (K-107)", () => {
     expect(script).toContain("edge-f5d93ff436db");
     expect(script).toContain("kitshn-linux-arm64.gz");
     expect(script).toContain("gzip -dc");
+    // A failed unpack must stop the script before the mv (set -e skips && lists).
+    expect(script).not.toMatch(/gzip -dc[^\n]*&&/);
     expect(script).toContain("SHA256SUMS");
     expect(legacyUpdateScript("f5d93ff436db", "win32 10", "x64")).toBeNull();
     expect(legacyUpdateScript("local", "linux", "x64")).toBeNull();

@@ -1629,6 +1629,10 @@ export class Kitshn extends DurableObject<Env> {
         this.commit(
           { _tag: "kitshn", reason: `share with ${circle?.name ?? circleId} ended` },
           resolveEdits(this.state, [
+            // K-521: the card leaves its stack, so the rest of the stack stays where it is.
+            ...stacksWithout(this.state.stacks.values(), resourceId).map(
+              (change): Edit => ({ _tag: "stack", ...change }),
+            ),
             { _tag: "place", id: resourceId, after: to },
             { _tag: "shareSetting", resourceId, circleId, after: { ...setting, endsAt: null } },
           ]),

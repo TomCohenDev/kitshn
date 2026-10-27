@@ -1127,3 +1127,7 @@ a > code {
   outline: 3px dashed var(--accent);
   outline-offset: 4px;
 }
+.mini.stack-target {
+  outline: 3px dashed var(--accent);
+  outline-offset: 2px;
+}

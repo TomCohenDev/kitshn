@@ -248,7 +248,7 @@ export function App() {
       edits.push({
         _tag: "stack",
         id,
-        after: { id, name: into?.name ?? "Stack", members: [...(into?.members ?? [target]), ...moving] },
+        after: { id, name: into?.name ?? state.resources.get(target)?.name ?? "Stack", members: [...(into?.members ?? [target]), ...moving] },
       });
       const names = moving.flatMap((card) => state.resources.get(card)?.name ?? []).join(", ");
       await commit(
@@ -469,10 +469,6 @@ export function App() {
     else showToast({ text: result.error, error: true, undo: null });
   };
 
-  /** The cards of the owner's stack that holds a card, or the card alone (K-521). */
-  const stackMates = (id: string) =>
-    [...(state?.stacks.values() ?? [])].find((stack) => stack.members.includes(id))?.members ?? [id];
-
   /** K-511: share or unshare without a drag, by placing the card where exactly the wanted circles hold it. */
   const reshare = async (resource: Resource, circle: Circle, share: boolean) => {
     const current = new Set(circlesHolding(state, resource.id).map((held) => held.id));
@@ -488,18 +484,9 @@ export function App() {
       });
       return;
     }
-    // K-521: a stacked card takes its stack along, so the stack keeps one place.
-    const cards = stackMates(resource.id).flatMap((id) => state.resources.get(id) ?? []);
-    const places = new Map(state.places);
-    for (const card of cards) places.set(card.id, to);
-    const after: State = { ...state, places };
-    await commit(
-      cards.map((card): Edit => ({ _tag: "place", id: card.id, after: to })),
-      cards.map((card) => {
-        const level = shareLevel(after, card, circle);
-        return { resource: card, circle, from: share ? null : level, to: share ? level : null };
-      }),
-    );
+    // A stacked card takes its stack along (K-521), so the diff comes from the resolved changes.
+    const edits: Array<Edit> = [{ _tag: "place", id: resource.id, after: to }];
+    await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
   };
 
   return (
@@ -729,11 +716,7 @@ export function App() {
         onPlace={(resource) => {
           const center = { x: (innerWidth / 2 - view.x) / view.s, y: (innerHeight / 2 - view.y) / view.s };
           const to = placeInside(state, center, new Set());
-          if (to)
-            void commit(
-              stackMates(resource.id).map((id): Edit => ({ _tag: "place", id, after: to })),
-              [],
-            );
+          if (to) void commit([{ _tag: "place", id: resource.id, after: to }], []);
         }}
         onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
         paused={store.snapshot.paused}

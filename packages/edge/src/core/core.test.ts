@@ -402,6 +402,26 @@ describe("stacks (K-521, K-522)", () => {
     expect(applyChanges(after, invert(changes)).stacks.size).toBe(0);
   });
 
+  it("moves the whole stack when one of its cards moves, and lets a card leave in the same change", () => {
+    const point = { x: 0, y: 40 };
+    const { after } = edit(start(), [
+      { _tag: "place", id: "riffle", after: point },
+      { _tag: "stack", id: "s1", after: stack },
+    ]);
+    const moved = applyChanges(after, resolveEdits(after, [{ _tag: "place", id: "riffle", after: { x: 5, y: 5 } }]));
+    expect(moved.places.get("kitshn-admin")).toEqual({ x: 5, y: 5 });
+    expect(ruleViolation(moved) ?? "").not.toMatch(/share one place/);
+    const left = applyChanges(
+      after,
+      resolveEdits(after, [
+        ...stacksWithout(after.stacks.values(), "riffle").map((change): Edit => ({ _tag: "stack", ...change })),
+        { _tag: "place", id: "riffle", after: { x: 5, y: 5 } },
+      ]),
+    );
+    expect(left.places.get("kitshn-admin")).toEqual(point);
+    expect(left.stacks.size).toBe(0);
+  });
+
   it("keeps the rules true when a stacked card is deleted outside an edit", () => {
     const point = { x: 0, y: 40 };
     const { after } = edit(start(), [

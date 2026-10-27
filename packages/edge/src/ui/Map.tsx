@@ -134,11 +134,14 @@ export function MapView(props: Props) {
 
   /** The drawn card under the pointer that a drop stacks onto, from what is on screen (K-522). */
   const stackTargetAt = (clientX: number, clientY: number, dragged: ReadonlySet<string>) => {
-    for (const element of document.elementsFromPoint(clientX, clientY)) {
-      const id = element.closest<HTMLElement>("[data-card]")?.dataset["card"];
-      if (id && !dragged.has(id)) return id;
-    }
-    return null;
+    const top = document
+      .elementsFromPoint(clientX, clientY)
+      .find((element) => !dragged.has(element.closest<HTMLElement>("[data-card]")?.dataset["card"] ?? ""));
+    const id = top?.closest<HTMLElement>("[data-card]")?.dataset["card"];
+    if (!id) return null;
+    // A stack by group (K-508) keeps its cards; a drop there moves instead.
+    const stack = stackOf(id);
+    return stack && !stack[0].startsWith(USER_STACK) ? null : id;
   };
 
   const preview = (changes: Array<Change>, pointer: Point) => {
@@ -192,9 +195,12 @@ export function MapView(props: Props) {
       }
       const ids = new Set(props.selection.cards.has(id) ? props.selection.cards : [id]);
       const stack = stackOf(id);
+      if (stack && !props.openStacks.has(stack[0])) for (const member of stack[1]) ids.add(member);
       // K-521: an owner's stack moves as one, also when it is open; Pull out takes a card out.
-      if (stack && (!props.openStacks.has(stack[0]) || stack[0].startsWith(USER_STACK)))
-        for (const member of stack[1]) ids.add(member);
+      for (const card of ids) {
+        const own = stackOf(card);
+        if (own?.[0].startsWith(USER_STACK)) for (const member of own[1]) ids.add(member);
+      }
       // A closed stack of the owner is selected whole, so its panel shows (K-521).
       const whole = stack && !props.openStacks.has(stack[0]) && stack[0].startsWith(USER_STACK);
       if (!props.selection.cards.has(id))
@@ -333,7 +339,11 @@ export function MapView(props: Props) {
           .filter(([id]) => {
             const kind = shown.resources.get(id)?.kind;
             const stack = stackOf(id);
-            const drawn = !stack || props.openStacks.has(stack[0]) || stack[1][0] === id;
+            // A closed owner's stack draws a list, not a frame.
+            const drawn =
+              !stack ||
+              props.openStacks.has(stack[0]) ||
+              (stack[1][0] === id && !stack[0].startsWith(USER_STACK));
             return kind !== undefined && PREVIEW_KINDS.has(kind) && !props.hidden.has(kind) && drawn;
           })
           .map(([id, place]) => ({ id, x: place.x * view.s + view.x, y: place.y * view.s + view.y }))
@@ -406,9 +416,13 @@ export function MapView(props: Props) {
           const stack = stackOf(resource.id);
           const open = stack ? props.openStacks.has(stack[0]) : false;
           const index = stack ? stack[1].indexOf(resource.id) : 0;
-          if (stack && !open && index > 0) return null;
-          const head = stack ? shown.places.get(stack[1][0] ?? "") : undefined;
           const own = stack?.[0].startsWith(USER_STACK) ?? false;
+          // A closed owner's stack shows through its first card of a shown kind.
+          const face = own
+            ? stack?.[1].find((id) => !props.hidden.has(shown.resources.get(id)?.kind ?? resource.kind))
+            : stack?.[1][0];
+          if (stack && !open && resource.id !== face) return null;
+          const head = stack ? shown.places.get(stack[1][0] ?? "") : undefined;
           // An owner's stack opens downwards, as a list; a stack by group opens in a row (K-508, K-521).
           const at =
             stack && open && head
@@ -422,7 +436,7 @@ export function MapView(props: Props) {
               <div
                 key={resource.id}
                 data-card={resource.id}
-                class={`mini${selected ? " sel" : ""}`}
+                class={`mini${selected ? " sel" : ""}${stackTarget === resource.id ? " stack-target" : ""}`}
                 style={{ left: px(at.x), top: px(at.y), background: KINDS[resource.kind].color }}
                 title={resource.name}
               />

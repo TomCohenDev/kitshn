@@ -1,3 +1,4 @@
+import { lstatSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 /**
@@ -70,6 +71,14 @@ export function realpathOf(path: string, realpath: (path: string) => string, exi
   if (exists(absolute)) return realpath(absolute);
   const parent = dirname(absolute);
   return parent === absolute ? absolute : join(realpathOf(parent, realpath, exists), absolute.slice(parent.length + 1));
+}
+
+/**
+ * The real path of a source on this disk. A link counts as present even when its target is missing, so a
+ * dangling link fails the deploy instead of passing as a folder that Docker would create (K-818).
+ */
+export function realpathOnDisk(path: string): string {
+  return realpathOf(path, realpathSync, (part) => lstatSync(part, { throwIfNoEntry: false }) !== undefined);
 }
 
 /**

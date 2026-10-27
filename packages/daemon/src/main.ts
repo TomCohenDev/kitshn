@@ -9,7 +9,7 @@ import {
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOf, sourceRisks } from "./guard.ts";
+import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
 import {
   chmodSync,
@@ -18,7 +18,6 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  realpathSync,
   renameSync,
   rmSync,
   statfsSync,
@@ -391,7 +390,7 @@ async function composeUp(
           `the Compose file asks for ${refused.join(", ")}; the owner allows each one for ${command.repo} in the panel of this machine (K-818)`,
         );
     };
-    const real = (path: string) => realpathOf(path, realpathSync, existsSync);
+    const real = realpathOnDisk;
     // Explicit files, so a `COMPOSE_FILE` in the params cannot add a file that the check never reads.
     const files = composeFiles(source, command.file, existsSync, real);
     // Before Compose reads the files, so it never fetches what `include` or `extends` names.

@@ -1,6 +1,8 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { bindSources, composeFiles, composeRisks, envFileRisks, nestedSources, rawRisks, realpathOf } from "./guard.ts";
+import { bindSources, composeFiles, composeRisks, envFileRisks, nestedSources, rawRisks, realpathOf, realpathOnDisk } from "./guard.ts";
 
 const roots = ["/apps/a/src", "/apps/a/data", "/apps/a/logs", "/apps/a/sockets"] as const;
 const same = (path: string) => path;
@@ -259,5 +261,20 @@ describe("Compose files of an app (K-818)", () => {
     // The app folder itself may be a link, as /var is on macOS.
     const moved = (path: string) => path.replace("/apps/", "/private/apps/");
     expect(composeFiles(source, "compose.yml", () => true, moved)).toEqual(["/apps/a/src/compose.yml"]);
+  });
+});
+
+describe("links on disk (K-818)", () => {
+  it("fails on a dangling link, also as a middle folder, instead of passing it as a new folder", () => {
+    const app = mkdtempSync(join(tmpdir(), "kitshn-guard-"));
+    try {
+      mkdirSync(join(app, "data"));
+      symlinkSync(join(app, "missing-later"), join(app, "data", "dangling"));
+      expect(() => realpathOnDisk(join(app, "data", "dangling"))).toThrow(/ENOENT/);
+      expect(() => realpathOnDisk(join(app, "data", "dangling", "sub"))).toThrow(/ENOENT/);
+      expect(realpathOnDisk(join(app, "data", "new", "folder")).endsWith("/data/new/folder")).toBe(true);
+    } finally {
+      rmSync(app, { recursive: true, force: true });
+    }
   });
 });

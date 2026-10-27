@@ -354,14 +354,20 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
   );
   if (raised)
     throw new RuleError(`While paused, access only goes down: ${raised.resource.name} would gain ${raised.circle.name}.`);
+  const ends = (time: number | null | undefined) => time ?? Number.POSITIVE_INFINITY;
+  for (const key of new Set([...before.shareSettings.keys(), ...after.shareSettings.keys()]))
+    if (ends(after.shareSettings.get(key)?.endsAt) > ends(before.shareSettings.get(key)?.endsAt))
+      throw new RuleError("While paused, access only goes down: a share would end later.");
   for (const circle of after.circles.values()) {
     const old = before.circles.get(circle.id);
     if (!old) continue;
     const key = (member: Member) => JSON.stringify(member);
     const had = new Set(old.members.map(key));
-    const ends = (time: number | null) => time ?? Number.POSITIVE_INFINITY;
+    const has = new Set(circle.members.map(key));
     if (
       circle.members.some((member) => !had.has(key(member))) ||
+      // In an "all must match" circle, a member that goes lets more visitors in.
+      (old.match === "all" && old.members.some((member) => !has.has(key(member)))) ||
       (old.needsPasskey && !circle.needsPasskey) ||
       (old.match === "all" && circle.match === "any") ||
       ends(circle.endsAt) > ends(old.endsAt) ||

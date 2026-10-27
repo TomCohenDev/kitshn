@@ -201,6 +201,8 @@ fresh_policy=$(policy "kitshn fresh passkey" "$(jq -nc --argjson include "$fresh
   '{name:"kitshn fresh passkey",decision:"allow",include:$include,require:[],exclude:[],mfa_config:{allowed_authenticators:["biometrics","security_key"],session_duration:"10m"}}')")
 # Its cookie stays on its path, so the admin application's cookie of the whole host does not replace it.
 FRESH_AUD=$(printf '%s' "$APPS" | jq -r --arg d "$KITSHN_HOST/api/fresh" 'map(select(.domain == $d)) | .[0].aud // empty')
+fresh_name=$(printf '%s' "$APPS" | jq -r --arg d "$KITSHN_HOST/api/fresh" 'map(select(.domain == $d)) | .[0].name // empty')
+case "$fresh_name" in "" | kitshn*) ;; *) die "the Access application \"$fresh_name\" already covers $KITSHN_HOST/api/fresh. kitshn does not change it." ;; esac
 if [ -n "$FRESH_AUD" ]; then
   kept "application \"kitshn fresh passkey\" on $KITSHN_HOST/api/fresh"
 else

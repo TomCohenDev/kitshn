@@ -488,5 +488,11 @@ describe("emergency pause (K-1504)", () => {
     expect(() => refuseRaiseWhilePaused(paused, wider)).toThrow(/only goes down/);
     const narrower = edit(paused, [{ _tag: "circle", id: "owner", after: { ...owner, needsPasskey: true } }]).after;
     expect(() => refuseRaiseWhilePaused(paused, narrower)).not.toThrow();
+    const allMatch = { ...owner, match: "all" as const, members: [...owner.members, { _tag: "ip" as const, range: "10.0.0.0/8" }] };
+    const strict = { ...paused, circles: new Map(paused.circles).set("owner", allMatch) };
+    const looser = { ...strict, circles: new Map(strict.circles).set("owner", { ...allMatch, members: owner.members }) };
+    expect(() => refuseRaiseWhilePaused(strict, looser)).toThrow(/only goes down/);
+    const ending = { ...paused, shareSettings: new Map([["kitshn-admin/owner", { level: null, endsAt: 5 }]]) };
+    expect(() => refuseRaiseWhilePaused(ending, { ...ending, shareSettings: new Map() })).toThrow(/end later/);
   });
 });

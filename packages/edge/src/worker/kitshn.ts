@@ -982,9 +982,9 @@ export class Kitshn extends DurableObject<Env> {
   private canControl(visitor: Visitor, machineId: string) {
     const resource = this.state.resources.get(machineId);
     if (!resource) return false;
-    // K-1504, MM-711: commands still work for the owner while paused; the pause takes no tool from them.
-    if (this.state.paused && this.hasAdmin(visitor)) return resource.kind === "machine";
-    return visitorLevel(this.state, resource, visitor, Date.now()) === "control";
+    // K-1504, MM-711: the owner keeps the commands they had; the pause takes no tool from them and gives none.
+    const state = this.state.paused && this.hasAdmin(visitor) ? { ...this.state, paused: false } : this.state;
+    return visitorLevel(state, resource, visitor, Date.now()) === "control";
   }
 
   /** K-610 to K-614: a job runs on one machine, or on the first online machine with its labels. */
@@ -2083,7 +2083,8 @@ export class Kitshn extends DurableObject<Env> {
         )
       : undefined;
     const place = circle ? placeInside(this.state, { x: circle.x, y: circle.y }, new Set([circle.id])) : null;
-    if (circle && place) {
+    // K-1504: a deploy that was running when the pause started finishes with its card in the tray.
+    if (circle && place && !this.state.paused) {
       this.commit(
         actor,
         resolveEdits(this.state, [{ _tag: "place", id: row.resource_id, after: place }]),

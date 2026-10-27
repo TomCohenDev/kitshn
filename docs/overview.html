@@ -70,7 +70,7 @@ td.ok { color: var(--success); font-weight:700; }
 <div class="wrap">
 
 <section>
-  <h2>1 · The parts</h2>
+  <h2>1 · The parts of kit</h2>
   <p class="lead">Logic and state live on Cloudflare. Machines only do machine work. T3 Code talks only to the local daemon.</p>
   <div class="board k">
     <div class="arch">
@@ -144,7 +144,7 @@ td.ok { color: var(--success); font-weight:700; }
     <li><b>Circle heads.</b> Name, default level, passkey flag, and at most 4 member chips with "+N" (K-506). Dragging a head carries the circle's cards; Alt-drag moves the circle alone, with the same preview (K-504).</li>
     <li><b>Undo toast</b> after each share change, plus the history (K-503). Public needs one confirmation the first time (K-210).</li>
   </ol>
-  <p class="lead">Also: the command palette shares without a drag, for phones (K-511). Zoomed out, cards become dots and circles show counts (K-513). Machines are circle members too, so the old arrows become circles such as "Mac agents" (K-107, K-713).</p>
+  <p class="lead">Also: a circle can require that every member matches, for example qlik.com and the Qlik network (K-203). Presets save and apply map layouts (K-716). The command palette shares without a drag, for phones (K-511). Zoomed out, cards become dots and circles show counts (K-513). Machines are circle members too, so the old arrows become circles such as "Mac agents" (K-107, K-713).</p>
 </section>
 
 <section>
@@ -173,13 +173,14 @@ td.ok { color: var(--success); font-weight:700; }
 
 <section>
   <h2>4 · Free plan budget</h2>
-  <p class="lead">5 machines, about 15 apps, about 200 pages. Estimates, not measurements.</p>
+  <p class="lead">5 machines, about 15 apps, 46 pages today (about 14 MB) that grow by about 20 per week. Estimates, not measurements.</p>
   <table>
     <tr><th>Budget</th><th>Free limit</th><th>Expected</th></tr>
     <tr><td>Worker requests</td><td>100,000 / day</td><td class="ok">about 500 / day</td></tr>
     <tr><td>Durable Object requests</td><td>100,000 / day</td><td class="ok">about 1,100 / day</td></tr>
-    <tr><td>Rows written</td><td>100,000 / day</td><td class="ok">about 1,600 / day</td></tr>
+    <tr><td>Rows written</td><td>100,000 / day</td><td class="ok">about 1,350 / day</td></tr>
     <tr><td>Rows read</td><td>5,000,000 / day</td><td class="ok">about 30,000 / day</td></tr>
+    <tr><td>R2 storage</td><td>10 GB</td><td class="ok">14 MB, about 300 MB after a year</td></tr>
     <tr><td>Access seats</td><td>50 people</td><td class="ok">about 7</td></tr>
     <tr><td>Access applications</td><td>500</td><td class="ok">about 40</td></tr>
     <tr><td>Service tokens</td><td>50</td><td>about 9 · tightest for growth</td></tr>
@@ -192,15 +193,16 @@ td.ok { color: var(--success); font-weight:700; }
   <h2>5 · Milestones</h2>
   <div class="miles k">
     <div class="box mile"><div class="h">0 · Spec approved</div><div class="mono">GitHub App created</div></div>
-    <div class="box mile"><div class="h">1 · Edge core</div><div class="mono">Worker, DO, bootstrap, map</div></div>
+    <div class="box mile"><div class="h">1 · Edge core</div><div class="mono">kit.yarden-zamir.com · bootstrap, map</div></div>
     <div class="box mile"><div class="h">2 · Daemon</div><div class="mono">join, tunnel, jobs</div></div>
     <div class="box mile"><div class="h">3 · Static, pages, files</div><div class="mono">tick3d first</div></div>
     <div class="box mile"><div class="h">4 · Compose, previews</div><div class="mono">apps move one by one</div></div>
     <div class="box mile"><div class="h">5 · T3 interface</div><div class="mono">kitshn_* tools</div></div>
-    <div class="box mile"><div class="h">6 · Portal cutover</div><div class="mono">import, keep tunnels</div></div>
+    <div class="box mile"><div class="h">6 · Portal cutover</div><div class="mono">Mac and Linux · keep tunnels</div></div>
     <div class="box mile"><div class="h">7 · Clean-up</div><div class="mono">drop forwarders, Caddy</div></div>
+    <div class="box mile"><div class="h">8 · Windows</div><div class="mono">daemon · portal removed</div></div>
   </div>
-  <p class="lead" style="margin-top:8px">The machine map portal and KitSHn 1 keep running until each piece moves.</p>
+  <p class="lead" style="margin-top:8px">The machine map portal and KitSHn 1 keep running until each piece moves. Windows machines stay on the portal until milestone 8. The KitSHn 1 website moves to kitshn-legacy.yarden-zamir.com.</p>
 </section>
 
 </div>

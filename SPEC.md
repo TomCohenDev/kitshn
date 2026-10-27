@@ -2,9 +2,9 @@
 
 KitSHn 2 runs your apps, sites, pages, files and machines on Cloudflare, and decides who may open each one. It puts everything on one map. Circles on the map say who. A card inside a circle is shared with that circle.
 
-The repo is named "KitSHn 2". Code, the CLI, packages, the address and the MCP tools use `kitshn`.
+The repo is named "KitSHn 2". "kit" is the short name of the project. Code, packages and the MCP tools use `kitshn`. The CLI is `kitshn`, with `kit` as a short alias. The admin and the map live at `kit.yarden-zamir.com` (K-1208).
 
-Requirements have stable numbers with the prefix `K-`. Do not renumber them. Mark a removed requirement "Removed" and keep its number. `OPEN:` marks a question for the owner. `VERIFY:` marks a Cloudflare fact that the docs do not confirm; the first milestone that needs it tests it.
+Requirements have stable numbers with the prefix `K-`. Do not renumber them. Mark a removed requirement "Removed" and keep its number. `VERIFY:` marks a Cloudflare fact that the docs do not confirm; the first milestone that needs it tests it.
 
 The architecture, the request paths and the budget are in [docs/architecture.md](docs/architecture.md). The order of work is in [docs/migration.md](docs/migration.md).
 
@@ -34,23 +34,27 @@ The architecture, the request paths and the budget are in [docs/architecture.md]
 ## 1. Identity and login
 
 - **K-101** Cloudflare Access does every login. kitshn has no login code and no password store.
-- **K-102** People log in with the Access One-time PIN (an email code). Access is the only identity provider at the start. OPEN: GitHub as a second login method, so that the owner needs no email code?
+- **K-102** People log in with the Access One-time PIN (an email code). GitHub is a second login method next to the email code. The passkey check of K-103 applies after either login method.
 - **K-103** A circle with "needs passkey" asks for a passkey or a security key after the login, through Access independent MFA. [Independent MFA](https://developers.cloudflare.com/cloudflare-one/access-controls/access-settings/independent-mfa/) supports biometrics (Touch ID, Face ID, Windows Hello) and security keys, per application and per policy.
 - **K-104** kitshn administration is a resource of kind `kitshn.admin` with the level `control`. Its card sits in the "Owner" circle. The Owner circle has "needs passkey" on.
 - **K-105** kitshn refuses every change that leaves the admin resource without a share to a circle that has at least one person and "needs passkey". This guard runs on every write: a drag, a circle edit, an undo, an agent tool and the pause (K-1504).
 - **K-106** A device proves itself with an Access service token: one token per device, for example "Mac desktop app" or "Yarden's phone". A device is a circle member like a person.
 - **K-107** A machine proves itself with its own service token (K-602). A machine is a circle member too, so a share can give one machine access to another resource.
 - **K-108** Browser approvals of the machine map (browser keys, the Clients approval flow) do not exist in kitshn. A passkey or a device token replaces them.
-- **K-109** Access sessions of the admin resource last 24 hours. Sessions of other resources last 30 days unless a circle sets a shorter time. OPEN: are these the right lengths?
+- **K-109** Access sessions of the admin resource last 24 hours. Sessions of other resources last 30 days unless a circle sets a shorter time.
 - **K-110** "Sign out everywhere" ends every Access session of the account through the Cloudflare API.
-- **K-111** Zero Trust Free counts one seat per person who logs in, up to 50. kitshn turns on seat expiration in Zero Trust admin controls, set to 1 month, so guests who stop coming free their seat. [Seat management](https://developers.cloudflare.com/cloudflare-one/team-and-resources/users/seat-management/) runs the expiry once a day. OPEN: 1 month, or longer?
+- **K-111** Zero Trust Free counts one seat per person who logs in, up to 50. kitshn turns on seat expiration in Zero Trust admin controls, set to 1 month, so guests who stop coming free their seat. [Seat management](https://developers.cloudflare.com/cloudflare-one/team-and-resources/users/seat-management/) runs the expiry once a day.
 - **K-112** The admin view shows the seats in use, with a warning at 40. The removal of a seat stays in the dashboard, because the docs show no API for it. VERIFY: a user removal API.
 
 ## 2. Circles and shares
 
-- **K-201** A circle has a name, a colour, a default level, members, an optional end date, and the flag "needs passkey".
+- **K-201** A circle has a name, a colour, a default level, members, a match mode (K-203), an optional end date, and the flag "needs passkey".
 - **K-202** Member kinds: an email, an email domain, an IP range, a device token, a machine, and "everyone". "Everyone" means anyone who can reach the address, with no login.
-- **K-203** A circle matches a visitor when the visitor matches at least one member. With "needs passkey", the visitor must also pass a passkey check. OPEN: a second member mode "all must match", for example "qlik.com and the Qlik network"? The machine map Guests view has "required IP ranges" for this case.
+- **K-203** A circle has one of two match modes:
+  - "Any" (the default): the visitor matches at least one member. In Access, the members are include rules.
+  - "All must match": the visitor matches every member, for example the domain `qlik.com` and the IP range of the Qlik network. In Access, the members are require rules. This replaces the "required IP ranges" of the machine map Guests view.
+
+  With "needs passkey", the visitor must also pass a passkey check in both modes.
 - **K-204** A card is shared with every circle that it sits inside. Circles overlap freely, and there is no limit on their number.
 - **K-205** A share uses the default level of its circle. One card can override the level for one circle. The override shows as a chip on the card.
 - **K-206** A level that the resource kind does not have becomes the highest level of that kind that is lower. A circle with the default `control` thus gives a file `view`.
@@ -114,11 +118,11 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-516** The map works on a phone: a long press starts a drag, and the panel is a bottom sheet.
 - **K-517** The map uses the tick3d look in light and dark mode (the `neo-brutalism` skill): lilac dotted canvas, ink borders, hard shadows, tilted stickers, Bricolage Grotesque.
 - **K-518** Map state (places, circles, members, shares, stacks) lives in the kitshn database, never in Git (K-001).
-- **K-519** Views next to the map: History, Queue, Seats, Machines (a table of status and health), Library (section 10). Each view and each selected item has its own link.
+- **K-519** Views next to the map: History (with presets, K-716), Queue, Seats, Machines (a table of status and health), Library (section 10). Each view and each selected item has its own link.
 
 ## 6. Machines and the daemon
 
-- **K-601** Each machine runs one `kitshn` daemon as a system service: systemd on Linux, launchd on macOS. OPEN: Windows support in the first version, or later?
+- **K-601** Each machine runs one `kitshn` daemon as a system service: systemd on Linux, launchd on macOS. The first version has no Windows daemon. A Windows machine stays on the machine map portal until a later milestone ([docs/migration.md](docs/migration.md)).
 - **K-602** "Add machine" creates a service token and a remotely managed tunnel, and shows a one-time join code that expires after 10 minutes. `kitshn join <code>` installs nothing else and saves the token and the tunnel token in a file that only the daemon user can read.
 - **K-603** The daemon runs `cloudflared` for the tunnel of its machine. kitshn owns the tunnel ingress through the API; the daemon never edits it.
 - **K-604** The daemon keeps one WebSocket to the Durable Object at `/connect`, with backoff after a failure. Liveness uses `ping` and `pong` with the Durable Object auto response, so a ping wakes nothing.
@@ -142,7 +146,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-703** The interface pushes events. A provider subscribes once, then gets each change of its resources, grants and commands as an event. Nothing polls.
 - **K-704** `register` names the provider, its resource kinds (K-302) and its commands. Each new connection registers again, so a provider restart needs no cleanup.
 - **K-705** `upsert` and `remove` add, change and remove resources of the provider's kinds, with a name, a parent, addresses and a status.
-- **K-706** For each resource of a provider, the daemon pushes a grant table: each matching rule (an email, a domain, an IP range, a service token client id, a machine id, the passkey flag) with its level. The provider decides a level with no call, from the JWT that Access put on the request.
+- **K-706** For each resource of a provider, the daemon pushes a grant table: each circle with its match mode (K-203), its rules (an email, a domain, an IP range, a service token client id, a machine id) and its passkey flag, with its level. The provider decides a level with no call, from the JWT that Access put on the request.
 - **K-707** The daemon passes a command for a provider as an event. The provider answers with the result. The daemon forwards it to kitshn.
 - **K-708** `publishPage`, `publishFile` and `expose` let a provider add a page (section 10), a file, or a live site (K-1104) with one call.
 - **K-709** A resource kind can carry a desired state: a JSON value that kitshn stores and pushes to every machine with that provider. kitshn does not read the value. T3 Code uses it for shared settings and themes. Each value is at most 64 KB.
@@ -168,18 +172,19 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
   | `machines_command` | `kitshn_command` |
   | `machines_queue_cancel` | `kitshn_queue_cancel` |
   | `machines_undo` | `kitshn_undo` |
-  | `machines_preset` | Removed; circles replace presets. OPEN: keep presets as saved maps? |
+  | `machines_preset` | `kitshn_preset` (save, list or apply a preset, K-716) |
   | `machines_join` | `kitshn_join` |
   | `machines_resources` | `kitshn_resources` |
   | `machine_exec` | `kitshn_exec` |
   | (new) | `kitshn_publish` (page, file or site), `kitshn_expose` (a live site), `kitshn_deploy` (run a deploy) |
 
 - **K-715** Agents never raise access. An agent change that adds a card to a circle, raises a level, or adds a circle member becomes a proposal for the owner. Changes that lower access apply at once. This keeps MM-803.
+- **K-716** A preset is a saved map layout: the circles, their members and the shares, with a name. Apply a preset from the History view or with `kitshn_preset`. An apply is one revision with Undo, runs the guard of K-105, and follows K-715 for agents.
 
 ## 8. Recipes and deploys
 
 - **K-801** A recipe is `kitshn.config.ts` with `export default defineApp({...})`. The value is one object literal. The `kitshn` npm package exports `defineApp` and its types.
-- **K-802** Recipes do not compute. A lint rule in `kitshn check` refuses loops, conditions, function calls other than `defineApp`, and imports other than `kitshn`. OPEN: is a lint rule enough, or should kitshn read the file as data with no evaluation at all?
+- **K-802** Recipes do not compute. A lint rule in `kitshn check` refuses loops, conditions, function calls other than `defineApp`, and imports other than `kitshn`. The lint rule is enough, because kitshn never runs repo code (K-803).
 - **K-803** GitHub Actions evaluates the recipe and sends JSON. kitshn checks the JSON with the same schema. kitshn never runs repo code.
 - **K-804** Kinds: a Compose app (`compose`), a static site (`static`), a Worker app (`worker`). A recipe has exactly one kind.
 
@@ -202,7 +207,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-808** `needs.vars` and `needs.secrets` list names. Values come from the kitshn store, per app and environment. A `KITSHN_<NAME>` GitHub variable or secret forwards into the store as `<NAME>` on each deploy and wins over the store. A deploy fails before any work when a needed name has no value, and it names each missing name.
 - **K-809** The kitshn store encrypts secret values with AES-GCM under a Worker secret. The map shows names and "set" or "missing", never a value.
 - **K-810** The workflow file is the same few lines for every app. It needs `permissions: id-token: write` and calls the kitshn action.
-- **K-811** Deploy auth: Actions sends its GitHub OIDC token (issuer `https://token.actions.githubusercontent.com`). kitshn accepts a token whose `repository_owner_id` is on its list of owners. It refuses any other token. OPEN: add organizations to the list?
+- **K-811** Deploy auth: Actions sends its GitHub OIDC token (issuer `https://token.actions.githubusercontent.com`). kitshn accepts a token whose `repository_owner_id` is on its list of owners. It refuses any other token. The list holds user accounts only; GitHub organizations are not on it for now.
 - **K-812** A Compose deploy is a job (K-610). Actions uploads the source as a `git archive` to R2 through a short-lived signed URL. The daemon downloads it, builds with Compose at the lowest CPU weight (as KitSHn 1), and starts it. The archive is deleted after the job.
 - **K-813** The Actions step keeps one WebSocket to kitshn until the deploy ends, and prints each log line and the final address. It fails when the deploy fails.
 - **K-814** The deploy ends with a route check: kitshn requests the address and records status and content type, as KitSHn 1 does.
@@ -229,11 +234,11 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-1005** The Library view lists all pages with a search by title, thread and machine, and a preview. It reads the index in the Durable Object, not R2.
 - **K-1006** Deleting a thread does not delete its library page. "Delete" in the library removes the page from R2 and the map.
 - **K-1007** An MCP App page is not shared, because its buttons need its live MCP server. The library keeps it private and says why.
-- **K-1008** An import adds the existing pages of each machine once. OPEN: import all past pages, or only pages from the last 90 days?
+- **K-1008** An import adds all past pages of each machine once. Each imported page is private, as a new page (K-1002). Work pages (QCDI, Upsolver, SDE) are no exception. On 2026-10-27 there are 46 pages, about 14 MB: 41 on the Mac, 5 on the VPS, 0 on the Oracle VPS. Pages on Windows are not counted, and wait for the Windows daemon (K-601). New pages arrive at about 20 per week.
 
 ## 11. Files and sites
 
-- **K-1101** "Upload" on the map, and `kitshn_publish` for agents, put a file into R2 and a card into the tray. A file is at most 100 MB. OPEN: is 100 MB right?
+- **K-1101** "Upload" on the map, and `kitshn_publish` for agents, put a file into R2 and a card into the tray. A file is at most 100 MB.
 - **K-1102** The Worker serves files at `files.<zone>/<id>/<name>` with the checks of K-1004.
 - **K-1103** Public sites (for example tick3d and the resume) are static sites (K-805) in the Everyone circle.
 - **K-1104** A live site is a local server of a machine, shared through the tunnel of the machine. `kitshn expose <socket or port> --name <name>` or `kitshn_expose` adds it. Its address is `<name>.<zone>`. It is live only: when the machine is off, the site is off. kitshn keeps no copy.
@@ -253,20 +258,20 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 
 ## 12. Bootstrap
 
-- **K-1201** One command sets up kitshn on a new Cloudflare account: `curl -fsSL https://kitshn.<host>/install | sh`, with the Cloudflare API token in `CLOUDFLARE_API_TOKEN`.
+- **K-1201** One command sets up kitshn on a new Cloudflare account: `curl -fsSL https://kit.yarden-zamir.com/install | sh`, with the Cloudflare API token in `CLOUDFLARE_API_TOKEN`. The `/install` path needs no login.
 - **K-1202** The owner makes the token by hand through a link with the permissions filled in. The script names each missing permission and the link.
 - **K-1203** The script uses only `curl`, `sh` and `jq`. It downloads the Worker bundle of a kitshn release and uploads it through the Workers API, with static assets through the direct upload flow ([direct upload](https://developers.cloudflare.com/workers/static-assets/direct-upload/)). It does not use Wrangler.
-- **K-1204** The script creates, or reuses when present: the Worker with its Durable Object, the R2 bucket, the Worker secrets, the Access applications of the admin resource and of `/connect`, the Owner circle policy with the owner email and "needs passkey", the One-time PIN login method, and seat expiration (K-111).
+- **K-1204** The script creates, or reuses when present: the Worker with its Durable Object, the R2 bucket, the Worker secrets, the Access applications of the admin resource and of `/connect`, the Owner circle policy with the owner email and "needs passkey", the One-time PIN login method, the GitHub login method (K-102), and seat expiration (K-111).
 - **K-1205** A second run changes nothing that is already right. It prints what it changed.
 - **K-1206** At the end, the script prints the admin address and a one-time link to register the first passkey in the Access App Launcher.
-- **K-1207** OPEN: the Zero Trust organization (the team domain and the free plan) may need the dashboard once. The docs do not show an API that creates it. The script then stops with the dashboard link and continues on the next run.
-- **K-1208** The admin and the map live at one host on an owner zone. OPEN: which host? `kitshn.yarden-zamir.com` serves the KitSHn 1 website today; the choices are to move that site, or to use another name such as `map.yarden-zamir.com`.
+- **K-1207** The Zero Trust organization (the team domain and the free plan) exists on the owner's account. On a new account, the script tests whether the API can create it. When it cannot, the script stops with the dashboard link, and continues on the next run after one dashboard visit. VERIFY: an API that creates the Zero Trust organization.
+- **K-1208** The admin and the map live at `kit.yarden-zamir.com`. The KitSHn 1 website moves from `kitshn.yarden-zamir.com` to `kitshn-legacy.yarden-zamir.com`. KitSHn 1 serves it from the `kitshn-meta` repo.
 
 ## 13. Free plan budget
 
-- **K-1301** The reference setup is 5 machines, about 15 apps, about 200 pages, 2 people and a few guests. [docs/architecture.md](docs/architecture.md) holds its budget table.
+- **K-1301** The reference setup is 5 machines, about 15 apps, about 50 pages that grow by about 20 per week (K-1008), 2 people and a few guests. [docs/architecture.md](docs/architecture.md) holds its budget table.
 - **K-1302** kitshn writes Durable Object rows only on change. Presence writes on change only. Resource samples are not stored in the Durable Object (K-606). Each `setAlarm` counts as one row written ([Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)), so kitshn sets one alarm for the next due item, never one alarm per item.
-- **K-1303** The admin view shows today's use of Worker requests, Durable Object requests, rows written, Access seats, Access applications, service tokens, Worker scripts and DNS records, with a warning at 80% of each limit. OPEN: this needs "Account Analytics: Read" on the token. Add it?
+- **K-1303** The admin view shows today's use of Worker requests, Durable Object requests, rows written, Access seats, Access applications, service tokens, Worker scripts and DNS records, with a warning at 80% of each limit. The token has "Account Analytics: Read" for this view.
 - **K-1304** When a daily Durable Object limit runs out, the map shows the cause and the reset time (00:00 UTC). Cloudflare Access keeps enforcing the last compiled shares, so access does not change.
 
 ## 14. Migration

@@ -36,7 +36,7 @@ This page says what the parts are, where each piece of state lives, how requests
 
 | State | Lives in | Notes |
 | --- | --- | --- |
-| Circles, members, shares, overrides, card places, stacks | Durable Object SQLite | Never in Git (K-518). |
+| Circles, members, shares, overrides, card places, stacks, presets | Durable Object SQLite | Never in Git (K-518, K-716). |
 | Resource index (machines, apps, environments, pages, files) | Durable Object SQLite | R2 holds the bytes. |
 | Revisions (history) | Durable Object SQLite | Pruned after 90 days or 5,000 entries (K-1503). |
 | Job queue and command results | Durable Object SQLite | Expired jobs pruned daily. |
@@ -64,7 +64,7 @@ This page says what the parts are, where each piece of state lives, how requests
 
 ## Free plan budget
 
-Reference setup (K-1301): 5 machines, about 15 apps with about 5 open previews, about 200 pages, 2 people and a few guests. The numbers are estimates from the request paths above, not measurements.
+Reference setup (K-1301): 5 machines, about 15 apps with about 5 open previews, about 50 pages that grow by about 20 per week, 2 people and a few guests. The numbers are estimates from the request paths above, not measurements.
 
 | Budget | Free limit | Expected use | How it stays low |
 | --- | --- | --- | --- |
@@ -72,10 +72,10 @@ Reference setup (K-1301): 5 machines, about 15 apps with about 5 open previews, 
 | Worker CPU | 10 ms per request | under 5 ms for a snapshot of about 500 rows | Waiting on the Cloudflare API does not count. |
 | Subrequests | 50 per request | at most 40 per alarm run | Alarm queue (K-406). |
 | Durable Object requests | 100,000 per day ([pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)) | about 1,100 per day: 500 from the Worker, about 450 from 8,700 daemon messages at the 20:1 WebSocket ratio, 100 alarms | Pings use the auto response. Samples once a minute. |
-| Rows written | 100,000 per day | about 1,600 per day, counting index rows: shares and revisions 200, deploys 160, pages 60, presence 100, alarms 100, Access bookkeeping 100, doubled for indexes | Write on change only. One alarm for the next due item. No sample rows. |
+| Rows written | 100,000 per day | about 1,350 per day, counting index rows: shares and revisions 200, deploys 160, pages 10 (about 3 new pages a day), presence 100, alarms 100, Access bookkeeping 100, doubled for indexes | Write on change only. One alarm for the next due item. No sample rows. |
 | Rows read | 5,000,000 per day | about 30,000 per day | Snapshot per map open. |
 | DO storage | 5 GB | under 50 MB | Bytes live in R2. |
-| R2 storage | 10 GB-month ([R2 pricing](https://developers.cloudflare.com/r2/pricing/)) | about 40 MB of pages, files as uploaded, archives deleted after each deploy | |
+| R2 storage | 10 GB-month ([R2 pricing](https://developers.cloudflare.com/r2/pricing/)) | about 14 MB of pages today (46 pages), growing about 6 MB per week, so about 300 MB after one year. Files as uploaded, at most 100 MB each (K-1101), archives deleted after each deploy | |
 | R2 Class A | 1,000,000 per month | about 3,000 per month | |
 | Access seats | 50 people | about 7: owner, one second user, a few guests | Seat expiration after 1 month (K-111). Devices and machines use service tokens, which take no seat. |
 | Access applications | 500 ([account limits](https://developers.cloudflare.com/cloudflare-one/account-limits/)) | about 40 | Public resources need none. |

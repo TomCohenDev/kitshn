@@ -151,10 +151,7 @@ export function ruleViolation(state: State): string | null {
       circle.needsPasskey &&
       circle.endsAt === null &&
       circle.members.some((member) => member._tag === "email") &&
-      // An "all" circle with two people, or with a device or machine, matches nobody.
-      (circle.match === "any" ||
-        (circle.members.filter((member) => member._tag === "email").length === 1 &&
-          !circle.members.some((member) => member._tag === "device" || member._tag === "machine"))) &&
+      (circle.match === "any" || allCircleCanMatch(circle)) &&
       shareLevel(state, admin, circle) === "control" &&
       (state.shareSettings.get(shareKey(admin.id, circle.id))?.endsAt ?? null) === null,
   );
@@ -162,6 +159,22 @@ export function ruleViolation(state: State): string | null {
     return "The kitshn admin must stay shared at control with a circle that has a person and needs a passkey.";
   }
   return null;
+}
+
+/** An "all" circle matches someone only with one person, no device or machine, and domains of that person. */
+function allCircleCanMatch(circle: Circle): boolean {
+  const emails = circle.members.flatMap((member) =>
+    member._tag === "email" ? [member.email.toLowerCase()] : [],
+  );
+  const [email] = emails;
+  if (emails.length !== 1 || !email) return false;
+  return circle.members.every((member) =>
+    member._tag === "device" || member._tag === "machine"
+      ? false
+      : member._tag === "domain"
+        ? email.endsWith(`@${member.domain.toLowerCase()}`)
+        : true,
+  );
 }
 
 export interface ShareDiff {

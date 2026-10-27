@@ -40,7 +40,7 @@ const SCHEMA = [
   "CREATE TABLE IF NOT EXISTS share_settings (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
   `CREATE TABLE IF NOT EXISTS revisions (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL,
     actor TEXT NOT NULL, summary TEXT NOT NULL, changes TEXT NOT NULL, undoes INTEGER)`,
-  "CREATE TABLE IF NOT EXISTS access_objects (key TEXT PRIMARY KEY, cf_id TEXT NOT NULL, body TEXT NOT NULL, error TEXT)",
+  "CREATE TABLE IF NOT EXISTS access_objects (key TEXT PRIMARY KEY, cf_id TEXT NOT NULL, body TEXT NOT NULL, tried TEXT NOT NULL, error TEXT)",
   "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
 ];
 
@@ -93,9 +93,12 @@ export class Kitshn extends DurableObject<Env> {
       shareSettings: json<ShareSetting>(this.sql("SELECT id, body FROM share_settings")),
     };
     this.access = new Map(
-      this.sql<{ key: string; cf_id: string; body: string; error: string | null }>(
-        "SELECT key, cf_id, body, error FROM access_objects",
-      ).map((row) => [row.key, { key: row.key, cfId: row.cf_id, body: row.body, error: row.error }]),
+      this.sql<{ key: string; cf_id: string; body: string; tried: string; error: string | null }>(
+        "SELECT key, cf_id, body, tried, error FROM access_objects",
+      ).map((row) => [
+        row.key,
+        { key: row.key, cfId: row.cf_id, body: row.body, tried: row.tried, error: row.error },
+      ]),
     );
     const rows = this.sql<{ id: number; at: number; actor: string; summary: string; undoes: number | null }>(
       "SELECT id, at, actor, summary, undoes FROM revisions ORDER BY id DESC LIMIT ?",
@@ -221,6 +224,11 @@ export class Kitshn extends DurableObject<Env> {
       return this.insertRevision(actor, summary, changes, undoes);
     });
     this.state = after;
+    for (const change of changes) {
+      if (change._tag === "shareSetting") this.stuckShares.delete(change.id);
+      if (change._tag === "place")
+        for (const id of this.stuckShares) if (id.startsWith(`${change.id}/`)) this.stuckShares.delete(id);
+    }
     this.revisions = [
       { id, at: Date.now(), actor, summary, undoes, undoneBy: null },
       ...this.revisions.map((revision) =>
@@ -435,10 +443,11 @@ export class Kitshn extends DurableObject<Env> {
         put: (row: AccessRow) => {
           this.access.set(row.key, row);
           this.sql(
-            "INSERT OR REPLACE INTO access_objects (key, cf_id, body, error) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO access_objects (key, cf_id, body, tried, error) VALUES (?, ?, ?, ?, ?)",
             row.key,
             row.cfId,
             row.body,
+            row.tried,
             row.error,
           );
         },

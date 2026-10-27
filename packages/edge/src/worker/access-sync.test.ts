@@ -113,6 +113,23 @@ describe("Access sync (K-406, K-408)", () => {
     expect(JSON.parse(cf.rows.get("app:kitshn-admin:kit.example.com")!.body).policies).toEqual([]);
   });
 
+  it("never empties an application when a policy create fails, and retries after the daily reset", async () => {
+    const cf = fakeCloudflare({ apps: [{ id: "app-1", name: "kitshn admin", domain: "kit.example.com" }] });
+    const desired = desiredAccess(start(), 0);
+    const down: Api = async (method, path, body) => {
+      if (path.includes("/policies")) throw new Error("503");
+      return cf.api(method, path, body);
+    };
+    await syncAccess(desired, cf.store, down, "a");
+    expect(cf.calls.filter((call) => call.includes("/apps/"))).toEqual([]);
+    expect(hasAccessWork(desired, cf.rows)).toBe(false);
+
+    for (const row of cf.rows.values()) cf.rows.set(row.key, { ...row, error: null });
+    expect(hasAccessWork(desired, cf.rows)).toBe(true);
+    await syncAccess(desired, cf.store, cf.api, "a");
+    expect(JSON.parse(cf.rows.get("app:kitshn-admin:kit.example.com")!.body).policies).toHaveLength(1);
+  });
+
   it("updates the policy when the circle changes", async () => {
     const cf = fakeCloudflare();
     const state = start();

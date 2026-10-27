@@ -1,11 +1,15 @@
 import { ACCESS_NAME_PREFIX, type AppBody, type DesiredAccess, type PolicyBody } from "../core/access.ts";
 import type { AccessState } from "../core/protocol.ts";
 
-/** What kitshn last wrote for one Access object. `body` is the exact JSON it sent. */
+/**
+ * What kitshn knows about one Access object. `body` is the JSON that Cloudflare last accepted ("" when
+ * none). `tried` is the JSON of the last attempt; with `error` set, that attempt failed.
+ */
 export interface AccessRow {
   readonly key: string;
   readonly cfId: string;
   readonly body: string;
+  readonly tried: string;
   readonly error: string | null;
 }
 
@@ -20,17 +24,29 @@ export type Api = <T>(method: "GET" | "POST" | "PUT" | "DELETE", path: string, b
 /** K-406: one alarm run makes at most this many Cloudflare API calls. */
 export const CALLS_PER_RUN = 40;
 
-/**
- * The application with the policies that exist in Cloudflare. A policy that is not there yet, or that
- * Cloudflare refused, is left out, so a failure never keeps a removed share alive (fails closed).
- */
-const appRequest = (app: AppBody, rows: ReadonlyMap<string, AccessRow>) => {
-  const ids = app.policyKeys.map((key) => rows.get(key)?.cfId ?? "").filter((id) => id !== "");
-  const { policyKeys: _, ...rest } = app;
-  return { ...rest, policies: ids.map((id, index) => ({ id, precedence: index + 1 })) };
-};
+const policyBody = (policy: PolicyBody) => JSON.stringify(policy);
 
-const policyRequest = (policy: PolicyBody) => policy;
+/** True when an attempt with this body failed and waits for the daily retry (K-408). */
+const failedWith = (row: AccessRow | undefined, body: string) => row?.error != null && row.tried === body;
+
+/**
+ * The application body, or null while it must wait. A policy without a Cloudflare id is left out only
+ * when the result takes access away from what Cloudflare has (fails closed). Otherwise the application
+ * waits for that policy, so a failed create never empties an application.
+ */
+function appBody(key: string, app: AppBody, rows: ReadonlyMap<string, AccessRow>): string | null {
+  const ids = app.policyKeys.map((policyKey) => rows.get(policyKey)?.cfId ?? "").filter((id) => id !== "");
+  if (ids.length < app.policyKeys.length) {
+    const row = rows.get(key);
+    if (!row?.body) return null;
+    const written = new Set(
+      (JSON.parse(row.body) as { policies: Array<{ id: string }> }).policies.map((p) => p.id),
+    );
+    if (!ids.every((id) => written.has(id))) return null;
+  }
+  const { policyKeys: _, ...rest } = app;
+  return JSON.stringify({ ...rest, policies: ids.map((id, index) => ({ id, precedence: index + 1 })) });
+}
 
 /** K-407: the Access state of each card with an application. */
 export function accessStates(
@@ -43,14 +59,14 @@ export function accessStates(
     const parts = [
       ...app.policyKeys.map((policyKey) => {
         const policy = desired.policies.get(policyKey);
-        return { row: rows.get(policyKey), body: policy ? JSON.stringify(policyRequest(policy)) : "" };
+        return { row: rows.get(policyKey), body: policy ? policyBody(policy) : "" };
       }),
-      { row: rows.get(key), body: JSON.stringify(appRequest(app, rows)) },
+      { row: rows.get(key), body: appBody(key, app, rows) ?? "" },
     ];
-    const failed = parts.find((part) => part.row?.error);
+    const failed = parts.find((part) => failedWith(part.row, part.body));
     const state: AccessState = failed?.row?.error
       ? { state: "failed", error: failed.row.error }
-      : parts.every((part) => part.row && part.row.cfId && part.row.body === part.body)
+      : parts.every((part) => part.row?.cfId && part.row.body === part.body)
         ? { state: "applied" }
         : { state: "applying" };
     const previous = states[resourceId];
@@ -59,13 +75,15 @@ export function accessStates(
   return states;
 }
 
-/** True when some object differs from what kitshn last wrote, not counting objects that failed. */
+/** True when some object needs a write that is not waiting for the daily retry. */
 export function hasAccessWork(desired: DesiredAccess, rows: ReadonlyMap<string, AccessRow>): boolean {
   for (const [key, policy] of desired.policies) {
-    if (rows.get(key)?.body !== JSON.stringify(policyRequest(policy))) return true;
+    const body = policyBody(policy);
+    if (rows.get(key)?.body !== body && !failedWith(rows.get(key), body)) return true;
   }
   for (const [key, app] of desired.apps) {
-    if (rows.get(key)?.body !== JSON.stringify(appRequest(app, rows))) return true;
+    const body = appBody(key, app, rows);
+    if (body !== null && rows.get(key)?.body !== body && !failedWith(rows.get(key), body)) return true;
   }
   for (const row of rows.values()) if (isStale(desired, row)) return true;
   return false;
@@ -106,12 +124,11 @@ export async function syncAccess(
   const write = async (
     key: string,
     kind: "policies" | "apps",
-    request: object,
+    body: string,
     find: (list: ReadonlyArray<Named>) => Named | undefined,
   ) => {
-    const body = JSON.stringify(request);
     const row = store.rows.get(key);
-    if (row?.body === body) return true;
+    if (row?.body === body || failedWith(row, body)) return true;
     let cfId = row?.cfId ?? "";
     try {
       if (!cfId) {
@@ -127,29 +144,28 @@ export async function syncAccess(
         cfId = found && found.name.startsWith(ACCESS_NAME_PREFIX) ? found.id : "";
       }
       if (!spend()) return false;
+      const request: unknown = JSON.parse(body);
       const result = cfId
         ? await api<Named>("PUT", `${base}/${kind}/${cfId}`, request)
         : await api<Named>("POST", `${base}/${kind}`, request);
-      store.put({ key, cfId: result.id, body, error: null });
+      store.put({ key, cfId: result.id, body, tried: body, error: null });
     } catch (error) {
       // Someone deleted the object: forget its id, so the next run creates it again.
-      if (isNotFound(error) && cfId) store.put({ key, cfId: "", body: "", error: null });
-      else store.put({ key, cfId, body, error: message(error) });
+      if (isNotFound(error) && cfId) store.put({ key, cfId: "", body: "", tried: "", error: null });
+      else store.put({ key, cfId, body: row?.body ?? "", tried: body, error: message(error) });
     }
     return true;
   };
 
   for (const [key, policy] of desired.policies) {
-    const request = policyRequest(policy);
-    if (!(await write(key, "policies", request, (list) => list.find((item) => item.name === policy.name)))) {
-      return false;
-    }
+    const found = (list: ReadonlyArray<Named>) => list.find((item) => item.name === policy.name);
+    if (!(await write(key, "policies", policyBody(policy), found))) return false;
   }
   for (const [key, app] of desired.apps) {
-    const request = appRequest(app, store.rows);
-    if (!(await write(key, "apps", request, (list) => list.find((item) => item.domain === app.domain)))) {
-      return false;
-    }
+    const body = appBody(key, app, store.rows);
+    if (body === null) continue;
+    const found = (list: ReadonlyArray<Named>) => list.find((item) => item.domain === app.domain);
+    if (!(await write(key, "apps", body, found))) return false;
   }
   const stale = [...store.rows.values()].filter((row) => isStale(desired, row));
   // Applications first: Access refuses to delete a policy that an application still uses.
@@ -166,7 +182,7 @@ export async function syncAccess(
       store.remove(row.key);
     } catch (error) {
       if (isNotFound(error)) store.remove(row.key);
-      else store.put({ ...row, error: message(error) });
+      else store.put({ ...row, tried: "", error: message(error) });
     }
   }
   return true;

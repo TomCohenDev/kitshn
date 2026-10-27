@@ -130,6 +130,18 @@ describe("admin guard (K-105)", () => {
       },
     ]);
     expect(ruleViolation(after)).toMatch(/passkey/);
+    const otherDomain = edit(state, [
+      {
+        _tag: "circle",
+        id: OWNER_CIRCLE_ID,
+        after: {
+          ...owner,
+          match: "all",
+          members: [...owner.members, { _tag: "domain", domain: "other.com" }],
+        },
+      },
+    ]);
+    expect(ruleViolation(otherDomain.after)).toMatch(/passkey/);
   });
 
   it("accepts a second passkey circle that takes over the admin", () => {

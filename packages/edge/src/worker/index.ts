@@ -5,7 +5,7 @@ import {
   loginStep,
   objectKey,
 } from "../core/library.ts";
-import { type ContentLogins, callerOf, contentVisitorOf, cookieValues, deployerOf } from "./auth.ts";
+import { type ContentLogins, callerOf, contentVisitorOf, cookieValues, deployerOf, freshCallerOf } from "./auth.ts";
 import { escapeHtml, originDown, seenText } from "./live.ts";
 import type { Env } from "./env.ts";
 
@@ -210,6 +210,17 @@ export default {
       ) {
         return Response.json({ error: "Send JSON with Content-Type: application/json." }, { status: 415 });
       }
+      // K-1504: "Resume" passes the passkey check of `/api/fresh` first; Access sends the owner back here.
+      if (url.pathname === "/api/fresh/start" && request.method === "GET")
+        return Response.redirect(`${url.origin}/#resume`, 302);
+      if (url.pathname === "/api/fresh/resume" && request.method === "POST") {
+        const fresh = await freshCallerOf(request, env, Date.now());
+        if (typeof fresh === "string") return Response.json({ error: fresh }, { status: 401 });
+        const headers = new Headers(request.headers);
+        headers.set("x-kitshn-caller", JSON.stringify(fresh));
+        return env.KITSHN.getByName("kitshn").fetch(new Request(`${url.origin}/fresh/resume`, { method: "POST", headers }));
+      }
+      if (url.pathname.startsWith("/api/fresh/")) return Response.json({ error: "Not found." }, { status: 404 });
       const caller = await callerOf(request, env, env.ACCESS_ADMIN_AUD);
       if (typeof caller === "string") return Response.json({ error: caller }, { status: 401 });
       const headers = new Headers(request.headers);

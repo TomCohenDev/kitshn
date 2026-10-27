@@ -76,6 +76,27 @@ export async function callerOf(request: Request, env: Env, audience: string): Pr
   };
 }
 
+/** K-1504: how old a fresh passkey login may be for "Resume". */
+export const FRESH_SECONDS = 600;
+
+/**
+ * K-1504: an owner login that passed the passkey check of the `/api/fresh` application within the last
+ * ten minutes, or why not.
+ */
+export async function freshCallerOf(request: Request, env: Env, now: number): Promise<Caller | string> {
+  if (env.DEV_IDENTITY && isLocal(new URL(request.url))) return callerOf(request, env, "");
+  if (!env.ACCESS_FRESH_AUD) return "Run the bootstrap again to turn on the fresh passkey check.";
+  const token = request.headers.get("cf-access-jwt-assertion");
+  if (!token) return "The request has no Cloudflare Access token.";
+  const identity = await accessIdentity(token, env, [env.ACCESS_FRESH_AUD]);
+  if (typeof identity === "string") return identity;
+  if (!identity.email) return "Resume needs a person with a passkey, not a service token.";
+  if (identity.issuedAt === null || now / 1000 - identity.issuedAt > FRESH_SECONDS)
+    return "The passkey check is older than 10 minutes. Press Resume again.";
+  const ip = request.headers.get("cf-connecting-ip");
+  return { visitor: { email: identity.email, clientId: null, ip }, actor: { _tag: "person", email: identity.email } };
+}
+
 /** The two login applications of a content host: `/login`, and `/login/passkey` with the passkey check. */
 export interface ContentLogins {
   readonly login: string;

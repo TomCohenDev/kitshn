@@ -406,6 +406,9 @@ async function composeUp(
 }
 
 /** K-904: stops the app, stops exposing it, and for a preview removes its volumes and files. */
+/** The image of the teardown clean-up; busybox has `find -delete` and is a few MB. */
+const CLEANUP_IMAGE = "busybox:1.38";
+
 async function composeDown(command: Extract<Command, { kind: "compose-down" }>): Promise<JobOutcome> {
   const sites = readSites();
   if (sites) writeSites(sites.filter((site) => site.name !== command.name));
@@ -424,9 +427,26 @@ async function composeDown(command: Extract<Command, { kind: "compose-down" }>):
     // Compose reads the app's own files, not a compose.yml in the daemon's folder.
     { timeoutMs: COMPOSE_TIMEOUT_MS, cwd: existsSync(join(dir, "src")) ? join(dir, "src") : paths.data },
   );
-  if (command.removeData) rmSync(dir, { recursive: true, force: true });
-  return result;
+  if (!command.removeData) return result;
+  // K-904: containers often write as root, which the daemon user cannot remove. A short container with the
+  // same folder removes what is inside; nothing widens the permissions of the files.
+  const inside = existsSync(dir)
+    ? await runProgram("docker", ["run", "--rm", "-v", `${dir}:/app`, CLEANUP_IMAGE, "find", "/app", "-mindepth", "1", "-delete"], {
+        timeoutMs: COMPOSE_TIMEOUT_MS,
+      })
+    : { ok: true, exitCode: 0, output: "" };
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch (error) {
+    return {
+      ok: false,
+      exitCode: null,
+      output: `${result.output}${inside.output}\n[kitshn: ${dir} stays: ${error instanceof Error ? error.message : String(error)}]`,
+    };
+  }
+  return { ...result, output: result.output + inside.output };
 }
+
 
 /** One Compose job per app at a time: a teardown never runs during the build of the same app. */
 const appQueues = new Map<string, Promise<unknown>>();

@@ -446,7 +446,11 @@ export async function syncAccess(
 interface LauncherApp {
   readonly id: string;
   readonly type?: string;
-  readonly policies?: ReadonlyArray<{ readonly id: string; readonly precedence?: number }>;
+  readonly policies?: ReadonlyArray<{
+    readonly id: string;
+    readonly name?: string;
+    readonly precedence?: number;
+  }>;
   readonly [field: string]: unknown;
 }
 
@@ -486,4 +490,66 @@ export async function syncLauncher(
   const body = Object.fromEntries(Object.entries(launcher).filter(([field]) => !READ_ONLY.has(field)));
   await api("PUT", `${base}/${found.id}`, { ...body, policies: next });
   return { attached: want, calls: 3 };
+}
+
+/** The bootstrap's policy that lets every service token log in (K-1204); it stays on the login applications. */
+export const MACHINES_POLICY_NAME = `${ACCESS_NAME_PREFIX}machines`;
+
+/** K-1004: the policy ids that the login applications should have. Policies without an id yet wait. */
+export function loginWant(desired: DesiredAccess, rows: ReadonlyMap<string, AccessRow>): string {
+  const ids = (keys: ReadonlyArray<string>) =>
+    keys.map((key) => rows.get(key)?.cfId ?? "").filter((id) => id !== "");
+  return JSON.stringify({ login: ids(desired.logins.login), passkey: ids(desired.logins.passkey) });
+}
+
+/**
+ * K-1004: gives the four login applications of pages and files, which the bootstrap made, the policies of
+ * the circles that may log in. It keeps only the machines policy of the bootstrap and drops every other
+ * policy. `attached` is the `loginWant` that kitshn last applied; it calls Cloudflare only when that
+ * differs, or when `force` is set (the daily compare of K-408).
+ */
+export async function syncLogins(
+  desired: DesiredAccess,
+  store: AccessStore,
+  api: Api,
+  accountId: string,
+  zone: string,
+  attached: string,
+  force: boolean,
+): Promise<{ readonly attached: string; readonly calls: number }> {
+  const want = loginWant(desired, store.rows);
+  if (!force && want === attached) return { attached, calls: 0 };
+  const ids = JSON.parse(want) as { login: Array<string>; passkey: Array<string> };
+  const base = `/accounts/${accountId}/access/apps`;
+  const apps = await api<ReadonlyArray<LauncherApp>>("GET", `${base}?per_page=${PAGE}`);
+  let calls = 1;
+  for (const host of [`pages.${zone}`, `files.${zone}`]) {
+    for (const [path, wanted] of [
+      ["/login", ids.login],
+      ["/login/passkey", ids.passkey],
+    ] as const) {
+      const domain = `${host}${path}`;
+      const app = apps.find(
+        (item) =>
+          item["domain"] === domain &&
+          typeof item["name"] === "string" &&
+          item["name"].startsWith(ACCESS_NAME_PREFIX),
+      );
+      if (!app) throw new Error(`The account has no kitshn login application on ${domain}. Run the bootstrap.`);
+      const live = [...(app.policies ?? [])].sort((a, b) => (a.precedence ?? 0) - (b.precedence ?? 0));
+      const next = [
+        ...live.filter((policy) => policy.name === MACHINES_POLICY_NAME).map((policy) => policy.id),
+        ...wanted,
+      ];
+      if (deepEqual(next, live.map((policy) => policy.id))) continue;
+      // The list carries whole applications, so the PUT sends every other field back unchanged.
+      const body = Object.fromEntries(Object.entries(app).filter(([field]) => !READ_ONLY.has(field)));
+      await api("PUT", `${base}/${app.id}`, {
+        ...body,
+        policies: next.map((id, index) => ({ id, precedence: index + 1 })),
+      });
+      calls++;
+    }
+  }
+  return { attached: want, calls };
 }

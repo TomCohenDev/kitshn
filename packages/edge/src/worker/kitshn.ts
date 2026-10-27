@@ -69,6 +69,8 @@ import {
   signOutEverywhere,
   syncAccess,
   syncLauncher,
+  syncLogins,
+  loginWant,
   verifyAccess,
   verifyPasskeys,
 } from "./access-sync.ts";
@@ -1655,7 +1657,7 @@ export class Kitshn extends DurableObject<Env> {
     const desired = desiredAccess(this.state, now);
     if (
       this.env.CLOUDFLARE_API_TOKEN &&
-      (hasAccessWork(desired, this.access, this.reachableAddresses()) || this.launcherWork())
+      (hasAccessWork(desired, this.access, this.reachableAddresses()) || this.launcherWork() || this.loginWork())
     )
       next = now;
     // A failed tunnel, DNS or route write tries again after five minutes (K-410). Only a future retry
@@ -1736,6 +1738,7 @@ export class Kitshn extends DurableObject<Env> {
       // K-408: retry what failed once a day.
       this.sql("UPDATE access_objects SET error = NULL WHERE error IS NOT NULL");
       this.sql("DELETE FROM meta WHERE key = 'launcher_failed'");
+      this.sql("DELETE FROM meta WHERE key = 'login_failed'");
       // A refused address may be free now, for example after the other machine let it go.
       this.sql("UPDATE live_sites SET state = 'checking' WHERE state = 'refused'");
       // K-1503 style clean-up: keep the newest 1,000 finished jobs.
@@ -2810,6 +2813,38 @@ export class Kitshn extends DurableObject<Env> {
     return want !== (this.meta("launcher_policy") ?? "") && this.meta("launcher_failed") !== `failed:${want}`;
   }
 
+  /** K-1004: returns the Cloudflare calls it made. */
+  private async syncLogins(api: Api, force: boolean) {
+    const desired = desiredAccess(this.state, Date.now());
+    const want = loginWant(desired, this.access);
+    if (!force && this.meta("login_failed") === `failed:${want}`) return 0;
+    try {
+      const result = await syncLogins(
+        desired,
+        this.accessStore(),
+        api,
+        this.env.CLOUDFLARE_ACCOUNT_ID,
+        this.env.KITSHN_ZONE,
+        this.meta("login_policies") ?? "",
+        force,
+      );
+      this.setMeta("login_policies", result.attached);
+      this.setMeta("login_failed", "none");
+      return result.calls;
+    } catch (error) {
+      // K-408: a failed write waits for the daily retry, so the alarm does not loop on it.
+      console.warn(`kitshn could not update the page and file logins: ${String(error)}`);
+      this.setMeta("login_failed", `failed:${want}`);
+      return 5;
+    }
+  }
+
+  /** K-1004: the login applications lack the wanted policies, and that change did not fail since the daily retry. */
+  private loginWork() {
+    const want = loginWant(desiredAccess(this.state, Date.now()), this.access);
+    return want !== (this.meta("login_policies") ?? "") && this.meta("login_failed") !== `failed:${want}`;
+  }
+
   private accessLock: Promise<unknown> = Promise.resolve();
 
   /** Runs one Access sync at a time, so a deploy and the alarm never both create the same object. */
@@ -2884,8 +2919,9 @@ export class Kitshn extends DurableObject<Env> {
       spent += await this.checkSites(api, 6);
       await this.syncDns(api, 5);
       await this.syncRoutes(api, 5);
-      // K-113: take an unwanted enrollment policy off the App Launcher before the sync deletes it.
+      // K-113, K-1004: take unwanted policies off the App Launcher and the logins before the sync deletes them.
       spent += await this.syncLauncher(api, daily);
+      spent += await this.syncLogins(api, daily);
       await this.withAccessLock(() =>
         // The state can change while the daily compare waits, so the sync reads it inside the lock.
         syncAccess(
@@ -2894,13 +2930,14 @@ export class Kitshn extends DurableObject<Env> {
           api,
           this.env.CLOUDFLARE_ACCOUNT_ID,
           // The tunnels, DNS records and offline routes above used at most 16 calls, and the
-          // launcher step below needs 3 (K-406).
-          CALLS_PER_RUN - spent - 19,
+          // launcher and login steps below need 3 and 5 (K-406).
+          CALLS_PER_RUN - spent - 24,
           this.reachableAddresses(),
         ),
       );
-      // A policy that the sync just made goes on the App Launcher in the same run.
+      // A policy that the sync just made goes on the App Launcher and the logins in the same run.
       await this.syncLauncher(api, false);
+      await this.syncLogins(api, false);
 
       changed ||=
         daily || JSON.stringify(accessStates(desiredAccess(this.state, now), this.access)) !== before;

@@ -228,7 +228,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-902** A preview of a Compose app runs on the machine of its app. It gets a tunnel route to its socket and a DNS record.
 - **K-903** A preview of a static site or Worker app is its own Worker script with a custom domain. The free plan allows 100 Worker scripts per account; kitshn refuses a new preview at 90 and names the open previews.
 - **K-904** With the GitHub App (K-908), a closed pull request removes its preview at once: containers, images, volumes, socket, route, DNS record, Access application and card. Without the App, the workflow does it on the `closed` event, as KitSHn 1.
-- **K-905** A preview keeps what the recipe lists in `keep` (logs, data folders), as KitSHn 1. "Prune" in the card panel removes what is kept.
+- **K-905** Planned: today a closed preview loses all its data. A preview keeps what the recipe lists in `keep` (logs, data folders), as KitSHn 1. "Prune" in the card panel removes what is kept.
 - **K-906** Preview limits work as KitSHn 1: `limits: { cpus, memory }` caps all previews of an app together. Production is never limited.
 - **K-907** A preview starts in its `startsIn` circle, by default "Owner".
 - **K-908** The kitshn GitHub App adds: preview teardown on close (K-904), deployment statuses (K-816) without a workflow token, builds that agent keys start (K-718, with the permission "Actions: write"), repo cards before the first deploy, and "New app" from the map, which creates a repo from a template. The owner creates the App after the spec is approved.

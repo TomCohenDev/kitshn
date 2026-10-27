@@ -15,6 +15,7 @@ import {
   type ResourceKind,
   type Stack,
   type State,
+  type PauseMode,
   type Point,
   circlesHolding,
   insideCircle,
@@ -25,10 +26,12 @@ import {
 } from "../core/model.ts";
 import { MAX_UPLOAD_BYTES } from "../core/library.ts";
 import { placeInside } from "../core/place.ts";
-import type { JobView, MachineView, RevisionView } from "../core/protocol.ts";
+import type { JobView, MachineView, RepoView, RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
 import { CircleEditor, type DeviceSecret, EndsPicker, LevelOverride, SecretDialog } from "./Circle.tsx";
 import { AddSite } from "./Add.tsx";
+import { PauseDialog, PausedBanner } from "./Pause.tsx";
+import { RepoList, setRepoState } from "./Repos.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
 import { MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
@@ -104,6 +107,7 @@ export function App() {
   const [previews, setPreviews] = useState(() => localStorage.getItem(PREVIEWS_KEY) === "on");
   const [addingSite, setAddingSite] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
+  const [pausing, setPausing] = useState(false);
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
   const [route, setRoute] = useState(routeFromHash);
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -136,6 +140,8 @@ export function App() {
     const keepFiles = (event: DragEvent) => {
       if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
     };
+    // K-1504: Access sends the owner back here after the fresh passkey check of "Resume".
+    if (location.hash === "#resume") void finishResume();
     addEventListener("hashchange", onHash);
     addEventListener("keydown", onKey);
     addEventListener("dragover", keepFiles);
@@ -332,6 +338,40 @@ export function App() {
     );
   };
 
+  /** K-1504: one press after the confirm pauses everything at once. */
+  const pauseNow = async (mode: PauseMode) => {
+    setPausing(false);
+    const result = await applyEdits([{ _tag: "pause", after: mode }]);
+    showToast(
+      result.ok
+        ? {
+            text:
+              mode === "lockdown"
+                ? "Locked down. Only the Owner circle's people open the admin; public sites are closed too."
+                : "Paused. Only the Owner circle's people open the admin; public sites stay open.",
+            error: false,
+            undo: null,
+          }
+        : { text: result.error, error: true, undo: null },
+    );
+  };
+
+  /** Resume needs a fresh passkey: Access checks it on `/api/fresh` and sends the owner back to `#resume`. */
+  const startResume = () => location.assign("/api/fresh/start");
+
+  const finishResume = async () => {
+    history.replaceState(null, "", location.pathname + location.search);
+    // MM-712: a link alone never resumes; the owner confirms once more after the passkey check.
+    if (!(await ask("Your passkey check passed. Resume everything now? Every share comes back."))) return;
+    const result = await callApi<{ revision: number | null }>("POST", "/api/fresh/resume", {});
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: "Resumed. Every share is back.", error: false, undo: null },
+    );
+  };
+
+
   const showToast = (next: Toast) => {
     setToast(next);
     if (toastTimer.current !== null) clearTimeout(toastTimer.current);
@@ -489,6 +529,7 @@ export function App() {
     await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
   };
 
+  const waitingRepos = store.snapshot?.repos.filter((repo) => repo.state === "waiting").length ?? 0;
   return (
     <>
       {route.tab === "map" ? (
@@ -633,6 +674,32 @@ export function App() {
           </>
         ) : null}
         <span class="grow" />
+        {waitingRepos > 0 ? (
+          <button
+            class="btn"
+            title="Repos that wait for you to allow their first deploy (K-819)"
+            onClick={() => {
+              location.hash = "map";
+              setSelection({ cards: new Set(), circle: null });
+            }}
+          >
+            <span class="sticker wait">{plural(waitingRepos, "repo")} waiting</span>
+          </button>
+        ) : null}
+        {store.snapshot?.paused ? (
+          <button class="btn resume" onClick={startResume} title="Resume needs your passkey again">
+            Resume
+          </button>
+        ) : (
+          <button
+            class="btn big-red"
+            onClick={() => setPausing(true)}
+            title="Emergency pause: stop shares, agents and deploys at once"
+            aria-label="Emergency pause"
+          >
+            ■ Pause
+          </button>
+        )}
         <button class="btn" onClick={() => setPalette("")} title="Command palette (Cmd+K or Ctrl+K)">
           ⌘K
         </button>
@@ -686,6 +753,7 @@ export function App() {
       ) : null}
       <Panel
         state={state}
+        repos={store.snapshot.repos}
         selection={selection}
         access={store.snapshot.access}
         me={store.snapshot.me}
@@ -719,7 +787,7 @@ export function App() {
           if (to) void commit([{ _tag: "place", id: resource.id, after: to }], []);
         }}
         onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
-        paused={store.snapshot.paused}
+        paused={store.snapshot.paused !== null}
         machines={machines}
         version={store.snapshot.version}
         jobs={store.snapshot.jobs}
@@ -742,22 +810,7 @@ export function App() {
           );
         }}
         warnings={store.snapshot.accessWarnings}
-        onPause={async (pause) => {
-          const text = pause
-            ? "Pause sets every share to none, except the Owner circle's share of the admin. Pause now?"
-            : "Resume gives every share back. Resume now?";
-          if (!(await ask(text))) return;
-          const result = await applyEdits([{ _tag: "pause", after: pause }]);
-          showToast(
-            result.ok
-              ? {
-                  text: pause ? "Paused. Only the Owner circle opens the admin." : "Resumed.",
-                  error: false,
-                  undo: result.revision,
-                }
-              : { text: result.error, error: true, undo: null },
-          );
-        }}
+        onPause={(pause) => (pause ? setPausing(true) : startResume())}
         onSignOut={async () => {
           if (!(await ask("End every session of every kitshn application? Everyone logs in again, you too.")))
             return;
@@ -776,10 +829,15 @@ export function App() {
         }}
       />
       {store.snapshot.paused ? (
-        <div class="banner" role="status">
-          Paused: only the Owner circle opens the admin. Everything else is closed.
-        </div>
+        <PausedBanner
+          mode={store.snapshot.paused}
+          by={store.snapshot.pausedBy ? actorLabel(store.snapshot.pausedBy.actor) : null}
+          since={store.snapshot.pausedBy ? `since ${new Date(store.snapshot.pausedBy.at).toLocaleString()}` : null}
+          onLockdown={() => void pauseNow("lockdown")}
+          onResume={startResume}
+        />
       ) : null}
+      {pausing ? <PauseDialog onCancel={() => setPausing(false)} onPause={(mode) => void pauseNow(mode)} /> : null}
       {palette !== null ? (
         <Palette
           state={state}
@@ -794,6 +852,7 @@ export function App() {
             newCircle: () => void newCircle(),
             fit,
             history: () => (location.hash = "history"),
+            pause: () => (store.snapshot?.paused ? startResume() : setPausing(true)),
             addMachine: () => setAddingMachine(true),
             addSite: () => setAddingSite(true),
             upload: () => {
@@ -894,6 +953,8 @@ function History(props: { revisions: ReadonlyArray<RevisionView>; onUndo: (id: n
 
 function Panel(props: {
   state: State;
+  /** K-819: the repos that deploy or wait to deploy. */
+  repos: ReadonlyArray<RepoView>;
   selection: Selection;
   access: Readonly<Record<string, import("../core/protocol.ts").AccessState>>;
   me: Actor;
@@ -942,6 +1003,7 @@ function Panel(props: {
       <CardPanel
         resource={cards[0]}
         state={state}
+        repo={props.repos.find((repo) => repo.resourceIds.includes(cards[0]?.id ?? "")) ?? null}
         access={props.access[cards[0].id] ?? null}
         onEdit={props.onEdit}
         onPlace={props.onPlace}
@@ -1019,6 +1081,7 @@ function Panel(props: {
             </li>
           ))}
         </ul>
+        <RepoList repos={props.repos} onToast={props.onToast} />
         <p class="muted">You are {actorLabel(props.me)}.</p>
         {props.warnings.length > 0 ? (
           <>
@@ -1110,6 +1173,8 @@ function StackPanel(props: {
 function CardPanel(props: {
   resource: Resource;
   state: State;
+  /** K-819: the repo gate of the repo that deploys this card, when it has one. */
+  repo: RepoView | null;
   access: import("../core/protocol.ts").AccessState | null;
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onPlace: (resource: Resource) => void;
@@ -1138,6 +1203,26 @@ function CardPanel(props: {
           <a class="btn" href={`https://${address}`} target="_blank" rel="noreferrer">
             Open
           </a>
+        </div>
+      ) : null}
+      {props.repo ? (
+        <div class="row">
+          <span class="label">Deploys</span>
+          <span class={`sticker ${props.repo.state === "allowed" ? "ok" : props.repo.state === "waiting" ? "wait" : ""}`}>
+            {props.repo.state}
+          </span>
+          <button
+            type="button"
+            class={props.repo.state === "blocked" ? "btn" : "btn danger"}
+            onClick={async () => {
+              if (!props.repo) return;
+              const next = props.repo.state === "blocked" ? "allowed" : "blocked";
+              const { text, error } = await setRepoState(props.repo, next);
+              props.onToast(text, error);
+            }}
+          >
+            {props.repo.state === "blocked" ? "Allow deploys" : "Block deploys"}
+          </button>
         </div>
       ) : null}
       {props.access ? (
@@ -1252,6 +1337,8 @@ interface PaletteActions {
   newCircle: () => void;
   fit: () => void;
   history: () => void;
+  /** K-1504: opens the big red button, or Resume while paused. */
+  pause: () => void;
   addMachine: () => void;
   addSite: () => void;
   upload: () => void;
@@ -1275,6 +1362,7 @@ function Palette(props: {
       { label: "Upload a page or a file", run: actions.upload },
       { label: "Fit the map", run: actions.fit },
       { label: "Open History", run: actions.history },
+      { label: "Emergency pause, or Resume", run: actions.pause },
     ];
     for (const resource of state.resources.values()) {
       all.push({

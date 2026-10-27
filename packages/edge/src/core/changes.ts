@@ -2,7 +2,9 @@ import {
   ADMIN_RESOURCE_ID,
   type Circle,
   type Level,
+  type Member,
   OWNER_CIRCLE_ID,
+  type PauseMode,
   type Point,
   type Resource,
   type ShareSetting,
@@ -10,6 +12,7 @@ import {
   type State,
   circlesHolding,
   isPublicCircle,
+  levelRank,
   shareKey,
   shareLevel,
 } from "./model.ts";
@@ -24,7 +27,7 @@ export type Edit =
       readonly circleId: string;
       readonly after: ShareSetting | null;
     }
-  | { readonly _tag: "pause"; readonly after: boolean }
+  | { readonly _tag: "pause"; readonly after: PauseMode | null }
   | { readonly _tag: "stack"; readonly id: string; readonly after: Stack | null };
 
 /** One stored change of a revision. Undo swaps `before` and `after`. */
@@ -47,7 +50,7 @@ export type Change =
       readonly before: ShareSetting | null;
       readonly after: ShareSetting | null;
     }
-  | { readonly _tag: "pause"; readonly id: "pause"; readonly before: boolean; readonly after: boolean }
+  | { readonly _tag: "pause"; readonly id: "pause"; readonly before: PauseMode | null; readonly after: PauseMode | null }
   | {
       readonly _tag: "stack";
       readonly id: string;
@@ -290,7 +293,11 @@ export const describeDiff = (diff: ShareDiff) =>
 
 export function summarize(before: State, after: State, changes: ReadonlyArray<Change>): string {
   const pause = changes.find((change) => change._tag === "pause");
-  if (pause) return pause.after ? "Paused all shares (K-1504)" : "Resumed all shares";
+  if (pause) {
+    if (pause.after === null) return "Resumed all shares";
+    if (pause.after === "keep-public") return "Paused all shares except public sites, apps, pages and files (K-1504)";
+    return pause.before ? "Closed public sites too: lockdown (K-1504)" : "Paused all shares: lockdown (K-1504)";
+  }
   const diffs = shareDiff(before, after);
   if (diffs.length > 0) {
     const shown = diffs.slice(0, 3).map(describeDiff).join("; ");
@@ -331,4 +338,51 @@ export function stacksWithout(stacks: Iterable<Stack>, id: string): Array<{ id: 
       const members = stack.members.filter((member) => member !== id);
       return { id: stack.id, after: members.length > 1 ? { ...stack, members } : null };
     });
+}
+
+/**
+ * K-1504: only "Resume" with a fresh passkey ends a pause or reopens public sites after a lockdown; an edit or
+ * an undo never does.
+ */
+export function refuseResume(changes: Array<Change>): Array<Change> {
+  const opens = (change: Change) =>
+    change._tag === "pause" && (!change.after || (change.before === "lockdown" && change.after === "keep-public"));
+  if (changes.some(opens))
+    throw new RuleError("Resume needs your passkey again: press Resume on the map.");
+  return changes;
+}
+
+/**
+ * K-1504, MM-711: while paused, a change that would raise access when Resume returns the shares is refused:
+ * a new share or a higher level, a new circle member, "needs passkey" off, "all must match" to "any", or a
+ * later or removed end date. Changes that lower access still work.
+ */
+export function refuseRaiseWhilePaused(before: State, after: State): void {
+  if (!before.paused || !after.paused) return;
+  const raised = shareDiff(before, after).find(
+    (diff) => diff.to !== null && (diff.from === null || levelRank(diff.to) > levelRank(diff.from)),
+  );
+  if (raised)
+    throw new RuleError(`While paused, access only goes down: ${raised.resource.name} would gain ${raised.circle.name}.`);
+  const ends = (time: number | null | undefined) => time ?? Number.POSITIVE_INFINITY;
+  for (const key of new Set([...before.shareSettings.keys(), ...after.shareSettings.keys()]))
+    if (ends(after.shareSettings.get(key)?.endsAt) > ends(before.shareSettings.get(key)?.endsAt))
+      throw new RuleError("While paused, access only goes down: a share would end later.");
+  for (const circle of after.circles.values()) {
+    const old = before.circles.get(circle.id);
+    if (!old) continue;
+    const key = (member: Member) => JSON.stringify(member);
+    const had = new Set(old.members.map(key));
+    const has = new Set(circle.members.map(key));
+    if (
+      circle.members.some((member) => !had.has(key(member))) ||
+      // In an "all must match" circle, a member that goes lets more visitors in.
+      (old.match === "all" && old.members.some((member) => !has.has(key(member)))) ||
+      (old.needsPasskey && !circle.needsPasskey) ||
+      (old.match === "all" && circle.match === "any") ||
+      ends(circle.endsAt) > ends(old.endsAt) ||
+      levelRank(circle.level) > levelRank(old.level)
+    )
+      throw new RuleError(`While paused, access only goes down: the circle ${circle.name} would let in more.`);
+  }
 }

@@ -7,7 +7,9 @@ import {
   type AccessRow,
   type Api,
   accessStates,
+  fillAudiences,
   hasAccessWork,
+  rowsWithoutAud,
   signOutEverywhere,
   syncAccess,
   syncLauncher,
@@ -22,7 +24,7 @@ function start(): State {
     places: new Map(s.places),
     shareSettings: new Map(),
     stacks: new Map(),
-    paused: false,
+    paused: null,
     machines: new Map(),
   };
 }
@@ -35,7 +37,7 @@ function fakeCloudflare(existing: { policies?: Array<object>; apps?: Array<objec
     if (method === "GET")
       return (path.includes("/policies") ? (existing.policies ?? []) : (existing.apps ?? [])) as T;
     const id = method === "PUT" ? (path.split("/").pop() ?? "") : `id${++next}`;
-    return { id } as T;
+    return (path.includes("/apps") ? { id, aud: `aud-${id}` } : { id }) as T;
   };
   const rows = new Map<string, AccessRow>();
   const store = {
@@ -90,6 +92,46 @@ describe("Access sync (K-406, K-408)", () => {
     expect(cf.calls).toEqual([`DELETE /apps/${appId}`, `DELETE /policies/${ownerId}`]);
     // The Owner circle still needs a passkey, so its people keep the enrollment policy (K-113).
     expect([...cf.rows.keys()]).toEqual(["policy:enrollment"]);
+  });
+
+  it("keeps the audience tag of each application (K-603)", async () => {
+    const cf = fakeCloudflare();
+    await syncAccess(desiredAccess(start(), 0), cf.store, cf.api, "a");
+    const app = cf.rows.get("app:kitshn-admin:kit.example.com")!;
+    expect(app.aud).toBe(`aud-${app.cfId}`);
+    expect(cf.rows.get("policy:owner:people")!.aud).toBe("");
+  });
+
+  it("reads missing audience tags from one list of the applications, by id (K-603)", async () => {
+    const cf = fakeCloudflare({
+      apps: [
+        { id: "app-1", name: "kitshn a", aud: "aud-1" },
+        { id: "app-2", name: "kitshn b", aud: "aud-2" },
+      ],
+    });
+    const row = (key: string, cfId: string, aud: string): AccessRow => ({
+      key,
+      cfId,
+      aud,
+      body: "{}",
+      tried: "",
+      error: null,
+    });
+    // Rows from before the audience tag column, as a deploy finds them.
+    cf.store.put(row("app:x:x.example.com", "app-1", ""));
+    cf.store.put(row("app:y:y.example.com", "app-gone", ""));
+    cf.store.put(row("app:z:z.example.com", "app-2", "aud-2"));
+    expect(await fillAudiences(cf.store, cf.api, "a")).toBe(1);
+    expect(cf.calls).toEqual(["GET /apps?per_page=1000&page=1"]);
+    expect(cf.rows.get("app:x:x.example.com")!.aud).toBe("aud-1");
+    // The list does not have app-gone: someone deleted it, so the row forgets the id and the next sync
+    // makes the application again, instead of holding up the tunnel of its machine.
+    expect(cf.rows.get("app:y:y.example.com")).toMatchObject({ cfId: "", aud: "", body: "" });
+    expect(rowsWithoutAud(cf.rows)).toEqual([]);
+
+    cf.calls.length = 0;
+    expect(await fillAudiences(cf.store, cf.api, "a")).toBe(0);
+    expect(cf.calls).toEqual([]);
   });
 
   it("stops at the call budget and reports work left", async () => {
@@ -368,7 +410,7 @@ describe("passkey enrollment on the App Launcher (K-113)", () => {
       name: "Guests",
       members: [{ _tag: "email" as const, email: "g@x.com" }],
     };
-    const paused = { ...state, paused: true, circles: new Map(state.circles).set("guests", guests) };
+    const paused = { ...state, paused: "lockdown" as const, circles: new Map(state.circles).set("guests", guests) };
     expect(desiredAccess(paused, 0).policies.get("policy:enrollment")?.include).toEqual([
       { email: { email: "owner@example.com" } },
     ]);

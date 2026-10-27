@@ -58,7 +58,19 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   ],
   // 5: stacks that the owner makes (K-521).
   ["CREATE TABLE stacks (id TEXT PRIMARY KEY, body TEXT NOT NULL)"],
+  // 6: the repo gate (K-819), by GitHub repository id. The Durable Object then fills `deploys.repo_id` of
+  // older rows (backfillRepoIds), because the id comes out of the card id with code.
+  [
+    `CREATE TABLE repos (repo_id TEXT PRIMARY KEY, name TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('waiting', 'allowed', 'blocked')), first_seen INTEGER NOT NULL, branch TEXT)`,
+    "ALTER TABLE deploys ADD COLUMN repo_id TEXT",
+  ],
+  // 7: the audience tag of each Access application, for the Access check on tunnel ingress (K-603).
+  ["ALTER TABLE access_objects ADD COLUMN aud TEXT NOT NULL DEFAULT ''"],
 ];
+
+/** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */
+export const REPO_GATE_MIGRATION = 6;
 
 /** Runs the migrations after `from`. Returns the new version. The caller provides the transaction. */
 export function migrate(exec: (query: string) => void, from: number): number {

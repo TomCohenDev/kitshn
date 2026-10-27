@@ -108,7 +108,7 @@ export function isAgentKey(state: State, member: Member, now: number): boolean {
   const visitor = { email: null, clientId: member.clientId, ip: null };
   const admin = state.resources.get(ADMIN_RESOURCE_ID);
   // The pause takes every device off the admin for a while; that does not make the owner's devices agents.
-  const unpaused = { ...state, paused: false };
+  const unpaused = { ...state, paused: null };
   return (
     circlesOf(state, visitor, now).size > 0 &&
     (!admin || visitorLevel(unpaused, admin, visitor, now) !== "control")

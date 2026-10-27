@@ -19,7 +19,14 @@ async function accessIdentity(
   env: Env,
   audiences: ReadonlyArray<string>,
 ): Promise<
-  { email: string | null; clientId: string | null; audience: string; issuedAt: number | null } | string
+  | {
+      email: string | null;
+      clientId: string | null;
+      audience: string;
+      issuedAt: number | null;
+      expiresAt: number | null;
+    }
+  | string
 > {
   const wanted = audiences.filter(Boolean);
   if (!env.ACCESS_TEAM_DOMAIN || wanted.length === 0) return "kitshn has no Access configuration.";
@@ -45,6 +52,7 @@ async function accessIdentity(
       clientId: email ? null : clientId,
       audience,
       issuedAt: payload.iat ?? null,
+      expiresAt: payload.exp ?? null,
     };
   } catch (error) {
     return `The Access token is not valid: ${error instanceof Error ? error.message : String(error)}`;
@@ -76,10 +84,53 @@ export async function callerOf(request: Request, env: Env, audience: string): Pr
   };
 }
 
+/** K-1504: how old a fresh passkey login may be for "Resume". */
+export const FRESH_SECONDS = 600;
+
+/**
+ * K-1504: an owner login that passed the passkey check of the `/api/fresh` application within the last
+ * ten minutes, or why not.
+ */
+export async function freshCallerOf(request: Request, env: Env, now: number): Promise<Caller | string> {
+  if (env.DEV_IDENTITY && isLocal(new URL(request.url))) return callerOf(request, env, "");
+  if (!env.ACCESS_FRESH_AUD) return "Run the bootstrap again to turn on the fresh passkey check.";
+  const token = request.headers.get("cf-access-jwt-assertion");
+  if (!token) return "The request has no Cloudflare Access token.";
+  const identity = await accessIdentity(token, env, [env.ACCESS_FRESH_AUD]);
+  if (typeof identity === "string") return identity;
+  if (!identity.email) return "Resume needs a person with a passkey, not a service token.";
+  if (identity.issuedAt === null || now / 1000 - identity.issuedAt > FRESH_SECONDS)
+    return "The passkey check is older than 10 minutes. Press Resume again.";
+  const ip = request.headers.get("cf-connecting-ip");
+  return { visitor: { email: identity.email, clientId: null, ip }, actor: { _tag: "person", email: identity.email } };
+}
+
 /** The two login applications of a content host: `/login`, and `/login/passkey` with the passkey check. */
 export interface ContentLogins {
   readonly login: string;
   readonly passkey: string;
+}
+
+/**
+ * K-1004: the cookie where the Worker keeps the token of one login step. Both login applications of a host
+ * write `CF_Authorization` on `/`, so the later one replaces the earlier one; the Worker keeps its own copy.
+ */
+export const stepCookie = (step: "login" | "passkey") => `__Host-kitshn-${step}-token`;
+
+/**
+ * K-1004: the token that Access put on a login step with its expiry, or the reason it does not prove that
+ * step.
+ */
+export async function stepToken(
+  token: string | null,
+  env: Env,
+  audience: string,
+): Promise<{ readonly token: string; readonly expiresAt: number } | string> {
+  if (!token) return "Access sent no token with this step.";
+  const identity = await accessIdentity(token, env, [audience]);
+  if (typeof identity === "string") return identity;
+  if (identity.expiresAt === null) return "The Access token has no expiry.";
+  return { token, expiresAt: identity.expiresAt };
 }
 
 /** Every value of a cookie: a browser can send two with the same name (another path or a parent domain). */
@@ -98,28 +149,40 @@ export async function contentVisitorOf(
   request: Request,
   env: Env,
   logins: ContentLogins,
-): Promise<{ readonly visitor: ContentVisitor; readonly problem: string | null }> {
+): Promise<{
+  readonly visitor: ContentVisitor;
+  readonly problem: string | null;
+  /** What each token was, for the loop guard text: its source, then its step or the reason it failed. */
+  readonly seen: ReadonlyArray<string>;
+}> {
   const ip = request.headers.get("cf-connecting-ip");
   const anonymous: ContentVisitor = { email: null, clientId: null, ip, passkey: false, issuedAt: null };
   if (env.DEV_IDENTITY && isLocal(new URL(request.url)))
     return {
       visitor: { email: env.DEV_IDENTITY, clientId: null, ip, passkey: true, issuedAt: null },
       problem: null,
+      seen: [],
     };
   const header = request.headers.get("cf-access-jwt-assertion");
+  const cookies = request.headers.get("cookie");
   const tokens = [
-    ...(header ? [header] : []),
-    ...cookieValues(request.headers.get("cookie"), "CF_Authorization"),
+    ...(header ? [{ source: "header", token: header }] : []),
+    ...[stepCookie("passkey"), stepCookie("login"), "CF_Authorization"].flatMap((name) =>
+      cookieValues(cookies, name).map((token) => ({ source: name, token })),
+    ),
   ];
   let problem: string | null = null;
   // A passkey login wins over a plain one, because it gives the higher level (K-103).
   let best: ContentVisitor | null = null;
-  for (const token of tokens) {
+  const seen: Array<string> = [];
+  for (const { source, token } of tokens) {
     const identity = await accessIdentity(token, env, [logins.login, logins.passkey]);
     if (typeof identity === "string") {
       problem = identity;
+      seen.push(`${source}: ${identity}`);
       continue;
     }
+    seen.push(`${source}: ${identity.audience === logins.passkey ? "passkey" : "plain"} login`);
     const visitor: ContentVisitor = {
       email: identity.email,
       clientId: identity.clientId,
@@ -129,7 +192,7 @@ export async function contentVisitorOf(
     };
     if (!best || (visitor.passkey && !best.passkey)) best = visitor;
   }
-  return { visitor: best ?? anonymous, problem: best ? null : problem };
+  return { visitor: best ?? anonymous, problem: best ? null : problem, seen };
 }
 
 /** Who deploys: the repo of a GitHub Actions run, from its OIDC token (K-811). */

@@ -49,7 +49,7 @@ export const Edit_ = Schema.Union([
     circleId: Schema.String,
     after: Schema.NullOr(ShareSetting),
   }),
-  Schema.TaggedStruct("pause", { after: Schema.Boolean }),
+  Schema.TaggedStruct("pause", { after: Schema.NullOr(Schema.Literals(["keep-public", "lockdown"])) }),
   Schema.TaggedStruct("stack", {
     id: Schema.String,
     after: Schema.NullOr(

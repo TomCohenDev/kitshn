@@ -729,19 +729,77 @@ select {
   }
 }
 
-.banner {
+/* K-1504: the big red button. */
+:root {
+  --hazard: #e5232e;
+  --hazard-dark: #c8101b;
+}
+/* The big red button. Red in both modes, so it never reads as an ordinary action. */
+.btn.big-red {
+  background: var(--hazard);
+  color: #ffffff;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  border-color: var(--shadow-ink);
+  box-shadow: 3px 3px 0 0 var(--shadow-ink);
+}
+.btn.big-red:not(:disabled):hover {
+  background: var(--hazard-dark);
+}
+.btn.resume {
+  background: var(--green);
+  color: #000000;
+  font-weight: 800;
+}
+.hazard-frame {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+  border: 10px solid transparent;
+  border-image: repeating-linear-gradient(-45deg, var(--hazard) 0 14px, #000000 14px 28px) 10;
+}
+.paused-banner {
   position: fixed;
   top: 112px;
-  left: 50%;
+  /* Centred over the map, left of the side panel. */
+  left: calc(50% - 190px);
   transform: translateX(-50%);
-  z-index: 11;
-  padding: 4px 12px;
-  font-weight: 800;
-  color: var(--error-fg);
-  background: var(--error-surface);
-  border: var(--bw) solid var(--border);
+  z-index: 31;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 6px 8px 6px 14px;
+  color: #ffffff;
+  background: var(--hazard);
+  border: var(--bw) solid var(--shadow-ink);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+}
+.paused-banner > * {
+  white-space: nowrap;
+}
+.paused-banner strong {
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pause-dialog {
+  max-width: 34rem;
+  border-color: var(--hazard);
+  box-shadow: 6px 6px 0 0 var(--hazard);
+}
+.pause-dialog h2 {
+  color: var(--hazard);
+}
+.pause-dialog li {
+  margin-bottom: 6px;
+  cursor: default;
+}
+.pause-dialog .row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
 }
 .secret {
   display: flex;
@@ -1159,4 +1217,18 @@ a > code {
 .allow-list textarea {
   width: 100%;
   font: 0.85rem var(--mono);
+}
+/* K-819: the repos that deploy, in the map panel. */
+.repo-list {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+.repo-list li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
 }

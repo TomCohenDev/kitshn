@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { PolicyBody } from "../core/access.ts";
+import type { AccessRow } from "./access-sync.ts";
 import {
+  type IngressAccess,
   type LiveSite,
   escapeHtml,
+  ingressAccess,
   liveSiteId,
   offlineReason,
   parseSites,
@@ -23,15 +27,121 @@ const site = (name: string, machineId: string, up: boolean, dev = false): LiveSi
   state: "ok",
 });
 
+const bypass: IngressAccess = { kind: "bypass" };
+
+const policyRow = (key: string, cfId: string, decision: PolicyBody["decision"]): [string, AccessRow] => [
+  key,
+  { key, cfId, aud: "", body: JSON.stringify({ decision }), tried: "", error: null },
+];
+
+/** An application row; `body` is what Cloudflare accepted, `tried` an update that did not land yet. */
+const appRow = (key: string, policyIds: Array<string>, aud: string, body?: string): [string, AccessRow] => {
+  const accepted = JSON.stringify({ policies: policyIds.map((id) => ({ id })) });
+  return [key, { key, cfId: `cf-${key}`, aud, body: body ?? accepted, tried: accepted, error: null }];
+};
+
 describe("live sites (K-1104 to K-1108)", () => {
   it("routes each site through the tunnel, with Host localhost for a dev server", () => {
-    expect(tunnelConfig([site("b", "m", true, true), site("a", "m", true)]).config.ingress).toEqual([
+    expect(tunnelConfig([site("b", "m", true, true), site("a", "m", true)], () => bypass).config.ingress).toEqual([
       { hostname: "a.example.com", service: "http://localhost:5173" },
       {
         hostname: "b.example.com",
         service: "http://localhost:5173",
         originRequest: { httpHostHeader: "localhost" },
       },
+      { service: "http_status:404" },
+    ]);
+  });
+
+  it("makes cloudflared check the Access JWT of the application (K-603)", () => {
+    const access = new Map<string, IngressAccess>([
+      ["a", { kind: "check", teamName: "team", aud: "aud-a" }],
+      ["b", { kind: "check", teamName: "team", aud: "aud-b" }],
+    ]);
+    const sites = [site("a", "m", true), site("b", "m", true, true)];
+    expect(tunnelConfig(sites, (item) => access.get(item.name)!).config.ingress).toEqual([
+      {
+        hostname: "a.example.com",
+        service: "http://localhost:5173",
+        originRequest: { access: { required: true, teamName: "team", audTag: ["aud-a"] } },
+      },
+      {
+        hostname: "b.example.com",
+        service: "http://localhost:5173",
+        originRequest: {
+          httpHostHeader: "localhost",
+          access: { required: true, teamName: "team", audTag: ["aud-b"] },
+        },
+      },
+      { service: "http_status:404" },
+    ]);
+  });
+
+  it("takes the Bypass decision from what Cloudflare accepted (K-403)", () => {
+    const team = "team.cloudflareaccess.com";
+    const rows = new Map([
+      policyRow("policy:everyone:people", "p-bypass", "bypass"),
+      policyRow("policy:owner:people", "p-allow", "allow"),
+      appRow("app:live-m-pub:pub.example.com", ["p-bypass", "p-allow"], "aud-pub"),
+      appRow("app:live-m-priv:priv.example.com", ["p-allow"], "aud-priv"),
+      // A Bypass application needs no tag, so it never holds up its machine.
+      appRow("app:live-m-new:new.example.com", ["p-bypass"], ""),
+      appRow("app:live-m-wait:wait.example.com", ["p-allow"], ""),
+    ]);
+    const of = (name: string, domain = team) => ingressAccess(site(name, "m", true), rows, domain);
+    expect(of("pub")).toEqual({ kind: "bypass" });
+    expect(of("new")).toEqual({ kind: "bypass" });
+    expect(of("priv")).toEqual({ kind: "check", teamName: "team", aud: "aud-priv" });
+    expect(of("wait")).toMatchObject({ kind: "pending" });
+    // An empty team domain leaves the rule without the check instead of holding up the machine.
+    expect(of("priv", "")).toEqual({ kind: "pending", reason: "ACCESS_TEAM_DOMAIN is empty" });
+
+    // Everyone to a circle: the check comes on only after Cloudflare accepted the application without
+    // Bypass, so a failed update never locks out the members.
+    const key = "app:live-m-pub:pub.example.com";
+    expect(of("pub")).toEqual({ kind: "bypass" });
+    rows.set(...appRow(key, ["p-allow"], "aud-pub"));
+    expect(of("pub")).toEqual({ kind: "check", teamName: "team", aud: "aud-pub" });
+    // The other way, the check stays while Cloudflare still has the application without Bypass.
+    rows.set(...appRow(key, ["p-bypass"], "aud-pub", JSON.stringify({ policies: [{ id: "p-allow" }] })));
+    expect(of("pub")).toEqual({ kind: "check", teamName: "team", aud: "aud-pub" });
+  });
+
+  it("writes no check while kitshn does not know if the application bypasses (K-403, K-603)", () => {
+    // The daily compare clears an accepted body that Cloudflare no longer matches (K-408). A check
+    // then could refuse every visitor of a public site, so the rule goes without it until the next sync.
+    const rows = new Map([
+      policyRow("policy:everyone:people", "p-bypass", "bypass"),
+      policyRow("policy:owner:people", "p-allow", "allow"),
+      appRow("app:live-m-app:app.example.com", ["p-allow"], "aud-app", ""),
+    ]);
+    const of = () => ingressAccess(site("app", "m", true), rows, "team.cloudflareaccess.com");
+    expect(of()).toMatchObject({ kind: "pending" });
+
+    rows.set(...appRow("app:live-m-app:app.example.com", ["p-allow", "p-bypass"], "aud-app"));
+    rows.set("policy:owner:people", { ...rows.get("policy:owner:people")!, body: "" });
+    // A known Bypass policy decides even when another policy body is unknown.
+    expect(of()).toEqual({ kind: "bypass" });
+    rows.set(...appRow("app:live-m-app:app.example.com", ["p-allow"], "aud-app"));
+    expect(of()).toMatchObject({ kind: "pending" });
+  });
+
+  it("keeps a site without a known audience tag in the tunnel, without the check (K-603)", () => {
+    // At deploy, rows from before the audience tag column have an id but no tag. Their rules stay,
+    // without the check, until the tag is stored; no site is dropped and the machine is not held up.
+    const rows = new Map([
+      policyRow("policy:owner:people", "p-allow", "allow"),
+      appRow("app:live-m-a:a.example.com", ["p-allow"], "aud-a"),
+      appRow("app:live-m-b:b.example.com", ["p-allow"], ""),
+    ]);
+    const accessOf = (item: LiveSite) => ingressAccess(item, rows, "team.cloudflareaccess.com");
+    expect(tunnelConfig([site("a", "m", true), site("b", "m", true)], accessOf).config.ingress).toEqual([
+      {
+        hostname: "a.example.com",
+        service: "http://localhost:5173",
+        originRequest: { access: { required: true, teamName: "team", audTag: ["aud-a"] } },
+      },
+      { hostname: "b.example.com", service: "http://localhost:5173" },
       { service: "http_status:404" },
     ]);
   });
@@ -66,7 +176,7 @@ describe("live sites (K-1104 to K-1108)", () => {
   });
 
   it("counts an address as reachable while accepted ingress, a DNS record or a route has it", () => {
-    const applied = JSON.stringify(tunnelConfig([site("old", "m", true)]));
+    const applied = JSON.stringify(tunnelConfig([site("old", "m", true)], () => bypass));
     const reachable = reachableAddresses({
       ingress: [applied, ""],
       records: [

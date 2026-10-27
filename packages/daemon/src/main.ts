@@ -9,7 +9,7 @@ import {
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { bindSources, composeFiles, composeRisks, fileSources, nestedSources, rawRisks, realpathOf } from "./guard.ts";
+import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOf, sourceRisks } from "./guard.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
 import {
   chmodSync,
@@ -412,7 +412,7 @@ async function composeUp(
       "--env-file",
       env.KITSHN_PARAMS_FILE,
     ];
-    const roots = [real(source), real(data), real(env.KITSHN_LOG_DIR), real(sockets)] as const;
+    const roots = [source, data, env.KITSHN_LOG_DIR, sockets] as const;
     mkdirSync(scratch, { recursive: true, mode: 0o700 });
     chmodSync(scratch, 0o700);
     const readConfig = async (extra: ReadonlyArray<string>) => {
@@ -428,9 +428,10 @@ async function composeUp(
       }
     };
     // Without the params first, so an error in the files does not show their values.
-    const uninterpolated = await readConfig(["--no-interpolate"]);
+    // It names the env and label files without reading them; the run with the params reads them.
+    refuse(envFileRisks(await readConfig(["--no-interpolate"]), roots, real));
     const config = await readConfig([]);
-    refuse(composeRisks(config, uninterpolated, command.project, roots, real));
+    refuse(composeRisks(config, command.project, roots, real));
     if (takeover.kind === "take") {
       // Set first: a stop that fails half-way still gets its start back.
       stoppedKitshn1 = takeover.project;
@@ -497,17 +498,11 @@ async function composeUp(
     stoppedIds = ids;
     if (ids.length > 0) await step("stop the app", "docker", ["stop", ...ids]);
     // The takeover may also have brought links into the data folder.
-    const moved = [...bindSources(config), ...fileSources(config)].filter((path) => {
-      const resolved = real(path);
-      return (
-        !roots.some((root) => resolved === root || resolved.startsWith(`${root}/`)) &&
-        !command.allowed.includes(`bind:${path}`) &&
-        !command.allowed.includes(`file:${path}`)
-      );
-    });
-    const nested = nestedSources(config, real).filter((path) => !command.allowed.includes(`nested:${path}`));
-    if (moved.length + nested.length > 0)
-      throw new Error(`a path left the app's folders after the check: ${[...moved, ...nested].join(", ")} (K-818)`);
+    const moved = sourceRisks(config, roots, real).filter((risk) => !command.allowed.includes(risk));
+    if (moved.length > 0) throw new Error(`a path changed after the check: ${moved.join(", ")} (K-818)`);
+    // A teardown takes down what the last `up` started, also when that `up` failed.
+    copyFileSync(checked, join(scratch, "down.json"));
+    copyFileSync(env.KITSHN_PARAMS_FILE, join(scratch, "down.env"));
     upStarted = true;
     await step("docker compose up", "docker", [...run, "up", "-d", "--no-build", "--remove-orphans"], { cwd: source, env });
     const until = Date.now() + SOCKET_WAIT_MS;
@@ -528,7 +523,7 @@ async function composeUp(
     renameSync(join(dir, "source.tgz"), join(staged, "source.tgz"));
     copyFileSync(join(dir, "params.env"), join(staged, "params.env"));
     chmodSync(join(staged, "params.env"), 0o600);
-    renameSync(checked, join(staged, "compose.checked.json"));
+    rmSync(checked, { force: true });
     rmSync(`${good}.old`, { recursive: true, force: true });
     if (existsSync(good)) renameSync(good, `${good}.old`);
     renameSync(staged, good);
@@ -558,7 +553,8 @@ async function composeUp(
     // A takeover that did not end in a running app gives the site back to KitSHn 1, and the next deploy
     // copies its data again, so no write of KitSHn 1 is lost.
     if (stoppedKitshn1 !== null) {
-      await runProgram("docker", ["compose", "-p", command.project, "down"], { cwd: paths.data });
+      // By its project label alone; the app's folder holds no Compose file.
+      await runProgram("docker", ["compose", "-p", command.project, "down"], { cwd: dir });
       rmSync(join(dir, "kitshn1-taken"), { force: true });
       for (const folder of ["data", "data.kitshn1"])
         output += await removeAsRoot(join(dir, folder), `${command.project}-${folder.replace(".", "-")}`).catch(
@@ -610,13 +606,10 @@ async function composeDown(command: Extract<Command, { kind: "compose-down" }>):
   if (sites) writeSites(sites.filter((site) => site.name !== command.name));
   void checkSites();
   const dir = join(paths.data, "apps", command.project);
-  // K-818: the checked config of the last good build names the same services and profiles as `up`; the
-  // repo's own files are never read. Without one, Compose finds the app by its project label alone.
-  const good = join(dir, "good");
-  const kept = existsSync(join(good, "compose.checked.json")) && existsSync(join(good, "params.env"));
-  const files = kept
-    ? ["-f", join(good, "compose.checked.json"), "--env-file", join(good, "params.env")]
-    : [];
+  // K-818: the checked config of the last `up` names the same services and profiles; the repo's own files
+  // are never read. Without one, Compose finds the app by its project label alone.
+  const last = [join(dir, "private", "down.json"), join(dir, "private", "down.env")] as const;
+  const files = last.every((file) => existsSync(file)) ? ["-f", last[0], "--env-file", last[1]] : [];
   const result = await runProgram(
     "docker",
     [
@@ -633,10 +626,16 @@ async function composeDown(command: Extract<Command, { kind: "compose-down" }>):
   );
   // Containers that may still run could write while the files go, so a failed down keeps them for a retry.
   if (!command.removeData || !result.ok) return result;
+  // Also the volumes that no kept config names, such as those of an earlier build.
+  const volumes = await runProgram("docker", ["volume", "ls", "-q", "--filter", `label=com.docker.compose.project=${command.project}`]);
+  const names = volumes.output.split("\n").map((name) => name.trim()).filter(Boolean);
+  const removed = volumes.ok && names.length > 0 ? await runProgram("docker", ["volume", "rm", ...names]) : volumes;
+  const output = `${result.output}${removed.output}`;
+  if (!removed.ok) return { ok: false, exitCode: removed.exitCode, output };
   try {
-    return { ...result, output: result.output + (await removeAsRoot(dir, command.project)) };
+    return { ...result, output: output + (await removeAsRoot(dir, command.project)) };
   } catch (error) {
-    return { ok: false, exitCode: null, output: `${result.output}\n[kitshn: ${error instanceof Error ? error.message : String(error)}]` };
+    return { ok: false, exitCode: null, output: `${output}\n[kitshn: ${error instanceof Error ? error.message : String(error)}]` };
   }
 }
 

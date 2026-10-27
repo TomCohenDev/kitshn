@@ -1,10 +1,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { bindSources, composeFiles, composeRisks, nestedSources, rawRisks, realpathOf } from "./guard.ts";
+import { bindSources, composeFiles, composeRisks, envFileRisks, nestedSources, rawRisks, realpathOf } from "./guard.ts";
 
 const roots = ["/apps/a/src", "/apps/a/data", "/apps/a/logs", "/apps/a/sockets"] as const;
 const same = (path: string) => path;
-const risks = (config: unknown, uninterpolated: unknown = {}) => composeRisks(config, uninterpolated, "a", roots, same);
+const risks = (config: unknown, uninterpolated: unknown = {}) =>
+  [...envFileRisks(uninterpolated, roots, same), ...composeRisks(config, "a", roots, same)].sort();
 
 describe("risky Compose settings (K-818)", () => {
   it("passes an app that stays in its own folders", () => {
@@ -73,7 +74,10 @@ describe("risky Compose settings (K-818)", () => {
     const real = (path: string) => realpathOf(path, (p) => links[p] ?? p, exists);
     expect(real("/apps/a/src/etc/systemd/system/ssh.service.d")).toBe("/etc/systemd/system/ssh.service.d");
     const config = { services: { web: { volumes: [{ type: "bind", source: "/apps/a/src/etc/systemd", target: "/x" }] } } };
-    expect(composeRisks(config, {}, "a", roots, real)).toEqual(["bind:/apps/a/src/etc/systemd"]);
+    expect(composeRisks(config, "a", roots, real)).toEqual([
+      "bind:/apps/a/src/etc/systemd",
+      "link:/apps/a/src/etc/systemd",
+    ]);
     expect(bindSources(config)).toEqual(["/apps/a/src/etc/systemd"]);
   });
   it("keeps values of safe keys inside the app: names, logging, networks, build inputs", () => {
@@ -108,7 +112,7 @@ describe("risky Compose settings (K-818)", () => {
     const named = (name: string, tag: string) => ({
       services: { web: { build: { context: "/apps/a/src", tags: [tag] }, image: name, container_name: name } },
     });
-    const preview = (config: unknown) => composeRisks(config, {}, "a-pr-1", roots, same);
+    const preview = (config: unknown) => composeRisks(config, "a-pr-1", roots, same);
     expect(preview(named("a-pr-1-web", "a-pr-1-web:v2"))).toEqual([]);
     // Another app's project starts with this one's name: a-pr-12 owns a-pr-12-web.
     expect(preview(named("a-pr-12-web", "a-pr-12-web:latest"))).toEqual(["build.tags", "container_name", "image"]);
@@ -129,7 +133,7 @@ describe("real apps (K-818)", () => {
     const project = `${repo}-prod`;
     const config: unknown = JSON.parse(readFileSync(new URL(`fixtures/${repo}.config.json`, import.meta.url), "utf8"));
     const folders = ["src", "data", "logs", "sockets"].map((folder) => `/apps/${project}/${folder}`);
-    return composeRisks(config, {}, project, [folders[0] ?? "", ...folders.slice(1)], same);
+    return composeRisks(config, project, [folders[0] ?? "", ...folders.slice(1)], same);
   };
   it("passes real apps, and names only the settings that they really need", () => {
     expect(real("tick3d")).toEqual([]);
@@ -154,6 +158,25 @@ describe("binds under other binds (K-818)", () => {
   it("passes the same root twice, and paths under a read-only bind", () => {
     expect(risks(app([bind("/apps/a/sockets")], [bind("/apps/a/sockets")]))).toEqual([]);
     expect(risks(app([bind("/apps/a/data", true), bind("/apps/a/data/x")]))).toEqual([]);
+  });
+  // A link can change after the check: the app re-points it through a writable bind before a restart.
+  it("refuses a bind or file source that is a link, also one that the repo ships", () => {
+    const links: Record<string, string> = { "/apps/a/data/link": "/apps/a/src/sub", "/apps/a/src/link": "/apps/a/src/sub" };
+    const real = (path: string) => links[path] ?? path;
+    const check = (config: unknown) => composeRisks(config, "a", roots, real);
+    expect(check(app([bind("/apps/a/src")], [bind("/apps/a/data/link")]))).toEqual([
+      "link:/apps/a/data/link",
+      "nested:/apps/a/data/link",
+    ]);
+    expect(check(app([bind("/apps/a/src")], [bind("/apps/a/src/link")]))).toEqual([
+      "link:/apps/a/src/link",
+      "nested:/apps/a/src/link",
+    ]);
+    expect(check({ secrets: { key: { file: "/apps/a/src/link" } } })).toEqual(["link:/apps/a/src/link"]);
+  });
+  it("passes an app folder that is itself a link, as /var is on macOS", () => {
+    const real = (path: string) => path.replace("/apps/", "/private/apps/");
+    expect(composeRisks(app([bind("/apps/a/data/x")]), "a", roots, real)).toEqual([]);
   });
   it("compares the paths after symlinks", () => {
     const real = (path: string) => (path === "/apps/a/data/link" ? "/apps/a/src/sub" : path);

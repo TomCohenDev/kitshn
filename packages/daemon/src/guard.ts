@@ -73,23 +73,62 @@ export function realpathOf(path: string, realpath: (path: string) => string, exi
 }
 
 /**
- * K-818: the settings of a Compose app that need an allowance. `config` is `docker compose config --format
- * json`; `uninterpolated` is the same with `--no-interpolate`, which still names the env and label files.
+ * The app's own folders: first the new source, then data, logs and sockets. Build inputs and env files stay
+ * in the new source, which no running container of the app can change.
  */
-export function composeRisks(
-  config: unknown,
-  uninterpolated: unknown,
-  project: string,
-  /**
-   * The app's own folders, with symlinks resolved: first the new source, then data, logs and sockets.
-   * Build inputs and env files stay in the new source, which no running container of the app can change.
-   */
-  roots: readonly [source: string, ...others: Array<string>],
-  real: (path: string) => string,
-): Array<string> {
+type Roots = readonly [source: string, ...others: Array<string>];
+
+/**
+ * K-818: the env and label files of `docker compose config --format json --no-interpolate`, which names them
+ * without reading them. Checked before the run with the params, which reads them.
+ */
+export function envFileRisks(uninterpolated: unknown, roots: Roots, real: (path: string) => string): Array<string> {
+  const source = real(roots[0]);
   const risks = new Set<string>();
-  const inside = (path: string) => roots.some((root) => under(real(path), root));
-  const inSource = (path: string) => under(real(path), roots[0]);
+  for (const service of Object.values(record(record(uninterpolated)["services"]))) {
+    const s = record(service);
+    for (const key of ["env_file", "label_file"])
+      for (const entry of list(s[key])) {
+        const path = typeof entry === "string" ? entry : record(entry)["path"];
+        if (typeof path !== "string" || path.includes("$") || !under(real(path), source))
+          risks.add(`${key}:${String(path)}`);
+      }
+  }
+  return [...risks].sort();
+}
+
+/**
+ * K-818: the bind and file sources that need an allowance: one out of the app's folders after symlinks, one
+ * that is a link inside them, which the app can re-point before a restart, and one under a writable bind.
+ * The daemon checks them with the config, and again right before `up`.
+ */
+export function sourceRisks(config: unknown, roots: Roots, real: (path: string) => string): Array<string> {
+  const realRoots = roots.map(real);
+  const inside = (path: string) => realRoots.some((root) => under(real(path), root));
+  const link = (path: string) => {
+    const absolute = resolve(path);
+    for (const [index, root] of roots.entries()) {
+      const realRoot = realRoots[index] ?? root;
+      // The app's folder itself may be a link, as /var is on macOS; only links below a root count.
+      const base = [root, realRoot].find((candidate) => under(absolute, candidate));
+      if (base !== undefined) return real(absolute) !== realRoot + absolute.slice(base.length);
+    }
+    return false;
+  };
+  const binds = bindSources(config);
+  const files = fileSources(config);
+  return [
+    ...binds.filter((path) => !inside(path)).map((path) => `bind:${resolve(path)}`),
+    ...files.filter((path) => !inside(path)).map((path) => `file:${resolve(path)}`),
+    ...[...binds, ...files].filter(link).map((path) => `link:${resolve(path)}`),
+    ...nestedSources(config, real).map((path) => `nested:${resolve(path)}`),
+  ];
+}
+
+/** K-818: the settings of a Compose app that need an allowance. `config` is `docker compose config --format json`. */
+export function composeRisks(config: unknown, project: string, roots: Roots, real: (path: string) => string): Array<string> {
+  const risks = new Set<string>(sourceRisks(config, roots, real));
+  const inSource = (path: string) => under(real(path), real(roots[0]));
   const top = record(config);
   for (const key of Object.keys(top)) if (!SAFE_TOP_KEYS.has(key) && !key.startsWith("x-")) risks.add(`top:${key}`);
   for (const [serviceName, service] of Object.entries(record(top["services"]))) {
@@ -116,9 +155,7 @@ export function composeRisks(
       if (value !== null && Object.keys(record(value)).length > 0) risks.add("networks.options");
     for (const volume of list(s["volumes"])) {
       const v = record(volume);
-      if (v["type"] === "bind" && typeof v["source"] === "string" && !inside(v["source"]))
-        risks.add(`bind:${resolve(v["source"])}`);
-      else if (v["type"] !== "bind" && v["type"] !== "volume" && v["type"] !== "tmpfs") risks.add(`volume:${String(v["type"])}`);
+      if (v["type"] !== "bind" && v["type"] !== "volume" && v["type"] !== "tmpfs") risks.add(`volume:${String(v["type"])}`);
     }
     const build = record(s["build"]);
     for (const key of Object.keys(build)) if (!SAFE_BUILD_KEYS.has(key)) risks.add(`build.${key}`);
@@ -139,15 +176,6 @@ export function composeRisks(
     for (const key of Object.keys(deploy))
       if (!["resources", "restart_policy", "replicas", "labels"].includes(key)) risks.add(`deploy.${key}`);
     if (Object.keys(record(record(deploy["resources"])["reservations"])).includes("devices")) risks.add("devices");
-  }
-  // The env and label files are gone from the interpolated config, so they come from the other one.
-  for (const service of Object.values(record(record(uninterpolated)["services"]))) {
-    const s = record(service);
-    for (const key of ["env_file", "label_file"])
-      for (const entry of list(s[key])) {
-        const path = typeof entry === "string" ? entry : record(entry)["path"];
-        if (typeof path !== "string" || path.includes("$") || !inSource(path)) risks.add(`${key}:${String(path)}`);
-      }
   }
   for (const [name, volume] of Object.entries(record(top["volumes"]))) {
     const v = record(volume);
@@ -174,11 +202,8 @@ export function composeRisks(
   }
   for (const section of ["secrets", "configs"])
     for (const entry of Object.values(record(top[section]))) {
-      const file = record(entry)["file"];
-      if (typeof file === "string" && !inside(file)) risks.add(`file:${resolve(file)}`);
       if (record(entry)["environment"] !== undefined) risks.add(`${section}.environment`);
     }
-  for (const path of nestedSources(config, real)) risks.add(`nested:${resolve(path)}`);
   return [...risks].sort();
 }
 

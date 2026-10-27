@@ -176,9 +176,10 @@ export function parseAllowances(value: unknown): Array<ComposeAllowance> | strin
     const repo = typeof entry["repo"] === "string" ? entry["repo"].trim() : "";
     const setting = typeof entry["setting"] === "string" ? entry["setting"].trim() : "";
     const parts = repo.split("/");
-    if (parts.length !== 2 || parts.some((part) => part === "" || part === "." || part === ".."))
+    const blank = (text: string) => [...text].some((char) => char.trim() === "");
+    if (parts.length !== 2 || blank(repo) || parts.some((part) => part === "" || part === "." || part === ".."))
       return `"${repo}" is not a repo; write owner/name.`;
-    if (!setting || setting.length > 200 || setting.includes(" "))
+    if (!setting || setting.length > 200 || blank(setting))
       return `"${setting}" is not a setting name, for example bind:/var/run/docker.sock.`;
     entries.push({ repo, setting });
   }

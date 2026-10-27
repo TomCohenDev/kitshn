@@ -284,7 +284,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 ## 14. Migration
 
 - **K-1401** The machine map portal and KitSHn 1 keep running until each piece moves. [docs/migration.md](docs/migration.md) holds the order.
-- **K-1402** `.github/workflows/deploy.yml` in this repo forwards to KitSHn 1 and stays until the last app moves. `.github/workflows/host.yml` stays until no app needs the host Caddy.
+- **K-1402** `.github/workflows/deploy.yml` in this repo forwards to KitSHn 1 and stays until the last app moves. The host Caddy setup (`host.yml`) lives in `Yarden-zamir/kitshn-1` and stays there until no app needs the host Caddy.
 - **K-1403** An import reads a machine map export and creates: a machine card for each machine, keeping its tunnel, its hostname and its service token; a circle for each arrow source, with the machine as member; Guests rules as circles; shared settings as `t3.settings` desired state; each machine map preset as a kitshn preset (K-716), with its arrows converted by the same rule as the live arrows. It does not import history or browser keys.
 - **K-1404** A KitSHn 1 app moves with `kitshn adopt owner/repo`: it writes `kitshn.config.ts` from `.kitshn.yaml`, `compose.yml` and `Caddyfile.j2`, and changes the workflow file. The first deploy with kitshn 2 reuses the persistent data folder of KitSHn 1 on the same machine, then the DNS record moves from the VPS address to the tunnel.
 

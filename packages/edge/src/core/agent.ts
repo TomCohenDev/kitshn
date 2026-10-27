@@ -228,6 +228,9 @@ export function isAgentKey(state: State, member: Member, now: number): boolean {
   );
 }
 
+/** A pull request environment is always `pr-<n>` (K-807). */
+export const isPreview = (environment: string) => /^pr-\d+$/.test(environment);
+
 /** The last finished deploy of a card, as kitshn stores it (K-807, K-812). */
 export interface LastDeploy {
   readonly app: "static" | "compose";
@@ -266,7 +269,7 @@ export function agentDeployPlan(
   if (!last) return refused("kitshn has no finished deploy of this card to start again.");
   if (mode === "build") {
     // A pull request environment is always `pr-<n>` (K-807); its build comes from a push to the pull request.
-    if (/^pr-\d+$/.test(last.environment))
+    if (isPreview(last.environment))
       return refused("A preview builds again on a new push to its pull request, not from an agent key.");
     return last.branch
       ? { kind: "build", repo: last.repo, branch: last.branch }

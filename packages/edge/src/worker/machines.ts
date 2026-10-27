@@ -45,6 +45,12 @@ export function parseCommand(value: unknown): Command | string {
     }
     return { kind: "shell", script };
   }
+  // K-909: the project is not the sender's choice: kitshn takes it from the machine's report.
+  if (value.kind === "compose-volume-remove") {
+    const volume = "volume" in value ? value.volume : undefined;
+    if (typeof volume !== "string" || !volume || volume.length > 255) return "Name the volume to delete.";
+    return { kind: "compose-volume-remove", project: "", volume };
+  }
   return `kitshn has no command "${String(value.kind)}".`;
 }
 

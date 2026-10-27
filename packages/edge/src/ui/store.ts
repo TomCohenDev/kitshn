@@ -15,7 +15,7 @@ interface StoreState {
 }
 
 type Result =
-  | { readonly ok: true; readonly revision: number | null }
+  | { readonly ok: true; readonly revision: number | null; readonly notes: ReadonlyArray<string> }
   | { readonly ok: false; readonly error: string; readonly lost?: true };
 
 let current: StoreState = { snapshot: null, connection: "connecting", reason: null, held: [] };
@@ -67,7 +67,9 @@ export function connect() {
         set({ snapshot: { ...snapshot, machines } });
       }
     } else {
-      waiting.get(message.requestId)?.(message.ok ? { ok: true, revision: message.revision } : message);
+      waiting.get(message.requestId)?.(
+        message.ok ? { ok: true, revision: message.revision, notes: message.notes } : message,
+      );
       waiting.delete(message.requestId);
     }
   };

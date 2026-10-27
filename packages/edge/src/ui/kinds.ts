@@ -14,7 +14,7 @@ export const KINDS: Record<
     readonly tilt: string;
   }
 > = {
-  "kitshn.admin": { label: "Admin", icon: "🔐", color: "var(--accent)", ink: "#ffffff", tilt: "-2deg" },
+  "kitshn.admin": { label: "Admin", icon: "🔐", color: "var(--accent)", ink: "var(--accent-fg)", tilt: "-2deg" },
   machine: { label: "Machines", icon: "🖥", color: "var(--info)", tilt: "-3deg" },
   "site.static": { label: "Static sites", icon: "🌐", color: "var(--green)", tilt: "2deg" },
   "site.worker": { label: "Worker apps", icon: "⚙️", color: "var(--green)", tilt: "1deg" },
@@ -43,5 +43,8 @@ export const LEVEL_COLORS: Record<Level, string> = {
   control: "var(--pink)",
 };
 
-/** Six clearly different hues; each stays visible as a ring on the light and on the dark canvas. */
-export const CIRCLE_COLORS = ["#6C5CE7", "#FF5277", "#00B3FF", "#FFB347", "#7CFF8A", "#FFE14D"];
+/**
+ * Six clearly different hues; each stays visible as a ring on the light and on the dark canvas. No yellow:
+ * it is the selection colour in light mode.
+ */
+export const CIRCLE_COLORS = ["#6C5CE7", "#FF5277", "#00B3FF", "#FFB347", "#7CFF8A", "#14B8A6"];

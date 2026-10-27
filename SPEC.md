@@ -114,7 +114,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-511** The command palette (Cmd+K or Ctrl+K) finds every card, circle and action. "Share <card> with <circle>" works without a drag, also on a phone.
 - **K-512** The card panel shows who can open the card: each circle, its members, the level, and the address. It has "Copy address" and "Open".
 - **K-513** Zoomed out under 40%, cards become dots and each circle shows its counts by kind. The map never animates continuously, and a change plays at most one short transition.
-- **K-514** Pan, zoom, fit and auto layout work as in the machine map (MM-1114 to MM-1121). Each device keeps its own view in local storage.
+- **K-514** Pan, zoom, fit and auto layout work as in the machine map (MM-1114 to MM-1121). Each device keeps its own view in local storage. On a wide screen the fit and a saved view zoom out no further than 0.85, so card names stay readable; a larger map is centred, and the wheel zooms out further.
 - **K-515** A card of an offline machine, or of an app on it, shows the "offline" sticker and the time since it was last seen.
 - **K-516** The map works on a phone: a long press starts a drag, and the panel is a bottom sheet.
 - **K-517** The map uses the tick3d look in light and dark mode (the `neo-brutalism` skill): lilac dotted canvas, ink borders, hard shadows, tilted stickers, Bricolage Grotesque.

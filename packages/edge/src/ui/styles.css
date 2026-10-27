@@ -486,7 +486,7 @@ select {
 .tray {
   position: fixed;
   left: 10px;
-  /* Below the header, which wraps to two rows on a laptop now that the text is larger. */
+  /* Below the header, which wraps to two rows on a laptop. Revisit when the header height changes. */
   top: 112px;
   max-height: calc(100dvh - 180px);
   width: 210px;
@@ -742,4 +742,14 @@ pre.output {
   background: #fff;
   border: var(--bw) solid var(--border);
   border-radius: var(--radius);
+}
+
+/* A circle colour as a small ink-bordered swatch, readable on any surface. */
+.swatch {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  border: var(--bw) solid var(--border);
+  border-radius: 50%;
+  vertical-align: -0.05em;
 }

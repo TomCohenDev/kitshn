@@ -76,6 +76,8 @@ interface Props {
 const LONG_PRESS_MS = 350;
 /** Preact 11 does not add a unit to numeric style values. */
 const px = (value: number) => `${value}px`;
+/** An open stack spaces its cards by this much: the card width (styles.css) plus a gap. */
+const STACK_GAP = 205;
 const ZOOMED_OUT = 0.4;
 
 export function MapView(props: Props) {
@@ -292,7 +294,7 @@ export function MapView(props: Props) {
           const index = stack ? stack[1].indexOf(resource.id) : 0;
           if (stack && !open && index > 0) return null;
           const head = stack ? shown.places.get(stack[1][0] ?? "") : undefined;
-          const at = stack && open && head ? { x: head.x + index * 175, y: head.y } : place;
+          const at = stack && open && head ? { x: head.x + index * STACK_GAP, y: head.y } : place;
           const selected = props.selection.cards.has(resource.id);
           if (zoomedOut) {
             return (

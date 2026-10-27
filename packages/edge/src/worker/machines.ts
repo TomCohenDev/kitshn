@@ -63,6 +63,8 @@ export function legacyUpdateScript(version: string, os: string, arch: string): s
     `base=https://github.com/Yarden-zamir/kitshn/releases/download/edge-${version}`,
     'bin="$HOME/.local/bin/kitshn"',
     'tmp=$(mktemp "$bin.XXXXXX")',
+    // Remove the temporary file when any step fails; after the mv it no longer exists.
+    'trap \'rm -f "$tmp"\' EXIT',
     `curl -fsSL "$base/${file}" -o "$tmp"`,
     `expected=$(curl -fsSL "$base/SHA256SUMS" | awk -v f=${file} '$2 == f || $2 == "*" f { print $1 }')`,
     `actual=$( (sha256sum "$tmp" 2>/dev/null || shasum -a 256 "$tmp") | awk '{ print $1 }')`,

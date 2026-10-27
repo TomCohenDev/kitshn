@@ -659,6 +659,8 @@ export class Kitshn extends DurableObject<Env> {
       };
       socket.serializeAttachment({ ...attachment, status } satisfies Attachment);
       this.sendMachine(machine);
+      // An update job waits for the status; it can go now.
+      this.deliverJobs();
     } else if (message.type === "sample" && isRecord(message.sample)) {
       const share = (value: unknown) => (typeof value === "number" && value >= 0 && value <= 1 ? value : 0);
       const sample: Sample = {
@@ -940,14 +942,17 @@ export class Kitshn extends DurableObject<Env> {
         // K-617: the version at delivery, so a job that waited never installs an older release.
         command = { kind: "update", version: this.env.KITSHN_VERSION };
         const status = this.machineView(machine).status;
-        if (!status?.capabilities?.includes("update")) {
-          const script = status ? legacyUpdateScript(command.version, status.os, status.arch) : null;
+        // The daemon sends its status just after it connects; the job waits for it.
+        if (!status) continue;
+        const fail = (output: string) => this.sql("UPDATE jobs SET state = 'failed', output = ? WHERE id = ?", output, job.id);
+        if (!/^[0-9a-f]{12}$/.test(command.version)) {
+          fail(`This kitshn runs the build "${command.version}", which has no release to update to.`);
+          continue;
+        }
+        if (!status.capabilities?.includes("update")) {
+          const script = status.version === "dev" ? null : legacyUpdateScript(command.version, status.os, status.arch);
           if (!script) {
-            this.sql(
-              "UPDATE jobs SET state = 'failed', output = ? WHERE id = ?",
-              "kitshn does not know the platform of this daemon, so it cannot update it. Join the machine again.",
-              job.id,
-            );
+            fail("This daemon runs from source, or kitshn does not know its platform. Update it by hand or join the machine again.");
             continue;
           }
           command = { kind: "shell", script };

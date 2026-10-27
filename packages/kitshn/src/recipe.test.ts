@@ -92,3 +92,17 @@ describe("plan (K-807, K-901, K-904)", () => {
     });
   });
 });
+
+describe("Compose recipes (K-804, K-812)", () => {
+  const deploy = [{ on: "push", branch: "main", name: "prod" }];
+  it("takes a Compose app with labels", () => {
+    expect(decodeRecipe({ compose: { runsOn: ["docker"] }, deploy })).toEqual({
+      compose: { runsOn: ["docker"] },
+      deploy,
+    });
+  });
+  it("refuses a recipe with two kinds or none", () => {
+    expect(() => decodeRecipe({ compose: {}, static: { output: "dist" }, deploy })).toThrow();
+    expect(() => decodeRecipe({ deploy })).toThrow();
+  });
+});

@@ -31,7 +31,10 @@ export function parseSiteFile(value: unknown): Array<SiteEntry> | null {
   for (const item of value) {
     const entry = item as Partial<Record<keyof SiteEntry, unknown>>;
     if (typeof entry.name !== "string" || typeof entry.target !== "string") return null;
-    if (!LABEL.test(entry.name) || !(entry.target.startsWith("unix:/") || entry.target.startsWith("http://localhost:"))) {
+    if (
+      !LABEL.test(entry.name) ||
+      !(entry.target.startsWith("unix:/") || entry.target.startsWith("http://localhost:"))
+    ) {
       return null;
     }
     sites.push({ name: entry.name, target: entry.target, dev: entry.dev === true });
@@ -46,10 +49,15 @@ export function parseSiteFile(value: unknown): Array<SiteEntry> | null {
 export async function probe(target: string, timeoutMs = 2000): Promise<boolean> {
   if (target.startsWith("unix:")) return connects({ path: target.slice("unix:".length) }, timeoutMs);
   const port = Number(new URL(target).port);
-  return (await connects({ host: "127.0.0.1", port }, timeoutMs)) || connects({ host: "::1", port }, timeoutMs);
+  return (
+    (await connects({ host: "127.0.0.1", port }, timeoutMs)) || connects({ host: "::1", port }, timeoutMs)
+  );
 }
 
-function connects(options: { path: string } | { host: string; port: number }, timeoutMs: number): Promise<boolean> {
+function connects(
+  options: { path: string } | { host: string; port: number },
+  timeoutMs: number,
+): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = createConnection(options);
     const done = (up: boolean) => {

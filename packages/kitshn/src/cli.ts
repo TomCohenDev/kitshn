@@ -111,6 +111,7 @@ async function deploy(server: string, dir: string) {
     console.log(`kitshn: removed ${plan.plan.environment} at https://${plan.plan.address}`);
     return;
   }
+  if ("compose" in recipe) return deployCompose(server, dir, plan.deployId, plan.plan.address ?? "");
   if (recipe.static.build) {
     console.log(`kitshn: building with: ${recipe.static.build}`);
     execFileSync("sh", ["-c", recipe.static.build], { cwd: dir, stdio: "inherit" });
@@ -169,6 +170,80 @@ async function deploy(server: string, dir: string) {
     `kitshn: deployed ${Object.keys(manifest).length} files to https://${done.address} (route check: ${done.status}).`,
   );
   console.log(`kitshn: ${done.card}`);
+}
+
+/** The largest source archive kitshn takes (K-812). */
+const MAX_ARCHIVE = 200 * 1024 * 1024;
+
+/**
+ * K-808: `KITSHN_<NAME>` secrets and variables of the run, as `<NAME>=value` lines for Compose. The
+ * workflow passes them as JSON; a secret wins over a variable with the same name.
+ */
+function params(): string {
+  const read = (name: string) => {
+    try {
+      return JSON.parse(process.env[name] ?? "{}") as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  };
+  const values = new Map<string, string>();
+  for (const source of [read("KITSHN_VARS_JSON"), read("KITSHN_SECRETS_JSON")]) {
+    for (const [key, value] of Object.entries(source)) {
+      if (!key.startsWith("KITSHN_") || typeof value !== "string") continue;
+      if (value.includes("\n")) fail(`${key} has a line break; a Compose env file cannot hold it.`);
+      values.set(key.slice("KITSHN_".length), value);
+    }
+  }
+  return [...values].map(([key, value]) => `${key}=${value}`).join("\n");
+}
+
+async function upload(server: string, path: string, deployId: string, body: Buffer, type: string) {
+  const response = await fetch(new URL(path, server), {
+    method: "POST",
+    headers: {
+      "content-type": type,
+      "x-kitshn-deploy": deployId,
+      authorization: `Bearer ${await oidcToken(new URL(server).origin)}`,
+    },
+    body,
+  });
+  const data = (await response.json().catch(() => null)) as { error?: string } | null;
+  if (!response.ok) fail(data?.error ?? `${path} answered ${response.status}.`);
+}
+
+/**
+ * K-812, K-813: sends the checkout and the params to R2 for this deploy, starts the job on a machine, and
+ * prints its output until it ends. The checkout keeps `.git`, because builds can read it; the workflow
+ * checks out without a stored token.
+ */
+async function deployCompose(server: string, dir: string, deployId: string, address: string) {
+  const archive = execFileSync("tar", ["-czf", "-", "--exclude=./node_modules", "-C", dir, "."], {
+    maxBuffer: MAX_ARCHIVE + 1,
+  });
+  if (archive.length > MAX_ARCHIVE) fail("the source archive is larger than 200 MB.");
+  console.log(`kitshn: sending the source (${Math.round(archive.length / 1024)} KB)`);
+  await upload(server, "/deploy/archive", deployId, archive, "application/gzip");
+  await upload(server, "/deploy/params", deployId, Buffer.from(params()), "text/plain");
+  const started = await call<{ machine: string }>(server, "/deploy/start", { deployId });
+  console.log(`kitshn: building and starting on ${started.machine}`);
+  let shown = 0;
+  for (;;) {
+    await new Promise((done) => setTimeout(done, 3000));
+    const status = await call<{ state: string; output: string; exitCode: number | null }>(
+      server,
+      "/deploy/status",
+      { deployId },
+    );
+    if (status.output.length > shown) {
+      process.stdout.write(status.output.slice(shown));
+      shown = status.output.length;
+    }
+    if (status.state === "done") break;
+    if (status.state === "failed" || status.state === "expired")
+      fail(`the deploy ${status.state} (exit code ${status.exitCode ?? "none"}).`);
+  }
+  console.log(`\nkitshn: deployed to https://${address}`);
 }
 
 const [command, ...args] = process.argv.slice(2);

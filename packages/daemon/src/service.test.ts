@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { cloudflaredUrl, expectedHash, pathsFor, releaseAsset, serviceCommands, serviceFile } from "./service.ts";
+import {
+  cloudflaredUrl,
+  expectedHash,
+  pathsFor,
+  releaseAsset,
+  serviceCommands,
+  serviceFile,
+} from "./service.ts";
 
 describe("daemon service (K-601)", () => {
   it("keeps the tokens in the user's config folder", () => {

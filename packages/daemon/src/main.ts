@@ -177,7 +177,9 @@ function pruneSamples() {
  * K-612, K-617: downloads the daemon of the release that kitshn names, checks it against the release's
  * SHA256SUMS, puts it in place of this binary, and exits; the service manager starts the new one.
  */
-async function updateDaemon(version: string): Promise<{ ok: boolean; exitCode: number | null; output: string }> {
+async function updateDaemon(
+  version: string,
+): Promise<{ ok: boolean; exitCode: number | null; output: string }> {
   const failed = (output: string) => ({ ok: false, exitCode: null, output });
   if (!/^[0-9a-f]{12}$/.test(version)) return failed(`kitshn named no valid release (${version}).`);
   // A daemon run from source has the runtime as its execPath; replacing that would break the runtime.
@@ -192,7 +194,8 @@ async function updateDaemon(version: string): Promise<{ ok: boolean; exitCode: n
     const expected = expectedHash(await sums.text(), name);
     const bytes = new Uint8Array(await binary.arrayBuffer());
     const actual = createHash("sha256").update(bytes).digest("hex");
-    if (!expected || expected !== actual) return failed(`${name} of edge-${version} does not match its SHA256SUMS.`);
+    if (!expected || expected !== actual)
+      return failed(`${name} of edge-${version} does not match its SHA256SUMS.`);
     const next = `${process.execPath}.new`;
     // A leftover file keeps its old mode, so start fresh and set the mode explicitly.
     rmSync(next, { force: true });
@@ -218,41 +221,30 @@ process.on("exit", () => {
   }
 });
 
-function runJob(command: Command): Promise<{ ok: boolean; exitCode: number | null; output: string }> {
-  if (command.kind === "diagnostics") {
-    const text = [
-      `kitshn ${VERSION}`,
-      `machine ${hostname()} ${osPlatform()} ${release()} ${arch()}`,
-      `uptime ${Math.round(uptime() / 60)} minutes`,
-      `config ${paths.config}`,
-      `data ${paths.data}`,
-      `cloudflared ${tunnelState}`,
-    ].join("\n");
-    return Promise.resolve({ ok: true, exitCode: 0, output: text });
-  }
-  if (command.kind === "update") return updateDaemon(command.version);
-  if (command.kind === "restart") {
-    // The service manager starts the daemon again after this exit.
-    setTimeout(() => process.exit(0), 500);
-    return Promise.resolve({ ok: true, exitCode: 0, output: "restarting" });
-  }
+type JobOutcome = { ok: boolean; exitCode: number | null; output: string };
+
+/** Runs a program with a time limit; it gets its own process group, so the limit also ends its children. */
+function runProgram(
+  program: string,
+  args: ReadonlyArray<string>,
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
+): Promise<JobOutcome> {
+  const timeoutMs = options.timeoutMs ?? JOB_TIMEOUT_MS;
   return new Promise((resolve) => {
     let output = "";
     let done = false;
-    const finish = (result: { ok: boolean; exitCode: number | null; output: string }) => {
+    const finish = (result: JobOutcome) => {
       if (done) return;
       done = true;
       if (child.pid) runningGroups.delete(child.pid);
       clearTimeout(timer);
       resolve(result);
     };
-    // Its own process group, so a timeout also ends the children that the script starts.
-    // `$KITSHN` is this daemon's binary, so a job can run `"$KITSHN" expose …` (K-1104).
-    const child = spawn("/bin/sh", ["-c", command.script], {
+    const child = spawn(program, [...args], {
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
-      // From source, execPath is bun itself, not kitshn.
-      env: VERSION === "dev" ? process.env : { ...process.env, KITSHN: process.execPath },
+      cwd: options.cwd,
+      env: options.env ?? process.env,
     });
     if (child.pid) runningGroups.add(child.pid);
     const add = (chunk: Buffer) => {
@@ -272,11 +264,159 @@ function runJob(command: Command): Promise<{ ok: boolean; exitCode: number | nul
       finish({
         ok: false,
         exitCode: null,
-        output: `${output}\n[kitshn: the job ran longer than 10 minutes and was stopped]`,
+        output: `${output}\n[kitshn: the job ran longer than ${Math.round(timeoutMs / 60_000)} minutes and was stopped]`,
       });
-    }, JOB_TIMEOUT_MS);
+    }, timeoutMs);
     child.on("close", (code) => finish({ ok: code === 0, exitCode: code, output }));
     child.on("error", (error) => finish({ ok: false, exitCode: null, output: String(error) }));
+  });
+}
+
+/** A Compose build can take longer than a shell command. */
+const COMPOSE_TIMEOUT_MS = 30 * 60_000;
+const SOCKET_WAIT_MS = 180_000;
+
+let joined: JoinSecrets | null = null;
+
+/** K-812: a file of the running deploy, read with the machine token. */
+async function deployFile(deployId: string, file: string): Promise<Buffer> {
+  if (!joined) throw new Error("The daemon has no machine token.");
+  const response = await fetch(new URL(`/connect/deploys/${deployId}/${file}`, joined.server), {
+    headers: { "CF-Access-Client-Id": joined.clientId, "CF-Access-Client-Secret": joined.clientSecret },
+  });
+  if (!response.ok)
+    throw new Error(`kitshn answered ${response.status} for ${file}: ${await response.text()}`);
+  return Buffer.from(await response.arrayBuffer());
+}
+
+/**
+ * K-812, K-607: builds and starts a Compose app with the variables of KitSHn 1, so its `compose.yml` works
+ * unchanged: the app listens on `$KITSHN_DEFAULT_SOCKET`. Then the socket becomes a live site under the
+ * name of the address, and the tunnel sends the address there.
+ */
+async function composeUp(command: Extract<Command, { kind: "compose" }>): Promise<JobOutcome> {
+  const dir = join(paths.data, "apps", command.project);
+  const source = join(dir, "src");
+  const sockets = join(dir, "sockets");
+  const socketPath = join(sockets, "default.sock");
+  let output = "";
+  const step = async (title: string, program: string, args: ReadonlyArray<string>, options = {}) => {
+    output += `$ ${title}\n`;
+    const result = await runProgram(program, args, { timeoutMs: COMPOSE_TIMEOUT_MS, ...options });
+    output += result.output;
+    if (!result.ok) throw new Error(`${title} failed with exit code ${result.exitCode ?? "none"}`);
+  };
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "source.tgz"), await deployFile(command.deployId, "source.tgz"));
+    writeFileSync(join(dir, "params.env"), await deployFile(command.deployId, "params.env"), { mode: 0o600 });
+    rmSync(source, { recursive: true, force: true });
+    mkdirSync(source, { recursive: true });
+    await step("unpack the source", "tar", ["-xzf", join(dir, "source.tgz"), "-C", source]);
+    rmSync(join(dir, "source.tgz"), { force: true });
+    // The container user may not be the daemon user; the socket directory must take its socket.
+    mkdirSync(sockets, { recursive: true });
+    chmodSync(sockets, 0o777);
+    const env = {
+      ...process.env,
+      KITSHN_RECIPE: command.repo,
+      KITSHN_ENVIRONMENT: command.environment,
+      KITSHN_DEPLOYMENT: command.project,
+      KITSHN_SOCKET_DIR: sockets,
+      KITSHN_DEFAULT_SOCKET: socketPath,
+    };
+    // KitSHn 1 apps join this network; it exists on a KitSHn 1 host and is made elsewhere.
+    if (!(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok)
+      await step("make the kitshn-edge network", "docker", ["network", "create", "kitshn-edge"]);
+    await step(
+      "docker compose up",
+      "nice",
+      [
+        "-n",
+        "19",
+        "docker",
+        "compose",
+        "-p",
+        command.project,
+        "-f",
+        command.file,
+        "--env-file",
+        join(dir, "params.env"),
+        "up",
+        "-d",
+        "--build",
+        "--remove-orphans",
+      ],
+      { cwd: source, env },
+    );
+    const until = Date.now() + SOCKET_WAIT_MS;
+    while (!(await probe(`unix:${socketPath}`))) {
+      if (Date.now() > until) throw new Error(`the app opened no socket at ${socketPath} within 3 minutes`);
+      await new Promise((done) => setTimeout(done, 2000));
+    }
+    const sites = readSites();
+    if (sites === null) throw new Error(`${sitesFile()} is broken; fix it, then deploy again`);
+    const next = addSite(sites, { name: command.name, target: `unix:${socketPath}`, dev: false });
+    if (typeof next === "string") throw new Error(next);
+    writeSites(next);
+    void checkSites();
+    output += `\nThe app answers on its socket; the tunnel sends ${command.name} there.\n`;
+    return { ok: true, exitCode: 0, output };
+  } catch (error) {
+    return {
+      ok: false,
+      exitCode: null,
+      output: `${output}\n[kitshn: ${error instanceof Error ? error.message : String(error)}]`,
+    };
+  }
+}
+
+/** K-904: stops the app, stops exposing it, and for a preview removes its volumes and files. */
+async function composeDown(command: Extract<Command, { kind: "compose-down" }>): Promise<JobOutcome> {
+  const sites = readSites();
+  if (sites) writeSites(sites.filter((site) => site.name !== command.name));
+  void checkSites();
+  const dir = join(paths.data, "apps", command.project);
+  const result = await runProgram(
+    "docker",
+    [
+      "compose",
+      "-p",
+      command.project,
+      "down",
+      "--remove-orphans",
+      ...(command.removeData ? ["--volumes", "--rmi", "local"] : []),
+    ],
+    { timeoutMs: COMPOSE_TIMEOUT_MS },
+  );
+  if (command.removeData) rmSync(dir, { recursive: true, force: true });
+  return result;
+}
+
+function runJob(command: Command): Promise<JobOutcome> {
+  if (command.kind === "compose") return composeUp(command);
+  if (command.kind === "compose-down") return composeDown(command);
+  if (command.kind === "diagnostics") {
+    const text = [
+      `kitshn ${VERSION}`,
+      `machine ${hostname()} ${osPlatform()} ${release()} ${arch()}`,
+      `uptime ${Math.round(uptime() / 60)} minutes`,
+      `config ${paths.config}`,
+      `data ${paths.data}`,
+      `cloudflared ${tunnelState}`,
+    ].join("\n");
+    return Promise.resolve({ ok: true, exitCode: 0, output: text });
+  }
+  if (command.kind === "update") return updateDaemon(command.version);
+  if (command.kind === "restart") {
+    // The service manager starts the daemon again after this exit.
+    setTimeout(() => process.exit(0), 500);
+    return Promise.resolve({ ok: true, exitCode: 0, output: "restarting" });
+  }
+  // `$KITSHN` is this daemon's binary, so a job can run `"$KITSHN" expose …` (K-1104).
+  // From source, execPath is bun itself, not kitshn.
+  return runProgram("/bin/sh", ["-c", command.script], {
+    env: VERSION === "dev" ? process.env : { ...process.env, KITSHN: process.execPath },
   });
 }
 
@@ -287,7 +427,7 @@ function report() {
   const message: DaemonMessage = {
     type: "status",
     status: {
-      capabilities: ["update"],
+      capabilities: ["update", "compose"],
       version: VERSION,
       os: `${osPlatform()} ${release()}`,
       arch: arch(),
@@ -337,6 +477,7 @@ function flushResults() {
 
 /** K-604: one WebSocket to kitshn, with backoff after a failure and a ping every 10 seconds. */
 function connect(config: JoinSecrets) {
+  joined = config;
   let delay = 1000;
   // After a 4001 or 4002 close, every later try waits an hour, until a connection opens again.
   let stopped = false;
@@ -472,7 +613,10 @@ async function runCommand() {
       socket.send(JSON.stringify({ type: "sample", sample: value } satisfies DaemonMessage));
   }, SAMPLE_MS);
   setInterval(pruneSamples, 24 * 60 * 60_000);
-  setInterval(() => void checkSites().catch((error: unknown) => log(`site check failed: ${String(error)}`)), 10_000);
+  setInterval(
+    () => void checkSites().catch((error: unknown) => log(`site check failed: ${String(error)}`)),
+    10_000,
+  );
 }
 
 const [command, ...args] = process.argv.slice(2);

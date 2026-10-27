@@ -118,7 +118,12 @@ export function App() {
     toastTimer.current = window.setTimeout(() => setToast(null), UNDO_MS);
   };
 
-  const ask = (text: string) => new Promise<boolean>((resolve) => setConfirm({ text, resolve }));
+  // A new question cancels an open one, so the edit that waits on it is released.
+  const ask = (text: string) =>
+    new Promise<boolean>((resolve) => {
+      confirm?.resolve(false);
+      setConfirm({ text, resolve });
+    });
 
   /** Sends edits. K-210: a card that enters a public circle asks first. K-503: a share change shows Undo. */
   const commit = async (edits: Array<Edit>, diffs: Array<ShareDiff>) => {

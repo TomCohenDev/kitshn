@@ -45,6 +45,8 @@ export function connect() {
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(url);
   socket = ws;
+  // A new socket starts with the newest state, also when the server state was reset to a lower revision.
+  let first = true;
   set({ connection: "connecting" });
   ws.onopen = () => {
     retryDelay = 1000;
@@ -53,7 +55,8 @@ export function connect() {
   ws.onmessage = (event) => {
     const message = JSON.parse(String(event.data)) as ServerMessage;
     if (message.type === "snapshot") {
-      if (!isNewer(message.snapshot.revision, current.snapshot?.revision ?? null)) return;
+      if (!first && !isNewer(message.snapshot.revision, current.snapshot?.revision ?? null)) return;
+      first = false;
       set({ snapshot: message.snapshot, held: settle(current.held, message.snapshot.revision) });
     } else if (message.type === "machine") {
       const snapshot = current.snapshot;
@@ -132,8 +135,8 @@ export async function applyEdits(edits: ReadonlyArray<Edit>, requestId = hold(ed
   const result = await request({ type: "apply", edits }, requestId);
   const others = current.held.filter((item) => item.requestId !== requestId);
   if (!result.ok && result.lost) {
-    // Saved or not is unknown: keep the edit until the next snapshot shows what kitshn has.
-    set({ held: [...others, { requestId, edits, revision: 0 }] });
+    // Saved or not is unknown: keep the edit in its place until the next snapshot shows what kitshn has.
+    set({ held: current.held.map((item) => (item.requestId === requestId ? { ...item, revision: 0 } : item)) });
   } else if (!result.ok || result.revision === null) set({ held: others });
   else {
     const saved: Held = { requestId, edits, revision: result.revision };

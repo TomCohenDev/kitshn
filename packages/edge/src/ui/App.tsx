@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import type { Actor, Edit, ShareDiff } from "../core/changes.ts";
+import {
+  type Actor,
+  type Edit,
+  type ShareDiff,
+  applyChanges,
+  resolveEdits,
+  shareDiff,
+} from "../core/changes.ts";
 import {
   type Circle,
   type Level,
@@ -23,7 +30,7 @@ import { CircleEditor, type DeviceSecret, EndsPicker, LevelOverride, SecretDialo
 import { AddSite } from "./Add.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
-import { MapView, type Selection, type View } from "./Map.tsx";
+import { MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
 import { overlay } from "./held.ts";
 import {
   applyEdits,
@@ -38,6 +45,7 @@ import {
 } from "./store.ts";
 
 const VIEW_KEY = "kitshn.view";
+const PREVIEWS_KEY = "kitshn.previews";
 /**
  * On a wide screen the fit and a saved view stay at least this close, so card names stay readable on a
  * laptop. A bigger map is then centred, not shown whole; the wheel still zooms out to 0.15.
@@ -74,9 +82,6 @@ const actorLabel = (actor: Actor) =>
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
-/** The tray shows the newest cards; the Library lists all of them (K-1005). */
-const TRAY_CARDS = 8;
-
 const routeFromHash = () => {
   const [tab = "map", id = ""] = location.hash.slice(1).split("/");
   return { tab: tab === "history" || tab === "machines" || tab === "library" ? tab : ("map" as const), id };
@@ -94,6 +99,8 @@ export function App() {
   const [addingMachine, setAddingMachine] = useState(false);
   const [secret, setSecret] = useState<DeviceSecret | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
+  const [trayFilter, setTrayFilter] = useState("");
+  const [previews, setPreviews] = useState(() => localStorage.getItem(PREVIEWS_KEY) === "on");
   const [addingSite, setAddingSite] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
@@ -160,14 +167,18 @@ export function App() {
     const tooBig = files.filter((file) => file.size > MAX_UPLOAD_BYTES);
     const fitting = files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
     const refused =
-      tooBig.length > 0 ? `${tooBig.map((file) => file.name).join(", ")}: kitshn takes at most 100 MB a file.` : "";
+      tooBig.length > 0
+        ? `${tooBig.map((file) => file.name).join(", ")}: kitshn takes at most 100 MB a file.`
+        : "";
     if (fitting.length === 0 || !state) {
       if (refused) showToast({ text: refused, error: true, undo: null });
       return;
     }
     // Every card lands in exactly the circles of the drop point, also when several fan out (K-204).
     const circles = [...state.circles.values()];
-    const wanted = new Set(at ? circles.filter((circle) => insideCircle(at, circle)).map((circle) => circle.id) : []);
+    const wanted = new Set(
+      at ? circles.filter((circle) => insideCircle(at, circle)).map((circle) => circle.id) : [],
+    );
     const publicHere = circles.filter((circle) => wanted.has(circle.id) && isPublicCircle(circle));
     if (publicHere.length > 0) {
       const what = fitting.length === 1 ? fitting[0]?.name : plural(fitting.length, "file");
@@ -205,6 +216,27 @@ export function App() {
     });
   };
 
+  /**
+   * K-509: cards dragged from the tray land at the drop point, each in exactly the circles there, so they
+   * get those shares; a public circle asks first, as for any drag (K-210).
+   */
+  const placeFromTray = async (ids: Array<string>, at: Point) => {
+    if (!state) return;
+    const wanted = new Set(
+      [...state.circles.values()].filter((circle) => insideCircle(at, circle)).map((c) => c.id),
+    );
+    const edits: Array<Extract<Edit, { _tag: "place" }>> = ids
+      .filter((id) => state.resources.has(id) && !state.places.has(id))
+      .map((id, index) => ({
+        _tag: "place",
+        id,
+        after: placeInside(state, { x: at.x + (index % 2) * 30, y: at.y + index * 90 }, wanted) ?? at,
+      }));
+    if (edits.length === 0) return;
+    await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
+    setSelection({ cards: new Set(edits.map((edit) => edit.id)), circle: null });
+  };
+
   /** Opens the circle editor with its Add member input ready. */
   const addMemberTo = (circleId: string) => {
     setSelection({ cards: new Set(), circle: circleId });
@@ -232,8 +264,9 @@ export function App() {
     const goingPublic = diffs.filter((diff) => diff.to && !diff.from && isPublicCircle(diff.circle));
     // The drop stays where the owner let go while they answer; Cancel puts it back.
     const requestId = hold(edits);
-    for (const diff of goingPublic) {
-      if (!(await ask(`This makes ${diff.resource.name} public. Anyone with the address can open it.`))) {
+    if (goingPublic.length > 0) {
+      const names = [...new Set(goingPublic.map((diff) => diff.resource.name))].join(", ");
+      if (!(await ask(`This makes ${names} public. Anyone with the address can open it.`))) {
         release(requestId);
         return;
       }
@@ -288,6 +321,13 @@ export function App() {
     queueMicrotask(() => fitRef.current?.());
   }
   const tray = [...state.resources.values()].filter((resource) => !state.places.has(resource.id));
+  const shownTray = tray
+    .filter((resource) =>
+      `${resource.name} ${resource.kind} ${resource.addresses[0] ?? ""}`
+        .toLowerCase()
+        .includes(trayFilter.trim().toLowerCase()),
+    )
+    .reverse();
 
   const fit = () => {
     const points = [
@@ -371,6 +411,8 @@ export function App() {
       {route.tab === "map" ? (
         <MapView
           onDropFiles={(files, at) => void uploadFiles(files, at)}
+          onDropCards={(ids, at) => void placeFromTray(ids, at)}
+          previews={previews}
           state={state}
           access={store.snapshot.access}
           selection={selection}
@@ -493,6 +535,17 @@ export function App() {
             <button class="btn" onClick={fit}>
               Fit
             </button>
+            <button
+              class="btn toggle"
+              aria-pressed={previews}
+              title="Live previews of sites and pages near the centre, when zoomed in"
+              onClick={() => {
+                localStorage.setItem(PREVIEWS_KEY, previews ? "off" : "on");
+                setPreviews(!previews);
+              }}
+            >
+              Previews{previews && view.s < 0.8 ? " (zoom in)" : ""}
+            </button>
           </>
         ) : null}
         <span class="grow" />
@@ -505,24 +558,46 @@ export function App() {
       </header>
       {tray.length > 0 && route.tab === "map" ? (
         <aside class="tray">
-          <span class="label title">New · private</span>
-          {tray.slice(-TRAY_CARDS).map((resource) => (
-            <div
-              key={resource.id}
-              class={`card${selection.cards.has(resource.id) ? " sel" : ""}`}
-              onClick={() => setSelection({ cards: new Set([resource.id]), circle: null })}
-            >
-              <div class="name">
-                {KINDS[resource.kind].icon} {resource.name}
+          <div class="tray-head">
+            <span class="label">New · private ({tray.length})</span>
+            <input
+              type="search"
+              placeholder="Filter"
+              aria-label="Filter the tray"
+              value={trayFilter}
+              onInput={(event) => setTrayFilter((event.target as HTMLInputElement).value)}
+            />
+            <span class="help">Drag cards onto the map. Shift-click picks several.</span>
+          </div>
+          <div class="tray-list">
+            {shownTray.length === 0 ? <p class="help">No card matches.</p> : null}
+            {shownTray.map((resource) => (
+              <div
+                key={resource.id}
+                class={`card${selection.cards.has(resource.id) ? " sel" : ""}`}
+                draggable
+                onDragStart={(event) => {
+                  // A selected card carries the whole selection of tray cards with it.
+                  const ids = selection.cards.has(resource.id)
+                    ? shownTray.filter((item) => selection.cards.has(item.id)).map((item) => item.id)
+                    : [resource.id];
+                  event.dataTransfer?.setData(TRAY_CARDS_TYPE, JSON.stringify(ids));
+                  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+                }}
+                onClick={(event) => {
+                  const cards = new Set(event.shiftKey ? selection.cards : []);
+                  if (event.shiftKey && cards.has(resource.id)) cards.delete(resource.id);
+                  else cards.add(resource.id);
+                  setSelection({ cards, circle: null });
+                }}
+              >
+                <div class="name">
+                  {KINDS[resource.kind].icon} {resource.name}
+                </div>
+                <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
               </div>
-              <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
-            </div>
-          ))}
-          {tray.length > TRAY_CARDS ? (
-            <a class="muted" href="#library">
-              {tray.length - TRAY_CARDS} more in the Library
-            </a>
-          ) : null}
+            ))}
+          </div>
         </aside>
       ) : null}
       <Panel

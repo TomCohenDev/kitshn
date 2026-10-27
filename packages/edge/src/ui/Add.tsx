@@ -4,7 +4,6 @@ import { RESERVED_SITE_NAMES } from "../core/library.ts";
 import { Toggle } from "./Circle.tsx";
 import { callApi } from "./store.ts";
 
-
 const isName = (name: string) =>
   name.length > 0 &&
   name.length <= 40 &&
@@ -15,7 +14,9 @@ const isName = (name: string) =>
 /** A port, or an absolute socket path that a shell can take in single quotes. */
 function targetError(target: string): string | null {
   if (target.startsWith("/"))
-    return target.includes("'") || target.includes(" ") ? "A socket path cannot have a quote or a space." : null;
+    return target.includes("'") || target.includes(" ")
+      ? "A socket path cannot have a quote or a space."
+      : null;
   const port = Number(target);
   return Number.isInteger(port) && port > 0 && port < 65536 && String(port) === target
     ? null
@@ -73,7 +74,9 @@ export function AddSite(props: {
   const online = props.machines.filter((view) => view.online);
   const [picked, setPicked] = useState("");
   // A machine that comes online while the dialog is open becomes the default.
-  const machineId = online.some((view) => view.machine.id === picked) ? picked : (online[0]?.machine.id ?? "");
+  const machineId = online.some((view) => view.machine.id === picked)
+    ? picked
+    : (online[0]?.machine.id ?? "");
   const [target, setTarget] = useState("");
   const [name, setName] = useState("");
   const [dev, setDev] = useState(false);

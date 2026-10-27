@@ -62,6 +62,8 @@ export function stacksOf(state: State): Map<string, Array<string>> {
 interface Props {
   /** K-1101: files dropped from the computer, with the map point under the pointer. */
   onDropFiles: (files: Array<File>, at: Point) => void;
+  /** Cards dragged from the tray (K-509), with the map point under the pointer. */
+  onDropCards: (ids: Array<string>, at: Point) => void;
   readonly state: State;
   readonly access: Readonly<Record<string, AccessState>>;
   readonly machines: ReadonlyMap<string, MachineView>;
@@ -69,6 +71,8 @@ interface Props {
   readonly onSelect: (selection: Selection) => void;
   readonly hidden: ReadonlySet<ResourceKind>;
   readonly view: View;
+  /** Live previews of site and page cards (when the zoom allows). */
+  readonly previews: boolean;
   readonly onView: (view: View) => void;
   readonly openStacks: ReadonlySet<string>;
   readonly onToggleStack: (key: string) => void;
@@ -80,6 +84,19 @@ const LONG_PRESS_MS = 350;
 const px = (value: number) => `${value}px`;
 /** An open stack spaces its cards by this much: the card width (styles.css) plus a gap. */
 const STACK_GAP = 205;
+/** Live previews: at most this many frames, for these kinds, from this zoom on. */
+const MAX_PREVIEWS = 4;
+const PREVIEW_SCALE = 0.8;
+const PREVIEW_KINDS: ReadonlySet<ResourceKind> = new Set([
+  "site.static",
+  "site.worker",
+  "site.compose",
+  "site.live",
+  "page",
+]);
+
+/** The drag data of tray cards: a JSON list of card ids. */
+export const TRAY_CARDS_TYPE = "application/x-kitshn-cards";
 const ZOOMED_OUT = 0.4;
 
 export function MapView(props: Props) {
@@ -88,6 +105,8 @@ export function MapView(props: Props) {
   const [draft, setDraft] = useState<{ state: State; diffs: Array<ShareDiff>; pointer: Point } | null>(null);
   const longPress = useRef<number | null>(null);
   const viewport = useRef<HTMLDivElement>(null);
+  /** The cards that had a frame in the last render (live previews keep them, see below). */
+  const previewed = useRef<ReadonlySet<string>>(new Set());
 
   const shown = draft?.state ?? state;
   const toWorld = (clientX: number, clientY: number): Point => ({
@@ -262,6 +281,30 @@ export function MapView(props: Props) {
   };
 
   const previewCircles = new Set(draft?.diffs.map((diff) => diff.circle.id));
+  // A few frames at most, for the site cards nearest the centre of the view, and only when they are readable.
+  // Candidates: drawn site and page cards whose centre is in the open part of the map (not under the tray
+  // or the panel). A card keeps its frame while it stays a candidate, so a pan never reloads a frame.
+  const visible =
+    props.previews && view.s >= PREVIEW_SCALE
+      ? [...shown.places]
+          .filter(([id]) => {
+            const kind = shown.resources.get(id)?.kind;
+            const stack = stackOf(id);
+            const drawn = !stack || props.openStacks.has(stack[0]) || stack[1][0] === id;
+            return kind !== undefined && PREVIEW_KINDS.has(kind) && !props.hidden.has(kind) && drawn;
+          })
+          .map(([id, place]) => ({ id, x: place.x * view.s + view.x, y: place.y * view.s + view.y }))
+          .filter((card) => card.x > 240 && card.y > 120 && card.x < innerWidth - 400 && card.y < innerHeight)
+          .sort(
+            (a, b) =>
+              Math.hypot(a.x - innerWidth / 2, a.y - innerHeight / 2) -
+              Math.hypot(b.x - innerWidth / 2, b.y - innerHeight / 2),
+          )
+          .map((card) => card.id)
+      : [];
+  const kept = [...previewed.current].filter((id) => visible.includes(id));
+  const previewIds = new Set([...kept, ...visible.filter((id) => !kept.includes(id))].slice(0, MAX_PREVIEWS));
+  previewed.current = previewIds;
   const zoomedOut = view.s < ZOOMED_OUT;
   const draggedIds = drag?.type === "cards" && drag.moved ? new Set(drag.origins.keys()) : new Set<string>();
 
@@ -276,15 +319,23 @@ export function MapView(props: Props) {
       onWheel={onWheel}
       onContextMenu={(event) => event.preventDefault()}
       onDragOver={(event) => {
-        if (!event.dataTransfer?.types.includes("Files")) return;
+        const types = event.dataTransfer?.types ?? [];
+        if (!types.includes("Files") && !types.includes(TRAY_CARDS_TYPE)) return;
         event.preventDefault();
-        event.dataTransfer.dropEffect = "copy";
+        if (event.dataTransfer) event.dataTransfer.dropEffect = types.includes("Files") ? "copy" : "move";
       }}
       onDrop={(event) => {
+        const at = toWorld(event.clientX, event.clientY);
+        const cards = event.dataTransfer?.getData(TRAY_CARDS_TYPE);
+        if (cards) {
+          event.preventDefault();
+          props.onDropCards(JSON.parse(cards) as Array<string>, at);
+          return;
+        }
         const files = [...(event.dataTransfer?.files ?? [])];
         if (files.length === 0) return;
         event.preventDefault();
-        props.onDropFiles(files, toWorld(event.clientX, event.clientY));
+        props.onDropFiles(files, at);
       }}
     >
       <div class="world" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})` }}>
@@ -332,6 +383,7 @@ export function MapView(props: Props) {
               open={open}
               access={props.access[resource.id] ?? null}
               machine={props.machines.get(resource.id) ?? null}
+              preview={previewIds.has(resource.id)}
             />
           );
         })}
@@ -456,6 +508,7 @@ function CardView(props: {
   open: boolean;
   access: AccessState | null;
   machine: MachineView | null;
+  preview: boolean;
 }) {
   const { resource, state } = props;
   const kind = KINDS[resource.kind];
@@ -506,6 +559,36 @@ function CardView(props: {
             </span>
           ))}
       </div>
+      {props.preview && resource.addresses[0] ? <CardPreview address={resource.addresses[0]} /> : null}
+    </div>
+  );
+}
+
+/**
+ * A live view of a site or page. A site behind Access shows only when this browser already has its Access
+ * cookie: the Access login refuses to load in a frame, so "Open site" logs in in a tab.
+ */
+function CardPreview(props: { address: string }) {
+  const [interact, setInteract] = useState(false);
+  const url = `https://${props.address}`;
+  return (
+    <div class="preview-frame">
+      <iframe
+        src={url}
+        title={`Preview of ${props.address}`}
+        loading="lazy"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+        style={{ pointerEvents: interact ? "auto" : "none" }}
+      />
+      <div class="row" onPointerDown={(event) => event.stopPropagation()}>
+        <button type="button" class="btn" onClick={() => setInteract(!interact)}>
+          {interact ? "Done" : "Interact"}
+        </button>
+        <a class="btn" href={url} target="_blank" rel="noreferrer">
+          Open site
+        </a>
+      </div>
+      <div class="help">Blank? Open the site once to log in.</div>
     </div>
   );
 }

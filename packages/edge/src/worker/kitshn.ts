@@ -40,7 +40,7 @@ import type { MachineView, RevisionView, ServerMessage, Snapshot } from "../core
 import { ClientMessage } from "../core/schema.ts";
 import { demo } from "../core/demo.ts";
 import {
-  CONTENT_SECURITY_POLICY,
+  contentSecurityPolicy,
   type ContentVisitor,
   type LibraryItem,
   MAX_UPLOAD_BYTES,
@@ -2124,7 +2124,8 @@ export class Kitshn extends DurableObject<Env> {
         source,
       );
       this.putResource(resource);
-      if (!place) return this.insertRevision(caller.actor, `Added the ${kind} ${title} to the tray`, [], null);
+      if (!place)
+        return this.insertRevision(caller.actor, `Added the ${kind} ${title} to the tray`, [], null);
       // The UI asks before a drop makes a card public (K-210); an agent tool must ask the same way (K-715).
       const changes: Array<Change> = [{ _tag: "place", id: item.id, before: null, after: place }];
       this.persist(changes);
@@ -2146,7 +2147,7 @@ export class Kitshn extends DurableObject<Env> {
     return new Response(object.body, {
       headers: {
         "content-type": row.kind === "page" ? "text/html; charset=utf-8" : row.content_type,
-        "content-security-policy": CONTENT_SECURITY_POLICY,
+        "content-security-policy": contentSecurityPolicy(this.env.KITSHN_HOST),
         "x-content-type-options": "nosniff",
         "cache-control": "private, no-store",
       },

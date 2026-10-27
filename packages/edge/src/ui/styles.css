@@ -312,6 +312,9 @@ select {
   position: absolute;
   inset: 0;
   touch-action: none;
+  /* A drag on the map never selects text; panels and inputs stay selectable. */
+  user-select: none;
+  -webkit-user-select: none;
 }
 .world {
   position: absolute;
@@ -507,21 +510,40 @@ select {
   max-height: calc(100dvh - 180px);
   width: 210px;
   z-index: 9;
-  padding: 26px 8px 8px;
+  display: flex;
+  flex-direction: column;
   border: var(--bw) dashed var(--border);
   border-radius: 6px;
   background: var(--raised);
+}
+/* The head stays; only the list scrolls, and the scroll never reaches the map. */
+.tray-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: var(--bw) dashed var(--border);
+}
+.tray-head input {
+  width: 100%;
+}
+.tray-head .help {
+  margin: 0;
+  font-size: 0.75rem;
+}
+.tray-list {
   overflow: auto;
+  overscroll-behavior: contain;
+  padding: 8px;
 }
-.tray .title {
-  position: absolute;
-  top: 4px;
-  left: 8px;
-}
+
 .tray .card {
   position: relative;
   margin: 0 0 10px;
   width: 100%;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
 }
 .toast {
   position: fixed;
@@ -1051,4 +1073,29 @@ a > code {
   border: var(--bw) solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+}
+
+/* A live preview: a desktop-size page drawn at a quarter size inside the card. */
+.preview-frame {
+  margin-top: 6px;
+}
+.preview-frame iframe {
+  display: block;
+  width: 720px;
+  height: 440px;
+  margin-bottom: -330px;
+  margin-right: -540px;
+  transform: scale(0.25);
+  transform-origin: 0 0;
+  background: #fff;
+  border: var(--bw) solid var(--border);
+}
+.preview-frame .row {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+.preview-frame .btn {
+  font-size: 0.75rem;
+  padding: 1px 6px;
 }

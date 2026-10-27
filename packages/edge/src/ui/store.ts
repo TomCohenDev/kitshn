@@ -165,7 +165,13 @@ export function upload(
     xhr.onerror = () => resolve({ error: `kitshn is not reachable for ${file.name}.` });
     xhr.onload = () => {
       const data = parseAnswer(xhr.responseText);
-      if (xhr.status >= 200 && xhr.status < 300 && data?.id && data.address && typeof data.revision === "number")
+      if (
+        xhr.status >= 200 &&
+        xhr.status < 300 &&
+        data?.id &&
+        data.address &&
+        typeof data.revision === "number"
+      )
         resolve({ id: data.id, address: data.address, revision: data.revision });
       else resolve({ error: data?.error ?? `kitshn answered ${xhr.status} for ${file.name}.` });
     };

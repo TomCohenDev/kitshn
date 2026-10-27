@@ -4,6 +4,7 @@ import {
   type Level,
   type Member,
   OWNER_CIRCLE_ID,
+  type PauseMode,
   type Point,
   type Resource,
   type ShareSetting,
@@ -26,7 +27,7 @@ export type Edit =
       readonly circleId: string;
       readonly after: ShareSetting | null;
     }
-  | { readonly _tag: "pause"; readonly after: boolean }
+  | { readonly _tag: "pause"; readonly after: PauseMode | null }
   | { readonly _tag: "stack"; readonly id: string; readonly after: Stack | null };
 
 /** One stored change of a revision. Undo swaps `before` and `after`. */
@@ -49,7 +50,7 @@ export type Change =
       readonly before: ShareSetting | null;
       readonly after: ShareSetting | null;
     }
-  | { readonly _tag: "pause"; readonly id: "pause"; readonly before: boolean; readonly after: boolean }
+  | { readonly _tag: "pause"; readonly id: "pause"; readonly before: PauseMode | null; readonly after: PauseMode | null }
   | {
       readonly _tag: "stack";
       readonly id: string;
@@ -292,7 +293,11 @@ export const describeDiff = (diff: ShareDiff) =>
 
 export function summarize(before: State, after: State, changes: ReadonlyArray<Change>): string {
   const pause = changes.find((change) => change._tag === "pause");
-  if (pause) return pause.after ? "Paused all shares (K-1504)" : "Resumed all shares";
+  if (pause) {
+    if (pause.after === null) return "Resumed all shares";
+    if (pause.after === "keep-public") return "Paused all shares except public sites, apps, pages and files (K-1504)";
+    return pause.before ? "Closed public sites too: lockdown (K-1504)" : "Paused all shares: lockdown (K-1504)";
+  }
   const diffs = shareDiff(before, after);
   if (diffs.length > 0) {
     const shown = diffs.slice(0, 3).map(describeDiff).join("; ");
@@ -335,9 +340,14 @@ export function stacksWithout(stacks: Iterable<Stack>, id: string): Array<{ id: 
     });
 }
 
-/** K-1504: only "Resume" with a fresh passkey ends a pause; an edit or an undo never does. */
+/**
+ * K-1504: only "Resume" with a fresh passkey ends a pause or reopens public sites after a lockdown; an edit or
+ * an undo never does.
+ */
 export function refuseResume(changes: Array<Change>): Array<Change> {
-  if (changes.some((change) => change._tag === "pause" && !change.after))
+  const opens = (change: Change) =>
+    change._tag === "pause" && (!change.after || (change.before === "lockdown" && change.after === "keep-public"));
+  if (changes.some(opens))
     throw new RuleError("Resume needs your passkey again: press Resume on the map.");
   return changes;
 }

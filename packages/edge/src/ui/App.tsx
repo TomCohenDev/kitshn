@@ -15,6 +15,7 @@ import {
   type ResourceKind,
   type Stack,
   type State,
+  type PauseMode,
   type Point,
   circlesHolding,
   insideCircle,
@@ -338,12 +339,19 @@ export function App() {
   };
 
   /** K-1504: one press after the confirm pauses everything at once. */
-  const pauseNow = async () => {
+  const pauseNow = async (mode: PauseMode) => {
     setPausing(false);
-    const result = await applyEdits([{ _tag: "pause", after: true }]);
+    const result = await applyEdits([{ _tag: "pause", after: mode }]);
     showToast(
       result.ok
-        ? { text: "Paused. Only the Owner circle's people open the admin.", error: false, undo: null }
+        ? {
+            text:
+              mode === "lockdown"
+                ? "Locked down. Only the Owner circle's people open the admin; public sites are closed too."
+                : "Paused. Only the Owner circle's people open the admin; public sites stay open.",
+            error: false,
+            undo: null,
+          }
         : { text: result.error, error: true, undo: null },
     );
   };
@@ -779,7 +787,7 @@ export function App() {
           if (to) void commit([{ _tag: "place", id: resource.id, after: to }], []);
         }}
         onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
-        paused={store.snapshot.paused}
+        paused={store.snapshot.paused !== null}
         machines={machines}
         version={store.snapshot.version}
         jobs={store.snapshot.jobs}
@@ -822,12 +830,14 @@ export function App() {
       />
       {store.snapshot.paused ? (
         <PausedBanner
+          mode={store.snapshot.paused}
           by={store.snapshot.pausedBy ? actorLabel(store.snapshot.pausedBy.actor) : null}
           since={store.snapshot.pausedBy ? `since ${new Date(store.snapshot.pausedBy.at).toLocaleString()}` : null}
+          onLockdown={() => void pauseNow("lockdown")}
           onResume={startResume}
         />
       ) : null}
-      {pausing ? <PauseDialog onCancel={() => setPausing(false)} onPause={() => void pauseNow()} /> : null}
+      {pausing ? <PauseDialog onCancel={() => setPausing(false)} onPause={(mode) => void pauseNow(mode)} /> : null}
       {palette !== null ? (
         <Palette
           state={state}

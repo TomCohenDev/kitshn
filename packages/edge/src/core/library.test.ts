@@ -32,7 +32,7 @@ function start(): State {
     places: new Map(s.places),
     shareSettings: new Map(),
     stacks: new Map(),
-    paused: false,
+    paused: null,
     machines: new Map(),
   };
 }
@@ -102,7 +102,7 @@ describe("page and file access (K-1004)", () => {
   });
 
   it("asks the passkey during a pause also on a network of a passkey circle (K-1504)", () => {
-    const state = { ...start(), paused: true };
+    const state = { ...start(), paused: "lockdown" as const };
     const owner = state.circles.get("owner")!;
     const withOffice: Circle = {
       ...owner,
@@ -114,8 +114,13 @@ describe("page and file access (K-1004)", () => {
     );
   });
 
+  it("keeps a public page open in a pause, but not in a lockdown (K-1504)", () => {
+    expect(decide({ ...at(start(), 760), paused: "keep-public" }, anonymous)).toBe("allow");
+    expect(decide({ ...at(start(), 760), paused: "lockdown" }, anonymous)).toBe("login");
+  });
+
   it("lets only people through during a pause (K-1504)", () => {
-    const paused = { ...at(start(), 2000), paused: true };
+    const paused = { ...at(start(), 2000), paused: "lockdown" as const };
     expect(decide(paused, person("friend@example.com"))).toBe("deny");
     expect(decide(paused, person(OWNER, true))).toBe("allow");
   });

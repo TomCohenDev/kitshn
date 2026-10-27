@@ -5,22 +5,26 @@ import {
   type State,
   activeShares,
   circlesHolding,
-  isPublicCircle,
   shareKey,
 } from "./model.ts";
-import { visitorLevel } from "./visitor.ts";
+import { type Visitor, circleMatches, visitorLevel } from "./visitor.ts";
 
 /**
- * K-718: the circles that name the device itself as a member. Everyone, network and machine members do not
- * count: they match many callers, so they give an agent key nothing.
+ * K-718: the agent circles of a device: circles of devices only that name it, have not ended, and that it
+ * matches. A circle with people, networks, domains or Everyone is never an agent circle, so an agent key
+ * cannot move a card to anyone but other devices.
  */
-export const circlesOf = (state: State, clientId: string | null) =>
+export const circlesOf = (state: State, visitor: Visitor, now: number) =>
   new Set(
-    clientId === null
+    visitor.clientId === null
       ? []
       : [...state.circles.values()]
-          .filter((circle) =>
-            circle.members.some((member) => member._tag === "device" && member.clientId === clientId),
+          .filter(
+            (circle) =>
+              circle.members.every((member) => member._tag === "device") &&
+              circle.members.some((member) => member._tag === "device" && member.clientId === visitor.clientId) &&
+              (circle.endsAt === null || circle.endsAt > now) &&
+              circleMatches(circle, visitor, state.machines),
           )
           .map((circle) => circle.id),
   );
@@ -30,8 +34,8 @@ export const circlesOf = (state: State, clientId: string | null) =>
  * `control` (or a `control` override). This is the level of the circle, before a kind cuts it down: a site
  * has only `view` (K-301), and an agent key still manages it.
  */
-export function cardsControlledBy(state: State, clientId: string | null, now: number) {
-  const own = circlesOf(state, clientId);
+export function cardsControlledBy(state: State, visitor: Visitor, now: number) {
+  const own = circlesOf(state, visitor, now);
   return new Set(
     [...state.resources.values()]
       .filter((resource) =>
@@ -48,28 +52,28 @@ export function cardsControlledBy(state: State, clientId: string | null, now: nu
 
 /**
  * K-718: why an agent key may not make these edits, or null. It may only move cards that it controls, and
- * only from and to places inside its own circles at the level `control` that are not public; circles,
+ * only from and to places inside its agent circles at the level `control`, or out of every circle; circles,
  * members, stacks, levels and the pause stay with the admin.
  */
 export function agentRefusal(
   state: State,
   after: State,
-  clientId: string | null,
+  visitor: Visitor,
   edits: ReadonlyArray<Edit>,
   now: number,
 ) {
-  const controlled = cardsControlledBy(state, clientId, now);
-  const own = circlesOf(state, clientId);
+  const controlled = cardsControlledBy(state, visitor, now);
+  const own = circlesOf(state, visitor, now);
   for (const edit of edits) {
     if (edit._tag !== "place") return `An agent key may only move cards; it cannot change a ${edit._tag}.`;
     if (!controlled.has(edit.id))
       return `This key has no control on the card "${state.resources.get(edit.id)?.name ?? edit.id}".`;
     for (const side of [state, after]) {
       const foreign = circlesHolding(side, edit.id).find(
-        (circle) => !own.has(circle.id) || circle.level !== "control" || isPublicCircle(circle),
+        (circle) => !own.has(circle.id) || circle.level !== "control",
       );
       if (foreign)
-        return `An agent key moves cards only between its own circles with control that are not public, and "${foreign.name}" is not one of them.`;
+        return `An agent key moves cards only between its own agent circles with control, and "${foreign.name}" is not one of them.`;
     }
   }
   return null;

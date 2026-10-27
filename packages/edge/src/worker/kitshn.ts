@@ -409,8 +409,12 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private authorized(caller: Caller) {
+    return this.hasAdmin(caller.visitor);
+  }
+
+  private hasAdmin(visitor: Visitor) {
     const admin = this.state.resources.get(ADMIN_RESOURCE_ID);
-    return admin !== undefined && visitorLevel(this.state, admin, caller.visitor, Date.now()) === "control";
+    return admin !== undefined && visitorLevel(this.state, admin, visitor, Date.now()) === "control";
   }
 
   private snapshot(me: Actor): Snapshot {
@@ -911,6 +915,16 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ removed: id });
   }
 
+  /**
+   * K-614, K-718: a sender with the admin needs control on the machine card; any other sender is an agent key
+   * and needs the card in its agent circles, checked again when the job goes out.
+   */
+  private mayRunOn(visitor: Visitor, machineId: string) {
+    return this.hasAdmin(visitor)
+      ? this.canControl(visitor, machineId)
+      : cardsControlledBy(this.state, visitor, Date.now()).has(machineId);
+  }
+
   /** K-614: the sender of a command needs control on the machine card itself, not only on the admin. */
   private canControl(visitor: Visitor, machineId: string) {
     const resource = this.state.resources.get(machineId);
@@ -998,7 +1012,7 @@ export class Kitshn extends DurableObject<Env> {
       const visitor = JSON.parse(job.visitor) as Visitor & { readonly kitshn?: true };
       // A job that kitshn makes itself (a deploy) needs no member with control (K-614).
       const allowed = new Set(
-        visitor.kitshn ? online : [...online].filter((id) => this.canControl(visitor, id)),
+        visitor.kitshn ? online : [...online].filter((id) => this.mayRunOn(visitor, id)),
       );
       const machine =
         job.machine_id !== null
@@ -2300,14 +2314,13 @@ export class Kitshn extends DurableObject<Env> {
    */
   private async agentRequest(path: string, request: Request, caller: Caller) {
     const now = Date.now();
-    const clientId = caller.visitor.clientId;
-    const own = circlesOf(this.state, clientId);
+    const own = circlesOf(this.state, caller.visitor, now);
     if (own.size === 0)
       return Response.json(
-        { error: "This key is not a device member of any circle, so it manages nothing (K-718)." },
+        { error: "This key is in no agent circle, so it manages nothing (K-718)." },
         { status: 403 },
       );
-    const managed = cardsControlledBy(this.state, clientId, now);
+    const managed = cardsControlledBy(this.state, caller.visitor, now);
     if (path === "/agent/state" && request.method === "GET") {
       return Response.json({
         circles: [...this.state.circles.values()]
@@ -2316,9 +2329,14 @@ export class Kitshn extends DurableObject<Env> {
         cards: [...managed].flatMap((id) => {
           const resource = this.state.resources.get(id);
           if (!resource) return [];
+          const { kind, name, addresses, status } = resource;
           return [
             {
-              ...resource,
+              id,
+              kind,
+              name,
+              addresses,
+              status,
               place: this.state.places.get(id) ?? null,
               circles: circlesHolding(this.state, id)
                 .map((c) => c.id)
@@ -2346,7 +2364,7 @@ export class Kitshn extends DurableObject<Env> {
         const refusal = agentRefusal(
           this.state,
           applyChanges(this.state, changes),
-          clientId,
+          caller.visitor,
           edits,
           now,
         );
@@ -2362,7 +2380,7 @@ export class Kitshn extends DurableObject<Env> {
       const machineId =
         typeof body === "object" && body !== null && "machineId" in body ? body.machineId : undefined;
       // Only the machines whose cards it manages; a label job could land on any machine.
-      if (typeof machineId !== "string" || !managed.has(machineId))
+      if (typeof machineId !== "string" || !cardsControlledBy(this.state, caller.visitor, Date.now()).has(machineId))
         return Response.json(
           { error: "An agent key runs jobs only on a machine whose card it manages (K-718)." },
           { status: 403 },

@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+
+const as = (clientId: string) => ({ email: null, clientId, ip: null });
 import { agentRefusal, cardsControlledBy, isAgentKey } from "./agent.ts";
 import { type Edit, applyChanges, resolveEdits } from "./changes.ts";
 import type { Circle, Resource, State } from "./model.ts";
@@ -56,7 +58,7 @@ function start(): State {
 }
 
 const check = (state: State, edits: Array<Edit>) =>
-  agentRefusal(state, applyChanges(state, resolveEdits(state, edits)), "agent-1", edits, 0);
+  agentRefusal(state, applyChanges(state, resolveEdits(state, edits)), as("agent-1"), edits, 0);
 
 describe("agent keys (K-718)", () => {
   it("moves a card it controls between its own circles", () => {
@@ -80,8 +82,8 @@ describe("agent keys (K-718)", () => {
     ).toMatch(/only move/);
   });
   it("gets nothing from network or Everyone circles, and a token that no circle names manages nothing", () => {
-    expect(cardsControlledBy(start(), "agent-1", 0).has("nas")).toBe(false);
-    expect(cardsControlledBy(start(), "stranger", 0).size).toBe(0);
+    expect(cardsControlledBy(start(), as("agent-1"), 0).has("nas")).toBe(false);
+    expect(cardsControlledBy(start(), as("stranger"), 0).size).toBe(0);
     expect(check(start(), [{ _tag: "place", id: "nas", after: { x: 0, y: 1000 } }])).toMatch(/no control/);
   });
   it("does not call the owner's device an agent during a pause", () => {
@@ -92,5 +94,14 @@ describe("agent keys (K-718)", () => {
     const state = { ...base, circles };
     expect(isAgentKey({ ...state, paused: true }, device, 0)).toBe(false);
     expect(isAgentKey(state, { ...device, clientId: "agent-1" }, 0)).toBe(true);
+  });
+  it("counts only circles of devices that have not ended, and may take a card out of every circle", () => {
+    const base = start();
+    const agents = base.circles.get("agents")!;
+    const mixed = { ...agents, members: [...agents.members, { _tag: "email", email: "her@example.com" } as const] };
+    expect(cardsControlledBy({ ...base, circles: new Map(base.circles).set("agents", mixed) }, as("agent-1"), 0).size).toBe(0);
+    const ended = { ...agents, endsAt: 1 };
+    expect(cardsControlledBy({ ...base, circles: new Map(base.circles).set("agents", ended) }, as("agent-1"), 5).size).toBe(0);
+    expect(check(base, [{ _tag: "place", id: "site", after: null }])).toBeNull();
   });
 });

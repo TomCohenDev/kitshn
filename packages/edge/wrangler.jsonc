@@ -23,6 +23,7 @@
     "ACCESS_CONNECT_AUD": "",
     "OWNER_EMAILS": "owner@example.com",
     "CLOUDFLARE_ACCOUNT_ID": "",
+    "KITSHN_VERSION": "local",
     "KITSHN_ZONE": "localhost",
     "CLOUDFLARE_ZONE_ID": "",
     "DEPLOY_OWNER_IDS": "",

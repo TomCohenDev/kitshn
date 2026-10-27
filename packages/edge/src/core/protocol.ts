@@ -32,6 +32,8 @@ export interface Snapshot {
   readonly machines: ReadonlyArray<MachineView>;
   /** The newest jobs, with their output cut to 4,000 characters. */
   readonly jobs: ReadonlyArray<JobView>;
+  /** K-617: the release of this kitshn; "Update daemon" installs the daemon of this release. */
+  readonly version: string;
   readonly me: Actor;
 }
 

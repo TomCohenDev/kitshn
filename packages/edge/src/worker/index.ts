@@ -76,6 +76,15 @@ export default {
       headers.set("x-kitshn-caller", JSON.stringify(caller));
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
     }
+    // K-617: the release that machines and deploy workflows download. Both paths are public in Access.
+    if (
+      (url.pathname === "/join/version" || url.pathname === "/deploy/version") &&
+      request.method === "GET"
+    ) {
+      return new Response(`${env.KITSHN_VERSION}\n`, {
+        headers: { "content-type": "text/plain", "cache-control": "no-store" },
+      });
+    }
     if (url.pathname.startsWith("/deploy/") && request.method === "POST") {
       // K-811: GitHub Actions deploys here with its OIDC token; Access lets the path through.
       const deployer = await deployerOf(request, env);

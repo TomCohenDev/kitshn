@@ -376,6 +376,7 @@ export function App() {
         onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
         paused={store.snapshot.paused}
         machines={machines}
+        version={store.snapshot.version}
         jobs={store.snapshot.jobs}
         onToast={(text, error) => showToast({ text, error, undo: null })}
         onRemoveMachine={async (view) => {
@@ -554,6 +555,7 @@ function Panel(props: {
   machines: ReadonlyMap<string, MachineView>;
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
+  version: string;
   onToast: (text: string, error: boolean) => void;
   onPause: (pause: boolean) => void;
   onSignOut: () => void;
@@ -586,6 +588,7 @@ function Panel(props: {
         onPlace={props.onPlace}
         onReshare={props.onReshare}
         machine={props.machines.get(cards[0].id) ?? null}
+        version={props.version}
         jobs={props.jobs}
         onRemoveMachine={props.onRemoveMachine}
         onToast={props.onToast}
@@ -674,6 +677,7 @@ function CardPanel(props: {
   machine: MachineView | null;
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
+  version: string;
   onToast: (text: string, error: boolean) => void;
 }) {
   const { resource, state } = props;
@@ -716,6 +720,7 @@ function CardPanel(props: {
       {props.machine ? (
         <MachinePanel
           view={props.machine}
+          version={props.version}
           jobs={props.jobs}
           onRemove={() => props.machine && props.onRemoveMachine(props.machine)}
           onToast={props.onToast}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cloudflaredUrl, pathsFor, serviceCommands, serviceFile } from "./service.ts";
+import { cloudflaredUrl, expectedHash, pathsFor, releaseAsset, serviceCommands, serviceFile } from "./service.ts";
 
 describe("daemon service (K-601)", () => {
   it("keeps the tokens in the user's config folder", () => {
@@ -31,5 +31,14 @@ describe("daemon service (K-601)", () => {
     expect(cloudflaredUrl("linux", "arm64").url).toMatch(/cloudflared-linux-arm64$/);
     expect(cloudflaredUrl("darwin", "x64")).toMatchObject({ archive: true });
     expect(() => cloudflaredUrl("linux", "ia32")).toThrow();
+  });
+
+  it("finds the daemon of a release and its hash in SHA256SUMS (K-617)", () => {
+    expect(releaseAsset("linux", "arm64")).toBe("kitshn-linux-arm64");
+    expect(() => releaseAsset("linux", "ia32")).toThrow();
+    const sums = `${"a".repeat(64)}  kitshn-linux-arm64\n${"b".repeat(64)} *kitshn.mjs\n`;
+    expect(expectedHash(sums, "kitshn-linux-arm64")).toBe("a".repeat(64));
+    expect(expectedHash(sums, "kitshn.mjs")).toBe("b".repeat(64));
+    expect(expectedHash(sums, "kitshn-linux-x64")).toBeNull();
   });
 });

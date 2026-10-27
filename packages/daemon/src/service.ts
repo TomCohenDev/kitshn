@@ -100,3 +100,22 @@ export function cloudflaredUrl(platform: Platform, arch: string): { url: string;
     ? { url: `${base}/cloudflared-darwin-${cpu}.tgz`, archive: true }
     : { url: `${base}/cloudflared-linux-${cpu}`, archive: false };
 }
+
+/** K-617: where kitshn releases live. Each release edge-<version> holds the daemons and SHA256SUMS. */
+export const RELEASES = "https://github.com/Yarden-zamir/kitshn/releases/download";
+
+/** The daemon file of a platform in a release. */
+export function releaseAsset(platform: Platform, arch: string): string {
+  const cpu = arch === "arm64" ? "arm64" : arch === "x64" ? "x64" : null;
+  if (!cpu) throw new Error(`kitshn has no daemon for the CPU ${arch}.`);
+  return `kitshn-${platform}-${cpu}`;
+}
+
+/** The hash that SHA256SUMS (the output of sha256sum) lists for one file, or null. */
+export function expectedHash(sums: string, file: string): string | null {
+  for (const line of sums.split("\n")) {
+    const [hash, name] = line.trim().split(/\s+\*?/);
+    if (name === file && hash && /^[0-9a-f]{64}$/.test(hash)) return hash;
+  }
+  return null;
+}

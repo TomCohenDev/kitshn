@@ -406,6 +406,7 @@ export class Kitshn extends DurableObject<Env> {
       paused: this.state.paused,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
+      version: this.env.KITSHN_VERSION,
       me,
     };
   }
@@ -844,8 +845,18 @@ export class Kitshn extends DurableObject<Env> {
   /** K-610 to K-614: a job runs on one machine, or on the first online machine with its labels. */
   private addJob(caller: Caller, body: unknown) {
     const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
-    const command = parseCommand(input["command"]);
-    if (typeof command === "string") return Response.json({ error: command }, { status: 400 });
+    const parsed = parseCommand(input["command"]);
+    if (typeof parsed === "string") return Response.json({ error: parsed }, { status: 400 });
+    if (parsed.kind === "update" && !/^[0-9a-f]{12}$/.test(this.env.KITSHN_VERSION)) {
+      return Response.json(
+        {
+          error: `This kitshn runs the build "${this.env.KITSHN_VERSION}", which has no release to update to.`,
+        },
+        { status: 409 },
+      );
+    }
+    const command: Command =
+      parsed.kind === "update" ? { kind: "update", version: this.env.KITSHN_VERSION } : parsed;
     const labels = parseLabels(input["labels"] ?? []);
     if (typeof labels === "string") return Response.json({ error: labels }, { status: 400 });
     const machineId = typeof input["machineId"] === "string" ? input["machineId"] : null;

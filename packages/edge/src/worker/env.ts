@@ -16,6 +16,8 @@ export interface Env {
   /** Optional JSON list of service tokens that join the Owner circle on the first start, for agents (K-106). */
   readonly OWNER_DEVICES?: string;
   readonly CLOUDFLARE_ACCOUNT_ID: string;
+  /** K-617: the release of this Worker (12 hex characters), or "local" for a local build. */
+  readonly KITSHN_VERSION: string;
   /** The zone that kitshn publishes on (K-1111), and its id. */
   readonly KITSHN_ZONE: string;
   readonly CLOUDFLARE_ZONE_ID: string;

@@ -40,6 +40,13 @@ jobs:
       - name: kitshn deploy
         env:
           SERVER: ${{ inputs.server }}
+        # K-617: the CLI of the release that the kitshn server names, checked against its SHA256SUMS.
         run: |
-          curl -fsSL https://github.com/Yarden-zamir/kitshn/releases/download/edge/kitshn.mjs -o "$RUNNER_TEMP/kitshn.mjs"
+          version=$(curl -fsSL "$SERVER/deploy/version")
+          [[ "$version" =~ ^[0-9a-f]{12}$ ]] || { echo "kitshn: $SERVER names no release ($version)."; exit 1; }
+          base="https://github.com/Yarden-zamir/kitshn/releases/download/edge-$version"
+          cd "$RUNNER_TEMP"
+          curl -fsSL "$base/kitshn.mjs" -o kitshn.mjs
+          curl -fsSL "$base/SHA256SUMS" | grep ' kitshn.mjs$' | sha256sum -c -
+          cd "$GITHUB_WORKSPACE"
           node "$RUNNER_TEMP/kitshn.mjs" deploy --server "$SERVER"

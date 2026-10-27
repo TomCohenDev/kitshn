@@ -36,9 +36,29 @@ mkdir -p "$bin"
 if [ -n "${KITSHN_DAEMON:-}" ]; then
   cp "$KITSHN_DAEMON" "$bin/kitshn.new"
 else
-  url="https://github.com/Yarden-zamir/kitshn/releases/download/edge/kitshn-$os-$cpu"
-  echo "Downloading the kitshn daemon from $url"
-  curl -fsSL "$url" -o "$bin/kitshn.new"
+  # K-617: the release that this kitshn names, checked against its SHA256SUMS.
+  version=$(curl -fsSL "$server/join/version")
+  case "$version" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *)
+    echo "kitshn: $server names no release ($version), so there is no daemon to download." >&2
+    exit 1
+    ;;
+  esac
+  base="https://github.com/Yarden-zamir/kitshn/releases/download/edge-$version"
+  echo "Downloading the kitshn daemon of release $version"
+  curl -fsSL "$base/kitshn-$os-$cpu" -o "$bin/kitshn.new"
+  expected=$(curl -fsSL "$base/SHA256SUMS" | awk -v f="kitshn-$os-$cpu" '$2 == f || $2 == "*" f { print $1 }')
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$bin/kitshn.new" | awk '{ print $1 }')
+  else
+    actual=$(shasum -a 256 "$bin/kitshn.new" | awk '{ print $1 }')
+  fi
+  if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+    rm -f "$bin/kitshn.new"
+    echo "kitshn: the daemon does not match the SHA256SUMS of release $version." >&2
+    exit 1
+  fi
 fi
 chmod 755 "$bin/kitshn.new"
 mv "$bin/kitshn.new" "$bin/kitshn"

@@ -36,6 +36,8 @@ export function parseLabels(value: unknown): Array<string> | string {
 export function parseCommand(value: unknown): Command | string {
   if (typeof value !== "object" || value === null || !("kind" in value)) return "A job needs a command.";
   if (value.kind === "diagnostics" || value.kind === "restart") return { kind: value.kind };
+  // The version is not the sender's choice: kitshn fills in its own (K-617).
+  if (value.kind === "update") return { kind: "update", version: "" };
   if (value.kind === "shell") {
     const script = "script" in value ? value.script : undefined;
     if (typeof script !== "string" || !script.trim() || script.length > 10_000) {

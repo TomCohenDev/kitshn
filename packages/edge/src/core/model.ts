@@ -46,6 +46,7 @@ export type Member =
 /** K-718: the rights that the owner can give an agent key on its device member. */
 export const AGENT_RIGHTS = ["addsApps", "publishes"] as const;
 export type AgentRight = (typeof AGENT_RIGHTS)[number];
+export const AGENT_RIGHT_NAMES: Record<AgentRight, string> = { addsApps: "may add apps", publishes: "may publish" };
 
 export interface Circle {
   readonly id: string;

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { type Edit, deepEqual } from "../core/changes.ts";
 import {
   AGENT_RIGHTS,
+  AGENT_RIGHT_NAMES,
   type AgentRight,
   type Circle,
   LEVELS,
@@ -168,19 +169,6 @@ export function LevelOverride(props: {
   );
 }
 
-/** K-718: the rights that the owner gives an agent key in its agent circle, with their stickers. */
-const RIGHTS: Record<AgentRight, { readonly sticker: string; readonly label: string; readonly help: string }> = {
-  addsApps: {
-    sticker: "adds apps",
-    label: "May add apps",
-    help: "It may allow a waiting repo; its cards start in this circle (K-819)",
-  },
-  publishes: {
-    sticker: "publishes",
-    label: "May publish",
-    help: "It may move its sites into the Everyone circle",
-  },
-};
 
 function MemberSticker(props: {
   member: Member;
@@ -205,13 +193,7 @@ function MemberSticker(props: {
           agent
         </span>
       ) : null}
-      {member._tag === "device"
-        ? AGENT_RIGHTS.filter((right) => member[right]).map((right) => (
-            <span key={right} class="sticker" style={{ background: "var(--green)" }} title={RIGHTS[right].help}>
-              {RIGHTS[right].sticker}
-            </span>
-          ))
-        : null}
+      {member._tag === "device" && onRight ? <RightStickers member={member} /> : null}
       <span class="who">
         {MEMBER_ICONS[props.member._tag]} {memberLabel(props.member)}
       </span>
@@ -226,10 +208,10 @@ function MemberSticker(props: {
       {member._tag === "device" && onRight ? (
         <div class="rights">
           {AGENT_RIGHTS.map((right) => (
-            <span key={right} title={RIGHTS[right].help}>
+            <span key={right} title={RIGHT_HELP[right]}>
               <Toggle
                 checked={member[right] === true}
-                label={RIGHTS[right].label}
+                label={AGENT_RIGHT_NAMES[right]}
                 onChange={(on) => onRight(right, on)}
               />
             </span>
@@ -241,6 +223,25 @@ function MemberSticker(props: {
 }
 
 type DeviceMember = Extract<Member, { _tag: "device" }>;
+
+const RIGHT_STICKERS: Record<AgentRight, string> = { addsApps: "adds apps", publishes: "publishes" };
+const RIGHT_HELP: Record<AgentRight, string> = {
+  addsApps: "It may allow a waiting repo; its cards start in this circle (K-819)",
+  publishes: "It may move the sites that it added into the overlap of this circle and Everyone",
+};
+
+/** K-718: a sticker for each right of an agent key, on its chip in the circle editor and on the map. */
+export function RightStickers(props: { member: DeviceMember }) {
+  return (
+    <>
+      {AGENT_RIGHTS.filter((right) => props.member[right]).map((right) => (
+        <span key={right} class="sticker right" title={RIGHT_HELP[right]}>
+          {RIGHT_STICKERS[right]}
+        </span>
+      ))}
+    </>
+  );
+}
 
 /** A missing right is off, so turning one off removes its key. */
 function withRight(member: DeviceMember, right: AgentRight, on: boolean): DeviceMember {

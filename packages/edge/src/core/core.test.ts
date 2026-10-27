@@ -197,6 +197,19 @@ describe("changes and undo (K-1501, K-1502)", () => {
     expect(summarize(state, after, changes)).toBe("riffle: − Owner; riffle: + Her · view");
   });
 
+  it("names an agent right that a circle edit gives or takes (K-718)", () => {
+    const state = start();
+    const owner = state.circles.get("owner")!;
+    const bot = { _tag: "device" as const, tokenId: "t", clientId: "c", name: "Bot" };
+    const withBot = edit(state, [{ _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, bot] } }]).after;
+    const gave = edit(withBot, [
+      { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, { ...bot, publishes: true }] } },
+    ]);
+    expect(summarize(withBot, gave.after, gave.changes)).toBe("Gave Bot may publish in Owner");
+    const took = edit(gave.after, [{ _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, bot] } }]);
+    expect(summarize(gave.after, took.after, took.changes)).toBe("Took may publish from Bot in Owner");
+  });
+
   it("uses a share override over the circle default (K-205)", () => {
     const state = start();
     const { after } = edit(state, [

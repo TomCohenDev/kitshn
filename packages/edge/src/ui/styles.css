@@ -1165,11 +1165,17 @@ a > code {
   padding: 1px 6px;
 }
 
-/* K-718: an agent key among the members of a circle. */
-.chip .sticker.agent {
+/* K-718: an agent key among the members of a circle, and its rights. */
+.chip .sticker.agent,
+.chip .sticker.right {
   margin-left: 4px;
   font-size: 0.6rem;
+}
+.chip .sticker.agent {
   background: var(--yellow);
+}
+.sticker.right {
+  background: var(--green);
 }
 
 /* K-521: an owner's stack, as one card with a list of its cards. */

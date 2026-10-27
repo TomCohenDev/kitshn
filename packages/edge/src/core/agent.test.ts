@@ -10,9 +10,10 @@ import {
   cardsControlledBy,
   isAgentKey,
   mayDeployOn,
+  publishPlace,
 } from "./agent.ts";
 import { type Edit, applyChanges, resolveEdits } from "./changes.ts";
-import { type AgentRight, type Circle, type Resource, type State, circlesHolding } from "./model.ts";
+import { type AgentRight, type Circle, type Point, type Resource, type State, circlesHolding } from "./model.ts";
 import { placeInside } from "./place.ts";
 import { seed } from "./seed.ts";
 
@@ -70,7 +71,7 @@ function start(): State {
 
 const check = (state: State, edits: Array<Edit>) => {
   const changes = resolveEdits(state, edits);
-  return agentRefusal(state, applyChanges(state, changes), as("agent-1"), changes, 0);
+  return agentRefusal(state, applyChanges(state, changes), as("agent-1"), changes, 0, new Set(["site"]));
 };
 
 describe("agent keys (K-718)", () => {
@@ -191,16 +192,54 @@ describe("agent keys that add and publish apps (K-718, K-819)", () => {
     // "public" holds Everyone, so it is no agent circle.
     expect(agentHas(withRights("public", { publishes: true }), as("agent-1"), "publishes", 0)).toBe(false);
   });
-  it("moves a site into Everyone only with the right to publish", () => {
-    const publish = (state: State) => {
-      const changes = resolveEdits(state, [{ _tag: "place", id: "site", after: { x: 760, y: 0 } }]);
-      return agentRefusal(state, applyChanges(state, changes), as("agent-1"), changes, 0);
+  it("publishes a card that it added into the overlap of its agent circle and Everyone, and keeps managing it", () => {
+    const state = overlapping({ publishes: true });
+    const place = publishPlace(state, as("agent-1"), "site", true, 0);
+    if (typeof place === "string") throw new Error(place);
+    const after = moved(state, place);
+    expect(circlesHolding(after, "site").map((circle) => circle.id).sort()).toEqual(["agents", "everyone"]);
+    expect(check(state, [{ _tag: "place", id: "site", after: place }])).toBeNull();
+    // It still manages the card, so redeploy, unpublish and the machine rule keep working.
+    expect(cardsControlledBy(after, as("agent-1"), 0).has("site")).toBe(true);
+  });
+  it("refuses a publish without the right, of a card that it did not add, or of a live site", () => {
+    const place = publishPlace(overlapping({ publishes: true }), as("agent-1"), "site", true, 0) as Point;
+    const into = (state: State, added: ReadonlySet<string>) => {
+      const changes = resolveEdits(state, [{ _tag: "place", id: "site", after: place }]);
+      return agentRefusal(state, applyChanges(state, changes), as("agent-1"), changes, 0, added);
     };
-    expect(publish(start())).toMatch(/Everyone/);
-    expect(publish(withRights("agents", { publishes: true }))).toBeNull();
-    const state = withRights("agents", { publishes: true });
-    const machine = { ...state.resources.get("site")!, kind: "machine" as const };
-    expect(publish({ ...state, resources: new Map(state.resources).set("site", machine) })).toMatch(/Everyone/);
+    expect(into(overlapping({}), new Set(["site"]))).toMatch(/Everyone/);
+    expect(into(overlapping({ publishes: true }), new Set())).toMatch(/Everyone/);
+    const live = overlapping({ publishes: true });
+    const site = { ...live.resources.get("site")!, kind: "site.live" as const };
+    expect(into({ ...live, resources: new Map(live.resources).set("site", site) }, new Set(["site"]))).toMatch(
+      /Everyone/,
+    );
+  });
+  it("refuses a publish that leaves every agent circle, and names the missing overlap", () => {
+    const apart = withRights("agents", { publishes: true });
+    expect(publishPlace(apart, as("agent-1"), "site", true, 0)).toMatch(/overlaps Everyone/);
+    expect(check(apart, [{ _tag: "place", id: "site", after: { x: 760, y: 0 } }])).toMatch(/overlaps Everyone/);
+    expect(check(overlapping({ publishes: true }), [{ _tag: "place", id: "site", after: { x: 760, y: -100 } }])).toMatch(
+      /overlap of an agent circle/,
+    );
+  });
+  it("takes a published card back into the agent circle alone, also without the right", () => {
+    const published = overlapping({ publishes: true });
+    const place = publishPlace(published, as("agent-1"), "site", true, 0) as Point;
+    const after = moved(overlapping({}), place);
+    const back = publishPlace(after, as("agent-1"), "site", false, 0);
+    if (typeof back === "string") throw new Error(back);
+    expect(circlesHolding(moved(after, back), "site").map((circle) => circle.id)).toEqual(["agents"]);
+    expect(check(after, [{ _tag: "place", id: "site", after: back }])).toBeNull();
+  });
+  it("treats a repurposed Everyone circle as any other circle", () => {
+    const state = overlapping({ publishes: true });
+    const place = publishPlace(state, as("agent-1"), "site", true, 0) as Point;
+    const everyone = state.circles.get("everyone")!;
+    const members = [...everyone.members, { _tag: "email", email: "her@example.com" } as const];
+    const repurposed = { ...state, circles: new Map(state.circles).set("everyone", { ...everyone, members }) };
+    expect(check(repurposed, [{ _tag: "place", id: "site", after: place }])).toMatch(/Everyone/);
   });
   it("starts a new card in the first agent circle at control of the key", () => {
     const home = agentHomeCircle(start(), "agent-1", 0);
@@ -222,3 +261,16 @@ describe("agent keys that add and publish apps (K-718, K-819)", () => {
     expect(mayDeployOn(managed, "stranger", "m1", 0)).toBe(false);
   });
 });
+
+/** The agent circle overlaps Everyone (at 760, 0 with r 260), and the site sits in the agent circle alone. */
+function overlapping(rights: Partial<Record<AgentRight, true>>): State {
+  const state = withRights("agents", rights);
+  const agents = state.circles.get("agents")!;
+  return {
+    ...state,
+    circles: new Map(state.circles).set("agents", { ...agents, x: 760, y: 400 }),
+    places: new Map(state.places).set("site", { x: 760, y: 500 }),
+  };
+}
+
+const moved = (state: State, place: Point): State => ({ ...state, places: new Map(state.places).set("site", place) });

@@ -18,6 +18,8 @@ export async function setRepoState(
   if ("error" in result) return { text: result.error, error: true };
   if (state === "forget") return { text: `Forgot ${repo.name}.`, error: false };
   if (state === "blocked") return { text: `Blocked deploys of ${repo.name}.`, error: false };
+  if (repo.state === "allowed" && repo.allowedBy)
+    return { text: `Took over ${repo.name} from ${repo.allowedBy.name}.`, error: false };
   if (result.dispatched)
     return { text: `Allowed ${repo.name} and started its deploy from ${result.dispatched}.`, error: false };
   if (result.paused)
@@ -74,6 +76,12 @@ export function RepoList(props: {
               {repo.state !== "allowed" ? (
                 <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "allowed")}>
                   Allow
+                </button>
+              ) : null}
+              {/* K-819: the owner takes over a repo that an agent key allowed; its apps then follow the owner's rules. */}
+              {repo.state === "allowed" && repo.allowedBy ? (
+                <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "allowed")}>
+                  Take over
                 </button>
               ) : null}
               {repo.state === "waiting" && repo.branch !== null ? (

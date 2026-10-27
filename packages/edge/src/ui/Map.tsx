@@ -14,6 +14,7 @@ import {
 } from "../core/model.ts";
 import type { AccessState, MachineView } from "../core/protocol.ts";
 import { isAgentKey } from "../core/agent.ts";
+import { RightStickers } from "./Circle.tsx";
 import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { PresenceSticker } from "./Machines.tsx";
 
@@ -542,6 +543,8 @@ function CircleView(props: {
 }) {
   const { circle } = props;
   const shown = circle.members.slice(0, 4);
+  // K-718: rights count only in a circle of devices only.
+  const agentCircle = circle.members.every((member) => member._tag === "device");
   const extra = circle.members.length - shown.length;
   const counts = new Map<ResourceKind, number>();
   if (props.zoomedOut) {
@@ -586,7 +589,12 @@ function CircleView(props: {
           {shown.map((member, index) => (
             <span class="chip" key={index}>
               {MEMBER_ICONS[member._tag]} {memberLabel(member)}
-              {isAgentKey(props.state, member, Date.now()) ? <span class="sticker agent">agent</span> : null}
+              {member._tag === "device" && isAgentKey(props.state, member, Date.now()) ? (
+                <>
+                  <span class="sticker agent">agent</span>
+                  {agentCircle ? <RightStickers member={member} /> : null}
+                </>
+              ) : null}
             </span>
           ))}
           {extra > 0 ? (

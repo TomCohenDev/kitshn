@@ -22,7 +22,6 @@ import {
 import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
-  EVERYONE_CIRCLE_ID,
   isPublicCircle,
   type Circle,
   type Member,
@@ -59,7 +58,9 @@ import {
   agentRefusal,
   cardsControlledBy,
   circlesOf,
+  isEveryoneCircle,
   mayDeployOn,
+  publishPlace,
 } from "../core/agent.ts";
 import { demo } from "../core/demo.ts";
 import {
@@ -2026,7 +2027,9 @@ export class Kitshn extends DurableObject<Env> {
         this.insertRevision(caller.actor, `Forgot ${row.name} (K-819)`, [], null);
         return [];
       }
-      if (row.state === state) return [];
+      // K-819: the owner's Allow takes over a repo that an agent key allowed, and clears the key.
+      const takeOver = state === "allowed" && allowedBy === null && row.allowed_by_client !== null;
+      if (row.state === state && !takeOver) return [];
       if (state === "allowed")
         this.sql(
           "UPDATE repos SET state = 'allowed', allowed_by_client = ?, allowed_by_name = ? WHERE repo_id = ?",
@@ -2041,7 +2044,9 @@ export class Kitshn extends DurableObject<Env> {
         );
       this.insertRevision(
         caller.actor,
-        `${state === "allowed" ? "Allowed" : "Blocked"} deploys of ${row.name} (K-819)`,
+        takeOver && row.state === "allowed"
+          ? `Took over deploys of ${row.name} from ${row.allowed_by_name ?? "an agent key"} (K-819)`
+          : `${state === "allowed" ? "Allowed" : "Blocked"} deploys of ${row.name} (K-819)`,
         [],
         null,
       );
@@ -2721,20 +2726,50 @@ export class Kitshn extends DurableObject<Env> {
         { status: 403 },
       );
     const managed = cardsControlledBy(this.state, caller.visitor, now);
-    // K-614: the history names the device by its member name, not by its token id.
-    const device = [...this.state.circles.values()]
-      .flatMap((circle) => circle.members)
+    // K-614: the history names the device by its member name in its agent circle, not by its token id.
+    const device = [...own]
+      .flatMap((id) => this.state.circles.get(id)?.members ?? [])
       .find((member) => member._tag === "device" && member.clientId === caller.visitor.clientId);
     const agent: Caller =
       caller.actor._tag === "device" && device?._tag === "device"
         ? { ...caller, actor: { ...caller.actor, name: device.name } }
         : caller;
-    // A key that publishes also sees the Everyone circle, so it can move a site there.
-    const publishes = agentHas(this.state, caller.visitor, "publishes", now);
-    const visible = (id: string) => own.has(id) || (publishes && id === EVERYONE_CIRCLE_ID);
+    const rights = AGENT_RIGHTS.filter((right) => agentHas(this.state, caller.visitor, right, now));
+    // A key that publishes also sees the Everyone circle, where its published cards sit.
+    const visible = (id: string) => {
+      const circle = this.state.circles.get(id);
+      return own.has(id) || (rights.includes("publishes") && circle !== undefined && isEveryoneCircle(circle));
+    };
+    // K-718: the cards of repos that this key allowed (K-819); only these may become public.
+    const added = new Set(
+      this.sql<{ resource_id: string }>(
+        `SELECT DISTINCT deploys.resource_id FROM deploys JOIN repos ON repos.repo_id = deploys.repo_id
+         WHERE repos.allowed_by_client = ?`,
+        caller.visitor.clientId,
+      ).map((row) => row.resource_id),
+    );
+    const move = (edits: ReadonlyArray<Edit>) => {
+      try {
+        const changes = resolveEdits(this.state, edits);
+        const refusal = agentRefusal(this.state, applyChanges(this.state, changes), caller.visitor, changes, now, added);
+        if (refusal) return Response.json({ error: refusal }, { status: 403 });
+        return Response.json({ revision: this.commit(agent.actor, changes, null) });
+      } catch (error) {
+        if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
+        throw error;
+      }
+    };
     if (path === "/agent/state" && request.method === "GET") {
       return Response.json({
-        rights: AGENT_RIGHTS.filter((right) => agentHas(this.state, caller.visitor, right, now)),
+        rights,
+        // K-819: with "may add apps", the waiting repos that the key may allow.
+        repos: rights.includes("addsApps")
+          ? this.sql<RepoRow>("SELECT * FROM repos WHERE state = 'waiting' ORDER BY first_seen DESC").map((row) => ({
+              repoId: row.repo_id,
+              name: row.name,
+              branch: row.branch,
+            }))
+          : [],
         circles: [...this.state.circles.values()]
           .filter((circle) => visible(circle.id))
           .map(({ id, name, level, x, y, r }) => ({ id, name, level, x, y, r })),
@@ -2750,6 +2785,7 @@ export class Kitshn extends DurableObject<Env> {
               addresses,
               status,
               place: this.state.places.get(id) ?? null,
+              added: added.has(id),
               circles: circlesHolding(this.state, id)
                 .map((c) => c.id)
                 .filter(visible),
@@ -2771,21 +2807,19 @@ export class Kitshn extends DurableObject<Env> {
       } catch (error) {
         return Response.json({ error: String(error) }, { status: 400 });
       }
-      try {
-        const changes = resolveEdits(this.state, edits);
-        const refusal = agentRefusal(
-          this.state,
-          applyChanges(this.state, changes),
-          caller.visitor,
-          changes,
-          now,
-        );
-        if (refusal) return Response.json({ error: refusal }, { status: 403 });
-        return Response.json({ revision: this.commit(agent.actor, changes, null) });
-      } catch (error) {
-        if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
-        throw error;
-      }
+      return move(edits);
+    }
+    if (path === "/agent/publish" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      const card = isRecord(body) && typeof body["card"] === "string" ? body["card"] : null;
+      const publish = isRecord(body) ? body["public"] : null;
+      if (card === null || typeof publish !== "boolean")
+        return Response.json({ error: 'Send {"card": <id>, "public": true | false}.' }, { status: 400 });
+      if (!managed.has(card))
+        return Response.json({ error: `This key has no control on the card "${card}".` }, { status: 403 });
+      const place = publishPlace(this.state, caller.visitor, card, publish, now);
+      if (typeof place === "string") return Response.json({ error: place }, { status: 409 });
+      return move([{ _tag: "place", id: card, after: place }]);
     }
     if (path === "/agent/jobs" && request.method === "POST") {
       const body: unknown = await request.json().catch(() => null);

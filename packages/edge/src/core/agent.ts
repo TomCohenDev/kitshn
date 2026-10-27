@@ -6,17 +6,22 @@ import {
   type Circle,
   EVERYONE_CIRCLE_ID,
   type Member,
+  type Point,
+  type ResourceKind,
   type State,
   activeShares,
   circlesHolding,
+  insideCircle,
+  isPublicCircle,
   shareKey,
 } from "./model.ts";
+import { placeInside } from "./place.ts";
 import { type Visitor, circleMatches, visitorLevel } from "./visitor.ts";
 
 /**
  * K-718: the agent circles of a device: circles of devices only that name it, have not ended, and that it
  * matches. A circle with people, networks, domains or Everyone is never an agent circle, so an agent key
- * cannot move a card to anyone but other devices, except a site into Everyone with the right "publishes".
+ * cannot move a card to anyone but other devices, except a site that it added into Everyone (agentRefusal).
  */
 export const circlesOf = (state: State, visitor: Visitor, now: number) =>
   new Set(
@@ -47,9 +52,13 @@ export function agentHas(state: State, visitor: Visitor, right: AgentRight, now:
  * the level `control`, so the key manages the card. Undefined sends the card to the tray.
  */
 export const agentHomeCircle = (state: State, clientId: string, now: number) =>
-  [...circlesOf(state, { email: null, clientId, ip: null }, now)]
+  controlCircles(state, { email: null, clientId, ip: null }, now)[0];
+
+/** K-718: the agent circles of a key at the level `control`, in map order. */
+const controlCircles = (state: State, visitor: Visitor, now: number) =>
+  [...circlesOf(state, visitor, now)]
     .flatMap((id) => state.circles.get(id) ?? [])
-    .find((circle) => circle.level === "control");
+    .filter((circle) => circle.level === "control");
 
 /**
  * K-819: a Compose app of a repo that an agent key allowed runs only on a machine where that key may run jobs
@@ -99,12 +108,25 @@ export function agentMayRunOn(state: State, visitor: Visitor, machineId: string,
   );
 }
 
+/** K-718: the kinds that an agent key may publish. A live site serves a dev server on a machine, so never. */
+const PUBLISHABLE: ReadonlySet<ResourceKind> = new Set(["site.static", "site.worker", "site.compose"]);
+
+/** K-718: the Everyone circle as the seed makes it: public to all, with no other member, not repurposed. */
+export const isEveryoneCircle = (circle: Circle) =>
+  circle.id === EVERYONE_CIRCLE_ID &&
+  isPublicCircle(circle) &&
+  circle.match === "any" &&
+  circle.members.length === 1;
+
 /**
  * K-718: why an agent key may not make these changes, or null. It may only move cards that it controls, and
- * only from and to places inside its agent circles at the level `control`, or out of every circle. A key
- * that "publishes" may also move a site into and out of the Everyone circle. Circles,
+ * only from and to places inside its agent circles at the level `control`, or out of every circle. Circles,
  * members, stacks, levels and the pause stay with the admin. These are the resolved changes, so the other
  * cards of a stack that a move takes along (K-521) pass the same check.
+ *
+ * A card that the key added (`added`: the cards of repos that it allowed, K-819) may also sit in the Everyone
+ * circle, but only together with one of its agent circles at `control`, so the key keeps managing it. Only a
+ * key that "publishes" moves such a card into Everyone; any key may take it out again.
  */
 export function agentRefusal(
   state: State,
@@ -112,6 +134,7 @@ export function agentRefusal(
   visitor: Visitor,
   changes: ReadonlyArray<Change>,
   now: number,
+  added: ReadonlySet<string>,
 ) {
   const controlled = cardsControlledBy(state, visitor, now);
   const own = circlesOf(state, visitor, now);
@@ -120,18 +143,61 @@ export function agentRefusal(
     if (edit._tag !== "place") return `An agent key may only move cards; it cannot change a ${edit._tag}.`;
     if (!controlled.has(edit.id))
       return `This key has no control on the card "${state.resources.get(edit.id)?.name ?? edit.id}".`;
-    const site = state.resources.get(edit.id)?.kind.startsWith("site.") ?? false;
+    const kind = state.resources.get(edit.id)?.kind;
+    const publishable = added.has(edit.id) && kind !== undefined && PUBLISHABLE.has(kind);
     for (const side of [state, after]) {
-      const foreign = circlesHolding(side, edit.id).find(
+      const holding = circlesHolding(side, edit.id);
+      const mayBePublic = publishable && (side === state || publishes);
+      const foreign = holding.find(
         (circle) =>
-          !(publishes && site && circle.id === EVERYONE_CIRCLE_ID) &&
+          !(mayBePublic && isEveryoneCircle(circle)) &&
           (!own.has(circle.id) || levelIn(side, edit.id, circle) !== "control"),
       );
       if (foreign)
-        return `An agent key moves cards only between its own agent circles with control${publishes ? ", and sites into Everyone" : ""}, and "${foreign.name}" is not one of them.`;
+        return `An agent key moves cards only between its own agent circles with control${publishes ? ", and the sites that it added into Everyone" : ""}, and "${foreign.name}" is not one of them.`;
+      const keeps = holding.some((circle) => own.has(circle.id) && levelIn(side, edit.id, circle) === "control");
+      if (side === after && holding.some(isEveryoneCircle) && !keeps)
+        return publishRefusal(state, visitor, now);
     }
   }
   return null;
+}
+
+/** K-718: why a published card would leave every agent circle of the key. */
+function publishRefusal(state: State, visitor: Visitor, now: number) {
+  const everyone = [...state.circles.values()].find(isEveryoneCircle);
+  const overlaps = controlCircles(state, visitor, now).some(
+    (circle) => everyone !== undefined && Math.hypot(circle.x - everyone.x, circle.y - everyone.y) < circle.r + everyone.r,
+  );
+  return overlaps
+    ? "Publish into the overlap of an agent circle and Everyone, so the key keeps managing the card."
+    : "No agent circle of this key overlaps Everyone. Ask the owner to drag the Agents circle so it overlaps Everyone.";
+}
+
+/**
+ * K-718: where a card goes when the key publishes it (into the overlap of one of its agent circles at
+ * `control` and Everyone) or takes it back (into that agent circle alone). A string names why not.
+ * The caller still runs agentRefusal on the move.
+ */
+export function publishPlace(
+  state: State,
+  visitor: Visitor,
+  cardId: string,
+  publish: boolean,
+  now: number,
+): Point | string {
+  const from = state.places.get(cardId);
+  if (!from) return "The card is in the tray. Move it into an agent circle first.";
+  const everyone = [...state.circles.values()].find(isEveryoneCircle);
+  if (!everyone) return "The map has no Everyone circle.";
+  const homes = controlCircles(state, visitor, now);
+  // The circle that holds the card now comes first, so the card moves as little as possible.
+  const ordered = [...homes.filter((circle) => insideCircle(from, circle)), ...homes];
+  for (const home of ordered) {
+    const place = placeInside(state, from, new Set(publish ? [home.id, everyone.id] : [home.id]));
+    if (place) return place;
+  }
+  return publish ? publishRefusal(state, visitor, now) : "No agent circle of this key at control has room for the card.";
 }
 
 /** K-718: a device member in an agent circle, without the admin card. The map calls it an agent. */

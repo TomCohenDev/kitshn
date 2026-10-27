@@ -9,6 +9,7 @@ import {
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import { composeRisks } from "./guard.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
 import {
   chmodSync,
@@ -16,6 +17,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statfsSync,
@@ -413,6 +415,34 @@ async function composeUp(
       const made = await runProgram("docker", ["network", "create", "kitshn-edge"]);
       if (!made.ok && !(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok)
         throw new Error(`docker network create kitshn-edge failed: ${made.output}`);
+    }
+    // K-818: risky Compose settings run only when the owner allows them for this repo on this machine.
+    const configFile = join(dir, "compose.config.json");
+    const composeArgs = [
+      "compose",
+      "-p",
+      command.project,
+      ...(command.file ? ["-f", command.file] : []),
+      "--env-file",
+      join(dir, "params.env"),
+    ];
+    try {
+      await step("check the Compose settings", "docker", [...composeArgs, "config", "--format", "json", "-o", configFile], {
+        cwd: source,
+        env,
+      });
+      const real = (path: string) => (existsSync(path) ? realpathSync(path) : path);
+      const roots = [source, env.KITSHN_DATA_DIR, env.KITSHN_LOG_DIR, sockets].map(real);
+      const refused = composeRisks(JSON.parse(readFileSync(configFile, "utf8")), roots, real).filter(
+        (risk) => !command.allowed.includes(risk),
+      );
+      if (refused.length > 0)
+        throw new Error(
+          `the Compose file asks for ${refused.join(", ")}; the owner allows each one for ${command.repo} in the panel of this machine (K-818)`,
+        );
+    } finally {
+      // The resolved config holds the values of the params.
+      rmSync(configFile, { force: true });
     }
     await step(
       "docker compose up",

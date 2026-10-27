@@ -142,6 +142,8 @@ export function agentDeployPlan(
     readonly takesDeploys: boolean;
     /** The card still runs on that machine (K-611). */
     readonly runsCard: boolean;
+    /** K-818: the risky Compose settings that the machine allows for this repo. */
+    readonly allowed: ReadonlyArray<string>;
   } | null,
 ):
   | { readonly kind: "redeploy"; readonly command: Extract<Command, { kind: "compose-redeploy" }> }
@@ -166,6 +168,7 @@ export function agentDeployPlan(
     kind: "redeploy",
     command: {
       kind: "compose-redeploy",
+      allowed: machine.allowed,
       project: last.resourceId,
       name: last.name,
       environment: last.environment,

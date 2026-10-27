@@ -11,7 +11,19 @@ export interface Machine {
   readonly clientId: string;
   /** The remotely managed tunnel of the machine (K-603). */
   readonly tunnelId: string;
+  /** K-818: risky Compose settings that the owner allows for one repo on this machine. */
+  readonly allow?: ReadonlyArray<ComposeAllowance>;
 }
+
+/** K-818: one allow list entry: a repo (`owner/name`) and one setting name of the daemon's check. */
+export interface ComposeAllowance {
+  readonly repo: string;
+  readonly setting: string;
+}
+
+/** K-818: the settings that a machine allows for one repo. */
+export const allowedFor = (machine: Machine, repo: string): Array<string> =>
+  (machine.allow ?? []).filter((entry) => entry.repo.toLowerCase() === repo.toLowerCase()).map((entry) => entry.setting);
 
 /** K-605: what a daemon reports about itself. */
 export interface MachineStatus {
@@ -46,6 +58,8 @@ export type Command =
   | {
       readonly kind: "compose";
       readonly deployId: string;
+      /** K-818: the risky Compose settings that the owner allows for this repo on this machine. */
+      readonly allowed: ReadonlyArray<string>;
       readonly project: string;
       readonly name: string;
       readonly environment: string;
@@ -59,6 +73,7 @@ export type Command =
    */
   | {
       readonly kind: "compose-redeploy";
+      readonly allowed: ReadonlyArray<string>;
       readonly project: string;
       readonly name: string;
       readonly environment: string;
@@ -150,4 +165,22 @@ export function newJoinCode(): string {
   const alphabet = "23456789abcdefghjkmnpqrstuvwxyz";
   const random = crypto.getRandomValues(new Uint8Array(20));
   return [...random].map((value) => alphabet[value % alphabet.length]).join("");
+}
+
+/** K-818: checks an allow list from the map: at most 50 entries of a repo `owner/name` and a setting name. */
+export function parseAllowances(value: unknown): Array<ComposeAllowance> | string {
+  if (!Array.isArray(value) || value.length > 50) return "The allow list is a list of at most 50 entries.";
+  const entries: Array<ComposeAllowance> = [];
+  for (const item of value) {
+    const entry = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : {};
+    const repo = typeof entry["repo"] === "string" ? entry["repo"].trim() : "";
+    const setting = typeof entry["setting"] === "string" ? entry["setting"].trim() : "";
+    const parts = repo.split("/");
+    if (parts.length !== 2 || parts.some((part) => part === "" || part === "." || part === ".."))
+      return `"${repo}" is not a repo; write owner/name.`;
+    if (!setting || setting.length > 200 || setting.includes(" "))
+      return `"${setting}" is not a setting name, for example bind:/var/run/docker.sock.`;
+    entries.push({ repo, setting });
+  }
+  return entries;
 }

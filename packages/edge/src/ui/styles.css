@@ -1150,3 +1150,13 @@ a > code {
 .open-card button.link:hover {
   text-decoration: underline;
 }
+/* K-818: the allow list of risky Compose settings in the machine panel. */
+.allow-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+.allow-list textarea {
+  width: 100%;
+  font: 0.85rem var(--mono);
+}

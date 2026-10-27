@@ -14,7 +14,13 @@ export const KINDS: Record<
     readonly tilt: string;
   }
 > = {
-  "kitshn.admin": { label: "Admin", icon: "🔐", color: "var(--accent)", ink: "var(--accent-fg)", tilt: "-2deg" },
+  "kitshn.admin": {
+    label: "Admin",
+    icon: "🔐",
+    color: "var(--accent)",
+    ink: "var(--accent-fg)",
+    tilt: "-2deg",
+  },
   machine: { label: "Machines", icon: "🖥", color: "var(--info)", tilt: "-3deg" },
   "site.static": { label: "Static sites", icon: "🌐", color: "var(--green)", tilt: "2deg" },
   "site.worker": { label: "Worker apps", icon: "⚙️", color: "var(--green)", tilt: "1deg" },

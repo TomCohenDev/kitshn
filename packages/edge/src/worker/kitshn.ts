@@ -424,6 +424,7 @@ export class Kitshn extends DurableObject<Env> {
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
       version: this.env.KITSHN_VERSION,
+      accessTeam: this.env.ACCESS_TEAM_DOMAIN,
       revision: this.lastRevision(),
       me,
     };

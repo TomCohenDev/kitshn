@@ -22,3 +22,13 @@ Section 16 of SPEC.md maps every machine map feature to a milestone, or drops it
 - Each moved app changes one line in its own workflow file: `permissions: id-token: write`. A reusable workflow cannot raise the permissions of its caller, so `deploy.yml` here cannot do it for the apps.
 - The address: the admin of kitshn 2 is `kit.yarden-zamir.com` (K-1208). The KitSHn 1 website moves from `kitshn.yarden-zamir.com` to `kitshn-legacy.yarden-zamir.com`, served by KitSHn 1 from the `kitshn-meta` repo. Links to the old address, for example in the KitSHn 1 README, need an update.
 - During milestone 4, one VPS serves both KitSHn 1 apps (Caddy on ports 80 and 443) and kitshn 2 apps (tunnel). They do not clash, because kitshn 2 needs no inbound port. A moved app changes its DNS record from the VPS address to the tunnel by hand. When the first kitshn 2 deploy takes over KitSHn 1 data (K-1404), it stops the KitSHn 1 app, so the site is down from that deploy until the record moves; move it right after the deploy.
+- Tunnel ingress checks the Access JWT (K-603), so a request reaches an app only through Access. The check does not tell the app who the user is. Access also sends `Cf-Access-Authenticated-User-Email`, but that header is not signed, and anything on the machine that reaches the socket can set it. An app that needs the user identity verifies the `Cf-Access-Jwt-Assertion` header itself ([validate JWTs](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/)):
+  1. Get the signing keys from `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`. `<team>` is the first label of `ACCESS_TEAM_DOMAIN`.
+  2. Check the signature and the expiry of the token.
+  3. Check that `iss` is `https://<team>.cloudflareaccess.com`.
+  4. Check that `aud` contains the audience tag of the app. Read the tag in the Cloudflare dashboard: **Zero Trust** > **Access controls** > **Applications** > the application `kitshn <card name>` > **Configure** > **Additional settings** > **Application Audience (AUD) Tag**.
+  5. Read the identity from the verified token (`email`, or `common_name` for a service token).
+
+  kitshn does not pass the tag to apps yet ([#72](https://github.com/Yarden-zamir/kitshn/issues/72)). The tag changes when kitshn makes the Access application again, for example after someone deletes it in Cloudflare. Then update the tag in the app.
+
+  A site in Everyone has a Bypass policy (K-403), and Access sends no JWT for Bypass. On such a site, a verifier must not require the token. It treats a request without a token as a visitor with no identity.

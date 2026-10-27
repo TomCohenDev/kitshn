@@ -67,7 +67,9 @@ import {
   type Api,
   accessStates,
   CALLS_PER_RUN,
+  fillAudiences,
   hasAccessWork,
+  rowsWithoutAud,
   signOutEverywhere,
   syncAccess,
   syncLauncher,
@@ -90,6 +92,7 @@ import {
 import { type Recipe, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
 import {
   type LiveSite,
+  ingressAccess,
   liveSiteId,
   reachableAddresses,
   offlineReason,
@@ -238,11 +241,11 @@ export class Kitshn extends DurableObject<Env> {
     );
     this.accessWarnings = JSON.parse(this.meta("access_warnings") ?? "[]") as Array<string>;
     this.access = new Map(
-      this.sql<{ key: string; cf_id: string; body: string; tried: string; error: string | null }>(
-        "SELECT key, cf_id, body, tried, error FROM access_objects",
+      this.sql<{ key: string; cf_id: string; aud: string; body: string; tried: string; error: string | null }>(
+        "SELECT key, cf_id, aud, body, tried, error FROM access_objects",
       ).map((row) => [
         row.key,
-        { key: row.key, cfId: row.cf_id, body: row.body, tried: row.tried, error: row.error },
+        { key: row.key, cfId: row.cf_id, aud: row.aud, body: row.body, tried: row.tried, error: row.error },
       ]),
     );
     const rows = this.sql<{
@@ -1242,13 +1245,19 @@ export class Kitshn extends DurableObject<Env> {
     let calls = 0;
     const now = Date.now();
     const rows = new Map(this.tunnelRows().map((row) => [row.machine_id, row]));
+    const accessOf = this.ingressAccessOf();
     for (const machine of this.state.machines.values()) {
-      const config = tunnelConfig(this.protectedSites(machine.id));
-      const body = JSON.stringify(config);
       const row = rows.get(machine.id);
-      if (row?.applied === body && row.error === null) continue;
       if (row?.error && row.retry_at > now) continue;
+      const config = tunnelConfig(this.protectedSites(machine.id), accessOf);
+      const body = JSON.stringify(config);
+      if (row?.applied === body && row.error === null) continue;
       if (calls++ >= budget) return;
+      for (const site of this.protectedSites(machine.id)) {
+        const access = accessOf(site);
+        if (access.kind === "pending")
+          console.warn(`kitshn writes the ingress of ${site.address} without the Access check: ${access.reason}.`);
+      }
       try {
         await api(
           "PUT",
@@ -1300,10 +1309,11 @@ export class Kitshn extends DurableObject<Env> {
   private tunnelWork() {
     const now = Date.now();
     const tunnels = new Map(this.tunnelRows().map((row) => [row.machine_id, row]));
+    const accessOf = this.ingressAccessOf();
     const stale = [...this.state.machines.values()].some((machine) => {
       const row = tunnels.get(machine.id);
-      const due = !row?.error || row.retry_at <= now;
-      return due && row?.applied !== JSON.stringify(tunnelConfig(this.protectedSites(machine.id)));
+      if (row?.error && row.retry_at > now) return false;
+      return row?.applied !== JSON.stringify(tunnelConfig(this.protectedSites(machine.id), accessOf));
     });
     const checking = [...this.liveSites.values()].some(
       (site) => site.state === "checking" && (this.checkRetryAt.get(site.id) ?? 0) <= Date.now(),
@@ -1327,6 +1337,11 @@ export class Kitshn extends DurableObject<Env> {
 
   private sitesOf(machineId: string) {
     return [...this.liveSites.values()].filter((site) => site.machineId === machineId);
+  }
+
+  /** K-603: the Access check of each ingress rule, from the Access objects that Cloudflare accepted. */
+  private ingressAccessOf() {
+    return (site: LiveSite) => ingressAccess(site, this.access, this.env.ACCESS_TEAM_DOMAIN);
   }
 
   /** Live sites whose address is checked and whose Access application exists in Cloudflare. */
@@ -1696,6 +1711,8 @@ export class Kitshn extends DurableObject<Env> {
       now,
     );
     if (retry?.at) next = Math.min(next, retry.at);
+    if (this.env.CLOUDFLARE_API_TOKEN && rowsWithoutAud(this.access).length > 0)
+      next = Math.min(next, Math.max(this.audRetryAt, now));
     const ends = [
       ...[...this.state.shareSettings.values()].map((setting) => setting.endsAt),
       ...[...this.state.circles.values()].map((circle) => circle.endsAt),
@@ -3055,6 +3072,22 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private accessLock: Promise<unknown> = Promise.resolve();
+  /** K-603: when the alarm reads missing audience tags again. In memory: a restart only reads sooner. */
+  private audRetryAt = 0;
+
+  /** K-603: reads missing audience tags before the tunnels use them. Returns the number of calls. */
+  private async fillAudiences(api: Api, now: number) {
+    if (rowsWithoutAud(this.access).length === 0 || this.audRetryAt > now) return 0;
+    try {
+      // In the lock, so a deploy's Access sync never writes a row between the read and the put.
+      return await this.withAccessLock(() => fillAudiences(this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID));
+    } catch (error) {
+      console.warn(`kitshn could not read the audience tags of Access: ${String(error)}`);
+      return 1;
+    } finally {
+      if (rowsWithoutAud(this.access).length > 0) this.audRetryAt = now + RETRY_MS;
+    }
+  }
 
   /** Runs one Access sync at a time, so a deploy and the alarm never both create the same object. */
   private withAccessLock<T>(work: () => Promise<T>): Promise<T> {
@@ -3069,9 +3102,10 @@ export class Kitshn extends DurableObject<Env> {
       put: (row: AccessRow) => {
         this.access.set(row.key, row);
         this.sql(
-          "INSERT OR REPLACE INTO access_objects (key, cf_id, body, tried, error) VALUES (?, ?, ?, ?, ?)",
+          "INSERT OR REPLACE INTO access_objects (key, cf_id, aud, body, tried, error) VALUES (?, ?, ?, ?, ?, ?)",
           row.key,
           row.cfId,
+          row.aud,
           row.body,
           row.tried,
           row.error,
@@ -3122,6 +3156,7 @@ export class Kitshn extends DurableObject<Env> {
           spent = 12;
         }
       }
+      spent += await this.fillAudiences(api, now);
       // Removals first: ingress and DNS go before an Access application does. Additions wait for the next
       // run, because ingress and DNS need the application that the Access sync makes (K-410).
       await this.syncTunnels(api, 6);

@@ -87,6 +87,17 @@ export function composeRisks(
   for (const service of Object.values(record(top["services"]))) {
     const s = record(service);
     for (const key of Object.keys(s)) if (!SAFE_SERVICE_KEYS.has(key) && !key.startsWith("x-")) risks.add(key);
+    const own = (name: unknown) => typeof name === "string" && name.startsWith(`${project}-`);
+    // A built image or a container name of another app would take its place on this machine.
+    if (s["build"] !== undefined && s["image"] !== undefined && !own(s["image"])) risks.add("image");
+    if (s["container_name"] !== undefined && !own(s["container_name"])) risks.add("container_name");
+    const logging = record(s["logging"]);
+    if (logging["driver"] !== undefined && logging["driver"] !== "json-file" && logging["driver"] !== "local")
+      risks.add("logging");
+    for (const option of Object.keys(record(logging["options"])))
+      if (!["max-size", "max-file", "compress"].includes(option)) risks.add("logging");
+    for (const value of Object.values(record(s["networks"])))
+      if (value !== null && Object.keys(record(value)).length > 0) risks.add("networks.options");
     for (const volume of list(s["volumes"])) {
       const v = record(volume);
       if (v["type"] === "bind" && typeof v["source"] === "string" && !inside(v["source"]))
@@ -95,10 +106,14 @@ export function composeRisks(
     }
     const build = record(s["build"]);
     for (const key of Object.keys(build)) if (!SAFE_BUILD_KEYS.has(key)) risks.add(`build.${key}`);
-    if (typeof build["context"] === "string" && (build["context"].includes("://") || !inside(build["context"])))
-      risks.add(`build:${build["context"]}`);
-    if (typeof build["dockerfile"] === "string" && build["dockerfile"].startsWith("/") && !inside(build["dockerfile"]))
+    const context = typeof build["context"] === "string" ? build["context"] : null;
+    if (context !== null && (context.includes("://") || !inside(context))) risks.add(`build:${context}`);
+    if (context !== null && typeof build["dockerfile"] === "string" && !inside(resolve(context, build["dockerfile"])))
       risks.add(`build:${build["dockerfile"]}`);
+    for (const tag of list(build["tags"])) if (!own(tag)) risks.add("build.tags");
+    for (const source of list(build["cache_from"]))
+      if (typeof source !== "string" || (source.includes("type=") && !source.includes("type=registry")))
+        risks.add("build.cache_from");
     for (const name of Object.keys(record(s["networks"])))
       if (name !== "default" && name !== SHARED_NETWORK && !Object.hasOwn(record(top["networks"]), name))
         risks.add(`network:${name}`);
@@ -125,15 +140,17 @@ export function composeRisks(
   }
   for (const [name, network] of Object.entries(record(top["networks"]))) {
     const n = record(network);
-    if (name === SHARED_NETWORK || n["name"] === SHARED_NETWORK) continue;
+    // Only a name and labels; ipam, ipv6 and drivers can change routing on the host.
+    if (Object.keys(n).some((key) => !["name", "labels", "external"].includes(key))) risks.add(`network:${name}`);
+    if (n["name"] === SHARED_NETWORK) continue;
     const own = typeof n["name"] !== "string" || n["name"] === `${project}_${name}`;
-    if (!own || n["external"] === true || n["driver"] !== undefined || n["driver_opts"] !== undefined)
-      risks.add(`network:${name}`);
+    if (!own || n["external"] === true) risks.add(`network:${name}`);
   }
   for (const section of ["secrets", "configs"])
     for (const entry of Object.values(record(top[section]))) {
       const file = record(entry)["file"];
       if (typeof file === "string" && !inside(file)) risks.add(`file:${resolve(file)}`);
+      if (record(entry)["environment"] !== undefined) risks.add(`${section}.environment`);
     }
   return [...risks].sort();
 }
@@ -144,6 +161,30 @@ export function bindSources(config: unknown): Array<string> {
     list(record(service)["volumes"]).flatMap((volume) => {
       const v = record(volume);
       return v["type"] === "bind" && typeof v["source"] === "string" ? [v["source"]] : [];
+    }),
+  );
+}
+
+/**
+ * K-818: `docker compose config` inlines `include` and `extends`, so their files and env files never show
+ * in its output. The raw Compose files of the app must not use them without an allowance.
+ */
+export function rawRisks(text: string): Array<string> {
+  const risks = new Set<string>();
+  for (const line of text.split("\n")) {
+    if (line.startsWith("include:")) risks.add("include");
+    if (line.trimStart().startsWith("extends:")) risks.add("extends");
+  }
+  return [...risks];
+}
+
+/** K-818: the secret and config files of a config, checked again right before `up`. */
+export function fileSources(config: unknown): Array<string> {
+  const top = record(config);
+  return ["secrets", "configs"].flatMap((section) =>
+    Object.values(record(top[section])).flatMap((entry) => {
+      const file = record(entry)["file"];
+      return typeof file === "string" ? [file] : [];
     }),
   );
 }

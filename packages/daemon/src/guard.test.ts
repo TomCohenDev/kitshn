@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bindSources, composeRisks, realpathOf } from "./guard.ts";
+import { bindSources, composeRisks, rawRisks, realpathOf } from "./guard.ts";
 
 const roots = ["/apps/a/src", "/apps/a/data", "/apps/a/logs", "/apps/a/sockets"];
 const same = (path: string) => path;
@@ -75,5 +75,33 @@ describe("risky Compose settings (K-818)", () => {
     const config = { services: { web: { volumes: [{ type: "bind", source: "/apps/a/src/etc/systemd", target: "/x" }] } } };
     expect(composeRisks(config, {}, "a", roots, real)).toEqual(["bind:/apps/a/src/etc/systemd"]);
     expect(bindSources(config)).toEqual(["/apps/a/src/etc/systemd"]);
+  });
+  it("keeps values of safe keys inside the app: names, logging, networks, build inputs", () => {
+    const config = {
+      services: {
+        web: {
+          build: { context: "/apps/a/src", dockerfile: "../../b/Dockerfile", tags: ["postgres:16"], cache_from: ["type=local,src=/"] },
+          image: "busybox:1.38",
+          container_name: "b-web",
+          logging: { driver: "fluentd", options: { "fluentd-address": "unix:///run/x.sock" } },
+          networks: { "kitshn-edge": { aliases: ["other-db"] } },
+        },
+        ok: { build: { context: "/apps/a/src" }, image: "a-ok", container_name: "a-ok", logging: { driver: "local", options: { "max-size": "10m" } } },
+      },
+      networks: { inner: { ipam: { config: [{ subnet: "169.254.0.0/16" }] } } },
+      secrets: { s: { environment: "HOME" } },
+    };
+    expect(risks(config)).toEqual([
+      "build.cache_from",
+      "build.tags",
+      "build:../../b/Dockerfile",
+      "container_name",
+      "image",
+      "logging",
+      "network:inner",
+      "networks.options",
+      "secrets.environment",
+    ]);
+    expect(rawRisks("include:\n  - ../other.yml\nservices:\n  web:\n    extends:\n      file: /x.yml\n")).toEqual(["include", "extends"]);
   });
 });

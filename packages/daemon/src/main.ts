@@ -9,7 +9,7 @@ import {
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { bindSources, composeRisks, realpathOf } from "./guard.ts";
+import { bindSources, composeRisks, fileSources, rawRisks, realpathOf } from "./guard.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
 import {
   chmodSync,
@@ -337,6 +337,11 @@ async function composeUp(
       writeFileSync(join(dir, "source.tgz"), await deployFile(command.deployId, "source.tgz"));
       writeFileSync(join(dir, "params.env"), await deployFile(command.deployId, "params.env"), { mode: 0o600 });
     }
+    // K-818: no container of the app runs while its files change, are checked and start, so none can swap a
+    // path or rewrite the Compose file between the check and `up`. Orphans and one-off runs count too.
+    const running = await runProgram("docker", ["ps", "-q", "--filter", `label=com.docker.compose.project=${command.project}`]);
+    const ids = running.output.split("\n").map((id) => id.trim()).filter(Boolean);
+    if (ids.length > 0) await step("stop the app", "docker", ["stop", ...ids]);
     // The last build's containers may have written into the source as root (a bind mount of `.`).
     output += await removeAsRoot(source, `${command.project}-src`);
     mkdirSync(source, { recursive: true });
@@ -441,27 +446,38 @@ async function composeUp(
       }
     };
     const config = await readConfig([]);
-    const refused = composeRisks(config, await readConfig(["--no-interpolate"]), command.project, roots, real).filter(
-      (risk) => !command.allowed.includes(risk),
-    );
+    const raw = (command.file ? [command.file] : COMPOSE_FILES)
+      .map((name) => join(source, name))
+      .filter((path) => existsSync(path))
+      .flatMap((path) => rawRisks(readFileSync(path, "utf8")));
+    const refused = [
+      ...raw,
+      ...composeRisks(config, await readConfig(["--no-interpolate"]), command.project, roots, real),
+    ].filter((risk) => !command.allowed.includes(risk));
     if (refused.length > 0)
       throw new Error(
         `the Compose file asks for ${refused.join(", ")}; the owner allows each one for ${command.repo} in the panel of this machine (K-818)`,
       );
-    await step("docker compose build", "nice", ["-n", "19", "docker", ...composeArgs, "build"], { cwd: source, env });
-    // A container of the last build could swap a bind path for a symlink after the check, so none runs now.
-    await step("stop the app", "docker", [...composeArgs, "stop"], { cwd: source, env });
-    const moved = bindSources(config).filter((path) => {
-      const resolved = real(path);
-      return !roots.some((root) => resolved === root || resolved.startsWith(`${root}/`)) && !command.allowed.includes(`bind:${path}`);
-    });
-    if (moved.length > 0) throw new Error(`a bind path left the app's folders after the check: ${moved.join(", ")} (K-818)`);
-    await step(
-      "docker compose up",
-      "docker",
-      [...composeArgs, "up", "-d", "--no-build", "--remove-orphans"],
-      { cwd: source, env },
-    );
+    // Build and start from the checked config itself, so the repo's files are not read again.
+    const checked = join(dir, "compose.checked.json");
+    writeFileSync(checked, JSON.stringify(config), { mode: 0o600 });
+    try {
+      const run = ["compose", "-p", command.project, "--project-directory", source, "-f", checked];
+      await step("docker compose build", "nice", ["-n", "19", "docker", ...run, "build"], { cwd: source, env });
+      const moved = [...bindSources(config), ...fileSources(config)].filter((path) => {
+        const resolved = real(path);
+        return (
+          !roots.some((root) => resolved === root || resolved.startsWith(`${root}/`)) &&
+          !command.allowed.includes(`bind:${path}`) &&
+          !command.allowed.includes(`file:${path}`)
+        );
+      });
+      if (moved.length > 0) throw new Error(`a path left the app's folders after the check: ${moved.join(", ")} (K-818)`);
+      await step("docker compose up", "docker", [...run, "up", "-d", "--no-build", "--remove-orphans"], { cwd: source, env });
+    } finally {
+      // The checked config holds the values of the params.
+      rmSync(checked, { force: true });
+    }
     const until = Date.now() + SOCKET_WAIT_MS;
     while (!(await probe(`unix:${socketPath}`))) {
       if (Date.now() > until) throw new Error(`the app opened no socket at ${socketPath} within 3 minutes`);
@@ -506,7 +522,19 @@ async function composeUp(
 }
 
 /** Short root jobs on app folders (copy, clean-up); busybox has `cp -a` and `find -delete` and is a few MB. */
-const HELPER_IMAGE = "busybox:1.38";
+// Pinned by digest, so no app can take the name with an image of its own (K-818).
+const HELPER_IMAGE = "busybox:1.38@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e";
+/** The Compose files that Compose reads without `-f`, in its own order. */
+const COMPOSE_FILES = [
+  "compose.yaml",
+  "compose.yml",
+  "docker-compose.yaml",
+  "docker-compose.yml",
+  "compose.override.yaml",
+  "compose.override.yml",
+  "docker-compose.override.yaml",
+  "docker-compose.override.yml",
+];
 
 /**
  * Removes a folder that an app's containers wrote into, often as root, which the daemon user cannot remove.

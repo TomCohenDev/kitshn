@@ -20,6 +20,8 @@ import {
   EVERYONE_CIRCLE_ID,
   pauseModeOf,
   OWNER_CIRCLE_ID,
+  RESOURCE_KINDS,
+  type ResourceKind,
   type Resource,
   type State,
   levelForKind,
@@ -506,6 +508,32 @@ describe("emergency pause (K-1504)", () => {
       "keep-public",
       "lockdown",
     ]);
+  });
+  it("names the kind of each pause step in the history", () => {
+    const state = start();
+    const soft = edit(state, [{ _tag: "pause", after: "keep-public" }]);
+    const hard = edit(soft.after, [{ _tag: "pause", after: "lockdown" }]);
+    const direct = edit(state, [{ _tag: "pause", after: "lockdown" }]);
+    expect(summarize(state, soft.after, soft.changes)).toMatch(/except public/);
+    expect(summarize(soft.after, hard.after, hard.changes)).toMatch(/Closed public sites too/);
+    expect(summarize(state, direct.after, direct.changes)).toMatch(/Paused all shares: lockdown/);
+  });
+  it("keeps public shares open in a pause only on sites, pages and files", () => {
+    const state = start();
+    const everyone = circle(state, EVERYONE_CIRCLE_ID);
+    const base = state.resources.get("riffle")!;
+    const kinds = Object.keys(RESOURCE_KINDS).filter((kind) => kind !== "kitshn.admin") as Array<ResourceKind>;
+    for (const kind of kinds) {
+      const card = { ...base, id: "card", kind, addresses: [] };
+      const open = {
+        ...state,
+        resources: new Map(state.resources).set("card", card),
+        places: new Map(state.places).set("card", { x: everyone.x, y: everyone.y }),
+      };
+      const paused = edit(open, [{ _tag: "pause", after: "keep-public" }]).after;
+      const kept = visitorLevel(paused, card, { email: null, clientId: null, ip: null }, 0) !== null;
+      expect([kind, kept]).toEqual([kind, kind.startsWith("site.") || kind === "page" || kind === "file"]);
+    }
   });
   it("closes a public machine card in every pause", () => {
     const state = start();

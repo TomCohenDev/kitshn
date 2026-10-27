@@ -16,8 +16,9 @@ import {
   shareLevel,
 } from "../core/model.ts";
 import { placeInside } from "../core/place.ts";
-import type { RevisionView } from "../core/protocol.ts";
+import type { JobView, MachineView, RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, MEMBER_ICONS } from "./kinds.ts";
+import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
 import { MapView, type Selection, type View } from "./Map.tsx";
 import { applyEdits, callApi, explainRefusal, toState, undoRevision, useStore } from "./store.ts";
 
@@ -51,7 +52,7 @@ const plural = (count: number, word: string) => `${count} ${word}${count === 1 ?
 
 const routeFromHash = () => {
   const [tab = "map", id = ""] = location.hash.slice(1).split("/");
-  return { tab: tab === "history" ? ("history" as const) : ("map" as const), id };
+  return { tab: tab === "history" || tab === "machines" ? tab : ("map" as const), id };
 };
 
 export function App() {
@@ -62,6 +63,7 @@ export function App() {
   const [openStacks, setOpenStacks] = useState<ReadonlySet<string>>(new Set());
   const [toast, setToast] = useState<Toast | null>(null);
   const [palette, setPalette] = useState(false);
+  const [addingMachine, setAddingMachine] = useState(false);
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
   const [route, setRoute] = useState(routeFromHash);
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -70,6 +72,10 @@ export function App() {
   const fitRef = useRef<(() => void) | null>(null);
 
   const state = useMemo(() => (store.snapshot ? toState(store.snapshot) : null), [store.snapshot]);
+  const machines = useMemo(
+    () => new Map((store.snapshot?.machines ?? []).map((view) => [view.machine.id, view])),
+    [store.snapshot],
+  );
 
   useEffect(() => {
     const onHash = () => setRoute(routeFromHash());
@@ -259,15 +265,22 @@ export function App() {
             setOpenStacks(next);
           }}
           onCommit={(edits, diffs) => void commit(edits, diffs)}
+          machines={machines}
         />
+      ) : route.tab === "machines" ? (
+        <MachinesView machines={store.snapshot.machines} onAdd={() => setAddingMachine(true)} />
       ) : (
         <History revisions={store.snapshot.revisions} onUndo={(id) => void undo(id)} />
       )}
+      {addingMachine ? <AddMachine onClose={() => setAddingMachine(false)} /> : null}
       <header class="bar">
         <h1>kitshn</h1>
         <div class="seg">
           <button aria-pressed={route.tab === "map"} onClick={() => (location.hash = "map")}>
             Map
+          </button>
+          <button aria-pressed={route.tab === "machines"} onClick={() => (location.hash = "machines")}>
+            Machines
           </button>
           <button aria-pressed={route.tab === "history"} onClick={() => (location.hash = "history")}>
             History
@@ -297,6 +310,9 @@ export function App() {
             <span class="sep" />
             <button class="btn primary" onClick={() => void newCircle()}>
               + Circle
+            </button>
+            <button class="btn" onClick={() => setAddingMachine(true)}>
+              + Machine
             </button>
             <button class="btn" onClick={fit}>
               Fit
@@ -359,6 +375,26 @@ export function App() {
         }}
         onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
         paused={store.snapshot.paused}
+        machines={machines}
+        jobs={store.snapshot.jobs}
+        onToast={(text, error) => showToast({ text, error, undo: null })}
+        onRemoveMachine={async (view) => {
+          if (
+            !(await ask(
+              `Remove ${view.machine.name}? kitshn deletes its service token, its tunnel and its queue (K-615).`,
+            ))
+          )
+            return;
+          const result = await callApi<{ removed: string }>(
+            "DELETE",
+            `/api/machines/${encodeURIComponent(view.machine.id)}`,
+          );
+          showToast(
+            "error" in result
+              ? { text: result.error, error: true, undo: null }
+              : { text: `Removed ${view.machine.name}.`, error: false, undo: null },
+          );
+        }}
         warnings={store.snapshot.accessWarnings}
         onPause={async (pause) => {
           const text = pause
@@ -486,7 +522,7 @@ function History(props: { revisions: ReadonlyArray<RevisionView>; onUndo: (id: n
                   <span class="stamp" title={`Undone by #${revision.undoneBy}`}>
                     ✓ undone
                   </span>
-                ) : revision.undoes === null ? (
+                ) : revision.undoes === null && revision.undoable ? (
                   <button class="btn" onClick={() => props.onUndo(revision.id)}>
                     Undo
                   </button>
@@ -515,6 +551,10 @@ function Panel(props: {
   onReshare: (resource: Resource, circle: Circle, share: boolean) => void;
   paused: boolean;
   warnings: ReadonlyArray<string>;
+  machines: ReadonlyMap<string, MachineView>;
+  jobs: ReadonlyArray<JobView>;
+  onRemoveMachine: (view: MachineView) => void;
+  onToast: (text: string, error: boolean) => void;
   onPause: (pause: boolean) => void;
   onSignOut: () => void;
 }) {
@@ -545,6 +585,10 @@ function Panel(props: {
         onEdit={props.onEdit}
         onPlace={props.onPlace}
         onReshare={props.onReshare}
+        machine={props.machines.get(cards[0].id) ?? null}
+        jobs={props.jobs}
+        onRemoveMachine={props.onRemoveMachine}
+        onToast={props.onToast}
       />
     );
   } else if (cards.length > 1) {
@@ -627,6 +671,10 @@ function CardPanel(props: {
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean) => void;
+  machine: MachineView | null;
+  jobs: ReadonlyArray<JobView>;
+  onRemoveMachine: (view: MachineView) => void;
+  onToast: (text: string, error: boolean) => void;
 }) {
   const { resource, state } = props;
   const holding = circlesHolding(state, resource.id);
@@ -664,6 +712,14 @@ function CardPanel(props: {
         <button class="btn primary" onClick={() => props.onPlace(resource)}>
           Place on the map
         </button>
+      ) : null}
+      {props.machine ? (
+        <MachinePanel
+          view={props.machine}
+          jobs={props.jobs}
+          onRemove={() => props.machine && props.onRemoveMachine(props.machine)}
+          onToast={props.onToast}
+        />
       ) : null}
       <div class="label" style={{ marginTop: "12px" }}>
         Who can open it

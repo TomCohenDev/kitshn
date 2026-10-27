@@ -183,6 +183,8 @@ public_policy=$(policy "kitshn public paths" '{"name":"kitshn public paths","dec
 machines_policy=$(policy "kitshn machines" '{"name":"kitshn machines","decision":"non_identity","include":[{"any_valid_service_token":{}}],"require":[],"exclude":[]}')
 ADMIN_AUD=$(app "$KITSHN_HOST" "kitshn admin" 24h "$owner_policy")
 app "$KITSHN_HOST/install" "kitshn install (public)" 24h "$public_policy" >/dev/null
+# K-602: the join script and the join code exchange. The one-time code protects the exchange.
+app "$KITSHN_HOST/join" "kitshn join (public)" 24h "$public_policy" >/dev/null
 CONNECT_AUD=$(app "$KITSHN_HOST/connect" "kitshn connect" 24h "$machines_policy")
 
 say "6. R2 bucket"
@@ -242,7 +244,7 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
     main_module: "worker.js",
     compatibility_date: $date,
     compatibility_flags: ["nodejs_compat"],
-    assets: {jwt: $jwt, config: {not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/connect", "/connect/*"]}},
+    assets: {jwt: $jwt, config: {not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/connect", "/join/exchange"]}},
     bindings: [
       {type: "assets", name: "ASSETS"},
       {type: "durable_object_namespace", name: "KITSHN", class_name: "Kitshn"},

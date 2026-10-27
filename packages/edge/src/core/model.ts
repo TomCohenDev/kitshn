@@ -1,3 +1,5 @@
+import type { Machine } from "./machine.ts";
+
 /** All levels in one order, lowest first. A resource kind uses a subset (K-301, K-206). */
 export const LEVELS = ["view", "use", "control"] as const;
 export type Level = (typeof LEVELS)[number];
@@ -79,6 +81,8 @@ export interface State {
   readonly shareSettings: ReadonlyMap<string, ShareSetting>;
   /** K-1504: while paused, only the Owner circle keeps its share of the admin. */
   readonly paused: boolean;
+  /** Joined machines (K-602); a machine member matches its service token (K-107). */
+  readonly machines: ReadonlyMap<string, Machine>;
 }
 
 export const levelRank = (level: Level) => LEVELS.indexOf(level);

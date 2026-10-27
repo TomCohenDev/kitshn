@@ -32,8 +32,8 @@ jobs:
       - run: pnpm run lint
       - run: pnpm run typecheck
       - run: pnpm run test
-      - run: sh -n packages/edge/public/install
-      - run: pnpm run build
+      - run: sh -n packages/edge/public/install && sh -n packages/edge/public/join
+      - run: pnpm --filter @kitshn/edge run build
       - uses: actions/upload-artifact@v7
         with:
           name: kitshn-edge
@@ -43,9 +43,23 @@ jobs:
     if: github.event_name == 'push'
     needs: check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Build the daemon for each platform (K-601)
+        working-directory: packages/daemon
+        run: node scripts/build.ts
       - uses: actions/download-artifact@v8
         with:
           name: kitshn-edge
@@ -55,10 +69,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          files="kitshn-edge.tar.gz packages/daemon/dist/kitshn-linux-arm64 packages/daemon/dist/kitshn-linux-x64 packages/daemon/dist/kitshn-darwin-arm64 packages/daemon/dist/kitshn-darwin-x64"
           if gh release view edge >/dev/null 2>&1; then
-            gh release upload edge kitshn-edge.tar.gz --clobber
-            gh release edit edge --target "$GITHUB_SHA" --notes "kitshn 2 Worker bundle from $GITHUB_SHA."
+            gh release upload edge $files --clobber
+            gh release edit edge --target "$GITHUB_SHA" --notes "kitshn 2 Worker bundle and daemon from $GITHUB_SHA."
           else
-            gh release create edge kitshn-edge.tar.gz --prerelease --latest=false --target "$GITHUB_SHA" \
-              --title "kitshn 2 edge" --notes "kitshn 2 Worker bundle from $GITHUB_SHA."
+            gh release create edge $files --prerelease --latest=false --target "$GITHUB_SHA" \
+              --title "kitshn 2 edge" --notes "kitshn 2 Worker bundle and daemon from $GITHUB_SHA."
           fi

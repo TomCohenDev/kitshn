@@ -702,3 +702,28 @@ select {
   border-radius: var(--radius);
   overflow-wrap: anywhere;
 }
+
+pre.command,
+pre.output {
+  margin: 6px 0;
+  padding: 8px;
+  max-height: 14rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  background: var(--raised);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+}
+.dialog form input,
+.dialog form + .row {
+  margin: 4px 0;
+}
+.mono {
+  font-family: var(--mono);
+}
+.card .presence {
+  --tilt: 2deg;
+}

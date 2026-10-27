@@ -11,7 +11,7 @@
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/connect", "/connect/*"],
+    "run_worker_first": ["/api/*", "/connect", "/join/exchange"],
   },
   "durable_objects": { "bindings": [{ "name": "KITSHN", "class_name": "Kitshn" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Kitshn"] }],

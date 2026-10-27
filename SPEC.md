@@ -122,8 +122,8 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 
 ## 6. Machines and the daemon
 
-- **K-601** Each machine runs one `kitshn` daemon as a system service: systemd on Linux, launchd on macOS. The first version has no Windows daemon. A Windows machine stays on the machine map portal until a later milestone ([docs/migration.md](docs/migration.md)).
-- **K-602** "Add machine" creates a service token and a remotely managed tunnel, and shows a one-time join code that expires after 10 minutes. `kitshn join <code>` installs nothing else and saves the token and the tunnel token in a file that only the daemon user can read.
+- **K-601** Each machine runs one `kitshn` daemon as a service of the user who joined it: a systemd user service on Linux (it starts without a login when the user has lingering on), a launchd agent on macOS. The daemon is one binary per platform, so a machine needs no Node.js. The first version has no Windows daemon. A Windows machine stays on the machine map portal until a later milestone ([docs/migration.md](docs/migration.md)).
+- **K-602** "Add machine" creates a service token and a remotely managed tunnel, and shows a one-time join command with a code that expires after 10 minutes: `curl -fsSL <address>/join | sh -s -- <code> <address>`. The command downloads the daemon, runs `kitshn join`, and starts the service. `kitshn join` saves the token and the tunnel token in a file that only the daemon user can read. kitshn stores the two tokens only encrypted with a key from the code, and deletes them when the code is used.
 - **K-603** The daemon runs `cloudflared` for the tunnel of its machine. kitshn owns the tunnel ingress through the API; the daemon never edits it.
 - **K-604** The daemon keeps one WebSocket to the Durable Object at `/connect`, with backoff after a failure. Liveness uses `ping` and `pong` with the Durable Object auto response, so a ping wakes nothing.
 - **K-605** The daemon sends its status on connection and on each change, at most once every 5 seconds. It sends a resource sample (CPU, memory, disk) once a minute.

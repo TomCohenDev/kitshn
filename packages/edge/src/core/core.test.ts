@@ -56,6 +56,7 @@ function start(): State {
     places: new Map([...s.places, ["riffle", { x: 0, y: -200 }]]),
     shareSettings: new Map(),
     paused: false,
+    machines: new Map(),
   };
 }
 
@@ -235,8 +236,12 @@ describe("visitors (K-203, K-207)", () => {
         { _tag: "ip", range: "10.0.0.0/8" },
       ],
     };
-    expect(circleMatches(qlik, { email: "a@qlik.com", clientId: null, ip: "10.1.2.3" })).toBe(true);
-    expect(circleMatches(qlik, { email: "a@qlik.com", clientId: null, ip: "8.8.8.8" })).toBe(false);
+    expect(circleMatches(qlik, { email: "a@qlik.com", clientId: null, ip: "10.1.2.3" }, new Map())).toBe(
+      true,
+    );
+    expect(circleMatches(qlik, { email: "a@qlik.com", clientId: null, ip: "8.8.8.8" }, new Map())).toBe(
+      false,
+    );
   });
 
   it("gives the owner control of the admin and nobody else", () => {
@@ -262,7 +267,7 @@ describe("visitors (K-203, K-207)", () => {
 
 describe("Access compile (K-401 to K-403)", () => {
   it("compiles the Owner circle to one allow policy with the passkey check", () => {
-    const policies = circlePolicies(circle(start(), OWNER_CIRCLE_ID));
+    const policies = circlePolicies(circle(start(), OWNER_CIRCLE_ID), new Map());
     expect([...policies.keys()]).toEqual(["policy:owner:people"]);
     const body = policies.get("policy:owner:people")!;
     expect(body.decision).toBe("allow");
@@ -271,9 +276,9 @@ describe("Access compile (K-401 to K-403)", () => {
   });
 
   it("compiles Everyone to a bypass and devices to Service Auth", () => {
-    expect(circlePolicies(circle(start(), EVERYONE_CIRCLE_ID)).get("policy:everyone:people")?.decision).toBe(
-      "bypass",
-    );
+    expect(
+      circlePolicies(circle(start(), EVERYONE_CIRCLE_ID), new Map()).get("policy:everyone:people")?.decision,
+    ).toBe("bypass");
     const devices: Circle = {
       ...circle(start(), "her"),
       members: [
@@ -281,7 +286,7 @@ describe("Access compile (K-401 to K-403)", () => {
         { _tag: "device", tokenId: "t1", clientId: "c1.access", name: "her phone" },
       ],
     };
-    const policies = circlePolicies(devices);
+    const policies = circlePolicies(devices, new Map());
     expect(policies.get("policy:her:tokens")?.decision).toBe("non_identity");
     expect(policies.get("policy:her:people")?.mfa_config).toBeUndefined();
   });
@@ -296,12 +301,12 @@ describe("Access compile (K-401 to K-403)", () => {
         { _tag: "device", tokenId: "t1", clientId: "c1.access", name: "her phone" },
       ],
     };
-    expect(circlePolicies(withToken).size).toBe(0);
+    expect(circlePolicies(withToken, new Map()).size).toBe(0);
     const withMachine: Circle = {
       ...withToken,
       members: [withToken.members[0]!, { _tag: "machine", machineId: "m1" }],
     };
-    expect(circlePolicies(withMachine).size).toBe(0);
+    expect(circlePolicies(withMachine, new Map()).size).toBe(0);
   });
 
   it("gives each addressed card an application with the policies of its circles", () => {

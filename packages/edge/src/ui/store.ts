@@ -49,7 +49,15 @@ export function connect() {
   ws.onmessage = (event) => {
     const message = JSON.parse(String(event.data)) as ServerMessage;
     if (message.type === "snapshot") set({ snapshot: message.snapshot });
-    else {
+    else if (message.type === "machine") {
+      const snapshot = current.snapshot;
+      if (snapshot) {
+        const machines = snapshot.machines.map((view) =>
+          view.machine.id === message.view.machine.id ? message.view : view,
+        );
+        set({ snapshot: { ...snapshot, machines } });
+      }
+    } else {
       waiting.get(message.requestId)?.(message.ok ? { ok: true, revision: message.revision } : message);
       waiting.delete(message.requestId);
     }
@@ -86,7 +94,7 @@ function request(message: object): Promise<Result> {
 
 /** A JSON call to the admin API. Returns the body, or an error with the reason. */
 export async function callApi<T>(
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "DELETE",
   path: string,
   body?: object,
 ): Promise<T | { error: string }> {
@@ -115,5 +123,6 @@ export function toState(snapshot: Snapshot): State {
     places: new Map(Object.entries(snapshot.places)),
     shareSettings: new Map(Object.entries(snapshot.shareSettings)),
     paused: snapshot.paused,
+    machines: new Map(snapshot.machines.map((view) => [view.machine.id, view.machine])),
   };
 }

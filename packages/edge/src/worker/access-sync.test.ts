@@ -21,6 +21,7 @@ function start(): State {
     places: new Map(s.places),
     shareSettings: new Map(),
     paused: false,
+    machines: new Map(),
   };
 }
 

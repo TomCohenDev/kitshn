@@ -352,6 +352,12 @@ export class Kitshn extends DurableObject<Env> {
             state,
             Date.now(),
           );
+      // The demo's riffle card counts as deployed, so the card panel shows "Remove app" (K-909).
+      if (extra.resources.some((resource) => resource.id === "riffle"))
+        this.sql(
+          `INSERT OR IGNORE INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file)
+           VALUES ('demo-riffle', 'Yarden-zamir/riffle', '1001', 'prod', 'riffle', 'riffle.example.com', '', NULL, 'deploy', 'demo', 'done', 0, 'main', 'compose', NULL, NULL)`,
+        );
       this.insertRevision({ _tag: "kitshn", reason: "setup" }, "Set up kitshn", changes, null);
     });
     this.load();

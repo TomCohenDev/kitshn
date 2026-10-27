@@ -5,6 +5,8 @@ import {
   conflictOf,
   type Edit,
   invert,
+  refuseRaiseWhilePaused,
+  refuseResume,
   resolveEdits,
   ruleViolation,
   shareDiff,
@@ -467,5 +469,30 @@ describe("stacks (K-521, K-522)", () => {
     }
     expect(stacks.size).toBe(0);
     expect(ruleViolation({ ...after, resources, places, stacks })).toBeNull();
+  });
+});
+
+describe("emergency pause (K-1504)", () => {
+  it("lets an edit or an undo pause, but never resume", () => {
+    const paused = edit(start(), [{ _tag: "pause", after: true }]);
+    expect(refuseResume(paused.changes)).toEqual(paused.changes);
+    expect(() => refuseResume(resolveEdits(paused.after, [{ _tag: "pause", after: false }]))).toThrow(/passkey/);
+    expect(() => refuseResume(invert(paused.changes))).toThrow(/passkey/);
+  });
+  it("lets access only go down while paused (MM-711)", () => {
+    const paused = edit(start(), [{ _tag: "pause", after: true }]).after;
+    const owner = paused.circles.get("owner")!;
+    const wider = edit(paused, [
+      { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, { _tag: "everyone" }] } },
+    ]).after;
+    expect(() => refuseRaiseWhilePaused(paused, wider)).toThrow(/only goes down/);
+    const narrower = edit(paused, [{ _tag: "circle", id: "owner", after: { ...owner, needsPasskey: true } }]).after;
+    expect(() => refuseRaiseWhilePaused(paused, narrower)).not.toThrow();
+    const allMatch = { ...owner, match: "all" as const, members: [...owner.members, { _tag: "ip" as const, range: "10.0.0.0/8" }] };
+    const strict = { ...paused, circles: new Map(paused.circles).set("owner", allMatch) };
+    const looser = { ...strict, circles: new Map(strict.circles).set("owner", { ...allMatch, members: owner.members }) };
+    expect(() => refuseRaiseWhilePaused(strict, looser)).toThrow(/only goes down/);
+    const ending = { ...paused, shareSettings: new Map([["kitshn-admin/owner", { level: null, endsAt: 5 }]]) };
+    expect(() => refuseRaiseWhilePaused(ending, { ...ending, shareSettings: new Map() })).toThrow(/end later/);
   });
 });

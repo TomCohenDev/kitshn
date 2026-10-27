@@ -10,6 +10,8 @@ import {
   conflictOf,
   deepEqual,
   invert,
+  refuseRaiseWhilePaused,
+  refuseResume,
   resolveEdits,
   ruleViolation,
   shareDiff,
@@ -384,12 +386,22 @@ export class Kitshn extends DurableObject<Env> {
     const after = applyChanges(before, changes);
     const violation = ruleViolation(after);
     if (violation) throw new RuleError(violation);
+    refuseRaiseWhilePaused(before, after);
     const summary =
       undoes === null
         ? summarize(before, after, changes)
         : `Undo #${undoes}: ${summarize(before, after, changes)}`;
     const id = this.ctx.storage.transactionSync(() => {
       this.persist(changes);
+      if (changes.some((change) => change._tag === "pause" && change.after)) {
+        this.setMeta("paused_by", JSON.stringify(actor));
+        this.setMeta("paused_at", String(Date.now()));
+        // K-1504: jobs that devices and agent keys queued do not run after Resume.
+        this.sql(
+          `UPDATE jobs SET state = 'failed', output = 'The emergency pause ended this job.'
+           WHERE state = 'queued' AND json_extract(visitor, '$.email') IS NULL AND json_extract(visitor, '$.clientId') IS NOT NULL`,
+        );
+      }
       return this.insertRevision(actor, summary, changes, undoes);
     });
     this.state = after;
@@ -410,7 +422,22 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private apply(actor: Actor, edits: ReadonlyArray<Edit>) {
-    return this.commit(actor, resolveEdits(this.state, edits), null);
+    return this.commit(actor, refuseResume(resolveEdits(this.state, edits)), null);
+  }
+
+  /** K-1504: "Resume", after the Worker checked a passkey login of at most ten minutes. */
+  private resume(caller: Caller) {
+    if (!this.authorized(caller))
+      return Response.json({ error: "You have no control level on the kitshn admin (K-104)." }, { status: 403 });
+    if (!this.state.paused) return Response.json({ revision: null });
+    try {
+      return Response.json({
+        revision: this.commit(caller.actor, resolveEdits(this.state, [{ _tag: "pause", after: false }]), null),
+      });
+    } catch (error) {
+      if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
+      throw error;
+    }
   }
 
   /** K-1502: Undo makes a new revision that reverses the old one, and runs the same rules. */
@@ -437,7 +464,7 @@ export class Kitshn extends DurableObject<Env> {
       throw new RuleError(
         `This undo would make ${goingPublic.resource.name} public through its stack. Move the stack by hand.`,
       );
-    return this.commit(actor, changes, revisionId);
+    return this.commit(actor, refuseResume(changes), revisionId);
   }
 
   private authorized(caller: Caller) {
@@ -461,6 +488,7 @@ export class Kitshn extends DurableObject<Env> {
       accessWarnings: this.accessWarnings,
       paused: this.state.paused,
       repos: this.repoViews(),
+      pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
       version: this.env.KITSHN_VERSION,
@@ -540,6 +568,8 @@ export class Kitshn extends DurableObject<Env> {
     if (!header) return new Response("The Worker sent no caller.", { status: 500 });
     const caller = JSON.parse(header) as Caller;
     if (path === "/connect") return this.connectMachine(request, caller);
+    // Only the Worker's fresh passkey route sends this path (K-1504).
+    if (path === "/fresh/resume" && request.method === "POST") return this.resume(caller);
     if (path.startsWith("/agent/")) return this.agentRequest(path, request, caller);
     if (path.startsWith("/connect/deploys/")) return this.deploySource(path, caller);
     if (!this.authorized(caller)) {
@@ -962,7 +992,10 @@ export class Kitshn extends DurableObject<Env> {
   /** K-614: the sender of a command needs control on the machine card itself, not only on the admin. */
   private canControl(visitor: Visitor, machineId: string) {
     const resource = this.state.resources.get(machineId);
-    return resource !== undefined && visitorLevel(this.state, resource, visitor, Date.now()) === "control";
+    if (!resource) return false;
+    // K-1504, MM-711: the owner keeps the commands they had; the pause takes no tool from them and gives none.
+    const state = this.state.paused && this.hasAdmin(visitor) ? { ...this.state, paused: false } : this.state;
+    return visitorLevel(state, resource, visitor, Date.now()) === "control";
   }
 
   /** K-610 to K-614: a job runs on one machine, or on the first online machine with its labels. */
@@ -1949,6 +1982,12 @@ export class Kitshn extends DurableObject<Env> {
     const result = plan(recipe, deployer.repo, event, this.env.KITSHN_ZONE);
     if (result.kind === "error") return Response.json({ error: result.reason }, { status: 400 });
     if (result.kind === "skip") return Response.json({ deployId: null, plan: result });
+    // K-1504: no new deploy while paused; a teardown still runs, because it only lowers access.
+    if (result.kind === "deploy" && this.state.paused)
+      return Response.json(
+        { error: "kitshn is paused (Emergency pause). Deploys wait until the owner resumes." },
+        { status: 423 },
+      );
     // A blocked repo still tears down what it made (K-819).
     const gate = result.kind === "teardown" ? null : this.repoGate(deployer);
     if (gate) return gate;
@@ -2158,7 +2197,8 @@ export class Kitshn extends DurableObject<Env> {
         )
       : undefined;
     const place = circle ? placeInside(this.state, { x: circle.x, y: circle.y }, new Set([circle.id])) : null;
-    if (circle && place) {
+    // K-1504: a deploy that was running when the pause started finishes with its card in the tray.
+    if (circle && place && !this.state.paused) {
       this.commit(
         actor,
         resolveEdits(this.state, [{ _tag: "place", id: row.resource_id, after: place }]),
@@ -3089,6 +3129,12 @@ const libraryItem = (row: LibraryRow): LibraryItem => ({
 const deployObject = (deployId: string, file: string) => `deploys/${deployId}/${file}`;
 
 /** The requester of a job that kitshn makes itself, such as a deploy (K-614). */
+/** K-1504: who paused and when, from the meta rows that a pause writes. */
+function parsePausedBy(actor: string | null, at: string | null): { readonly actor: Actor; readonly at: number } | null {
+  if (!actor || !at) return null;
+  return { actor: JSON.parse(actor) as Actor, at: Number(at) };
+}
+
 const KITSHN_JOB = JSON.stringify({ email: null, clientId: null, ip: null, kitshn: true });
 
 /** K-718: the workflow file that an agent key starts in an app repo, the one that the map's recipe shows. */

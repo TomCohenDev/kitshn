@@ -13,6 +13,8 @@ export interface Env {
   readonly ACCESS_CONNECT_AUD: string;
   /** K-718: the audience tag of the `/agent` Access application (service tokens of agent keys). */
   readonly ACCESS_AGENT_AUD?: string;
+  /** K-1504: the audience tag of the `/api/fresh` application, a passkey check of at most 10 minutes. */
+  readonly ACCESS_FRESH_AUD?: string;
   /** K-1004: the audience tags of the login applications of `pages.<zone>` and `files.<zone>`. */
   readonly PAGES_LOGIN_AUD: string;
   readonly PAGES_PASSKEY_AUD: string;

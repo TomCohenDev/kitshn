@@ -36,6 +36,8 @@ export interface Snapshot {
   readonly paused: boolean;
   /** K-819: the repos that deployed or wait to deploy, newest first. */
   readonly repos: ReadonlyArray<RepoView>;
+  /** K-1504: who paused and when, while paused. */
+  readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;
   /** The newest jobs, with their output cut to 4,000 characters. */
   readonly jobs: ReadonlyArray<JobView>;

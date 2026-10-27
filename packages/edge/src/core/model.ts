@@ -90,11 +90,25 @@ export interface State {
   readonly places: ReadonlyMap<string, Point>;
   readonly shareSettings: ReadonlyMap<string, ShareSetting>;
   readonly stacks: ReadonlyMap<string, Stack>;
-  /** K-1504: while paused, only the Owner circle keeps its share of the admin. */
-  readonly paused: boolean;
+  /**
+   * K-1504: null when not paused. While paused, the Owner circle keeps its share of the admin, and
+   * "keep-public" also keeps the shares of public circles; "lockdown" closes those too.
+   */
+  readonly paused: PauseMode | null;
   /** Joined machines (K-602); a machine member matches its service token (K-107). */
   readonly machines: ReadonlyMap<string, Machine>;
 }
+
+export type PauseMode = "keep-public" | "lockdown";
+
+/** K-1504: the stored pause; any value other than empty or "keep-public" fails closed as a lockdown. */
+export function pauseModeOf(stored: string | null): PauseMode | null {
+  if (stored === null || stored === "" || stored === "false") return null;
+  return stored === "keep-public" ? "keep-public" : "lockdown";
+}
+
+/** K-1504: the kinds whose public shares a pause keeps open; machines, repos and the admin always close. */
+const KEPT_PUBLIC: ReadonlySet<ResourceKind> = new Set(["site.static", "site.worker", "site.compose", "site.live", "page", "file"]);
 
 export const levelRank = (level: Level) => LEVELS.indexOf(level);
 
@@ -137,14 +151,20 @@ export function sharesOf(state: State, resource: Resource): Array<Share> {
 
 /**
  * The shares that give access now: not past an end date (K-209, K-201), and during a pause only the
- * admin share of the Owner circle (K-1504).
+ * admin share of the Owner circle and, unless it is a lockdown, the shares of public circles (K-1504).
  */
 export function activeShares(state: State, resource: Resource, now: number): Array<Share> {
   return sharesOf(state, resource).filter((share) => {
     if (share.circle.endsAt !== null && share.circle.endsAt <= now) return false;
     const shareEnds = state.shareSettings.get(shareKey(resource.id, share.circle.id))?.endsAt ?? null;
     if (shareEnds !== null && shareEnds <= now) return false;
-    return !state.paused || (resource.id === ADMIN_RESOURCE_ID && share.circle.id === OWNER_CIRCLE_ID);
+    if (!state.paused || (resource.id === ADMIN_RESOURCE_ID && share.circle.id === OWNER_CIRCLE_ID)) return true;
+    return (
+      state.paused === "keep-public" &&
+      KEPT_PUBLIC.has(resource.kind) &&
+      isPublicCircle(share.circle) &&
+      share.circle.match === "any"
+    );
   });
 }
 

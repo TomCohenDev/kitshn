@@ -5,7 +5,16 @@ import {
   loginStep,
   objectKey,
 } from "../core/library.ts";
-import { type ContentLogins, callerOf, contentVisitorOf, cookieValues, deployerOf, freshCallerOf } from "./auth.ts";
+import {
+  type ContentLogins,
+  callerOf,
+  contentVisitorOf,
+  cookieValues,
+  deployerOf,
+  freshCallerOf,
+  stepCookie,
+  stepToken,
+} from "./auth.ts";
 import { escapeHtml, originDown, seenText } from "./live.ts";
 import type { Env } from "./env.ts";
 
@@ -56,7 +65,8 @@ function redirect(location: string, stale: boolean) {
   const response = Response.redirect(location, 302);
   if (!stale) return response;
   const headers = new Headers(response.headers);
-  headers.append("set-cookie", "CF_Authorization=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax");
+  for (const name of ["CF_Authorization", stepCookie("login"), stepCookie("passkey")])
+    headers.append("set-cookie", `${name}=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax`);
   return new Response(null, { status: 302, headers });
 }
 
@@ -86,24 +96,43 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
       ? { login: env.PAGES_LOGIN_AUD, passkey: env.PAGES_PASSKEY_AUD }
       : { login: env.FILES_LOGIN_AUD, passkey: env.FILES_PASSKEY_AUD };
   if (url.pathname === "/login" || url.pathname === "/login/passkey") {
-    // Access let the visitor through and set the cookie for the whole host; go back to the item, and say
-    // which step this was, so the item never sends the visitor to the same step again (no redirect loop).
+    // Access let the visitor through and sent the token of this step; go back to the item, and say which
+    // step this was, so the item never sends the visitor to the same step again (no redirect loop).
     const next = new URL(url.searchParams.get("next") ?? "/", url.origin);
-    if (next.origin !== url.origin) return Response.redirect(url.origin, 302);
-    // A short cookie on the item's path, not a URL mark, so a bookmark or a shared link never carries it.
+    // A `;` in the path would add attributes to the return mark cookie below.
+    if (next.origin !== url.origin || next.pathname.includes(";")) return Response.redirect(url.origin, 302);
     const step = url.pathname === "/login" ? "login" : "passkey";
-    return new Response(null, {
-      status: 302,
-      headers: {
-        location: `${next.origin}${next.pathname}`,
-        "set-cookie": `${RETURN_MARK}=${step}; Max-Age=60; Path=${next.pathname}; Secure; HttpOnly; SameSite=Lax`,
-      },
-    });
+    const checked = await stepToken(
+      request.headers.get("cf-access-jwt-assertion"),
+      env,
+      step === "login" ? logins.login : logins.passkey,
+    );
+    if (typeof checked === "string")
+      return text(
+        `Access let you through the ${step === "passkey" ? "passkey login" : "login"} on ${url.host}, but kitshn` +
+          ` could not use it: ${checked} Log out at https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/logout,` +
+          ` then open ${next.origin}${next.pathname} again.`,
+        401,
+      );
+    const headers = new Headers({ location: `${next.origin}${next.pathname}` });
+    // The Worker keeps the token of this step itself, because the other login application replaces
+    // `CF_Authorization` (K-1004). It lives as long as the token.
+    const maxAge = Math.max(0, checked.expiresAt - Math.floor(Date.now() / 1000));
+    headers.append(
+      "set-cookie",
+      `${stepCookie(step)}=${checked.token}; Max-Age=${maxAge}; Path=/; Secure; HttpOnly; SameSite=Lax`,
+    );
+    // A short cookie on the item's path, not a URL mark, so a bookmark or a shared link never carries it.
+    headers.append(
+      "set-cookie",
+      `${RETURN_MARK}=${step}; Max-Age=60; Path=${next.pathname}; Secure; HttpOnly; SameSite=Lax`,
+    );
+    return new Response(null, { status: 302, headers });
   }
   if (request.method !== "GET" && request.method !== "HEAD") return text("Use GET.", 405);
   const [, id = "", ...rest] = url.pathname.split("/");
   if (!isLibraryId(id)) return text(`kitshn has no ${kind} here.`, 404);
-  const { visitor, problem } = await contentVisitorOf(request, env, logins);
+  const { visitor, problem, seen } = await contentVisitorOf(request, env, logins);
   const answer = (await (
     await env.KITSHN.getByName("kitshn").fetch("https://kitshn.internal/internal/content", {
       method: "POST",
@@ -111,10 +140,8 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
     })
   ).json()) as ContentAnswer;
   const back = `?next=${encodeURIComponent(url.pathname)}`;
-  const step = loginStep(
-    answer.decision,
-    cookieValues(request.headers.get("cookie"), RETURN_MARK)[0] ?? null,
-  );
+  const cameBack = cookieValues(request.headers.get("cookie"), RETURN_MARK)[0] ?? null;
+  const step = loginStep(answer.decision, cameBack);
   if (step === "explain") {
     const reason = answer.stale
       ? `: this login is from before "Sign out everywhere" (K-110)`
@@ -123,14 +150,14 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
         : `${visitor.email ? ` as ${visitor.email}` : ""}${visitor.passkey ? " with a passkey" : ""}.`;
     const response = text(
       `Access let you in, but kitshn could not use the login on ${url.host}${reason}` +
-        ` Log out at https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/logout, then open ${url.origin}${url.pathname} again.`,
+        ` Log out at https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/logout, then open ${url.origin}${url.pathname} again.` +
+        `\n\nWhat kitshn saw: kitshn wanted the ${answer.decision === "passkey" ? "passkey login" : "login"} after the ${cameBack} step;` +
+        ` tokens: ${seen.length > 0 ? seen.join("; ") : "none"}.`,
       401,
     );
     // The next try starts clean: no old login, no return mark.
-    response.headers.append(
-      "set-cookie",
-      "CF_Authorization=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax",
-    );
+    for (const name of ["CF_Authorization", stepCookie("login"), stepCookie("passkey")])
+      response.headers.append("set-cookie", `${name}=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax`);
     response.headers.append(
       "set-cookie",
       `${RETURN_MARK}=; Max-Age=0; Path=${url.pathname}; Secure; HttpOnly; SameSite=Lax`,

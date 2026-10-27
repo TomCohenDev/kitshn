@@ -24,7 +24,7 @@ function start(): State {
     places: new Map(s.places),
     shareSettings: new Map(),
     stacks: new Map(),
-    paused: false,
+    paused: null,
     machines: new Map(),
   };
 }
@@ -410,7 +410,7 @@ describe("passkey enrollment on the App Launcher (K-113)", () => {
       name: "Guests",
       members: [{ _tag: "email" as const, email: "g@x.com" }],
     };
-    const paused = { ...state, paused: true, circles: new Map(state.circles).set("guests", guests) };
+    const paused = { ...state, paused: "lockdown" as const, circles: new Map(state.circles).set("guests", guests) };
     expect(desiredAccess(paused, 0).policies.get("policy:enrollment")?.include).toEqual([
       { email: { email: "owner@example.com" } },
     ]);

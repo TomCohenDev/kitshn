@@ -11,7 +11,8 @@ interface StoreState {
   readonly reason: string | null;
 }
 
-type Result = { readonly ok: true; readonly revision: number | null } | { readonly ok: false; readonly error: string };
+type Result =
+  { readonly ok: true; readonly revision: number | null } | { readonly ok: false; readonly error: string };
 
 let current: StoreState = { snapshot: null, connection: "connecting", reason: null };
 const listeners = new Set<() => void>();

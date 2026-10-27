@@ -1,6 +1,9 @@
 import type { Level, Member, ResourceKind } from "../core/model.ts";
 
-export const KINDS: Record<ResourceKind, { readonly label: string; readonly icon: string; readonly color: string; readonly tilt: string }> = {
+export const KINDS: Record<
+  ResourceKind,
+  { readonly label: string; readonly icon: string; readonly color: string; readonly tilt: string }
+> = {
   "kitshn.admin": { label: "Admin", icon: "🔐", color: "var(--accent)", tilt: "-2deg" },
   machine: { label: "Machines", icon: "🖥", color: "var(--info)", tilt: "-3deg" },
   "site.static": { label: "Static sites", icon: "🌐", color: "var(--green)", tilt: "2deg" },

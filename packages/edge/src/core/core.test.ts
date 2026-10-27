@@ -104,11 +104,32 @@ describe("admin guard (K-105)", () => {
     const state = start();
     const everyone = circle(state, EVERYONE_CIRCLE_ID);
     const covering = edit(state, [
-      { _tag: "circle", id: EVERYONE_CIRCLE_ID, after: { ...everyone, level: "control", x: 0, y: 40, r: 100 } },
+      {
+        _tag: "circle",
+        id: EVERYONE_CIRCLE_ID,
+        after: { ...everyone, level: "control", x: 0, y: 40, r: 100 },
+      },
     ]);
     expect(ruleViolation(covering.after)).toMatch(/public/);
     const deleted = edit(state, [{ _tag: "circle", id: OWNER_CIRCLE_ID, after: null }]);
     expect(ruleViolation(deleted.after)).toMatch(/Owner circle/);
+  });
+
+  it("refuses an Owner circle that can never match anyone", () => {
+    const state = start();
+    const owner = circle(state, OWNER_CIRCLE_ID);
+    const { after } = edit(state, [
+      {
+        _tag: "circle",
+        id: OWNER_CIRCLE_ID,
+        after: {
+          ...owner,
+          match: "all",
+          members: [...owner.members, { _tag: "email", email: "b@example.com" }],
+        },
+      },
+    ]);
+    expect(ruleViolation(after)).toMatch(/passkey/);
   });
 
   it("accepts a second passkey circle that takes over the admin", () => {
@@ -250,6 +271,24 @@ describe("Access compile (K-401 to K-403)", () => {
     const policies = circlePolicies(devices);
     expect(policies.get("policy:her:tokens")?.decision).toBe("non_identity");
     expect(policies.get("policy:her:people")?.mfa_config).toBeUndefined();
+  });
+
+  it("gives an all circle no policy when a member cannot become a require rule (K-006)", () => {
+    const base = circle(start(), "her");
+    const withToken: Circle = {
+      ...base,
+      match: "all",
+      members: [
+        { _tag: "email", email: "her@example.com" },
+        { _tag: "device", tokenId: "t1", clientId: "c1.access", name: "her phone" },
+      ],
+    };
+    expect(circlePolicies(withToken).size).toBe(0);
+    const withMachine: Circle = {
+      ...withToken,
+      members: [withToken.members[0]!, { _tag: "machine", machineId: "m1" }],
+    };
+    expect(circlePolicies(withMachine).size).toBe(0);
   });
 
   it("gives each addressed card an application with the policies of its circles", () => {

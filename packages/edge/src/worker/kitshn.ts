@@ -60,6 +60,8 @@ export class Kitshn extends DurableObject<Env> {
   private state!: State;
   private revisions: Array<RevisionView> = [];
   private access = new Map<string, AccessRow>();
+  /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
+  private stuckShares = new Set<string>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -116,15 +118,30 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private seed() {
-    const emails = this.env.OWNER_EMAILS.split(",").map((email) => email.trim()).filter(Boolean);
+    const emails = this.env.OWNER_EMAILS.split(",")
+      .map((email) => email.trim())
+      .filter(Boolean);
     if (emails.length === 0) throw new Error("OWNER_EMAILS is empty: kitshn cannot make the Owner circle.");
     const initial = seed(emails, this.env.KITSHN_HOST);
-    const extra = this.env.DEV_DEMO && this.env.KITSHN_HOST === "localhost" ? demo() : { resources: [], places: [], circles: [] };
+    const extra =
+      this.env.DEV_DEMO && this.env.KITSHN_HOST === "localhost"
+        ? demo()
+        : { resources: [], places: [], circles: [] };
     this.ctx.storage.transactionSync(() => {
       for (const resource of [...initial.resources, ...extra.resources]) this.putResource(resource);
       const changes: Array<Change> = [
-        ...[...initial.circles, ...extra.circles].map((circle): Change => ({ _tag: "circle", id: circle.id, before: null, after: circle })),
-        ...[...initial.places, ...extra.places].map(([id, point]): Change => ({ _tag: "place", id, before: null, after: point })),
+        ...[...initial.circles, ...extra.circles].map((circle): Change => ({
+          _tag: "circle",
+          id: circle.id,
+          before: null,
+          after: circle,
+        })),
+        ...[...initial.places, ...extra.places].map(([id, point]): Change => ({
+          _tag: "place",
+          id,
+          before: null,
+          after: point,
+        })),
       ];
       this.persist(changes);
       this.insertRevision({ _tag: "kitshn", reason: "setup" }, "Set up kitshn", changes, null);
@@ -142,20 +159,40 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private putResource(resource: Resource) {
-    this.sql("INSERT OR REPLACE INTO resources (id, body) VALUES (?, ?)", resource.id, JSON.stringify(resource));
+    this.sql(
+      "INSERT OR REPLACE INTO resources (id, body) VALUES (?, ?)",
+      resource.id,
+      JSON.stringify(resource),
+    );
   }
 
   private persist(changes: ReadonlyArray<Change>) {
     for (const change of changes) {
-      const table = change._tag === "circle" ? "circles" : change._tag === "place" ? "places" : "share_settings";
+      const table =
+        change._tag === "circle" ? "circles" : change._tag === "place" ? "places" : "share_settings";
       if (change.after === null) this.sql(`DELETE FROM ${table} WHERE id = ?`, change.id);
       else if (change._tag === "place") {
-        this.sql("INSERT OR REPLACE INTO places (id, x, y) VALUES (?, ?, ?)", change.id, change.after.x, change.after.y);
-      } else this.sql(`INSERT OR REPLACE INTO ${table} (id, body) VALUES (?, ?)`, change.id, JSON.stringify(change.after));
+        this.sql(
+          "INSERT OR REPLACE INTO places (id, x, y) VALUES (?, ?, ?)",
+          change.id,
+          change.after.x,
+          change.after.y,
+        );
+      } else
+        this.sql(
+          `INSERT OR REPLACE INTO ${table} (id, body) VALUES (?, ?)`,
+          change.id,
+          JSON.stringify(change.after),
+        );
     }
   }
 
-  private insertRevision(actor: Actor, summary: string, changes: ReadonlyArray<Change>, undoes: number | null) {
+  private insertRevision(
+    actor: Actor,
+    summary: string,
+    changes: ReadonlyArray<Change>,
+    undoes: number | null,
+  ) {
     const [row] = this.sql<{ id: number }>(
       "INSERT INTO revisions (at, actor, summary, changes, undoes) VALUES (?, ?, ?, ?, ?) RETURNING id",
       Date.now(),
@@ -175,7 +212,10 @@ export class Kitshn extends DurableObject<Env> {
     const after = applyChanges(before, changes);
     const violation = ruleViolation(after);
     if (violation) throw new RuleError(violation);
-    const summary = undoes === null ? summarize(before, after, changes) : `Undo #${undoes}: ${summarize(before, after, changes)}`;
+    const summary =
+      undoes === null
+        ? summarize(before, after, changes)
+        : `Undo #${undoes}: ${summarize(before, after, changes)}`;
     const id = this.ctx.storage.transactionSync(() => {
       this.persist(changes);
       return this.insertRevision(actor, summary, changes, undoes);
@@ -183,7 +223,9 @@ export class Kitshn extends DurableObject<Env> {
     this.state = after;
     this.revisions = [
       { id, at: Date.now(), actor, summary, undoes, undoneBy: null },
-      ...this.revisions.map((revision) => (revision.id === undoes ? { ...revision, undoneBy: id } : revision)),
+      ...this.revisions.map((revision) =>
+        revision.id === undoes ? { ...revision, undoneBy: id } : revision,
+      ),
     ].slice(0, RECENT_REVISIONS);
     this.broadcast();
     void this.scheduleAlarm();
@@ -197,10 +239,10 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1502: Undo makes a new revision that reverses the old one, and runs the same rules. */
   private undo(actor: Actor, revisionId: number) {
     const [row] = this.sql<{ changes: string }>("SELECT changes FROM revisions WHERE id = ?", revisionId);
-    if (!row) throw new RuleError(`Revision #${revisionId} does not exist, or it is older than the history keeps.`);
-    const [undoneBy] = this.sql<{ id: number }>("SELECT id FROM revisions WHERE undoes = ? LIMIT 1", revisionId);
-    if (undoneBy) throw new RuleError(`Revision #${revisionId} is already undone by #${undoneBy.id}.`);
+    if (!row)
+      throw new RuleError(`Revision #${revisionId} does not exist, or it is older than the history keeps.`);
     const changes = invert(JSON.parse(row.changes) as Array<Change>);
+    // This also refuses a second undo of the same revision: its changes are no longer current.
     const conflict = conflictOf(this.state, changes);
     if (conflict) throw new RuleError(`A later revision changed ${conflict}. Undo that revision first.`);
     return this.commit(actor, changes, revisionId);
@@ -237,7 +279,9 @@ export class Kitshn extends DurableObject<Env> {
   private handle(caller: Caller, message: ClientMessage): Extract<ServerMessage, { type: "result" }> {
     try {
       const revision =
-        message.type === "apply" ? this.apply(caller.actor, message.edits) : this.undo(caller.actor, message.revision);
+        message.type === "apply"
+          ? this.apply(caller.actor, message.edits)
+          : this.undo(caller.actor, message.revision);
       return { type: "result", requestId: message.requestId, ok: true, revision };
     } catch (error) {
       if (!(error instanceof RuleError)) throw error;
@@ -250,11 +294,15 @@ export class Kitshn extends DurableObject<Env> {
     if (!header) return new Response("The Worker sent no caller.", { status: 500 });
     const caller = JSON.parse(header) as Caller;
     if (!this.authorized(caller)) {
-      return Response.json({ error: "You have no control level on the kitshn admin (K-104)." }, { status: 403 });
+      return Response.json(
+        { error: "You have no control level on the kitshn admin (K-104)." },
+        { status: 403 },
+      );
     }
     const path = new URL(request.url).pathname;
     if (path === "/api/ws") {
-      if (request.headers.get("upgrade") !== "websocket") return new Response("Expected a WebSocket.", { status: 426 });
+      if (request.headers.get("upgrade") !== "websocket")
+        return new Response("Expected a WebSocket.", { status: 426 });
       const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
       this.ctx.acceptWebSocket(server);
       server.serializeAttachment(caller);
@@ -266,7 +314,11 @@ export class Kitshn extends DurableObject<Env> {
       if (request.method !== "POST") return new Response("Use POST.", { status: 405 });
       let message: ClientMessage;
       try {
-        message = decodeClientMessage({ ...((await request.json()) as object), type: path.slice(5), requestId: "http" });
+        message = decodeClientMessage({
+          ...((await request.json()) as object),
+          type: path.slice(5),
+          requestId: "http",
+        });
       } catch (error) {
         return Response.json({ error: String(error) }, { status: 400 });
       }
@@ -284,7 +336,9 @@ export class Kitshn extends DurableObject<Env> {
     }
     let message: ClientMessage;
     try {
-      message = decodeClientMessage(JSON.parse(typeof data === "string" ? data : new TextDecoder().decode(data)));
+      message = decodeClientMessage(
+        JSON.parse(typeof data === "string" ? data : new TextDecoder().decode(data)),
+      );
     } catch (error) {
       socket.close(4000, `kitshn cannot read the message: ${String(error).slice(0, 100)}`);
       return;
@@ -318,7 +372,7 @@ export class Kitshn extends DurableObject<Env> {
 
   private expiredShares(now: number) {
     return [...this.state.shareSettings.entries()].filter(([id, setting]) => {
-      if (setting.endsAt === null || setting.endsAt > now) return false;
+      if (setting.endsAt === null || setting.endsAt > now || this.stuckShares.has(id)) return false;
       const [resourceId, circleId] = id.split("/");
       return circlesHolding(this.state, resourceId ?? "").some((circle) => circle.id === circleId);
     });
@@ -346,6 +400,7 @@ export class Kitshn extends DurableObject<Env> {
         );
       } catch (error) {
         // The share already gives no access after its end date; only the card stays where it is.
+        this.stuckShares.add(id);
         console.warn(`kitshn could not move ${resourceId} out of ${circleId}: ${String(error)}`);
       }
     }
@@ -360,9 +415,13 @@ export class Kitshn extends DurableObject<Env> {
       );
       // K-408: retry what failed once a day.
       this.sql("UPDATE access_objects SET error = NULL WHERE error IS NOT NULL");
-      this.sql("INSERT OR REPLACE INTO meta (key, value) VALUES ('daily_at', ?)", String(nextUtcMidnight(now)));
+      this.sql(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('daily_at', ?)",
+        String(nextUtcMidnight(now)),
+      );
     });
     for (const row of this.access.values()) if (row.error) this.access.set(row.key, { ...row, error: null });
+    this.load();
   }
 
   override async alarm() {

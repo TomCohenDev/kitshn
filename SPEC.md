@@ -87,7 +87,7 @@ The architecture, the request paths and the budget are in [docs/architecture.md]
 ## 4. Enforcement
 
 - **K-401** kitshn compiles shares into Cloudflare Access wherever Access can check them, so a check costs no Worker request.
-- **K-402** Each circle becomes one reusable Access policy. A resource with an address becomes one self-hosted Access application whose policies are the circles that hold it. VERIFY: the API attaches reusable policies to many applications. The account limits are 500 applications and 500 reusable policies ([account limits](https://developers.cloudflare.com/cloudflare-one/account-limits/)).
+- **K-402** Each circle becomes reusable Access policies: one for its people (Allow, with the passkey check), and one for its devices and networks (Service Auth), because Access lets service tokens and logins without a person in only through Service Auth. A resource with an address becomes one self-hosted Access application whose policies are the circles that hold it. VERIFY: the API attaches reusable policies to many applications. The account limits are 500 applications and 500 reusable policies ([account limits](https://developers.cloudflare.com/cloudflare-one/account-limits/)).
 - **K-403** A resource inside "Everyone" gets a Bypass policy, or no Access application.
 - **K-404** The Worker checks shares itself for what it serves: pages and files (section 10 and 11). It reads the Access JWT and the visitor IP, never a cookie of its own.
 - **K-405** A provider enforces levels inside its own program. kitshn gives it a grant table for each of its resources (K-706). Access still guards the address: it lets in every circle with a level above none.

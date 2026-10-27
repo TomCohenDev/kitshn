@@ -164,14 +164,19 @@ app() {
     return
   fi
   body=$(jq -nc --arg domain "$1" --arg name "$2" --arg session "$3" --arg policy "$4" \
-    '{name:$name,type:"self_hosted",domain:$domain,session_duration:$session,policies:[{id:$policy,precedence:1}]}')
+    '{name:$name,type:"self_hosted",domain:$domain,session_duration:$session,same_site_cookie_attribute:"lax",policies:[{id:$policy,precedence:1}]}')
   created=$(api POST "/accounts/$ACCOUNT/access/apps" "$body")
   changed "created the application \"$2\" on $1" >&2
   printf '%s' "$created" | jq -r .aud
 }
-owner_rules=$(printf '%s' "$KITSHN_OWNER_EMAILS" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0) | {email: {email: .}})')
-owner_policy=$(policy "kitshn circle Owner" "$(jq -nc --argjson include "$owner_rules" --argjson mfa "$MFA" \
-  '{name:"kitshn circle Owner",decision:"allow",include:$include,require:[],exclude:[],mfa_config:$mfa}')")
+# After the first run the Worker owns the admin application and the Owner policy, and it may rename
+# the policy with the circle. So the script makes the Owner policy only with a new admin application.
+owner_policy=""
+if ! printf '%s' "$APPS" | jq -e --arg d "$KITSHN_HOST" 'any(.[]; .domain == $d)' >/dev/null; then
+  owner_rules=$(printf '%s' "$KITSHN_OWNER_EMAILS" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0) | {email: {email: .}})')
+  owner_policy=$(policy "kitshn circle Owner" "$(jq -nc --argjson include "$owner_rules" --argjson mfa "$MFA" \
+    '{name:"kitshn circle Owner",decision:"allow",include:$include,require:[],exclude:[],mfa_config:$mfa}')")
+fi
 public_policy=$(policy "kitshn public paths" '{"name":"kitshn public paths","decision":"bypass","include":[{"everyone":{}}],"require":[],"exclude":[]}')
 machines_policy=$(policy "kitshn machines" '{"name":"kitshn machines","decision":"non_identity","include":[{"any_valid_service_token":{}}],"require":[],"exclude":[]}')
 ADMIN_AUD=$(app "$KITSHN_HOST" "kitshn admin" 24h "$owner_policy")
@@ -220,11 +225,16 @@ for bucket in $(printf '%s' "$session" | jq -r '.buckets[]? | join(",")'); do
 done
 migrations='{"new_tag":"v1","new_sqlite_classes":["Kitshn"]}'
 scripts=$(api GET "/accounts/$ACCOUNT/workers/scripts")
+if printf '%s' "$scripts" | jq -e --arg s "$SCRIPT" 'any(.[]; .id == $s)' >/dev/null; then
+  settings=$(api GET "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/settings")
+  printf '%s' "$settings" | jq -e 'any(.bindings[]?; .type == "durable_object_namespace" and .class_name == "Kitshn")' >/dev/null ||
+    die "a Worker named $SCRIPT exists and it is not kitshn. kitshn does not overwrite it."
+fi
 if [ "$(printf '%s' "$scripts" | jq -r --arg s "$SCRIPT" 'map(select(.id == $s)) | .[0].migration_tag // empty')" = v1 ]; then
   migrations=null
 fi
 metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --argjson migrations "$migrations" \
-  --arg host "$KITSHN_HOST" --arg team "$TEAM" --arg auds "$ADMIN_AUD,$CONNECT_AUD" \
+  --arg host "$KITSHN_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" \
   --arg owners "$KITSHN_OWNER_EMAILS" --arg account "$ACCOUNT" '
   {
     main_module: "worker.js",
@@ -236,7 +246,8 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
       {type: "durable_object_namespace", name: "KITSHN", class_name: "Kitshn"},
       {type: "plain_text", name: "KITSHN_HOST", text: $host},
       {type: "plain_text", name: "ACCESS_TEAM_DOMAIN", text: $team},
-      {type: "plain_text", name: "ACCESS_AUDS", text: $auds},
+      {type: "plain_text", name: "ACCESS_ADMIN_AUD", text: $admin_aud},
+      {type: "plain_text", name: "ACCESS_CONNECT_AUD", text: $connect_aud},
       {type: "plain_text", name: "OWNER_EMAILS", text: $owners},
       {type: "plain_text", name: "CLOUDFLARE_ACCOUNT_ID", text: $account}
     ],

@@ -35,7 +35,10 @@ export async function cloudflare<T>(
   }
   if (!response.ok || !envelope?.success) {
     const reason = envelope?.errors?.map((error) => `${error.code}: ${error.message}`).join("; ");
-    throw new CloudflareError(response.status, `${method} ${path} failed (${response.status}): ${reason ?? text.slice(0, 200)}`);
+    throw new CloudflareError(
+      response.status,
+      `${method} ${path} failed (${response.status}): ${reason ?? text.slice(0, 200)}`,
+    );
   }
   return envelope.result;
 }

@@ -20,9 +20,12 @@ export type Api = <T>(method: "GET" | "POST" | "PUT" | "DELETE", path: string, b
 /** K-406: one alarm run makes at most this many Cloudflare API calls. */
 export const CALLS_PER_RUN = 40;
 
+/**
+ * The application with the policies that exist in Cloudflare. A policy that is not there yet, or that
+ * Cloudflare refused, is left out, so a failure never keeps a removed share alive (fails closed).
+ */
 const appRequest = (app: AppBody, rows: ReadonlyMap<string, AccessRow>) => {
-  const ids = app.policyKeys.map((key) => rows.get(key)?.cfId ?? "");
-  if (ids.some((id) => id === "")) return null;
+  const ids = app.policyKeys.map((key) => rows.get(key)?.cfId ?? "").filter((id) => id !== "");
   const { policyKeys: _, ...rest } = app;
   return { ...rest, policies: ids.map((id, index) => ({ id, precedence: index + 1 })) };
 };
@@ -62,8 +65,7 @@ export function hasAccessWork(desired: DesiredAccess, rows: ReadonlyMap<string, 
     if (rows.get(key)?.body !== JSON.stringify(policyRequest(policy))) return true;
   }
   for (const [key, app] of desired.apps) {
-    const request = appRequest(app, rows);
-    if (request && rows.get(key)?.body !== JSON.stringify(request)) return true;
+    if (rows.get(key)?.body !== JSON.stringify(appRequest(app, rows))) return true;
   }
   for (const row of rows.values()) if (isStale(desired, row)) return true;
   return false;
@@ -101,7 +103,12 @@ export async function syncAccess(
   let existingPolicies: ReadonlyArray<Named> | null = null;
   let existingApps: ReadonlyArray<Named> | null = null;
 
-  const write = async (key: string, kind: "policies" | "apps", request: object, find: (list: ReadonlyArray<Named>) => Named | undefined) => {
+  const write = async (
+    key: string,
+    kind: "policies" | "apps",
+    request: object,
+    find: (list: ReadonlyArray<Named>) => Named | undefined,
+  ) => {
     const body = JSON.stringify(request);
     const row = store.rows.get(key);
     if (row?.body === body) return true;
@@ -140,7 +147,6 @@ export async function syncAccess(
   }
   for (const [key, app] of desired.apps) {
     const request = appRequest(app, store.rows);
-    if (!request) continue;
     if (!(await write(key, "apps", request, (list) => list.find((item) => item.domain === app.domain)))) {
       return false;
     }

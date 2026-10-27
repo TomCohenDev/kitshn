@@ -11,8 +11,12 @@ const Time = Schema.Finite;
 export const Level = Schema.Literals(Model.LEVELS);
 
 export const Member = Schema.Union([
-  Schema.TaggedStruct("email", { email: Schema.String.check(Schema.isPattern(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) }),
-  Schema.TaggedStruct("domain", { domain: Schema.String.check(Schema.isPattern(/^[a-z0-9.-]+\.[a-z]{2,}$/)) }),
+  Schema.TaggedStruct("email", {
+    email: Schema.String.check(Schema.isPattern(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)),
+  }),
+  Schema.TaggedStruct("domain", {
+    domain: Schema.String.check(Schema.isPattern(/^[a-z0-9.-]+\.[a-z]{2,}$/)),
+  }),
   Schema.TaggedStruct("ip", { range: Schema.String.check(Schema.isPattern(/^[0-9a-fA-F:.]+\/\d{1,3}$/)) }),
   Schema.TaggedStruct("device", { tokenId: Schema.String, clientId: Schema.String, name: Name }),
   Schema.TaggedStruct("machine", { machineId: Id }),

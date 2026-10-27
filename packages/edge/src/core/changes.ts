@@ -26,8 +26,18 @@ export type Edit =
 
 /** One stored change of a revision. Undo swaps `before` and `after`. */
 export type Change =
-  | { readonly _tag: "circle"; readonly id: string; readonly before: Circle | null; readonly after: Circle | null }
-  | { readonly _tag: "place"; readonly id: string; readonly before: Point | null; readonly after: Point | null }
+  | {
+      readonly _tag: "circle";
+      readonly id: string;
+      readonly before: Circle | null;
+      readonly after: Circle | null;
+    }
+  | {
+      readonly _tag: "place";
+      readonly id: string;
+      readonly before: Point | null;
+      readonly after: Point | null;
+    }
   | {
       readonly _tag: "shareSetting";
       readonly id: string;
@@ -141,6 +151,10 @@ export function ruleViolation(state: State): string | null {
       circle.needsPasskey &&
       circle.endsAt === null &&
       circle.members.some((member) => member._tag === "email") &&
+      // An "all" circle with two people, or with a device or machine, matches nobody.
+      (circle.match === "any" ||
+        (circle.members.filter((member) => member._tag === "email").length === 1 &&
+          !circle.members.some((member) => member._tag === "device" || member._tag === "machine"))) &&
       shareLevel(state, admin, circle) === "control" &&
       (state.shareSettings.get(shareKey(admin.id, circle.id))?.endsAt ?? null) === null,
   );

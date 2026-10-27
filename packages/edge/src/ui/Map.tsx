@@ -172,7 +172,11 @@ export function MapView(props: Props) {
         window.clearTimeout(longPress.current);
         longPress.current = null;
       }
-      props.onView({ ...drag.view, x: drag.view.x + event.clientX - drag.sx, y: drag.view.y + event.clientY - drag.sy });
+      props.onView({
+        ...drag.view,
+        x: drag.view.x + event.clientX - drag.sx,
+        y: drag.view.y + event.clientY - drag.sy,
+      });
       return;
     }
     if (drag.type === "box") {
@@ -212,11 +216,17 @@ export function MapView(props: Props) {
         id,
         { x: Math.round(origin.x + dx), y: Math.round(origin.y + dy) },
       ]);
-      preview([{ _tag: "circle", id: after.id, before: drag.origin, after }, ...placeChanges(moves)], pointer);
+      preview(
+        [{ _tag: "circle", id: after.id, before: drag.origin, after }, ...placeChanges(moves)],
+        pointer,
+      );
       return;
     }
     const r = Math.max(60, Math.round(Math.hypot(world.x - drag.origin.x, world.y - drag.origin.y) * 1.2));
-    preview([{ _tag: "circle", id: drag.origin.id, before: drag.origin, after: { ...drag.origin, r } }], pointer);
+    preview(
+      [{ _tag: "circle", id: drag.origin.id, before: drag.origin, after: { ...drag.origin, r } }],
+      pointer,
+    );
   };
 
   const onPointerUp = () => {
@@ -324,7 +334,9 @@ export function MapView(props: Props) {
           {draft.diffs.slice(0, 6).map((diff) => (
             <span key={`${diff.resource.id}/${diff.circle.id}`} class={diff.to ? "" : "minus"}>
               {diff.to ? `+ ${diff.circle.name} · ${diff.to}` : `− ${diff.circle.name}`}
-              {draft.diffs.some((other) => other.resource.id !== diff.resource.id) ? ` (${diff.resource.name})` : ""}
+              {draft.diffs.some((other) => other.resource.id !== diff.resource.id)
+                ? ` (${diff.resource.name})`
+                : ""}
             </span>
           ))}
           {draft.diffs.length > 6 ? <span>and {draft.diffs.length - 6} more</span> : null}
@@ -337,8 +349,10 @@ export function MapView(props: Props) {
 /** The edits that turn `from` into `to`, for circles and places only. */
 function editsOf(from: State, to: State): Array<Edit> {
   const edits: Array<Edit> = [];
-  for (const [id, circle] of to.circles) if (from.circles.get(id) !== circle) edits.push({ _tag: "circle", id, after: circle });
-  for (const [id, place] of to.places) if (from.places.get(id) !== place) edits.push({ _tag: "place", id, after: place });
+  for (const [id, circle] of to.circles)
+    if (from.circles.get(id) !== circle) edits.push({ _tag: "circle", id, after: circle });
+  for (const [id, place] of to.places)
+    if (from.places.get(id) !== place) edits.push({ _tag: "place", id, after: place });
   return edits;
 }
 
@@ -357,7 +371,8 @@ function CircleView(props: {
   if (props.zoomedOut) {
     for (const resource of props.state.resources.values()) {
       const place = props.state.places.get(resource.id);
-      if (place && insideCircle(place, circle)) counts.set(resource.kind, (counts.get(resource.kind) ?? 0) + 1);
+      if (place && insideCircle(place, circle))
+        counts.set(resource.kind, (counts.get(resource.kind) ?? 0) + 1);
     }
   }
   return (
@@ -396,7 +411,11 @@ function CircleView(props: {
             </span>
           ))}
           {extra > 0 ? (
-            <span class="chip" data-head={circle.id} title={circle.members.slice(4).map(memberLabel).join(", ")}>
+            <span
+              class="chip"
+              data-head={circle.id}
+              title={circle.members.slice(4).map(memberLabel).join(", ")}
+            >
               +{extra}
             </span>
           ) : null}

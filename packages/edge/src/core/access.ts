@@ -25,6 +25,8 @@ export interface AppBody {
   readonly type: "self_hosted";
   readonly domain: string;
   readonly session_duration: string;
+  /** Another site cannot send the Access cookie in a request that changes state. */
+  readonly same_site_cookie_attribute: "lax";
   /** Keys of `DesiredAccess.policies`, in precedence order. */
   readonly policyKeys: ReadonlyArray<string>;
 }
@@ -42,7 +44,8 @@ export const PASSKEY_MFA = {
 /** Names of everything kitshn makes in Access start with this, so kitshn never touches other objects (K-408). */
 export const ACCESS_NAME_PREFIX = "kitshn ";
 
-export const peoplePolicyName = (circle: Pick<Circle, "name">) => `${ACCESS_NAME_PREFIX}circle ${circle.name}`;
+export const peoplePolicyName = (circle: Pick<Circle, "name">) =>
+  `${ACCESS_NAME_PREFIX}circle ${circle.name}`;
 export const tokenPolicyName = (circle: Pick<Circle, "name">) =>
   `${ACCESS_NAME_PREFIX}circle ${circle.name} (devices and networks)`;
 export const appName = (resourceName: string) =>
@@ -111,8 +114,14 @@ export function circlePolicies(circle: Circle): Map<string, PolicyBody> {
     return policies;
   }
 
-  // "All must match": the first rule includes, the others require. People and tokens never meet in one
-  // request, so a circle with both only lets people in. "Everyone" adds nothing to an "all" circle.
+  // "All must match": the first rule includes, the others require. "Everyone" adds nothing here.
+  // A member that cannot become a require rule would widen the circle, so such a circle gets no
+  // policy (K-006): a machine (no token before milestone 2), people with a token, or two tokens.
+  const impossible =
+    circle.members.some((member) => member._tag === "machine") ||
+    (people.length > 0 && tokens.length > 0) ||
+    tokens.length > 1;
+  if (impossible) return policies;
   if (people.length > 0) {
     const [first, ...rest] = people;
     if (first) {
@@ -127,9 +136,8 @@ export function circlePolicies(circle: Circle): Map<string, PolicyBody> {
     }
     return policies;
   }
-  // Two tokens never both match one request, so such a circle matches nobody and gets no policy.
   const [first, ...rest] = [...tokens, ...networks];
-  if (first && tokens.length <= 1) {
+  if (first) {
     policies.set(`policy:${circle.id}:tokens`, {
       ...base,
       name: tokenPolicyName(circle),
@@ -179,6 +187,7 @@ export function desiredAccess(state: State, now: number): DesiredAccess {
         domain: address,
         // K-109
         session_duration: resource.id === ADMIN_RESOURCE_ID ? "24h" : "720h",
+        same_site_cookie_attribute: "lax",
         policyKeys,
       });
     }

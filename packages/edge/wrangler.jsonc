@@ -18,7 +18,8 @@
   "vars": {
     "KITSHN_HOST": "localhost",
     "ACCESS_TEAM_DOMAIN": "",
-    "ACCESS_AUDS": "",
+    "ACCESS_ADMIN_AUD": "",
+    "ACCESS_CONNECT_AUD": "",
     "OWNER_EMAILS": "owner@example.com",
     "CLOUDFLARE_ACCOUNT_ID": "",
   },

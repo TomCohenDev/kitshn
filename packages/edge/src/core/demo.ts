@@ -2,7 +2,13 @@ import type { Circle, Point, Resource } from "./model.ts";
 
 /** Local development only (DEV_DEMO): sample cards and circles, so the map has something to show. */
 export function demo() {
-  const resource = (id: string, kind: Resource["kind"], name: string, address: string | null, group: string | null = null): Resource => ({
+  const resource = (
+    id: string,
+    kind: Resource["kind"],
+    name: string,
+    address: string | null,
+    group: string | null = null,
+  ): Resource => ({
     id,
     kind,
     name,

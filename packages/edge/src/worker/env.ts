@@ -7,8 +7,10 @@ export interface Env {
   readonly KITSHN_HOST: string;
   /** The Zero Trust team domain, for example `team.cloudflareaccess.com`. */
   readonly ACCESS_TEAM_DOMAIN: string;
-  /** Comma-separated audience tags of the Access applications in front of this Worker. */
-  readonly ACCESS_AUDS: string;
+  /** The audience tag of the admin Access application (the map and `/api`). */
+  readonly ACCESS_ADMIN_AUD: string;
+  /** The audience tag of the `/connect` Access application (daemons, K-604). */
+  readonly ACCESS_CONNECT_AUD: string;
   /** Comma-separated owner emails; they seed the Owner circle on the first start (K-1204). */
   readonly OWNER_EMAILS: string;
   readonly CLOUDFLARE_ACCOUNT_ID: string;

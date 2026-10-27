@@ -18,14 +18,19 @@ function start(): State {
 function fakeCloudflare(existing: { policies?: Array<object>; apps?: Array<object> } = {}) {
   const calls: Array<string> = [];
   let next = 0;
-  const api: Api = async <T,>(method: string, path: string) => {
+  const api: Api = async <T>(method: string, path: string) => {
     calls.push(`${method} ${path.replace("/accounts/a/access", "")}`);
-    if (method === "GET") return (path.includes("/policies") ? (existing.policies ?? []) : (existing.apps ?? [])) as T;
+    if (method === "GET")
+      return (path.includes("/policies") ? (existing.policies ?? []) : (existing.apps ?? [])) as T;
     const id = method === "PUT" ? (path.split("/").pop() ?? "") : `id${++next}`;
     return { id } as T;
   };
   const rows = new Map<string, AccessRow>();
-  const store = { rows, put: (row: AccessRow) => rows.set(row.key, row), remove: (key: string) => rows.delete(key) };
+  const store = {
+    rows,
+    put: (row: AccessRow) => rows.set(row.key, row),
+    remove: (key: string) => rows.delete(key),
+  };
   return { api, calls, store, rows };
 }
 
@@ -34,7 +39,12 @@ describe("Access sync (K-406, K-408)", () => {
     const cf = fakeCloudflare();
     const desired = desiredAccess(start(), 0);
     expect(await syncAccess(desired, cf.store, cf.api, "a")).toBe(true);
-    expect(cf.calls).toEqual(["GET /policies?per_page=1000", "POST /policies", "GET /apps?per_page=1000", "POST /apps"]);
+    expect(cf.calls).toEqual([
+      "GET /policies?per_page=1000",
+      "POST /policies",
+      "GET /apps?per_page=1000",
+      "POST /apps",
+    ]);
     expect(hasAccessWork(desired, cf.rows)).toBe(false);
     expect(accessStates(desired, cf.rows)).toEqual({ "kitshn-admin": { state: "applied" } });
 
@@ -83,6 +93,26 @@ describe("Access sync (K-406, K-408)", () => {
     expect(hasAccessWork(desired, cf.rows)).toBe(false);
   });
 
+  it("removes a share from the application even when the policy of a new share fails", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    const owner = state.circles.get("owner")!;
+    const moved = applyChanges(
+      state,
+      resolveEdits(state, [
+        { _tag: "circle", id: "others", after: { ...owner, id: "others", name: "Others", x: 5000 } },
+        { _tag: "place", id: "kitshn-admin", after: { x: 5000, y: 40 } },
+      ]),
+    );
+    const failing: Api = async (method, path, body) => {
+      if (method === "POST" && path.endsWith("/policies")) throw new Error("refused");
+      return cf.api(method, path, body);
+    };
+    await syncAccess(desiredAccess(moved, 0), cf.store, failing, "a");
+    expect(JSON.parse(cf.rows.get("app:kitshn-admin:kit.example.com")!.body).policies).toEqual([]);
+  });
+
   it("updates the policy when the circle changes", async () => {
     const cf = fakeCloudflare();
     const state = start();
@@ -91,7 +121,11 @@ describe("Access sync (K-406, K-408)", () => {
     const changed = applyChanges(
       state,
       resolveEdits(state, [
-        { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, { _tag: "domain", domain: "x.com" }] } },
+        {
+          _tag: "circle",
+          id: "owner",
+          after: { ...owner, members: [...owner.members, { _tag: "domain", domain: "x.com" }] },
+        },
       ]),
     );
     const desired = desiredAccess(changed, 0);

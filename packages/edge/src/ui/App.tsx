@@ -41,7 +41,11 @@ const loadView = (): View => {
 };
 
 const actorLabel = (actor: Actor) =>
-  actor._tag === "person" ? actor.email : actor._tag === "device" ? `📱 ${actor.name}` : `kitshn (${actor.reason})`;
+  actor._tag === "person"
+    ? actor.email
+    : actor._tag === "device"
+      ? `📱 ${actor.name}`
+      : `kitshn (${actor.reason})`;
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
@@ -109,22 +113,35 @@ export function App() {
   const commit = async (edits: Array<Edit>, diffs: Array<ShareDiff>) => {
     const goingPublic = diffs.filter((diff) => diff.to && !diff.from && isPublicCircle(diff.circle));
     for (const diff of goingPublic) {
-      if (!(await ask(`This makes ${diff.resource.name} public. Anyone with the address can open it.`))) return;
+      if (!(await ask(`This makes ${diff.resource.name} public. Anyone with the address can open it.`)))
+        return;
     }
     const result = await applyEdits(edits);
     if (!result.ok) showToast({ text: result.error, error: true, undo: null });
     else if (diffs.length > 0) {
       const text = diffs
         .slice(0, 2)
-        .map((diff) => (diff.to ? `Shared ${diff.resource.name} with ${diff.circle.name} · ${diff.to}` : `Removed ${diff.resource.name} from ${diff.circle.name}`))
+        .map((diff) =>
+          diff.to
+            ? `Shared ${diff.resource.name} with ${diff.circle.name} · ${diff.to}`
+            : `Removed ${diff.resource.name} from ${diff.circle.name}`,
+        )
         .join(". ");
-      showToast({ text: diffs.length > 2 ? `${text}. And ${diffs.length - 2} more.` : text, error: false, undo: result.revision });
+      showToast({
+        text: diffs.length > 2 ? `${text}. And ${diffs.length - 2} more.` : text,
+        error: false,
+        undo: result.revision,
+      });
     }
   };
 
   const undo = async (revision: number) => {
     const result = await undoRevision(revision);
-    showToast(result.ok ? { text: `Undid #${revision}.`, error: false, undo: null } : { text: result.error, error: true, undo: null });
+    showToast(
+      result.ok
+        ? { text: `Undid #${revision}.`, error: false, undo: null }
+        : { text: result.error, error: true, undo: null },
+    );
   };
 
   if (!state || !store.snapshot) {
@@ -132,7 +149,13 @@ export function App() {
       <div class="center">
         <div class="card">
           <h2>kitshn</h2>
-          <p class="muted">{refusal ?? store.reason ?? (store.connection === "offline" ? "kitshn is not reachable. Trying again." : "Opening the map.")}</p>
+          <p class="muted">
+            {refusal ??
+              store.reason ??
+              (store.connection === "offline"
+                ? "kitshn is not reachable. Trying again."
+                : "Opening the map.")}
+          </p>
         </div>
       </div>
     );
@@ -160,8 +183,15 @@ export function App() {
     const left = tray.length > 0 ? (wide ? 210 : 170) : 10;
     const width = Math.max(innerWidth - left - (wide ? 370 : 10), 200);
     const height = Math.max(innerHeight - (wide ? 100 : innerHeight / 2), 200);
-    const s = Math.min(2, Math.max(0.15, Math.min(width / (maxX - minX + 120), height / (maxY - minY + 160))));
-    changeView({ s, x: left + (width - (maxX - minX) * s) / 2 - minX * s, y: 80 + (height - (maxY - minY) * s) / 2 - minY * s });
+    const s = Math.min(
+      2,
+      Math.max(0.15, Math.min(width / (maxX - minX + 120), height / (maxY - minY + 160))),
+    );
+    changeView({
+      s,
+      x: left + (width - (maxX - minX) * s) / 2 - minX * s,
+      y: 80 + (height - (maxY - minY) * s) / 2 - minY * s,
+    });
   };
 
   fitRef.current = fit;
@@ -204,9 +234,10 @@ export function App() {
     }
     const after: State = { ...state, places: new Map(state.places).set(resource.id, to) };
     const level = shareLevel(after, resource, circle);
-    await commit([{ _tag: "place", id: resource.id, after: to }], [
-      { resource, circle, from: share ? null : level, to: share ? level : null },
-    ]);
+    await commit(
+      [{ _tag: "place", id: resource.id, after: to }],
+      [{ resource, circle, from: share ? null : level, to: share ? level : null }],
+    );
   };
 
   return (
@@ -307,7 +338,12 @@ export function App() {
           if (!result.ok) showToast({ text: result.error, error: true, undo: null });
         }}
         onDeleteCircle={async (circle) => {
-          if (!(await ask(`Delete the circle "${circle.name}"? Its cards stay where they are and lose its share.`))) return;
+          if (
+            !(await ask(
+              `Delete the circle "${circle.name}"? Its cards stay where they are and lose its share.`,
+            ))
+          )
+            return;
           const result = await applyEdits([{ _tag: "circle", id: circle.id, after: null }]);
           if (result.ok) {
             setSelection({ cards: new Set(), circle: null });
@@ -373,7 +409,10 @@ export function App() {
         </div>
       ) : null}
       {route.tab === "map" ? (
-        <div class="hint">Drag a card into a circle to share it · Shift-click or drag empty space to select many · Alt-drag a circle head to move it alone · Ctrl or ⌘ + wheel zooms</div>
+        <div class="hint">
+          Drag a card into a circle to share it · Shift-click or drag empty space to select many · Alt-drag a
+          circle head to move it alone · Ctrl or ⌘ + wheel zooms
+        </div>
       ) : null}
     </>
   );
@@ -442,9 +481,21 @@ function Panel(props: {
     return resource ? [resource] : [];
   });
   let body;
-  if (circle) body = <CircleEditor circle={circle} state={state} onEdit={props.onEdit} onDelete={props.onDeleteCircle} />;
+  if (circle)
+    body = (
+      <CircleEditor circle={circle} state={state} onEdit={props.onEdit} onDelete={props.onDeleteCircle} />
+    );
   else if (cards.length === 1 && cards[0]) {
-    body = <CardPanel resource={cards[0]} state={state} access={props.access[cards[0].id] ?? null} onEdit={props.onEdit} onPlace={props.onPlace} onReshare={props.onReshare} />;
+    body = (
+      <CardPanel
+        resource={cards[0]}
+        state={state}
+        access={props.access[cards[0].id] ?? null}
+        onEdit={props.onEdit}
+        onPlace={props.onPlace}
+        onReshare={props.onReshare}
+      />
+    );
   } else if (cards.length > 1) {
     body = (
       <section>
@@ -466,14 +517,24 @@ function Panel(props: {
         <div class="label">kitshn</div>
         <h2>The map</h2>
         <p>
-          Circles say <b>who</b>: people, email domains, devices, networks. A card inside a circle is shared with that circle at its level.
+          Circles say <b>who</b>: people, email domains, devices, networks. A card inside a circle is shared
+          with that circle at its level.
         </p>
-        <p>A card counts for every circle it sits in. Select a card to see who can open it, or a circle head to edit it.</p>
+        <p>
+          A card counts for every circle it sits in. Select a card to see who can open it, or a circle head to
+          edit it.
+        </p>
         <div class="label">Circles</div>
         <ul>
           {[...state.circles.values()].map((item) => (
             <li key={item.id}>
-              <b style={{ color: item.color }}>●</b> {item.name}: {plural([...state.places.keys()].filter((id) => circlesHolding(state, id).some((held) => held.id === item.id)).length, "card")}
+              <b style={{ color: item.color }}>●</b> {item.name}:{" "}
+              {plural(
+                [...state.places.keys()].filter((id) =>
+                  circlesHolding(state, id).some((held) => held.id === item.id),
+                ).length,
+                "card",
+              )}
             </li>
           ))}
         </ul>
@@ -521,7 +582,11 @@ function CardPanel(props: {
       {props.access ? (
         <div class="row">
           <span class="label">Access</span>
-          <span class={`sticker ${props.access.state === "applied" ? "ok" : props.access.state === "applying" ? "wait" : ""}`}>{props.access.state}</span>
+          <span
+            class={`sticker ${props.access.state === "applied" ? "ok" : props.access.state === "applying" ? "wait" : ""}`}
+          >
+            {props.access.state}
+          </span>
           {props.access.state === "failed" ? <span class="muted">{props.access.error}</span> : null}
         </div>
       ) : null}
@@ -558,7 +623,11 @@ function CardPanel(props: {
                   <span class="sticker" style={{ background: circle.color }}>
                     {level ?? "none"}
                   </span>
-                  <button class="btn" title="Unshare without a drag" onClick={() => props.onReshare(resource, circle, false)}>
+                  <button
+                    class="btn"
+                    title="Unshare without a drag"
+                    onClick={() => props.onReshare(resource, circle, false)}
+                  >
                     Remove
                   </button>
                 </div>
@@ -591,7 +660,12 @@ function CardPanel(props: {
                   <input
                     type="datetime-local"
                     value={toLocalInput(setting?.endsAt ?? null)}
-                    onChange={(event) => put({ level: setting?.level ?? null, endsAt: fromLocalInput((event.target as HTMLInputElement).value) })}
+                    onChange={(event) =>
+                      put({
+                        level: setting?.level ?? null,
+                        endsAt: fromLocalInput((event.target as HTMLInputElement).value),
+                      })
+                    }
                   />
                 </div>
               </li>
@@ -624,26 +698,44 @@ function memberFrom(kind: AddableKind, value: string): Member | string {
   const text = value.trim();
   if (kind === "everyone") return { _tag: "everyone" };
   if (!text) return "Type a value first.";
-  if (kind === "email") return text.includes("@") ? { _tag: "email", email: text.toLowerCase() } : "An email needs an @.";
+  if (kind === "email")
+    return text.includes("@") ? { _tag: "email", email: text.toLowerCase() } : "An email needs an @.";
   if (kind === "domain") return { _tag: "domain", domain: text.replace(/^@/, "").toLowerCase() };
-  return text.includes("/") ? { _tag: "ip", range: text } : { _tag: "ip", range: text.includes(":") ? `${text}/128` : `${text}/32` };
+  return text.includes("/")
+    ? { _tag: "ip", range: text }
+    : { _tag: "ip", range: text.includes(":") ? `${text}/128` : `${text}/32` };
 }
 
-function CircleEditor(props: { circle: Circle; state: State; onEdit: (edits: Array<Edit>) => void; onDelete: (circle: Circle) => void }) {
+function CircleEditor(props: {
+  circle: Circle;
+  state: State;
+  onEdit: (edits: Array<Edit>) => void;
+  onDelete: (circle: Circle) => void;
+}) {
   const { circle, state } = props;
   const [kind, setKind] = useState<AddableKind>("email");
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const put = (next: Partial<Circle>) => props.onEdit([{ _tag: "circle", id: circle.id, after: { ...circle, ...next } }]);
-  const inside = [...state.resources.values()].filter((resource) => circlesHolding(state, resource.id).includes(circle));
+  const put = (next: Partial<Circle>) =>
+    props.onEdit([{ _tag: "circle", id: circle.id, after: { ...circle, ...next } }]);
+  const inside = [...state.resources.values()].filter((resource) =>
+    circlesHolding(state, resource.id).includes(circle),
+  );
   return (
     <section>
       <div class="label">Circle</div>
       <h2>{circle.name}</h2>
       <div class="row">
         <span class="label">Name</span>
-        <input value={circle.name} onChange={(event) => put({ name: (event.target as HTMLInputElement).value.trim() || circle.name })} />
-        <input type="color" value={circle.color} onChange={(event) => put({ color: (event.target as HTMLInputElement).value.toUpperCase() })} />
+        <input
+          value={circle.name}
+          onChange={(event) => put({ name: (event.target as HTMLInputElement).value.trim() || circle.name })}
+        />
+        <input
+          type="color"
+          value={circle.color}
+          onChange={(event) => put({ color: (event.target as HTMLInputElement).value.toUpperCase() })}
+        />
       </div>
       <div class="row">
         <span class="label">Level</span>
@@ -658,32 +750,54 @@ function CircleEditor(props: { circle: Circle; state: State; onEdit: (edits: Arr
       <div class="row">
         <span class="label">Match</span>
         <div class="seg">
-          <button aria-pressed={circle.match === "any"} onClick={() => put({ match: "any" })} title="The visitor matches at least one member">
+          <button
+            aria-pressed={circle.match === "any"}
+            onClick={() => put({ match: "any" })}
+            title="The visitor matches at least one member"
+          >
             any
           </button>
-          <button aria-pressed={circle.match === "all"} onClick={() => put({ match: "all" })} title="The visitor matches every member">
+          <button
+            aria-pressed={circle.match === "all"}
+            onClick={() => put({ match: "all" })}
+            title="The visitor matches every member"
+          >
             all must match
           </button>
         </div>
       </div>
       <div class="row">
         <label>
-          <input type="checkbox" checked={circle.needsPasskey} onChange={(event) => put({ needsPasskey: (event.target as HTMLInputElement).checked })} /> Needs a passkey 🔑
+          <input
+            type="checkbox"
+            checked={circle.needsPasskey}
+            onChange={(event) => put({ needsPasskey: (event.target as HTMLInputElement).checked })}
+          />{" "}
+          Needs a passkey 🔑
         </label>
       </div>
       <div class="row">
         <span class="label">Ends</span>
-        <input type="datetime-local" value={toLocalInput(circle.endsAt)} onChange={(event) => put({ endsAt: fromLocalInput((event.target as HTMLInputElement).value) })} />
+        <input
+          type="datetime-local"
+          value={toLocalInput(circle.endsAt)}
+          onChange={(event) => put({ endsAt: fromLocalInput((event.target as HTMLInputElement).value) })}
+        />
       </div>
       <div class="label" style={{ marginTop: "10px" }}>
         Who is in it
       </div>
       <div class="row">
-        {circle.members.length === 0 ? <span class="muted">Nobody yet. A circle with no members matches nobody.</span> : null}
+        {circle.members.length === 0 ? (
+          <span class="muted">Nobody yet. A circle with no members matches nobody.</span>
+        ) : null}
         {circle.members.map((member, index) => (
           <span class="chip" key={index}>
             {MEMBER_ICONS[member._tag]} {memberLabel(member)}
-            <button title="Remove" onClick={() => put({ members: circle.members.filter((_, other) => other !== index) })}>
+            <button
+              title="Remove"
+              onClick={() => put({ members: circle.members.filter((_, other) => other !== index) })}
+            >
               ×
             </button>
           </span>
@@ -700,7 +814,10 @@ function CircleEditor(props: { circle: Circle; state: State; onEdit: (edits: Arr
           put({ members: [...circle.members, member] });
         }}
       >
-        <select value={kind} onChange={(event) => setKind((event.target as HTMLSelectElement).value as AddableKind)}>
+        <select
+          value={kind}
+          onChange={(event) => setKind((event.target as HTMLSelectElement).value as AddableKind)}
+        >
           {MEMBER_KINDS.map((option) => (
             <option key={option}>{option}</option>
           ))}
@@ -708,7 +825,9 @@ function CircleEditor(props: { circle: Circle; state: State; onEdit: (edits: Arr
         {kind !== "everyone" ? (
           <input
             value={value}
-            placeholder={kind === "email" ? "name@example.com" : kind === "domain" ? "example.com" : "10.0.0.0/24"}
+            placeholder={
+              kind === "email" ? "name@example.com" : kind === "domain" ? "example.com" : "10.0.0.0/24"
+            }
             onInput={(event) => setValue((event.target as HTMLInputElement).value)}
             style={{ width: "150px" }}
           />
@@ -753,24 +872,38 @@ function Palette(props: { state: State; onClose: () => void; actions: PaletteAct
       { label: "Open History", run: actions.history },
     ];
     for (const resource of state.resources.values()) {
-      all.push({ label: `${KINDS[resource.kind].icon} ${resource.name}`, run: () => actions.select({ cards: new Set([resource.id]), circle: null }) });
+      all.push({
+        label: `${KINDS[resource.kind].icon} ${resource.name}`,
+        run: () => actions.select({ cards: new Set([resource.id]), circle: null }),
+      });
       if (!state.places.has(resource.id)) continue;
       const holding = new Set(circlesHolding(state, resource.id).map((circle) => circle.id));
       for (const circle of state.circles.values()) {
         all.push(
           holding.has(circle.id)
-            ? { label: `Unshare ${resource.name} from ${circle.name}`, run: () => actions.reshare(resource, circle, false) }
-            : { label: `Share ${resource.name} with ${circle.name}`, run: () => actions.reshare(resource, circle, true) },
+            ? {
+                label: `Unshare ${resource.name} from ${circle.name}`,
+                run: () => actions.reshare(resource, circle, false),
+              }
+            : {
+                label: `Share ${resource.name} with ${circle.name}`,
+                run: () => actions.reshare(resource, circle, true),
+              },
         );
       }
     }
     for (const circle of state.circles.values()) {
-      all.push({ label: `⭕ ${circle.name}`, run: () => actions.select({ cards: new Set(), circle: circle.id }) });
+      all.push({
+        label: `⭕ ${circle.name}`,
+        run: () => actions.select({ cards: new Set(), circle: circle.id }),
+      });
     }
     return all;
   }, [state, actions]);
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const matches = entries.filter((entry) => words.every((word) => entry.label.toLowerCase().includes(word))).slice(0, 50);
+  const matches = entries
+    .filter((entry) => words.every((word) => entry.label.toLowerCase().includes(word)))
+    .slice(0, 50);
   const run = (index: number) => {
     const entry = matches[index];
     if (!entry) return;
@@ -798,7 +931,12 @@ function Palette(props: { state: State; onClose: () => void; actions: PaletteAct
         />
         <ul>
           {matches.map((entry, index) => (
-            <li key={entry.label} aria-selected={index === active} onClick={() => run(index)} onMouseEnter={() => setActive(index)}>
+            <li
+              key={entry.label}
+              aria-selected={index === active}
+              onClick={() => run(index)}
+              onMouseEnter={() => setActive(index)}
+            >
               {entry.label}
             </li>
           ))}

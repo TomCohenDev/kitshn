@@ -28,5 +28,10 @@ export interface Snapshot {
 
 export type ServerMessage =
   | { readonly type: "snapshot"; readonly snapshot: Snapshot }
-  | { readonly type: "result"; readonly requestId: string; readonly ok: true; readonly revision: number | null }
+  | {
+      readonly type: "result";
+      readonly requestId: string;
+      readonly ok: true;
+      readonly revision: number | null;
+    }
   | { readonly type: "result"; readonly requestId: string; readonly ok: false; readonly error: string };

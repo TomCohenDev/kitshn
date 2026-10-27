@@ -46,7 +46,7 @@ export function ipInRange(ip: string, range: string): boolean {
   if (!address || !network || address.length !== network.length) return false;
   if (!Number.isInteger(bits) || bits < 0 || bits > network.length * 8) return false;
   for (let bit = 0; bit < bits; bit++) {
-    const mask = 0x80 >> bit % 8;
+    const mask = 0x80 >> (bit % 8);
     if (((address[bit >> 3] ?? 0) & mask) !== ((network[bit >> 3] ?? 0) & mask)) return false;
   }
   return true;

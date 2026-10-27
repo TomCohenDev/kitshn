@@ -105,6 +105,21 @@ export function contentAccess(
   return visitor.email === null && visitor.clientId === null ? "login" : "deny";
 }
 
+/**
+ * K-1004: the login step that a decision sends the visitor to, or "explain" when the visitor just came back
+ * from that same step: Access let them in, but kitshn still cannot read the login, and a redirect would loop.
+ */
+export function loginStep(
+  decision: "allow" | "login" | "passkey" | "deny" | "missing",
+  cameBackFrom: string | null,
+): "login" | "passkey" | "explain" | null {
+  if (decision !== "login" && decision !== "passkey") return null;
+  // After the passkey login every step is done; after the login only the passkey step may follow. So the
+  // two steps can never take turns forever.
+  if (cameBackFrom === "passkey" || (cameBackFrom === "login" && decision === "login")) return "explain";
+  return decision;
+}
+
 /** The HTML page header of the T3 render route: an opaque origin with scripts, so a page reads no cookie. */
 export const contentSecurityPolicy = (adminHost: string) =>
   // Only the map may frame a page or a file (its live previews), so no other site can overlay one.

@@ -48,3 +48,43 @@ export async function callerOf(request: Request, env: Env, audience: string): Pr
     return `The Access token is not valid: ${error instanceof Error ? error.message : String(error)}`;
   }
 }
+
+/** Who deploys: the repo of a GitHub Actions run, from its OIDC token (K-811). */
+export interface Deployer {
+  readonly repo: string;
+  readonly ownerId: string;
+  readonly sha: string;
+}
+
+const github = createRemoteJWKSet(new URL("https://token.actions.githubusercontent.com/.well-known/jwks"));
+
+/**
+ * K-811: accepts a GitHub Actions OIDC token for this kitshn, from a repo of a listed owner account.
+ * Returns a reason string for any other request.
+ */
+export async function deployerOf(request: Request, env: Env): Promise<Deployer | string> {
+  const header = request.headers.get("authorization") ?? "";
+  if (!header.startsWith("Bearer "))
+    return "A deploy needs the GitHub Actions OIDC token (permissions: id-token: write).";
+  const owners = env.DEPLOY_OWNER_IDS.split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  if (owners.length === 0)
+    return "This kitshn trusts no GitHub owner yet. Run the bootstrap with KITSHN_DEPLOY_OWNERS.";
+  try {
+    const { payload } = await jwtVerify(header.slice("Bearer ".length), github, {
+      issuer: "https://token.actions.githubusercontent.com",
+      audience: new URL(request.url).origin,
+    });
+    const repo = payload["repository"];
+    const ownerId = payload["repository_owner_id"];
+    const sha = payload["sha"];
+    if (typeof repo !== "string" || typeof ownerId !== "string" || typeof sha !== "string") {
+      return "The GitHub token has no repository, owner or commit.";
+    }
+    if (!owners.includes(ownerId)) return `kitshn does not trust the GitHub owner of ${repo} (K-811).`;
+    return { repo, ownerId, sha };
+  } catch (error) {
+    return `The GitHub token is not valid: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}

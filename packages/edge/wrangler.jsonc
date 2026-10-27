@@ -11,7 +11,7 @@
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/connect", "/join/exchange"],
+    "run_worker_first": ["/api/*", "/connect", "/join/exchange", "/deploy/*"],
   },
   "durable_objects": { "bindings": [{ "name": "KITSHN", "class_name": "Kitshn" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Kitshn"] }],
@@ -22,5 +22,8 @@
     "ACCESS_CONNECT_AUD": "",
     "OWNER_EMAILS": "owner@example.com",
     "CLOUDFLARE_ACCOUNT_ID": "",
+    "KITSHN_ZONE": "localhost",
+    "CLOUDFLARE_ZONE_ID": "",
+    "DEPLOY_OWNER_IDS": "",
   },
 }

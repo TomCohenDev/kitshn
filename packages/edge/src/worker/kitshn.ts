@@ -44,6 +44,7 @@ import { type Visitor, visitorLevel } from "../core/visitor.ts";
 import {
   type AccessRow,
   type AccessStore,
+  type Api,
   accessStates,
   CALLS_PER_RUN,
   hasAccessWork,
@@ -52,8 +53,17 @@ import {
   verifyAccess,
   verifyPasskeys,
 } from "./access-sync.ts";
-import type { Caller } from "./auth.ts";
+import type { Caller, Deployer } from "./auth.ts";
 import { CloudflareError, cloudflare } from "./cloudflare.ts";
+import {
+  DEPLOY_MS,
+  SCRIPT_LIMIT,
+  STATIC_WORKER,
+  environmentNames,
+  parseEvent,
+  parseManifest,
+} from "./deploys.ts";
+import { type Recipe, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
 import {
   JOB_EXPIRY_MS,
   JOIN_CODE_MS,
@@ -86,6 +96,9 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS join_codes (lookup TEXT PRIMARY KEY, machine_id TEXT NOT NULL, iv TEXT NOT NULL,
     sealed TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
   "CREATE TABLE IF NOT EXISTS tunnel_objects (machine_id TEXT PRIMARY KEY, body TEXT NOT NULL, error TEXT)",
+  `CREATE TABLE IF NOT EXISTS deploys (id TEXT PRIMARY KEY, repo TEXT NOT NULL, environment TEXT NOT NULL,
+    resource_id TEXT NOT NULL, address TEXT NOT NULL, script TEXT NOT NULL, starts_in TEXT, kind TEXT NOT NULL,
+    sha TEXT NOT NULL, state TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
 ];
 
 /** What a WebSocket of this Durable Object belongs to. */
@@ -429,6 +442,11 @@ export class Kitshn extends DurableObject<Env> {
     const path = new URL(request.url).pathname;
     // The join exchange is public: the join code itself is the secret (K-602).
     if (path === "/join/exchange" && request.method === "POST") return this.exchangeJoin(request);
+    if (path.startsWith("/deploy/")) {
+      const header = request.headers.get("x-kitshn-deployer");
+      if (!header) return new Response("The Worker sent no deployer.", { status: 500 });
+      return this.deployStep(path, JSON.parse(header) as Deployer, await request.json().catch(() => null));
+    }
     const header = request.headers.get("x-kitshn-caller");
     if (!header) return new Response("The Worker sent no caller.", { status: 500 });
     const caller = JSON.parse(header) as Caller;
@@ -1136,6 +1154,261 @@ export class Kitshn extends DurableObject<Env> {
     }
   }
 
+  /** K-803 to K-807, K-901 to K-904: the steps of a static site deploy from GitHub Actions. */
+  private async deployStep(path: string, deployer: Deployer, body: unknown): Promise<Response> {
+    const api = this.api();
+    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+    const fail = (status: number, error: string) => Response.json({ error }, { status });
+    try {
+      if (path === "/deploy/plan") return await this.planDeploy(api, deployer, input);
+      const [row] = this.sql<DeployRow>(
+        "SELECT * FROM deploys WHERE id = ?",
+        String(input["deployId"] ?? ""),
+      );
+      if (!row || row.repo !== deployer.repo) return fail(404, "kitshn knows no such deploy of this repo.");
+      if (row.expires_at < Date.now() || row.state !== "planned")
+        return fail(410, "This deploy expired or ended. Run it again.");
+      if (path === "/deploy/assets" && row.kind === "deploy")
+        return await this.deployAssets(api, row, input["manifest"]);
+      if (path === "/deploy/finish" && row.kind === "deploy")
+        return await this.finishDeploy(api, row, deployer, input["jwt"]);
+      if (path === "/deploy/teardown" && row.kind === "teardown")
+        return await this.teardown(api, row, deployer);
+      return fail(400, `${path} does not fit this deploy.`);
+    } catch (error) {
+      if (error instanceof RuleError) return fail(400, error.message);
+      return fail(502, `kitshn could not finish the step: ${String(error)}`);
+    }
+  }
+
+  private async planDeploy(api: Api, deployer: Deployer, input: Record<string, unknown>) {
+    let recipe: Recipe;
+    try {
+      recipe = decodeRecipe(input["recipe"]);
+    } catch (error) {
+      return Response.json(
+        { error: `The recipe does not match the schema (K-803): ${String(error)}` },
+        { status: 400 },
+      );
+    }
+    const event = parseEvent(input["event"]);
+    if (typeof event === "string") return Response.json({ error: event }, { status: 400 });
+    const result = plan(recipe, deployer.repo, event, this.env.KITSHN_ZONE);
+    if (result.kind === "skip") return Response.json({ deployId: null, plan: result });
+    const { resourceId, script } = environmentNames(deployer.repo, result.environment);
+    const existing = this.state.resources.get(resourceId);
+    if (result.kind === "teardown" && !existing) {
+      return Response.json({
+        deployId: null,
+        plan: { kind: "skip", reason: `${result.environment} is not deployed.` },
+      });
+    }
+    const other = [...this.state.resources.values()].find(
+      (resource) => resource.id !== resourceId && resource.addresses.includes(result.address),
+    );
+    if (other)
+      return Response.json(
+        { error: `${result.address} belongs to the card ${other.name}.` },
+        { status: 409 },
+      );
+    if (result.kind === "deploy" && !existing) {
+      // Only an address that nothing uses yet: kitshn never takes over a record that it did not make.
+      const records = await api<Array<unknown>>(
+        "GET",
+        `/zones/${this.env.CLOUDFLARE_ZONE_ID}/dns_records?name=${encodeURIComponent(result.address)}`,
+      );
+      if (records.length > 0)
+        return Response.json({ error: `${result.address} already has a DNS record.` }, { status: 409 });
+      if (result.ephemeral) {
+        const scripts = await api<Array<unknown>>(
+          "GET",
+          `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/scripts`,
+        );
+        if (scripts.length >= SCRIPT_LIMIT) {
+          return Response.json(
+            {
+              error: `The account has ${scripts.length} Worker scripts; kitshn opens no preview at ${SCRIPT_LIMIT} (K-903).`,
+            },
+            { status: 409 },
+          );
+        }
+      }
+    }
+    const deployId = crypto.randomUUID();
+    this.sql(
+      `INSERT INTO deploys (id, repo, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?)`,
+      deployId,
+      deployer.repo,
+      result.environment,
+      resourceId,
+      result.address,
+      script,
+      result.startsIn,
+      result.kind,
+      deployer.sha,
+      Date.now() + DEPLOY_MS,
+    );
+    return Response.json({ deployId, plan: result });
+  }
+
+  private async deployAssets(api: Api, row: DeployRow, value: unknown) {
+    const manifest = parseManifest(value);
+    if (typeof manifest === "string") return Response.json({ error: manifest }, { status: 400 });
+    const session = await api<{ jwt: string; buckets?: Array<Array<string>> }>(
+      "POST",
+      `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${row.script}/assets-upload-session`,
+      { manifest },
+    );
+    // The upload token can only upload these files; Actions sends them straight to Cloudflare.
+    return Response.json({
+      jwt: session.jwt,
+      buckets: session.buckets ?? [],
+      uploadUrl: `https://api.cloudflare.com/client/v4/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/assets/upload?base64=true`,
+    });
+  }
+
+  private async finishDeploy(api: Api, row: DeployRow, deployer: Deployer, jwt: unknown) {
+    if (typeof jwt !== "string" || !jwt)
+      return Response.json({ error: "The deploy needs the upload completion token." }, { status: 400 });
+    const actor: Actor = { _tag: "kitshn", reason: `deploy of ${row.repo} ${deployer.sha.slice(0, 7)}` };
+    let card = "The card waits in the tray, so the site is private until you share it on the map (K-509).";
+    if (!this.state.resources.has(row.resource_id)) {
+      const slug = repoSlug(row.repo);
+      this.putResource({
+        id: row.resource_id,
+        kind: "site.static",
+        name: row.environment === "prod" ? slug : `${slug} ${row.environment}`,
+        addresses: [row.address],
+        status: "deploying",
+        group: slug,
+        machine: null,
+      });
+      this.load();
+      const circle = row.starts_in
+        ? [...this.state.circles.values()].find((item) =>
+            [item.id, item.name.toLowerCase()].includes(row.starts_in!.toLowerCase()),
+          )
+        : undefined;
+      const place = circle
+        ? placeInside(this.state, { x: circle.x, y: circle.y }, new Set([circle.id]))
+        : null;
+      if (circle && place) {
+        this.commit(
+          actor,
+          resolveEdits(this.state, [{ _tag: "place", id: row.resource_id, after: place }]),
+          null,
+        );
+        card = `The card starts in ${circle.name} (K-807).`;
+      } else {
+        this.insertRevision(actor, `Deployed ${row.repo} ${row.environment}`, [], null);
+        this.load();
+      }
+    } else card = "The card keeps its place; the map decides who opens it (K-807).";
+    // Fail closed: the Access application exists before the address does.
+    await syncAccess(
+      desiredAccess(this.state, Date.now()),
+      this.accessStore(),
+      api,
+      this.env.CLOUDFLARE_ACCOUNT_ID,
+      20,
+    );
+    const app = this.access.get(`app:${row.resource_id}:${row.address}`);
+    if (!app?.cfId || app.error) {
+      return Response.json(
+        {
+          error: `The Access application of ${row.address} is not ready: ${app?.error ?? "pending"}. Run the deploy again.`,
+        },
+        { status: 503 },
+      );
+    }
+    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+    const metadata = {
+      main_module: "worker.js",
+      compatibility_date: "2026-10-20",
+      assets: { jwt, config: { not_found_handling: "404-page", html_handling: "auto-trailing-slash" } },
+      bindings: [{ type: "assets", name: "ASSETS" }],
+    };
+    const form = new FormData();
+    form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+    form.append(
+      "worker.js",
+      new Blob([STATIC_WORKER], { type: "application/javascript+module" }),
+      "worker.js",
+    );
+    const upload = await fetch(
+      `https://api.cloudflare.com/client/v4${account}/workers/scripts/${row.script}`,
+      {
+        method: "PUT",
+        headers: { authorization: `Bearer ${this.env.CLOUDFLARE_API_TOKEN}` },
+        body: form,
+      },
+    );
+    const uploaded = (await upload.json()) as { success: boolean; errors?: unknown };
+    if (!uploaded.success) throw new Error(`the Worker upload failed: ${JSON.stringify(uploaded.errors)}`);
+    // The workers.dev address would skip Access.
+    await api("POST", `${account}/workers/scripts/${row.script}/subdomain`, {
+      enabled: false,
+      previews_enabled: false,
+    });
+    const domains = await api<Array<{ id: string; service: string }>>(
+      "GET",
+      `${account}/workers/domains?hostname=${encodeURIComponent(row.address)}`,
+    );
+    const attached = domains.find((domain) => domain.service === row.script);
+    if (!attached) {
+      if (domains.length > 0) throw new Error(`${row.address} already serves another Worker.`);
+      await api("PUT", `${account}/workers/domains`, {
+        hostname: row.address,
+        service: row.script,
+        zone_id: this.env.CLOUDFLARE_ZONE_ID,
+        environment: "production",
+      });
+    }
+    // K-814: the route check records what a visitor without a login gets.
+    const check = await fetch(`https://${row.address}/`, { redirect: "manual" }).catch(() => null);
+    const resource = this.state.resources.get(row.resource_id);
+    if (resource) this.putResource({ ...resource, status: "running" });
+    this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
+    this.load();
+    this.broadcast();
+    void this.scheduleAlarm();
+    return Response.json({ address: row.address, status: check?.status ?? 0, card });
+  }
+
+  /** K-904: a closed pull request removes its preview: the address, the Worker, the card and its Access app. */
+  private async teardown(api: Api, row: DeployRow, deployer: Deployer) {
+    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+    const domains = await api<Array<{ id: string; service: string }>>(
+      "GET",
+      `${account}/workers/domains?hostname=${encodeURIComponent(row.address)}`,
+    );
+    for (const domain of domains.filter((item) => item.service === row.script)) {
+      await api("DELETE", `${account}/workers/domains/${domain.id}`);
+    }
+    await api("DELETE", `${account}/workers/scripts/${row.script}?force=true`).catch((error: unknown) =>
+      error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error),
+    );
+    const resource = this.state.resources.get(row.resource_id);
+    this.ctx.storage.transactionSync(() => {
+      for (const table of ["resources", "places"])
+        this.sql(`DELETE FROM ${table} WHERE id = ?`, row.resource_id);
+      this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${row.resource_id}/%`);
+      this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
+      this.insertRevision(
+        { _tag: "kitshn", reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}` },
+        `Removed ${resource?.name ?? row.environment}, its preview closed (K-904)`,
+        [],
+        null,
+      );
+    });
+    this.load();
+    this.broadcast();
+    void this.scheduleAlarm();
+    return Response.json({ removed: row.address });
+  }
+
   private accessStore(): AccessStore {
     return {
       rows: this.access,
@@ -1232,6 +1505,20 @@ function ownerDevices(text: string | undefined): Array<Extract<Member, { _tag: "
 
 /** The output of a job whose machine went offline; a later real result replaces it. */
 const OFFLINE_OUTPUT = "The machine went offline during the job. kitshn takes its result if it comes later.";
+
+interface DeployRow extends Record<string, SqlStorageValue> {
+  id: string;
+  repo: string;
+  environment: string;
+  resource_id: string;
+  address: string;
+  script: string;
+  starts_in: string | null;
+  kind: "deploy" | "teardown";
+  sha: string;
+  state: string;
+  expires_at: number;
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;

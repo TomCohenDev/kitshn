@@ -20,3 +20,30 @@ export function kitshn1Deployment(repo: string, environment: string, persistentR
     .replace(/-+$/, "");
   return project ? { dataDir: join(persistentRoot, owner, name, environment), project } : null;
 }
+
+/** K-1404: what the first deploy of an app on this machine does with the data of its KitSHn 1 deployment. */
+export type Takeover =
+  | { readonly kind: "skip"; readonly note: string | null }
+  | { readonly kind: "take"; readonly dataDir: string; readonly project: string };
+
+export function takeoverPlan(input: {
+  readonly repo: string;
+  readonly environment: string;
+  readonly persistentRoot: string;
+  /** The app has a data folder on this machine already. */
+  readonly hasData: boolean;
+  /** An earlier deploy took the KitSHn 1 data over (the marker file). */
+  readonly taken: boolean;
+  readonly exists: (path: string) => boolean;
+}): Takeover {
+  if (input.hasData || input.taken) return { kind: "skip", note: null };
+  const old = kitshn1Deployment(input.repo, input.environment, input.persistentRoot);
+  if (!old) return { kind: "skip", note: null };
+  if (!input.exists(old.dataDir)) return { kind: "skip", note: `No KitSHn 1 data at ${old.dataDir}; the app starts empty.` };
+  return { kind: "take", ...old };
+}
+
+/** The new name of a named volume of the KitSHn 1 project, or null when it is not one of its volumes. */
+export function movedVolume(volume: string, oldProject: string, newProject: string): string | null {
+  return volume.startsWith(`${oldProject}_`) ? `${newProject}_${volume.slice(oldProject.length + 1)}` : null;
+}

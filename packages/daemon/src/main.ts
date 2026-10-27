@@ -9,7 +9,7 @@ import {
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { kitshn1Deployment } from "./kitshn1.ts";
+import { movedVolume, takeoverPlan } from "./kitshn1.ts";
 import {
   chmodSync,
   copyFileSync,
@@ -309,6 +309,8 @@ async function composeUp(
   const sockets = join(dir, "sockets");
   const socketPath = join(sockets, "default.sock");
   let output = "";
+  /** K-1404: the KitSHn 1 project that this job stopped, which a failure starts again. */
+  let stoppedKitshn1: string | null = null;
   const step = async (title: string, program: string, args: ReadonlyArray<string>, options = {}) => {
     output += `$ ${title}\n`;
     const result = await runProgram(program, args, { timeoutMs: COMPOSE_TIMEOUT_MS, ...options });
@@ -338,24 +340,52 @@ async function composeUp(
     // K-1404: the first deploy of an app on this machine takes over the data of its KitSHn 1 deployment.
     // KitSHn 1 stops first, so no write lands after the copy; root-owned files need a short container.
     const data = join(dir, "data");
-    const old = kitshn1Deployment(command.repo, command.environment, KITSHN1_PERSISTENT);
-    if (command.kind === "compose" && !existsSync(data) && old && existsSync(old.dataDir)) {
-      await step("stop the KitSHn 1 app", "docker", ["compose", "-p", old.project, "stop"], { cwd: paths.data });
-      mkdirSync(data, { recursive: true });
+    const marker = join(dir, "kitshn1-taken");
+    const takeover =
+      command.kind === "compose"
+        ? takeoverPlan({
+            repo: command.repo,
+            environment: command.environment,
+            persistentRoot: KITSHN1_PERSISTENT,
+            hasData: existsSync(data),
+            taken: existsSync(marker),
+            exists: existsSync,
+          })
+        : ({ kind: "skip", note: null } as const);
+    if (takeover.kind === "skip" && takeover.note) output += `${takeover.note}\n`;
+    if (takeover.kind === "take") {
+      await step("stop the KitSHn 1 app", "docker", ["compose", "-p", takeover.project, "stop"], { cwd: paths.data });
+      stoppedKitshn1 = takeover.project;
+      // A staged copy becomes the data folder only when it is complete.
+      const staged = `${data}.kitshn1`;
+      output += await removeAsRoot(staged, `${command.project}-stage`);
+      mkdirSync(staged, { recursive: true });
       await step("copy the KitSHn 1 data", "docker", [
-        "run",
-        "--rm",
-        "-v",
-        `${old.dataDir}:/from:ro`,
-        "-v",
-        `${data}:/to`,
-        HELPER_IMAGE,
-        "cp",
-        "-a",
-        "/from/.",
-        "/to/",
+        "run", "--rm", "--network", "none", "-v", `${takeover.dataDir}:/from:ro`, "-v", `${staged}:/to`,
+        HELPER_IMAGE, "cp", "-a", "/from/.", "/to/",
       ]);
-      output += `KitSHn 1 data of ${old.project} copied from ${old.dataDir}; it stays there for a rollback.\n`;
+      const volumes = await runProgram("docker", [
+        "volume", "ls", "-q", "--filter", `label=com.docker.compose.project=${takeover.project}`,
+      ]);
+      if (!volumes.ok) throw new Error(`docker volume ls failed: ${volumes.output}`);
+      for (const volume of volumes.output.split("\n").map((line) => line.trim()).filter(Boolean)) {
+        const target = movedVolume(volume, takeover.project, command.project);
+        if (!target) continue;
+        const suffix = target.slice(command.project.length + 1);
+        await step(`create the volume ${target}`, "docker", [
+          "volume", "create",
+          "--label", `com.docker.compose.project=${command.project}`,
+          "--label", `com.docker.compose.volume=${suffix}`,
+          target,
+        ]);
+        await step(`copy the volume ${volume}`, "docker", [
+          "run", "--rm", "--network", "none", "-v", `${volume}:/from:ro`, "-v", `${target}:/to`,
+          HELPER_IMAGE, "cp", "-a", "/from/.", "/to/",
+        ]);
+      }
+      renameSync(staged, data);
+      writeFileSync(marker, `${takeover.dataDir}\n`);
+      output += `KitSHn 1 data of ${takeover.project} copied from ${takeover.dataDir}; it stays there for a rollback.\n`;
     }
     // The container user may not be the daemon user; the socket directory must take its socket.
     mkdirSync(sockets, { recursive: true });
@@ -424,11 +454,17 @@ async function composeUp(
     output += `\nThe app answers on its socket; the tunnel sends ${command.name} there.\n`;
     return { ok: true, exitCode: 0, output };
   } catch (error) {
-    return {
-      ok: false,
-      exitCode: null,
-      output: `${output}\n[kitshn: ${error instanceof Error ? error.message : String(error)}]`,
-    };
+    output += `\n[kitshn: ${error instanceof Error ? error.message : String(error)}]`;
+    // A takeover that did not end in a running app gives the site back to KitSHn 1, and the next deploy
+    // copies its data again, so no write of KitSHn 1 is lost.
+    if (stoppedKitshn1 !== null) {
+      await runProgram("docker", ["compose", "-p", command.project, "down"], { cwd: paths.data });
+      rmSync(join(dir, "kitshn1-taken"), { force: true });
+      output += await removeAsRoot(join(dir, "data"), `${command.project}-data`).catch((cleanup: unknown) => `${String(cleanup)}\n`);
+      const started = await runProgram("docker", ["compose", "-p", stoppedKitshn1, "start"], { cwd: paths.data });
+      output += `$ start the KitSHn 1 app ${stoppedKitshn1} again\n${started.output}`;
+    }
+    return { ok: false, exitCode: null, output };
   }
 }
 

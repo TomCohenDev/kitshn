@@ -2402,11 +2402,13 @@ export class Kitshn extends DurableObject<Env> {
     }
     if (path.startsWith("/agent/jobs/") && request.method === "GET") {
       const id = Number(path.slice("/agent/jobs/".length));
-      const [job] = this.recentJobs(1, 4000, id);
-      const [row] = this.sql<{ visitor: string }>("SELECT visitor FROM jobs WHERE id = ?", id);
+      const [row] = Number.isSafeInteger(id)
+        ? this.sql<{ visitor: string }>("SELECT visitor FROM jobs WHERE id = ?", id)
+        : [];
       const sender = row ? (JSON.parse(row.visitor) as Visitor).clientId : null;
+      const [job] = sender !== null && sender === caller.visitor.clientId ? this.recentJobs(1, 4000, id) : [];
       // Only its own jobs: their state, exit code and output.
-      if (!job || sender !== caller.visitor.clientId)
+      if (!job)
         return Response.json({ error: `This key sent no job ${id}.` }, { status: 404 });
       return Response.json(job);
     }

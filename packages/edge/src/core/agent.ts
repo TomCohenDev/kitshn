@@ -53,14 +53,21 @@ const levelIn = (state: State, resourceId: string, circle: Circle) =>
   state.shareSettings.get(shareKey(resourceId, circle.id))?.level ?? circle.level;
 
 /**
- * K-718: an agent key runs jobs on a machine only when it manages the machine card and every card that runs
- * on that machine, because a shell on the machine reaches all of them.
+ * K-718: an agent key runs jobs on a machine only when it manages the machine card, every card that runs on
+ * the machine, and every card that the machine's own token opens (K-107), because a shell there reaches all.
  */
 export function agentMayRunOn(state: State, visitor: Visitor, machineId: string, now: number) {
   const managed = cardsControlledBy(state, visitor, now);
+  const machine = state.machines.get(machineId);
+  const token = { email: null, clientId: machine?.clientId ?? null, ip: null };
   return (
+    machine !== undefined &&
     managed.has(machineId) &&
-    [...state.resources.values()].every((resource) => resource.machine !== machineId || managed.has(resource.id))
+    [...state.resources.values()].every(
+      (resource) =>
+        managed.has(resource.id) ||
+        (resource.machine !== machineId && visitorLevel(state, resource, token, now) === null),
+    )
   );
 }
 

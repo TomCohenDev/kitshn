@@ -110,10 +110,15 @@ describe("agent keys (K-718)", () => {
     const app = { ...base.resources.get("site")!, id: "app", machine: "m1" };
     const resources = new Map(base.resources).set("m1", machine).set("app", app);
     const places = new Map(base.places).set("m1", { x: 0, y: 1000 }).set("app", { x: -5000, y: 0 });
-    const state = { ...base, resources, places };
+    const m1 = { id: "m1", name: "m1", labels: [], order: 0, serviceTokenId: "s", clientId: "m1-token", tunnelId: "t" };
+    const state = { ...base, resources, places, machines: new Map([["m1", m1]]) };
     expect(agentMayRunOn(state, as("agent-1"), "m1", 0)).toBe(false);
     const inside = { ...state, places: new Map(places).set("app", { x: 0, y: 1000 }) };
     expect(agentMayRunOn(inside, as("agent-1"), "m1", 0)).toBe(true);
+    // The machine's own token opens the NAS through the "home" circle, which the agent does not manage.
+    const home = inside.circles.get("home")!;
+    const circles = new Map(inside.circles).set("home", { ...home, members: [{ _tag: "machine", machineId: "m1" }] });
+    expect(agentMayRunOn({ ...inside, circles }, as("agent-1"), "m1", 0)).toBe(false);
   });
   it("calls a device an agent only when it has an agent circle", () => {
     expect(isAgentKey(start(), { _tag: "device", tokenId: "t9", clientId: "tv", name: "TV" }, 0)).toBe(false);

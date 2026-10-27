@@ -1,7 +1,6 @@
-import type { DesiredAccess } from "../core/access.ts";
 import { RESERVED_SITE_NAMES } from "../core/library.ts";
 import type { LiveSiteReport } from "../core/machine.ts";
-import type { AccessRow } from "./access-sync.ts";
+import { type AccessRow, appliesBypass } from "./access-sync.ts";
 
 /** One live site of a machine (K-1104), as the Durable Object keeps it. */
 export interface LiveSite {
@@ -70,21 +69,19 @@ export type IngressAccess =
   | { readonly kind: "bypass" };
 
 /**
- * K-603, K-403: the Access check of a site's ingress rule, from its application `app:<site>:<address>`.
- * Null while kitshn does not know the audience tag of the application.
+ * K-603, K-403: the Access check of a site's ingress rule, from its application `app:<site>:<address>`
+ * as Cloudflare last accepted it. The check comes on only once the application no longer bypasses, and
+ * goes off only once it does. Null while kitshn does not know the audience tag of the application.
  */
 export function ingressAccess(
   site: LiveSite,
-  desired: DesiredAccess,
   rows: ReadonlyMap<string, AccessRow>,
   teamDomain: string,
 ): IngressAccess | null {
-  const key = `app:${site.id}:${site.address}`;
-  const row = rows.get(key);
-  if (!row?.cfId || !row.aud) return null;
-  const policyKeys = desired.apps.get(key)?.policyKeys ?? [];
-  if (policyKeys.some((policyKey) => desired.policies.get(policyKey)?.decision === "bypass"))
-    return { kind: "bypass" };
+  const row = rows.get(`app:${site.id}:${site.address}`);
+  if (!row?.cfId) return null;
+  if (appliesBypass(row, rows)) return { kind: "bypass" };
+  if (!row.aud) return null;
   const teamName = teamDomain.split(".")[0];
   if (!teamName) throw new Error("ACCESS_TEAM_DOMAIN is empty, so kitshn cannot guard tunnel ingress.");
   return { kind: "check", teamName, aud: row.aud };
@@ -99,26 +96,26 @@ export function tunnelConfig(sites: ReadonlyArray<LiveSite>, accessOf: (site: Li
   const guarded = [...sites]
     .sort((a, b) => a.address.localeCompare(b.address))
     .map((site) => ({ site, access: accessOf(site) }));
-  if (guarded.some((item) => item.access === null)) return null;
+  const ready = guarded.filter(
+    (item): item is { site: LiveSite; access: IngressAccess } => item.access !== null,
+  );
+  if (ready.length < guarded.length) return null;
   return {
     config: {
       ingress: [
-        ...guarded.flatMap(({ site, access }) => {
-            if (access === null) return [];
-            const originRequest = {
-              ...(site.dev ? { httpHostHeader: "localhost" } : {}),
-              ...(access.kind === "check"
-                ? { access: { required: true, teamName: access.teamName, audTag: [access.aud] } }
-                : {}),
-            };
-            return [
-              {
-                hostname: site.address,
-                service: site.target,
-                ...(Object.keys(originRequest).length > 0 ? { originRequest } : {}),
-              },
-            ];
-          }),
+        ...ready.map(({ site, access }) => {
+          const originRequest = {
+            ...(site.dev ? { httpHostHeader: "localhost" } : {}),
+            ...(access.kind === "check"
+              ? { access: { required: true, teamName: access.teamName, audTag: [access.aud] } }
+              : {}),
+          };
+          return {
+            hostname: site.address,
+            service: site.target,
+            ...(Object.keys(originRequest).length > 0 ? { originRequest } : {}),
+          };
+        }),
         { service: "http_status:404" },
       ],
     },

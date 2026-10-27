@@ -124,9 +124,11 @@ describe("Access sync (K-406, K-408)", () => {
     expect(await fillAudiences(cf.store, cf.api, "a")).toBe(1);
     expect(cf.calls).toEqual(["GET /apps?per_page=1000&page=1"]);
     expect(cf.rows.get("app:x:x.example.com")!.aud).toBe("aud-1");
-    expect(rowsWithoutAud(cf.rows).map((item) => item.key)).toEqual(["app:y:y.example.com"]);
+    // The list does not have app-gone: someone deleted it, so the row forgets the id and the next sync
+    // makes the application again, instead of holding up the tunnel of its machine.
+    expect(cf.rows.get("app:y:y.example.com")).toMatchObject({ cfId: "", aud: "", body: "" });
+    expect(rowsWithoutAud(cf.rows)).toEqual([]);
 
-    cf.store.put(row("app:y:y.example.com", "", ""));
     cf.calls.length = 0;
     expect(await fillAudiences(cf.store, cf.api, "a")).toBe(0);
     expect(cf.calls).toEqual([]);

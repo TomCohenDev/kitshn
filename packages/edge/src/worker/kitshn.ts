@@ -1328,10 +1328,9 @@ export class Kitshn extends DurableObject<Env> {
     return [...this.liveSites.values()].filter((site) => site.machineId === machineId);
   }
 
-  /** K-603: the Access check of each ingress rule, from the Access state of now. */
+  /** K-603: the Access check of each ingress rule, from the Access objects that Cloudflare accepted. */
   private ingressAccessOf() {
-    const desired = desiredAccess(this.state, Date.now());
-    return (site: LiveSite) => ingressAccess(site, desired, this.access, this.env.ACCESS_TEAM_DOMAIN);
+    return (site: LiveSite) => ingressAccess(site, this.access, this.env.ACCESS_TEAM_DOMAIN);
   }
 
   /** Live sites whose address is checked and whose Access application exists in Cloudflare. */

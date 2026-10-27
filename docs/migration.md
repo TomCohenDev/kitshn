@@ -29,4 +29,6 @@ Section 16 of SPEC.md maps every machine map feature to a milestone, or drops it
   4. Check that `aud` contains the audience tag of the app. Read the tag in the Cloudflare dashboard: **Zero Trust** > **Access controls** > **Applications** > the application `kitshn <card name>` > **Configure** > **Additional settings** > **Application Audience (AUD) Tag**.
   5. Read the identity from the verified token (`email`, or `common_name` for a service token).
 
-  kitshn does not pass the tag to apps. The tag changes when kitshn makes the Access application again, for example after someone deletes it in Cloudflare. Then update the tag in the app.
+  kitshn does not pass the tag to apps yet ([#72](https://github.com/Yarden-zamir/kitshn/issues/72)). The tag changes when kitshn makes the Access application again, for example after someone deletes it in Cloudflare. Then update the tag in the app.
+
+  A site in Everyone has a Bypass policy (K-403), and Access sends no JWT for Bypass. On such a site, a verifier must not require the token. It treats a request without a token as a visitor with no identity.

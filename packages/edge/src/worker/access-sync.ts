@@ -336,32 +336,51 @@ export async function verifyPasskeys(
   return calls;
 }
 
+/**
+ * K-403, K-603: true when the application that Cloudflare last accepted has a Bypass policy. A policy
+ * whose accepted body kitshn does not know counts as no Bypass, so the Access check stays on.
+ */
+export function appliesBypass(app: AccessRow, rows: ReadonlyMap<string, AccessRow>): boolean {
+  const ids = new Set(policyIds(app.body));
+  return [...rows.values()].some(
+    (row) =>
+      row.key.startsWith("policy:") &&
+      ids.has(row.cfId) &&
+      row.body !== "" &&
+      (JSON.parse(row.body) as { decision?: string }).decision === "bypass",
+  );
+}
+
 /** The application rows that have a Cloudflare id but no audience tag yet (K-603). */
 export const rowsWithoutAud = (rows: ReadonlyMap<string, AccessRow>) =>
   [...rows.values()].filter((row) => row.key.startsWith("app:") && row.cfId !== "" && row.aud === "");
 
 /**
  * K-603: reads the audience tag of each application row that has an id but no tag, from the list of
- * applications, matched by id. Returns the number of calls. An account has at most 500 applications
- * (K-402), so this is one call; the loop reads further pages only if that limit grows.
+ * applications, matched by id. An id that the full list does not have was deleted in Cloudflare: the row
+ * forgets it, as the daily compare does (K-408), so the next sync makes the application again. Returns
+ * the number of calls. An account has at most 500 applications (K-402), so this is one call; the loop
+ * reads further pages only if that limit grows.
  */
 export async function fillAudiences(store: AccessStore, api: Api, accountId: string): Promise<number> {
   const missing = rowsWithoutAud(store.rows);
   if (missing.length === 0) return 0;
   const auds = new Map<string, string>();
   let calls = 0;
+  // The loop ends only after a short page, so `auds` holds every application of the account.
   for (let page = 1; ; page++) {
     const apps = await api<ReadonlyArray<Named>>(
       "GET",
       `/accounts/${accountId}/access/apps?per_page=${PAGE}&page=${page}`,
     );
     calls++;
-    for (const app of apps) if (app.aud) auds.set(app.id, app.aud);
+    for (const app of apps) auds.set(app.id, app.aud ?? "");
     if (apps.length < PAGE) break;
   }
   for (const row of missing) {
     const aud = auds.get(row.cfId);
-    if (aud) store.put({ ...row, aud });
+    if (aud === undefined) store.put({ ...row, cfId: "", aud: "", body: "", tried: "", error: null });
+    else if (aud) store.put({ ...row, aud });
   }
   return calls;
 }

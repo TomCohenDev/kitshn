@@ -43,6 +43,7 @@ import {
 import { placeInside } from "../core/place.ts";
 import type { MachineView, RevisionView, ServerMessage, Snapshot } from "../core/protocol.ts";
 import { ClientMessage } from "../core/schema.ts";
+import { agentMayRunOn, agentRefusal, cardsControlledBy, circlesOf } from "../core/agent.ts";
 import { demo } from "../core/demo.ts";
 import {
   contentSecurityPolicy,
@@ -431,8 +432,12 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private authorized(caller: Caller) {
+    return this.hasAdmin(caller.visitor);
+  }
+
+  private hasAdmin(visitor: Visitor) {
     const admin = this.state.resources.get(ADMIN_RESOURCE_ID);
-    return admin !== undefined && visitorLevel(this.state, admin, caller.visitor, Date.now()) === "control";
+    return admin !== undefined && visitorLevel(this.state, admin, visitor, Date.now()) === "control";
   }
 
   private snapshot(me: Actor): Snapshot {
@@ -525,6 +530,7 @@ export class Kitshn extends DurableObject<Env> {
     if (!header) return new Response("The Worker sent no caller.", { status: 500 });
     const caller = JSON.parse(header) as Caller;
     if (path === "/connect") return this.connectMachine(request, caller);
+    if (path.startsWith("/agent/")) return this.agentRequest(path, request, caller);
     if (path.startsWith("/connect/deploys/")) return this.deploySource(path, caller);
     if (!this.authorized(caller)) {
       return Response.json(
@@ -931,6 +937,16 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ removed: id });
   }
 
+  /**
+   * K-614, K-718: a sender with the admin needs control on the machine card; any other sender is an agent key
+   * and needs the card in its agent circles, checked again when the job goes out.
+   */
+  private mayRunOn(visitor: Visitor, machineId: string) {
+    return this.hasAdmin(visitor)
+      ? this.canControl(visitor, machineId)
+      : agentMayRunOn(this.state, visitor, machineId, Date.now());
+  }
+
   /** K-614: the sender of a command needs control on the machine card itself, not only on the admin. */
   private canControl(visitor: Visitor, machineId: string) {
     const resource = this.state.resources.get(machineId);
@@ -1018,7 +1034,7 @@ export class Kitshn extends DurableObject<Env> {
       const visitor = JSON.parse(job.visitor) as Visitor & { readonly kitshn?: true };
       // A job that kitshn makes itself (a deploy) needs no member with control (K-614).
       const allowed = new Set(
-        visitor.kitshn ? online : [...online].filter((id) => this.canControl(visitor, id)),
+        visitor.kitshn ? online : [...online].filter((id) => this.mayRunOn(visitor, id)),
       );
       const machine =
         job.machine_id !== null
@@ -1088,7 +1104,7 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json(updated);
   }
 
-  private recentJobs(limit: number, outputLimit = 4000): Array<Job> {
+  private recentJobs(limit: number, outputLimit = 4000, id: number | null = null): Array<Job> {
     return this.sql<{
       id: number;
       machine_id: string | null;
@@ -1101,7 +1117,9 @@ export class Kitshn extends DurableObject<Env> {
       exit_code: number | null;
       output: string;
     }>(
-      "SELECT id, machine_id, labels, command, state, created_at, expires_at, actor, exit_code, output FROM jobs ORDER BY id DESC LIMIT ?",
+      "SELECT id, machine_id, labels, command, state, created_at, expires_at, actor, exit_code, output FROM jobs WHERE ? IS NULL OR id = ? ORDER BY id DESC LIMIT ?",
+      id,
+      id,
       limit,
     ).map((row) => ({
       id: row.id,
@@ -2324,6 +2342,111 @@ export class Kitshn extends DurableObject<Env> {
     this.broadcast();
     void this.scheduleAlarm();
     return Response.json({ removed: row.address });
+  }
+
+  /**
+   * K-718: an agent key sees the cards that it manages and the circles that it is in (no members), moves
+   * those cards between those circles, and runs jobs on the machines that it controls (K-614).
+   */
+  private async agentRequest(path: string, request: Request, caller: Caller) {
+    const now = Date.now();
+    const own = circlesOf(this.state, caller.visitor, now);
+    if (own.size === 0)
+      return Response.json(
+        { error: "This key is in no agent circle, so it manages nothing (K-718)." },
+        { status: 403 },
+      );
+    const managed = cardsControlledBy(this.state, caller.visitor, now);
+    // K-614: the history names the device by its member name, not by its token id.
+    const device = [...this.state.circles.values()]
+      .flatMap((circle) => circle.members)
+      .find((member) => member._tag === "device" && member.clientId === caller.visitor.clientId);
+    const agent: Caller =
+      caller.actor._tag === "device" && device?._tag === "device"
+        ? { ...caller, actor: { ...caller.actor, name: device.name } }
+        : caller;
+    if (path === "/agent/state" && request.method === "GET") {
+      return Response.json({
+        circles: [...this.state.circles.values()]
+          .filter((circle) => own.has(circle.id))
+          .map(({ id, name, level, x, y, r }) => ({ id, name, level, x, y, r })),
+        cards: [...managed].flatMap((id) => {
+          const resource = this.state.resources.get(id);
+          if (!resource) return [];
+          const { kind, name, addresses, status } = resource;
+          return [
+            {
+              id,
+              kind,
+              name,
+              addresses,
+              status,
+              place: this.state.places.get(id) ?? null,
+              circles: circlesHolding(this.state, id)
+                .map((c) => c.id)
+                .filter((circle) => own.has(circle)),
+            },
+          ];
+        }),
+      });
+    }
+    if (path === "/agent/apply" && request.method === "POST") {
+      let edits: ReadonlyArray<Edit>;
+      try {
+        const message = decodeClientMessage({
+          ...((await request.json()) as object),
+          type: "apply",
+          requestId: "agent",
+        });
+        if (message.type !== "apply") throw new Error("Send edits.");
+        edits = message.edits;
+      } catch (error) {
+        return Response.json({ error: String(error) }, { status: 400 });
+      }
+      try {
+        const changes = resolveEdits(this.state, edits);
+        const refusal = agentRefusal(
+          this.state,
+          applyChanges(this.state, changes),
+          caller.visitor,
+          changes,
+          now,
+        );
+        if (refusal) return Response.json({ error: refusal }, { status: 403 });
+        return Response.json({ revision: this.commit(agent.actor, changes, null) });
+      } catch (error) {
+        if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
+        throw error;
+      }
+    }
+    if (path === "/agent/jobs" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      const machineId =
+        typeof body === "object" && body !== null && "machineId" in body ? body.machineId : undefined;
+      // Only the machines whose cards it manages; a label job could land on any machine.
+      if (typeof machineId !== "string" || !agentMayRunOn(this.state, caller.visitor, machineId, Date.now()))
+        return Response.json(
+          {
+            error:
+              "An agent key runs jobs only on a machine whose card, and every card that runs on it, it manages (K-718).",
+          },
+          { status: 403 },
+        );
+      return this.addJob(agent, body);
+    }
+    if (path.startsWith("/agent/jobs/") && request.method === "GET") {
+      const id = Number(path.slice("/agent/jobs/".length));
+      const [row] = Number.isSafeInteger(id)
+        ? this.sql<{ visitor: string }>("SELECT visitor FROM jobs WHERE id = ?", id)
+        : [];
+      const sender = row ? (JSON.parse(row.visitor) as Visitor).clientId : null;
+      const [job] = sender !== null && sender === caller.visitor.clientId ? this.recentJobs(1, 4000, id) : [];
+      // Only its own jobs: their state, exit code and output.
+      if (!job)
+        return Response.json({ error: `This key sent no job ${id}.` }, { status: 404 });
+      return Response.json(job);
+    }
+    return Response.json({ error: `The agent path has no ${request.method} ${path}.` }, { status: 404 });
   }
 
   private libraryItems(): Array<LibraryItem> {

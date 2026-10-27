@@ -180,6 +180,18 @@ export default {
     if (url.hostname !== env.KITSHN_HOST && url.hostname.endsWith(`.${env.KITSHN_ZONE}`)) {
       return offline(request, env, ctx);
     }
+    // K-718: agent keys. Access lets any service token in; the Durable Object decides what each may do.
+    if (url.pathname.startsWith("/agent/")) {
+      if (!env.ACCESS_AGENT_AUD)
+        return Response.json({ error: "Run the bootstrap again to turn on agent keys." }, { status: 503 });
+      const caller = await callerOf(request, env, env.ACCESS_AGENT_AUD);
+      if (typeof caller === "string") return Response.json({ error: caller }, { status: 401 });
+      if (caller.visitor.clientId === null)
+        return Response.json({ error: "The agent path takes a service token only." }, { status: 403 });
+      const headers = new Headers(request.headers);
+      headers.set("x-kitshn-caller", JSON.stringify(caller));
+      return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
+    }
     if (url.pathname.startsWith("/api/")) {
       // A browser sends Origin on a WebSocket and a cross-site POST. Only the map's own page may call.
       const origin = request.headers.get("origin");

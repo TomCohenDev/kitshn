@@ -64,5 +64,19 @@ export function demo() {
     y: 520,
     r: 220,
   };
-  return { resources, places, circles: [her, qlik] };
+  // K-718: an agent key that manages the sites in its circle, and nothing else.
+  const agents: Circle = {
+    id: "agents",
+    name: "Agents",
+    color: "#14B8A6",
+    level: "control",
+    members: [{ _tag: "device", tokenId: "demo-agent", clientId: "demo-agent.access", name: "Deploy bot" }],
+    match: "any",
+    needsPasskey: false,
+    endsAt: null,
+    x: 760,
+    y: 600,
+    r: 200,
+  };
+  return { resources, places, circles: [her, qlik, agents] };
 }

@@ -13,6 +13,7 @@ import {
   shareLevel,
 } from "../core/model.ts";
 import type { AccessState, MachineView } from "../core/protocol.ts";
+import { isAgentKey } from "../core/agent.ts";
 import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { PresenceSticker } from "./Machines.tsx";
 
@@ -585,6 +586,7 @@ function CircleView(props: {
           {shown.map((member, index) => (
             <span class="chip" key={index}>
               {MEMBER_ICONS[member._tag]} {memberLabel(member)}
+              {isAgentKey(props.state, member, Date.now()) ? <span class="sticker agent">agent</span> : null}
             </span>
           ))}
           {extra > 0 ? (

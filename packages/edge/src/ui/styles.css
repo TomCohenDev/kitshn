@@ -1100,6 +1100,13 @@ a > code {
   padding: 1px 6px;
 }
 
+/* K-718: an agent key among the members of a circle. */
+.chip .sticker.agent {
+  margin-left: 4px;
+  font-size: 0.6rem;
+  background: var(--yellow);
+}
+
 /* K-521: an owner's stack, as one card with a list of its cards. */
 .stack-card ul {
   margin: 4px 0 0;

@@ -5,8 +5,9 @@ import {
   type Member,
   type Resource,
   type State,
-  levelRank,
   activeShares,
+  isPublicCircle,
+  levelRank,
 } from "./model.ts";
 
 /** Who sent a request, as Access and Cloudflare tell the Worker (K-404). */
@@ -90,10 +91,10 @@ export function circleMatches(
 
 /** K-207: the highest level of the shares whose circle matches the visitor, or null. */
 export function visitorLevel(state: State, resource: Resource, visitor: Visitor, now: number): Level | null {
-  // K-1504: during a pause only people pass, as in Access: no device, machine or network-only visitor.
-  if (state.paused && visitor.email === null) return null;
   let best: Level | null = null;
   for (const share of activeShares(state, resource, now)) {
+    // K-1504: during a pause only people and public circles pass, as in Access: no device, machine or network-only visitor.
+    if (state.paused && visitor.email === null && !isPublicCircle(share.circle)) continue;
     if (!circleMatches(share.circle, visitor, state.machines)) continue;
     if (best === null || levelRank(share.level) > levelRank(best)) best = share.level;
   }

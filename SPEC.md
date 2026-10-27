@@ -184,7 +184,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 
 - **K-715** Agents never raise access. An agent change that adds a card to a circle, raises a level, or adds a circle member becomes a proposal for the owner. Changes that lower access apply at once. This keeps MM-803.
 - **K-716** A preset is a saved map layout: the circles, their members and the shares, with a name. Apply a preset from the History view or with `kitshn_preset`. An apply is one revision with Undo, runs the guard of K-105, and follows K-715 for agents.
-- **K-717** Each `t3.app` card has the setting "Update channel": `nightly` (a build for each commit) or `daily` (one release a day). Every machine starts on `nightly`. The owner changes it in the card panel or with `kitshn_set_setting`; the setting is desired state of the card (K-709), and the T3 provider on the machine applies it to its own updater. Milestone 5 adds the setting; milestone 6 turns it on with the provider.
+- **K-717** Each `t3.app` card has the setting "Update channel": `nightly` (a build for each commit) or `daily` (one release a day). Every machine starts on `nightly`. The setting belongs to one card, not to the kind (K-709 is per kind): kitshn stores it with the card and pushes it only to the provider on that machine. Changing it needs `control` on the card, which kitshn checks when it writes the value; an agent with `control` may change it, because it does not change access (K-715). The owner changes it in the card panel or with `kitshn_set_setting`. The T3 updater uses the new channel from its next update check. Milestone 5 adds the setting; milestone 6 turns it on with the provider.
 
 ## 8. Recipes and deploys
 

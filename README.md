@@ -2,6 +2,8 @@
 
 # KitSHn
 
+> KitSHn 1 moved to [Yarden-zamir/kitshn-1](https://github.com/Yarden-zamir/kitshn-1). Apps that call `deploy.yml` here keep working through it. This repo becomes KitSHn 2: see [SPEC.md](SPEC.md) and [docs/architecture.md](docs/architecture.md). The text below describes KitSHn 1.
+
 [![release](https://img.shields.io/github/v/release/Yarden-zamir/kitshn?labelColor=2F3532&color=3E6B55)](https://github.com/Yarden-zamir/kitshn/releases)
 [![license](https://img.shields.io/github/license/Yarden-zamir/kitshn?labelColor=2F3532&color=3E6B55)](LICENSE)
 

@@ -11,6 +11,7 @@ import {
   signOutEverywhere,
   syncAccess,
   syncLauncher,
+  loginHeld,
   loginWant,
   loginWarnings,
   syncLogins,
@@ -440,18 +441,30 @@ describe("page and file logins (K-1004)", () => {
   const anyLogin = { id: "any", name: "kitshn any login" };
   const anyPasskey = { id: "any-passkey", name: "kitshn any login (passkey)" };
 
-  function loginCloudflare(fail: (path: string) => boolean = () => false, attachMachines = true) {
+  function loginCloudflare(
+    fail: (path: string) => boolean = () => false,
+    attachMachines = true,
+    listMachines = true,
+  ) {
     const cf = fakeCloudflare();
     const puts: Array<{ path: string; body: unknown }> = [];
     const machines = { id: "machines", name: "kitshn machines", precedence: 2 };
     const apps = ["pages", "files"].flatMap((host) => [
       {
         id: `${host}-login`,
+        uid: `${host}-login`,
         aud: "x",
+        created_at: "2026-10-27T00:00:00Z",
+        updated_at: "2026-10-27T00:00:00Z",
+        type: "self_hosted",
         name: `kitshn ${host} login`,
         domain: `${host}.example.com/login`,
+        destinations: [{ type: "public", uri: `${host}.example.com/login` }],
         self_hosted_domains: [`${host}.example.com/login`],
+        session_duration: "720h",
+        same_site_cookie_attribute: "lax",
         allowed_idps: ["otp"],
+        scim_config: { enabled: false },
         policies: attachMachines ? [{ ...anyLogin, precedence: 1 }, machines] : [{ ...anyLogin, precedence: 1 }],
       },
       {
@@ -464,7 +477,8 @@ describe("page and file logins (K-1004)", () => {
     ]);
     const api: Api = async <T>(method: string, path: string, body?: unknown) => {
       if (path.includes("/apps?")) return apps as T;
-      if (path.includes("/policies?")) return [anyLogin, anyPasskey, machines] as T;
+      if (path.includes("/policies?"))
+        return (listMachines ? [anyLogin, anyPasskey, machines] : [anyLogin, anyPasskey]) as T;
       if (fail(path)) throw new Error("refused");
       if (method === "PUT") puts.push({ path, body });
       return cf.api(method as "GET", path, body);
@@ -484,9 +498,13 @@ describe("page and file logins (K-1004)", () => {
       {
         path: "/accounts/a/access/apps/pages-login",
         body: {
+          type: "self_hosted",
           name: "kitshn pages login",
           domain: "pages.example.com/login",
+          destinations: [{ type: "public", uri: "pages.example.com/login" }],
           self_hosted_domains: ["pages.example.com/login"],
+          session_duration: "720h",
+          same_site_cookie_attribute: "lax",
           allowed_idps: ["otp"],
           policies: [
             { id: "machines", precedence: 1 },
@@ -602,5 +620,53 @@ describe("page and file logins (K-1004)", () => {
     expect(await syncWithLogins(7, true, logins, access)).toBe(0);
     expect(await syncWithLogins(21, false, logins, access)).toBe(0);
     expect(order).toEqual(["access 7", "access 21"]);
+  });
+
+  it("leaves /login alone without the machines policy, so service tokens keep their login", async () => {
+    const cf = loginCloudflare(undefined, true, false);
+    const desired = desiredAccess(start(), 0);
+    await syncAccess(desired, cf.store, cf.api, "a");
+    await expect(syncLogins(desired, cf.store, cf.api, "a", "example.com", "", false)).rejects.toThrow(
+      'no policy "kitshn machines"',
+    );
+    expect(cf.puts.map((put) => put.path)).toEqual([
+      "/accounts/a/access/apps/pages-passkey",
+      "/accounts/a/access/apps/files-passkey",
+    ]);
+  });
+
+  it("never drops the passkey check of a policy that a login application holds while the login step waits", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    const attached = loginWant(desiredAccess(state, 0), cf.rows);
+    const people = cf.rows.get("policy:owner:people")!;
+    // "Needs passkey" turns off, and the login step was skipped or failed: the apps still hold the policy.
+    const owner = state.circles.get("owner")!;
+    const relaxed = desiredAccess(
+      { ...state, circles: new Map(state.circles).set("owner", { ...owner, needsPasskey: false }) },
+      0,
+    );
+    const held = loginHeld(attached);
+    cf.calls.length = 0;
+    await syncAccess(relaxed, cf.store, cf.api, "a", 40, new Set(), held);
+    expect(cf.calls).not.toContain(`PUT /policies/${people.cfId}`);
+    expect(cf.rows.get("policy:owner:people")!.body).toBe(people.body);
+    // Once the login step lets go of it, the sync writes it.
+    await syncAccess(relaxed, cf.store, cf.api, "a", 40, new Set(), loginHeld(loginWant(relaxed, cf.rows)));
+    expect(cf.calls).toContain(`PUT /policies/${people.cfId}`);
+  });
+
+  it("never deletes a policy that a login application holds", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    const held = loginHeld(loginWant(desiredAccess(state, 0), cf.rows));
+    const gone = desiredAccess({ ...state, resources: new Map() }, 0);
+    cf.calls.length = 0;
+    await syncAccess(gone, cf.store, cf.api, "a", 40, new Set(), held);
+    const deleted = cf.calls.filter((call) => call.startsWith("DELETE /policies"));
+    for (const id of held) expect(deleted).not.toContain(`DELETE /policies/${id}`);
+    expect(hasAccessWork(gone, cf.rows, new Set(), held)).toBe(false);
   });
 });

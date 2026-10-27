@@ -88,8 +88,10 @@ export function hasAccessWork(
   desired: DesiredAccess,
   rows: ReadonlyMap<string, AccessRow>,
   reachable: ReadonlySet<string> = new Set(),
+  held: ReadonlySet<string> = new Set(),
 ): boolean {
   for (const [key, policy] of desired.policies) {
+    if (isHeld(rows.get(key), held)) continue;
     const body = policyBody(policy);
     if (rows.get(key)?.body !== body && !failedWith(rows.get(key), body)) return true;
   }
@@ -97,10 +99,21 @@ export function hasAccessWork(
     const body = appBody(key, app, rows);
     if (body !== null && rows.get(key)?.body !== body && !failedWith(rows.get(key), body)) return true;
   }
-  const kept = keptPolicies(desired, rows, reachable);
+  const kept = withHeld(keptPolicies(desired, rows, reachable), held);
   for (const row of rows.values()) if (isStale(desired, row, reachable, kept)) return true;
   return false;
 }
+
+/**
+ * K-1004: policy ids that the login applications hold since the last login step that succeeded. The sync
+ * neither changes nor deletes them until the login step lets go of them, so a passkey check never drops
+ * from `/login/passkey` and a policy in use never goes.
+ */
+const isHeld = (row: AccessRow | undefined, held: ReadonlySet<string>) =>
+  row !== undefined && row.cfId !== "" && held.has(row.cfId);
+
+const withHeld = (kept: ReadonlySet<string> | null, held: ReadonlySet<string>) =>
+  kept === null ? null : new Set([...kept, ...held]);
 
 /** The address of an application row, from its key `app:<card>:<address>`, so it never depends on the body. */
 const appDomain = (row: AccessRow) => {
@@ -344,6 +357,7 @@ export async function syncAccess(
   accountId: string,
   budget = CALLS_PER_RUN,
   reachable: ReadonlySet<string> = new Set(),
+  held: ReadonlySet<string> = new Set(),
 ): Promise<boolean> {
   let calls = 0;
   const spend = () => calls++ < budget;
@@ -358,6 +372,7 @@ export async function syncAccess(
     find: (list: ReadonlyArray<Named>) => Named | undefined,
   ) => {
     const row = store.rows.get(key);
+    if (kind === "policies" && isHeld(row, held)) return true;
     if (row?.body === body || failedWith(row, body)) return true;
     let cfId = row?.cfId ?? "";
     try {
@@ -372,8 +387,8 @@ export async function syncAccess(
         }
         const found = find((kind === "policies" ? existingPolicies : existingApps) ?? []);
         // Never adopt an object that another row holds: one Cloudflare object belongs to one row (K-410).
-        const held = new Set([...store.rows.values()].map((item) => item.cfId));
-        cfId = found && found.name.startsWith(ACCESS_NAME_PREFIX) && !held.has(found.id) ? found.id : "";
+        const taken = new Set([...store.rows.values()].map((item) => item.cfId));
+        cfId = found && found.name.startsWith(ACCESS_NAME_PREFIX) && !taken.has(found.id) ? found.id : "";
       }
       if (!spend()) return false;
       const request: unknown = JSON.parse(body);
@@ -419,7 +434,7 @@ export async function syncAccess(
     const found = (list: ReadonlyArray<Named>) => list.find((item) => item.domain === app.domain);
     if (!(await write(key, "apps", body, found))) return false;
   }
-  const kept = keptPolicies(desired, store.rows, reachable);
+  const kept = withHeld(keptPolicies(desired, store.rows, reachable), held);
   const stale = [...store.rows.values()].filter((row) => isStale(desired, row, reachable, kept));
   // Applications first: Access refuses to delete a policy that an application still uses.
   stale.sort((a, b) => Number(a.key.startsWith("policy:")) - Number(b.key.startsWith("policy:")));
@@ -514,6 +529,13 @@ export function loginWant(desired: DesiredAccess, rows: ReadonlyMap<string, Acce
   return JSON.stringify({ login: ids(desired.logins.login), passkey: ids(desired.logins.passkey) });
 }
 
+/** K-1004: the policy ids in a `loginWant`, which the login applications hold once it is applied. */
+export function loginHeld(attached: string): Set<string> {
+  if (!attached) return new Set();
+  const ids = JSON.parse(attached) as { login: Array<string>; passkey: Array<string> };
+  return new Set([...ids.login, ...ids.passkey]);
+}
+
 /** K-1004: a login policy that Cloudflare refused, so the map shows why some people cannot log in. */
 export function loginWarnings(desired: DesiredAccess, rows: ReadonlyMap<string, AccessRow>): Array<string> {
   const keys = new Set([...desired.logins.login, ...desired.logins.passkey]);
@@ -570,10 +592,12 @@ export async function syncLogins(
   const uses = new Map(apps.map((app) => [app.id, (app.policies ?? []).map((policy) => policy.id)]));
   for (const host of [`pages.${zone}`, `files.${zone}`]) {
     for (const [path, wanted] of [
-      ["/login", machines ? [machines, ...ids.login] : ids.login],
+      ["/login", machines ? [machines, ...ids.login] : null],
       ["/login/passkey", ids.passkey],
     ] as const) {
       const domain = `${host}${path}`;
+      // Without the machines policy a write would end service-token logins, so `/login` waits (error above).
+      if (wanted === null) continue;
       const app = apps.find(
         (item) =>
           item["domain"] === domain &&
@@ -588,9 +612,11 @@ export async function syncLogins(
       if (deepEqual(wanted, live.map((policy) => policy.id))) continue;
       calls++;
       try {
-        // The list holds whole applications (the same type as a single GET), so like the App Launcher,
-        // every other field goes back unchanged and only the policies change.
-        const body = Object.fromEntries(Object.entries(app).filter(([field]) => !READ_ONLY.has(field)));
+        // The list holds whole applications, so like the App Launcher every other field goes back unchanged.
+        // Checked on 2026-10-27: Access accepts this PUT without scim_config.
+        const body = Object.fromEntries(
+          Object.entries(app).filter(([field]) => !READ_ONLY.has(field) && field !== "scim_config"),
+        );
         await api("PUT", `${base}/apps/${app.id}`, {
           ...body,
           policies: wanted.map((id, index) => ({ id, precedence: index + 1 })),
@@ -604,6 +630,8 @@ export async function syncLogins(
   const used = new Set([...uses.values()].flat());
   for (const policy of policies) {
     if (!OLD_LOGIN_POLICY_NAMES.has(policy.name) || used.has(policy.id)) continue;
+    // The rest goes at the next daily run.
+    if (calls >= LOGIN_CALLS) break;
     calls++;
     try {
       await api("DELETE", `${base}/policies/${policy.id}`);

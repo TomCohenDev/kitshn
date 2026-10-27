@@ -70,6 +70,7 @@ import {
   syncAccess,
   syncLauncher,
   LOGIN_CALLS,
+  loginHeld,
   loginWant,
   loginWarnings,
   syncLogins,
@@ -1666,7 +1667,7 @@ export class Kitshn extends DurableObject<Env> {
     const desired = desiredAccess(this.state, now);
     if (
       this.env.CLOUDFLARE_API_TOKEN &&
-      (hasAccessWork(desired, this.access, this.reachableAddresses()) || this.launcherWork() || this.loginWork())
+      (hasAccessWork(desired, this.access, this.reachableAddresses(), loginHeld(this.meta("login_policies") ?? "")) || this.launcherWork() || this.loginWork())
     )
       next = now;
     // A failed tunnel, DNS or route write tries again after five minutes (K-410). Only a future retry
@@ -2856,6 +2857,8 @@ export class Kitshn extends DurableObject<Env> {
             this.env.CLOUDFLARE_ACCOUNT_ID,
             left,
             this.reachableAddresses(),
+            // Read after the login step, which may have let go of some.
+            loginHeld(this.meta("login_policies") ?? ""),
           ),
       ),
     );

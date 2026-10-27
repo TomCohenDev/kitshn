@@ -113,7 +113,7 @@ import {
 import type { Caller, Deployer } from "./auth.ts";
 import { CloudflareError, cloudflare } from "./cloudflare.ts";
 import { dispatchDeploy } from "./github.ts";
-import { REPLACED, failQueuedDowns, removalDown, requeueDowns } from "./downs.ts";
+import { REPLACED, dropLiveSite, failQueuedDowns, removalDown, requeueDowns } from "./downs.ts";
 import { REPO_GATE_MIGRATION, migrate } from "./migrations.ts";
 import {
   DEPLOY_MS,
@@ -597,9 +597,12 @@ export class Kitshn extends DurableObject<Env> {
       if (composeUndo(removalDown(this.query, card.id)) === "refuse")
         throw new RuleError(`The machine is stopping ${card.name} now; undo after it finishes (K-909).`);
     const revision = this.commit(actor, changes, undoes);
-    // A stop that still waits goes; the app then starts again, or runs on where it never stopped.
-    for (const card of restored)
+    // A stop that still waits goes, and the app starts again (a short restart where it never stopped).
+    for (const card of restored) {
       failQueuedDowns(this.query, card.id, "The undo of the removal replaced this job (K-909).");
+      dropLiveSite(this.query, card.id);
+    }
+    if (restored.length > 0) this.load();
     const notes: Array<string> = [];
     for (const { before, after } of apps) {
       if (after) notes.push(await this.restartApp(actor, after));
@@ -979,6 +982,8 @@ export class Kitshn extends DurableObject<Env> {
   private reconcilePresence() {
     for (const [id, value] of this.presence)
       if (value.online && this.openSocket(id) === null) this.setPresence(id, false);
+    // K-909: a restart closed every socket without a close event, so no stop stays sent forever.
+    for (const id of this.state.machines.keys()) if (this.openSocket(id) === null) requeueDowns(this.query, id);
   }
 
   /** K-604: a daemon connects with its machine's service token; the Worker checked the Access JWT. */
@@ -2636,6 +2641,8 @@ export class Kitshn extends DurableObject<Env> {
     if (this.state.resources.has(row.resource_id))
       return "The card keeps its place; the map decides who opens it (K-807).";
     const slug = repoSlug(row.repo);
+    // K-909: the row of a removed app with this id would take the new card with it (dropLiveSite).
+    if (kind === "site.compose") dropLiveSite(this.query, row.resource_id);
     this.putResource({
       id: row.resource_id,
       kind,

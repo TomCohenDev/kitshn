@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { REPLACED, failQueuedDowns, removalDown, requeueDowns } from "./downs.ts";
+import { REPLACED, dropLiveSite, failQueuedDowns, removalDown, requeueDowns } from "./downs.ts";
 import { migrate } from "./migrations.ts";
 
 function jobs() {
@@ -18,7 +18,7 @@ function jobs() {
         .get(JSON.stringify(command), state)?.["id"],
     );
   const state = (id: number) => db.prepare("SELECT state, output FROM jobs WHERE id = ?").get(id);
-  return { sql, add, state };
+  return { db, sql, add, state };
 }
 
 const down = { kind: "compose-down", project: "app", name: "app", removeData: false };
@@ -55,5 +55,24 @@ describe("removal downs (K-909)", () => {
     expect(state(sent)).toMatchObject({ state: "queued" });
     expect(state(other)).toMatchObject({ state: "failed" });
     expect(removalDown(sql, "app")).toEqual({ id: sent, state: "queued" });
+  });
+
+  it("a volume delete is no newer deploy, so a stop that the machine had still goes out again", () => {
+    const { sql, add, state } = jobs();
+    const sent = add(down, "sent");
+    add({ kind: "compose-volume-remove", project: "app", volume: "app_data" }, "queued");
+    add({ kind: "compose-down", project: "app", name: "app", removeData: true }, "queued");
+    requeueDowns(sql, "m1");
+    expect(state(sent)).toMatchObject({ state: "queued" });
+  });
+
+  it("a card that comes back loses the old site row, so a report without the site keeps the card", () => {
+    const { db, sql } = jobs();
+    db.exec(`INSERT INTO live_sites (id, machine_id, name, address, target, dev, up, last_up, state)
+             VALUES ('app', 'm1', 'app', 'app.example.com', 'unix:/s', 0, 1, 0, 'ok')`);
+    // The stop ran on the machine; the undo restores the card before the machine reports the sites.
+    dropLiveSite(sql, "app");
+    // updateLiveSites forgets the card of each row of the machine that the report leaves out: there is none.
+    expect(sql("SELECT id FROM live_sites WHERE machine_id = 'm1'")).toEqual([]);
   });
 });

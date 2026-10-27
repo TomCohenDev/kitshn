@@ -147,7 +147,9 @@ export async function verifyAccess(
     return ["The account has too many Access objects for the daily compare (K-408), so kitshn skipped it."];
   }
   for (const row of store.rows.values()) {
-    if (!row.cfId || !row.body) continue;
+    // A pending attempt (a failed write or revoke) is retried by the sync itself; comparing it here would
+    // drop the old body that the session revoke of K-409 needs.
+    if (!row.cfId || !row.body || (row.tried !== "" && row.tried !== row.body)) continue;
     const ours = JSON.parse(row.body) as Record<string, unknown>;
     let same: boolean;
     if (row.key.startsWith("policy:")) {
@@ -234,7 +236,8 @@ export async function signOutEverywhere(
 
 /**
  * K-408 for the passkey check (K-103): the policy lists carry no MFA settings, so this reads each policy
- * that needs a passkey once a day and marks it when someone changed its MFA settings.
+ * that needs a passkey once a day and marks it when someone changed its MFA settings. It reads at most
+ * `budget` policies a day, which covers 10 passkey circles; revisit when an owner has more.
  */
 export async function verifyPasskeys(
   store: AccessStore,

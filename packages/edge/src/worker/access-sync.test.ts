@@ -222,4 +222,35 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
       `POST /apps/${cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId}/revoke_tokens`,
     ]);
   });
+
+  it("retries a failed session revoke after the daily compare", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    const owner = state.circles.get("owner")!;
+    const two = applyChanges(
+      state,
+      resolveEdits(state, [
+        { _tag: "circle", id: "b", after: { ...owner, id: "b", name: "B", x: 0, y: 0, r: 100 } },
+      ]),
+    );
+    await syncAccess(desiredAccess(two, 0), cf.store, cf.api, "a");
+    const revokeFails: Api = async (method, path, body) => {
+      if (path.endsWith("/revoke_tokens")) throw new Error("500");
+      return cf.api(method, path, body);
+    };
+    const desired = desiredAccess(state, 0);
+    await syncAccess(desired, cf.store, revokeFails, "a");
+    for (const row of cf.rows.values()) cf.rows.set(row.key, { ...row, error: null });
+    const appId = cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId;
+    const live: Api = async <T>(method: string, path: string) => {
+      if (path.includes("/policies?")) return [] as T;
+      if (path.includes("/apps?"))
+        return [{ id: appId, name: "kitshn admin", domain: "kit.example.com", policies: [] }] as T;
+      return cf.api(method as "GET", path);
+    };
+    await verifyAccess(desired, cf.store, live, "a");
+    cf.calls.length = 0;
+    await syncAccess(desired, cf.store, cf.api, "a");
+    expect(cf.calls).toContain(`POST /apps/${appId}/revoke_tokens`);
+  });
 });

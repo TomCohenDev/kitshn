@@ -19,7 +19,14 @@ async function accessIdentity(
   env: Env,
   audiences: ReadonlyArray<string>,
 ): Promise<
-  { email: string | null; clientId: string | null; audience: string; issuedAt: number | null } | string
+  | {
+      email: string | null;
+      clientId: string | null;
+      audience: string;
+      issuedAt: number | null;
+      expiresAt: number | null;
+    }
+  | string
 > {
   const wanted = audiences.filter(Boolean);
   if (!env.ACCESS_TEAM_DOMAIN || wanted.length === 0) return "kitshn has no Access configuration.";
@@ -45,6 +52,7 @@ async function accessIdentity(
       clientId: email ? null : clientId,
       audience,
       issuedAt: payload.iat ?? null,
+      expiresAt: payload.exp ?? null,
     };
   } catch (error) {
     return `The Access token is not valid: ${error instanceof Error ? error.message : String(error)}`;
@@ -107,13 +115,22 @@ export interface ContentLogins {
  * K-1004: the cookie where the Worker keeps the token of one login step. Both login applications of a host
  * write `CF_Authorization` on `/`, so the later one replaces the earlier one; the Worker keeps its own copy.
  */
-export const stepCookie = (step: "login" | "passkey") => `kitshn-${step}-token`;
+export const stepCookie = (step: "login" | "passkey") => `__Host-kitshn-${step}-token`;
 
-/** K-1004: why the token that Access put on a login step does not prove that step, or null when it does. */
-export async function stepTokenProblem(token: string | null, env: Env, audience: string): Promise<string | null> {
+/**
+ * K-1004: the token that Access put on a login step with its expiry, or the reason it does not prove that
+ * step.
+ */
+export async function stepToken(
+  token: string | null,
+  env: Env,
+  audience: string,
+): Promise<{ readonly token: string; readonly expiresAt: number } | string> {
   if (!token) return "Access sent no token with this step.";
   const identity = await accessIdentity(token, env, [audience]);
-  return typeof identity === "string" ? identity : null;
+  if (typeof identity === "string") return identity;
+  if (identity.expiresAt === null) return "The Access token has no expiry.";
+  return { token, expiresAt: identity.expiresAt };
 }
 
 /** Every value of a cookie: a browser can send two with the same name (another path or a parent domain). */
@@ -149,17 +166,16 @@ export async function contentVisitorOf(
   const header = request.headers.get("cf-access-jwt-assertion");
   const cookies = request.headers.get("cookie");
   const tokens = [
-    ...(header ? [header] : []),
-    ...cookieValues(cookies, stepCookie("passkey")),
-    ...cookieValues(cookies, stepCookie("login")),
-    ...cookieValues(cookies, "CF_Authorization"),
+    ...(header ? [{ source: "header", token: header }] : []),
+    ...[stepCookie("passkey"), stepCookie("login"), "CF_Authorization"].flatMap((name) =>
+      cookieValues(cookies, name).map((token) => ({ source: name, token })),
+    ),
   ];
   let problem: string | null = null;
   // A passkey login wins over a plain one, because it gives the higher level (K-103).
   let best: ContentVisitor | null = null;
   const seen: Array<string> = [];
-  for (const [index, token] of tokens.entries()) {
-    const source = index === 0 && header ? "header" : "cookie";
+  for (const { source, token } of tokens) {
     const identity = await accessIdentity(token, env, [logins.login, logins.passkey]);
     if (typeof identity === "string") {
       problem = identity;

@@ -1,4 +1,5 @@
 import { ACCESS_NAME_PREFIX, type AppBody, type DesiredAccess, type PolicyBody } from "../core/access.ts";
+import { deepEqual } from "../core/changes.ts";
 import type { AccessState } from "../core/protocol.ts";
 
 /**
@@ -23,6 +24,7 @@ export type Api = <T>(method: "GET" | "POST" | "PUT" | "DELETE", path: string, b
 
 /** K-406: one alarm run makes at most this many Cloudflare API calls. */
 export const CALLS_PER_RUN = 40;
+const PAGE = 1000;
 
 const policyBody = (policy: PolicyBody) => JSON.stringify(policy);
 
@@ -98,10 +100,179 @@ const isNotFound = (error: unknown) =>
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
+const policyIds = (body: string) =>
+  (JSON.parse(body) as { policies?: ReadonlyArray<{ id: string }> }).policies?.map((policy) => policy.id) ??
+  [];
+
+const removesPolicy = (before: string, after: string) => {
+  const kept = new Set(policyIds(after));
+  return policyIds(before).some((id) => !kept.has(id));
+};
+
 interface Named {
   readonly id: string;
   readonly name: string;
   readonly domain?: string;
+}
+
+interface LivePolicy extends Named {
+  readonly decision: string;
+  readonly include: unknown;
+  readonly require: unknown;
+  readonly exclude: unknown;
+}
+
+interface LiveApp extends Named {
+  readonly session_duration?: string;
+  readonly policies?: ReadonlyArray<{ readonly id: string }>;
+}
+
+/**
+ * K-408, the daily run: reads Access in two calls and marks each object that someone changed or deleted,
+ * so the next sync writes it again. The lists carry no MFA settings, so a changed passkey setting is not
+ * seen here; revisit if the list API adds `mfa_config`. Returns warnings for applications that kitshn did
+ * not make but that cover a kitshn address; kitshn never changes those.
+ */
+export async function verifyAccess(
+  desired: DesiredAccess,
+  store: AccessStore,
+  api: Api,
+  accountId: string,
+): Promise<Array<string>> {
+  const base = `/accounts/${accountId}/access`;
+  const policies = await api<ReadonlyArray<LivePolicy>>("GET", `${base}/policies?per_page=${PAGE}`);
+  const apps = await api<ReadonlyArray<LiveApp>>("GET", `${base}/apps?per_page=${PAGE}`);
+  // A full page can hide objects on a next page; then "missing" means nothing, so kitshn compares nothing.
+  if (policies.length >= PAGE || apps.length >= PAGE) {
+    return ["The account has too many Access objects for the daily compare (K-408), so kitshn skipped it."];
+  }
+  for (const row of store.rows.values()) {
+    // A pending attempt (a failed write or revoke) is retried by the sync itself; comparing it here would
+    // drop the old body that the session revoke of K-409 needs.
+    if (!row.cfId || !row.body || (row.tried !== "" && row.tried !== row.body)) continue;
+    const ours = JSON.parse(row.body) as Record<string, unknown>;
+    let same: boolean;
+    if (row.key.startsWith("policy:")) {
+      const live = policies.find((policy) => policy.id === row.cfId);
+      same =
+        live !== undefined &&
+        deepEqual(
+          {
+            name: live.name,
+            decision: live.decision,
+            include: live.include,
+            require: live.require,
+            exclude: live.exclude,
+          },
+          {
+            name: ours["name"],
+            decision: ours["decision"],
+            include: ours["include"],
+            require: ours["require"],
+            exclude: ours["exclude"],
+          },
+        );
+      if (!live) store.put({ ...row, cfId: "", body: "", tried: "", error: null });
+      else if (!same) store.put({ ...row, body: "", tried: "", error: null });
+      continue;
+    }
+    const live = apps.find((app) => app.id === row.cfId);
+    same =
+      live !== undefined &&
+      deepEqual(
+        {
+          name: live.name,
+          domain: live.domain,
+          session: live.session_duration,
+          policies: live.policies?.map((p) => p.id) ?? [],
+        },
+        {
+          name: ours["name"],
+          domain: ours["domain"],
+          session: ours["session_duration"],
+          policies: policyIds(row.body),
+        },
+      );
+    if (!live) store.put({ ...row, cfId: "", body: "", tried: "", error: null });
+    else if (!same) store.put({ ...row, body: "", tried: "", error: null });
+  }
+  const ours = new Set([...store.rows.values()].map((row) => row.cfId));
+  const warnings: Array<string> = [];
+  for (const app of desired.apps.values()) {
+    for (const live of apps) {
+      if (live.domain === app.domain && !ours.has(live.id)) {
+        warnings.push(
+          `The Access application "${live.name}" also covers ${app.domain}. kitshn did not make it and does not change it.`,
+        );
+      }
+    }
+  }
+  return warnings;
+}
+
+/** K-110: ends the sessions of every application that kitshn made. It never touches other applications. */
+export async function signOutEverywhere(
+  store: AccessStore,
+  api: Api,
+  accountId: string,
+): Promise<{ ended: number; failed: Array<string> }> {
+  let ended = 0;
+  const failed: Array<string> = [];
+  const apps = [...store.rows.values()].filter((row) => row.key.startsWith("app:") && row.cfId);
+  for (const [index, row] of apps.entries()) {
+    if (index >= CALLS_PER_RUN) {
+      failed.push(`${apps.length - index} more applications (the call limit of one request)`);
+      break;
+    }
+    try {
+      await api("POST", `/accounts/${accountId}/access/apps/${row.cfId}/revoke_tokens`);
+      ended++;
+    } catch (error) {
+      failed.push(`${row.key}: ${message(error)}`);
+    }
+  }
+  return { ended, failed };
+}
+
+/**
+ * K-408 for the passkey check (K-103): the policy lists carry no MFA settings, so this reads each policy
+ * that needs a passkey once a day and marks it when someone changed its MFA settings. It reads at most
+ * `budget` policies a day, which covers 10 passkey circles; revisit when an owner has more.
+ */
+export async function verifyPasskeys(
+  store: AccessStore,
+  api: Api,
+  accountId: string,
+  budget: number,
+): Promise<number> {
+  let calls = 0;
+  for (const row of store.rows.values()) {
+    if (calls >= budget) break;
+    if (!row.key.startsWith("policy:") || !row.cfId || !row.body) continue;
+    const ours = (
+      JSON.parse(row.body) as {
+        mfa_config?: { allowed_authenticators: Array<string>; session_duration: string };
+      }
+    ).mfa_config;
+    if (!ours) continue;
+    calls++;
+    const live = await api<{
+      mfa_config?: {
+        allowed_authenticators?: Array<string>;
+        session_duration?: string;
+        mfa_disabled?: boolean;
+      } | null;
+    }>("GET", `/accounts/${accountId}/access/policies/${row.cfId}`);
+    const same =
+      live.mfa_config?.mfa_disabled !== true &&
+      deepEqual(
+        [...(live.mfa_config?.allowed_authenticators ?? [])].sort(),
+        [...ours.allowed_authenticators].sort(),
+      ) &&
+      live.mfa_config?.session_duration === ours.session_duration;
+    if (!same) store.put({ ...row, body: "", tried: "", error: null });
+  }
+  return calls;
 }
 
 /**
@@ -148,6 +319,26 @@ export async function syncAccess(
       const result = cfId
         ? await api<Named>("PUT", `${base}/${kind}/${cfId}`, request)
         : await api<Named>("POST", `${base}/${kind}`, request);
+      // K-409: a removed share takes effect at once, so the sessions of the application end. Until the
+      // revoke succeeds, the row keeps its old body, so the next run writes and revokes again.
+      if (kind === "apps" && row?.body && removesPolicy(row.body, body)) {
+        if (!spend()) {
+          store.put({ key, cfId: result.id, body: row.body, tried: "", error: null });
+          return false;
+        }
+        try {
+          await api("POST", `${base}/apps/${result.id}/revoke_tokens`);
+        } catch (error) {
+          store.put({
+            key,
+            cfId: result.id,
+            body: row.body,
+            tried: body,
+            error: `sessions not ended: ${message(error)}`,
+          });
+          return true;
+        }
+      }
       store.put({ key, cfId: result.id, body, tried: body, error: null });
     } catch (error) {
       // Someone deleted the object: forget its id, so the next run creates it again.

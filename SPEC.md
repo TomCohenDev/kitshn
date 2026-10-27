@@ -42,7 +42,7 @@ The architecture, the request paths and the budget are in [docs/architecture.md]
 - **K-107** A machine proves itself with its own service token (K-602). A machine is a circle member too, so a share can give one machine access to another resource.
 - **K-108** Browser approvals of the machine map (browser keys, the Clients approval flow) do not exist in kitshn. A passkey or a device token replaces them.
 - **K-109** Access sessions of the admin resource last 24 hours. Sessions of other resources last 30 days unless a circle sets a shorter time.
-- **K-110** "Sign out everywhere" ends every Access session of the account through the Cloudflare API.
+- **K-110** "Sign out everywhere" ends every Access session of every application that kitshn made, through the Cloudflare API. It does not end sessions of other applications (K-408).
 - **K-111** Zero Trust Free counts one seat per person who logs in, up to 50. kitshn turns on seat expiration in Zero Trust admin controls, set to 1 month, so guests who stop coming free their seat. [Seat management](https://developers.cloudflare.com/cloudflare-one/team-and-resources/users/seat-management/) runs the expiry once a day.
 - **K-112** The admin view shows the seats in use, with a warning at 40. The view can also remove a seat. Checked on 2026-10-27: `GET /accounts/{id}/access/users` lists each user with `seat_uid` and `access_seat`. VERIFY: the [seat API](https://developers.cloudflare.com/api/resources/zero_trust/subresources/seats/methods/edit/) `PATCH /accounts/{id}/access/seats` turns a seat off. Milestone 2 tests it with the Seats view.
 
@@ -286,4 +286,4 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-1501** Every change makes one revision with the time, the actor (owner device, agent with machine and thread, or kitshn for an expiry) and a summary.
 - **K-1502** "Undo" on a revision makes a new revision that reverses it. Undo runs the guard of K-105.
 - **K-1503** Revisions older than 90 days and beyond the newest 5,000 are deleted by the daily alarm.
-- **K-1504** "Emergency pause" moves no card, but sets every share to none except the admin share of the Owner circle, and sends "stop all agents" to every provider that has the command. "Resume" returns the shares. The pause keeps MM-708 to MM-719 where they apply.
+- **K-1504** "Emergency pause" moves no card, but sets every share to none except the admin share of the Owner circle for its people (devices and machines get nothing), and sends "stop all agents" to every provider that has the command (providers arrive in milestone 5). "Resume" returns the shares. The pause keeps MM-708 to MM-719 where they apply.

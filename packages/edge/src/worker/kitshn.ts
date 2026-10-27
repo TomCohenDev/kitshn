@@ -16,6 +16,7 @@ import {
 import {
   ADMIN_RESOURCE_ID,
   type Circle,
+  type Member,
   type Point,
   type Resource,
   type ShareSetting,
@@ -28,7 +29,17 @@ import { ClientMessage } from "../core/schema.ts";
 import { demo } from "../core/demo.ts";
 import { seed } from "../core/seed.ts";
 import { visitorLevel } from "../core/visitor.ts";
-import { type AccessRow, accessStates, hasAccessWork, syncAccess } from "./access-sync.ts";
+import {
+  type AccessRow,
+  type AccessStore,
+  accessStates,
+  CALLS_PER_RUN,
+  hasAccessWork,
+  signOutEverywhere,
+  syncAccess,
+  verifyAccess,
+  verifyPasskeys,
+} from "./access-sync.ts";
 import type { Caller } from "./auth.ts";
 import { cloudflare } from "./cloudflare.ts";
 import type { Env } from "./env.ts";
@@ -62,6 +73,18 @@ export class Kitshn extends DurableObject<Env> {
   private access = new Map<string, AccessRow>();
   /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
   private stuckShares = new Set<string>();
+  private accessWarnings: Array<string> = [];
+
+  private meta(key: string): string | null {
+    const [row] = this.sql<{ value: string }>("SELECT value FROM meta WHERE key = ?", key);
+    return row?.value ?? null;
+  }
+
+  /** Writes a meta value only when it changes (K-1302). */
+  private setMeta(key: string, value: string) {
+    if (this.meta(key) !== value)
+      this.sql("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", key, value);
+  }
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -91,7 +114,9 @@ export class Kitshn extends DurableObject<Env> {
         ]),
       ),
       shareSettings: json<ShareSetting>(this.sql("SELECT id, body FROM share_settings")),
+      paused: this.meta("paused") === "true",
     };
+    this.accessWarnings = JSON.parse(this.meta("access_warnings") ?? "[]") as Array<string>;
     this.access = new Map(
       this.sql<{ key: string; cf_id: string; body: string; tried: string; error: string | null }>(
         "SELECT key, cf_id, body, tried, error FROM access_objects",
@@ -125,7 +150,7 @@ export class Kitshn extends DurableObject<Env> {
       .map((email) => email.trim())
       .filter(Boolean);
     if (emails.length === 0) throw new Error("OWNER_EMAILS is empty: kitshn cannot make the Owner circle.");
-    const initial = seed(emails, this.env.KITSHN_HOST);
+    const initial = seed(emails, this.env.KITSHN_HOST, ownerDevices(this.env.OWNER_DEVICES));
     const extra =
       this.env.DEV_DEMO && this.env.KITSHN_HOST === "localhost"
         ? demo()
@@ -171,6 +196,10 @@ export class Kitshn extends DurableObject<Env> {
 
   private persist(changes: ReadonlyArray<Change>) {
     for (const change of changes) {
+      if (change._tag === "pause") {
+        this.setMeta("paused", String(change.after));
+        continue;
+      }
       const table =
         change._tag === "circle" ? "circles" : change._tag === "place" ? "places" : "share_settings";
       if (change.after === null) this.sql(`DELETE FROM ${table} WHERE id = ?`, change.id);
@@ -269,6 +298,8 @@ export class Kitshn extends DurableObject<Env> {
       shareSettings: Object.fromEntries(this.state.shareSettings) as Record<string, ShareSetting>,
       revisions: this.revisions,
       access: accessStates(desiredAccess(this.state, Date.now()), this.access),
+      accessWarnings: this.accessWarnings,
+      paused: this.state.paused,
       me,
     };
   }
@@ -318,6 +349,10 @@ export class Kitshn extends DurableObject<Env> {
       return new Response(null, { status: 101, webSocket: client });
     }
     if (path === "/api/state" && request.method === "GET") return Response.json(this.snapshot(caller.actor));
+    if (path === "/api/sign-out" && request.method === "POST") return this.signOut();
+    if (path === "/api/devices" && request.method === "GET") return this.listDevices();
+    if (path === "/api/devices" && request.method === "POST")
+      return this.addDevice(await request.json().catch(() => null));
     if (path === "/api/apply" || path === "/api/undo") {
       if (request.method !== "POST") return new Response("Use POST.", { status: 405 });
       let message: ClientMessage;
@@ -432,37 +467,142 @@ export class Kitshn extends DurableObject<Env> {
     this.load();
   }
 
+  /** K-110: ends every session of every application that kitshn made. */
+  private async signOut() {
+    const api = this.api();
+    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    try {
+      return Response.json(await signOutEverywhere(this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID));
+    } catch (error) {
+      return Response.json({ error: String(error) }, { status: 502 });
+    }
+  }
+
+  /** K-106: the Access service tokens of the account, to pick a device member. */
+  private async listDevices() {
+    const api = this.api();
+    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    try {
+      const tokens = await api<Array<{ id: string; name: string; client_id: string }>>(
+        "GET",
+        `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/service_tokens?per_page=1000`,
+      );
+      return Response.json(
+        tokens.map((token) => ({ tokenId: token.id, clientId: token.client_id, name: token.name })),
+      );
+    } catch (error) {
+      return Response.json({ error: String(error) }, { status: 502 });
+    }
+  }
+
+  /** K-106: one new service token per device. The secret shows once and kitshn does not keep it. */
+  private async addDevice(body: unknown) {
+    const api = this.api();
+    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    const name = typeof body === "object" && body !== null && "name" in body ? String(body.name).trim() : "";
+    if (!name || name.length > 60)
+      return Response.json({ error: "Give the device a name of 1 to 60 characters." }, { status: 400 });
+    try {
+      const token = await api<{ id: string; client_id: string; client_secret: string }>(
+        "POST",
+        `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/service_tokens`,
+        { name: `kitshn device ${name}`, duration: "8760h" },
+      );
+      return Response.json({
+        tokenId: token.id,
+        clientId: token.client_id,
+        clientSecret: token.client_secret,
+        name,
+      });
+    } catch (error) {
+      return Response.json({ error: String(error) }, { status: 502 });
+    }
+  }
+
+  private accessStore(): AccessStore {
+    return {
+      rows: this.access,
+      put: (row: AccessRow) => {
+        this.access.set(row.key, row);
+        this.sql(
+          "INSERT OR REPLACE INTO access_objects (key, cf_id, body, tried, error) VALUES (?, ?, ?, ?, ?)",
+          row.key,
+          row.cfId,
+          row.body,
+          row.tried,
+          row.error,
+        );
+      },
+      remove: (key: string) => {
+        this.access.delete(key);
+        this.sql("DELETE FROM access_objects WHERE key = ?", key);
+      },
+    };
+  }
+
+  /** The Cloudflare API with the Worker's token, or a reason when the Worker has none (local development). */
+  private api() {
+    const token = this.env.CLOUDFLARE_API_TOKEN;
+    if (!token) return null;
+    return <T>(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown) =>
+      cloudflare<T>(token, method, path, body);
+  }
+
   override async alarm() {
     const now = Date.now();
     this.endShares(now);
-    if (this.dailyAt() <= now) this.daily(now);
-    const token = this.env.CLOUDFLARE_API_TOKEN;
-    if (token) {
-      const store = {
-        rows: this.access,
-        put: (row: AccessRow) => {
-          this.access.set(row.key, row);
-          this.sql(
-            "INSERT OR REPLACE INTO access_objects (key, cf_id, body, tried, error) VALUES (?, ?, ?, ?, ?)",
-            row.key,
-            row.cfId,
-            row.body,
-            row.tried,
-            row.error,
+    const daily = this.dailyAt() <= now;
+    if (daily) this.daily(now);
+    const api = this.api();
+    if (api) {
+      const desired = desiredAccess(this.state, now);
+      // K-406: the daily compare spends part of the 40 calls of this run.
+      let spent = 0;
+      if (daily) {
+        try {
+          this.accessWarnings = await verifyAccess(
+            desired,
+            this.accessStore(),
+            api,
+            this.env.CLOUDFLARE_ACCOUNT_ID,
           );
-        },
-        remove: (key: string) => {
-          this.access.delete(key);
-          this.sql("DELETE FROM access_objects WHERE key = ?", key);
-        },
-      };
-      const api = <T>(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown) =>
-        cloudflare<T>(token, method, path, body);
-      await syncAccess(desiredAccess(this.state, now), store, api, this.env.CLOUDFLARE_ACCOUNT_ID);
+          spent += 2;
+          spent += await verifyPasskeys(this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID, 10);
+          this.setMeta("access_warnings", JSON.stringify(this.accessWarnings));
+        } catch (error) {
+          console.warn(`kitshn could not compare Access with the shares: ${String(error)}`);
+          spent = 12;
+        }
+      }
+      await syncAccess(
+        desired,
+        this.accessStore(),
+        api,
+        this.env.CLOUDFLARE_ACCOUNT_ID,
+        CALLS_PER_RUN - spent,
+      );
       this.broadcast();
     }
     await this.scheduleAlarm();
   }
+}
+
+/** OWNER_DEVICES: a JSON list of `{ tokenId, clientId, name }` that join the Owner circle at setup (K-106). */
+function ownerDevices(text: string | undefined): Array<Extract<Member, { _tag: "device" }>> {
+  if (!text) return [];
+  const list = JSON.parse(text) as unknown;
+  if (!Array.isArray(list)) throw new Error("OWNER_DEVICES is not a JSON list.");
+  return list.map((item: unknown) => {
+    const device = item as Partial<Record<"tokenId" | "clientId" | "name", unknown>>;
+    if (
+      typeof device.tokenId !== "string" ||
+      typeof device.clientId !== "string" ||
+      typeof device.name !== "string"
+    ) {
+      throw new Error("Each OWNER_DEVICES item needs tokenId, clientId and name.");
+    }
+    return { _tag: "device", tokenId: device.tokenId, clientId: device.clientId, name: device.name };
+  });
 }
 
 const send = (socket: WebSocket, message: ServerMessage) => socket.send(JSON.stringify(message));

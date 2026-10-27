@@ -84,6 +84,27 @@ function request(message: object): Promise<Result> {
   return new Promise((resolve) => waiting.set(requestId, resolve));
 }
 
+/** A JSON call to the admin API. Returns the body, or an error with the reason. */
+export async function callApi<T>(
+  method: "GET" | "POST",
+  path: string,
+  body?: object,
+): Promise<T | { error: string }> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method,
+      headers: { "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  } catch (error) {
+    return { error: `kitshn is not reachable: ${String(error)}` };
+  }
+  const data = (await response.json().catch(() => null)) as (T & { error?: string }) | null;
+  if (!response.ok || data === null) return { error: data?.error ?? `kitshn answered ${response.status}.` };
+  return data;
+}
+
 export const applyEdits = (edits: ReadonlyArray<Edit>) => request({ type: "apply", edits });
 export const undoRevision = (revision: number) => request({ type: "undo", revision });
 
@@ -93,5 +114,6 @@ export function toState(snapshot: Snapshot): State {
     resources: new Map(snapshot.resources.map((resource) => [resource.id, resource])),
     places: new Map(Object.entries(snapshot.places)),
     shareSettings: new Map(Object.entries(snapshot.shareSettings)),
+    paused: snapshot.paused,
   };
 }

@@ -22,7 +22,8 @@ export type Edit =
       readonly resourceId: string;
       readonly circleId: string;
       readonly after: ShareSetting | null;
-    };
+    }
+  | { readonly _tag: "pause"; readonly after: boolean };
 
 /** One stored change of a revision. Undo swaps `before` and `after`. */
 export type Change =
@@ -43,7 +44,8 @@ export type Change =
       readonly id: string;
       readonly before: ShareSetting | null;
       readonly after: ShareSetting | null;
-    };
+    }
+  | { readonly _tag: "pause"; readonly id: "pause"; readonly before: boolean; readonly after: boolean };
 
 export type Actor =
   | { readonly _tag: "person"; readonly email: string }
@@ -81,6 +83,8 @@ const current = (state: State, change: Pick<Change, "_tag" | "id">) => {
       return state.places.get(change.id) ?? null;
     case "shareSetting":
       return state.shareSettings.get(change.id) ?? null;
+    case "pause":
+      return state.paused;
   }
 };
 
@@ -89,7 +93,12 @@ export function resolveEdits(state: State, edits: ReadonlyArray<Edit>): Array<Ch
   const seen = new Set<string>();
   const changes: Array<Change> = [];
   for (const edit of edits) {
-    const id = edit._tag === "shareSetting" ? shareKey(edit.resourceId, edit.circleId) : edit.id;
+    const id =
+      edit._tag === "shareSetting"
+        ? shareKey(edit.resourceId, edit.circleId)
+        : edit._tag === "pause"
+          ? "pause"
+          : edit.id;
     const key = `${edit._tag}:${id}`;
     if (seen.has(key)) throw new RuleError(`The same ${edit._tag} "${id}" is edited twice in one change.`);
     seen.add(key);
@@ -125,14 +134,16 @@ export function applyChanges(state: State, changes: ReadonlyArray<Change>): Stat
   const circles = new Map(state.circles);
   const places = new Map(state.places);
   const shareSettings = new Map(state.shareSettings);
+  let paused = state.paused;
   const put = <V>(map: Map<string, V>, id: string, value: V | null) =>
     value === null ? map.delete(id) : map.set(id, value);
   for (const change of changes) {
     if (change._tag === "circle") put(circles, change.id, change.after);
     else if (change._tag === "place") put(places, change.id, change.after);
-    else put(shareSettings, change.id, change.after);
+    else if (change._tag === "shareSetting") put(shareSettings, change.id, change.after);
+    else paused = change.after;
   }
-  return { circles, resources: state.resources, places, shareSettings };
+  return { circles, resources: state.resources, places, shareSettings, paused };
 }
 
 /**
@@ -143,8 +154,9 @@ export function ruleViolation(state: State): string | null {
   if (!state.circles.has(OWNER_CIRCLE_ID)) return "The Owner circle cannot be deleted.";
   const admin = state.resources.get(ADMIN_RESOURCE_ID);
   if (!admin) return "The kitshn admin card is missing.";
-  const holding = circlesHolding(state, admin.id);
-  const publicCircle = holding.find((circle) => isPublicCircle(circle) && shareLevel(state, admin, circle));
+  const all = circlesHolding(state, admin.id);
+  const publicCircle = all.find((circle) => isPublicCircle(circle) && shareLevel(state, admin, circle));
+  const holding = all.filter((circle) => !state.paused || circle.id === OWNER_CIRCLE_ID);
   if (publicCircle) return `The kitshn admin cannot be shared with "${publicCircle.name}", which is public.`;
   const guarded = holding.some(
     (circle) =>
@@ -155,6 +167,9 @@ export function ruleViolation(state: State): string | null {
       shareLevel(state, admin, circle) === "control" &&
       (state.shareSettings.get(shareKey(admin.id, circle.id))?.endsAt ?? null) === null,
   );
+  if (!guarded && state.paused) {
+    return "A pause keeps only the Owner circle's share of the admin, so the Owner circle must hold the admin at control with a person and a passkey.";
+  }
   if (!guarded) {
     return "The kitshn admin must stay shared at control with a circle that has a person and needs a passkey.";
   }
@@ -209,6 +224,8 @@ export const describeDiff = (diff: ShareDiff) =>
     : `${diff.resource.name}: − ${diff.circle.name}`;
 
 export function summarize(before: State, after: State, changes: ReadonlyArray<Change>): string {
+  const pause = changes.find((change) => change._tag === "pause");
+  if (pause) return pause.after ? "Paused all shares (K-1504)" : "Resumed all shares";
   const diffs = shareDiff(before, after);
   if (diffs.length > 0) {
     const shown = diffs.slice(0, 3).map(describeDiff).join("; ");

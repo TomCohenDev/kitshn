@@ -13,6 +13,8 @@ export interface Env {
   readonly ACCESS_CONNECT_AUD: string;
   /** Comma-separated owner emails; they seed the Owner circle on the first start (K-1204). */
   readonly OWNER_EMAILS: string;
+  /** Optional JSON list of service tokens that join the Owner circle on the first start, for agents (K-106). */
+  readonly OWNER_DEVICES?: string;
   readonly CLOUDFLARE_ACCOUNT_ID: string;
   /** The API token that writes Access changes (K-406). Missing in local development. */
   readonly CLOUDFLARE_API_TOKEN?: string;

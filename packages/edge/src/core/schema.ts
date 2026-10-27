@@ -49,6 +49,7 @@ export const Edit_ = Schema.Union([
     circleId: Schema.String,
     after: Schema.NullOr(ShareSetting),
   }),
+  Schema.TaggedStruct("pause", { after: Schema.Boolean }),
 ]);
 
 export const Actor_ = Schema.Union([

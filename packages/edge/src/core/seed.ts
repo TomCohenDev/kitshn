@@ -1,5 +1,6 @@
 import {
   ADMIN_RESOURCE_ID,
+  type Member,
   type Circle,
   EVERYONE_CIRCLE_ID,
   OWNER_CIRCLE_ID,
@@ -8,13 +9,17 @@ import {
 } from "./model.ts";
 
 /** K-211, K-104: the Owner and Everyone circles, and the admin card inside Owner. */
-export function seed(ownerEmails: ReadonlyArray<string>, adminHost: string) {
+export function seed(
+  ownerEmails: ReadonlyArray<string>,
+  adminHost: string,
+  ownerDevices: ReadonlyArray<Extract<Member, { _tag: "device" }>> = [],
+) {
   const owner: Circle = {
     id: OWNER_CIRCLE_ID,
     name: "Owner",
     color: "#6C5CE7",
     level: "control",
-    members: ownerEmails.map((email) => ({ _tag: "email", email })),
+    members: [...ownerEmails.map((email): Member => ({ _tag: "email", email })), ...ownerDevices],
     match: "any",
     needsPasskey: true,
     endsAt: null,

@@ -7,7 +7,9 @@
 #
 # Optional: KITSHN_ACCOUNT_ID (when the token sees more than one account), KITSHN_BUNDLE (a URL or a
 # local path of kitshn-edge.tar.gz), KITSHN_SET_TOKEN=1 (store a new API token in the Worker),
-# KITSHN_GITHUB_CLIENT_ID and KITSHN_GITHUB_CLIENT_SECRET (add GitHub login, K-102).
+# KITSHN_GITHUB_CLIENT_ID and KITSHN_GITHUB_CLIENT_SECRET (add GitHub login, K-102),
+# KITSHN_OWNER_DEVICES (a JSON list of {tokenId, clientId, name} service tokens that join the Owner
+# circle when kitshn starts for the first time, for agents; K-106).
 set -eu
 
 API=https://api.cloudflare.com/client/v4
@@ -235,7 +237,7 @@ if [ "$(printf '%s' "$scripts" | jq -r --arg s "$SCRIPT" 'map(select(.id == $s))
 fi
 metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --argjson migrations "$migrations" \
   --arg host "$KITSHN_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" \
-  --arg owners "$KITSHN_OWNER_EMAILS" --arg account "$ACCOUNT" '
+  --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" '
   {
     main_module: "worker.js",
     compatibility_date: $date,
@@ -249,6 +251,7 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
       {type: "plain_text", name: "ACCESS_ADMIN_AUD", text: $admin_aud},
       {type: "plain_text", name: "ACCESS_CONNECT_AUD", text: $connect_aud},
       {type: "plain_text", name: "OWNER_EMAILS", text: $owners},
+      {type: "plain_text", name: "OWNER_DEVICES", text: $devices},
       {type: "plain_text", name: "CLOUDFLARE_ACCOUNT_ID", text: $account}
     ],
     keep_bindings: ["secret_text"]

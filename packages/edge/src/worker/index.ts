@@ -5,7 +5,16 @@ import {
   loginStep,
   objectKey,
 } from "../core/library.ts";
-import { type ContentLogins, callerOf, contentVisitorOf, cookieValues, deployerOf, freshCallerOf } from "./auth.ts";
+import {
+  type ContentLogins,
+  callerOf,
+  contentVisitorOf,
+  cookieValues,
+  deployerOf,
+  freshCallerOf,
+  stepCookie,
+  stepTokenProblem,
+} from "./auth.ts";
 import { escapeHtml, originDown, seenText } from "./live.ts";
 import type { Env } from "./env.ts";
 
@@ -86,19 +95,33 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
       ? { login: env.PAGES_LOGIN_AUD, passkey: env.PAGES_PASSKEY_AUD }
       : { login: env.FILES_LOGIN_AUD, passkey: env.FILES_PASSKEY_AUD };
   if (url.pathname === "/login" || url.pathname === "/login/passkey") {
-    // Access let the visitor through and set the cookie for the whole host; go back to the item, and say
-    // which step this was, so the item never sends the visitor to the same step again (no redirect loop).
+    // Access let the visitor through and sent the token of this step; go back to the item, and say which
+    // step this was, so the item never sends the visitor to the same step again (no redirect loop).
     const next = new URL(url.searchParams.get("next") ?? "/", url.origin);
     if (next.origin !== url.origin) return Response.redirect(url.origin, 302);
-    // A short cookie on the item's path, not a URL mark, so a bookmark or a shared link never carries it.
     const step = url.pathname === "/login" ? "login" : "passkey";
-    return new Response(null, {
-      status: 302,
-      headers: {
-        location: `${next.origin}${next.pathname}`,
-        "set-cookie": `${RETURN_MARK}=${step}; Max-Age=60; Path=${next.pathname}; Secure; HttpOnly; SameSite=Lax`,
-      },
-    });
+    const token = request.headers.get("cf-access-jwt-assertion");
+    const problem = await stepTokenProblem(token, env, step === "login" ? logins.login : logins.passkey);
+    if (problem)
+      return text(
+        `Access let you through the ${step === "passkey" ? "passkey login" : "login"} on ${url.host}, but kitshn` +
+          ` could not use it: ${problem} Log out at https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/logout,` +
+          ` then open ${next.origin}${next.pathname} again.`,
+        401,
+      );
+    const headers = new Headers({ location: `${next.origin}${next.pathname}` });
+    // The Worker keeps the token of this step itself, because the other login application replaces
+    // `CF_Authorization` (K-1004). The session of the step bounds it; the token's own expiry still counts.
+    headers.append(
+      "set-cookie",
+      `${stepCookie(step)}=${token}; Max-Age=${step === "login" ? 30 * 86400 : 86400}; Path=/; Secure; HttpOnly; SameSite=Lax`,
+    );
+    // A short cookie on the item's path, not a URL mark, so a bookmark or a shared link never carries it.
+    headers.append(
+      "set-cookie",
+      `${RETURN_MARK}=${step}; Max-Age=60; Path=${next.pathname}; Secure; HttpOnly; SameSite=Lax`,
+    );
+    return new Response(null, { status: 302, headers });
   }
   if (request.method !== "GET" && request.method !== "HEAD") return text("Use GET.", 405);
   const [, id = "", ...rest] = url.pathname.split("/");
@@ -127,10 +150,8 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
       401,
     );
     // The next try starts clean: no old login, no return mark.
-    response.headers.append(
-      "set-cookie",
-      "CF_Authorization=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax",
-    );
+    for (const name of ["CF_Authorization", stepCookie("login"), stepCookie("passkey")])
+      response.headers.append("set-cookie", `${name}=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax`);
     response.headers.append(
       "set-cookie",
       `${RETURN_MARK}=; Max-Age=0; Path=${url.pathname}; Secure; HttpOnly; SameSite=Lax`,

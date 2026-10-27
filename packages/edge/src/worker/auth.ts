@@ -103,6 +103,19 @@ export interface ContentLogins {
   readonly passkey: string;
 }
 
+/**
+ * K-1004: the cookie where the Worker keeps the token of one login step. Both login applications of a host
+ * write `CF_Authorization` on `/`, so the later one replaces the earlier one; the Worker keeps its own copy.
+ */
+export const stepCookie = (step: "login" | "passkey") => `kitshn-${step}-token`;
+
+/** K-1004: why the token that Access put on a login step does not prove that step, or null when it does. */
+export async function stepTokenProblem(token: string | null, env: Env, audience: string): Promise<string | null> {
+  if (!token) return "Access sent no token with this step.";
+  const identity = await accessIdentity(token, env, [audience]);
+  return typeof identity === "string" ? identity : null;
+}
+
 /** Every value of a cookie: a browser can send two with the same name (another path or a parent domain). */
 export const cookieValues = (header: string | null, name: string) =>
   (header ?? "")
@@ -122,7 +135,7 @@ export async function contentVisitorOf(
 ): Promise<{
   readonly visitor: ContentVisitor;
   readonly problem: string | null;
-  /** What each token was, for the loop guard text: "login", "passkey", or the reason it failed. */
+  /** What each token was, for the loop guard text: its source, then its step or the reason it failed. */
   readonly seen: ReadonlyArray<string>;
 }> {
   const ip = request.headers.get("cf-connecting-ip");
@@ -134,9 +147,12 @@ export async function contentVisitorOf(
       seen: [],
     };
   const header = request.headers.get("cf-access-jwt-assertion");
+  const cookies = request.headers.get("cookie");
   const tokens = [
     ...(header ? [header] : []),
-    ...cookieValues(request.headers.get("cookie"), "CF_Authorization"),
+    ...cookieValues(cookies, stepCookie("passkey")),
+    ...cookieValues(cookies, stepCookie("login")),
+    ...cookieValues(cookies, "CF_Authorization"),
   ];
   let problem: string | null = null;
   // A passkey login wins over a plain one, because it gives the higher level (K-103).
@@ -150,7 +166,7 @@ export async function contentVisitorOf(
       seen.push(`${source}: ${identity}`);
       continue;
     }
-    seen.push(`${source}: ${identity.audience === logins.passkey ? "passkey" : "login"} login`);
+    seen.push(`${source}: ${identity.audience === logins.passkey ? "passkey" : "plain"} login`);
     const visitor: ContentVisitor = {
       email: identity.email,
       clientId: identity.clientId,

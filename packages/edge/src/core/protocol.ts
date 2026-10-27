@@ -1,5 +1,5 @@
 import type { Actor } from "./changes.ts";
-import type { Command, Machine, MachineStatus, Sample } from "./machine.ts";
+import type { Command, Machine, MachineStatus, ProjectVolume, Sample } from "./machine.ts";
 import type { Circle, PauseMode, Point, Resource, ShareSetting, Stack } from "./model.ts";
 import type { RepoGate } from "./repos.ts";
 
@@ -65,6 +65,8 @@ export type ServerMessage =
       readonly requestId: string;
       readonly ok: true;
       readonly revision: number | null;
+      /** K-909: what an undo of an app removal started again, or why it did not. */
+      readonly notes: ReadonlyArray<string>;
     }
   | { readonly type: "result"; readonly requestId: string; readonly ok: false; readonly error: string };
 
@@ -74,6 +76,8 @@ export interface MachineView {
   readonly lastSeen: number | null;
   readonly status: MachineStatus | null;
   readonly sample: Sample | null;
+  /** K-909: idle volumes of kitshn apps that have no card; each has its own delete. */
+  readonly orphanVolumes: ReadonlyArray<ProjectVolume>;
 }
 
 export interface JobView {

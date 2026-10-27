@@ -7,6 +7,7 @@ import {
   invert,
   refuseRaiseWhilePaused,
   refuseResume,
+  removeAppChanges,
   resolveEdits,
   ruleViolation,
   shareDiff,
@@ -222,6 +223,50 @@ describe("changes and undo (K-1501, K-1502)", () => {
     expect(() => resolveEdits(start(), [{ _tag: "place", id: "nope", after: { x: 0, y: 0 } }])).toThrow(
       /No card/,
     );
+  });
+});
+
+describe("app removal and its undo (K-909, K-1502)", () => {
+  const shared = () =>
+    edit(start(), [{ _tag: "shareSetting", resourceId: "riffle", circleId: "owner", after: { level: null, endsAt: 5 } }]).after;
+
+  it("removes the card with its place and shares, and undo puts it back in the same place and circles", () => {
+    const state = shared();
+    const removal = removeAppChanges(state, "riffle");
+    const removed = applyChanges(state, removal);
+    expect(removed.resources.has("riffle")).toBe(false);
+    expect(removed.places.has("riffle")).toBe(false);
+    expect(removed.shareSettings.size).toBe(0);
+    expect(summarize(state, removed, removal)).toBe("Removed the app riffle (K-909)");
+    const undo = invert(removal);
+    expect(conflictOf(removed, undo)).toBeNull();
+    const back = applyChanges(removed, undo);
+    expect(back.places).toEqual(state.places);
+    expect(back.shareSettings).toEqual(state.shareSettings);
+    expect(back.resources.get("riffle")).toEqual({ ...state.resources.get("riffle"), status: "unknown" });
+    expect(summarize(removed, back, undo)).toBe("Restored the app riffle (K-909)");
+  });
+
+  it("takes a card out of its stack and undo puts it back", () => {
+    const point = { x: 0, y: 40 };
+    const { after: state } = edit(start(), [
+      { _tag: "place", id: "riffle", after: point },
+      { _tag: "place", id: "kitshn-admin", after: point },
+      { _tag: "stack", id: "s1", after: { id: "s1", name: "Sites", members: ["kitshn-admin", "riffle"] } },
+    ]);
+    const removal = removeAppChanges(state, "riffle");
+    const removed = applyChanges(state, removal);
+    expect(removed.stacks.size).toBe(0);
+    expect(ruleViolation(removed)).toBeNull();
+    expect(applyChanges(removed, invert(removal)).stacks).toEqual(state.stacks);
+  });
+
+  it("refuses an undo once a later deploy made the card again, and a card that is no app", () => {
+    const state = shared();
+    const removal = removeAppChanges(state, "riffle");
+    expect(conflictOf(applyChanges(state, removal.slice(0, -1)), invert(removal))).toBe('app "riffle"');
+    expect(() => removeAppChanges(state, "kitshn-admin")).toThrow(/not an app/);
+    expect(() => removeAppChanges(state, "gone")).toThrow(/No card/);
   });
 });
 

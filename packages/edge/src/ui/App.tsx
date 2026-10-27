@@ -4,6 +4,7 @@ import {
   type Edit,
   type ShareDiff,
   applyChanges,
+  isAppCard,
   resolveEdits,
   shareDiff,
 } from "../core/changes.ts";
@@ -421,9 +422,23 @@ export function App() {
     const result = await undoRevision(revision);
     showToast(
       result.ok
-        ? { text: `Undid #${revision}.`, error: false, undo: null }
+        ? { text: [`Undid #${revision}.`, ...result.notes].join(" "), error: false, undo: null }
         : { text: result.error, error: true, undo: null },
     );
+  };
+
+  /** K-909: no confirm; the toast and History undo it. */
+  const removeApp = async (resource: Resource) => {
+    const result = await callApi<{ revision: number | null; notes: ReadonlyArray<string> }>(
+      "DELETE",
+      `/api/apps/${encodeURIComponent(resource.id)}`,
+    );
+    if ("error" in result) {
+      showToast({ text: result.error, error: true, undo: null });
+      return;
+    }
+    setSelection({ cards: new Set(), circle: null });
+    showToast({ text: [`Removed ${resource.name}.`, ...result.notes].join(" "), error: false, undo: result.revision });
   };
 
   if (!state || !store.snapshot) {
@@ -788,6 +803,7 @@ export function App() {
           if (to) void commit([{ _tag: "place", id: resource.id, after: to }], []);
         }}
         onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
+        onRemoveApp={(resource) => void removeApp(resource)}
         paused={store.snapshot.paused !== null}
         machines={machines}
         version={store.snapshot.version}
@@ -850,6 +866,7 @@ export function App() {
               location.hash = "map";
             },
             reshare: (resource, circle, share) => void reshare(resource, circle, share),
+            removeApp: (resource) => void removeApp(resource),
             newCircle: () => void newCircle(),
             fit,
             history: () => (location.hash = "history"),
@@ -963,6 +980,7 @@ function Panel(props: {
   onDeleteCircle: (circle: Circle) => void;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean) => void;
+  onRemoveApp: (resource: Resource) => void;
   paused: boolean;
   warnings: ReadonlyArray<string>;
   machines: ReadonlyMap<string, MachineView>;
@@ -1009,6 +1027,7 @@ function Panel(props: {
         onEdit={props.onEdit}
         onPlace={props.onPlace}
         onReshare={props.onReshare}
+        onRemoveApp={props.onRemoveApp}
         machine={props.machines.get(cards[0].id) ?? null}
         version={props.version}
         jobs={props.jobs}
@@ -1180,6 +1199,7 @@ function CardPanel(props: {
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean) => void;
+  onRemoveApp: (resource: Resource) => void;
   machine: MachineView | null;
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
@@ -1244,6 +1264,15 @@ function CardPanel(props: {
       {!state.places.has(resource.id) ? (
         <button class="btn primary" onClick={() => props.onPlace(resource)}>
           Place on the map
+        </button>
+      ) : null}
+      {isAppCard(resource) ? (
+        <button
+          class="btn danger"
+          title="Takes down what the deploy made and keeps the volumes. Undo starts it again (K-909)."
+          onClick={() => props.onRemoveApp(resource)}
+        >
+          Remove app
         </button>
       ) : null}
       {props.machine ? (
@@ -1335,6 +1364,8 @@ function CardPanel(props: {
 interface PaletteActions {
   select: (selection: Selection) => void;
   reshare: (resource: Resource, circle: Circle, share: boolean) => void;
+  /** K-909 */
+  removeApp: (resource: Resource) => void;
   newCircle: () => void;
   fit: () => void;
   history: () => void;
@@ -1370,6 +1401,8 @@ function Palette(props: {
         label: `${KINDS[resource.kind].icon} ${resource.name}`,
         run: () => actions.select({ cards: new Set([resource.id]), circle: null }),
       });
+      if (isAppCard(resource))
+        all.push({ label: `Remove the app ${resource.name}`, run: () => actions.removeApp(resource) });
       if (!state.places.has(resource.id)) continue;
       const holding = new Set(circlesHolding(state, resource.id).map((circle) => circle.id));
       for (const circle of state.circles.values()) {

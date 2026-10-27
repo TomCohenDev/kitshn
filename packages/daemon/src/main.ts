@@ -4,6 +4,7 @@ import {
   type Command,
   type DaemonMessage,
   type JoinSecrets,
+  type ProjectVolume,
   type ServerToDaemon,
 } from "@kitshn/edge/machine";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -47,6 +48,7 @@ import {
   serviceFile,
 } from "./service.ts";
 import { type SiteEntry, addSite, parseSiteFile, probe, targetOf } from "./sites.ts";
+import { RUNNING_FORMAT, VOLUME_FORMAT, idleVolumes, volumeRemoveRefusal } from "./volumes.ts";
 
 declare const KITSHN_VERSION: string;
 const VERSION = typeof KITSHN_VERSION === "string" ? KITSHN_VERSION : "dev";
@@ -638,6 +640,34 @@ async function composeDown(command: Extract<Command, { kind: "compose-down" }>):
   }
 }
 
+/**
+ * K-909: the idle volumes of kitshn apps, read from Docker; null when Docker does not answer. Known limit:
+ * runProgram keeps the last 64 KiB of output, which cuts the list at about a thousand volumes. Revisit then.
+ */
+async function readIdleVolumes(): Promise<Array<ProjectVolume> | null> {
+  const volumes = await runProgram("docker", ["volume", "ls", "--format", VOLUME_FORMAT]);
+  const running = await runProgram("docker", ["ps", "--format", RUNNING_FORMAT]);
+  if (!volumes.ok || !running.ok) return null;
+  const apps = join(paths.data, "apps");
+  return idleVolumes(volumes.output, running.output, existsSync(apps) ? readdirSync(apps) : []);
+}
+
+/** K-909: tells kitshn the idle volumes, so the machine card lists the orphaned ones. */
+async function reportVolumes() {
+  const volumes = await readIdleVolumes();
+  if (volumes === null || socket?.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({ type: "volumes", volumes } satisfies DaemonMessage));
+}
+
+/** K-909: deletes one volume, only while it is still an idle volume of that kitshn app. */
+async function removeVolume(command: Extract<Command, { kind: "compose-volume-remove" }>): Promise<JobOutcome> {
+  const idle = await readIdleVolumes();
+  if (idle === null) return { ok: false, exitCode: null, output: "Docker does not answer, so the volume stays." };
+  const refusal = volumeRemoveRefusal(idle, command);
+  if (refusal !== null) return { ok: false, exitCode: null, output: refusal };
+  return runProgram("docker", ["volume", "rm", command.volume]);
+}
+
 /** One Compose job per app at a time: a teardown never runs during the build of the same app. */
 const appQueues = new Map<string, Promise<unknown>>();
 function oneAtATime(project: string, work: () => Promise<JobOutcome>): Promise<JobOutcome> {
@@ -650,6 +680,7 @@ function runJob(command: Command): Promise<JobOutcome> {
   if (command.kind === "compose" || command.kind === "compose-redeploy")
     return oneAtATime(command.project, () => composeUp(command));
   if (command.kind === "compose-down") return oneAtATime(command.project, () => composeDown(command));
+  if (command.kind === "compose-volume-remove") return oneAtATime(command.project, () => removeVolume(command));
   if (command.kind === "diagnostics") {
     const text = [
       `kitshn ${VERSION}`,
@@ -753,6 +784,7 @@ function connect(config: JoinSecrets) {
       report();
       lastSites = "";
       void checkSites().catch((error: unknown) => log(`site check failed: ${String(error)}`));
+      void reportVolumes().catch((error: unknown) => log(`volume report failed: ${String(error)}`));
       ws.send(JSON.stringify({ type: "sample", sample: sample() } satisfies DaemonMessage));
       ping = setInterval(() => {
         if (Date.now() - lastPong > PONG_TIMEOUT_MS) {
@@ -783,6 +815,9 @@ function connect(config: JoinSecrets) {
             // The connection can change while a job runs; the result goes out on the current one.
             pendingResults.push({ type: "jobResult", id: message.id, result });
             flushResults();
+            // K-909: a Compose job can leave volumes idle or take them away.
+            if (message.command.kind.startsWith("compose"))
+              void reportVolumes().catch((error: unknown) => log(`volume report failed: ${String(error)}`));
           });
       }
     };

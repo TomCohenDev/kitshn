@@ -1020,7 +1020,8 @@ export class Kitshn extends DurableObject<Env> {
           fail(`This kitshn runs the build "${command.version}", which has no release to update to.`);
           continue;
         }
-        if (!status.capabilities?.includes("update")) {
+        // A daemon from before the gzipped release files updates with the shell script, which unpacks them.
+        if (!status.capabilities?.includes("update-gz")) {
           const script =
             status.version === "dev" ? null : legacyUpdateScript(command.version, status.os, status.arch);
           if (!script) {

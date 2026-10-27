@@ -47,8 +47,9 @@ else
   esac
   base="https://github.com/Yarden-zamir/kitshn/releases/download/edge-$version"
   echo "Downloading the kitshn daemon of release $version"
-  curl -fsSL "$base/kitshn-$os-$cpu" -o "$bin/kitshn.new"
-  expected=$(curl -fsSL "$base/SHA256SUMS" | awk -v f="kitshn-$os-$cpu" '$2 == f || $2 == "*" f { print $1 }')
+  # K-617: the daemon comes gzipped; SHA256SUMS names the .gz file, so the check comes before unpacking.
+  curl -fsSL "$base/kitshn-$os-$cpu.gz" -o "$bin/kitshn.new"
+  expected=$(curl -fsSL "$base/SHA256SUMS" | awk -v f="kitshn-$os-$cpu.gz" '$2 == f || $2 == "*" f { print $1 }')
   if command -v sha256sum >/dev/null 2>&1; then
     actual=$(sha256sum "$bin/kitshn.new" | awk '{ print $1 }')
   else
@@ -59,6 +60,12 @@ else
     echo "kitshn: the daemon does not match the SHA256SUMS of release $version." >&2
     exit 1
   fi
+  if ! gzip -dc "$bin/kitshn.new" > "$bin/kitshn.unpacked"; then
+    rm -f "$bin/kitshn.new" "$bin/kitshn.unpacked"
+    echo "kitshn: could not unpack the daemon; this needs gzip." >&2
+    exit 1
+  fi
+  mv "$bin/kitshn.unpacked" "$bin/kitshn.new"
 fi
 chmod 755 "$bin/kitshn.new"
 mv "$bin/kitshn.new" "$bin/kitshn"

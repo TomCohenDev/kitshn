@@ -1,4 +1,4 @@
-import type { Edit } from "./changes.ts";
+import type { Change } from "./changes.ts";
 import {
   ADMIN_RESOURCE_ID,
   type Circle,
@@ -72,20 +72,21 @@ export function agentMayRunOn(state: State, visitor: Visitor, machineId: string,
 }
 
 /**
- * K-718: why an agent key may not make these edits, or null. It may only move cards that it controls, and
+ * K-718: why an agent key may not make these changes, or null. It may only move cards that it controls, and
  * only from and to places inside its agent circles at the level `control`, or out of every circle; circles,
- * members, stacks, levels and the pause stay with the admin.
+ * members, stacks, levels and the pause stay with the admin. These are the resolved changes, so the other
+ * cards of a stack that a move takes along (K-521) pass the same check.
  */
 export function agentRefusal(
   state: State,
   after: State,
   visitor: Visitor,
-  edits: ReadonlyArray<Edit>,
+  changes: ReadonlyArray<Change>,
   now: number,
 ) {
   const controlled = cardsControlledBy(state, visitor, now);
   const own = circlesOf(state, visitor, now);
-  for (const edit of edits) {
+  for (const edit of changes) {
     if (edit._tag !== "place") return `An agent key may only move cards; it cannot change a ${edit._tag}.`;
     if (!controlled.has(edit.id))
       return `This key has no control on the card "${state.resources.get(edit.id)?.name ?? edit.id}".`;

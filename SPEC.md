@@ -122,6 +122,8 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-518** Map state (places, circles, members, shares, stacks) lives in the kitshn database, never in Git (K-001).
 - **K-519** Views next to the map: History (with presets, K-716), Queue, Seats, Machines (a table of status and health), Library (section 10). Each view and each selected item has its own link.
 - **K-520** "Previews" shows a live view of up to four site and page cards near the centre of the map, from zoom 80%. Each is a lazy, sandboxed frame that takes no clicks until "Interact". A site behind Access shows only when the browser has its Access session already, because the Access login refuses to load in a frame; the card offers "Open site" to log in.
+- **K-521** The owner can stack cards: drop a card on another card, or select several cards and choose "Stack". A stack has a name and holds two or more cards; a card is in one stack at most. Its cards sit on one point, so the stack moves as one and every card of it gets the same circles; moving one card moves its stack. A level override (K-205) and an end date (K-209) stay per card; when a stacked card's share ends, the card leaves its stack. Closed, a stack is one card that lists its cards from top to bottom; a click opens it as a column of cards. Stacks by group (K-508), such as the previews of an app, stay as they are.
+- **K-522** The stack panel renames the stack, pulls one card out (it lands next to the stack, in the same circles, so no share changes), and "Unstack" spreads all cards in the same circles. Each of these, and a drop that makes or grows a stack, is one revision with Undo (K-1502); a stack that enters a public circle asks first (K-210). A drop from the tray never stacks, and a stack by group dropped on a card joins that card's stack. While a drag is over a card, the card is outlined and the label says "Stack with" it.
 
 ## 6. Machines and the daemon
 
@@ -189,7 +191,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 
 ## 8. Recipes and deploys
 
-- **K-801** A recipe is `kitshn.config.ts` with `export default defineApp({...})`. The value is one object literal. The `kitshn` npm package exports `defineApp` and its types. Until it is on the npm registry, an app installs it from the `kitshn.tgz` asset of the `edge` release.
+- **K-801** A recipe is `kitshn.config.ts` with `export default defineApp({...})`. The value is one object literal. The `kitshn` npm package exports `defineApp` and its types as a `.d.ts` with no imports, so an editor shows recipe mistakes; it has no runtime dependencies, because its CLI is one bundled file. Until it is on the npm registry, an app does not need it: Actions runs `kitshn check` from the release. For editor types, install the `kitshn.tgz` asset of an `edge-<version>` release without saving it (`npm i --no-save <address>`), because the release workflow keeps only the newest releases. A later `npm i` removes it again, so an app keeps `kitshn.config.ts` out of its own `tsc` run.
 - **K-802** Recipes do not compute. A lint rule in `kitshn check` refuses loops, conditions, function calls other than `defineApp`, and imports other than `kitshn`. The lint rule is enough, because kitshn never runs repo code (K-803).
 - **K-803** GitHub Actions reads the recipe without running it: `kitshn check` turns the literal object into JSON. kitshn checks the JSON with the same schema. kitshn never runs repo code. The reusable workflow is `.github/workflows/kitshn2-deploy.yml` in this repo.
 - **K-804** Kinds: a Compose app (`compose`), a static site (`static`), a Worker app (`worker`). A recipe has exactly one kind.
@@ -198,8 +200,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
   import { defineApp } from "kitshn";
 
   export default defineApp({
-    compose: { runsOn: ["docker", "server"], expose: { web: "riffle" } },
-    needs: { vars: ["RIFFLE_BASE_URL"], secrets: ["DATABASE_URL"] },
+    compose: { runsOn: ["docker", "server"] },
     deploy: [
       { on: "push", branch: "main", name: "prod", address: "riffle.example.com" },
       { on: "pull_request", name: "pr-{pr}", ephemeral: true, startsIn: "Owner" },

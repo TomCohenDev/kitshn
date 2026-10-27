@@ -73,12 +73,23 @@ export interface ShareSetting {
 
 export const shareKey = (resourceId: string, circleId: string) => `${resourceId}/${circleId}`;
 
+/**
+ * K-521: a stack that the owner makes. Its cards sit on one point, so they share the same circles (K-204),
+ * move as one, and show as one list card. A card is in at most one stack.
+ */
+export interface Stack {
+  readonly id: string;
+  readonly name: string;
+  readonly members: ReadonlyArray<string>;
+}
+
 export interface State {
   readonly circles: ReadonlyMap<string, Circle>;
   readonly resources: ReadonlyMap<string, Resource>;
   /** Card centres. A resource without a place sits in the tray (K-509). */
   readonly places: ReadonlyMap<string, Point>;
   readonly shareSettings: ReadonlyMap<string, ShareSetting>;
+  readonly stacks: ReadonlyMap<string, Stack>;
   /** K-1504: while paused, only the Owner circle keeps its share of the admin. */
   readonly paused: boolean;
   /** Joined machines (K-602); a machine member matches its service token (K-107). */

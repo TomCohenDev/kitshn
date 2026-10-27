@@ -52,13 +52,16 @@ function start(): State {
     resources: new Map([...s.resources, site, { ...site, id: "nas", name: "nas" }].map((r) => [r.id, r])),
     places: new Map([...s.places, ["site", { x: 0, y: 1000 }], ["nas", { x: 2400, y: 1000 }]]),
     shareSettings: new Map(),
+    stacks: new Map(),
     paused: false,
     machines: new Map(),
   };
 }
 
-const check = (state: State, edits: Array<Edit>) =>
-  agentRefusal(state, applyChanges(state, resolveEdits(state, edits)), as("agent-1"), edits, 0);
+const check = (state: State, edits: Array<Edit>) => {
+  const changes = resolveEdits(state, edits);
+  return agentRefusal(state, applyChanges(state, changes), as("agent-1"), changes, 0);
+};
 
 describe("agent keys (K-718)", () => {
   it("moves a card it controls between its own circles", () => {
@@ -78,7 +81,7 @@ describe("agent keys (K-718)", () => {
     expect(check(start(), [{ _tag: "place", id: "site", after: { x: 1800, y: 1000 } }])).toMatch(/public/);
     expect(check(start(), [{ _tag: "place", id: "site", after: { x: 1200, y: 1000 } }])).toMatch(/watch/);
     expect(
-      check(start(), [{ _tag: "shareSetting", resourceId: "site", circleId: "agents", after: null }]),
+      check(start(), [{ _tag: "shareSetting", resourceId: "site", circleId: "agents", after: { level: "view", endsAt: null } }]),
     ).toMatch(/only move/);
   });
   it("gets nothing from network or Everyone circles, and a token that no circle names manages nothing", () => {
@@ -122,5 +125,17 @@ describe("agent keys (K-718)", () => {
   });
   it("calls a device an agent only when it has an agent circle", () => {
     expect(isAgentKey(start(), { _tag: "device", tokenId: "t9", clientId: "tv", name: "TV" }, 0)).toBe(false);
+  });
+  it("refuses a move that takes along a stacked card the key does not manage", () => {
+    const base = start();
+    const other = { ...base.resources.get("site")!, id: "other", name: "other" };
+    const state: State = {
+      ...base,
+      resources: new Map(base.resources).set("other", other),
+      places: new Map(base.places).set("other", { x: 0, y: 1000 }),
+      shareSettings: new Map([["other/agents", { level: "view", endsAt: null }]]),
+      stacks: new Map([["s1", { id: "s1", name: "pair", members: ["site", "other"] }]]),
+    };
+    expect(check(state, [{ _tag: "place", id: "site", after: { x: 600, y: 1000 } }])).toMatch(/other/);
   });
 });

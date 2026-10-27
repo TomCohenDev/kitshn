@@ -1,4 +1,10 @@
 import { Schema } from "effect";
+import type {
+  ComposeApp as PublicComposeApp,
+  DeployEntry as PublicDeployEntry,
+  Recipe as PublicRecipe,
+  StaticApp as PublicStaticApp,
+} from "./index.ts";
 
 const Name = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9{}-]{0,40}$/));
 
@@ -41,6 +47,28 @@ export const Recipe = Schema.Union([
   Schema.Struct({ compose: ComposeApp, deploy }),
 ]);
 export type Recipe = typeof Recipe.Type;
+
+// The public types of index.ts and the schema accept the same recipes; a failing line names the type.
+// Strict equality: plain assignability both ways misses a key that is optional on one side only.
+type Same<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+type Keys<T> = T extends unknown ? keyof T : never;
+// The schema's deploy is a plain array; the public one is non-empty, so the editor refuses `[]` too.
+type Kind<T, K extends string, Never extends string> = {
+  readonly [P in keyof Omit<Extract<T, Record<K, unknown>>, Never>]: P extends "deploy"
+    ? ReadonlyArray<PublicDeployEntry>
+    : Extract<T, Record<K, unknown>>[P];
+};
+type Assert<T extends true> = T;
+export type PublicTypesMatch = [
+  Assert<Same<typeof DeployEntry.Type, PublicDeployEntry>>,
+  Assert<Same<typeof StaticApp.Type, PublicStaticApp>>,
+  Assert<Same<typeof ComposeApp.Type, PublicComposeApp>>,
+  Assert<Same<Keys<Recipe>, Keys<PublicRecipe>>>,
+  Assert<Same<Extract<Recipe, { static: unknown }>, Kind<PublicRecipe, "static", "compose">>>,
+  Assert<Same<Extract<Recipe, { compose: unknown }>, Kind<PublicRecipe, "compose", "static">>>,
+  Assert<Same<Pick<Extract<PublicRecipe, { static: PublicStaticApp }>, "compose">, { readonly compose?: never }>>,
+  Assert<Same<Pick<Extract<PublicRecipe, { compose: PublicComposeApp }>, "static">, { readonly static?: never }>>,
+];
 
 export const decodeRecipe = Schema.decodeUnknownSync(Recipe, { onExcessProperty: "error" });
 

@@ -32,6 +32,8 @@ type Drag =
       readonly start: Point;
       readonly origins: ReadonlyMap<string, Point>;
       readonly clicked: string;
+      /** The card under the grab point, which a drop never stacks onto, so a nudge stays a move. */
+      under: string | null;
       moved: boolean;
     }
   | {
@@ -47,8 +49,15 @@ type Drag =
 /** Cards with one group stack when they share the same circles (K-508). */
 export function stacksOf(state: State): Map<string, Array<string>> {
   const stacks = new Map<string, Array<string>>();
+  // K-521: the owner's stacks come first; their cards leave the stacks by group.
+  const owned = new Set<string>();
+  for (const stack of state.stacks.values()) {
+    const placed = stack.members.filter((id) => state.places.has(id));
+    for (const id of placed) owned.add(id);
+    if (placed.length > 1) stacks.set(`${USER_STACK}${stack.id}`, placed);
+  }
   for (const resource of state.resources.values()) {
-    if (!resource.group || !state.places.has(resource.id)) continue;
+    if (!resource.group || owned.has(resource.id) || !state.places.has(resource.id)) continue;
     const circles = circlesHolding(state, resource.id)
       .map((circle) => circle.id)
       .sort()
@@ -59,6 +68,9 @@ export function stacksOf(state: State): Map<string, Array<string>> {
   for (const [key, ids] of stacks) if (ids.length < 2) stacks.delete(key);
   return stacks;
 }
+
+/** The key prefix of a stack that the owner made, as opposed to a stack by group (K-508). */
+export const USER_STACK = "stack:";
 
 interface Props {
   /** K-1101: files dropped from the computer, with the map point under the pointer. */
@@ -78,6 +90,8 @@ interface Props {
   readonly openStacks: ReadonlySet<string>;
   readonly onToggleStack: (key: string) => void;
   readonly onCommit: (edits: Array<Edit>, diffs: Array<ShareDiff>) => void;
+  /** K-522: cards dropped on another card become one stack with it. */
+  readonly onStackOnto: (ids: Array<string>, target: string) => void;
 }
 
 const LONG_PRESS_MS = 350;
@@ -85,6 +99,9 @@ const LONG_PRESS_MS = 350;
 const px = (value: number) => `${value}px`;
 /** An open stack spaces its cards by this much: the card width (styles.css) plus a gap. */
 const STACK_GAP = 205;
+/** The row step of an open owner's stack. */
+const STACK_ROW = 100;
+
 /** Live previews: at most this many frames, for these kinds, from this zoom on. */
 const MAX_PREVIEWS = 4;
 const PREVIEW_SCALE = 0.8;
@@ -103,6 +120,7 @@ const ZOOMED_OUT = 0.4;
 export function MapView(props: Props) {
   const { state, view } = props;
   const [drag, setDrag] = useState<Drag | null>(null);
+  const [stackTarget, setStackTarget] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ state: State; diffs: Array<ShareDiff>; pointer: Point } | null>(null);
   const longPress = useRef<number | null>(null);
   const viewport = useRef<HTMLDivElement>(null);
@@ -116,6 +134,18 @@ export function MapView(props: Props) {
   });
   const stacks = stacksOf(shown);
   const stackOf = (id: string) => [...stacks.entries()].find(([, ids]) => ids.includes(id));
+
+  /** The drawn card under the pointer that a drop stacks onto, from what is on screen (K-522). */
+  const stackTargetAt = (clientX: number, clientY: number, dragged: ReadonlySet<string>) => {
+    const top = document
+      .elementsFromPoint(clientX, clientY)
+      .find((element) => !dragged.has(element.closest<HTMLElement>("[data-card]")?.dataset["card"] ?? ""));
+    const id = top?.closest<HTMLElement>("[data-card]")?.dataset["card"];
+    if (!id) return null;
+    // A stack by group (K-508) keeps its cards; a drop there moves instead.
+    const stack = stackOf(id);
+    return stack && !stack[0].startsWith(USER_STACK) ? null : id;
+  };
 
   const preview = (changes: Array<Change>, pointer: Point) => {
     const next = applyChanges(state, changes);
@@ -169,10 +199,20 @@ export function MapView(props: Props) {
       const ids = new Set(props.selection.cards.has(id) ? props.selection.cards : [id]);
       const stack = stackOf(id);
       if (stack && !props.openStacks.has(stack[0])) for (const member of stack[1]) ids.add(member);
-      if (!props.selection.cards.has(id)) props.onSelect({ cards: new Set([id]), circle: null });
+      // K-521: an owner's stack moves as one, also when it is open; Pull out takes a card out.
+      for (const card of ids) {
+        const own = stackOf(card);
+        if (own?.[0].startsWith(USER_STACK)) for (const member of own[1]) ids.add(member);
+      }
+      // A closed stack of the owner is selected whole, so its panel shows (K-521).
+      const whole = stack && !props.openStacks.has(stack[0]) && stack[0].startsWith(USER_STACK);
+      if (!props.selection.cards.has(id))
+        props.onSelect({ cards: whole ? new Set(ids) : new Set([id]), circle: null });
       const origins = new Map<string, Point>();
       for (const card of ids) origins.set(card, state.places.get(card) ?? world);
-      const start = () => setDrag({ type: "cards", start: world, origins, clicked: id, moved: false });
+      const under = stackTargetAt(event.clientX, event.clientY, ids);
+      const start = () =>
+        setDrag({ type: "cards", start: world, origins, clicked: id, under, moved: false });
       // K-516: on touch, a long press starts the drag, so a swipe still pans.
       if (event.pointerType === "touch") {
         setDrag({ type: "pan", sx: event.clientX, sy: event.clientY, view });
@@ -230,6 +270,10 @@ export function MapView(props: Props) {
         { x: Math.round(origin.x + dx), y: Math.round(origin.y + dy) },
       ]);
       preview(placeChanges(moves), pointer);
+      const target = stackTargetAt(event.clientX, event.clientY, new Set(drag.origins.keys()));
+      // Once the pointer leaves the card it was grabbed over, that card is a target like any other.
+      if (target !== drag.under) drag.under = null;
+      setStackTarget(target === drag.under ? null : target);
       return;
     }
     if (drag.type === "circle") {
@@ -255,10 +299,23 @@ export function MapView(props: Props) {
     );
   };
 
-  const onPointerUp = () => {
+  const onPointerUp = (event: PointerEvent) => {
     if (longPress.current !== null) {
       window.clearTimeout(longPress.current);
       longPress.current = null;
+    }
+    // K-522: cards let go over another card stack with it instead of moving.
+    if (drag?.type === "cards" && drag.moved) {
+      const dragged = new Set(drag.origins.keys());
+      const found = stackTargetAt(event.clientX, event.clientY, dragged);
+      const target = found === drag.under ? null : found;
+      setStackTarget(null);
+      if (target) {
+        props.onStackOnto([...dragged], target);
+        setDrag(null);
+        setDraft(null);
+        return;
+      }
     }
     if (drag?.type === "cards" && !drag.moved) {
       const stack = stackOf(drag.clicked);
@@ -291,7 +348,11 @@ export function MapView(props: Props) {
           .filter(([id]) => {
             const kind = shown.resources.get(id)?.kind;
             const stack = stackOf(id);
-            const drawn = !stack || props.openStacks.has(stack[0]) || stack[1][0] === id;
+            // A closed owner's stack draws a list, not a frame.
+            const drawn =
+              !stack ||
+              props.openStacks.has(stack[0]) ||
+              (stack[1][0] === id && !stack[0].startsWith(USER_STACK));
             return kind !== undefined && PREVIEW_KINDS.has(kind) && !props.hidden.has(kind) && drawn;
           })
           .map(([id, place]) => ({ id, x: place.x * view.s + view.x, y: place.y * view.s + view.y }))
@@ -316,7 +377,14 @@ export function MapView(props: Props) {
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onPointerCancel={onPointerUp}
+      onPointerCancel={() => {
+        // A cancelled pointer drops nothing; the cards go back.
+        if (longPress.current !== null) window.clearTimeout(longPress.current);
+        longPress.current = null;
+        setStackTarget(null);
+        setDrag(null);
+        setDraft(null);
+      }}
       onWheel={onWheel}
       onContextMenu={(event) => event.preventDefault()}
       onDragOver={(event) => {
@@ -357,18 +425,45 @@ export function MapView(props: Props) {
           const stack = stackOf(resource.id);
           const open = stack ? props.openStacks.has(stack[0]) : false;
           const index = stack ? stack[1].indexOf(resource.id) : 0;
-          if (stack && !open && index > 0) return null;
+          const own = stack?.[0].startsWith(USER_STACK) ?? false;
+          // A closed owner's stack shows through its first card of a shown kind.
+          const face = own
+            ? stack?.[1].find((id) => !props.hidden.has(shown.resources.get(id)?.kind ?? resource.kind))
+            : stack?.[1][0];
+          if (stack && !open && resource.id !== face) return null;
           const head = stack ? shown.places.get(stack[1][0] ?? "") : undefined;
-          const at = stack && open && head ? { x: head.x + index * STACK_GAP, y: head.y } : place;
+          // An owner's stack opens downwards, as a list; a stack by group opens in a row (K-508, K-521).
+          const at =
+            stack && open && head
+              ? own
+                ? { x: head.x, y: head.y + index * STACK_ROW }
+                : { x: head.x + index * STACK_GAP, y: head.y }
+              : place;
           const selected = props.selection.cards.has(resource.id);
           if (zoomedOut) {
             return (
               <div
                 key={resource.id}
                 data-card={resource.id}
-                class={`mini${selected ? " sel" : ""}`}
+                class={`mini${selected ? " sel" : ""}${stackTarget === resource.id ? " stack-target" : ""}`}
                 style={{ left: px(at.x), top: px(at.y), background: KINDS[resource.kind].color }}
                 title={resource.name}
+              />
+            );
+          }
+          if (stack && own && !open) {
+            const userStack = shown.stacks.get(stack[0].slice(USER_STACK.length));
+            return (
+              <StackCard
+                key={resource.id}
+                id={resource.id}
+                name={userStack?.name ?? "Stack"}
+                members={stack[1].flatMap((id) => shown.resources.get(id) ?? [])}
+                state={shown}
+                at={at}
+                selected={stack[1].some((id) => props.selection.cards.has(id))}
+                dragging={draggedIds.has(resource.id)}
+                target={stackTarget === resource.id}
               />
             );
           }
@@ -380,6 +475,7 @@ export function MapView(props: Props) {
               at={at}
               selected={selected}
               dragging={draggedIds.has(resource.id)}
+              target={stackTarget === resource.id}
               count={stack && index === 0 ? stack[1].length : null}
               open={open}
               access={props.access[resource.id] ?? null}
@@ -400,7 +496,16 @@ export function MapView(props: Props) {
           }}
         />
       ) : null}
-      {draft && draft.diffs.length > 0 ? (
+      {draft && stackTarget ? (
+        <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
+          <span>
+            Stack with{" "}
+            {[...state.stacks.values()].find((stack) => stack.members.includes(stackTarget))?.name ??
+              state.resources.get(stackTarget)?.name ??
+              "this card"}
+          </span>
+        </div>
+      ) : draft && draft.diffs.length > 0 ? (
         <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
           {draft.diffs.slice(0, 6).map((diff) => (
             <span key={`${diff.resource.id}/${diff.circle.id}`} class={diff.to ? "" : "minus"}>
@@ -506,6 +611,7 @@ function CardView(props: {
   at: Point;
   selected: boolean;
   dragging: boolean;
+  target: boolean;
   count: number | null;
   open: boolean;
   access: AccessState | null;
@@ -517,7 +623,7 @@ function CardView(props: {
   const holding = circlesHolding(state, resource.id);
   return (
     <div
-      class={`card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}`}
+      class={`card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}`}
       data-card={resource.id}
       style={{ left: px(props.at.x), top: px(props.at.y) }}
     >
@@ -591,6 +697,43 @@ function CardPreview(props: { address: string }) {
         </a>
       </div>
       <div class="help">Blank? Open the site once to log in.</div>
+    </div>
+  );
+}
+
+/** K-521: a closed stack of the owner, as one card that lists its cards. A click opens it. */
+function StackCard(props: {
+  id: string;
+  name: string;
+  members: ReadonlyArray<Resource>;
+  state: State;
+  at: Point;
+  selected: boolean;
+  dragging: boolean;
+  target: boolean;
+}) {
+  const holding = circlesHolding(props.state, props.id);
+  return (
+    <div
+      class={`card stack-card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}`}
+      data-card={props.id}
+      style={{ left: px(props.at.x), top: px(props.at.y) }}
+    >
+      <span class="sticker count">{props.members.length} ▸</span>
+      <div class="name">🗃 {props.name}</div>
+      <ul>
+        {props.members.slice(0, 6).map((member) => (
+          <li key={member.id}>
+            {KINDS[member.kind].icon} {member.name}
+          </li>
+        ))}
+        {props.members.length > 6 ? <li class="muted">and {props.members.length - 6} more</li> : null}
+      </ul>
+      <div class="foot">
+        {holding.map((circle) => (
+          <span key={circle.id} class="dot" title={circle.name} style={{ background: circle.color }} />
+        ))}
+      </div>
     </div>
   );
 }

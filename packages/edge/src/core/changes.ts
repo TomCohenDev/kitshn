@@ -6,6 +6,7 @@ import {
   type Point,
   type Resource,
   type ShareSetting,
+  type Stack,
   type State,
   circlesHolding,
   isPublicCircle,
@@ -23,7 +24,8 @@ export type Edit =
       readonly circleId: string;
       readonly after: ShareSetting | null;
     }
-  | { readonly _tag: "pause"; readonly after: boolean };
+  | { readonly _tag: "pause"; readonly after: boolean }
+  | { readonly _tag: "stack"; readonly id: string; readonly after: Stack | null };
 
 /** One stored change of a revision. Undo swaps `before` and `after`. */
 export type Change =
@@ -45,7 +47,13 @@ export type Change =
       readonly before: ShareSetting | null;
       readonly after: ShareSetting | null;
     }
-  | { readonly _tag: "pause"; readonly id: "pause"; readonly before: boolean; readonly after: boolean };
+  | { readonly _tag: "pause"; readonly id: "pause"; readonly before: boolean; readonly after: boolean }
+  | {
+      readonly _tag: "stack";
+      readonly id: string;
+      readonly before: Stack | null;
+      readonly after: Stack | null;
+    };
 
 export type Actor =
   | { readonly _tag: "person"; readonly email: string }
@@ -85,6 +93,8 @@ const current = (state: State, change: Pick<Change, "_tag" | "id">) => {
       return state.shareSettings.get(change.id) ?? null;
     case "pause":
       return state.paused;
+    case "stack":
+      return state.stacks.get(change.id) ?? null;
   }
 };
 
@@ -105,6 +115,13 @@ export function resolveEdits(state: State, edits: ReadonlyArray<Edit>): Array<Ch
     if (edit._tag === "circle" && edit.after && edit.after.id !== edit.id) {
       throw new RuleError(`A circle edit cannot change the circle id "${edit.id}".`);
     }
+    if (edit._tag === "stack" && edit.after) {
+      if (edit.after.id !== edit.id)
+        throw new RuleError(`A stack edit cannot change the stack id "${edit.id}".`);
+      if (edit.after.members.length < 2) throw new RuleError("A stack holds at least two cards.");
+      const missing = edit.after.members.find((id) => !state.resources.has(id));
+      if (missing) throw new RuleError(`No card "${missing}" exists.`);
+    }
     if (edit._tag === "place" && !state.resources.has(edit.id)) {
       throw new RuleError(`No card "${edit.id}" exists.`);
     }
@@ -116,7 +133,42 @@ export function resolveEdits(state: State, edits: ReadonlyArray<Edit>): Array<Ch
     if (deepEqual(before, edit.after)) continue;
     changes.push({ _tag: edit._tag, id, before, after: edit.after } as Change);
   }
-  return changes;
+  return withStackMates(state, changes);
+}
+
+/**
+ * K-521: a stack moves as one, so a change that moves one of its cards also moves the others of the stack
+ * after the change. Edits and undo both go through this.
+ */
+export function withStackMates(state: State, changes: ReadonlyArray<Change>): Array<Change> {
+  const stacks = new Map(state.stacks);
+  for (const change of changes) {
+    if (change._tag !== "stack") continue;
+    if (change.after) stacks.set(change.id, change.after);
+    else stacks.delete(change.id);
+  }
+  const placed = new Set(changes.flatMap((change) => (change._tag === "place" ? [change.id] : [])));
+  const mates: Array<Change> = [];
+  for (const change of changes) {
+    if (change._tag !== "place") continue;
+    // A card that goes back to the tray leaves its stack, as a deleted card does; the stack stays put.
+    if (change.after === null) {
+      for (const left of stacksWithout(stacks.values(), change.id)) {
+        mates.push({ _tag: "stack", id: left.id, before: stacks.get(left.id) ?? null, after: left.after });
+        if (left.after) stacks.set(left.id, left.after);
+        else stacks.delete(left.id);
+      }
+      continue;
+    }
+    const stack = [...stacks.values()].find((candidate) => candidate.members.includes(change.id));
+    for (const mate of stack?.members ?? []) {
+      if (placed.has(mate)) continue;
+      placed.add(mate);
+      const before = state.places.get(mate) ?? null;
+      if (!deepEqual(before, change.after)) mates.push({ _tag: "place", id: mate, before, after: change.after });
+    }
+  }
+  return [...changes, ...mates];
 }
 
 export const invert = (changes: ReadonlyArray<Change>): Array<Change> =>
@@ -134,6 +186,7 @@ export function applyChanges(state: State, changes: ReadonlyArray<Change>): Stat
   const circles = new Map(state.circles);
   const places = new Map(state.places);
   const shareSettings = new Map(state.shareSettings);
+  const stacks = new Map(state.stacks);
   let paused = state.paused;
   const put = <V>(map: Map<string, V>, id: string, value: V | null) =>
     value === null ? map.delete(id) : map.set(id, value);
@@ -141,9 +194,10 @@ export function applyChanges(state: State, changes: ReadonlyArray<Change>): Stat
     if (change._tag === "circle") put(circles, change.id, change.after);
     else if (change._tag === "place") put(places, change.id, change.after);
     else if (change._tag === "shareSetting") put(shareSettings, change.id, change.after);
+    else if (change._tag === "stack") put(stacks, change.id, change.after);
     else paused = change.after;
   }
-  return { ...state, circles, places, shareSettings, paused };
+  return { ...state, circles, places, shareSettings, stacks, paused };
 }
 
 /**
@@ -152,6 +206,17 @@ export function applyChanges(state: State, changes: ReadonlyArray<Change>): Stat
  */
 export function ruleViolation(state: State): string | null {
   if (!state.circles.has(OWNER_CIRCLE_ID)) return "The Owner circle cannot be deleted.";
+  // K-521: a card is in one stack at most, and the cards of a stack share one point.
+  const stacked = new Set<string>();
+  for (const stack of state.stacks.values()) {
+    for (const id of stack.members) {
+      if (!state.resources.has(id)) return `The stack "${stack.name}" holds a card that no longer exists.`;
+      if (stacked.has(id)) return `The card "${state.resources.get(id)?.name ?? id}" is in two stacks.`;
+      stacked.add(id);
+    }
+    const points = new Set(stack.members.map((id) => JSON.stringify(state.places.get(id) ?? null)));
+    if (points.size > 1) return `The cards of the stack "${stack.name}" must share one place.`;
+  }
   const admin = state.resources.get(ADMIN_RESOURCE_ID);
   if (!admin) return "The kitshn admin card is missing.";
   const all = circlesHolding(state, admin.id);
@@ -237,7 +302,33 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
     const verb = !circles[0].before ? "Created" : !circles[0].after ? "Deleted" : "Changed";
     return `${verb} circle ${circle?.name ?? circles[0].id}`;
   }
+  const stacks = changes.filter((change) => change._tag === "stack");
+  if (stacks.length > 0) {
+    const name = (id: string) => after.resources.get(id)?.name ?? before.resources.get(id)?.name ?? id;
+    const names = (ids: ReadonlyArray<string>) => ids.map(name).join(", ");
+    return stacks
+      .map(({ before: was, after: is, id }) => {
+        if (!was) return `Stacked ${names(is?.members ?? [])}`;
+        if (!is) return `Unstacked ${was.name}`;
+        const added = is.members.filter((member) => !was.members.includes(member));
+        const removed = was.members.filter((member) => !is.members.includes(member));
+        if (added.length > 0) return `Added ${names(added)} to ${is.name}`;
+        if (removed.length > 0) return `Took ${names(removed)} out of ${is.name}`;
+        return was.name === is.name ? `Changed the stack ${is.name || id}` : `Renamed ${was.name} to ${is.name}`;
+      })
+      .join("; ");
+  }
   const moved = changes.filter((change) => change._tag === "place").length;
   if (moved > 0 && moved === changes.length) return moved === 1 ? "Moved a card" : `Moved ${moved} cards`;
   return `Changed ${changes.length} items`;
+}
+
+/** K-522: the stacks that change when a card is gone; a stack left with fewer than two cards goes. */
+export function stacksWithout(stacks: Iterable<Stack>, id: string): Array<{ id: string; after: Stack | null }> {
+  return [...stacks]
+    .filter((stack) => stack.members.includes(id))
+    .map((stack) => {
+      const members = stack.members.filter((member) => member !== id);
+      return { id: stack.id, after: members.length > 1 ? { ...stack, members } : null };
+    });
 }

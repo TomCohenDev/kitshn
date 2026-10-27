@@ -1,4 +1,5 @@
 import type { Change } from "./changes.ts";
+import type { Command } from "./machine.ts";
 import {
   ADMIN_RESOURCE_ID,
   type Circle,
@@ -112,4 +113,64 @@ export function isAgentKey(state: State, member: Member, now: number): boolean {
     circlesOf(state, visitor, now).size > 0 &&
     (!admin || visitorLevel(unpaused, admin, visitor, now) !== "control")
   );
+}
+
+/** The last finished deploy of a card, as kitshn stores it (K-807, K-812). */
+export interface LastDeploy {
+  readonly app: "static" | "compose";
+  readonly repo: string;
+  readonly branch: string;
+  readonly resourceId: string;
+  readonly environment: string;
+  /** The address without the zone, which the daemon exposes. */
+  readonly name: string;
+  readonly composeFile: string | null;
+}
+
+/**
+ * K-718: what a deploy by an agent key does. `redeploy` starts the last build that came up, from the copy
+ * on the machine; `build` runs the repo's own workflow on the environment's branch. Neither takes code from
+ * the key (K-812).
+ */
+export function agentDeployPlan(
+  last: LastDeploy | null,
+  mode: "redeploy" | "build",
+  machine: {
+    /** The daemon knows `compose-redeploy`. */
+    readonly canRedeploy: boolean;
+    /** The owner still lets deploys run there (K-610). */
+    readonly takesDeploys: boolean;
+    /** The card still runs on that machine (K-611). */
+    readonly runsCard: boolean;
+  } | null,
+):
+  | { readonly kind: "redeploy"; readonly command: Extract<Command, { kind: "compose-redeploy" }> }
+  | { readonly kind: "build"; readonly repo: string; readonly branch: string }
+  | { readonly kind: "refused"; readonly status: 409; readonly error: string } {
+  const refused = (error: string) => ({ kind: "refused", status: 409, error }) as const;
+  if (!last) return refused("kitshn has no finished deploy of this card to start again.");
+  if (mode === "build") {
+    // A pull request environment is always `pr-<n>` (K-807); its build comes from a push to the pull request.
+    if (/^pr-\d+$/.test(last.environment))
+      return refused("A preview builds again on a new push to its pull request, not from an agent key.");
+    return last.branch
+      ? { kind: "build", repo: last.repo, branch: last.branch }
+      : refused("kitshn does not know the branch of this environment.");
+  }
+  if (last.app !== "compose")
+    return refused("A static site keeps serving its last build; a new build comes from the repo (build).");
+  if (!machine || !machine.runsCard) return refused("This app no longer runs on the machine of its last deploy.");
+  if (!machine.takesDeploys) return refused("The machine of this app no longer has the label deploy (K-610).");
+  if (!machine.canRedeploy) return refused("The daemon of this app cannot redeploy yet. Update the daemon first.");
+  return {
+    kind: "redeploy",
+    command: {
+      kind: "compose-redeploy",
+      project: last.resourceId,
+      name: last.name,
+      environment: last.environment,
+      repo: last.repo,
+      file: last.composeFile,
+    },
+  };
 }

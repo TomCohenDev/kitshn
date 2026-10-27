@@ -53,6 +53,18 @@ export type Command =
       /** The Compose file of the recipe; null lets Compose find `compose.yml` and its override file. */
       readonly file: string | null;
     }
+  /**
+   * K-718: start the last build of a Compose app that came up, from the copy on the machine. It never takes
+   * new code. Only kitshn makes this job, never the jobs API.
+   */
+  | {
+      readonly kind: "compose-redeploy";
+      readonly project: string;
+      readonly name: string;
+      readonly environment: string;
+      readonly repo: string;
+      readonly file: string | null;
+    }
   /** K-904: stop a Compose app and stop exposing it; a preview also loses its data. */
   | {
       readonly kind: "compose-down";

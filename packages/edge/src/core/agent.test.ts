@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 const as = (clientId: string) => ({ email: null, clientId, ip: null });
-import { agentMayRunOn, agentRefusal, cardsControlledBy, isAgentKey } from "./agent.ts";
+import { agentDeployPlan, agentMayRunOn, agentRefusal, cardsControlledBy, isAgentKey } from "./agent.ts";
 import { type Edit, applyChanges, resolveEdits } from "./changes.ts";
 import type { Circle, Resource, State } from "./model.ts";
 import { seed } from "./seed.ts";
@@ -137,5 +137,30 @@ describe("agent keys (K-718)", () => {
       stacks: new Map([["s1", { id: "s1", name: "pair", members: ["site", "other"] }]]),
     };
     expect(check(state, [{ _tag: "place", id: "site", after: { x: 600, y: 1000 } }])).toMatch(/other/);
+  });
+  it("deploys only the repo's code: the last good build, or the repo's workflow on its branch", () => {
+    const last = {
+      app: "compose" as const,
+      repo: "o/app",
+      branch: "main",
+      resourceId: "app-o-1-prod",
+      environment: "prod",
+      name: "app",
+      composeFile: null,
+    };
+    const ready = { canRedeploy: true, takesDeploys: true, runsCard: true };
+    expect(agentDeployPlan(last, "redeploy", ready)).toMatchObject({
+      kind: "redeploy",
+      command: { kind: "compose-redeploy", project: "app-o-1-prod", name: "app" },
+    });
+    expect(agentDeployPlan(last, "build", null)).toEqual({ kind: "build", repo: "o/app", branch: "main" });
+    expect(agentDeployPlan(last, "redeploy", { ...ready, canRedeploy: false })).toMatchObject({ error: /Update the daemon/ });
+    expect(agentDeployPlan(last, "redeploy", { ...ready, takesDeploys: false })).toMatchObject({ error: /label deploy/ });
+    expect(agentDeployPlan(last, "redeploy", { ...ready, runsCard: false })).toMatchObject({ error: /no longer runs/ });
+    expect(agentDeployPlan(last, "redeploy", null)).toMatchObject({ kind: "refused" });
+    expect(agentDeployPlan({ ...last, app: "static" }, "redeploy", ready)).toMatchObject({ kind: "refused" });
+    expect(agentDeployPlan({ ...last, branch: "" }, "build", null)).toMatchObject({ kind: "refused" });
+    expect(agentDeployPlan({ ...last, environment: "pr-7" }, "build", null)).toMatchObject({ error: /preview/ });
+    expect(agentDeployPlan(null, "build", null)).toMatchObject({ kind: "refused", error: /no finished deploy/ });
   });
 });

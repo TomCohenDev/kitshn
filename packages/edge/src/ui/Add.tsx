@@ -40,6 +40,7 @@ on:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, closed]
+  workflow_dispatch:
 permissions:
   contents: read
   id-token: write

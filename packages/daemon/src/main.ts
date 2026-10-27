@@ -311,6 +311,8 @@ async function composeUp(
   let output = "";
   /** K-1404: the KitSHn 1 project that this job stopped, which a failure starts again. */
   let stoppedKitshn1: string | null = null;
+  /** The volumes that the takeover made, which a failure removes so a retry copies fresh. */
+  const madeVolumes: Array<string> = [];
   const step = async (title: string, program: string, args: ReadonlyArray<string>, options = {}) => {
     output += `$ ${title}\n`;
     const result = await runProgram(program, args, { timeoutMs: COMPOSE_TIMEOUT_MS, ...options });
@@ -354,8 +356,9 @@ async function composeUp(
         : ({ kind: "skip", note: null } as const);
     if (takeover.kind === "skip" && takeover.note) output += `${takeover.note}\n`;
     if (takeover.kind === "take") {
-      await step("stop the KitSHn 1 app", "docker", ["compose", "-p", takeover.project, "stop"], { cwd: paths.data });
+      // Set first: a stop that fails half-way still gets its start back.
       stoppedKitshn1 = takeover.project;
+      await step("stop the KitSHn 1 app", "docker", ["compose", "-p", takeover.project, "stop"], { cwd: paths.data });
       // A staged copy becomes the data folder only when it is complete.
       const staged = `${data}.kitshn1`;
       output += await removeAsRoot(staged, `${command.project}-stage`);
@@ -372,6 +375,7 @@ async function composeUp(
         const target = movedVolume(volume, takeover.project, command.project);
         if (!target) continue;
         const suffix = target.slice(command.project.length + 1);
+        madeVolumes.push(target);
         await step(`create the volume ${target}`, "docker", [
           "volume", "create",
           "--label", `com.docker.compose.project=${command.project}`,
@@ -386,6 +390,7 @@ async function composeUp(
       renameSync(staged, data);
       writeFileSync(marker, `${takeover.dataDir}\n`);
       output += `KitSHn 1 data of ${takeover.project} copied from ${takeover.dataDir}; it stays there for a rollback.\n`;
+      output += `KitSHn 1 is stopped, so the site is down until you move the DNS record of ${command.name} to the tunnel (K-1404).\n`;
     }
     // The container user may not be the daemon user; the socket directory must take its socket.
     mkdirSync(sockets, { recursive: true });
@@ -460,7 +465,11 @@ async function composeUp(
     if (stoppedKitshn1 !== null) {
       await runProgram("docker", ["compose", "-p", command.project, "down"], { cwd: paths.data });
       rmSync(join(dir, "kitshn1-taken"), { force: true });
-      output += await removeAsRoot(join(dir, "data"), `${command.project}-data`).catch((cleanup: unknown) => `${String(cleanup)}\n`);
+      for (const folder of ["data", "data.kitshn1"])
+        output += await removeAsRoot(join(dir, folder), `${command.project}-${folder.replace(".", "-")}`).catch(
+          (cleanup: unknown) => `${String(cleanup)}\n`,
+        );
+      for (const volume of madeVolumes) output += (await runProgram("docker", ["volume", "rm", volume])).output;
       const started = await runProgram("docker", ["compose", "-p", stoppedKitshn1, "start"], { cwd: paths.data });
       output += `$ start the KitSHn 1 app ${stoppedKitshn1} again\n${started.output}`;
     }

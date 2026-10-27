@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const PART = /^[A-Za-z0-9._-]+$/;
 
@@ -39,7 +39,12 @@ export function takeoverPlan(input: {
   if (input.hasData || input.taken) return { kind: "skip", note: null };
   const old = kitshn1Deployment(input.repo, input.environment, input.persistentRoot);
   if (!old) return { kind: "skip", note: null };
-  if (!input.exists(old.dataDir)) return { kind: "skip", note: `No KitSHn 1 data at ${old.dataDir}; the app starts empty.` };
+  // The note is for a renamed repo: KitSHn 1 knew the owner and app, but not this environment's folder.
+  if (!input.exists(old.dataDir))
+    return {
+      kind: "skip",
+      note: input.exists(dirname(old.dataDir)) ? `No KitSHn 1 data at ${old.dataDir}; the app starts empty.` : null,
+    };
   return { kind: "take", ...old };
 }
 

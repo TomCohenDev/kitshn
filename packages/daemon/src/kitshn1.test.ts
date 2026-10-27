@@ -27,10 +27,12 @@ describe("the takeover decision (K-1404)", () => {
     expect(takeoverPlan({ ...base, taken: true, exists: () => true }).kind).toBe("skip");
   });
   it("says so when there is no KitSHn 1 data to take", () => {
-    expect(takeoverPlan({ ...base, exists: () => false })).toEqual({
+    expect(takeoverPlan({ ...base, exists: (path) => path === "/p/o/app" })).toEqual({
       kind: "skip",
       note: "No KitSHn 1 data at /p/o/app/prod; the app starts empty.",
     });
+    // A machine or an app that KitSHn 1 never ran stays quiet.
+    expect(takeoverPlan({ ...base, exists: () => false })).toEqual({ kind: "skip", note: null });
   });
   it("moves only the named volumes of the KitSHn 1 project", () => {
     expect(movedVolume("o-app-prod_sessions", "o-app-prod", "app-o-1-prod")).toBe("app-o-1-prod_sessions");

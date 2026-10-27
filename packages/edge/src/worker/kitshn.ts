@@ -2483,6 +2483,13 @@ export class Kitshn extends DurableObject<Env> {
   private async startCompose(api: Api, row: DeployRow, deployer: Deployer) {
     const machine = row.machine_id ? this.state.machines.get(row.machine_id) : undefined;
     if (!machine) return Response.json({ error: "The machine of this deploy is gone." }, { status: 409 });
+    // K-819: the plan checked the machine; the key can lose it before the start. Check before the card exists.
+    const allowedBy = this.allowingAgent(row.repo_id);
+    if (!mayDeployOn(this.state, allowedBy?.clientId ?? null, machine.id, Date.now()))
+      return Response.json(
+        { error: `The agent key ${allowedBy?.name} that allowed this repo no longer manages ${machine.name} (K-819).` },
+        { status: 409 },
+      );
     const card = this.ensureCard(row, deployer, "site.compose", machine.id);
     // Fail closed: the Access application exists before the tunnel sends the address to the app (K-410).
     await this.syncAccessLocked(api, 20);

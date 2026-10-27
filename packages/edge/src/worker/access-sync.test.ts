@@ -434,52 +434,57 @@ describe("passkey enrollment on the App Launcher (K-113)", () => {
 });
 
 describe("page and file logins (K-1004)", () => {
-  function loginCloudflare() {
+  const anyLogin = { id: "any", name: "kitshn any login" };
+  const anyPasskey = { id: "any-passkey", name: "kitshn any login (passkey)" };
+
+  function loginCloudflare(fail: (path: string) => boolean = () => false) {
     const cf = fakeCloudflare();
     const puts: Array<{ path: string; body: unknown }> = [];
     const machines = { id: "machines", name: "kitshn machines", precedence: 2 };
-    const anyLogin = { id: "any", name: "kitshn any login", precedence: 1 };
     const apps = ["pages", "files"].flatMap((host) => [
       {
         id: `${host}-login`,
         aud: "x",
         name: `kitshn ${host} login`,
         domain: `${host}.example.com/login`,
-        session_duration: "720h",
-        policies: [anyLogin, machines],
+        self_hosted_domains: [`${host}.example.com/login`],
+        policies: [{ ...anyLogin, precedence: 1 }, machines],
       },
       {
         id: `${host}-passkey`,
         aud: "y",
         name: `kitshn ${host} login (passkey)`,
         domain: `${host}.example.com/login/passkey`,
-        session_duration: "24h",
-        policies: [{ id: "any-passkey", name: "kitshn any login (passkey)", precedence: 1 }],
+        policies: [{ ...anyPasskey, precedence: 1 }],
       },
     ]);
     const api: Api = async <T>(method: string, path: string, body?: unknown) => {
       if (path.includes("/apps?")) return apps as T;
+      if (path.includes("/policies?")) return [anyLogin, anyPasskey, machines] as T;
+      if (fail(path)) throw new Error("refused");
       if (method === "PUT") puts.push({ path, body });
       return cf.api(method as "GET", path, body);
     };
     return { ...cf, api, puts };
   }
 
-  it("replaces the any-login policies with the circles' people and keeps the machines policy", async () => {
+  it("replaces the any-login policies with the circles' people, keeps machines, and deletes the old ones", async () => {
     const cf = loginCloudflare();
     const desired = desiredAccess(start(), 0);
     await syncAccess(desired, cf.store, cf.api, "a");
     const plain = cf.rows.get("policy:owner:login")!.cfId;
     const passkey = cf.rows.get("policy:owner:people")!.cfId;
+    cf.calls.length = 0;
     const result = await syncLogins(desired, cf.store, cf.api, "a", "example.com", "", false);
-    expect(result.calls).toBe(5);
     expect(cf.puts).toEqual([
       {
         path: "/accounts/a/access/apps/pages-login",
         body: {
           name: "kitshn pages login",
+          type: "self_hosted",
           domain: "pages.example.com/login",
           session_duration: "720h",
+          same_site_cookie_attribute: "lax",
           policies: [
             { id: "machines", precedence: 1 },
             { id: plain, precedence: 2 },
@@ -490,10 +495,43 @@ describe("page and file logins (K-1004)", () => {
       expect.objectContaining({ path: "/accounts/a/access/apps/files-login" }),
       expect.objectContaining({ path: "/accounts/a/access/apps/files-passkey" }),
     ]);
+    expect(cf.calls.filter((call) => call.startsWith("DELETE"))).toEqual([
+      "DELETE /policies/any",
+      "DELETE /policies/any-passkey",
+    ]);
+    expect(result.calls).toBe(8);
     // Nothing changed: no Cloudflare call.
     expect(await syncLogins(desired, cf.store, cf.api, "a", "example.com", result.attached, false)).toEqual({
       attached: result.attached,
       calls: 0,
     });
+  });
+
+  it("writes the other applications when one fails, keeps the old policy it still uses, and throws", async () => {
+    const cf = loginCloudflare((path) => path.endsWith("/apps/files-login"));
+    const desired = desiredAccess(start(), 0);
+    await syncAccess(desired, cf.store, cf.api, "a");
+    cf.calls.length = 0;
+    await expect(syncLogins(desired, cf.store, cf.api, "a", "example.com", "", false)).rejects.toThrow(
+      "files.example.com/login: refused",
+    );
+    expect(cf.puts.map((put) => put.path)).toEqual([
+      "/accounts/a/access/apps/pages-login",
+      "/accounts/a/access/apps/pages-passkey",
+      "/accounts/a/access/apps/files-passkey",
+    ]);
+    expect(cf.calls.filter((call) => call.startsWith("DELETE"))).toEqual(["DELETE /policies/any-passkey"]);
+  });
+
+  it("leaves out a policy that Cloudflare does not hold as written", async () => {
+    const cf = loginCloudflare();
+    const desired = desiredAccess(start(), 0);
+    await syncAccess(desired, cf.store, cf.api, "a");
+    const row = cf.rows.get("policy:owner:login")!;
+    cf.rows.set(row.key, { ...row, body: "" });
+    await syncLogins(desired, cf.store, cf.api, "a", "example.com", "", false);
+    expect(cf.puts[0]).toEqual(
+      expect.objectContaining({ body: expect.objectContaining({ policies: [{ id: "machines", precedence: 1 }] }) }),
+    );
   });
 });

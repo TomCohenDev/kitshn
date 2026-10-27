@@ -376,7 +376,19 @@ describe("page and file logins (K-1004)", () => {
     expect(access.policies.get("policy:owner:login")?.include).toEqual([{ email: { email: OWNER } }]);
   });
 
-  it("keeps an all circle exact and drops ended circles and the pause", () => {
+  it("adds nothing for circles of only networks or devices, which need no login", () => {
+    const state = withPage(start(), 450);
+    const her = circle(state, "her");
+    for (const members of [
+      [{ _tag: "ip" as const, range: "10.0.0.0/8" }],
+      [{ _tag: "device" as const, tokenId: "t1", clientId: "c1.access", name: "phone" }],
+    ]) {
+      const only = { ...state, circles: new Map(state.circles).set("her", { ...her, members }) };
+      expect(desiredAccess(only, 0).logins.login).toEqual(["policy:owner:login"]);
+    }
+  });
+
+  it("keeps an all circle exact and drops ended circles, ended shares and the pause", () => {
     const state = withPage(start(), 450);
     const her = circle(state, "her");
     const strict = {
@@ -387,11 +399,17 @@ describe("page and file logins (K-1004)", () => {
         members: [...her.members, { _tag: "ip" as const, range: "10.0.0.0/8" }],
       }),
     };
+    expect(desiredAccess(strict, 0).logins.login).toEqual(["policy:owner:login", "policy:her:people"]);
     expect(desiredAccess(strict, 0).policies.get("policy:her:people")?.require).toEqual([
       { ip: { ip: "10.0.0.0/8" } },
     ]);
     const ended = { ...state, circles: new Map(state.circles).set("her", { ...her, endsAt: 1 }) };
     expect(desiredAccess(ended, 1).logins.login).toEqual(["policy:owner:login"]);
+    const shareEnded = {
+      ...state,
+      shareSettings: new Map([[shareKey("notes", "her"), { level: null, endsAt: 1 }]]),
+    };
+    expect(desiredAccess(shareEnded, 1).logins.login).toEqual(["policy:owner:login"]);
     const { after } = edit(state, [{ _tag: "pause", after: true }]);
     expect(desiredAccess(after, 0).logins).toEqual({
       login: ["policy:owner:login"],

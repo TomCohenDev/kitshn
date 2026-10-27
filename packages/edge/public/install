@@ -171,7 +171,7 @@ app() {
     return
   fi
   body=$(jq -nc --arg domain "$1" --arg name "$2" --arg session "$3" --arg policy "$4" \
-    '{name:$name,type:"self_hosted",domain:$domain,session_duration:$session,same_site_cookie_attribute:"lax",policies:(if $policy == "" then [] else [{id:$policy,precedence:1}] end)}')
+    '{name:$name,type:"self_hosted",domain:$domain,session_duration:$session,same_site_cookie_attribute:"lax"} + (if $policy == "" then {} else {policies:[{id:$policy,precedence:1}]} end)')
   created=$(api POST "/accounts/$ACCOUNT/access/apps" "$body")
   changed "created the application \"$2\" on $1" >&2
   printf '%s' "$created" | jq -r .aud

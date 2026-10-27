@@ -69,8 +69,9 @@ import {
   signOutEverywhere,
   syncAccess,
   syncLauncher,
-  syncLogins,
+  LOGIN_CALLS,
   loginWant,
+  syncLogins,
   verifyAccess,
   verifyPasskeys,
 } from "./access-sync.ts";
@@ -471,6 +472,7 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private snapshot(me: Actor): Snapshot {
+    const loginError = this.meta("login_error");
     return {
       circles: [...this.state.circles.values()],
       resources: [...this.state.resources.values()],
@@ -479,7 +481,7 @@ export class Kitshn extends DurableObject<Env> {
       stacks: [...this.state.stacks.values()],
       revisions: this.revisions,
       access: accessStates(desiredAccess(this.state, Date.now()), this.access),
-      accessWarnings: this.accessWarnings,
+      accessWarnings: loginError ? [...this.accessWarnings, loginError] : this.accessWarnings,
       paused: this.state.paused,
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
@@ -2164,16 +2166,7 @@ export class Kitshn extends DurableObject<Env> {
     if (!machine) return Response.json({ error: "The machine of this deploy is gone." }, { status: 409 });
     const card = this.ensureCard(row, deployer, "site.compose", machine.id);
     // Fail closed: the Access application exists before the tunnel sends the address to the app (K-410).
-    await this.withAccessLock(() =>
-      syncAccess(
-        desiredAccess(this.state, Date.now()),
-        this.accessStore(),
-        api,
-        this.env.CLOUDFLARE_ACCOUNT_ID,
-        20,
-        this.reachableAddresses(),
-      ),
-    );
+    await this.syncAccessLocked(api, 20, false);
     const app = this.access.get(`app:${row.resource_id}:${row.address}`);
     if (!app?.cfId || app.error)
       return Response.json(
@@ -2282,16 +2275,7 @@ export class Kitshn extends DurableObject<Env> {
       return Response.json({ error: "The deploy needs the upload completion token." }, { status: 400 });
     const card = this.ensureCard(row, deployer, "site.static", null);
     // Fail closed: the Access application exists before the address does.
-    await this.withAccessLock(() =>
-      syncAccess(
-        desiredAccess(this.state, Date.now()),
-        this.accessStore(),
-        api,
-        this.env.CLOUDFLARE_ACCOUNT_ID,
-        20,
-        this.reachableAddresses(),
-      ),
-    );
+    await this.syncAccessLocked(api, 20, false);
     const app = this.access.get(`app:${row.resource_id}:${row.address}`);
     if (!app?.cfId || app.error) {
       return Response.json(
@@ -2830,13 +2814,41 @@ export class Kitshn extends DurableObject<Env> {
       );
       this.setMeta("login_policies", result.attached);
       this.setMeta("login_failed", "none");
+      this.setLoginError("");
       return result.calls;
     } catch (error) {
       // K-408: a failed write waits for the daily retry, so the alarm does not loop on it.
-      console.warn(`kitshn could not update the page and file logins: ${String(error)}`);
+      console.warn(String(error));
       this.setMeta("login_failed", `failed:${want}`);
-      return 5;
+      this.setLoginError(error instanceof Error ? error.message : String(error));
+      return LOGIN_CALLS;
     }
+  }
+
+  /** K-1004: the map shows a failed login update next to the other Access warnings. */
+  private setLoginError(text: string) {
+    if ((this.meta("login_error") ?? "") === text) return;
+    this.setMeta("login_error", text);
+    this.broadcast();
+  }
+
+  /**
+   * K-406, K-1004: every Access sync runs here. The login applications let go of a policy first, because
+   * Access refuses to delete a policy that an application still uses. Returns the calls of the login step.
+   */
+  private syncAccessLocked(api: Api, budget: number, force: boolean) {
+    return this.withAccessLock(async () => {
+      const spent = await this.syncLogins(api, force);
+      await syncAccess(
+        desiredAccess(this.state, Date.now()),
+        this.accessStore(),
+        api,
+        this.env.CLOUDFLARE_ACCOUNT_ID,
+        Math.max(0, budget - spent),
+        this.reachableAddresses(),
+      );
+      return spent;
+    });
   }
 
   /** K-1004: the login applications lack the wanted policies, and that change did not fail since the daily retry. */
@@ -2919,25 +2931,16 @@ export class Kitshn extends DurableObject<Env> {
       spent += await this.checkSites(api, 6);
       await this.syncDns(api, 5);
       await this.syncRoutes(api, 5);
-      // K-113, K-1004: take unwanted policies off the App Launcher and the logins before the sync deletes them.
+      // K-113: take an unwanted enrollment policy off the App Launcher before the sync deletes it.
       spent += await this.syncLauncher(api, daily);
-      spent += await this.syncLogins(api, daily);
-      await this.withAccessLock(() =>
-        // The state can change while the daily compare waits, so the sync reads it inside the lock.
-        syncAccess(
-          desiredAccess(this.state, Date.now()),
-          this.accessStore(),
-          api,
-          this.env.CLOUDFLARE_ACCOUNT_ID,
-          // The tunnels, DNS records and offline routes above used at most 16 calls, and the
-          // launcher and login steps below need 3 and 5 (K-406).
-          CALLS_PER_RUN - spent - 24,
-          this.reachableAddresses(),
-        ),
-      );
-      // A policy that the sync just made goes on the App Launcher and the logins in the same run.
+      // The tunnels, DNS records and offline routes above used at most 16 calls, and the launcher and
+      // login steps after the sync need 3 and LOGIN_CALLS (K-406). A daily run can leave the sync no
+      // calls; then the work stays and the next alarm runs at once.
+      const loginCalls = await this.syncAccessLocked(api, CALLS_PER_RUN - spent - 19 - LOGIN_CALLS, daily);
+      // A policy that the sync just made goes on the App Launcher and the logins in the same run. When the
+      // login step already wrote before the sync, the next alarm attaches the new policies instead.
       await this.syncLauncher(api, false);
-      await this.syncLogins(api, false);
+      if (loginCalls === 0) await this.withAccessLock(() => this.syncLogins(api, false));
 
       changed ||=
         daily || JSON.stringify(accessStates(desiredAccess(this.state, now), this.access)) !== before;

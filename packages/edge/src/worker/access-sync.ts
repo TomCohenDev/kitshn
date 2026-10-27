@@ -446,11 +446,7 @@ export async function syncAccess(
 interface LauncherApp {
   readonly id: string;
   readonly type?: string;
-  readonly policies?: ReadonlyArray<{
-    readonly id: string;
-    readonly name?: string;
-    readonly precedence?: number;
-  }>;
+  readonly policies?: ReadonlyArray<{ readonly id: string; readonly precedence?: number }>;
   readonly [field: string]: unknown;
 }
 
@@ -495,18 +491,36 @@ export async function syncLauncher(
 /** The bootstrap's policy that lets every service token log in (K-1204); it stays on the login applications. */
 export const MACHINES_POLICY_NAME = `${ACCESS_NAME_PREFIX}machines`;
 
-/** K-1004: the policy ids that the login applications should have. Policies without an id yet wait. */
+/** Policies that let anyone log in, which older bootstraps made (K-1004). kitshn deletes them once unused. */
+export const OLD_LOGIN_POLICY_NAMES: ReadonlySet<string> = new Set([
+  `${ACCESS_NAME_PREFIX}any login`,
+  `${ACCESS_NAME_PREFIX}any login (passkey)`,
+]);
+
+/** K-1004: the most Cloudflare calls of one `syncLogins`: two lists, four applications, two old policies. */
+export const LOGIN_CALLS = 8;
+
+/**
+ * K-1004: the policy ids that the login applications should have. A policy waits until Cloudflare holds
+ * it as written, so an id that someone deleted never goes into an application.
+ */
 export function loginWant(desired: DesiredAccess, rows: ReadonlyMap<string, AccessRow>): string {
   const ids = (keys: ReadonlyArray<string>) =>
-    keys.map((key) => rows.get(key)?.cfId ?? "").filter((id) => id !== "");
+    keys.map((key) => rows.get(key)).flatMap((row) => (row?.cfId && row.body ? [row.cfId] : []));
   return JSON.stringify({ login: ids(desired.logins.login), passkey: ids(desired.logins.passkey) });
+}
+
+interface LoginApp extends Named {
+  readonly policies?: ReadonlyArray<{ readonly id: string; readonly name?: string; readonly precedence?: number }>;
 }
 
 /**
  * K-1004: gives the four login applications of pages and files, which the bootstrap made, the policies of
  * the circles that may log in. It keeps only the machines policy of the bootstrap and drops every other
- * policy. `attached` is the `loginWant` that kitshn last applied; it calls Cloudflare only when that
- * differs, or when `force` is set (the daily compare of K-408).
+ * policy, then deletes the old policies that let anyone log in once no application uses them.
+ * `attached` is the `loginWant` that kitshn last applied; it calls Cloudflare only when that differs, or
+ * when `force` is set (the daily compare of K-408). Each application is written on its own; the errors
+ * are thrown together at the end.
  */
 export async function syncLogins(
   desired: DesiredAccess,
@@ -520,36 +534,57 @@ export async function syncLogins(
   const want = loginWant(desired, store.rows);
   if (!force && want === attached) return { attached, calls: 0 };
   const ids = JSON.parse(want) as { login: Array<string>; passkey: Array<string> };
-  const base = `/accounts/${accountId}/access/apps`;
-  const apps = await api<ReadonlyArray<LauncherApp>>("GET", `${base}?per_page=${PAGE}`);
-  let calls = 1;
+  const base = `/accounts/${accountId}/access`;
+  const apps = await api<ReadonlyArray<LoginApp>>("GET", `${base}/apps?per_page=${PAGE}`);
+  const policies = await api<ReadonlyArray<Named>>("GET", `${base}/policies?per_page=${PAGE}`);
+  let calls = 2;
+  const errors: Array<string> = [];
+  // The policy ids of each application after this run, to know which old policies are free to delete.
+  const uses = new Map(apps.map((app) => [app.id, (app.policies ?? []).map((policy) => policy.id)]));
   for (const host of [`pages.${zone}`, `files.${zone}`]) {
-    for (const [path, wanted] of [
-      ["/login", ids.login],
-      ["/login/passkey", ids.passkey],
+    for (const [path, wanted, session] of [
+      ["/login", ids.login, "720h"],
+      ["/login/passkey", ids.passkey, "24h"],
     ] as const) {
       const domain = `${host}${path}`;
-      const app = apps.find(
-        (item) =>
-          item["domain"] === domain &&
-          typeof item["name"] === "string" &&
-          item["name"].startsWith(ACCESS_NAME_PREFIX),
-      );
-      if (!app) throw new Error(`The account has no kitshn login application on ${domain}. Run the bootstrap.`);
+      const app = apps.find((item) => item.domain === domain && item.name.startsWith(ACCESS_NAME_PREFIX));
+      if (!app) {
+        errors.push(`no kitshn login application on ${domain}; run the bootstrap again`);
+        continue;
+      }
       const live = [...(app.policies ?? [])].sort((a, b) => (a.precedence ?? 0) - (b.precedence ?? 0));
       const next = [
         ...live.filter((policy) => policy.name === MACHINES_POLICY_NAME).map((policy) => policy.id),
         ...wanted,
       ];
       if (deepEqual(next, live.map((policy) => policy.id))) continue;
-      // The list carries whole applications, so the PUT sends every other field back unchanged.
-      const body = Object.fromEntries(Object.entries(app).filter(([field]) => !READ_ONLY.has(field)));
-      await api("PUT", `${base}/${app.id}`, {
-        ...body,
-        policies: next.map((id, index) => ({ id, precedence: index + 1 })),
-      });
       calls++;
+      try {
+        // The same fields that the bootstrap sends, so nothing else of the application changes.
+        await api("PUT", `${base}/apps/${app.id}`, {
+          name: app.name,
+          type: "self_hosted",
+          domain,
+          session_duration: session,
+          same_site_cookie_attribute: "lax",
+          policies: next.map((id, index) => ({ id, precedence: index + 1 })),
+        });
+        uses.set(app.id, next);
+      } catch (error) {
+        errors.push(`${domain}: ${message(error)}`);
+      }
     }
   }
+  const used = new Set([...uses.values()].flat());
+  for (const policy of policies) {
+    if (!OLD_LOGIN_POLICY_NAMES.has(policy.name) || used.has(policy.id)) continue;
+    calls++;
+    try {
+      await api("DELETE", `${base}/policies/${policy.id}`);
+    } catch (error) {
+      if (!isNotFound(error)) errors.push(`deleting the policy "${policy.name}": ${message(error)}`);
+    }
+  }
+  if (errors.length > 0) throw new Error(`kitshn could not update the page and file logins: ${errors.join("; ")}`);
   return { attached: want, calls };
 }

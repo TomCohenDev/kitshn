@@ -304,7 +304,7 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
 });
 
 describe("passkey enrollment on the App Launcher (K-113)", () => {
-  function launcherCloudflare(policies: Array<{ id: string }>) {
+  function launcherCloudflare(policies: Array<{ id: string; precedence?: number }>) {
     const cf = fakeCloudflare();
     const puts: Array<unknown> = [];
     const launcher = {
@@ -326,6 +326,52 @@ describe("passkey enrollment on the App Launcher (K-113)", () => {
     };
     return { ...cf, api, puts };
   }
+
+  it("keeps the precedence of the other policies and goes after them", async () => {
+    const cf = launcherCloudflare([
+      { id: "block", precedence: 3 },
+      { id: "t3-owner", precedence: 1 },
+    ]);
+    const state = start();
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    const enrollment = cf.rows.get("policy:enrollment")!.cfId;
+    await syncLauncher(desiredAccess(state, 0), cf.store, cf.api, "a", null, false);
+    expect(cf.puts).toEqual([
+      expect.objectContaining({
+        policies: [
+          { id: "block", precedence: 3 },
+          { id: "t3-owner", precedence: 1 },
+          { id: enrollment, precedence: 4 },
+        ],
+      }),
+    ]);
+  });
+
+  it("leaves out circles that would let in more people, and keeps only Owner during a pause", () => {
+    const state = start();
+    const owner = state.circles.get("owner")!;
+    const strict = {
+      ...owner,
+      id: "strict",
+      name: "Strict",
+      match: "all" as const,
+      members: [{ _tag: "domain" as const, domain: "corp.com" }],
+    };
+    const withStrict = { ...state, circles: new Map(state.circles).set("strict", strict) };
+    expect(desiredAccess(withStrict, 0).policies.get("policy:enrollment")?.include).toEqual([
+      { email: { email: "owner@example.com" } },
+    ]);
+    const guests = {
+      ...owner,
+      id: "guests",
+      name: "Guests",
+      members: [{ _tag: "email" as const, email: "g@x.com" }],
+    };
+    const paused = { ...state, paused: true, circles: new Map(state.circles).set("guests", guests) };
+    expect(desiredAccess(paused, 0).policies.get("policy:enrollment")?.include).toEqual([
+      { email: { email: "owner@example.com" } },
+    ]);
+  });
 
   it("adds the policy next to the old ones, keeps every other field, and takes back only its own", async () => {
     const cf = launcherCloudflare([{ id: "t3-owner" }]);

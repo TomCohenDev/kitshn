@@ -446,7 +446,7 @@ export async function syncAccess(
 interface LauncherApp {
   readonly id: string;
   readonly type?: string;
-  readonly policies?: ReadonlyArray<{ readonly id: string }>;
+  readonly policies?: ReadonlyArray<{ readonly id: string; readonly precedence?: number }>;
   readonly [field: string]: unknown;
 }
 
@@ -474,14 +474,16 @@ export async function syncLauncher(
   const found = apps.find((app) => app.type === "app_launcher");
   if (!found) throw new Error("The account has no App Launcher application, so nobody can enroll a passkey.");
   const launcher = await api<LauncherApp>("GET", `${base}/${found.id}`);
-  const ids = (launcher.policies ?? []).map((policy) => policy.id);
-  const next = ids.filter((id) => id === want || id !== attached);
-  if (want && !next.includes(want)) next.push(want);
-  if (deepEqual(next, ids)) return { attached: want, calls: 2 };
+  // Other policies keep their own precedence; the kitshn policy goes after all of them.
+  const live = (launcher.policies ?? []).map((policy, index) => ({
+    id: policy.id,
+    precedence: policy.precedence ?? index + 1,
+  }));
+  const next = live.filter((policy) => policy.id === want || policy.id !== attached);
+  if (want && !next.some((policy) => policy.id === want))
+    next.push({ id: want, precedence: Math.max(0, ...next.map((policy) => policy.precedence)) + 1 });
+  if (deepEqual(next, live)) return { attached: want, calls: 2 };
   const body = Object.fromEntries(Object.entries(launcher).filter(([field]) => !READ_ONLY.has(field)));
-  await api("PUT", `${base}/${found.id}`, {
-    ...body,
-    policies: next.map((id, index) => ({ id, precedence: index + 1 })),
-  });
+  await api("PUT", `${base}/${found.id}`, { ...body, policies: next });
   return { attached: want, calls: 3 };
 }

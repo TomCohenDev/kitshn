@@ -1,5 +1,12 @@
 import type { Machine } from "./machine.ts";
-import { ADMIN_RESOURCE_ID, type Circle, type Member, type State, activeShares } from "./model.ts";
+import {
+  ADMIN_RESOURCE_ID,
+  type Circle,
+  type Member,
+  OWNER_CIRCLE_ID,
+  type State,
+  activeShares,
+} from "./model.ts";
 
 /** An Access rule, in the shape of the Cloudflare API. */
 export type Rule =
@@ -204,9 +211,14 @@ export function desiredAccess(state: State, now: number): DesiredAccess {
     }
   }
   // K-113: the people of every passkey circle may open the App Launcher, where Access enrolls a passkey.
+  // An "all must match" circle is left out: its rules joined with "or" would let in more people than the
+  // circle does. Revisit if such a circle needs a passkey and its people have no other way in.
   const enrolling = new Map<string, Rule>();
   for (const circle of state.circles.values()) {
-    if (!circle.needsPasskey) continue;
+    if (!circle.needsPasskey || circle.match === "all") continue;
+    if (circle.endsAt !== null && circle.endsAt <= now) continue;
+    // K-1504: during a pause only the Owner circle keeps its people.
+    if (state.paused && circle.id !== OWNER_CIRCLE_ID) continue;
     for (const rule of present(circle.members.map(personRule))) enrolling.set(JSON.stringify(rule), rule);
   }
   if (enrolling.size > 0) {

@@ -1590,6 +1590,7 @@ export class Kitshn extends DurableObject<Env> {
       );
       // K-408: retry what failed once a day.
       this.sql("UPDATE access_objects SET error = NULL WHERE error IS NOT NULL");
+      this.sql("DELETE FROM meta WHERE key = 'launcher_failed'");
       // A refused address may be free now, for example after the other machine let it go.
       this.sql("UPDATE live_sites SET state = 'checking' WHERE state = 'refused'");
       // K-1503 style clean-up: keep the newest 1,000 finished jobs.
@@ -2160,6 +2161,7 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-113: returns the Cloudflare calls it made. */
   private async syncLauncher(api: Api, force: boolean) {
+    if (!force && this.meta("launcher_failed") === `failed:${this.launcherWant()}`) return 0;
     try {
       const result = await syncLauncher(
         desiredAccess(this.state, Date.now()),
@@ -2170,19 +2172,27 @@ export class Kitshn extends DurableObject<Env> {
         force,
       );
       this.setMeta("launcher_policy", result.attached ?? "");
+      this.setMeta("launcher_failed", "none");
       return result.calls;
     } catch (error) {
+      // K-408: a failed write waits for the daily retry, so the alarm does not loop on it.
       console.warn(`kitshn could not update the App Launcher: ${String(error)}`);
+      this.setMeta("launcher_failed", `failed:${this.launcherWant()}`);
       return 3;
     }
   }
 
-  /** K-113: the App Launcher does not yet have the enrollment policy that kitshn wants on it. */
-  private launcherWork() {
-    const want = desiredAccess(this.state, Date.now()).policies.has(ENROLLMENT_KEY)
+  /** K-113: the enrollment policy id that the App Launcher should have, or "" for none. */
+  private launcherWant() {
+    return desiredAccess(this.state, Date.now()).policies.has(ENROLLMENT_KEY)
       ? this.access.get(ENROLLMENT_KEY)?.cfId || ""
       : "";
-    return want !== (this.meta("launcher_policy") ?? "");
+  }
+
+  /** K-113: the App Launcher lacks the wanted policy, and that change did not fail since the daily retry. */
+  private launcherWork() {
+    const want = this.launcherWant();
+    return want !== (this.meta("launcher_policy") ?? "") && this.meta("launcher_failed") !== `failed:${want}`;
   }
 
   private accessLock: Promise<unknown> = Promise.resolve();

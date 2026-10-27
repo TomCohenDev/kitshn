@@ -112,7 +112,7 @@ export async function contentVisitorOf(
     ...cookieValues(request.headers.get("cookie"), "CF_Authorization"),
   ];
   let problem: string | null = null;
-  // The newest login wins: a passkey login after a plain one gives the higher level (K-103).
+  // A passkey login wins over a plain one, because it gives the higher level (K-103).
   let best: ContentVisitor | null = null;
   for (const token of tokens) {
     const identity = await accessIdentity(token, env, [logins.login, logins.passkey]);

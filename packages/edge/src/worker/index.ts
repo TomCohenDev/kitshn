@@ -5,7 +5,7 @@ import {
   loginStep,
   objectKey,
 } from "../core/library.ts";
-import { type ContentLogins, callerOf, contentVisitorOf, deployerOf } from "./auth.ts";
+import { type ContentLogins, callerOf, contentVisitorOf, cookieValues, deployerOf } from "./auth.ts";
 import { escapeHtml, originDown, seenText } from "./live.ts";
 import type { Env } from "./env.ts";
 
@@ -90,8 +90,15 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
     // which step this was, so the item never sends the visitor to the same step again (no redirect loop).
     const next = new URL(url.searchParams.get("next") ?? "/", url.origin);
     if (next.origin !== url.origin) return Response.redirect(url.origin, 302);
-    next.searchParams.set(RETURN_MARK, url.pathname === "/login" ? "login" : "passkey");
-    return Response.redirect(next.href, 302);
+    // A short cookie on the item's path, not a URL mark, so a bookmark or a shared link never carries it.
+    const step = url.pathname === "/login" ? "login" : "passkey";
+    return new Response(null, {
+      status: 302,
+      headers: {
+        location: `${next.origin}${next.pathname}`,
+        "set-cookie": `${RETURN_MARK}=${step}; Max-Age=60; Path=${next.pathname}; Secure; HttpOnly; SameSite=Lax`,
+      },
+    });
   }
   if (request.method !== "GET" && request.method !== "HEAD") return text("Use GET.", 405);
   const [, id = "", ...rest] = url.pathname.split("/");
@@ -104,14 +111,31 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
     })
   ).json()) as ContentAnswer;
   const back = `?next=${encodeURIComponent(url.pathname)}`;
-  const step = loginStep(answer.decision, url.searchParams.get(RETURN_MARK));
+  const step = loginStep(
+    answer.decision,
+    cookieValues(request.headers.get("cookie"), RETURN_MARK)[0] ?? null,
+  );
   if (step === "explain") {
-    return text(
-      `Access let you in, but kitshn could not read the login on ${url.host}` +
-        (problem ? `: ${problem}` : visitor.email ? ` as ${visitor.email} with a passkey.` : ".") +
-        ` Try again at ${url.origin}${url.pathname}. If it repeats, sign out at https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/logout and log in again.`,
+    const reason = answer.stale
+      ? `: this login is from before "Sign out everywhere" (K-110)`
+      : problem
+        ? `: ${problem}`
+        : `${visitor.email ? ` as ${visitor.email}` : ""}${visitor.passkey ? " with a passkey" : ""}.`;
+    const response = text(
+      `Access let you in, but kitshn could not use the login on ${url.host}${reason}` +
+        ` Log out at https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/logout, then open ${url.origin}${url.pathname} again.`,
       401,
     );
+    // The next try starts clean: no old login, no return mark.
+    response.headers.append(
+      "set-cookie",
+      "CF_Authorization=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax",
+    );
+    response.headers.append(
+      "set-cookie",
+      `${RETURN_MARK}=; Max-Age=0; Path=${url.pathname}; Secure; HttpOnly; SameSite=Lax`,
+    );
+    return response;
   }
   if (step === "login") return redirect(`${url.origin}/login${back}`, answer.stale);
   if (step === "passkey") return redirect(`${url.origin}/login/passkey${back}`, answer.stale);

@@ -138,5 +138,7 @@ describe("the browser login chain (K-1004)", () => {
     // Back from a step that kitshn still asks for: explain instead of a redirect loop.
     expect(loginStep("login", "login")).toBe("explain");
     expect(loginStep("passkey", "passkey")).toBe("explain");
+    // A passkey token that kitshn cannot read must not send the visitor back to the plain login either.
+    expect(loginStep("login", "passkey")).toBe("explain");
   });
 });

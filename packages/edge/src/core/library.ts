@@ -114,7 +114,10 @@ export function loginStep(
   cameBackFrom: string | null,
 ): "login" | "passkey" | "explain" | null {
   if (decision !== "login" && decision !== "passkey") return null;
-  return cameBackFrom === decision ? "explain" : decision;
+  // After the passkey login every step is done; after the login only the passkey step may follow. So the
+  // two steps can never take turns forever.
+  if (cameBackFrom === "passkey" || (cameBackFrom === "login" && decision === "login")) return "explain";
+  return decision;
 }
 
 /** The HTML page header of the T3 render route: an opaque origin with scripts, so a page reads no cookie. */

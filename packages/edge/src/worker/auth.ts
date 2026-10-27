@@ -31,6 +31,8 @@ async function accessIdentity(
     const { payload } = await jwtVerify(token, jwks.set, {
       issuer: `https://${env.ACCESS_TEAM_DOMAIN}`,
       audience: wanted,
+      // Access and the Worker clocks can differ by a second; without slack a fresh token fails its nbf.
+      clockTolerance: 60,
     });
     const email = typeof payload["email"] === "string" ? payload["email"] : null;
     const clientId = typeof payload["common_name"] === "string" ? payload["common_name"] : null;
@@ -80,12 +82,13 @@ export interface ContentLogins {
   readonly passkey: string;
 }
 
-const cookie = (request: Request, name: string) =>
-  (request.headers.get("cookie") ?? "")
+/** Every value of a cookie: a browser can send two with the same name (another path or a parent domain). */
+export const cookieValues = (header: string | null, name: string) =>
+  (header ?? "")
     .split(";")
     .map((part) => part.trim())
-    .find((part) => part.startsWith(`${name}=`))
-    ?.slice(name.length + 1) ?? null;
+    .filter((part) => part.startsWith(`${name}=`))
+    .map((part) => part.slice(name.length + 1));
 
 /**
  * K-1004: the visitor of a page or a file. Access sets the `CF_Authorization` cookie with `Path=/` at the
@@ -95,22 +98,38 @@ export async function contentVisitorOf(
   request: Request,
   env: Env,
   logins: ContentLogins,
-): Promise<ContentVisitor> {
+): Promise<{ readonly visitor: ContentVisitor; readonly problem: string | null }> {
   const ip = request.headers.get("cf-connecting-ip");
   const anonymous: ContentVisitor = { email: null, clientId: null, ip, passkey: false, issuedAt: null };
   if (env.DEV_IDENTITY && isLocal(new URL(request.url)))
-    return { email: env.DEV_IDENTITY, clientId: null, ip, passkey: true, issuedAt: null };
-  const token = request.headers.get("cf-access-jwt-assertion") ?? cookie(request, "CF_Authorization");
-  if (!token) return anonymous;
-  const identity = await accessIdentity(token, env, [logins.login, logins.passkey]);
-  if (typeof identity === "string") return anonymous;
-  return {
-    email: identity.email,
-    clientId: identity.clientId,
-    ip,
-    passkey: identity.audience === logins.passkey,
-    issuedAt: identity.issuedAt,
-  };
+    return {
+      visitor: { email: env.DEV_IDENTITY, clientId: null, ip, passkey: true, issuedAt: null },
+      problem: null,
+    };
+  const header = request.headers.get("cf-access-jwt-assertion");
+  const tokens = [
+    ...(header ? [header] : []),
+    ...cookieValues(request.headers.get("cookie"), "CF_Authorization"),
+  ];
+  let problem: string | null = null;
+  // The newest login wins: a passkey login after a plain one gives the higher level (K-103).
+  let best: ContentVisitor | null = null;
+  for (const token of tokens) {
+    const identity = await accessIdentity(token, env, [logins.login, logins.passkey]);
+    if (typeof identity === "string") {
+      problem = identity;
+      continue;
+    }
+    const visitor: ContentVisitor = {
+      email: identity.email,
+      clientId: identity.clientId,
+      ip,
+      passkey: identity.audience === logins.passkey,
+      issuedAt: identity.issuedAt,
+    };
+    if (!best || (visitor.passkey && !best.passkey)) best = visitor;
+  }
+  return { visitor: best ?? anonymous, problem: best ? null : problem };
 }
 
 /** Who deploys: the repo of a GitHub Actions run, from its OIDC token (K-811). */

@@ -1,8 +1,8 @@
 import {
   contentSecurityPolicy,
-  type ContentVisitor,
   type LibraryItem,
   isLibraryId,
+  loginStep,
   objectKey,
 } from "../core/library.ts";
 import { type ContentLogins, callerOf, contentVisitorOf, deployerOf } from "./auth.ts";
@@ -76,6 +76,9 @@ const text = (body: string, status: number) =>
   });
 
 /** K-1003, K-1004, K-1102: a page at `pages.<zone>/<id>` or a file at `files.<zone>/<id>/<name>`. */
+/** The query mark of a return from a login step (K-1004). */
+const RETURN_MARK = "kitshn-login";
+
 async function content(request: Request, env: Env, kind: "page" | "file"): Promise<Response> {
   const url = new URL(request.url);
   const logins: ContentLogins =
@@ -83,14 +86,17 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
       ? { login: env.PAGES_LOGIN_AUD, passkey: env.PAGES_PASSKEY_AUD }
       : { login: env.FILES_LOGIN_AUD, passkey: env.FILES_PASSKEY_AUD };
   if (url.pathname === "/login" || url.pathname === "/login/passkey") {
-    // Access let the visitor through and set the cookie for the whole host; go back to the item.
+    // Access let the visitor through and set the cookie for the whole host; go back to the item, and say
+    // which step this was, so the item never sends the visitor to the same step again (no redirect loop).
     const next = new URL(url.searchParams.get("next") ?? "/", url.origin);
-    return Response.redirect(next.origin === url.origin ? next.href : url.origin, 302);
+    if (next.origin !== url.origin) return Response.redirect(url.origin, 302);
+    next.searchParams.set(RETURN_MARK, url.pathname === "/login" ? "login" : "passkey");
+    return Response.redirect(next.href, 302);
   }
   if (request.method !== "GET" && request.method !== "HEAD") return text("Use GET.", 405);
   const [, id = "", ...rest] = url.pathname.split("/");
   if (!isLibraryId(id)) return text(`kitshn has no ${kind} here.`, 404);
-  const visitor: ContentVisitor = await contentVisitorOf(request, env, logins);
+  const { visitor, problem } = await contentVisitorOf(request, env, logins);
   const answer = (await (
     await env.KITSHN.getByName("kitshn").fetch("https://kitshn.internal/internal/content", {
       method: "POST",
@@ -98,8 +104,17 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
     })
   ).json()) as ContentAnswer;
   const back = `?next=${encodeURIComponent(url.pathname)}`;
-  if (answer.decision === "login") return redirect(`${url.origin}/login${back}`, answer.stale);
-  if (answer.decision === "passkey") return redirect(`${url.origin}/login/passkey${back}`, answer.stale);
+  const step = loginStep(answer.decision, url.searchParams.get(RETURN_MARK));
+  if (step === "explain") {
+    return text(
+      `Access let you in, but kitshn could not read the login on ${url.host}` +
+        (problem ? `: ${problem}` : visitor.email ? ` as ${visitor.email} with a passkey.` : ".") +
+        ` Try again at ${url.origin}${url.pathname}. If it repeats, sign out at https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/logout and log in again.`,
+      401,
+    );
+  }
+  if (step === "login") return redirect(`${url.origin}/login${back}`, answer.stale);
+  if (step === "passkey") return redirect(`${url.origin}/login/passkey${back}`, answer.stale);
   if (answer.decision === "deny")
     return text(
       `${visitor.email ?? visitor.clientId} has no access to this ${kind}. Ask its owner to share it.`,

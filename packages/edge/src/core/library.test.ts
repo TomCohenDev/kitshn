@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type ContentVisitor, contentAccess, fileNameError } from "./library.ts";
+import { type ContentVisitor, contentAccess, fileNameError, loginStep } from "./library.ts";
 import type { Circle, Resource, State } from "./model.ts";
 import { seed } from "./seed.ts";
 
@@ -124,5 +124,19 @@ describe("file names (K-1102)", () => {
   it("takes a normal name and refuses names that leave the path segment", () => {
     expect(fileNameError("report v2.pdf")).toBeNull();
     for (const name of ["", ".", "..", "a/b", "a\\b", "a\nb"]) expect(fileNameError(name)).not.toBeNull();
+  });
+});
+
+describe("the browser login chain (K-1004)", () => {
+  it("goes page, login, passkey login, page, and never back to a step it just passed", () => {
+    // An anonymous visitor goes to the login.
+    expect(loginStep("login", null)).toBe("login");
+    // Back from the login, a passkey circle needs the passkey login next.
+    expect(loginStep("passkey", "login")).toBe("passkey");
+    // Back from the passkey login with a login that kitshn reads: the page opens.
+    expect(loginStep("allow", "passkey")).toBeNull();
+    // Back from a step that kitshn still asks for: explain instead of a redirect loop.
+    expect(loginStep("login", "login")).toBe("explain");
+    expect(loginStep("passkey", "passkey")).toBe("explain");
   });
 });

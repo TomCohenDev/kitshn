@@ -9,7 +9,7 @@ import {
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { composeRisks } from "./guard.ts";
+import { bindSources, composeRisks, realpathOf } from "./guard.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
 import {
   chmodSync,
@@ -417,7 +417,6 @@ async function composeUp(
         throw new Error(`docker network create kitshn-edge failed: ${made.output}`);
     }
     // K-818: risky Compose settings run only when the owner allows them for this repo on this machine.
-    const configFile = join(dir, "compose.config.json");
     const composeArgs = [
       "compose",
       "-p",
@@ -426,42 +425,41 @@ async function composeUp(
       "--env-file",
       join(dir, "params.env"),
     ];
-    try {
-      await step("check the Compose settings", "docker", [...composeArgs, "config", "--format", "json", "-o", configFile], {
-        cwd: source,
-        env,
-      });
-      const real = (path: string) => (existsSync(path) ? realpathSync(path) : path);
-      const roots = [source, env.KITSHN_DATA_DIR, env.KITSHN_LOG_DIR, sockets].map(real);
-      const refused = composeRisks(JSON.parse(readFileSync(configFile, "utf8")), roots, real).filter(
-        (risk) => !command.allowed.includes(risk),
+    const real = (path: string) => realpathOf(path, realpathSync, existsSync);
+    const roots = [source, env.KITSHN_DATA_DIR, env.KITSHN_LOG_DIR, sockets].map(real);
+    const readConfig = async (extra: ReadonlyArray<string>) => {
+      const file = join(dir, "compose.config.json");
+      try {
+        await step("read the Compose settings", "docker", [...composeArgs, "config", "--format", "json", ...extra, "-o", file], {
+          cwd: source,
+          env,
+        });
+        return JSON.parse(readFileSync(file, "utf8")) as unknown;
+      } finally {
+        // The resolved config holds the values of the params.
+        rmSync(file, { force: true });
+      }
+    };
+    const config = await readConfig([]);
+    const refused = composeRisks(config, await readConfig(["--no-interpolate"]), command.project, roots, real).filter(
+      (risk) => !command.allowed.includes(risk),
+    );
+    if (refused.length > 0)
+      throw new Error(
+        `the Compose file asks for ${refused.join(", ")}; the owner allows each one for ${command.repo} in the panel of this machine (K-818)`,
       );
-      if (refused.length > 0)
-        throw new Error(
-          `the Compose file asks for ${refused.join(", ")}; the owner allows each one for ${command.repo} in the panel of this machine (K-818)`,
-        );
-    } finally {
-      // The resolved config holds the values of the params.
-      rmSync(configFile, { force: true });
-    }
+    await step("docker compose build", "nice", ["-n", "19", "docker", ...composeArgs, "build"], { cwd: source, env });
+    // A container of the last build could swap a bind path for a symlink after the check, so none runs now.
+    await step("stop the app", "docker", [...composeArgs, "stop"], { cwd: source, env });
+    const moved = bindSources(config).filter((path) => {
+      const resolved = real(path);
+      return !roots.some((root) => resolved === root || resolved.startsWith(`${root}/`)) && !command.allowed.includes(`bind:${path}`);
+    });
+    if (moved.length > 0) throw new Error(`a bind path left the app's folders after the check: ${moved.join(", ")} (K-818)`);
     await step(
       "docker compose up",
-      "nice",
-      [
-        "-n",
-        "19",
-        "docker",
-        "compose",
-        "-p",
-        command.project,
-        ...(command.file ? ["-f", command.file] : []),
-        "--env-file",
-        join(dir, "params.env"),
-        "up",
-        "-d",
-        "--build",
-        "--remove-orphans",
-      ],
+      "docker",
+      [...composeArgs, "up", "-d", "--no-build", "--remove-orphans"],
       { cwd: source, env },
     );
     const until = Date.now() + SOCKET_WAIT_MS;
@@ -601,7 +599,7 @@ function report() {
   const message: DaemonMessage = {
     type: "status",
     status: {
-      capabilities: ["update", "update-gz", "compose", "compose-redeploy"],
+      capabilities: ["update", "update-gz", "compose", "compose-redeploy", "compose-guard"],
       version: VERSION,
       os: `${osPlatform()} ${release()}`,
       arch: arch(),

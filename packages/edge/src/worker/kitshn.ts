@@ -1878,12 +1878,19 @@ export class Kitshn extends DurableObject<Env> {
           );
         }
         machineId = existing.machine;
+        const running = this.state.machines.get(existing.machine);
+        if (result.kind === "deploy" && running && !this.machineView(running).status?.capabilities?.includes("compose-guard"))
+          return Response.json(
+            { error: `Update the daemon on ${running.name} first: it does not check Compose settings yet (K-818).` },
+            { status: 409 },
+          );
       } else if (result.kind === "deploy") {
         const labels = compose.runsOn ?? [];
         const pick = [...this.state.machines.values()]
           // Only a machine that the owner labels "deploy" runs the apps of repos (K-610).
           .filter((machine) => ["deploy", ...labels].every((label) => machine.labels.includes(label)))
-          .filter((machine) => this.machineView(machine).status?.capabilities?.includes("compose"))
+          // K-818: only a daemon that checks Compose settings runs the apps of repos.
+          .filter((machine) => this.machineView(machine).status?.capabilities?.includes("compose-guard"))
           .sort((a, b) => a.order - b.order)
           .find((machine) => this.presence.get(machine.id)?.online);
         if (!pick) {
@@ -2494,7 +2501,9 @@ export class Kitshn extends DurableObject<Env> {
         mode,
         machine
           ? {
-              canRedeploy: this.machineView(machine).status?.capabilities?.includes("compose-redeploy") ?? false,
+              canRedeploy: ["compose-redeploy", "compose-guard"].every(
+                (capability) => this.machineView(machine).status?.capabilities?.includes(capability) ?? false,
+              ),
               takesDeploys: machine.labels.includes("deploy"),
               runsCard: this.state.resources.get(card)?.machine === machine.id,
               allowed: allowedFor(machine, row?.repo ?? ""),

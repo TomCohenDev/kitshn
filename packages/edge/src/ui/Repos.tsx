@@ -5,8 +5,11 @@ import { callApi } from "./store.ts";
 type RepoAction = Exclude<RepoState, "waiting"> | "forget";
 
 /** K-819: allows, blocks or forgets one repo by its GitHub repository id; returns the toast text. */
-export async function setRepoState(repo: RepoView, state: RepoAction): Promise<{ text: string; error: boolean }> {
-  const result = await callApi<{ dispatched?: string; dispatchError?: string }>(
+export async function setRepoState(
+  repo: RepoView,
+  state: RepoAction,
+): Promise<{ text: string; error: boolean }> {
+  const result = await callApi<{ dispatched?: string; dispatchError?: string; paused?: string }>(
     "POST",
     `/api/repos/${encodeURIComponent(repo.repoId)}`,
     { state },
@@ -14,9 +17,18 @@ export async function setRepoState(repo: RepoView, state: RepoAction): Promise<{
   if ("error" in result) return { text: result.error, error: true };
   if (state === "forget") return { text: `Forgot ${repo.name}.`, error: false };
   if (state === "blocked") return { text: `Blocked deploys of ${repo.name}.`, error: false };
-  if (result.dispatched) return { text: `Allowed ${repo.name} and started its deploy from ${result.dispatched}.`, error: false };
+  if (result.dispatched)
+    return { text: `Allowed ${repo.name} and started its deploy from ${result.dispatched}.`, error: false };
+  if (result.paused)
+    return {
+      text: `Allowed ${repo.name}. kitshn is paused, so its deploy from ${result.paused} did not start; start it after Resume.`,
+      error: false,
+    };
   if (result.dispatchError)
-    return { text: `Allowed ${repo.name}, but could not start its deploy: ${result.dispatchError}`, error: true };
+    return {
+      text: `Allowed ${repo.name}, but could not start its deploy: ${result.dispatchError}`,
+      error: true,
+    };
   return { text: `Allowed deploys of ${repo.name}. Run its workflow again to deploy.`, error: false };
 }
 
@@ -45,6 +57,15 @@ export function RepoList(props: {
               {repo.state !== "allowed" ? (
                 <button type="button" class="btn" onClick={() => void decide(repo, "allowed")}>
                   Allow
+                </button>
+              ) : null}
+              {repo.state === "waiting" && repo.branch !== null ? (
+                <span class="muted">Allow starts {repo.branch}</span>
+              ) : null}
+              {/* An Allow whose start failed or met the pause keeps the branch to start again. */}
+              {repo.state === "allowed" && repo.branch !== null ? (
+                <button type="button" class="btn" onClick={() => void decide(repo, "allowed")}>
+                  Start {repo.branch}
                 </button>
               ) : null}
               {repo.state !== "blocked" ? (

@@ -83,6 +83,7 @@ import {
   STATIC_WORKER,
   environmentNames,
   eventOf,
+  legacyRepos,
   parseManifest,
 } from "./deploys.ts";
 import { type Recipe, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
@@ -168,9 +169,10 @@ export class Kitshn extends DurableObject<Env> {
       const [version] = ctx.storage.sql
         .exec<{ value: string }>("SELECT value FROM meta WHERE key = 'schema_version'")
         .toArray();
-      ctx.storage.transactionSync(() =>
-        migrate((query) => ctx.storage.sql.exec(query), Number(version?.value ?? 0)),
-      );
+      ctx.storage.transactionSync(() => {
+        migrate((query) => ctx.storage.sql.exec(query), Number(version?.value ?? 0));
+        this.backfillRepoIds();
+      });
       this.load();
       if (this.state.circles.size === 0) this.seed();
       this.syncAdminAddress();
@@ -301,7 +303,13 @@ export class Kitshn extends DurableObject<Env> {
           ["1001", "Yarden-zamir/riffle", "allowed"],
           ["1002", "Yarden-zamir/new-app", "waiting"],
         ] as const)
-          this.sql("INSERT OR IGNORE INTO repos (repo_id, name, state, first_seen) VALUES (?, ?, ?, ?)", id, name, state, Date.now());
+          this.sql(
+            "INSERT OR IGNORE INTO repos (repo_id, name, state, first_seen) VALUES (?, ?, ?, ?)",
+            id,
+            name,
+            state,
+            Date.now(),
+          );
       this.insertRevision({ _tag: "kitshn", reason: "setup" }, "Set up kitshn", changes, null);
     });
     this.load();
@@ -600,7 +608,11 @@ export class Kitshn extends DurableObject<Env> {
     if (path.startsWith("/api/machines/") && request.method === "DELETE")
       return this.removeMachine(caller, decodeURIComponent(path.slice("/api/machines/".length)));
     if (path.startsWith("/api/repos/") && request.method === "POST")
-      return await this.setRepoState(caller, decodeURIComponent(path.slice("/api/repos/".length)), await request.json().catch(() => null));
+      return await this.setRepoState(
+        caller,
+        decodeURIComponent(path.slice("/api/repos/".length)),
+        await request.json().catch(() => null),
+      );
     if (path === "/api/jobs" && request.method === "POST")
       return this.addJob(caller, await request.json().catch(() => null));
     if (path === "/api/jobs" && request.method === "GET") return Response.json(this.recentJobs(100));
@@ -1085,7 +1097,8 @@ export class Kitshn extends DurableObject<Env> {
             ? "kitshn makes no other job for an agent key."
             : !cardsControlledBy(this.state, visitor, Date.now()).has(queuedCommand.project)
               ? "The key no longer manages the card."
-              : (this.redeployRefusal(job.machine_id, queuedCommand.project) ?? this.repoRefusal(queuedCommand.repo));
+              : (this.redeployRefusal(job.machine_id, queuedCommand.project) ??
+                this.repoRefusal(this.repoIdOfCard(queuedCommand.project)));
         if (reason !== null) {
           this.sql("UPDATE jobs SET state = 'failed', output = ? WHERE id = ?", reason, job.id);
           continue;
@@ -1831,70 +1844,110 @@ export class Kitshn extends DurableObject<Env> {
     }
   }
 
+  /**
+   * K-819: once, gives the deploy rows from before the gate their repo id, and allows each repo that finished
+   * a deploy then. A row whose card id holds no repo id keeps none; kitshn logs it, and its repo waits for the
+   * owner like a new one. Crashing here instead would stop the whole Durable Object over one old row.
+   */
+  private backfillRepoIds() {
+    if (this.meta("repo_ids_backfilled") !== null) return;
+    const rows = this.sql<DeployRow>("SELECT * FROM deploys ORDER BY expires_at");
+    const { repoIds, allowed, unknown } = legacyRepos(
+      rows.map((row) => ({ ...row, resourceId: row.resource_id })),
+    );
+    for (const [deployId, repoId] of repoIds)
+      this.sql("UPDATE deploys SET repo_id = ? WHERE id = ?", repoId, deployId);
+    const now = Date.now();
+    for (const [repoId, name] of allowed)
+      this.sql(
+        "INSERT INTO repos (repo_id, name, state, first_seen) VALUES (?, ?, 'allowed', ?)",
+        repoId,
+        name,
+        now,
+      );
+    if (unknown.length > 0)
+      console.error(
+        `K-819: the card ids of the deploys ${unknown.join(", ")} hold no repo id; their repos wait.`,
+      );
+    this.setMeta("repo_ids_backfilled", "true");
+  }
+
   /** K-819: refuses a deploy step of a repo that waits for the owner or that the owner blocked. */
   private repoGate(deployer: Deployer): Response | null {
     const [row] = this.sql<RepoRow>("SELECT * FROM repos WHERE repo_id = ?", deployer.repoId);
-    const branch = deployer.eventName === "push" ? deployer.branch : null;
-    // A repo that deployed before the gate existed has its id inside the ids of its cards.
-    const seenBefore =
-      !row &&
-      this.sql<{ repo: string; environment: string; resource_id: string }>(
-        "SELECT DISTINCT repo, environment, resource_id FROM deploys",
-      ).some((deploy) => environmentNames(deployer.repoId, deploy.repo, deploy.environment).resourceId === deploy.resource_id);
     const decision = gateDecision(
       row ? repoGateOf(row) : undefined,
-      { repoId: deployer.repoId, name: deployer.repo, branch },
-      seenBefore,
+      {
+        repoId: deployer.repoId,
+        name: deployer.repo,
+        branch: deployer.eventName === "push" ? deployer.branch : null,
+      },
       Date.now(),
     );
     const record = decision.record;
     if (record) {
       this.ctx.storage.transactionSync(() => {
         this.sql(
-          "INSERT INTO repos (repo_id, name, state, first_seen, branch) VALUES (?, ?, ?, ?, ?)",
+          "INSERT OR REPLACE INTO repos (repo_id, name, state, first_seen, branch) VALUES (?, ?, ?, ?, ?)",
           record.repoId,
           record.name,
           record.state,
           record.firstSeen,
           record.branch,
         );
-        if (record.state === "waiting")
-          this.insertRevision({ _tag: "kitshn", reason: "repo gate" }, `${record.name} waits to deploy (K-819)`, [], null);
+        if (!row)
+          this.insertRevision(
+            { _tag: "kitshn", reason: "repo gate" },
+            `${record.name} waits to deploy (K-819)`,
+            [],
+            null,
+          );
       });
       this.load();
-      this.broadcast();
-    } else if (row && (row.name !== deployer.repo || (row.state === "waiting" && row.branch !== branch))) {
-      this.sql("UPDATE repos SET name = ?, branch = ? WHERE repo_id = ?", deployer.repo, row.state === "waiting" ? branch : row.branch, deployer.repoId);
       this.broadcast();
     }
     return decision.allow ? null : Response.json({ error: decision.error }, { status: 403 });
   }
 
-  /** K-819: each repo with the cards that its id made, for the card panel. */
+  /** K-819: each repo with its cards on the map, for the card panel. */
   private repoViews(): Array<RepoView> {
-    const deploys = this.sql<{ repo: string; environment: string; resource_id: string }>(
-      "SELECT DISTINCT repo, environment, resource_id FROM deploys",
-    );
+    const cards = new Map<string, Array<string>>();
+    for (const { repo_id, resource_id } of this.sql<{ repo_id: string; resource_id: string }>(
+      "SELECT repo_id, resource_id FROM deploys WHERE repo_id IS NOT NULL GROUP BY repo_id, resource_id",
+    ))
+      if (this.state.resources.has(resource_id))
+        cards.set(repo_id, [...(cards.get(repo_id) ?? []), resource_id]);
     return this.sql<RepoRow>("SELECT * FROM repos ORDER BY first_seen DESC").map((row) => ({
       ...repoGateOf(row),
-      resourceIds: deploys
-        .filter((deploy) => environmentNames(row.repo_id, deploy.repo, deploy.environment).resourceId === deploy.resource_id)
-        .map((deploy) => deploy.resource_id),
+      resourceIds: cards.get(row.repo_id) ?? [],
     }));
   }
 
-  /** K-819: why kitshn may not run a job for this repo now, or null. A repo without a row deployed before the gate. */
-  private repoRefusal(repo: string): string | null {
-    const [row] = this.sql<{ state: RepoState }>("SELECT state FROM repos WHERE name = ?", repo);
-    if (!row || row.state === "allowed") return null;
-    return row.state === "blocked"
-      ? `The owner blocked deploys of ${repo} on the kitshn map.`
-      : `${repo} waits for the owner on the kitshn map.`;
+  /** K-819: the repo id of a card that a deploy made, or null when kitshn does not know it. */
+  private repoIdOfCard(resourceId: string): string | null {
+    const [row] = this.sql<{ repo_id: string }>(
+      "SELECT repo_id FROM deploys WHERE resource_id = ? AND repo_id IS NOT NULL LIMIT 1",
+      resourceId,
+    );
+    return row?.repo_id ?? null;
+  }
+
+  /** K-819: why kitshn may not deploy this repo now, or null. A repo without a known id or a row waits. */
+  private repoRefusal(repoId: string | null): string | null {
+    if (repoId === null) return "kitshn does not know the repo of this deploy. Deploy it once from GitHub.";
+    const [row] = this.sql<{ name: string; state: RepoState }>(
+      "SELECT name, state FROM repos WHERE repo_id = ?",
+      repoId,
+    );
+    if (row?.state === "allowed") return null;
+    return row?.state === "blocked"
+      ? `The owner blocked deploys of ${row.name} on the kitshn map.`
+      : `The repo ${row?.name ?? repoId} waits for the owner on the kitshn map.`;
   }
 
   /**
-   * K-819: the owner allows, blocks or forgets one repo. Allow starts the refused push again through the
-   * GitHub App; Block fails the repo's jobs that have not finished.
+   * K-819: the owner allows, blocks or forgets one repo. Allow starts the first refused push through the
+   * GitHub App, except during the pause. Block fails the repo's deploys and jobs that have not finished.
    */
   private async setRepoState(caller: Caller, repoId: string, body: unknown) {
     const state = isRecord(body) ? body["state"] : null;
@@ -1903,29 +1956,59 @@ export class Kitshn extends DurableObject<Env> {
     const [row] = this.sql<RepoRow>("SELECT * FROM repos WHERE repo_id = ?", repoId);
     if (!row) return Response.json({ error: `kitshn knows no repo ${repoId}.` }, { status: 404 });
     if (state === "forget" && row.state !== "waiting")
-      return Response.json({ error: "Only a waiting repo can be forgotten; block the others." }, { status: 409 });
-    this.ctx.storage.transactionSync(() => {
+      return Response.json(
+        { error: "Only a waiting repo can be forgotten; block the others." },
+        { status: 409 },
+      );
+    const stopped = this.ctx.storage.transactionSync(() => {
       if (state === "forget") {
         this.sql("DELETE FROM repos WHERE repo_id = ?", repoId);
         this.insertRevision(caller.actor, `Forgot ${row.name} (K-819)`, [], null);
-        return;
+        return [];
       }
-      this.sql("UPDATE repos SET state = ?, branch = NULL WHERE repo_id = ?", state, repoId);
+      if (row.state === state) return [];
+      if (state === "allowed") this.sql("UPDATE repos SET state = 'allowed' WHERE repo_id = ?", repoId);
       if (state === "blocked")
-        this.sql(
-          "UPDATE jobs SET state = 'failed', output = ? WHERE state IN ('queued', 'sent') AND json_extract(command, '$.repo') = ?",
-          `The owner blocked deploys of ${row.name} (K-819).`,
-          row.name,
-        );
-      this.insertRevision(caller.actor, `${state === "allowed" ? "Allowed" : "Blocked"} deploys of ${row.name} (K-819)`, [], null);
+        this.sql("UPDATE repos SET state = 'blocked', branch = NULL WHERE repo_id = ?", repoId);
+      this.insertRevision(
+        caller.actor,
+        `${state === "allowed" ? "Allowed" : "Blocked"} deploys of ${row.name} (K-819)`,
+        [],
+        null,
+      );
+      if (state === "allowed") return [];
+      // A teardown still runs (K-819); a daemon that already has the source can still finish its build.
+      this.sql(
+        `UPDATE jobs SET state = 'failed', output = ? WHERE state IN ('queued', 'sent')
+         AND json_extract(command, '$.kind') != 'compose-down'
+         AND json_extract(command, '$.project') IN (SELECT resource_id FROM deploys WHERE repo_id = ?)`,
+        `The owner blocked deploys of ${row.name} (K-819).`,
+        repoId,
+      );
+      return this.sql<{ id: string }>(
+        `UPDATE deploys SET state = 'failed' WHERE repo_id = ? AND kind = 'deploy' AND state IN ('planned', 'running')
+         AND app = 'compose' RETURNING id`,
+        repoId,
+      );
     });
+    if (stopped.length > 0 && this.env.BUCKET)
+      void this.env.BUCKET.delete(
+        stopped.flatMap(({ id }) => [deployObject(id, "source.tgz"), deployObject(id, "params.env")]),
+      );
     this.load();
     this.broadcast();
-    if (state !== "allowed" || row.state !== "waiting" || row.branch === null) return Response.json({ repoId, state });
+    if (state !== "allowed" || row.branch === null) return Response.json({ repoId, state });
+    if (this.state.paused) return Response.json({ repoId, state, paused: row.branch });
     const started = await this.agentBuild(caller, row.name, row.branch);
-    return started.ok
-      ? Response.json({ repoId, state, dispatched: row.branch })
-      : Response.json({ repoId, state, dispatchError: ((await started.json()) as { error: string }).error });
+    if (!started.ok)
+      return Response.json({
+        repoId,
+        state,
+        dispatchError: ((await started.json()) as { error: string }).error,
+      });
+    this.sql("UPDATE repos SET branch = NULL WHERE repo_id = ?", repoId);
+    this.broadcast();
+    return Response.json({ repoId, state, dispatched: row.branch });
   }
 
   /** K-803 to K-807, K-901 to K-904: the steps of a static site deploy from GitHub Actions. */
@@ -1941,7 +2024,7 @@ export class Kitshn extends DurableObject<Env> {
         "SELECT * FROM deploys WHERE id = ?",
         String(input["deployId"] ?? ""),
       );
-      if (!row || row.repo !== deployer.repo) return fail(404, "kitshn knows no such deploy of this repo.");
+      if (!row || row.repo_id !== deployer.repoId) return fail(404, "kitshn knows no such deploy of this repo.");
       if (row.expires_at < Date.now() || row.state !== "planned")
         return fail(410, "This deploy expired or ended. Run it again.");
       // A blocked repo still tears down what it made (K-819).
@@ -2130,10 +2213,11 @@ export class Kitshn extends DurableObject<Env> {
     }
     const deployId = crypto.randomUUID();
     this.sql(
-      `INSERT INTO deploys (id, repo, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?)`,
+      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?)`,
       deployId,
       deployer.repo,
+      deployer.repoId,
       result.environment,
       resourceId,
       result.address,
@@ -2220,7 +2304,7 @@ export class Kitshn extends DurableObject<Env> {
       "SELECT * FROM deploys WHERE id = ?",
       request.headers.get("x-kitshn-deploy") ?? "",
     );
-    if (!row || row.repo !== deployer.repo || row.app !== "compose" || row.kind !== "deploy")
+    if (!row || row.repo_id !== deployer.repoId || row.app !== "compose" || row.kind !== "deploy")
       return fail(404, "kitshn knows no such Compose deploy of this repo.");
     if (row.state !== "planned" || row.expires_at < Date.now())
       return fail(410, "This deploy expired or started.");
@@ -2266,7 +2350,7 @@ export class Kitshn extends DurableObject<Env> {
       !["source.tgz", "params.env"].includes(file)
     )
       return new Response("This machine runs no such deploy now.", { status: 404 });
-    const refusal = this.repoRefusal(row.repo);
+    const refusal = this.repoRefusal(row.repo_id);
     if (refusal) return new Response(refusal, { status: 403 });
     const object = await this.env.BUCKET?.get(deployObject(deployId, file));
     if (!object) return new Response("The file of this deploy is gone.", { status: 404 });
@@ -2329,7 +2413,7 @@ export class Kitshn extends DurableObject<Env> {
   /** K-813: the state and output of a Compose deploy, for the Actions step that waits on it. */
   private composeStatus(deployer: Deployer, deployId: string) {
     const [row] = this.sql<DeployRow>("SELECT * FROM deploys WHERE id = ?", deployId);
-    if (!row || row.repo !== deployer.repo || row.job_id === null)
+    if (!row || row.repo_id !== deployer.repoId || row.job_id === null)
       return Response.json({ error: "kitshn knows no such running deploy of this repo." }, { status: 404 });
     const [job] = this.sql<{ state: string; output: string; exit_code: number | null; expires_at: number }>(
       "SELECT state, output, exit_code, expires_at FROM jobs WHERE id = ?",
@@ -2654,7 +2738,7 @@ export class Kitshn extends DurableObject<Env> {
           : null,
       );
       if (plan.kind === "refused") return Response.json({ error: plan.error }, { status: plan.status });
-      const refusal = this.repoRefusal(plan.kind === "build" ? plan.repo : plan.command.repo);
+      const refusal = this.repoRefusal(row?.repo_id ?? null);
       if (refusal) return Response.json({ error: refusal }, { status: 403 });
       if (plan.kind === "build") return this.agentBuild(agent, plan.repo, plan.branch);
       if (!machine) return Response.json({ error: "The machine of this app is gone." }, { status: 409 });
@@ -3070,6 +3154,8 @@ const repoGateOf = (row: RepoRow): RepoGate => ({
 interface DeployRow extends Record<string, SqlStorageValue> {
   id: string;
   repo: string;
+  /** K-819: GitHub's id of the repo; null only for an old row whose card id holds none. */
+  repo_id: string | null;
   environment: string;
   resource_id: string;
   address: string;

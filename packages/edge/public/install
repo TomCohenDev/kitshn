@@ -171,7 +171,7 @@ app() {
     return
   fi
   body=$(jq -nc --arg domain "$1" --arg name "$2" --arg session "$3" --arg policy "$4" \
-    '{name:$name,type:"self_hosted",domain:$domain,session_duration:$session,same_site_cookie_attribute:"lax",policies:[{id:$policy,precedence:1}]}')
+    '{name:$name,type:"self_hosted",domain:$domain,session_duration:$session,same_site_cookie_attribute:"lax"} + (if $policy == "" then {} else {policies:[{id:$policy,precedence:1}]} end)')
   created=$(api POST "/accounts/$ACCOUNT/access/apps" "$body")
   changed "created the application \"$2\" on $1" >&2
   printf '%s' "$created" | jq -r .aud
@@ -211,28 +211,14 @@ else
   changed "created the application \"kitshn fresh passkey\" on $KITSHN_HOST/api/fresh"
 fi
 # K-1004: pages and files have no Access application on the whole host; the Worker checks the shares.
-# Only the login paths have one. It lets in anyone who logs in, and the passkey path adds the passkey
-# check (K-103). The Worker reads who logged in from the cookie that Access sets for the whole host.
-login_policy=$(policy "kitshn any login" '{"name":"kitshn any login","decision":"allow","include":[{"everyone":{}}],"require":[],"exclude":[]}')
-passkey_policy=$(policy "kitshn any login (passkey)" "$(jq -nc --argjson mfa "$MFA" \
-  '{name:"kitshn any login (passkey)",decision:"allow",include:[{everyone:{}}],require:[],exclude:[],mfa_config:$mfa}')")
-# app_two DOMAIN NAME SESSION POLICY_ID POLICY_ID: like app, with a second policy.
-app_two() {
-  found=$(printf '%s' "$APPS" | jq -c --arg domain "$1" 'map(select(.domain == $domain)) | .[0] // empty')
-  if [ -z "$found" ]; then
-    body=$(jq -nc --arg domain "$1" --arg name "$2" --arg session "$3" --arg a "$4" --arg b "$5" \
-      '{name:$name,type:"self_hosted",domain:$domain,session_duration:$session,same_site_cookie_attribute:"lax",policies:[{id:$a,precedence:1},{id:$b,precedence:2}]}')
-    created=$(api POST "/accounts/$ACCOUNT/access/apps" "$body")
-    changed "created the application \"$2\" on $1" >&2
-    printf '%s' "$created" | jq -r .aud
-  else
-    app "$@"
-  fi
-}
-PAGES_LOGIN_AUD=$(app_two "pages.$ZONE_NAME/login" "kitshn pages login" 720h "$login_policy" "$machines_policy")
-PAGES_PASSKEY_AUD=$(app "pages.$ZONE_NAME/login/passkey" "kitshn pages login (passkey)" 24h "$passkey_policy")
-FILES_LOGIN_AUD=$(app_two "files.$ZONE_NAME/login" "kitshn files login" 720h "$login_policy" "$machines_policy")
-FILES_PASSKEY_AUD=$(app "files.$ZONE_NAME/login/passkey" "kitshn files login (passkey)" 24h "$passkey_policy")
+# Only the login paths have one. The Worker gives them the policies of the circles that may log in, so
+# the script makes them with the machines policy only (the passkey paths with none) and never changes
+# their policies later (K-1205). The Worker reads who logged in from the cookie that Access sets for the
+# whole host.
+PAGES_LOGIN_AUD=$(app "pages.$ZONE_NAME/login" "kitshn pages login" 720h "$machines_policy")
+PAGES_PASSKEY_AUD=$(app "pages.$ZONE_NAME/login/passkey" "kitshn pages login (passkey)" 24h "")
+FILES_LOGIN_AUD=$(app "files.$ZONE_NAME/login" "kitshn files login" 720h "$machines_policy")
+FILES_PASSKEY_AUD=$(app "files.$ZONE_NAME/login/passkey" "kitshn files login (passkey)" 24h "")
 
 say "6. R2 bucket"
 NEED="Workers R2 Storage: Edit"

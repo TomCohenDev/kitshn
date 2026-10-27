@@ -330,6 +330,101 @@ describe("Access compile (K-401 to K-403)", () => {
   });
 });
 
+describe("page and file logins (K-1004)", () => {
+  const page: Resource = {
+    id: "notes",
+    kind: "page",
+    name: "notes",
+    addresses: [],
+    status: "running",
+    group: null,
+    machine: null,
+  };
+  const withPage = (state: State, x: number): State => ({
+    ...state,
+    resources: new Map(state.resources).set(page.id, page),
+    places: new Map(state.places).set(page.id, { x, y: 0 }),
+  });
+  const loginRules = (state: State) => {
+    const access = desiredAccess(state, 0);
+    return [...access.logins.login, ...access.logins.passkey].map((key) => access.policies.get(key)!);
+  };
+
+  it("lets in only the people of circles that can open an item, never everyone", () => {
+    // Only the Owner circle holds the admin; Her holds nothing and "Everyone" holds the page.
+    const state = withPage(start(), 760);
+    expect(desiredAccess(state, 0).logins).toEqual({
+      login: ["policy:owner:login"],
+      passkey: ["policy:owner:login-passkey"],
+    });
+    for (const policy of loginRules(state)) {
+      expect(policy.decision).toBe("allow");
+      expect(policy.include).toEqual([{ email: { email: OWNER } }]);
+    }
+  });
+
+  it("adds the people of a circle that holds a page, in a copy of its own", () => {
+    const access = desiredAccess(withPage(start(), 450), 0);
+    // Her holds no site, so her site policy is not wanted at all: a stuck login step never holds it.
+    expect(access.policies.has("policy:her:people")).toBe(false);
+    expect(access.logins.login).toEqual(["policy:owner:login", "policy:her:login"]);
+    expect(access.policies.get("policy:her:login")?.include).toEqual([
+      { email: { email: "her@example.com" } },
+    ]);
+  });
+
+  it("asks for the passkey only on the passkey login", () => {
+    const access = desiredAccess(withPage(start(), 450), 0);
+    expect(access.logins.passkey).toEqual(["policy:owner:login-passkey"]);
+    expect(access.policies.get("policy:owner:login-passkey")?.mfa_config).toBeDefined();
+    expect(access.policies.get("policy:owner:login")?.mfa_config).toBeUndefined();
+    expect(access.policies.get("policy:owner:login")?.include).toEqual([{ email: { email: OWNER } }]);
+  });
+
+  it("adds nothing for circles of only networks or devices, which need no login", () => {
+    const state = withPage(start(), 450);
+    const her = circle(state, "her");
+    for (const members of [
+      [{ _tag: "ip" as const, range: "10.0.0.0/8" }],
+      [{ _tag: "device" as const, tokenId: "t1", clientId: "c1.access", name: "phone" }],
+    ]) {
+      const only = { ...state, circles: new Map(state.circles).set("her", { ...her, members }) };
+      expect(desiredAccess(only, 0).logins.login).toEqual(["policy:owner:login"]);
+    }
+  });
+
+  it("keeps an all circle exact and drops ended circles, ended shares and the pause", () => {
+    const state = withPage(start(), 450);
+    const her = circle(state, "her");
+    const strict = {
+      ...state,
+      circles: new Map(state.circles).set("her", {
+        ...her,
+        match: "all" as const,
+        members: [...her.members, { _tag: "ip" as const, range: "10.0.0.0/8" }],
+      }),
+    };
+    expect(desiredAccess(strict, 0).logins.login).toEqual(["policy:owner:login", "policy:her:login"]);
+    expect(desiredAccess(strict, 0).policies.get("policy:her:login")?.require).toEqual([
+      { ip: { ip: "10.0.0.0/8" } },
+    ]);
+    const ended = { ...state, circles: new Map(state.circles).set("her", { ...her, endsAt: 1 }) };
+    expect(desiredAccess(ended, 1).logins.login).toEqual(["policy:owner:login"]);
+    const shareEnded = {
+      ...state,
+      shareSettings: new Map([[shareKey("notes", "her"), { level: null, endsAt: 1 }]]),
+    };
+    expect(desiredAccess(shareEnded, 1).logins.login).toEqual(["policy:owner:login"]);
+    for (const mode of ["keep-public", "lockdown"] as const) {
+      const { after } = edit(state, [{ _tag: "pause", after: mode }]);
+      expect(desiredAccess(after, 0).logins).toEqual({
+        login: ["policy:owner:login"],
+        passkey: ["policy:owner:login-passkey"],
+      });
+    }
+  });
+});
+
 describe("pause (K-1504)", () => {
   it("closes every share except the Owner circle's share of the admin", () => {
     const state = start();

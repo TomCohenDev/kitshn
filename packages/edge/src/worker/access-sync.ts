@@ -90,8 +90,10 @@ export function hasAccessWork(
   desired: DesiredAccess,
   rows: ReadonlyMap<string, AccessRow>,
   reachable: ReadonlySet<string> = new Set(),
+  held: ReadonlySet<string> = new Set(),
 ): boolean {
   for (const [key, policy] of desired.policies) {
+    if (isHeld(rows.get(key), held)) continue;
     const body = policyBody(policy);
     if (rows.get(key)?.body !== body && !failedWith(rows.get(key), body)) return true;
   }
@@ -99,10 +101,21 @@ export function hasAccessWork(
     const body = appBody(key, app, rows);
     if (body !== null && rows.get(key)?.body !== body && !failedWith(rows.get(key), body)) return true;
   }
-  const kept = keptPolicies(desired, rows, reachable);
+  const kept = withHeld(keptPolicies(desired, rows, reachable), held);
   for (const row of rows.values()) if (isStale(desired, row, reachable, kept)) return true;
   return false;
 }
+
+/**
+ * K-1004: policy ids that the login applications hold since the last login step that succeeded. The sync
+ * neither changes nor deletes them until the login step lets go of them, so a passkey check never drops
+ * from `/login/passkey` and a policy in use never goes.
+ */
+const isHeld = (row: AccessRow | undefined, held: ReadonlySet<string>) =>
+  row !== undefined && row.cfId !== "" && held.has(row.cfId);
+
+const withHeld = (kept: ReadonlySet<string> | null, held: ReadonlySet<string>) =>
+  kept === null ? null : new Set([...kept, ...held]);
 
 /** The address of an application row, from its key `app:<card>:<address>`, so it never depends on the body. */
 const appDomain = (row: AccessRow) => {
@@ -298,7 +311,8 @@ export async function signOutEverywhere(
 /**
  * K-408 for the passkey check (K-103): the policy lists carry no MFA settings, so this reads each policy
  * that needs a passkey once a day and marks it when someone changed its MFA settings. It reads at most
- * `budget` policies a day, which covers 10 passkey circles; revisit when an owner has more.
+ * `budget` policies a day, which covers 10 passkey circles, or 5 that also hold pages or files (their passkey
+ * login copy needs a read too); revisit when an owner has more.
  */
 export async function verifyPasskeys(
   store: AccessStore,
@@ -401,6 +415,7 @@ export async function syncAccess(
   accountId: string,
   budget = CALLS_PER_RUN,
   reachable: ReadonlySet<string> = new Set(),
+  held: ReadonlySet<string> = new Set(),
 ): Promise<boolean> {
   let calls = 0;
   const spend = () => calls++ < budget;
@@ -415,6 +430,7 @@ export async function syncAccess(
     find: (list: ReadonlyArray<Named>) => Named | undefined,
   ) => {
     const row = store.rows.get(key);
+    if (kind === "policies" && isHeld(row, held)) return true;
     if (row?.body === body || failedWith(row, body)) return true;
     let cfId = row?.cfId ?? "";
     try {
@@ -429,8 +445,8 @@ export async function syncAccess(
         }
         const found = find((kind === "policies" ? existingPolicies : existingApps) ?? []);
         // Never adopt an object that another row holds: one Cloudflare object belongs to one row (K-410).
-        const held = new Set([...store.rows.values()].map((item) => item.cfId));
-        cfId = found && found.name.startsWith(ACCESS_NAME_PREFIX) && !held.has(found.id) ? found.id : "";
+        const taken = new Set([...store.rows.values()].map((item) => item.cfId));
+        cfId = found && found.name.startsWith(ACCESS_NAME_PREFIX) && !taken.has(found.id) ? found.id : "";
       }
       if (!spend()) return false;
       const request: unknown = JSON.parse(body);
@@ -482,7 +498,7 @@ export async function syncAccess(
     const found = (list: ReadonlyArray<Named>) => list.find((item) => item.domain === app.domain);
     if (!(await write(key, "apps", body, found))) return false;
   }
-  const kept = keptPolicies(desired, store.rows, reachable);
+  const kept = withHeld(keptPolicies(desired, store.rows, reachable), held);
   const stale = [...store.rows.values()].filter((row) => isStale(desired, row, reachable, kept));
   // Applications first: Access refuses to delete a policy that an application still uses.
   stale.sort((a, b) => Number(a.key.startsWith("policy:")) - Number(b.key.startsWith("policy:")));
@@ -549,4 +565,158 @@ export async function syncLauncher(
   const body = Object.fromEntries(Object.entries(launcher).filter(([field]) => !READ_ONLY.has(field)));
   await api("PUT", `${base}/${found.id}`, { ...body, policies: next });
   return { attached: want, calls: 3 };
+}
+
+/** The bootstrap's policy that lets every service token log in (K-1204); it is always on `/login`. */
+export const MACHINES_POLICY_NAME = `${ACCESS_NAME_PREFIX}machines`;
+
+/** Policies that let anyone log in, which older bootstraps made (K-1004). kitshn deletes them once unused. */
+export const OLD_LOGIN_POLICY_NAMES: ReadonlySet<string> = new Set([
+  `${ACCESS_NAME_PREFIX}any login`,
+  `${ACCESS_NAME_PREFIX}any login (passkey)`,
+]);
+
+/** K-1004: the most Cloudflare calls of one `syncLogins`: two lists, four applications, two old policies. */
+export const LOGIN_CALLS = 8;
+
+/**
+ * K-1004: the policy ids that the login applications should have. A policy goes on only when Cloudflare
+ * holds the body that kitshn wants now, so a policy that still lacks a new passkey check never does.
+ */
+export function loginWant(desired: DesiredAccess, rows: ReadonlyMap<string, AccessRow>): string {
+  const ids = (keys: ReadonlyArray<string>) =>
+    keys.flatMap((key) => {
+      const row = rows.get(key);
+      const policy = desired.policies.get(key);
+      return row?.cfId && policy && row.body === policyBody(policy) ? [row.cfId] : [];
+    });
+  return JSON.stringify({ login: ids(desired.logins.login), passkey: ids(desired.logins.passkey) });
+}
+
+/** K-1004: the policy ids in a `loginWant`, which the login applications hold once it is applied. */
+export function loginHeld(attached: string): Set<string> {
+  if (!attached) return new Set();
+  const ids = JSON.parse(attached) as { login: Array<string>; passkey: Array<string> };
+  return new Set([...ids.login, ...ids.passkey]);
+}
+
+/**
+ * K-1004: the `loginWant` of what the login applications may hold after a login step: its own ids when it
+ * worked, and the earlier and its own ids together when some write failed, since some apps may hold each.
+ */
+export function loginHeldAfter(previous: string, want: string, ok: boolean): string {
+  if (ok || !previous) return want;
+  const before = JSON.parse(previous) as { login: Array<string>; passkey: Array<string> };
+  const after = JSON.parse(want) as { login: Array<string>; passkey: Array<string> };
+  return JSON.stringify({
+    login: [...new Set([...before.login, ...after.login])],
+    passkey: [...new Set([...before.passkey, ...after.passkey])],
+  });
+}
+
+/** K-1004: a login policy that Cloudflare refused, so the map shows why some people cannot log in. */
+export function loginWarnings(desired: DesiredAccess, rows: ReadonlyMap<string, AccessRow>): Array<string> {
+  const keys = new Set([...desired.logins.login, ...desired.logins.passkey]);
+  return [...keys].flatMap((key) => {
+    const error = rows.get(key)?.error;
+    const name = desired.policies.get(key)?.name ?? key;
+    return error ? [`The login policy "${name}" of pages and files failed: ${error}`] : [];
+  });
+}
+
+/**
+ * K-406, K-1004: the login step runs first and inside the budget, so the sync never deletes a policy that
+ * a login application still uses, and both together never pass the budget. Returns the login calls.
+ */
+export async function syncWithLogins(
+  budget: number,
+  loginWork: boolean,
+  logins: () => Promise<number>,
+  access: (budget: number) => Promise<boolean>,
+): Promise<number> {
+  // Without room for the whole login step it waits for the next alarm, which runs at once.
+  const spent = loginWork && budget >= LOGIN_CALLS ? await logins() : 0;
+  await access(Math.max(0, budget - spent));
+  return spent;
+}
+
+/**
+ * K-1004: gives the four login applications of pages and files, which the bootstrap made, the policies of
+ * the circles that may log in, and the machines policy on `/login`. It drops every other policy, then
+ * deletes the old policies that let anyone log in once no application uses them. `attached` is the
+ * `loginWant` that kitshn last applied; it calls Cloudflare only when that differs, or when `force` is set
+ * (the daily compare of K-408). Each application is written on its own; the errors are thrown together.
+ */
+export async function syncLogins(
+  desired: DesiredAccess,
+  store: AccessStore,
+  api: Api,
+  accountId: string,
+  zone: string,
+  attached: string,
+  force: boolean,
+): Promise<{ readonly attached: string; readonly calls: number }> {
+  const want = loginWant(desired, store.rows);
+  if (!force && want === attached) return { attached, calls: 0 };
+  const ids = JSON.parse(want) as { login: Array<string>; passkey: Array<string> };
+  const base = `/accounts/${accountId}/access`;
+  const apps = await api<ReadonlyArray<LauncherApp>>("GET", `${base}/apps?per_page=${PAGE}`);
+  const policies = await api<ReadonlyArray<Named>>("GET", `${base}/policies?per_page=${PAGE}`);
+  let calls = 2;
+  const errors: Array<string> = [];
+  const machines = policies.find((policy) => policy.name === MACHINES_POLICY_NAME)?.id;
+  if (!machines) errors.push(`no policy "${MACHINES_POLICY_NAME}"; run the bootstrap again`);
+  // The policy ids of each application after this run, to know which old policies are free to delete.
+  const uses = new Map(apps.map((app) => [app.id, (app.policies ?? []).map((policy) => policy.id)]));
+  for (const host of [`pages.${zone}`, `files.${zone}`]) {
+    for (const [path, wanted] of [
+      ["/login", machines ? [machines, ...ids.login] : null],
+      ["/login/passkey", ids.passkey],
+    ] as const) {
+      const domain = `${host}${path}`;
+      // Without the machines policy a write would end service-token logins, so `/login` waits (error above).
+      if (wanted === null) continue;
+      const app = apps.find(
+        (item) =>
+          item["domain"] === domain &&
+          typeof item["name"] === "string" &&
+          item["name"].startsWith(ACCESS_NAME_PREFIX),
+      );
+      if (!app) {
+        errors.push(`no kitshn login application on ${domain}; run the bootstrap again`);
+        continue;
+      }
+      const live = [...(app.policies ?? [])].sort((a, b) => (a.precedence ?? 0) - (b.precedence ?? 0));
+      if (deepEqual(wanted, live.map((policy) => policy.id))) continue;
+      calls++;
+      try {
+        // The list holds whole applications, so like the App Launcher every other field goes back unchanged.
+        // Checked on 2026-10-27: Access accepts this PUT without scim_config.
+        const body = Object.fromEntries(
+          Object.entries(app).filter(([field]) => !READ_ONLY.has(field) && field !== "scim_config"),
+        );
+        await api("PUT", `${base}/apps/${app.id}`, {
+          ...body,
+          policies: wanted.map((id, index) => ({ id, precedence: index + 1 })),
+        });
+        uses.set(app.id, wanted);
+      } catch (error) {
+        errors.push(`${domain}: ${message(error)}`);
+      }
+    }
+  }
+  const used = new Set([...uses.values()].flat());
+  for (const policy of policies) {
+    if (!OLD_LOGIN_POLICY_NAMES.has(policy.name) || used.has(policy.id)) continue;
+    // The rest goes at the next daily run.
+    if (calls >= LOGIN_CALLS) break;
+    calls++;
+    try {
+      await api("DELETE", `${base}/policies/${policy.id}`);
+    } catch (error) {
+      if (!isNotFound(error)) errors.push(`deleting the policy "${policy.name}": ${message(error)}`);
+    }
+  }
+  if (errors.length > 0) throw new Error(`kitshn could not update the page and file logins: ${errors.join("; ")}`);
+  return { attached: want, calls };
 }

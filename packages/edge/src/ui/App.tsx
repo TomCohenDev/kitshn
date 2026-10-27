@@ -17,7 +17,7 @@ import {
 } from "../core/model.ts";
 import { placeInside } from "../core/place.ts";
 import type { JobView, MachineView, RevisionView } from "../core/protocol.ts";
-import { CIRCLE_COLORS, KINDS, MEMBER_ICONS } from "./kinds.ts";
+import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
 import { MapView, type Selection, type View } from "./Map.tsx";
@@ -34,7 +34,10 @@ import {
   useStore,
 } from "./store.ts";
 
-const VIEW_KEY = "kitshn.view";
+// v2: the default view became readable (fit at most this far out); older saved views were too small.
+const VIEW_KEY = "kitshn.view.v2";
+/** The furthest the automatic fit zooms out, so card names stay readable on a laptop. Zoom goes further. */
+const FIT_MIN_SCALE = 0.85;
 const UNDO_MS = 10_000;
 
 interface Toast {
@@ -214,12 +217,12 @@ export function App() {
     const ys = points.map((point) => point.y);
     const [minX, maxX, minY, maxY] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
     const wide = innerWidth > 720;
-    const left = tray.length > 0 ? (wide ? 210 : 170) : 10;
+    const left = tray.length > 0 ? (wide ? 230 : 170) : 10;
     const width = Math.max(innerWidth - left - (wide ? 370 : 10), 200);
     const height = Math.max(innerHeight - (wide ? 100 : innerHeight / 2), 200);
     const s = Math.min(
       2,
-      Math.max(0.15, Math.min(width / (maxX - minX + 120), height / (maxY - minY + 160))),
+      Math.max(FIT_MIN_SCALE, Math.min(width / (maxX - minX + 120), height / (maxY - minY + 160))),
     );
     changeView({
       s,
@@ -824,7 +827,7 @@ function CardPanel(props: {
               <li key={circle.id}>
                 <div class="row">
                   <b style={{ color: circle.color }}>●</b> <b>{circle.name}</b>
-                  <span class="sticker" style={{ background: circle.color }}>
+                  <span class="sticker" style={{ background: level ? LEVEL_COLORS[level] : undefined }}>
                     {level ?? "none"}
                   </span>
                   <button

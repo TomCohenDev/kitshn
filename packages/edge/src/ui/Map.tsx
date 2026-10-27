@@ -13,7 +13,7 @@ import {
   shareLevel,
 } from "../core/model.ts";
 import type { AccessState, MachineView } from "../core/protocol.ts";
-import { KINDS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
+import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { PresenceSticker } from "./Machines.tsx";
 
 export interface View {
@@ -386,13 +386,15 @@ function CircleView(props: {
         top: px(circle.y - circle.r),
         width: px(circle.r * 2),
         height: px(circle.r * 2),
-        background: `${circle.color}22`,
-        borderColor: circle.color,
+        "--c": circle.color,
       }}
     >
       <div class="head" data-head={circle.id}>
         <span>{circle.name}</span>
-        <span class="sticker" style={{ "--tilt": LEVEL_TILTS[circle.level], background: circle.color }}>
+        <span
+          class="sticker"
+          style={{ "--tilt": LEVEL_TILTS[circle.level], background: LEVEL_COLORS[circle.level] }}
+        >
           {circle.level}
         </span>
         {circle.needsPasskey ? <span title="Needs a passkey">🔑</span> : null}
@@ -466,7 +468,7 @@ function CardView(props: {
       </div>
       <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
       <div class="foot">
-        <span class="sticker" style={{ "--tilt": kind.tilt, background: kind.color }}>
+        <span class="sticker" style={{ "--tilt": kind.tilt, background: kind.color, color: kind.ink }}>
           {resource.kind}
         </span>
         {props.machine ? <PresenceSticker view={props.machine} /> : null}

@@ -2000,16 +2000,29 @@ export class Kitshn extends DurableObject<Env> {
     this.broadcast();
     if (state !== "allowed" || row.branch === null) return Response.json({ repoId, state });
     if (this.state.paused) return Response.json({ repoId, state, paused: row.branch });
-    const started = await this.agentBuild(caller, repoId, row.branch);
-    if (!started.ok)
-      return Response.json({
-        repoId,
-        state,
-        dispatchError: ((await started.json()) as { error: string }).error,
-      });
-    this.sql("UPDATE repos SET branch = NULL WHERE repo_id = ?", repoId);
+    // The branch is the lock of the start: a second tab finds none and starts nothing.
+    const branch = row.branch;
+    const [claimed] = this.sql<{ repo_id: string }>(
+      "UPDATE repos SET branch = NULL WHERE repo_id = ? AND branch = ? RETURNING repo_id",
+      repoId,
+      branch,
+    );
+    if (!claimed) return Response.json({ repoId, state });
     this.broadcast();
-    return Response.json({ repoId, state, dispatched: row.branch });
+    const started = await this.agentBuild(caller, repoId, branch);
+    if (started.ok) return Response.json({ repoId, state, dispatched: branch });
+    // A failed start gives the branch back, unless the owner blocked or forgot the repo meanwhile.
+    this.sql(
+      "UPDATE repos SET branch = ? WHERE repo_id = ? AND branch IS NULL AND state = 'allowed'",
+      branch,
+      repoId,
+    );
+    this.broadcast();
+    return Response.json({
+      repoId,
+      state,
+      dispatchError: ((await started.json()) as { error: string }).error,
+    });
   }
 
   /** K-803 to K-807, K-901 to K-904: the steps of a static site deploy from GitHub Actions. */
@@ -2517,8 +2530,6 @@ export class Kitshn extends DurableObject<Env> {
         { status: 503 },
       );
     }
-    const endedBeforeUpload = this.endedRefusal(row.id);
-    if (endedBeforeUpload) return endedBeforeUpload;
     const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
     const metadata = {
       main_module: "worker.js",
@@ -2535,6 +2546,9 @@ export class Kitshn extends DurableObject<Env> {
     );
     const scripts = await api<Array<{ id: string }>>("GET", `${account}/workers/scripts`);
     const isNew = !scripts.some((item) => item.id === row.script);
+    // An existing site goes live with this upload, so Block must win right before it.
+    const endedBeforeUpload = this.endedRefusal(row.id);
+    if (endedBeforeUpload) return endedBeforeUpload;
     const upload = await fetch(
       `https://api.cloudflare.com/client/v4${account}/workers/scripts/${row.script}`,
       {

@@ -16,9 +16,10 @@ describe("GitHub App key (K-718)", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const key = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
     const calls: Array<{ url: string; body: unknown }> = [];
-    // The first installation does not hold the repo; the repo has a new name since its last deploy.
+    // A suspended installation is skipped, two others refuse, and the repo has a new name since its last deploy.
     const answers: Array<Response> = [
-      Response.json([{ id: 7 }, { id: 42 }]),
+      Response.json([{ id: 5, suspended_at: "2026-10-01T00:00:00Z" }, { id: 6 }, { id: 7 }, { id: 42 }]),
+      Response.json({ message: "Forbidden" }, { status: 403 }),
       Response.json({ message: "not accessible" }, { status: 422 }),
       Response.json({ token: "t" }),
       Response.json({ total_count: 1, repositories: [{ id: 1001, full_name: "o/renamed" }] }),
@@ -33,12 +34,13 @@ describe("GitHub App key (K-718)", () => {
     await expect(dispatchDeploy({ id: "1", key }, "1001", "main", "kitshn.yml")).resolves.toBe("o/renamed");
     expect(calls.map((call) => call.url)).toEqual([
       "https://api.github.com/app/installations?per_page=100",
+      "https://api.github.com/app/installations/6/access_tokens",
       "https://api.github.com/app/installations/7/access_tokens",
       "https://api.github.com/app/installations/42/access_tokens",
       "https://api.github.com/installation/repositories",
       "https://api.github.com/repos/o/renamed/actions/workflows/kitshn.yml/dispatches",
     ]);
-    expect(calls[2]?.body).toEqual({ repository_ids: [1001], permissions: { actions: "write" } });
-    expect(calls[4]?.body).toEqual({ ref: "refs/heads/main" });
+    expect(calls[3]?.body).toEqual({ repository_ids: [1001], permissions: { actions: "write" } });
+    expect(calls[5]?.body).toEqual({ ref: "refs/heads/main" });
   });
 });

@@ -84,6 +84,7 @@ export async function dispatchDeploy(app: GitHubApp, repoId: string, branch: str
   for (const installation of installations) {
     const installationId = record(installation)["id"];
     if (typeof installationId !== "number") throw new Error("GitHub sent an installation without an id.");
+    if (record(installation)["suspended_at"]) continue;
     try {
       const access = record(
         await call(jwt, "POST", `/app/installations/${installationId}/access_tokens`, {
@@ -95,8 +96,8 @@ export async function dispatchDeploy(app: GitHubApp, repoId: string, branch: str
       token = access["token"];
       break;
     } catch (error) {
-      // 422: this installation does not hold the repo, or lacks the permission Actions: write.
-      if (error instanceof GitHubError && error.status === 422) continue;
+      // This installation does not hold the repo, lacks Actions: write (422), or GitHub refuses it (403, 404).
+      if (error instanceof GitHubError && [403, 404, 422].includes(error.status)) continue;
       throw error;
     }
   }

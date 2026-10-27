@@ -1,6 +1,6 @@
 import { createServer } from "node:net";
 import { describe, expect, it } from "vitest";
-import { addSite, probe, targetOf } from "./sites.ts";
+import { addSite, parseSiteFile, probe, targetOf } from "./sites.ts";
 
 describe("exposed sites (K-1104, K-1107)", () => {
   it("turns a port or a socket path into a tunnel target", () => {
@@ -26,5 +26,12 @@ describe("exposed sites (K-1104, K-1107)", () => {
     server.close();
     await new Promise((resolve) => server.once("close", resolve));
     expect(await probe(`http://localhost:${port}`)).toBe(false);
+  });
+
+  it("treats a broken sites.json as broken, not as empty", () => {
+    expect(parseSiteFile({})).toBeNull();
+    expect(parseSiteFile([{ name: "x" }])).toBeNull();
+    expect(parseSiteFile([{ name: "x", target: "http://example.com" }])).toBeNull();
+    expect(parseSiteFile([])).toEqual([]);
   });
 });

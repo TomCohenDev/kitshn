@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type LiveSite, escapeHtml, offlineReason, parseSites, seenText, sitesNeedingRoutes, tunnelConfig } from "./live.ts";
+import { type LiveSite, escapeHtml, liveSiteId, offlineReason, parseSites, seenText, sitesNeedingRoutes, tunnelConfig } from "./live.ts";
 
 const site = (name: string, machineId: string, up: boolean, dev = false): LiveSite => ({
   id: `live-${machineId}-${name}`,
@@ -10,6 +10,7 @@ const site = (name: string, machineId: string, up: boolean, dev = false): LiveSi
   dev,
   up,
   lastUp: 0,
+  state: "ok",
 });
 
 describe("live sites (K-1104 to K-1108)", () => {
@@ -41,5 +42,12 @@ describe("live sites (K-1104 to K-1108)", () => {
     expect(offlineReason("Mac", true)).toContain("server on Mac");
     expect(seenText(0, 12 * 60_000)).toBe("12 minutes ago");
     expect(escapeHtml('<b>"x"</b>')).toBe("&lt;b&gt;&quot;x&quot;&lt;/b&gt;");
+  });
+
+  it("keeps two long site ids apart and refuses port 0", () => {
+    const machine = "a-machine-name-that-is-forty-seven-characters-x";
+    expect(liveSiteId(machine, "dashboard-api")).not.toBe(liveSiteId(machine, "dashboard-web"));
+    expect(liveSiteId(machine, "dashboard-api").length).toBeLessThanOrEqual(63);
+    expect(parseSites([{ name: "x", target: "http://localhost:0", up: true }]).sites).toEqual([]);
   });
 });

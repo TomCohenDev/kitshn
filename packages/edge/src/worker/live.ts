@@ -13,12 +13,25 @@ export interface LiveSite {
   readonly up: boolean;
   /** When the site or its machine was last seen up. */
   readonly lastUp: number;
+  /** "checking" until kitshn knows that nothing else uses the address; "refused" when something does. */
+  readonly state: "checking" | "ok" | "refused";
 }
 
 const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
-const TARGET = /^(http:\/\/localhost:\d{1,5}|unix:\/[^\s]{1,200})$/;
+const TARGET = /^(http:\/\/localhost:(\d{1,5})|unix:\/[^\s]{1,200})$/;
 
-export const liveSiteId = (machineId: string, name: string) => `live-${machineId}-${name}`.slice(0, 63);
+/** FNV-1a, 32 bits, as 8 hex characters. */
+const fnv = (text: string) => {
+  let hash = 0x811c9dc5;
+  for (const char of text) hash = Math.imul(hash ^ char.charCodeAt(0), 0x01000193) >>> 0;
+  return hash.toString(16).padStart(8, "0");
+};
+
+/** A long id keeps a hash of the machine and the name instead of being cut, so two sites never meet. */
+export const liveSiteId = (machineId: string, name: string) => {
+  const full = `live-${machineId}-${name}`;
+  return full.length <= 63 ? full : `live-${fnv(`${machineId}/${name}`)}-${name}`.slice(0, 63);
+};
 
 /** Checks the sites that a daemon reports. Returns the valid ones and a reason for each refused one. */
 export function parseSites(value: unknown): { sites: Array<LiveSiteReport>; refused: Array<string> } {
@@ -29,12 +42,19 @@ export function parseSites(value: unknown): { sites: Array<LiveSiteReport>; refu
     const site = item as Partial<Record<keyof LiveSiteReport, unknown>>;
     if (typeof site.name !== "string" || !LABEL.test(site.name))
       refused.push(`The name ${String(site.name)} is not valid.`);
-    else if (typeof site.target !== "string" || !TARGET.test(site.target))
+    else if (typeof site.target !== "string" || !validTarget(site.target))
       refused.push(`${site.name}: the target is not valid.`);
     else sites.push({ name: site.name, target: site.target, dev: site.dev === true, up: site.up === true });
   }
   return { sites, refused };
 }
+
+const validTarget = (target: string) => {
+  const match = TARGET.exec(target);
+  if (!match) return false;
+  const port = match[2];
+  return port === undefined || (Number(port) >= 1 && Number(port) <= 65535);
+};
 
 /** K-603, K-607, K-1105: the ingress of a machine's tunnel from its live sites. */
 export function tunnelConfig(sites: ReadonlyArray<LiveSite>) {

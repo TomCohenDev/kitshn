@@ -254,6 +254,7 @@ fi
 if [ "$(printf '%s' "$scripts" | jq -r --arg s "$SCRIPT" 'map(select(.id == $s)) | .[0].migration_tag // empty')" = v1 ]; then
   migrations=null
 fi
+# run_worker_first: the offline routes of live sites (K-1108) need the Worker before the map's assets.
 metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --argjson migrations "$migrations" \
   --arg host "$KITSHN_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" \
   --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" \
@@ -262,7 +263,7 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
     main_module: "worker.js",
     compatibility_date: $date,
     compatibility_flags: ["nodejs_compat"],
-    assets: {jwt: $jwt, config: {not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/connect", "/join/exchange", "/deploy/*"]}},
+    assets: {jwt: $jwt, config: {not_found_handling: "single-page-application", run_worker_first: true}},
     bindings: [
       {type: "assets", name: "ASSETS"},
       {type: "durable_object_namespace", name: "KITSHN", class_name: "Kitshn"},

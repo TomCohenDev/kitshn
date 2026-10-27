@@ -24,12 +24,33 @@ export function addSite(sites: ReadonlyArray<SiteEntry>, entry: SiteEntry): Arra
   );
 }
 
-/** K-1107: the daemon tries the port or socket of each site, on the machine only. */
-export function probe(target: string, timeoutMs = 2000): Promise<boolean> {
+/** Checks the entries of `sites.json`; anything else means the file is broken. */
+export function parseSiteFile(value: unknown): Array<SiteEntry> | null {
+  if (!Array.isArray(value)) return null;
+  const sites: Array<SiteEntry> = [];
+  for (const item of value) {
+    const entry = item as Partial<Record<keyof SiteEntry, unknown>>;
+    if (typeof entry.name !== "string" || typeof entry.target !== "string") return null;
+    if (!LABEL.test(entry.name) || !(entry.target.startsWith("unix:/") || entry.target.startsWith("http://localhost:"))) {
+      return null;
+    }
+    sites.push({ name: entry.name, target: entry.target, dev: entry.dev === true });
+  }
+  return sites;
+}
+
+/**
+ * K-1107: the daemon tries the port or socket of each site, on the machine only. A port counts as up
+ * when it answers on IPv4 or IPv6, because dev servers such as Vite often listen on ::1 only.
+ */
+export async function probe(target: string, timeoutMs = 2000): Promise<boolean> {
+  if (target.startsWith("unix:")) return connects({ path: target.slice("unix:".length) }, timeoutMs);
+  const port = Number(new URL(target).port);
+  return (await connects({ host: "127.0.0.1", port }, timeoutMs)) || connects({ host: "::1", port }, timeoutMs);
+}
+
+function connects(options: { path: string } | { host: string; port: number }, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const options = target.startsWith("unix:")
-      ? { path: target.slice("unix:".length) }
-      : { host: "127.0.0.1", port: Number(new URL(target).port) };
     const socket = createConnection(options);
     const done = (up: boolean) => {
       socket.destroy();

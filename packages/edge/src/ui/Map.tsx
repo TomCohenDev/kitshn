@@ -17,7 +17,7 @@ import type { AccessState, MachineView } from "../core/protocol.ts";
 import { isAgentKey } from "../core/agent.ts";
 import { RightStickers } from "./Circle.tsx";
 import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
-import { PresenceSticker } from "./Machines.tsx";
+import { KeySticker, PresenceSticker } from "./Machines.tsx";
 
 export interface View {
   readonly x: number;
@@ -657,6 +657,7 @@ function CardView(props: {
           {resource.kind}
         </span>
         {props.machine ? <PresenceSticker view={props.machine} /> : null}
+        {props.machine ? <KeySticker view={props.machine} /> : null}
         {holding.map((circle) => {
           const level = shareLevel(state, resource, circle);
           return (

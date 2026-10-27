@@ -13,7 +13,15 @@ export interface Machine {
   readonly tunnelId: string;
   /** K-818: risky Compose settings that the owner allows for one repo on this machine. */
   readonly allow?: ReadonlyArray<ComposeAllowance>;
+  /** K-1702. Absent on a machine that joined before machine keys; it sends its first key (K-1708). */
+  readonly key?: MachineKey;
 }
+
+export type MachineKey =
+  /** K-1702: the public half of the machine key pair, and when it became valid. */
+  | { readonly kind: "public"; readonly publicKey: string; readonly fingerprint: string; readonly since: number }
+  /** K-1703, K-1706: the machine waits for its key from a join code or a rekey code, and cannot connect. */
+  | { readonly kind: "waiting"; readonly since: number };
 
 /** K-818: one allow list entry: a repo (`owner/name`) and one setting name of the daemon's check. */
 export interface ComposeAllowance {
@@ -104,6 +112,10 @@ export interface LiveSiteReport {
 
 /** Messages from a daemon to kitshn over `/connect`. The text "ping" is answered by the auto response. */
 export type DaemonMessage =
+  /** K-1704: the signature of `connectText`. kitshn uses `publicKey` only for a machine without a key (K-1708). */
+  | { readonly type: "answer"; readonly signature: string; readonly publicKey: string }
+  /** K-1705: a new public half, with the signature of `rotateText` by the old private half. */
+  | { readonly type: "rotate"; readonly publicKey: string; readonly signature: string }
   | { readonly type: "status"; readonly status: MachineStatus }
   | { readonly type: "sample"; readonly sample: Sample }
   | { readonly type: "jobResult"; readonly id: number; readonly result: JobResult }
@@ -111,7 +123,89 @@ export type DaemonMessage =
   | { readonly type: "sites"; readonly sites: ReadonlyArray<LiveSiteReport> };
 
 /** Messages from kitshn to a daemon. */
-export type ServerToDaemon = { readonly type: "job"; readonly id: number; readonly command: Command };
+export type ServerToDaemon =
+  /**
+   * K-1704: the first message of each connection. `fingerprint` names the key that kitshn expects, so a daemon
+   * in the middle of a rotation signs with the right file; null when the machine has no key yet (K-1708).
+   */
+  | { readonly type: "challenge"; readonly challenge: string; readonly fingerprint: string | null }
+  /** K-1704: the answer passed; from now on kitshn reads the messages of this connection. */
+  | { readonly type: "accepted"; readonly fingerprint: string }
+  /** K-1705: "Rotate key" in the machine panel. */
+  | { readonly type: "rotateKey" }
+  | { readonly type: "job"; readonly id: number; readonly command: Command };
+
+const ED25519 = { name: "Ed25519" } as const;
+
+const base64url = (data: Uint8Array) =>
+  base64(data).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+const unbase64url = (text: string) => unbase64(text.replaceAll("-", "+").replaceAll("_", "/"));
+
+/** K-1702: the private half of a machine key, as the daemon keeps it in `machine.key`. */
+export interface MachinePrivateKey {
+  readonly kty: "OKP";
+  readonly crv: "Ed25519";
+  /** The public half, base64url of the 32 raw bytes; this is the public key on the wire. */
+  readonly x: string;
+  readonly d: string;
+}
+
+/** K-1701: a new Ed25519 key pair. */
+export async function newMachineKey(): Promise<MachinePrivateKey> {
+  const pair = (await crypto.subtle.generateKey(ED25519, true, ["sign", "verify"])) as CryptoKeyPair;
+  const { x, d } = (await crypto.subtle.exportKey("jwk", pair.privateKey)) as { x?: string; d?: string };
+  if (!x || !d) throw new Error("Web Crypto exported an Ed25519 key without its x or d.");
+  return { kty: "OKP", crv: "Ed25519", x, d };
+}
+
+/** A machine key from `machine.key`, or null when the value is not one. */
+export function parsePrivateKey(value: unknown): MachinePrivateKey | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { kty, crv, x, d } = value as Record<string, unknown>;
+  if (kty !== "OKP" || crv !== "Ed25519" || parsePublicKey(x) === null || typeof d !== "string") return null;
+  return { kty, crv, x: x as string, d };
+}
+
+/** A public key from the wire: base64url of 32 bytes. Null for anything else. */
+export function parsePublicKey(value: unknown): string | null {
+  if (typeof value !== "string" || value.length !== 43) return null;
+  try {
+    return unbase64url(value).length === 32 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** K-1702: the fingerprint of a public key: `SHA256:` and the base64url of the hash of its raw bytes. */
+export const fingerprintOf = async (publicKey: string) =>
+  `SHA256:${base64url(new Uint8Array(await crypto.subtle.digest("SHA-256", unbase64url(publicKey))))}`;
+
+/** K-1704: 32 random bytes for one connection. */
+export const newChallenge = () => base64url(crypto.getRandomValues(new Uint8Array(32)));
+
+/** K-1704: what the daemon signs to answer the challenge of one connection to one kitshn host. */
+export const connectText = (host: string, machineId: string, challenge: string) =>
+  ["kitshn-connect-v1", host, machineId, challenge].join("\n");
+
+/** K-1705: what the old key signs to hand over to the new one, bound to the connection like `connectText`. */
+export const rotateText = (host: string, machineId: string, challenge: string, publicKey: string) =>
+  ["kitshn-rotate-v1", host, machineId, challenge, publicKey].join("\n");
+
+export async function signText(key: MachinePrivateKey, text: string): Promise<string> {
+  const privateKey = await crypto.subtle.importKey("jwk", key, ED25519, false, ["sign"]);
+  return base64url(new Uint8Array(await crypto.subtle.sign(ED25519, privateKey, bytes(text))));
+}
+
+/** False for a wrong signature and for a key or a signature that is not one. */
+export async function verifyText(publicKey: string, text: string, signature: unknown): Promise<boolean> {
+  if (parsePublicKey(publicKey) === null || typeof signature !== "string") return false;
+  try {
+    const key = await crypto.subtle.importKey("raw", unbase64url(publicKey), ED25519, false, ["verify"]);
+    return await crypto.subtle.verify(ED25519, key, unbase64url(signature), bytes(text));
+  } catch {
+    return false;
+  }
+}
 
 /** What a join code unlocks (K-602). The Worker stores it only encrypted with a key from the code. */
 export interface JoinSecrets {

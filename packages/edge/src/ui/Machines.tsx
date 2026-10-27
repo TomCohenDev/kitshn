@@ -25,6 +25,67 @@ export function PresenceSticker(props: { view: MachineView }) {
   );
 }
 
+/** K-1708: a machine without a key, or one that waits for `kitshn rekey` (K-1706), shows it on its card. */
+export function KeySticker(props: { view: MachineView }) {
+  const key = props.view.machine.key;
+  if (key === undefined) return <span class="sticker wait" title="It sends its first key after Update daemon (K-1708)">no key</span>;
+  if (key.kind === "waiting") return <span class="sticker wait" title="Run the rekey command on it (K-1706)">waits for key</span>;
+  return null;
+}
+
+/** K-1702: the start of a fingerprint is enough to compare it by eye. */
+const shortFingerprint = (fingerprint: string) => `${fingerprint.slice(0, "SHA256:".length + 12)}…`;
+
+/** K-1702, K-1705, K-1706: the key of the machine, "Rotate key" and "Reset key". */
+function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error: boolean) => void }) {
+  const { machine, keyFailure } = props.view;
+  const [rekey, setRekey] = useState<{ command: string; expiresAt: number } | null>(null);
+  const path = `/api/machines/${encodeURIComponent(machine.id)}`;
+  const rotate = async () => {
+    const result = await callApi<{ rotating: string }>("POST", `${path}/rotate-key`, {});
+    props.onToast("error" in result ? result.error : `${machine.name} rotates its key now.`, "error" in result);
+  };
+  const reset = async () => {
+    const result = await callApi<{ command: string; expiresAt: number }>("POST", `${path}/reset-key`, {});
+    if ("error" in result) props.onToast(result.error, true);
+    else setRekey(result);
+  };
+  return (
+    <>
+      <div class="row">
+        <span class="label">Key</span>
+        {machine.key?.kind === "public" ? (
+          <span class="mono" title={machine.key.fingerprint}>
+            {shortFingerprint(machine.key.fingerprint)} · {ago(machine.key.since)} old
+          </span>
+        ) : (
+          <KeySticker view={props.view} />
+        )}
+        <button class="btn" disabled={machine.key?.kind !== "public" || !props.view.online} onClick={() => void rotate()}>
+          Rotate key
+        </button>
+        <button class="btn" onClick={() => void reset()}>
+          Reset key
+        </button>
+      </div>
+      {keyFailure ? (
+        <p class="muted">
+          Failed check {ago(keyFailure.at)} ago: {keyFailure.reason}
+        </p>
+      ) : null}
+      {rekey ? (
+        <>
+          <p>
+            Run this on the machine, as the user that runs the daemon. It works once, until{" "}
+            {new Date(rekey.expiresAt).toLocaleTimeString()}.
+          </p>
+          <pre class="command">{rekey.command}</pre>
+        </>
+      ) : null}
+    </>
+  );
+}
+
 /** K-602: "Add machine" makes a service token, a tunnel and a join code that works once for 10 minutes. */
 export function AddMachine(props: { onClose: () => void }) {
   const [name, setName] = useState("");
@@ -135,6 +196,7 @@ export function MachinePanel(props: {
           </span>
         ) : null}
       </div>
+      <MachineKeyRow view={view} onToast={props.onToast} />
       {view.sample ? (
         <div class="row">
           <span class="label">CPU</span> {percent(view.sample.cpu)} <span class="label">Memory</span>{" "}

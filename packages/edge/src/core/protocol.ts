@@ -74,6 +74,8 @@ export interface MachineView {
   readonly lastSeen: number | null;
   readonly status: MachineStatus | null;
   readonly sample: Sample | null;
+  /** K-1708: the last failed challenge since kitshn started, until the next one passes. */
+  readonly keyFailure: { readonly at: number; readonly reason: string } | null;
 }
 
 export interface JobView {

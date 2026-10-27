@@ -71,15 +71,17 @@ WantedBy=default.target
 `;
 }
 
-/** The commands that start and stop the service of the platform. */
+/** The commands that start, stop and restart the service of the platform. */
 export function serviceCommands(platform: Platform, file: string, uid: number) {
   if (platform === "darwin") {
     return {
       start: [["launchctl", "bootstrap", `gui/${uid}`, file]],
       stop: [["launchctl", "bootout", `gui/${uid}`, file]],
+      restart: [["launchctl", "kickstart", "-k", `gui/${uid}/com.kitshn.daemon`]],
     };
   }
   return {
+    restart: [["systemctl", "--user", "restart", "kitshn.service"]],
     start: [
       ["systemctl", "--user", "daemon-reload"],
       ["systemctl", "--user", "enable", "--now", "kitshn.service"],

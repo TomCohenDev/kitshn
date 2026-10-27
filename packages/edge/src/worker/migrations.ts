@@ -69,6 +69,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   ["ALTER TABLE access_objects ADD COLUMN aud TEXT NOT NULL DEFAULT ''"],
   // 8: the agent key that allowed a repo (K-718, K-819); null when the owner allowed it.
   ["ALTER TABLE repos ADD COLUMN allowed_by_client TEXT", "ALTER TABLE repos ADD COLUMN allowed_by_name TEXT"],
+  // 9: the one-time codes of "Reset key" (K-1706). They hold no secret, unlike join codes.
+  ["CREATE TABLE rekey_codes (lookup TEXT PRIMARY KEY, machine_id TEXT NOT NULL, expires_at INTEGER NOT NULL)"],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

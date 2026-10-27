@@ -12,7 +12,8 @@
 # circle when kitshn starts for the first time, for agents; K-106), KITSHN_DEPLOY_OWNERS (comma-separated
 # GitHub user names whose repos may deploy, K-811; a second run keeps the list when it is not set),
 # KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY (the id and the private key file of the kitshn GitHub
-# App, so agent keys can start a repo's kitshn workflow, K-718; a second run keeps them when not set).
+# App, so agent keys can start a repo's kitshn workflow, K-718; a second run keeps them unless
+# KITSHN_SET_GITHUB_APP=1).
 set -eu
 
 API=https://api.cloudflare.com/client/v4
@@ -344,7 +345,7 @@ if { [ -n "${KITSHN_GITHUB_APP_ID:-}" ] && [ -z "${KITSHN_GITHUB_APP_KEY:-}" ]; 
   die "set both KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY, or neither"
 fi
 has_app=$(printf '%s' "$secrets" | jq 'any(.[]; .name == "GITHUB_APP_KEY") and any(.[]; .name == "GITHUB_APP_ID")')
-if [ -n "${KITSHN_GITHUB_APP_ID:-}" ] && { [ "$has_app" != true ] || [ "${KITSHN_SET_TOKEN:-}" = 1 ]; }; then
+if [ -n "${KITSHN_GITHUB_APP_ID:-}" ] && { [ "$has_app" != true ] || [ "${KITSHN_SET_GITHUB_APP:-}" = 1 ]; }; then
   [ -r "$KITSHN_GITHUB_APP_KEY" ] || die "KITSHN_GITHUB_APP_KEY names no readable file: $KITSHN_GITHUB_APP_KEY"
   api PUT "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/secrets" \
     "$(jq -nc --arg id "$KITSHN_GITHUB_APP_ID" '{name:"GITHUB_APP_ID",text:$id,type:"secret_text"}')" >/dev/null
@@ -352,7 +353,7 @@ if [ -n "${KITSHN_GITHUB_APP_ID:-}" ] && { [ "$has_app" != true ] || [ "${KITSHN
     "$(jq -nc --rawfile key "$KITSHN_GITHUB_APP_KEY" '{name:"GITHUB_APP_KEY",text:$key,type:"secret_text"}')" >/dev/null
   changed "stored the GitHub App id and key as Worker secrets (K-718)"
 elif [ "$has_app" = true ]; then
-  kept "Worker secrets GITHUB_APP_ID and GITHUB_APP_KEY (set KITSHN_SET_TOKEN=1 to replace them)"
+  kept "Worker secrets GITHUB_APP_ID and GITHUB_APP_KEY (set KITSHN_SET_GITHUB_APP=1 to replace them)"
 else
   say "  note:    no GitHub App; agent keys cannot start builds until KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY are set"
 fi

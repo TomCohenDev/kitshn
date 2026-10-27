@@ -40,8 +40,10 @@ async function call(token: string, method: string, path: string, body?: object) 
     const text = await response.text();
     if (path.endsWith("/installation") && response.status === 404)
       throw new Error("The kitshn GitHub App is not installed on this repo.");
-    if (path.endsWith("/dispatches") && response.status === 422)
-      throw new Error(`GitHub refused the dispatch; add workflow_dispatch to the repo's kitshn.yml. ${text}`);
+    if (path.endsWith("/access_tokens") && response.status === 422)
+      throw new Error("Give the kitshn GitHub App the permission Actions: write, and accept it on the installation.");
+    if (path.endsWith("/dispatches") && response.status === 422 && text.includes("workflow_dispatch"))
+      throw new Error("Add workflow_dispatch to the repo's kitshn.yml.");
     throw new Error(`GitHub answered ${response.status} for ${method} ${path}: ${text}`);
   }
   return response.status === 204 ? null : ((await response.json()) as Record<string, unknown>);

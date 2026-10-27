@@ -1034,16 +1034,19 @@ export class Kitshn extends DurableObject<Env> {
     for (const job of queued) {
       const visitor = JSON.parse(job.visitor) as Visitor & { readonly kitshn?: true };
       const queuedCommand = JSON.parse(job.command) as Command;
-      // K-718: a redeploy that an agent key asked for goes out only while the key still manages the card.
-      if (
-        visitor.kitshn &&
-        visitor.clientId !== null &&
-        !(
-          queuedCommand.kind === "compose-redeploy" &&
-          cardsControlledBy(this.state, visitor, Date.now()).has(queuedCommand.project)
-        )
-      )
-        continue;
+      // K-718: a redeploy that an agent key asked for goes out only while every check of its start still holds.
+      if (visitor.kitshn && visitor.clientId !== null) {
+        const reason =
+          queuedCommand.kind !== "compose-redeploy"
+            ? "kitshn makes no other job for an agent key."
+            : !cardsControlledBy(this.state, visitor, Date.now()).has(queuedCommand.project)
+              ? "The key no longer manages the card."
+              : this.redeployRefusal(job.machine_id, queuedCommand.project);
+        if (reason !== null) {
+          this.sql("UPDATE jobs SET state = 'failed', output = ? WHERE id = ?", reason, job.id);
+          continue;
+        }
+      }
       // A job that kitshn makes itself (a deploy) needs no member with control (K-614).
       const allowed = new Set(
         visitor.kitshn ? online : [...online].filter((id) => this.mayRunOn(visitor, id)),
@@ -2498,6 +2501,14 @@ export class Kitshn extends DurableObject<Env> {
       return this.agentRedeploy(agent, machine.id, plan.command);
     }
     return Response.json({ error: `The agent path has no ${request.method} ${path}.` }, { status: 404 });
+  }
+
+  /** K-718: why a machine may not start the last good build of a card now, or null. */
+  private redeployRefusal(machineId: string | null, card: string) {
+    const machine = machineId === null ? undefined : this.state.machines.get(machineId);
+    if (!machine || this.state.resources.get(card)?.machine !== machine.id)
+      return "This app no longer runs on the machine of its last deploy.";
+    return machine.labels.includes("deploy") ? null : "The machine of this app no longer has the label deploy (K-610).";
   }
 
   /** K-718: queues the start of the last build that came up; kitshn makes the job, the key reads it. */

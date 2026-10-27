@@ -315,6 +315,8 @@ async function composeUp(
     mkdirSync(dir, { recursive: true });
     // K-718: the last build that came up stays in good/ with its params; a redeploy starts it again.
     const good = join(dir, "good");
+    // A stop in the middle of the swap below leaves only good.old; it is still the last good build.
+    if (!existsSync(good) && existsSync(`${good}.old`)) renameSync(`${good}.old`, good);
     if (command.kind === "compose-redeploy") {
       if (!existsSync(join(good, "source.tgz")) || !existsSync(join(good, "params.env")))
         throw new Error("this machine keeps no build of the app that came up; deploy it from the repo");

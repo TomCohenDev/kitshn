@@ -18,10 +18,21 @@ import {
 import { placeInside } from "../core/place.ts";
 import type { JobView, MachineView, RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, MEMBER_ICONS } from "./kinds.ts";
+import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
 import { MapView, type Selection, type View } from "./Map.tsx";
 import { overlay } from "./held.ts";
-import { applyEdits, callApi, explainRefusal, hold, release, toState, undoRevision, useStore } from "./store.ts";
+import {
+  applyEdits,
+  callApi,
+  explainRefusal,
+  hold,
+  release,
+  upload,
+  toState,
+  undoRevision,
+  useStore,
+} from "./store.ts";
 
 const VIEW_KEY = "kitshn.view";
 const UNDO_MS = 10_000;
@@ -51,9 +62,12 @@ const actorLabel = (actor: Actor) =>
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
+/** The tray shows the newest cards; the Library lists all of them (K-1005). */
+const TRAY_CARDS = 8;
+
 const routeFromHash = () => {
   const [tab = "map", id = ""] = location.hash.slice(1).split("/");
-  return { tab: tab === "history" || tab === "machines" ? tab : ("map" as const), id };
+  return { tab: tab === "history" || tab === "machines" || tab === "library" ? tab : ("map" as const), id };
 };
 
 export function App() {
@@ -281,6 +295,17 @@ export function App() {
           onCommit={(edits, diffs) => void commit(edits, diffs)}
           machines={machines}
         />
+      ) : route.tab === "library" ? (
+        <LibraryView
+          state={state}
+          revision={store.snapshot.revision}
+          onToast={(text, error) => showToast({ text, error, undo: null })}
+          ask={ask}
+          onShowCard={(id) => {
+            setSelection({ cards: new Set([id]), circle: null });
+            location.hash = "map";
+          }}
+        />
       ) : route.tab === "machines" ? (
         <MachinesView machines={store.snapshot.machines} onAdd={() => setAddingMachine(true)} />
       ) : (
@@ -295,6 +320,9 @@ export function App() {
           </button>
           <button aria-pressed={route.tab === "machines"} onClick={() => (location.hash = "machines")}>
             Machines
+          </button>
+          <button aria-pressed={route.tab === "library"} onClick={() => (location.hash = "library")}>
+            Library
           </button>
           <button aria-pressed={route.tab === "history"} onClick={() => (location.hash = "history")}>
             History
@@ -328,6 +356,32 @@ export function App() {
             <button class="btn" onClick={() => setAddingMachine(true)}>
               + Machine
             </button>
+            <label
+              class="btn"
+              title="An HTML file becomes a page; any other file stays a file (at most 100 MB)"
+            >
+              Upload
+              <input
+                type="file"
+                hidden
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  event.currentTarget.value = "";
+                  if (!file) return;
+                  void upload(file).then((result) =>
+                    showToast(
+                      "error" in result
+                        ? { text: result.error, error: true, undo: null }
+                        : {
+                            text: `Uploaded ${file.name}. It waits in the tray, private.`,
+                            error: false,
+                            undo: null,
+                          },
+                    ),
+                  );
+                }}
+              />
+            </label>
             <button class="btn" onClick={fit}>
               Fit
             </button>
@@ -344,7 +398,7 @@ export function App() {
       {tray.length > 0 && route.tab === "map" ? (
         <aside class="tray">
           <span class="label title">New · private</span>
-          {tray.map((resource) => (
+          {tray.slice(-TRAY_CARDS).map((resource) => (
             <div
               key={resource.id}
               class={`card${selection.cards.has(resource.id) ? " sel" : ""}`}
@@ -356,6 +410,11 @@ export function App() {
               <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
             </div>
           ))}
+          {tray.length > TRAY_CARDS ? (
+            <a class="muted" href="#library">
+              {tray.length - TRAY_CARDS} more in the Library
+            </a>
+          ) : null}
         </aside>
       ) : null}
       <Panel

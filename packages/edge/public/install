@@ -190,9 +190,33 @@ app "$KITSHN_HOST/join" "kitshn join (public)" 24h "$public_policy" >/dev/null
 # K-811: GitHub Actions deploys here; the Worker checks its OIDC token.
 app "$KITSHN_HOST/deploy" "kitshn deploy (public)" 24h "$public_policy" >/dev/null
 CONNECT_AUD=$(app "$KITSHN_HOST/connect" "kitshn connect" 24h "$machines_policy")
+# K-1004: pages and files have no Access application on the whole host; the Worker checks the shares.
+# Only the login paths have one. It lets in anyone who logs in, and the passkey path adds the passkey
+# check (K-103). The Worker reads who logged in from the cookie that Access sets for the whole host.
+login_policy=$(policy "kitshn any login" '{"name":"kitshn any login","decision":"allow","include":[{"everyone":{}}],"require":[],"exclude":[]}')
+passkey_policy=$(policy "kitshn any login (passkey)" "$(jq -nc --argjson mfa "$MFA" \
+  '{name:"kitshn any login (passkey)",decision:"allow",include:[{everyone:{}}],require:[],exclude:[],mfa_config:$mfa}')")
+# app_two DOMAIN NAME SESSION POLICY_ID POLICY_ID: like app, with a second policy.
+app_two() {
+  found=$(printf '%s' "$APPS" | jq -c --arg domain "$1" 'map(select(.domain == $domain)) | .[0] // empty')
+  if [ -z "$found" ]; then
+    body=$(jq -nc --arg domain "$1" --arg name "$2" --arg session "$3" --arg a "$4" --arg b "$5" \
+      '{name:$name,type:"self_hosted",domain:$domain,session_duration:$session,same_site_cookie_attribute:"lax",policies:[{id:$a,precedence:1},{id:$b,precedence:2}]}')
+    created=$(api POST "/accounts/$ACCOUNT/access/apps" "$body")
+    changed "created the application \"$2\" on $1" >&2
+    printf '%s' "$created" | jq -r .aud
+  else
+    app "$@"
+  fi
+}
+PAGES_LOGIN_AUD=$(app_two "pages.$ZONE_NAME/login" "kitshn pages login" 720h "$login_policy" "$machines_policy")
+PAGES_PASSKEY_AUD=$(app "pages.$ZONE_NAME/login/passkey" "kitshn pages login (passkey)" 24h "$passkey_policy")
+FILES_LOGIN_AUD=$(app_two "files.$ZONE_NAME/login" "kitshn files login" 720h "$login_policy" "$machines_policy")
+FILES_PASSKEY_AUD=$(app "files.$ZONE_NAME/login/passkey" "kitshn files login (passkey)" 24h "$passkey_policy")
 
 say "6. R2 bucket"
 NEED="Workers R2 Storage: Edit"
+R2=""
 if try GET "/accounts/$ACCOUNT/r2/buckets"; then
   if jq -e '.result.buckets // [] | any(.name == "kitshn")' "$WORK/out" >/dev/null; then
     kept "R2 bucket kitshn"
@@ -200,6 +224,7 @@ if try GET "/accounts/$ACCOUNT/r2/buckets"; then
     api POST "/accounts/$ACCOUNT/r2/buckets" '{"name":"kitshn"}' >/dev/null
     changed "created the R2 bucket kitshn"
   fi
+  R2=kitshn
 elif grep -q "enable R2" "$WORK/out"; then
   say "  later:   R2 is off on this account. Turn it on at https://dash.cloudflare.com/$ACCOUNT/r2/overview,"
   say "           then run this script again. Pages and files (milestone 3) need it; the map does not."
@@ -259,7 +284,8 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
   --arg host "$KITSHN_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" \
   --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" \
   --arg zone "$ZONE" --arg zone_name "$ZONE_NAME" --arg deployers "$DEPLOY_OWNER_IDS" \
-  --arg version "$(cat "$WORK/bundle/version")" '
+  --arg version "$(cat "$WORK/bundle/version")" --arg r2 "$R2" --arg pages_login "$PAGES_LOGIN_AUD" \
+  --arg pages_passkey "$PAGES_PASSKEY_AUD" --arg files_login "$FILES_LOGIN_AUD" --arg files_passkey "$FILES_PASSKEY_AUD" '
   {
     main_module: "worker.js",
     compatibility_date: $date,
@@ -278,8 +304,12 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
       {type: "plain_text", name: "CLOUDFLARE_ZONE_ID", text: $zone},
       {type: "plain_text", name: "KITSHN_ZONE", text: $zone_name},
       {type: "plain_text", name: "DEPLOY_OWNER_IDS", text: $deployers},
-      {type: "plain_text", name: "KITSHN_VERSION", text: $version}
-    ],
+      {type: "plain_text", name: "KITSHN_VERSION", text: $version},
+      {type: "plain_text", name: "PAGES_LOGIN_AUD", text: $pages_login},
+      {type: "plain_text", name: "PAGES_PASSKEY_AUD", text: $pages_passkey},
+      {type: "plain_text", name: "FILES_LOGIN_AUD", text: $files_login},
+      {type: "plain_text", name: "FILES_PASSKEY_AUD", text: $files_passkey}
+    ] + (if $r2 == "" then [] else [{type: "r2_bucket", name: "BUCKET", bucket_name: $r2}] end),
     keep_bindings: ["secret_text"]
   } + (if $migrations == null then {} else {migrations: $migrations} end)')
 printf '%s' "$metadata" >"$WORK/metadata.json"
@@ -301,19 +331,21 @@ fi
 api POST "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/subdomain" '{"enabled":false,"previews_enabled":false}' >/dev/null
 kept "workers.dev address off"
 
-say "8. Address (K-1208)"
+say "8. Addresses (K-1208, K-1003, K-1102)"
 NEED="Workers Routes: Edit and DNS: Edit"
-domains=$(api GET "/accounts/$ACCOUNT/workers/domains?hostname=$KITSHN_HOST")
-domain=$(printf '%s' "$domains" | jq -r --arg h "$KITSHN_HOST" 'map(select(.hostname == $h)) | .[0].service // empty')
-if [ "$domain" = "$SCRIPT" ]; then
-  kept "$KITSHN_HOST serves the Worker"
-elif [ -n "$domain" ]; then
-  die "$KITSHN_HOST already serves the Worker \"$domain\". kitshn does not take it over."
-else
-  api PUT "/accounts/$ACCOUNT/workers/domains" \
-    "$(jq -nc --arg h "$KITSHN_HOST" --arg z "$ZONE" --arg s "$SCRIPT" '{hostname:$h,zone_id:$z,service:$s,environment:"production"}')" >/dev/null
-  changed "$KITSHN_HOST now serves the Worker"
-fi
+for host in "$KITSHN_HOST" "pages.$ZONE_NAME" "files.$ZONE_NAME"; do
+  domains=$(api GET "/accounts/$ACCOUNT/workers/domains?hostname=$host")
+  domain=$(printf '%s' "$domains" | jq -r --arg h "$host" 'map(select(.hostname == $h)) | .[0].service // empty')
+  if [ "$domain" = "$SCRIPT" ]; then
+    kept "$host serves the Worker"
+  elif [ -n "$domain" ]; then
+    die "$host already serves the Worker \"$domain\". kitshn does not take it over."
+  else
+    api PUT "/accounts/$ACCOUNT/workers/domains" \
+      "$(jq -nc --arg h "$host" --arg z "$ZONE" --arg s "$SCRIPT" '{hostname:$h,zone_id:$z,service:$s,environment:"production"}')" >/dev/null
+    changed "$host now serves the Worker"
+  fi
+done
 
 say ""
 say "kitshn is ready: https://$KITSHN_HOST"

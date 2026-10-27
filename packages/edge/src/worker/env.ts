@@ -11,6 +11,13 @@ export interface Env {
   readonly ACCESS_ADMIN_AUD: string;
   /** The audience tag of the `/connect` Access application (daemons, K-604). */
   readonly ACCESS_CONNECT_AUD: string;
+  /** K-1004: the audience tags of the login applications of `pages.<zone>` and `files.<zone>`. */
+  readonly PAGES_LOGIN_AUD: string;
+  readonly PAGES_PASSKEY_AUD: string;
+  readonly FILES_LOGIN_AUD: string;
+  readonly FILES_PASSKEY_AUD: string;
+  /** The R2 bucket of pages and files (sections 10 and 11). Missing while R2 is off on the account. */
+  readonly BUCKET?: R2Bucket;
   /** Comma-separated owner emails; they seed the Owner circle on the first start (K-1204). */
   readonly OWNER_EMAILS: string;
   /** Optional JSON list of service tokens that join the Owner circle on the first start, for agents (K-106). */

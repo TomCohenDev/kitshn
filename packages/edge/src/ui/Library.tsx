@@ -1,0 +1,125 @@
+import { useEffect, useState } from "preact/hooks";
+import type { LibraryItem } from "../core/library.ts";
+import { type State, circlesHolding } from "../core/model.ts";
+import { KINDS } from "./kinds.ts";
+import { callApi } from "./store.ts";
+
+const size = (bytes: number) =>
+  bytes < 1024 * 1024
+    ? `${Math.max(1, Math.round(bytes / 1024))} KB`
+    : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+
+/** K-1005, K-1006: every page and file, with a search, a preview and Delete. It reads the index, not R2. */
+export function LibraryView(props: {
+  state: State;
+  /** The newest revision; the list loads again when it changes, for example after an upload. */
+  revision: number;
+  onToast: (text: string, error: boolean) => void;
+  ask: (text: string) => Promise<boolean>;
+  onShowCard: (id: string) => void;
+}) {
+  const [items, setItems] = useState<ReadonlyArray<LibraryItem> | null>(null);
+  const [query, setQuery] = useState("");
+  const [preview, setPreview] = useState<string | null>(null);
+
+  useEffect(() => {
+    void callApi<Array<LibraryItem>>("GET", "/api/library").then((result) => {
+      if ("error" in result) props.onToast(result.error, true);
+      else setItems(result);
+    });
+  }, [props.revision]);
+
+  const words = query.toLowerCase().split(" ").filter(Boolean);
+  const shown = (items ?? []).filter((item) => {
+    const text = [item.title, item.thread ?? "", item.machine ?? "", item.fileName ?? ""]
+      .join(" ")
+      .toLowerCase();
+    return words.every((word) => text.includes(word));
+  });
+
+  const remove = async (item: LibraryItem) => {
+    if (!(await props.ask(`Delete ${item.title}? Its address stops working for everyone.`))) return;
+    const result = await callApi<{ deleted: string }>("DELETE", `/api/library/${item.id}`);
+    if ("error" in result) props.onToast(result.error, true);
+    else if (preview === item.id) setPreview(null);
+  };
+
+  return (
+    <section class="history">
+      <h2>Library</h2>
+      <p class="muted">
+        Pages and files. A new one is private and waits in the tray; place its card in a circle to share it.
+      </p>
+      <input
+        type="search"
+        placeholder="Search by title, thread or machine"
+        value={query}
+        onInput={(event) => setQuery(event.currentTarget.value)}
+      />
+      {preview ? (
+        <iframe
+          class="preview"
+          title="Preview"
+          sandbox="allow-scripts"
+          src={`/api/library/${encodeURIComponent(preview)}/content`}
+        />
+      ) : null}
+      <table>
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Thread</th>
+            <th>Machine</th>
+            <th>Added</th>
+            <th>Size</th>
+            <th>Shared with</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {shown.map((item) => {
+            const resource = props.state.resources.get(item.id);
+            const circles = circlesHolding(props.state, item.id).map((circle) => circle.name);
+            return (
+              <tr key={item.id}>
+                <td>
+                  {KINDS[item.kind].icon}{" "}
+                  {resource?.addresses[0] ? (
+                    <a href={`https://${resource.addresses[0]}`} target="_blank" rel="noreferrer">
+                      {item.title}
+                    </a>
+                  ) : (
+                    item.title
+                  )}
+                </td>
+                <td>{item.thread ?? "–"}</td>
+                <td>{item.machine ?? "–"}</td>
+                <td>{new Date(item.createdAt).toLocaleString()}</td>
+                <td>{size(item.size)}</td>
+                <td>{circles.length > 0 ? circles.join(", ") : <span class="muted">private</span>}</td>
+                <td>
+                  <button class="btn" onClick={() => setPreview(preview === item.id ? null : item.id)}>
+                    {preview === item.id ? "Hide" : "Preview"}
+                  </button>
+                  <button class="btn" onClick={() => props.onShowCard(item.id)}>
+                    Card
+                  </button>
+                  <button class="btn danger" onClick={() => void remove(item)}>
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+          {items !== null && shown.length === 0 ? (
+            <tr>
+              <td colSpan={7}>
+                {items.length === 0 ? "No page or file yet." : "Nothing matches the search."}
+              </td>
+            </tr>
+          ) : null}
+        </tbody>
+      </table>
+    </section>
+  );
+}

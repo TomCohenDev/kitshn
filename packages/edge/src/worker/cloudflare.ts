@@ -27,6 +27,8 @@ export async function cloudflare<T>(
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const text = await response.text();
+  // Some DELETE calls (for example of a Worker custom domain) answer 200 with no body at all.
+  if (method === "DELETE" && response.ok && text.trim() === "") return undefined as T;
   let envelope: Envelope<T> | null = null;
   try {
     envelope = JSON.parse(text) as Envelope<T>;

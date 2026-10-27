@@ -270,8 +270,8 @@ describe("links on disk (K-818)", () => {
     try {
       mkdirSync(join(app, "data"));
       symlinkSync(join(app, "missing-later"), join(app, "data", "dangling"));
-      expect(() => realpathOnDisk(join(app, "data", "dangling"))).toThrow(/ENOENT/);
-      expect(() => realpathOnDisk(join(app, "data", "dangling", "sub"))).toThrow(/ENOENT/);
+      expect(() => realpathOnDisk(join(app, "data", "dangling"))).toThrow(/target is missing/);
+      expect(() => realpathOnDisk(join(app, "data", "dangling", "sub"))).toThrow(/target is missing/);
       expect(realpathOnDisk(join(app, "data", "new", "folder")).endsWith("/data/new/folder")).toBe(true);
     } finally {
       rmSync(app, { recursive: true, force: true });

@@ -78,7 +78,12 @@ export function realpathOf(path: string, realpath: (path: string) => string, exi
  * dangling link fails the deploy instead of passing as a folder that Docker would create (K-818).
  */
 export function realpathOnDisk(path: string): string {
-  return realpathOf(path, realpathSync, (part) => lstatSync(part, { throwIfNoEntry: false }) !== undefined);
+  try {
+    return realpathOf(path, realpathSync, (part) => lstatSync(part, { throwIfNoEntry: false }) !== undefined);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    throw new Error(`${path} is or passes a link whose target is missing (K-818)`);
+  }
 }
 
 /**

@@ -1,7 +1,7 @@
 import type { RepoGate } from "./repos.ts";
 
-/** K-819: a repo gate with the slug that groups the repo's cards (K-508). */
-export type RepoView = RepoGate & { readonly slug: string };
+/** K-819: `resourceIds` are the cards that this repo deployed, which the card panel matches. */
+export type RepoView = RepoGate & { readonly resourceIds: ReadonlyArray<string> };
 import type { Actor } from "./changes.ts";
 import type { Command, Machine, MachineStatus, Sample } from "./machine.ts";
 import type { Circle, Point, Resource, ShareSetting, Stack } from "./model.ts";

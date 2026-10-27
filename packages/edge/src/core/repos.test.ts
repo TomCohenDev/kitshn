@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { gateDecision } from "./repos.ts";
 
-const repo = { repoId: "42", name: "o/new" };
+const repo = { repoId: "42", name: "o/new", branch: "main" };
 
 describe("the repo gate (K-819)", () => {
   it("lets a new repo wait for the owner, and records it once", () => {
@@ -14,8 +14,8 @@ describe("the repo gate (K-819)", () => {
     expect(gateDecision(undefined, repo, true, 7)).toMatchObject({ allow: true, record: { state: "allowed" } });
   });
   it("refuses a blocked repo, also under a new name", () => {
-    const blocked = { repoId: "42", name: "o/old", state: "blocked" as const, firstSeen: 1 };
-    expect(gateDecision(blocked, { repoId: "42", name: "o/renamed" }, true, 7)).toMatchObject({
+    const blocked = { repoId: "42", name: "o/old", state: "blocked" as const, firstSeen: 1, branch: null };
+    expect(gateDecision(blocked, { repoId: "42", name: "o/renamed", branch: null }, true, 7)).toMatchObject({
       allow: false,
       error: expect.stringMatching(/blocked/),
     });

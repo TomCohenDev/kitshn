@@ -60,7 +60,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   ["CREATE TABLE stacks (id TEXT PRIMARY KEY, body TEXT NOT NULL)"],
   // 6: the repo gate (K-819), by GitHub repository id.
   [
-    "CREATE TABLE repos (repo_id TEXT PRIMARY KEY, name TEXT NOT NULL, state TEXT NOT NULL, first_seen INTEGER NOT NULL)",
+    `CREATE TABLE repos (repo_id TEXT PRIMARY KEY, name TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('waiting', 'allowed', 'blocked')), first_seen INTEGER NOT NULL, branch TEXT)`,
   ],
 ];
 

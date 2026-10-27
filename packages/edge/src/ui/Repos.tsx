@@ -2,12 +2,22 @@ import type { RepoView } from "../core/protocol.ts";
 import type { RepoState } from "../core/repos.ts";
 import { callApi } from "./store.ts";
 
-/** K-819: allows or blocks the deploys of one repo, by its GitHub repository id. */
-export async function setRepoState(repo: RepoView, state: Exclude<RepoState, "waiting">) {
-  const result = await callApi<{ state: RepoState }>("POST", `/api/repos/${encodeURIComponent(repo.repoId)}`, {
-    state,
-  });
-  return "error" in result ? result.error : null;
+type RepoAction = Exclude<RepoState, "waiting"> | "forget";
+
+/** K-819: allows, blocks or forgets one repo by its GitHub repository id; returns the toast text. */
+export async function setRepoState(repo: RepoView, state: RepoAction): Promise<{ text: string; error: boolean }> {
+  const result = await callApi<{ dispatched?: string; dispatchError?: string }>(
+    "POST",
+    `/api/repos/${encodeURIComponent(repo.repoId)}`,
+    { state },
+  );
+  if ("error" in result) return { text: result.error, error: true };
+  if (state === "forget") return { text: `Forgot ${repo.name}.`, error: false };
+  if (state === "blocked") return { text: `Blocked deploys of ${repo.name}.`, error: false };
+  if (result.dispatched) return { text: `Allowed ${repo.name} and started its deploy from ${result.dispatched}.`, error: false };
+  if (result.dispatchError)
+    return { text: `Allowed ${repo.name}, but could not start its deploy: ${result.dispatchError}`, error: true };
+  return { text: `Allowed deploys of ${repo.name}. Run its workflow again to deploy.`, error: false };
 }
 
 const STICKERS: Record<RepoState, string> = { waiting: "wait", allowed: "ok", blocked: "" };
@@ -18,9 +28,9 @@ export function RepoList(props: {
   onToast: (text: string, error: boolean) => void;
 }) {
   if (props.repos.length === 0) return null;
-  const decide = async (repo: RepoView, state: Exclude<RepoState, "waiting">) => {
-    const error = await setRepoState(repo, state);
-    props.onToast(error ?? `${state === "allowed" ? "Allowed" : "Blocked"} deploys of ${repo.name}.`, error !== null);
+  const decide = async (repo: RepoView, state: RepoAction) => {
+    const { text, error } = await setRepoState(repo, state);
+    props.onToast(text, error);
   };
   return (
     <>
@@ -40,6 +50,11 @@ export function RepoList(props: {
               {repo.state !== "blocked" ? (
                 <button type="button" class="btn danger" onClick={() => void decide(repo, "blocked")}>
                   Block
+                </button>
+              ) : null}
+              {repo.state === "waiting" ? (
+                <button type="button" class="btn" onClick={() => void decide(repo, "forget")}>
+                  Forget
                 </button>
               ) : null}
             </li>

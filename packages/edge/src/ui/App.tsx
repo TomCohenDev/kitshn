@@ -947,7 +947,7 @@ function Panel(props: {
       <CardPanel
         resource={cards[0]}
         state={state}
-        repo={props.repos.find((repo) => repo.slug === cards[0]?.group) ?? null}
+        repo={props.repos.find((repo) => repo.resourceIds.includes(cards[0]?.id ?? "")) ?? null}
         access={props.access[cards[0].id] ?? null}
         onEdit={props.onEdit}
         onPlace={props.onPlace}
@@ -1161,8 +1161,8 @@ function CardPanel(props: {
             onClick={async () => {
               if (!props.repo) return;
               const next = props.repo.state === "blocked" ? "allowed" : "blocked";
-              const error = await setRepoState(props.repo, next);
-              props.onToast(error ?? `${next === "allowed" ? "Allowed" : "Blocked"} deploys of ${props.repo.name}.`, error !== null);
+              const { text, error } = await setRepoState(props.repo, next);
+              props.onToast(text, error);
             }}
           >
             {props.repo.state === "blocked" ? "Allow deploys" : "Block deploys"}

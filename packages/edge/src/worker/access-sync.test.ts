@@ -254,4 +254,36 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
     await syncAccess(desired, cf.store, cf.api, "a");
     expect(cf.calls).toContain(`POST /apps/${appId}/revoke_tokens`);
   });
+
+  it("keeps the Access app while a route can still reach its address (K-410)", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    const gone: State = { ...state, resources: new Map() };
+    const desired = desiredAccess(gone, 0);
+    // The ingress update that removes the site failed, so the old ingress still reaches kit.example.com.
+    const reachable = new Set(["kit.example.com"]);
+    cf.calls.length = 0;
+    await syncAccess(desired, cf.store, cf.api, "a", 40, reachable);
+    expect(cf.calls.filter((call) => call.startsWith("DELETE"))).toEqual([]);
+    expect(hasAccessWork(desired, cf.rows, reachable)).toBe(false);
+    // Once the route is confirmed gone, the app goes, and then its policy.
+    await syncAccess(desired, cf.store, cf.api, "a", 40, new Set());
+    expect(cf.calls.filter((call) => call.startsWith("DELETE"))).toEqual([
+      "DELETE /apps/id2",
+      "DELETE /policies/id1",
+    ]);
+  });
+
+  it("keeps a reachable app also after the daily compare cleared its body (K-410)", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    const key = "app:kitshn-admin:kit.example.com";
+    cf.rows.set(key, { ...cf.rows.get(key)!, body: "", tried: "" });
+    const desired = desiredAccess({ ...state, resources: new Map() }, 0);
+    cf.calls.length = 0;
+    await syncAccess(desired, cf.store, cf.api, "a", 40, new Set(["kit.example.com"]));
+    expect(cf.calls.filter((call) => call.startsWith("DELETE"))).toEqual([]);
+  });
 });

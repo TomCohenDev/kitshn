@@ -95,6 +95,7 @@ The architecture, the request paths and the budget are in [docs/architecture.md]
 - **K-407** The map shows a change at once. Each card shows "applying" until Cloudflare has the change, and "failed" with the reason if Cloudflare refuses it.
 - **K-408** A daily alarm compares Access with the shares and repairs differences that kitshn made. It never changes an Access application or policy that kitshn did not make, and it names such an application when it covers a kitshn address.
 - **K-409** A lower level takes effect at once: kitshn revokes the Access sessions of the affected application, and providers end the sessions of members that lost a level.
+- **K-410** Removal order: kitshn never deletes an Access application while a route can still reach its address: tunnel ingress, a DNS record, a Worker route or a custom domain. It takes the route off and confirms it, then the DNS record, and deletes the Access application last. A failed step stops the sequence and retries after five minutes.
 
 ## 5. Map UX
 

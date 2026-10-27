@@ -78,7 +78,11 @@ export function accessStates(
 }
 
 /** True when some object needs a write that is not waiting for the daily retry. */
-export function hasAccessWork(desired: DesiredAccess, rows: ReadonlyMap<string, AccessRow>): boolean {
+export function hasAccessWork(
+  desired: DesiredAccess,
+  rows: ReadonlyMap<string, AccessRow>,
+  reachable: ReadonlySet<string> = new Set(),
+): boolean {
   for (const [key, policy] of desired.policies) {
     const body = policyBody(policy);
     if (rows.get(key)?.body !== body && !failedWith(rows.get(key), body)) return true;
@@ -87,22 +91,63 @@ export function hasAccessWork(desired: DesiredAccess, rows: ReadonlyMap<string, 
     const body = appBody(key, app, rows);
     if (body !== null && rows.get(key)?.body !== body && !failedWith(rows.get(key), body)) return true;
   }
-  for (const row of rows.values()) if (isStale(desired, row)) return true;
+  const kept = keptPolicies(desired, rows, reachable);
+  for (const row of rows.values()) if (isStale(desired, row, reachable, kept)) return true;
   return false;
 }
 
-/** A row that kitshn no longer wants. A failed deletion waits for the daily retry (K-408). */
-const isStale = (desired: DesiredAccess, row: AccessRow) =>
-  !desired.policies.has(row.key) && !desired.apps.has(row.key) && row.error === null;
+/** The address of an application row, from its key `app:<card>:<address>`, so it never depends on the body. */
+const appDomain = (row: AccessRow) => {
+  const domain = row.key.split(":").slice(2).join(":");
+  return domain || null;
+};
+
+/**
+ * K-006: an application that kitshn no longer wants stays while a route (tunnel ingress, DNS record,
+ * Worker route or custom domain) can still reach its address. Its policies stay with it.
+ */
+function keptPolicies(
+  desired: DesiredAccess,
+  rows: ReadonlyMap<string, AccessRow>,
+  reachable: ReadonlySet<string>,
+) {
+  const kept = new Set<string>();
+  for (const row of rows.values()) {
+    if (!row.key.startsWith("app:") || desired.apps.has(row.key)) continue;
+    const domain = appDomain(row);
+    if (domain === null || !reachable.has(domain)) continue;
+    // A kept app whose body the daily compare cleared has unknown policies: keep every policy for now.
+    if (!row.body) return null;
+    for (const id of policyIds(row.body)) kept.add(id);
+  }
+  return kept;
+}
+
+/** A row that kitshn no longer wants and may delete now. A failed deletion waits for the daily retry (K-408). */
+const isStale = (
+  desired: DesiredAccess,
+  row: AccessRow,
+  reachable: ReadonlySet<string>,
+  kept: ReadonlySet<string> | null,
+) => {
+  if (desired.policies.has(row.key) || desired.apps.has(row.key) || row.error !== null) return false;
+  if (row.key.startsWith("app:")) {
+    const domain = appDomain(row);
+    return domain === null || !reachable.has(domain);
+  }
+  return kept !== null && !kept.has(row.cfId);
+};
 
 const isNotFound = (error: unknown) =>
   typeof error === "object" && error !== null && "status" in error && error.status === 404;
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
+/** The policy ids in an application body. An empty body (cleared by the daily compare) has none. */
 const policyIds = (body: string) =>
-  (JSON.parse(body) as { policies?: ReadonlyArray<{ id: string }> }).policies?.map((policy) => policy.id) ??
-  [];
+  body
+    ? ((JSON.parse(body) as { policies?: ReadonlyArray<{ id: string }> }).policies?.map((policy) => policy.id) ?? [])
+    : [];
 
 const removesPolicy = (before: string, after: string) => {
   const kept = new Set(policyIds(after));
@@ -285,6 +330,7 @@ export async function syncAccess(
   api: Api,
   accountId: string,
   budget = CALLS_PER_RUN,
+  reachable: ReadonlySet<string> = new Set(),
 ): Promise<boolean> {
   let calls = 0;
   const spend = () => calls++ < budget;
@@ -312,7 +358,9 @@ export async function syncAccess(
           existingApps = await api<ReadonlyArray<Named>>("GET", `${base}/apps?per_page=1000`);
         }
         const found = find((kind === "policies" ? existingPolicies : existingApps) ?? []);
-        cfId = found && found.name.startsWith(ACCESS_NAME_PREFIX) ? found.id : "";
+        // Never adopt an object that another row holds: one Cloudflare object belongs to one row (K-410).
+        const held = new Set([...store.rows.values()].map((item) => item.cfId));
+        cfId = found && found.name.startsWith(ACCESS_NAME_PREFIX) && !held.has(found.id) ? found.id : "";
       }
       if (!spend()) return false;
       const request: unknown = JSON.parse(body);
@@ -358,11 +406,14 @@ export async function syncAccess(
     const found = (list: ReadonlyArray<Named>) => list.find((item) => item.domain === app.domain);
     if (!(await write(key, "apps", body, found))) return false;
   }
-  const stale = [...store.rows.values()].filter((row) => isStale(desired, row));
+  const kept = keptPolicies(desired, store.rows, reachable);
+  const stale = [...store.rows.values()].filter((row) => isStale(desired, row, reachable, kept));
   // Applications first: Access refuses to delete a policy that an application still uses.
   stale.sort((a, b) => Number(a.key.startsWith("policy:")) - Number(b.key.startsWith("policy:")));
   for (const row of stale) {
-    if (!row.cfId) {
+    // A row without an object, or one whose object another row now holds, goes without a call.
+    const shared = [...store.rows.values()].some((item) => item.key !== row.key && item.cfId === row.cfId);
+    if (!row.cfId || shared) {
       store.remove(row.key);
       continue;
     }

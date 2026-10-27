@@ -102,3 +102,24 @@ export function seenText(time: number | null, now: number): string {
 
 /** K-1109: an answer that means the origin is down: a bad gateway, or the tunnel error 1033. */
 export const originDown = (status: number) => status === 502 || status === 530;
+
+/**
+ * K-006: the addresses that a route can still reach: hostnames in tunnel ingress that Cloudflare
+ * accepted, DNS records and Worker routes that kitshn made. An Access application stays while its
+ * address is here.
+ */
+export function reachableAddresses(input: {
+  readonly ingress: Iterable<string>;
+  readonly records: Iterable<{ readonly address: string; readonly record_id: string }>;
+  readonly routes: Iterable<{ readonly address: string; readonly route_id: string }>;
+}): Set<string> {
+  const reachable = new Set<string>();
+  for (const body of input.ingress) {
+    if (!body) continue;
+    const config = JSON.parse(body) as { config?: { ingress?: Array<{ hostname?: string }> } };
+    for (const rule of config.config?.ingress ?? []) if (rule.hostname) reachable.add(rule.hostname);
+  }
+  for (const record of input.records) if (record.record_id) reachable.add(record.address);
+  for (const route of input.routes) if (route.route_id) reachable.add(route.address);
+  return reachable;
+}

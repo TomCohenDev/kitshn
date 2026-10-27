@@ -90,6 +90,8 @@ The tightest limits for growth are service tokens (50) and Worker scripts (100),
 
 ## Choices and simpler options
 
+- **Schema migrations.** The Durable Object keeps a `schema_version` in its `meta` table and runs numbered migrations from `packages/edge/src/worker/migrations.ts` once, in order. A shipped migration never changes; a new one goes at the end.
+
 - 🟠 **One Durable Object for everything.** It is simple and fits the budget. One instance serializes all writes, which is fine at this size. Revisit when the map holds more than about 10,000 cards.
 - 🟠 **Samples on the machine, not in the Durable Object.** The machine map wrote one row per machine per minute. That alone is about 7,200 rows written per day for 5 machines. Revisit if history must work while a machine is offline.
 - 🟠 **Source archive through R2, not a git clone on the machine.** The machine needs no GitHub credential. The GitHub App could hand out clone tokens instead; revisit when archives pass 500 MB.

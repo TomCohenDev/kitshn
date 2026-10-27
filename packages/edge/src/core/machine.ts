@@ -123,8 +123,8 @@ export interface LiveSiteReport {
 
 /** Messages from a daemon to kitshn over `/connect`. The text "ping" is answered by the auto response. */
 export type DaemonMessage =
-  /** K-1704: the signature of `connectText`. kitshn uses `publicKey` only for a machine without a key (K-1708). */
-  | { readonly type: "answer"; readonly signature: string; readonly publicKey: string }
+  /** K-1704: the signature of `connectText` with the key that the challenge names. */
+  | { readonly type: "answer"; readonly signature: string }
   /** K-1705: a new public half, with the signature of `rotateText` by the old private half. */
   | { readonly type: "rotate"; readonly publicKey: string; readonly signature: string }
   | { readonly type: "status"; readonly status: MachineStatus }
@@ -139,7 +139,8 @@ export type DaemonMessage =
 export type ServerToDaemon =
   /**
    * K-1704: the first message of each connection. `fingerprint` names the key that kitshn expects, so a daemon
-   * in the middle of a rotation signs with the right file; null when the machine has no key yet (K-1708).
+   * in the middle of a rotation signs with the right file. Null when the machine has no key yet: the daemon
+   * then does not answer, and the connection reports status only (K-1708).
    */
   | { readonly type: "challenge"; readonly challenge: string; readonly fingerprint: string | null }
   /** K-1704: the answer passed; from now on kitshn reads the messages of this connection. */
@@ -196,13 +197,21 @@ export const fingerprintOf = async (publicKey: string) =>
 /** K-1704: 32 random bytes for one connection. */
 export const newChallenge = () => base64url(crypto.getRandomValues(new Uint8Array(32)));
 
+/**
+ * K-1704: the host that both sides sign: the hostname without a port, from kitshn's own `KITSHN_HOST` or the
+ * daemon's configured server address, never from the challenge. So `localhost:8787` and `http://localhost:8787`
+ * sign the same host.
+ */
+export const signedHost = (hostOrAddress: string) =>
+  new URL(hostOrAddress.includes("://") ? hostOrAddress : `https://${hostOrAddress}`).hostname;
+
 /** K-1704: what the daemon signs to answer the challenge of one connection to one kitshn host. */
 export const connectText = (host: string, machineId: string, challenge: string) =>
-  ["kitshn-connect-v1", host, machineId, challenge].join("\n");
+  ["kitshn-connect-v1", signedHost(host), machineId, challenge].join("\n");
 
 /** K-1705: what the old key signs to hand over to the new one, bound to the connection like `connectText`. */
 export const rotateText = (host: string, machineId: string, challenge: string, publicKey: string) =>
-  ["kitshn-rotate-v1", host, machineId, challenge, publicKey].join("\n");
+  ["kitshn-rotate-v1", signedHost(host), machineId, challenge, publicKey].join("\n");
 
 export async function signText(key: MachinePrivateKey, text: string): Promise<string> {
   const privateKey = await crypto.subtle.importKey("jwk", key, ED25519, false, ["sign"]);

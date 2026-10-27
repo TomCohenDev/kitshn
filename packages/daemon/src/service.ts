@@ -10,6 +10,8 @@ export interface Paths {
   readonly data: string;
   /** The service file of the platform. */
   readonly service: string;
+  /** K-603: the service file of the tunnel, a second user service next to the daemon. */
+  readonly tunnelService: string;
 }
 
 export function pathsFor(
@@ -23,6 +25,7 @@ export function pathsFor(
       config: join(support, "machine.json"),
       data: support,
       service: join(home, "Library", "LaunchAgents", "com.kitshn.daemon.plist"),
+      tunnelService: join(home, "Library", "LaunchAgents", "com.kitshn.tunnel.plist"),
     };
   }
   const config = env["XDG_CONFIG_HOME"] || join(home, ".config");
@@ -31,6 +34,7 @@ export function pathsFor(
     config: join(config, "kitshn", "machine.json"),
     data: join(data, "kitshn"),
     service: join(config, "systemd", "user", "kitshn.service"),
+    tunnelService: join(config, "systemd", "user", "kitshn-tunnel.service"),
   };
 }
 
@@ -69,6 +73,74 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 `;
+}
+
+/**
+ * K-603: the tunnel is its own user service, so a restart or an update of the daemon never stops it. The token
+ * stays in a file of the user (`--token-file`), not on the command line.
+ */
+export function tunnelServiceFile(platform: Platform, cloudflared: string, tokenFile: string): string {
+  if (platform === "darwin") {
+    const args = [cloudflared, "--no-autoupdate", "tunnel", "run", "--token-file", tokenFile];
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.kitshn.tunnel</string>
+  <key>ProgramArguments</key><array>${args.map((arg) => `<string>${xml(arg)}</string>`).join("")}</array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+`;
+  }
+  return `[Unit]
+Description=kitshn tunnel (cloudflared)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart="${cloudflared}" --no-autoupdate tunnel run --token-file "${tokenFile}"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`;
+}
+
+/** K-603: start (idempotent), restart, stop and read the tunnel service. */
+export function tunnelCommands(platform: Platform, file: string, uid: number) {
+  if (platform === "darwin") {
+    const label = `gui/${uid}/com.kitshn.tunnel`;
+    return {
+      /** `bootstrap` fails when the agent is loaded already; the caller ignores that. */
+      start: [["launchctl", "bootstrap", `gui/${uid}`, file]],
+      restart: [["launchctl", "kickstart", "-k", label]],
+      stop: [["launchctl", "bootout", `gui/${uid}`, file]],
+      state: ["launchctl", "print", label],
+    };
+  }
+  return {
+    start: [
+      ["systemctl", "--user", "daemon-reload"],
+      ["systemctl", "--user", "enable", "--now", "kitshn-tunnel.service"],
+    ],
+    restart: [
+      ["systemctl", "--user", "daemon-reload"],
+      ["systemctl", "--user", "restart", "kitshn-tunnel.service"],
+    ],
+    stop: [["systemctl", "--user", "disable", "--now", "kitshn-tunnel.service"]],
+    state: ["systemctl", "--user", "is-active", "kitshn-tunnel.service"],
+  };
+}
+
+/** K-605: the tunnel state for the status report, from the output of the state command. */
+export function tunnelStateOf(platform: Platform, output: string): "starting" | "running" | "stopped" {
+  if (platform === "darwin") return output.includes("state = running") ? "running" : "stopped";
+  const state = output.trim();
+  if (state === "active") return "running";
+  return state === "activating" || state === "reloading" ? "starting" : "stopped";
 }
 
 /** The commands that start, stop and restart the service of the platform. */

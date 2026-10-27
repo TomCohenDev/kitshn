@@ -9,6 +9,7 @@ import {
   parsePublicKey,
   rotateText,
   signText,
+  signedHost,
   verifyText,
 } from "./machine.ts";
 
@@ -52,6 +53,17 @@ describe("machine keys (K-1701 to K-1705)", () => {
     expect(await verifyText(old.x, rotateText(host, "m1", challenge, next.x), answer)).toBe(false);
     const handover = await signText(old, rotateText(host, "m1", challenge, next.x));
     expect(await verifyText(old.x, rotateText(host, "m1", challenge, next.x), handover)).toBe(true);
+  });
+
+  it("signs the hostname without its port, from an address or a host", async () => {
+    expect(signedHost("localhost:8787")).toBe("localhost");
+    expect(signedHost("http://localhost:8787")).toBe("localhost");
+    expect(signedHost("https://kit.example.com")).toBe("kit.example.com");
+    const key = await newMachineKey();
+    const challenge = newChallenge();
+    // The daemon signs with its server address; kitshn checks with its KITSHN_HOST.
+    const signature = await signText(key, connectText("http://localhost:8787", "m1", challenge));
+    expect(await verifyText(key.x, connectText("localhost:8787", "m1", challenge), signature)).toBe(true);
   });
 
   it("returns false for a broken key or signature instead of throwing", async () => {

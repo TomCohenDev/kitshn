@@ -152,7 +152,10 @@ import {
   parseCommand,
   parseLabels,
   legacyUpdateScript,
+  type MachineCheck,
+  answerCheck,
   pickMachine,
+  socketStart,
 } from "./machines.ts";
 import type { Env } from "./env.ts";
 
@@ -177,16 +180,8 @@ type Attachment =
       readonly volumes?: ReadonlyArray<ProjectVolume>;
     };
 
-/**
- * K-1704: where a machine socket is in its check. kitshn reads messages and sends jobs only on "signed" and
- * "token" sockets.
- */
-type MachineCheck =
-  /** The challenge went out; no valid answer yet. */
-  | "waiting"
-  | "signed"
-  /** K-1708: the machine has no key yet, so its service token alone counts, as before machine keys. */
-  | "token";
+/** The attachment of a socket; null for one that never got one, which every reader skips. */
+const attachmentOf = (socket: WebSocket) => socket.deserializeAttachment() as Attachment | null;
 
 /** K-1704 */
 const CHALLENGE_MS = 10_000;
@@ -714,7 +709,7 @@ export class Kitshn extends DurableObject<Env> {
     const machine = teardown.machineId ? this.state.machines.get(teardown.machineId) : undefined;
     if (!machine) return `kitshn knows no machine of ${card.name}, so nothing stops there.`;
     this.queueKitshnJob(machine.id, teardown.command, actor, NEVER);
-    const when = this.onlineMachines().has(machine.id) ? "now" : `when ${machine.name} comes online`;
+    const when = this.jobMachines().has(machine.id) ? "now" : `when ${machine.name} comes online with a key`;
     return `${card.name} stops on ${machine.name} ${when}; its volumes stay on the machine.`;
   }
 
@@ -789,7 +784,7 @@ export class Kitshn extends DurableObject<Env> {
 
   private machineView(machine: Machine): MachineView {
     const socket = this.openSocket(machine.id);
-    const attachment = socket?.deserializeAttachment() as Attachment | undefined;
+    const attachment = socket ? attachmentOf(socket) : null;
     const live = attachment?.kind === "machine" ? attachment : null;
     return {
       machine,
@@ -811,7 +806,7 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1704: the sockets of a machine that kitshn reads and sends jobs to. */
   private checkedSockets(machineId: string) {
     return this.ctx.getWebSockets(machineId).filter((socket) => {
-      const attachment = socket.deserializeAttachment() as Attachment | null;
+      const attachment = attachmentOf(socket);
       return attachment?.kind === "machine" && attachment.check !== "waiting";
     });
   }
@@ -825,8 +820,8 @@ export class Kitshn extends DurableObject<Env> {
   private broadcast() {
     const repos = this.repoViews();
     for (const socket of this.ctx.getWebSockets("map")) {
-      const attachment = socket.deserializeAttachment() as Attachment;
-      if (attachment.kind !== "map") continue;
+      const attachment = attachmentOf(socket);
+      if (attachment?.kind !== "map") continue;
       const caller = attachment.caller;
       if (!this.authorized(caller)) {
         socket.close(4003, "You lost access to the kitshn admin.");
@@ -946,7 +941,8 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   override async webSocketMessage(socket: WebSocket, data: string | ArrayBuffer) {
-    const attachment = socket.deserializeAttachment() as Attachment;
+    const attachment = attachmentOf(socket);
+    if (attachment === null) return;
     if (attachment.kind === "machine") {
       await this.machineMessage(
         socket,
@@ -992,7 +988,7 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private socketGone(socket: WebSocket) {
-    const attachment = socket.deserializeAttachment() as Attachment | null;
+    const attachment = attachmentOf(socket);
     if (attachment?.kind !== "machine") return;
     // A socket that never passed its check (K-1704) never made the machine online.
     if (attachment.check === "waiting") return;
@@ -1028,6 +1024,17 @@ export class Kitshn extends DurableObject<Env> {
     return new Set([...this.state.machines.keys()].filter((id) => this.openSocket(id) !== null));
   }
 
+  /** K-1708: only a machine that signed its connection gets jobs; one without a key reports status only. */
+  private jobMachines() {
+    return new Set(
+      [...this.state.machines.keys()].filter((id) => {
+        const socket = this.openSocket(id);
+        const attachment = socket ? attachmentOf(socket) : null;
+        return attachment?.kind === "machine" && attachment.check === "signed";
+      }),
+    );
+  }
+
   /** After a restart, a presence row says online although its socket is gone; set it offline once. */
   private reconcilePresence() {
     for (const [id, value] of this.presence)
@@ -1049,26 +1056,30 @@ export class Kitshn extends DurableObject<Env> {
     if (!machine)
       return Response.json({ error: "This service token belongs to no joined machine." }, { status: 403 });
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
-    this.ctx.acceptWebSocket(server, [machine.id, "machines"]);
-    if (machine.key?.kind === "waiting") {
-      // A close code, not a 403, so the daemon waits long instead of trying every minute (K-1706).
+    const start = socketStart(machine.key);
+    if (start.kind === "waitsForKey") {
+      // Not hibernatable and without tags, so no reader of machine sockets ever sees it. A close code, not a
+      // 403, so the daemon waits long instead of trying every minute (K-1706).
+      server.accept();
       server.close(KEY_RESET, "This machine has no key. Run the command of Reset key on it.");
       return new Response(null, { status: 101, webSocket: client });
     }
+    this.ctx.acceptWebSocket(server, [machine.id, "machines"]);
     const challenge = newChallenge();
     const attachment = {
       kind: "machine",
       machineId: machine.id,
       since: Date.now(),
       challenge,
-      check: machine.key ? "waiting" : "token",
+      check: start.kind === "token" ? "token" : "waiting",
       answered: false,
       rotateBy: null,
       status: null,
       sample: null,
     } satisfies Attachment;
     server.serializeAttachment(attachment);
-    send(server, { type: "challenge", challenge, fingerprint: machine.key?.fingerprint ?? null } satisfies ServerToDaemon);
+    const fingerprint = start.kind === "challenge" ? start.fingerprint : null;
+    send(server, { type: "challenge", challenge, fingerprint } satisfies ServerToDaemon);
     if (attachment.check === "token") this.acceptMachine(server, attachment);
     else void this.scheduleAlarm();
     return new Response(null, { status: 101, webSocket: client });
@@ -1099,50 +1110,34 @@ export class Kitshn extends DurableObject<Env> {
   private refuseSocket(socket: WebSocket, machine: Machine, reason: string) {
     console.warn(`kitshn refused a connection of ${machine.name}: ${reason}`);
     this.keyFailures.set(machine.id, { at: Date.now(), reason });
+    // Its close event runs socketGone, so the machine goes offline once.
     socket.close(4003, reason.slice(0, 120));
-    this.socketGone(socket);
     this.sendMachine(machine);
   }
 
-  /**
-   * K-1704: checks the one answer of a socket. For a machine without a key, a valid answer also stores its
-   * first key (K-1708).
-   */
+  /** K-1704: checks the one answer of a socket against the stored key. */
   private async answerChallenge(
     socket: WebSocket,
     attachment: Extract<Attachment, { kind: "machine" }>,
     machine: Machine,
     message: Record<string, unknown>,
   ) {
-    if (attachment.answered || attachment.check === "signed")
-      return this.refuseSocket(socket, machine, "A connection answers its challenge once.");
-    if (machine.key?.kind === "waiting") return this.refuseSocket(socket, machine, "This machine has no key.");
+    const plan = answerCheck(machine.key, attachment);
+    if (plan.kind === "refuse") return this.refuseSocket(socket, machine, plan.reason);
     socket.serializeAttachment({ ...attachment, answered: true } satisfies Attachment);
-    const first = machine.key ? null : parsePublicKey(message["publicKey"]);
-    const publicKey = machine.key?.publicKey ?? first;
-    if (publicKey === null) return this.refuseSocket(socket, machine, "The answer has no valid public key.");
-    const firstKey = first === null ? null : await this.publicKey(first);
     const valid = await verifyText(
-      publicKey,
+      plan.publicKey,
       connectText(this.env.KITSHN_HOST, machine.id, attachment.challenge),
       message["signature"],
     );
-    // The key can change during the check: a rotation, a reset, a removal or another first key.
+    // The socket can close and the key can change during the check: a rotation, a reset or a removal.
+    if (socket.readyState !== WebSocket.OPEN) return;
     const now = this.state.machines.get(machine.id);
     if (!now || !deepEqual(now.key, machine.key))
       return this.refuseSocket(socket, machine, "The key of this machine changed during the check.");
-    if (!valid) {
-      const expected = machine.key ? `the key ${machine.key.fingerprint}` : "the key that it sent";
-      return this.refuseSocket(socket, machine, `The answer does not carry a signature of ${expected}.`);
-    }
-    const signed = { ...attachment, answered: true, check: "signed" } satisfies Attachment;
-    if (firstKey === null) return this.acceptMachine(socket, signed);
-    // K-1708: the socket counts already on its token; it only gets the key and the word "accepted".
-    const fingerprint = firstKey.fingerprint;
-    this.setKey(machine, firstKey, deviceActor(machine), `${machine.name} sent its first key ${fingerprint}`);
-    socket.serializeAttachment(signed);
-    this.keyFailures.delete(machine.id);
-    send(socket, { type: "accepted", fingerprint } satisfies ServerToDaemon);
+    if (!valid)
+      return this.refuseSocket(socket, machine, `The answer does not carry a signature of ${plan.fingerprint}.`);
+    this.acceptMachine(socket, { ...attachment, answered: true, check: "signed" });
   }
 
   /**
@@ -1205,17 +1200,20 @@ export class Kitshn extends DurableObject<Env> {
   ) {
     const machine = this.state.machines.get(attachment.machineId);
     if (!machine) return;
-    let message: DaemonMessage;
+    let message: DaemonMessage | null;
     try {
       message = JSON.parse(text) as DaemonMessage;
     } catch {
-      return;
+      message = null;
     }
-    if (!isRecord(message)) return;
-    if (message.type === "answer") return this.answerChallenge(socket, attachment, machine, message);
+    if (isRecord(message) && message.type === "answer")
+      return this.answerChallenge(socket, attachment, machine, message);
     // K-1704: until the check passes, kitshn reads nothing else from the socket.
     if (attachment.check === "waiting")
       return this.refuseSocket(socket, machine, "The daemon sent a message before it answered the challenge.");
+    if (!isRecord(message)) return;
+    // K-1708: a connection on the token alone only reports; it changes no site, volume or job.
+    if (attachment.check === "token" && message.type !== "status" && message.type !== "sample") return;
     if (message.type === "rotate") return this.rotateKey(socket, attachment, machine, message);
     if (message.type === "status" && isRecord(message.status)) {
       const status: MachineStatus = {
@@ -1447,12 +1445,15 @@ export class Kitshn extends DurableObject<Env> {
       return Response.json({ error: "This rekey code is not valid, or someone used it already." }, { status: 404 });
     const machine = this.state.machines.get(row.machine_id);
     const used = () => this.sql("DELETE FROM rekey_codes WHERE lookup = ?", lookup);
-    if (row.expires_at < Date.now() || machine?.key?.kind !== "waiting") {
+    if (row.expires_at < Date.now() || !machine || machine.key?.kind === "public") {
       used();
       return Response.json({ error: "This rekey code expired. Press Reset key again." }, { status: 410 });
     }
     // The key and the use of the code are one step, so a failed write keeps the code.
     this.setKey(machine, key, deviceActor(machine), `${machine.name} got the key ${key.fingerprint} with a rekey code`, used);
+    // K-1708: a connection on the token alone ends; the daemon connects again and signs.
+    for (const socket of this.ctx.getWebSockets(machine.id))
+      socket.close(4001, "This machine has a key now; connect again and sign.");
     return Response.json({ machineId: machine.id, fingerprint: key.fingerprint });
   }
 
@@ -1466,7 +1467,7 @@ export class Kitshn extends DurableObject<Env> {
         { status: 409 },
       );
     const socket = this.openSocket(id);
-    const attachment = socket?.deserializeAttachment() as Attachment | undefined;
+    const attachment = socket ? attachmentOf(socket) : null;
     if (!socket || attachment?.kind !== "machine" || attachment.check !== "signed")
       return Response.json({ error: `${machine.name} is offline. Use Reset key instead.` }, { status: 409 });
     socket.serializeAttachment({ ...attachment, rotateBy: caller.actor } satisfies Attachment);
@@ -1484,14 +1485,25 @@ export class Kitshn extends DurableObject<Env> {
     const code = newJoinCode();
     const lookup = await joinLookup(code);
     const expiresAt = Date.now() + JOIN_CODE_MS;
-    const old = machine.key?.kind === "public" ? ` ${machine.key.fingerprint}` : "";
-    this.setKey(machine, { kind: "waiting", since: Date.now() }, caller.actor, `Reset the key${old} of ${machine.name}`, () => {
+    const newCode = () => {
       this.sql("DELETE FROM rekey_codes WHERE machine_id = ?", id);
       this.sql("INSERT INTO rekey_codes (lookup, machine_id, expires_at) VALUES (?, ?, ?)", lookup, id, expiresAt);
-    });
+    };
+    const answer = Response.json({ machineId: id, code, expiresAt, command: `kitshn rekey ${code}` });
+    // K-1708: a machine without a key keeps its status connection until its first key arrives.
+    if (machine.key === undefined) {
+      this.ctx.storage.transactionSync(() => {
+        newCode();
+        this.insertRevision(caller.actor, `Made a key code for ${machine.name}`, [], null);
+      });
+      this.broadcast();
+      return answer;
+    }
+    const old = machine.key.kind === "public" ? ` ${machine.key.fingerprint}` : "";
+    this.setKey(machine, { kind: "waiting", since: Date.now() }, caller.actor, `Reset the key${old} of ${machine.name}`, newCode);
     for (const socket of this.ctx.getWebSockets(id))
       socket.close(KEY_RESET, "The owner reset the key of this machine.");
-    return Response.json({ machineId: id, code, expiresAt, command: `kitshn rekey ${code}` });
+    return answer;
   }
 
   /** K-615: removes the service token, the tunnel and the queue of a machine. */
@@ -1635,7 +1647,7 @@ export class Kitshn extends DurableObject<Env> {
    * goes to the first fitting machine in the order on which its sender has control (K-610, K-614).
    */
   private deliverJobs() {
-    const online = this.onlineMachines();
+    const online = this.jobMachines();
     const queued = this.sql<{
       id: number;
       machine_id: string | null;
@@ -1779,8 +1791,8 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1107: closes machine sockets that answered no ping for 30 seconds. K-1704: and those without an answer. */
   private checkLiveness(now: number) {
     for (const socket of this.ctx.getWebSockets("machines")) {
-      const attachment = socket.deserializeAttachment() as Attachment;
-      if (attachment.kind !== "machine") continue;
+      const attachment = attachmentOf(socket);
+      if (attachment?.kind !== "machine") continue;
       const machine = this.state.machines.get(attachment.machineId);
       if (machine && attachment.check === "waiting" && now - attachment.since >= CHALLENGE_MS) {
         this.refuseSocket(socket, machine, "No answer to the challenge within 10 seconds.");
@@ -2264,10 +2276,10 @@ export class Kitshn extends DurableObject<Env> {
     const now = Date.now();
     let next = this.dailyAt();
     for (const socket of this.ctx.getWebSockets("machines")) {
-      const attachment = socket.deserializeAttachment() as Attachment;
+      const attachment = attachmentOf(socket);
       next = Math.min(next, now + PING_TIMEOUT_MS);
       // K-1704: a socket without an answer closes after 10 seconds.
-      if (attachment.kind === "machine" && attachment.check === "waiting")
+      if (attachment?.kind === "machine" && attachment.check === "waiting")
         next = Math.min(next, attachment.since + CHALLENGE_MS);
     }
     if (this.env.CLOUDFLARE_API_TOKEN && this.tunnelWork()) next = now;

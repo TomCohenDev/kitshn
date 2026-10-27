@@ -28,7 +28,12 @@ export function PresenceSticker(props: { view: MachineView }) {
 /** K-1708: a machine without a key, or one that waits for `kitshn rekey` (K-1706), shows it on its card. */
 export function KeySticker(props: { view: MachineView }) {
   const key = props.view.machine.key;
-  if (key === undefined) return <span class="sticker wait" title="It sends its first key after Update daemon (K-1708)">no key</span>;
+  if (key === undefined)
+    return (
+      <span class="sticker wait" title="It reports status but gets no job until kitshn rekey (K-1708)">
+        needs a key
+      </span>
+    );
   if (key.kind === "waiting") return <span class="sticker wait" title="Run the rekey command on it (K-1706)">waits for key</span>;
   return null;
 }
@@ -65,7 +70,7 @@ function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error
           Rotate key
         </button>
         <button class="btn" onClick={() => void reset()}>
-          Reset key
+          {machine.key === undefined ? "Make key code" : "Reset key"}
         </button>
       </div>
       {keyFailure ? (

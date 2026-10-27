@@ -1,4 +1,4 @@
-import type { Command, Machine } from "../core/machine.ts";
+import type { Command, Machine, MachineKey } from "../core/machine.ts";
 import type { JobView } from "../core/protocol.ts";
 
 /** K-613: a job waits at most this long for its machine by default. */
@@ -96,4 +96,46 @@ export function machineIdFor(name: string): string {
     .slice(0, 40);
   const tail = crypto.randomUUID().slice(0, 6);
   return base ? `${base}-${tail}` : `machine-${tail}`;
+}
+
+/**
+ * K-1704: where a machine socket is in its check. kitshn reads messages and sends jobs only on "signed" and
+ * "token" sockets.
+ */
+export type MachineCheck =
+  /** The challenge went out; no valid answer yet. */
+  | "waiting"
+  | "signed"
+  /** K-1708: the machine has no key yet, so its service token alone counts, as before machine keys. */
+  | "token";
+
+/** K-1704, K-1706, K-1708: what kitshn does with a new `/connect` socket of a machine. */
+export type SocketStart =
+  /** K-1706: the machine waits for its key from a code, so the socket closes with 4005. */
+  | { readonly kind: "waitsForKey" }
+  | { readonly kind: "challenge"; readonly fingerprint: string }
+  /** K-1708: no key yet; the token counts for status only, and the machine gets no job. */
+  | { readonly kind: "token" };
+
+export function socketStart(key: MachineKey | undefined): SocketStart {
+  if (key === undefined) return { kind: "token" };
+  if (key.kind === "waiting") return { kind: "waitsForKey" };
+  return { kind: "challenge", fingerprint: key.fingerprint };
+}
+
+/** K-1704: how kitshn checks one answer to a challenge, before the signature check. */
+export type AnswerCheck =
+  | { readonly kind: "refuse"; readonly reason: string }
+  | { readonly kind: "verify"; readonly publicKey: string; readonly fingerprint: string };
+
+export function answerCheck(
+  key: MachineKey | undefined,
+  socket: { readonly check: MachineCheck; readonly answered: boolean },
+): AnswerCheck {
+  if (socket.answered || socket.check === "signed")
+    return { kind: "refuse", reason: "A connection answers its challenge once." };
+  // K-1708: the first key comes only with a rekey code, never on a connection.
+  if (key === undefined) return { kind: "refuse", reason: "This machine has no key yet. Use its key code." };
+  if (key.kind === "waiting") return { kind: "refuse", reason: "This machine waits for its key code." };
+  return { kind: "verify", publicKey: key.publicKey, fingerprint: key.fingerprint };
 }

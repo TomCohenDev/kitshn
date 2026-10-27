@@ -1,5 +1,7 @@
+import type { DesiredAccess } from "../core/access.ts";
 import { RESERVED_SITE_NAMES } from "../core/library.ts";
 import type { LiveSiteReport } from "../core/machine.ts";
+import type { AccessRow } from "./access-sync.ts";
 
 /** One live site of a machine (K-1104), as the Durable Object keeps it. */
 export interface LiveSite {
@@ -59,18 +61,58 @@ const validTarget = (target: string) => {
   return port === undefined || (Number(port) >= 1 && Number(port) <= 65535);
 };
 
+/**
+ * K-603: how cloudflared guards the ingress rule of a site. "check": it drops a request without a valid
+ * Access JWT of the application. "bypass": the application lets everyone in and issues no JWT (K-403).
+ * "unknown": kitshn has no audience tag for the application yet, so the site gets no rule.
+ */
+export type IngressAccess =
+  | { readonly kind: "check"; readonly teamName: string; readonly aud: string }
+  | { readonly kind: "bypass" }
+  | { readonly kind: "unknown" };
+
+/** K-603, K-403: the Access check of a site's ingress rule, from its application `app:<site>:<address>`. */
+export function ingressAccess(
+  site: LiveSite,
+  desired: DesiredAccess,
+  rows: ReadonlyMap<string, AccessRow>,
+  teamDomain: string,
+): IngressAccess {
+  const key = `app:${site.id}:${site.address}`;
+  const row = rows.get(key);
+  if (!row?.cfId || !row.aud) return { kind: "unknown" };
+  const policyKeys = desired.apps.get(key)?.policyKeys ?? [];
+  if (policyKeys.some((policyKey) => desired.policies.get(policyKey)?.decision === "bypass"))
+    return { kind: "bypass" };
+  const teamName = teamDomain.split(".")[0];
+  if (!teamName) throw new Error("ACCESS_TEAM_DOMAIN is empty, so kitshn cannot guard tunnel ingress.");
+  return { kind: "check", teamName, aud: row.aud };
+}
+
 /** K-603, K-607, K-1105: the ingress of a machine's tunnel from its live sites. */
-export function tunnelConfig(sites: ReadonlyArray<LiveSite>) {
+export function tunnelConfig(sites: ReadonlyArray<LiveSite>, accessOf: (site: LiveSite) => IngressAccess) {
   return {
     config: {
       ingress: [
         ...[...sites]
           .sort((a, b) => a.address.localeCompare(b.address))
-          .map((site) => ({
-            hostname: site.address,
-            service: site.target,
-            ...(site.dev ? { originRequest: { httpHostHeader: "localhost" } } : {}),
-          })),
+          .flatMap((site) => {
+            const access = accessOf(site);
+            if (access.kind === "unknown") return [];
+            const originRequest = {
+              ...(site.dev ? { httpHostHeader: "localhost" } : {}),
+              ...(access.kind === "check"
+                ? { access: { required: true, teamName: access.teamName, audTag: [access.aud] } }
+                : {}),
+            };
+            return [
+              {
+                hostname: site.address,
+                service: site.target,
+                ...(Object.keys(originRequest).length > 0 ? { originRequest } : {}),
+              },
+            ];
+          }),
         { service: "http_status:404" },
       ],
     },

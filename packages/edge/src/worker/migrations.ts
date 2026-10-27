@@ -58,6 +58,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   ],
   // 5: stacks that the owner makes (K-521).
   ["CREATE TABLE stacks (id TEXT PRIMARY KEY, body TEXT NOT NULL)"],
+  // 6: the audience tag of each Access application, for the Access check on tunnel ingress (K-603).
+  ["ALTER TABLE access_objects ADD COLUMN aud TEXT NOT NULL DEFAULT ''"],
 ];
 
 /** Runs the migrations after `from`. Returns the new version. The caller provides the transaction. */

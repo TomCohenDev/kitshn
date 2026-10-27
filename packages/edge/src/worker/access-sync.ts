@@ -15,6 +15,8 @@ import type { AccessState } from "../core/protocol.ts";
 export interface AccessRow {
   readonly key: string;
   readonly cfId: string;
+  /** The audience tag of an application with `cfId` ("" for a policy, or until Cloudflare returns it). */
+  readonly aud: string;
   readonly body: string;
   readonly tried: string;
   readonly error: string | null;
@@ -95,7 +97,8 @@ export function hasAccessWork(
   }
   for (const [key, app] of desired.apps) {
     const body = appBody(key, app, rows);
-    if (body !== null && rows.get(key)?.body !== body && !failedWith(rows.get(key), body)) return true;
+    const row = rows.get(key);
+    if (body !== null && (row?.body !== body || !row.aud) && !failedWith(row, body)) return true;
   }
   const kept = keptPolicies(desired, rows, reachable);
   for (const row of rows.values()) if (isStale(desired, row, reachable, kept)) return true;
@@ -166,6 +169,7 @@ interface Named {
   readonly id: string;
   readonly name: string;
   readonly domain?: string;
+  readonly aud?: string;
 }
 
 interface LivePolicy extends Named {
@@ -225,7 +229,7 @@ export async function verifyAccess(
             exclude: ours["exclude"],
           },
         );
-      if (!live) store.put({ ...row, cfId: "", body: "", tried: "", error: null });
+      if (!live) store.put({ ...row, cfId: "", aud: "", body: "", tried: "", error: null });
       else if (!same) store.put({ ...row, body: "", tried: "", error: null });
       continue;
     }
@@ -246,7 +250,7 @@ export async function verifyAccess(
           policies: policyIds(row.body),
         },
       );
-    if (!live) store.put({ ...row, cfId: "", body: "", tried: "", error: null });
+    if (!live) store.put({ ...row, cfId: "", aud: "", body: "", tried: "", error: null });
     else if (!same) store.put({ ...row, body: "", tried: "", error: null });
   }
   const ours = new Set([...store.rows.values()].map((row) => row.cfId));
@@ -358,7 +362,8 @@ export async function syncAccess(
     find: (list: ReadonlyArray<Named>) => Named | undefined,
   ) => {
     const row = store.rows.get(key);
-    if (row?.body === body || failedWith(row, body)) return true;
+    // An application without its audience tag is written again to get it (K-603).
+    if ((row?.body === body && (kind === "policies" || row.aud)) || failedWith(row, body)) return true;
     let cfId = row?.cfId ?? "";
     try {
       if (!cfId) {
@@ -380,11 +385,17 @@ export async function syncAccess(
       const result = cfId
         ? await api<Named>("PUT", `${base}/${kind}/${cfId}`, request)
         : await api<Named>("POST", `${base}/${kind}`, request);
+      const aud = kind === "apps" ? (result.aud ?? "") : "";
+      if (kind === "apps" && !aud) {
+        const error = "Cloudflare returned the application without its audience tag.";
+        store.put({ key, cfId: result.id, aud, body: row?.body ?? "", tried: body, error });
+        return true;
+      }
       // K-409: a removed share takes effect at once, so the sessions of the application end. Until the
       // revoke succeeds, the row keeps its old body, so the next run writes and revokes again.
       if (kind === "apps" && row?.body && removesPolicy(row.body, body)) {
         if (!spend()) {
-          store.put({ key, cfId: result.id, body: row.body, tried: "", error: null });
+          store.put({ key, cfId: result.id, aud, body: row.body, tried: "", error: null });
           return false;
         }
         try {
@@ -393,6 +404,7 @@ export async function syncAccess(
           store.put({
             key,
             cfId: result.id,
+            aud,
             body: row.body,
             tried: body,
             error: `sessions not ended: ${message(error)}`,
@@ -400,11 +412,14 @@ export async function syncAccess(
           return true;
         }
       }
-      store.put({ key, cfId: result.id, body, tried: body, error: null });
+      store.put({ key, cfId: result.id, aud, body, tried: body, error: null });
     } catch (error) {
       // Someone deleted the object: forget its id, so the next run creates it again.
-      if (isNotFound(error) && cfId) store.put({ key, cfId: "", body: "", tried: "", error: null });
-      else store.put({ key, cfId, body: row?.body ?? "", tried: body, error: message(error) });
+      if (isNotFound(error) && cfId) store.put({ key, cfId: "", aud: "", body: "", tried: "", error: null });
+      else {
+        const aud = cfId === row?.cfId ? row.aud : "";
+        store.put({ key, cfId, aud, body: row?.body ?? "", tried: body, error: message(error) });
+      }
     }
     return true;
   };

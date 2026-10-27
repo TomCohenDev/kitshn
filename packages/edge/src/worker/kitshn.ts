@@ -87,6 +87,7 @@ import {
 import { type Recipe, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
 import {
   type LiveSite,
+  ingressAccess,
   liveSiteId,
   reachableAddresses,
   offlineReason,
@@ -232,11 +233,11 @@ export class Kitshn extends DurableObject<Env> {
     );
     this.accessWarnings = JSON.parse(this.meta("access_warnings") ?? "[]") as Array<string>;
     this.access = new Map(
-      this.sql<{ key: string; cf_id: string; body: string; tried: string; error: string | null }>(
-        "SELECT key, cf_id, body, tried, error FROM access_objects",
+      this.sql<{ key: string; cf_id: string; aud: string; body: string; tried: string; error: string | null }>(
+        "SELECT key, cf_id, aud, body, tried, error FROM access_objects",
       ).map((row) => [
         row.key,
-        { key: row.key, cfId: row.cf_id, body: row.body, tried: row.tried, error: row.error },
+        { key: row.key, cfId: row.cf_id, aud: row.aud, body: row.body, tried: row.tried, error: row.error },
       ]),
     );
     const rows = this.sql<{
@@ -1213,8 +1214,9 @@ export class Kitshn extends DurableObject<Env> {
     let calls = 0;
     const now = Date.now();
     const rows = new Map(this.tunnelRows().map((row) => [row.machine_id, row]));
+    const accessOf = this.ingressAccessOf();
     for (const machine of this.state.machines.values()) {
-      const config = tunnelConfig(this.protectedSites(machine.id));
+      const config = tunnelConfig(this.protectedSites(machine.id), accessOf);
       const body = JSON.stringify(config);
       const row = rows.get(machine.id);
       if (row?.applied === body && row.error === null) continue;
@@ -1271,10 +1273,11 @@ export class Kitshn extends DurableObject<Env> {
   private tunnelWork() {
     const now = Date.now();
     const tunnels = new Map(this.tunnelRows().map((row) => [row.machine_id, row]));
+    const accessOf = this.ingressAccessOf();
     const stale = [...this.state.machines.values()].some((machine) => {
       const row = tunnels.get(machine.id);
       const due = !row?.error || row.retry_at <= now;
-      return due && row?.applied !== JSON.stringify(tunnelConfig(this.protectedSites(machine.id)));
+      return due && row?.applied !== JSON.stringify(tunnelConfig(this.protectedSites(machine.id), accessOf));
     });
     const checking = [...this.liveSites.values()].some(
       (site) => site.state === "checking" && (this.checkRetryAt.get(site.id) ?? 0) <= Date.now(),
@@ -1298,6 +1301,12 @@ export class Kitshn extends DurableObject<Env> {
 
   private sitesOf(machineId: string) {
     return [...this.liveSites.values()].filter((site) => site.machineId === machineId);
+  }
+
+  /** K-603: the Access check of each ingress rule, from the Access state of now. */
+  private ingressAccessOf() {
+    const desired = desiredAccess(this.state, Date.now());
+    return (site: LiveSite) => ingressAccess(site, desired, this.access, this.env.ACCESS_TEAM_DOMAIN);
   }
 
   /** Live sites whose address is checked and whose Access application exists in Cloudflare. */
@@ -2825,9 +2834,10 @@ export class Kitshn extends DurableObject<Env> {
       put: (row: AccessRow) => {
         this.access.set(row.key, row);
         this.sql(
-          "INSERT OR REPLACE INTO access_objects (key, cf_id, body, tried, error) VALUES (?, ?, ?, ?, ?)",
+          "INSERT OR REPLACE INTO access_objects (key, cf_id, aud, body, tried, error) VALUES (?, ?, ?, ?, ?, ?)",
           row.key,
           row.cfId,
+          row.aud,
           row.body,
           row.tried,
           row.error,

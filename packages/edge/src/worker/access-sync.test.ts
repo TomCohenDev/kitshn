@@ -35,7 +35,7 @@ function fakeCloudflare(existing: { policies?: Array<object>; apps?: Array<objec
     if (method === "GET")
       return (path.includes("/policies") ? (existing.policies ?? []) : (existing.apps ?? [])) as T;
     const id = method === "PUT" ? (path.split("/").pop() ?? "") : `id${++next}`;
-    return { id } as T;
+    return (path.includes("/apps") ? { id, aud: `aud-${id}` } : { id }) as T;
   };
   const rows = new Map<string, AccessRow>();
   const store = {
@@ -90,6 +90,38 @@ describe("Access sync (K-406, K-408)", () => {
     expect(cf.calls).toEqual([`DELETE /apps/${appId}`, `DELETE /policies/${ownerId}`]);
     // The Owner circle still needs a passkey, so its people keep the enrollment policy (K-113).
     expect([...cf.rows.keys()]).toEqual(["policy:enrollment"]);
+  });
+
+  it("keeps the audience tag of an application and fetches it when a row has none (K-603)", async () => {
+    const cf = fakeCloudflare();
+    const desired = desiredAccess(start(), 0);
+    await syncAccess(desired, cf.store, cf.api, "a");
+    const key = "app:kitshn-admin:kit.example.com";
+    const app = cf.rows.get(key)!;
+    expect(app.aud).toBe(`aud-${app.cfId}`);
+    expect(cf.rows.get("policy:owner:people")!.aud).toBe("");
+
+    // A row from before the audience tag column: the next sync writes the application again to read it.
+    cf.rows.set(key, { ...app, aud: "" });
+    expect(hasAccessWork(desired, cf.rows)).toBe(true);
+    cf.calls.length = 0;
+    await syncAccess(desired, cf.store, cf.api, "a");
+    expect(cf.calls).toEqual([`PUT /apps/${app.cfId}`]);
+    expect(cf.rows.get(key)!.aud).toBe(`aud-${app.cfId}`);
+  });
+
+  it("marks an application failed when Cloudflare returns no audience tag", async () => {
+    const cf = fakeCloudflare();
+    const noAud: Api = async <T>(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown) => {
+      const result = await cf.api<{ id: string }>(method, path, body);
+      return (method === "POST" && path.endsWith("/apps") ? { id: result.id } : result) as T;
+    };
+    const desired = desiredAccess(start(), 0);
+    await syncAccess(desired, cf.store, noAud, "a");
+    const app = cf.rows.get("app:kitshn-admin:kit.example.com")!;
+    expect(app).toMatchObject({ aud: "", body: "", error: expect.stringContaining("audience tag") });
+    expect(app.cfId).not.toBe("");
+    expect(accessStates(desired, cf.rows)["kitshn-admin"]?.state).toBe("failed");
   });
 
   it("stops at the call budget and reports work left", async () => {

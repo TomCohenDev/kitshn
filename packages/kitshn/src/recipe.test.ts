@@ -71,7 +71,7 @@ describe("plan (K-807, K-901, K-904)", () => {
       deploy: [{ on: "push", name: "prod", address: "a.b.example.com" }],
     });
     expect(plan(deep, "me/x", { name: "push", branch: "main", pr: null, action: null }, zone)).toMatchObject({
-      kind: "skip",
+      kind: "error",
     });
     const outside = decodeRecipe({
       static: { output: "." },
@@ -79,6 +79,6 @@ describe("plan (K-807, K-901, K-904)", () => {
     });
     expect(
       plan(outside, "me/x", { name: "push", branch: "main", pr: null, action: null }, zone),
-    ).toMatchObject({ kind: "skip" });
+    ).toMatchObject({ kind: "error" });
   });
 });

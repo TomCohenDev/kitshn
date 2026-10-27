@@ -60,7 +60,7 @@ import {
   SCRIPT_LIMIT,
   STATIC_WORKER,
   environmentNames,
-  parseEvent,
+  eventOf,
   parseManifest,
 } from "./deploys.ts";
 import { type Recipe, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
@@ -1192,17 +1192,18 @@ export class Kitshn extends DurableObject<Env> {
         { status: 400 },
       );
     }
-    const event = parseEvent(input["event"]);
+    const event = eventOf(deployer, input["event"]);
     if (typeof event === "string") return Response.json({ error: event }, { status: 400 });
     const result = plan(recipe, deployer.repo, event, this.env.KITSHN_ZONE);
+    if (result.kind === "error") return Response.json({ error: result.reason }, { status: 400 });
     if (result.kind === "skip") return Response.json({ deployId: null, plan: result });
-    const { resourceId, script } = environmentNames(deployer.repo, result.environment);
+    const { resourceId, script } = environmentNames(deployer.repoId, deployer.repo, result.environment);
     const existing = this.state.resources.get(resourceId);
-    if (result.kind === "teardown" && !existing) {
-      return Response.json({
-        deployId: null,
-        plan: { kind: "skip", reason: `${result.environment} is not deployed.` },
-      });
+    if (existing && !existing.addresses.includes(result.address)) {
+      return Response.json(
+        { error: `${result.environment} lives at ${existing.addresses[0]}. To move it, remove its card on the map first.` },
+        { status: 409 },
+      );
     }
     const other = [...this.state.resources.values()].find(
       (resource) => resource.id !== resourceId && resource.addresses.includes(result.address),
@@ -1212,6 +1213,26 @@ export class Kitshn extends DurableObject<Env> {
         { error: `${result.address} belongs to the card ${other.name}.` },
         { status: 409 },
       );
+    if (result.kind === "deploy") {
+      // Never take over a hostname that another Worker serves, or that a foreign Access app covers (K-408).
+      const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+      const domains = await api<Array<{ service: string }>>(
+        "GET",
+        `${account}/workers/domains?hostname=${encodeURIComponent(result.address)}`,
+      );
+      const foreign = domains.find((domain) => domain.service !== script);
+      if (foreign) {
+        return Response.json({ error: `${result.address} already serves the Worker ${foreign.service}.` }, { status: 409 });
+      }
+      const apps = await api<Array<{ name: string; domain?: string }>>("GET", `${account}/access/apps?per_page=1000`);
+      const foreignApp = apps.find((app) => app.domain === result.address && !app.name.startsWith("kitshn "));
+      if (foreignApp) {
+        return Response.json(
+          { error: `The Access application "${foreignApp.name}" covers ${result.address}; kitshn does not change it.` },
+          { status: 409 },
+        );
+      }
+    }
     if (result.kind === "deploy" && !existing) {
       // Only an address that nothing uses yet: kitshn never takes over a record that it did not make.
       const records = await api<Array<unknown>>(
@@ -1307,13 +1328,13 @@ export class Kitshn extends DurableObject<Env> {
       }
     } else card = "The card keeps its place; the map decides who opens it (K-807).";
     // Fail closed: the Access application exists before the address does.
-    await syncAccess(
+    await this.withAccessLock(() => syncAccess(
       desiredAccess(this.state, Date.now()),
       this.accessStore(),
       api,
       this.env.CLOUDFLARE_ACCOUNT_ID,
       20,
-    );
+    ));
     const app = this.access.get(`app:${row.resource_id}:${row.address}`);
     if (!app?.cfId || app.error) {
       return Response.json(
@@ -1337,6 +1358,8 @@ export class Kitshn extends DurableObject<Env> {
       new Blob([STATIC_WORKER], { type: "application/javascript+module" }),
       "worker.js",
     );
+    const scripts = await api<Array<{ id: string }>>("GET", `${account}/workers/scripts`);
+    const isNew = !scripts.some((item) => item.id === row.script);
     const upload = await fetch(
       `https://api.cloudflare.com/client/v4${account}/workers/scripts/${row.script}`,
       {
@@ -1347,11 +1370,16 @@ export class Kitshn extends DurableObject<Env> {
     );
     const uploaded = (await upload.json()) as { success: boolean; errors?: unknown };
     if (!uploaded.success) throw new Error(`the Worker upload failed: ${JSON.stringify(uploaded.errors)}`);
-    // The workers.dev address would skip Access.
-    await api("POST", `${account}/workers/scripts/${row.script}/subdomain`, {
-      enabled: false,
-      previews_enabled: false,
-    });
+    // The workers.dev address would skip Access. If it cannot be turned off, a new script goes away again.
+    try {
+      await api("POST", `${account}/workers/scripts/${row.script}/subdomain`, {
+        enabled: false,
+        previews_enabled: false,
+      });
+    } catch (error) {
+      if (isNew) await api("DELETE", `${account}/workers/scripts/${row.script}?force=true`).catch(() => undefined);
+      throw error;
+    }
     const domains = await api<Array<{ id: string; service: string }>>(
       "GET",
       `${account}/workers/domains?hostname=${encodeURIComponent(row.address)}`,
@@ -1396,7 +1424,7 @@ export class Kitshn extends DurableObject<Env> {
         this.sql(`DELETE FROM ${table} WHERE id = ?`, row.resource_id);
       this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${row.resource_id}/%`);
       this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
-      this.insertRevision(
+      if (resource) this.insertRevision(
         { _tag: "kitshn", reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}` },
         `Removed ${resource?.name ?? row.environment}, its preview closed (K-904)`,
         [],
@@ -1407,6 +1435,15 @@ export class Kitshn extends DurableObject<Env> {
     this.broadcast();
     void this.scheduleAlarm();
     return Response.json({ removed: row.address });
+  }
+
+  private accessLock: Promise<unknown> = Promise.resolve();
+
+  /** Runs one Access sync at a time, so a deploy and the alarm never both create the same object. */
+  private withAccessLock<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.accessLock.then(work, work);
+    this.accessLock = run.catch(() => undefined);
+    return run;
   }
 
   private accessStore(): AccessStore {
@@ -1468,13 +1505,15 @@ export class Kitshn extends DurableObject<Env> {
           spent = 12;
         }
       }
-      await syncAccess(
-        desired,
-        this.accessStore(),
-        api,
-        this.env.CLOUDFLARE_ACCOUNT_ID,
-        // Ten calls stay free for the tunnels (K-406, K-603).
-        CALLS_PER_RUN - spent - 10,
+      await this.withAccessLock(() =>
+        syncAccess(
+          desired,
+          this.accessStore(),
+          api,
+          this.env.CLOUDFLARE_ACCOUNT_ID,
+          // Ten calls stay free for the tunnels (K-406, K-603).
+          CALLS_PER_RUN - spent - 10,
+        ),
       );
       await this.syncTunnels(api, 10);
       changed ||=

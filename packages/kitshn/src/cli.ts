@@ -1,8 +1,8 @@
 // The kitshn CLI for app repos: `kitshn check` (K-802) and `kitshn deploy` (K-803, K-805, K-811).
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { extname, join, relative } from "node:path";
+import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
+import { extname, join, relative, resolve, sep } from "node:path";
 import { RecipeError, readRecipe } from "./parse.ts";
 import { type DeployEvent, decodeRecipe } from "./recipe.ts";
 
@@ -63,10 +63,17 @@ async function call<T>(server: string, path: string, body: object): Promise<T> {
   return data as T;
 }
 
+/**
+ * The files of a static site. It skips dotfiles and dot folders (.git holds the checkout token) and does
+ * not follow symlinks, so nothing outside the output folder is published.
+ */
 const files = (dir: string): Array<string> =>
   readdirSync(dir).flatMap((name) => {
+    if (name.startsWith(".")) return [];
     const path = join(dir, name);
-    return statSync(path).isDirectory() ? files(path) : [path];
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) return [];
+    return stat.isDirectory() ? files(path) : [path];
   });
 
 const TYPES: Record<string, string> = {
@@ -108,7 +115,10 @@ async function deploy(server: string, dir: string) {
     console.log(`kitshn: building with: ${recipe.static.build}`);
     execFileSync("sh", ["-c", recipe.static.build], { cwd: dir, stdio: "inherit" });
   }
-  const output = join(dir, recipe.static.output);
+  const output = resolve(dir, recipe.static.output);
+  if (output !== resolve(dir) && !output.startsWith(resolve(dir) + sep)) {
+    fail(`the output folder ${recipe.static.output} is outside the repo.`);
+  }
   if (!existsSync(output)) fail(`the output folder ${recipe.static.output} does not exist after the build.`);
   const manifest: Record<string, { hash: string; size: number }> = {};
   const byHash = new Map<string, { path: string; type: string }>();

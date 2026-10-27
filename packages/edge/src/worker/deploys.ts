@@ -11,29 +11,31 @@ const id = (text: string) =>
     .replace(/[^a-z0-9-]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
-/** The card id and the Worker script name of one environment of a repo. */
-export function environmentNames(repo: string, environment: string) {
-  const resourceId = id(`app-${repo.replace("/", "-")}-${environment}`).slice(0, 56);
+/**
+ * The card id and the Worker script name of one environment of a repo. The repo id keeps two repos with
+ * similar names apart (my.site and my-site).
+ */
+export function environmentNames(repoId: string, repo: string, environment: string) {
+  const slug = id(repo.split("/")[1] ?? repo).slice(0, 24);
+  const resourceId = id(`app-${slug}-${repoId}-${environment}`).slice(0, 56);
   return { resourceId, script: `kitshn-${resourceId}` };
 }
 
-export function parseEvent(value: unknown): DeployEvent | string {
-  if (typeof value !== "object" || value === null) return "The deploy needs its GitHub event.";
-  const event = value as Record<string, unknown>;
-  if (event["name"] !== "push" && event["name"] !== "pull_request")
-    return "kitshn deploys on push and pull_request.";
-  if (typeof event["branch"] !== "string") return "The event needs its branch.";
-  const pr = event["pr"];
-  if (pr !== null && (typeof pr !== "number" || !Number.isInteger(pr) || pr < 1))
-    return "The pull request number is not valid.";
-  const action = event["action"];
-  if (action !== null && typeof action !== "string") return "The pull request action is not valid.";
-  return {
-    name: event["name"],
-    branch: event["branch"],
-    pr: pr as number | null,
-    action: action as string | null,
-  };
+/**
+ * K-811: the event from the signed token. Only the pull request action comes from the request, because
+ * the token has none; it can only open or close the preview of the token's own pull request.
+ */
+export function eventOf(
+  deployer: { eventName: string; branch: string; pr: number | null },
+  value: unknown,
+): DeployEvent | string {
+  if (deployer.eventName !== "push" && deployer.eventName !== "pull_request") {
+    return `kitshn deploys on push and pull_request, not on ${deployer.eventName}.`;
+  }
+  if (deployer.eventName === "push") return { name: "push", branch: deployer.branch, pr: null, action: null };
+  const action = typeof value === "object" && value !== null ? (value as Record<string, unknown>)["action"] : null;
+  if (typeof action !== "string") return "A pull request deploy needs its action.";
+  return { name: "pull_request", branch: deployer.branch, pr: deployer.pr, action };
 }
 
 /** The asset manifest of the direct upload flow: paths to a 32-hex hash and a size. */

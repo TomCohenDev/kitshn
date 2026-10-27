@@ -244,8 +244,9 @@ DEPLOY_OWNER_IDS=$(printf "%s" "$settings" | jq -r '[.bindings[]? | select(.name
 if [ -n "${KITSHN_DEPLOY_OWNERS:-}" ]; then
   DEPLOY_OWNER_IDS=""
   for login in $(printf '%s' "$KITSHN_DEPLOY_OWNERS" | tr ',' ' '); do
-    id=$(curl -fsS "https://api.github.com/users/$login" | jq -r '.id // empty') || die "GitHub knows no user $login."
-    [ -n "$id" ] || die "GitHub knows no user $login."
+    # K-811: user accounts only; an organization is not on the list for now.
+    id=$(curl -fsS "https://api.github.com/users/$login" | jq -r 'select(.type == "User") | .id // empty') || die "GitHub knows no user $login."
+    [ -n "$id" ] || die "$login is not a GitHub user account (K-811)."
     DEPLOY_OWNER_IDS="${DEPLOY_OWNER_IDS:+$DEPLOY_OWNER_IDS,}$id"
   done
   kept "deploys from GitHub owners $KITSHN_DEPLOY_OWNERS ($DEPLOY_OWNER_IDS)"

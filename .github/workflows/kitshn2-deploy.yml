@@ -25,10 +25,13 @@ on:
 
 jobs:
   deploy:
+    # A pull request from a fork gets no OIDC token, so kitshn cannot deploy it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # One deploy at a time per pull request, and one for all pushes of a repo (they may share an environment).
     concurrency:
-      group: kitshn-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+      group: kitshn-${{ github.repository }}-${{ github.event.pull_request.number || 'push' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

@@ -44,7 +44,10 @@ export interface DeployEvent {
 }
 
 export type Plan =
+  /** Nothing to do for this event. */
   | { readonly kind: "skip"; readonly reason: string }
+  /** The recipe has a mistake; the deploy fails and says why (K-006). */
+  | { readonly kind: "error"; readonly reason: string }
   | {
       readonly kind: "deploy" | "teardown";
       readonly environment: string;
@@ -73,7 +76,7 @@ export function plan(recipe: Recipe, repo: string, event: DeployEvent, zone: str
     return { kind: "skip", reason: "The pull request has no number." };
   const environment = entry.name.replaceAll("{pr}", String(event.pr ?? ""));
   if (!LABEL.test(environment))
-    return { kind: "skip", reason: `The environment name "${environment}" is not a valid name.` };
+    return { kind: "error", reason: `The environment name "${environment}" is not a valid name.` };
   const slug = repoSlug(repo);
   const label = entry.address?.endsWith(`.${zone}`)
     ? entry.address.slice(0, -zone.length - 1)
@@ -82,13 +85,13 @@ export function plan(recipe: Recipe, repo: string, event: DeployEvent, zone: str
       : `${slug}-${environment}`;
   if (entry.address !== undefined && !entry.address.endsWith(`.${zone}`)) {
     return {
-      kind: "skip",
+      kind: "error",
       reason: `The address ${entry.address} is not under the kitshn zone ${zone} (K-1111).`,
     };
   }
   // K-901: one level under the zone, so the free Universal SSL certificate covers it.
   if (!LABEL.test(label))
-    return { kind: "skip", reason: `The address ${label}.${zone} must be one level under ${zone}.` };
+    return { kind: "error", reason: `The address ${label}.${zone} must be one name of at most 63 letters, digits or dashes under ${zone} (K-901).` };
   const ephemeral = entry.ephemeral === true;
   const closing = event.name === "pull_request" && event.action === "closed";
   if (closing && !ephemeral)
@@ -98,6 +101,7 @@ export function plan(recipe: Recipe, repo: string, event: DeployEvent, zone: str
     environment,
     address: `${label}.${zone}`,
     ephemeral,
-    startsIn: entry.startsIn ?? null,
+    // K-907: a preview starts in Owner unless the recipe names another circle.
+    startsIn: entry.startsIn ?? (ephemeral ? "Owner" : null),
   };
 }

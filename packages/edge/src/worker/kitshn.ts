@@ -2300,8 +2300,14 @@ export class Kitshn extends DurableObject<Env> {
    */
   private async agentRequest(path: string, request: Request, caller: Caller) {
     const now = Date.now();
-    const own = circlesOf(this.state, caller.visitor);
-    const managed = cardsControlledBy(this.state, caller.visitor, now);
+    const clientId = caller.visitor.clientId;
+    const own = circlesOf(this.state, clientId);
+    if (own.size === 0)
+      return Response.json(
+        { error: "This key is not a device member of any circle, so it manages nothing (K-718)." },
+        { status: 403 },
+      );
+    const managed = cardsControlledBy(this.state, clientId, now);
     if (path === "/agent/state" && request.method === "GET") {
       return Response.json({
         circles: [...this.state.circles.values()]
@@ -2314,7 +2320,9 @@ export class Kitshn extends DurableObject<Env> {
             {
               ...resource,
               place: this.state.places.get(id) ?? null,
-              circles: circlesHolding(this.state, id).map((c) => c.id),
+              circles: circlesHolding(this.state, id)
+                .map((c) => c.id)
+                .filter((circle) => own.has(circle)),
             },
           ];
         }),
@@ -2338,7 +2346,7 @@ export class Kitshn extends DurableObject<Env> {
         const refusal = agentRefusal(
           this.state,
           applyChanges(this.state, changes),
-          caller.visitor,
+          clientId,
           edits,
           now,
         );
@@ -2349,8 +2357,18 @@ export class Kitshn extends DurableObject<Env> {
         throw error;
       }
     }
-    if (path === "/agent/jobs" && request.method === "POST")
-      return this.addJob(caller, await request.json().catch(() => null));
+    if (path === "/agent/jobs" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      const machineId =
+        typeof body === "object" && body !== null && "machineId" in body ? body.machineId : undefined;
+      // Only the machines whose cards it manages; a label job could land on any machine.
+      if (typeof machineId !== "string" || !managed.has(machineId))
+        return Response.json(
+          { error: "An agent key runs jobs only on a machine whose card it manages (K-718)." },
+          { status: 403 },
+        );
+      return this.addJob(caller, body);
+    }
     return Response.json({ error: `The agent path has no ${request.method} ${path}.` }, { status: 404 });
   }
 

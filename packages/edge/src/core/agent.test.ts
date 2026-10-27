@@ -1,21 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { agentRefusal } from "./agent.ts";
+import { agentRefusal, cardsControlledBy, isAgentKey } from "./agent.ts";
 import { type Edit, applyChanges, resolveEdits } from "./changes.ts";
 import type { Circle, Resource, State } from "./model.ts";
 import { seed } from "./seed.ts";
 
-const agent = { email: null, clientId: "agent-1", ip: null };
 
 function start(): State {
   const s = seed(["owner@example.com"], "kit.example.com");
   const base = s.circles[0]!;
-  const circle = (id: string, x: number, level: "view" | "control"): Circle => ({
+  const circle = (
+    id: string,
+    x: number,
+    level: "view" | "control",
+    members: Circle["members"] = [{ _tag: "device", tokenId: "t1", clientId: "agent-1", name: "Agent" }],
+  ): Circle => ({
     ...base,
     id,
     name: id,
     level,
     needsPasskey: false,
-    members: [{ _tag: "device", tokenId: "t1", clientId: "agent-1", name: "Agent" }],
+    members,
     x,
     y: 1000,
     r: 200,
@@ -31,10 +35,20 @@ function start(): State {
   };
   return {
     circles: new Map(
-      [...s.circles, circle("agents", 0, "control"), circle("staging", 600, "control")].map((c) => [c.id, c]),
+      [
+        ...s.circles,
+        circle("agents", 0, "control"),
+        circle("staging", 600, "control"),
+        circle("watch", 1200, "view"),
+        circle("public", 1800, "control", [
+          { _tag: "everyone" },
+          { _tag: "device", tokenId: "t1", clientId: "agent-1", name: "Agent" },
+        ]),
+        circle("home", 2400, "control", [{ _tag: "ip", range: "10.0.0.0/24" }]),
+      ].map((c) => [c.id, c]),
     ),
-    resources: new Map([...s.resources, site].map((r) => [r.id, r])),
-    places: new Map([...s.places, ["site", { x: 0, y: 1000 }]]),
+    resources: new Map([...s.resources, site, { ...site, id: "nas", name: "nas" }].map((r) => [r.id, r])),
+    places: new Map([...s.places, ["site", { x: 0, y: 1000 }], ["nas", { x: 2400, y: 1000 }]]),
     shareSettings: new Map(),
     paused: false,
     machines: new Map(),
@@ -42,7 +56,7 @@ function start(): State {
 }
 
 const check = (state: State, edits: Array<Edit>) =>
-  agentRefusal(state, applyChanges(state, resolveEdits(state, edits)), agent, edits, 0);
+  agentRefusal(state, applyChanges(state, resolveEdits(state, edits)), "agent-1", edits, 0);
 
 describe("agent keys (K-718)", () => {
   it("moves a card it controls between its own circles", () => {
@@ -57,5 +71,26 @@ describe("agent keys (K-718)", () => {
     expect(check(start(), [{ _tag: "circle", id: "owner", after: { ...owner, name: "x" } }])).toMatch(
       /only move/,
     );
+  });
+  it("never makes a card public, nor moves it into a circle without control", () => {
+    expect(check(start(), [{ _tag: "place", id: "site", after: { x: 1800, y: 1000 } }])).toMatch(/public/);
+    expect(check(start(), [{ _tag: "place", id: "site", after: { x: 1200, y: 1000 } }])).toMatch(/watch/);
+    expect(
+      check(start(), [{ _tag: "shareSetting", resourceId: "site", circleId: "agents", after: null }]),
+    ).toMatch(/only move/);
+  });
+  it("gets nothing from network or Everyone circles, and a token that no circle names manages nothing", () => {
+    expect(cardsControlledBy(start(), "agent-1", 0).has("nas")).toBe(false);
+    expect(cardsControlledBy(start(), "stranger", 0).size).toBe(0);
+    expect(check(start(), [{ _tag: "place", id: "nas", after: { x: 0, y: 1000 } }])).toMatch(/no control/);
+  });
+  it("does not call the owner's device an agent during a pause", () => {
+    const base = start();
+    const owner = base.circles.get("owner")!;
+    const device = { _tag: "device", tokenId: "t2", clientId: "owner-phone", name: "Phone" } as const;
+    const circles = new Map(base.circles).set("owner", { ...owner, members: [...owner.members, device] });
+    const state = { ...base, circles };
+    expect(isAgentKey({ ...state, paused: true }, device, 0)).toBe(false);
+    expect(isAgentKey(state, { ...device, clientId: "agent-1" }, 0)).toBe(true);
   });
 });

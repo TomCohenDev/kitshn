@@ -1,5 +1,6 @@
 import {
   ADMIN_RESOURCE_ID,
+  AGENT_RIGHTS,
   type Circle,
   type Level,
   type Member,
@@ -371,11 +372,17 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
   for (const circle of after.circles.values()) {
     const old = before.circles.get(circle.id);
     if (!old) continue;
-    const key = (member: Member) => JSON.stringify(member);
-    const had = new Set(old.members.map(key));
+    // A device stays the same member when its name or an agent right changes; only a right that turns on raises.
+    const key = (member: Member) =>
+      JSON.stringify(member._tag === "device" ? { tokenId: member.tokenId, clientId: member.clientId } : member);
+    const rights = (members: ReadonlyArray<Member>) =>
+      members.flatMap((member) =>
+        member._tag === "device" ? AGENT_RIGHTS.filter((right) => member[right]).map((right) => `${key(member)}/${right}`) : [],
+      );
+    const had = new Set([...old.members.map(key), ...rights(old.members)]);
     const has = new Set(circle.members.map(key));
     if (
-      circle.members.some((member) => !had.has(key(member))) ||
+      [...circle.members.map(key), ...rights(circle.members)].some((entry) => !had.has(entry)) ||
       // In an "all must match" circle, a member that goes lets more visitors in.
       (old.match === "all" && old.members.some((member) => !has.has(key(member)))) ||
       (old.needsPasskey && !circle.needsPasskey) ||

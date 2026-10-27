@@ -2,7 +2,9 @@ import type { Change } from "./changes.ts";
 import type { Command } from "./machine.ts";
 import {
   ADMIN_RESOURCE_ID,
+  type AgentRight,
   type Circle,
+  EVERYONE_CIRCLE_ID,
   type Member,
   type State,
   activeShares,
@@ -14,7 +16,7 @@ import { type Visitor, circleMatches, visitorLevel } from "./visitor.ts";
 /**
  * K-718: the agent circles of a device: circles of devices only that name it, have not ended, and that it
  * matches. A circle with people, networks, domains or Everyone is never an agent circle, so an agent key
- * cannot move a card to anyone but other devices.
+ * cannot move a card to anyone but other devices, except a site into Everyone with the right "publishes".
  */
 export const circlesOf = (state: State, visitor: Visitor, now: number) =>
   new Set(
@@ -30,6 +32,31 @@ export const circlesOf = (state: State, visitor: Visitor, now: number) =>
           )
           .map((circle) => circle.id),
   );
+
+/** K-718: a key has a right when one of its agent circles names it with that right. Both are off by default. */
+export function agentHas(state: State, visitor: Visitor, right: AgentRight, now: number) {
+  return [...circlesOf(state, visitor, now)].some((id) =>
+    state.circles
+      .get(id)
+      ?.members.some((member) => member._tag === "device" && member.clientId === visitor.clientId && member[right]),
+  );
+}
+
+/**
+ * K-819: the circle where a new card of a repo that an agent key allowed starts: its first agent circle at
+ * the level `control`, so the key manages the card. Undefined sends the card to the tray.
+ */
+export const agentHomeCircle = (state: State, clientId: string, now: number) =>
+  [...circlesOf(state, { email: null, clientId, ip: null }, now)]
+    .flatMap((id) => state.circles.get(id) ?? [])
+    .find((circle) => circle.level === "control");
+
+/**
+ * K-819: a Compose app of a repo that an agent key allowed runs only on a machine where that key may run jobs
+ * (K-718). A repo that the owner allowed (`allowedBy` null) may use every machine with the label `deploy`.
+ */
+export const mayDeployOn = (state: State, allowedBy: string | null, machineId: string, now: number) =>
+  allowedBy === null || agentMayRunOn(state, { email: null, clientId: allowedBy, ip: null }, machineId, now);
 
 /**
  * K-718: the cards that a device manages: one of its own circles holds the card at the circle level
@@ -74,7 +101,8 @@ export function agentMayRunOn(state: State, visitor: Visitor, machineId: string,
 
 /**
  * K-718: why an agent key may not make these changes, or null. It may only move cards that it controls, and
- * only from and to places inside its agent circles at the level `control`, or out of every circle; circles,
+ * only from and to places inside its agent circles at the level `control`, or out of every circle. A key
+ * that "publishes" may also move a site into and out of the Everyone circle. Circles,
  * members, stacks, levels and the pause stay with the admin. These are the resolved changes, so the other
  * cards of a stack that a move takes along (K-521) pass the same check.
  */
@@ -87,16 +115,20 @@ export function agentRefusal(
 ) {
   const controlled = cardsControlledBy(state, visitor, now);
   const own = circlesOf(state, visitor, now);
+  const publishes = agentHas(state, visitor, "publishes", now);
   for (const edit of changes) {
     if (edit._tag !== "place") return `An agent key may only move cards; it cannot change a ${edit._tag}.`;
     if (!controlled.has(edit.id))
       return `This key has no control on the card "${state.resources.get(edit.id)?.name ?? edit.id}".`;
+    const site = state.resources.get(edit.id)?.kind.startsWith("site.") ?? false;
     for (const side of [state, after]) {
       const foreign = circlesHolding(side, edit.id).find(
-        (circle) => !own.has(circle.id) || levelIn(side, edit.id, circle) !== "control",
+        (circle) =>
+          !(publishes && site && circle.id === EVERYONE_CIRCLE_ID) &&
+          (!own.has(circle.id) || levelIn(side, edit.id, circle) !== "control"),
       );
       if (foreign)
-        return `An agent key moves cards only between its own agent circles with control, and "${foreign.name}" is not one of them.`;
+        return `An agent key moves cards only between its own agent circles with control${publishes ? ", and sites into Everyone" : ""}, and "${foreign.name}" is not one of them.`;
     }
   }
   return null;

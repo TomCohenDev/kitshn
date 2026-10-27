@@ -66,6 +66,11 @@ export function RepoList(props: {
             <li key={repo.repoId}>
               <code>{repo.name}</code>
               <span class={`sticker ${STICKERS[repo.state]}`}>{repo.state}</span>
+              {repo.allowedBy ? (
+                <span class="muted" title="An agent key allowed this repo; its apps stay in its circles (K-819)">
+                  by {repo.allowedBy.name}
+                </span>
+              ) : null}
               {repo.state !== "allowed" ? (
                 <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "allowed")}>
                   Allow

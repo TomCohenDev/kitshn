@@ -568,5 +568,13 @@ describe("emergency pause (K-1504)", () => {
     expect(() => refuseRaiseWhilePaused(strict, looser)).toThrow(/only goes down/);
     const ending = { ...paused, shareSettings: new Map([["kitshn-admin/owner", { level: null, endsAt: 5 }]]) };
     expect(() => refuseRaiseWhilePaused(ending, { ...ending, shareSettings: new Map() })).toThrow(/end later/);
+    // K-718: an agent right that turns on raises access; one that turns off lowers it.
+    const device = { _tag: "device" as const, tokenId: "t", clientId: "c", name: "Bot" };
+    const withDevice = (member: typeof device & { publishes?: true }) => ({
+      ...paused,
+      circles: new Map(paused.circles).set("owner", { ...owner, members: [...owner.members, member] }),
+    });
+    expect(() => refuseRaiseWhilePaused(withDevice(device), withDevice({ ...device, publishes: true }))).toThrow(/only goes down/);
+    expect(() => refuseRaiseWhilePaused(withDevice({ ...device, publishes: true }), withDevice(device))).not.toThrow();
   });
 });

@@ -28,10 +28,24 @@ export type Member =
   | { readonly _tag: "email"; readonly email: string }
   | { readonly _tag: "domain"; readonly domain: string }
   | { readonly _tag: "ip"; readonly range: string }
-  /** An Access service token (K-106). `tokenId` is the token id; `clientId` is what the JWT carries. */
-  | { readonly _tag: "device"; readonly tokenId: string; readonly clientId: string; readonly name: string }
+  /**
+   * An Access service token (K-106). `tokenId` is the token id; `clientId` is what the JWT carries.
+   * An agent key (K-718) may also add apps and publish them; a missing right is off.
+   */
+  | {
+      readonly _tag: "device";
+      readonly tokenId: string;
+      readonly clientId: string;
+      readonly name: string;
+      readonly addsApps?: true;
+      readonly publishes?: true;
+    }
   | { readonly _tag: "machine"; readonly machineId: string }
   | { readonly _tag: "everyone" };
+
+/** K-718: the rights that the owner can give an agent key on its device member. */
+export const AGENT_RIGHTS = ["addsApps", "publishes"] as const;
+export type AgentRight = (typeof AGENT_RIGHTS)[number];
 
 export interface Circle {
   readonly id: string;

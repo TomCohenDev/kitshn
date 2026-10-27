@@ -67,6 +67,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   ],
   // 7: the audience tag of each Access application, for the Access check on tunnel ingress (K-603).
   ["ALTER TABLE access_objects ADD COLUMN aud TEXT NOT NULL DEFAULT ''"],
+  // 8: the agent key that allowed a repo (K-718, K-819); null when the owner allowed it.
+  ["ALTER TABLE repos ADD COLUMN allowed_by_client TEXT", "ALTER TABLE repos ADD COLUMN allowed_by_name TEXT"],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

@@ -1,9 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 const as = (clientId: string) => ({ email: null, clientId, ip: null });
-import { agentDeployPlan, agentMayRunOn, agentRefusal, cardsControlledBy, isAgentKey } from "./agent.ts";
+import {
+  agentDeployPlan,
+  agentHas,
+  agentHomeCircle,
+  agentMayRunOn,
+  agentRefusal,
+  cardsControlledBy,
+  isAgentKey,
+  mayDeployOn,
+} from "./agent.ts";
 import { type Edit, applyChanges, resolveEdits } from "./changes.ts";
-import type { Circle, Resource, State } from "./model.ts";
+import { type AgentRight, type Circle, type Resource, type State, circlesHolding } from "./model.ts";
+import { placeInside } from "./place.ts";
 import { seed } from "./seed.ts";
 
 
@@ -162,5 +172,53 @@ describe("agent keys (K-718)", () => {
     expect(agentDeployPlan({ ...last, branch: "" }, "build", null)).toMatchObject({ kind: "refused" });
     expect(agentDeployPlan({ ...last, environment: "pr-7" }, "build", null)).toMatchObject({ error: /preview/ });
     expect(agentDeployPlan(null, "build", null)).toMatchObject({ kind: "refused", error: /no finished deploy/ });
+  });
+});
+
+/** The start state with these rights on the agent member of one circle. */
+function withRights(circleId: string, rights: Partial<Record<AgentRight, true>>): State {
+  const base = start();
+  const circle = base.circles.get(circleId)!;
+  const members = circle.members.map((member) => (member._tag === "device" ? { ...member, ...rights } : member));
+  return { ...base, circles: new Map(base.circles).set(circleId, { ...circle, members }) };
+}
+
+describe("agent keys that add and publish apps (K-718, K-819)", () => {
+  it("has no right by default, and only an agent circle gives one", () => {
+    expect(agentHas(start(), as("agent-1"), "addsApps", 0)).toBe(false);
+    expect(agentHas(start(), as("agent-1"), "publishes", 0)).toBe(false);
+    expect(agentHas(withRights("agents", { addsApps: true }), as("agent-1"), "addsApps", 0)).toBe(true);
+    // "public" holds Everyone, so it is no agent circle.
+    expect(agentHas(withRights("public", { publishes: true }), as("agent-1"), "publishes", 0)).toBe(false);
+  });
+  it("moves a site into Everyone only with the right to publish", () => {
+    const publish = (state: State) => {
+      const changes = resolveEdits(state, [{ _tag: "place", id: "site", after: { x: 760, y: 0 } }]);
+      return agentRefusal(state, applyChanges(state, changes), as("agent-1"), changes, 0);
+    };
+    expect(publish(start())).toMatch(/Everyone/);
+    expect(publish(withRights("agents", { publishes: true }))).toBeNull();
+    const state = withRights("agents", { publishes: true });
+    const machine = { ...state.resources.get("site")!, kind: "machine" as const };
+    expect(publish({ ...state, resources: new Map(state.resources).set("site", machine) })).toMatch(/Everyone/);
+  });
+  it("starts a new card in the first agent circle at control of the key", () => {
+    const home = agentHomeCircle(start(), "agent-1", 0);
+    expect(home?.id).toBe("agents");
+    const place = placeInside(start(), { x: home!.x, y: home!.y }, new Set([home!.id]));
+    const placed = { ...start(), places: new Map(start().places).set("new", place!) };
+    expect(circlesHolding(placed, "new").map((circle) => circle.id)).toEqual(["agents"]);
+    expect(agentHomeCircle(start(), "stranger", 0)).toBeUndefined();
+  });
+  it("deploys the Compose apps of an agent-allowed repo only to machines that the key runs jobs on", () => {
+    const base = start();
+    const machine = { ...base.resources.get("site")!, id: "m1", name: "m1", kind: "machine" as const };
+    const m1 = { id: "m1", name: "m1", labels: ["deploy"], order: 0, serviceTokenId: "s", clientId: "m1-token", tunnelId: "t" };
+    const state = { ...base, resources: new Map(base.resources).set("m1", machine), machines: new Map([["m1", m1]]) };
+    expect(mayDeployOn(state, null, "m1", 0)).toBe(true);
+    expect(mayDeployOn(state, "agent-1", "m1", 0)).toBe(false);
+    const managed = { ...state, places: new Map(state.places).set("m1", { x: 0, y: 1000 }) };
+    expect(mayDeployOn(managed, "agent-1", "m1", 0)).toBe(true);
+    expect(mayDeployOn(managed, "stranger", "m1", 0)).toBe(false);
   });
 });

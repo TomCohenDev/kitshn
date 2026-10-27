@@ -998,6 +998,7 @@ select:focus-visible {
 }
 .side ul.members li.member {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin: 0;
@@ -1009,6 +1010,12 @@ select:focus-visible {
   flex: 1 1 auto;
   font-weight: 700;
   overflow-wrap: anywhere;
+}
+.member .rights {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 .member .remove {
   width: 1.6rem;

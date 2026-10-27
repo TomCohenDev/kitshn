@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { type Edit, deepEqual } from "../core/changes.ts";
 import {
+  AGENT_RIGHTS,
+  type AgentRight,
   type Circle,
   LEVELS,
   type Level,
@@ -166,8 +168,29 @@ export function LevelOverride(props: {
   );
 }
 
-function MemberSticker(props: { member: Member; agent: boolean; onRemove: () => void }) {
-  const kind = MEMBER_STICKERS[props.member._tag];
+/** K-718: the rights that the owner gives an agent key in its agent circle, with their stickers. */
+const RIGHTS: Record<AgentRight, { readonly sticker: string; readonly label: string; readonly help: string }> = {
+  addsApps: {
+    sticker: "adds apps",
+    label: "May add apps",
+    help: "It may allow a waiting repo; its cards start in this circle (K-819)",
+  },
+  publishes: {
+    sticker: "publishes",
+    label: "May publish",
+    help: "It may move its sites into the Everyone circle",
+  },
+};
+
+function MemberSticker(props: {
+  member: Member;
+  agent: boolean;
+  onRemove: () => void;
+  /** Set only for an agent key in an agent circle: a right turns on or off. */
+  onRight: ((right: AgentRight, on: boolean) => void) | null;
+}) {
+  const { member, onRight } = props;
+  const kind = MEMBER_STICKERS[member._tag];
   return (
     <li class="member">
       <span class="sticker" style={{ background: kind.color }}>
@@ -182,6 +205,13 @@ function MemberSticker(props: { member: Member; agent: boolean; onRemove: () => 
           agent
         </span>
       ) : null}
+      {member._tag === "device"
+        ? AGENT_RIGHTS.filter((right) => member[right]).map((right) => (
+            <span key={right} class="sticker" style={{ background: "var(--green)" }} title={RIGHTS[right].help}>
+              {RIGHTS[right].sticker}
+            </span>
+          ))
+        : null}
       <span class="who">
         {MEMBER_ICONS[props.member._tag]} {memberLabel(props.member)}
       </span>
@@ -193,11 +223,31 @@ function MemberSticker(props: { member: Member; agent: boolean; onRemove: () => 
       >
         ×
       </button>
+      {member._tag === "device" && onRight ? (
+        <div class="rights">
+          {AGENT_RIGHTS.map((right) => (
+            <span key={right} title={RIGHTS[right].help}>
+              <Toggle
+                checked={member[right] === true}
+                label={RIGHTS[right].label}
+                onChange={(on) => onRight(right, on)}
+              />
+            </span>
+          ))}
+        </div>
+      ) : null}
     </li>
   );
 }
 
 type DeviceMember = Extract<Member, { _tag: "device" }>;
+
+/** A missing right is off, so turning one off removes its key. */
+function withRight(member: DeviceMember, right: AgentRight, on: boolean): DeviceMember {
+  const { [right]: _, ...rest } = member;
+  return on ? { ...rest, [right]: true } : rest;
+}
+
 type Device = Omit<DeviceMember, "_tag">;
 
 /** K-106: the service tokens of the account, and a new one; its secret shows once. */
@@ -465,6 +515,8 @@ export function CircleEditor(props: {
   const inside = [...state.resources.values()].filter((resource) =>
     circlesHolding(state, resource.id).includes(circle),
   );
+  // K-718: rights count only in a circle of devices only.
+  const agentCircle = circle.members.every((member) => member._tag === "device");
   const hasPeople = circle.members.some((member) => member._tag === "email" || member._tag === "domain");
   return (
     <section class="editor">
@@ -511,6 +563,14 @@ export function CircleEditor(props: {
             member={member}
             agent={isAgentKey(state, member, Date.now())}
             onRemove={() => void put({ members: circle.members.filter((_, other) => other !== index) })}
+            onRight={
+              member._tag === "device" && agentCircle && isAgentKey(state, member, Date.now())
+                ? (right, on) =>
+                    void put({
+                      members: circle.members.map((other, at) => (at === index ? withRight(member, right, on) : other)),
+                    })
+                : null
+            }
           />
         ))}
         {circle.members.length === 0 ? (

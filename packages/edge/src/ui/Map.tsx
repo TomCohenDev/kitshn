@@ -13,7 +13,7 @@ import {
   shareLevel,
 } from "../core/model.ts";
 import type { AccessState, MachineView } from "../core/protocol.ts";
-import { KINDS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
+import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { PresenceSticker } from "./Machines.tsx";
 
 export interface View {
@@ -76,6 +76,8 @@ interface Props {
 const LONG_PRESS_MS = 350;
 /** Preact 11 does not add a unit to numeric style values. */
 const px = (value: number) => `${value}px`;
+/** An open stack spaces its cards by this much: the card width (styles.css) plus a gap. */
+const STACK_GAP = 205;
 const ZOOMED_OUT = 0.4;
 
 export function MapView(props: Props) {
@@ -292,7 +294,7 @@ export function MapView(props: Props) {
           const index = stack ? stack[1].indexOf(resource.id) : 0;
           if (stack && !open && index > 0) return null;
           const head = stack ? shown.places.get(stack[1][0] ?? "") : undefined;
-          const at = stack && open && head ? { x: head.x + index * 175, y: head.y } : place;
+          const at = stack && open && head ? { x: head.x + index * STACK_GAP, y: head.y } : place;
           const selected = props.selection.cards.has(resource.id);
           if (zoomedOut) {
             return (
@@ -386,13 +388,15 @@ function CircleView(props: {
         top: px(circle.y - circle.r),
         width: px(circle.r * 2),
         height: px(circle.r * 2),
-        background: `${circle.color}22`,
-        borderColor: circle.color,
+        "--c": circle.color,
       }}
     >
       <div class="head" data-head={circle.id}>
         <span>{circle.name}</span>
-        <span class="sticker" style={{ "--tilt": LEVEL_TILTS[circle.level], background: circle.color }}>
+        <span
+          class="sticker"
+          style={{ "--tilt": LEVEL_TILTS[circle.level], background: LEVEL_COLORS[circle.level] }}
+        >
           {circle.level}
         </span>
         {circle.needsPasskey ? <span title="Needs a passkey">🔑</span> : null}
@@ -466,7 +470,7 @@ function CardView(props: {
       </div>
       <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
       <div class="foot">
-        <span class="sticker" style={{ "--tilt": kind.tilt, background: kind.color }}>
+        <span class="sticker" style={{ "--tilt": kind.tilt, background: kind.color, color: kind.ink }}>
           {resource.kind}
         </span>
         {props.machine ? <PresenceSticker view={props.machine} /> : null}

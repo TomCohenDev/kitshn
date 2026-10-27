@@ -17,7 +17,7 @@ import {
 } from "../core/model.ts";
 import { placeInside } from "../core/place.ts";
 import type { JobView, MachineView, RevisionView } from "../core/protocol.ts";
-import { CIRCLE_COLORS, KINDS, MEMBER_ICONS } from "./kinds.ts";
+import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
 import { MapView, type Selection, type View } from "./Map.tsx";
@@ -35,6 +35,12 @@ import {
 } from "./store.ts";
 
 const VIEW_KEY = "kitshn.view";
+/**
+ * On a wide screen the fit and a saved view stay at least this close, so card names stay readable on a
+ * laptop. A bigger map is then centred, not shown whole; the wheel still zooms out to 0.15.
+ */
+const FIT_MIN_SCALE = 0.85;
+const wideScreen = () => innerWidth > 720;
 const UNDO_MS = 10_000;
 
 interface Toast {
@@ -46,11 +52,12 @@ interface Toast {
 const loadView = (): View => {
   try {
     const saved = JSON.parse(localStorage.getItem(VIEW_KEY) ?? "null") as View | null;
-    if (saved && [saved.x, saved.y, saved.s].every(Number.isFinite)) return saved;
+    if (saved && [saved.x, saved.y, saved.s].every(Number.isFinite))
+      return wideScreen() ? { ...saved, s: Math.max(saved.s, FIT_MIN_SCALE) } : saved;
   } catch {
     // A broken saved view falls back to the default.
   }
-  return { x: innerWidth / 2 - 200, y: innerHeight / 2, s: 0.7 };
+  return { x: innerWidth / 2 - 200, y: innerHeight / 2, s: 1 };
 };
 
 const actorLabel = (actor: Actor) =>
@@ -213,18 +220,19 @@ export function App() {
     const xs = points.map((point) => point.x);
     const ys = points.map((point) => point.y);
     const [minX, maxX, minY, maxY] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
-    const wide = innerWidth > 720;
-    const left = tray.length > 0 ? (wide ? 210 : 170) : 10;
+    const wide = wideScreen();
+    const top = (document.querySelector("header.bar")?.getBoundingClientRect().bottom ?? 70) + 30;
+    const left = tray.length > 0 ? (wide ? 230 : 170) : 10;
     const width = Math.max(innerWidth - left - (wide ? 370 : 10), 200);
-    const height = Math.max(innerHeight - (wide ? 100 : innerHeight / 2), 200);
+    const height = Math.max(innerHeight - top - (wide ? 20 : innerHeight / 2), 200);
     const s = Math.min(
       2,
-      Math.max(0.15, Math.min(width / (maxX - minX + 120), height / (maxY - minY + 160))),
+      Math.max(wide ? FIT_MIN_SCALE : 0.15, Math.min(width / (maxX - minX + 120), height / (maxY - minY + 160))),
     );
     changeView({
       s,
       x: left + (width - (maxX - minX) * s) / 2 - minX * s,
-      y: 80 + (height - (maxY - minY) * s) / 2 - minY * s,
+      y: top + (height - (maxY - minY) * s) / 2 - minY * s,
     });
   };
 
@@ -699,7 +707,7 @@ function Panel(props: {
         <ul>
           {[...state.circles.values()].map((item) => (
             <li key={item.id}>
-              <b style={{ color: item.color }}>●</b> {item.name}:{" "}
+              <span class="swatch" style={{ background: item.color }} /> {item.name}:{" "}
               {plural(
                 [...state.places.keys()].filter((id) =>
                   circlesHolding(state, id).some((held) => held.id === item.id),
@@ -823,8 +831,8 @@ function CardPanel(props: {
             return (
               <li key={circle.id}>
                 <div class="row">
-                  <b style={{ color: circle.color }}>●</b> <b>{circle.name}</b>
-                  <span class="sticker" style={{ background: circle.color }}>
+                  <span class="swatch" style={{ background: circle.color }} /> <b>{circle.name}</b>
+                  <span class="sticker" style={{ background: level ? LEVEL_COLORS[level] : undefined }}>
                     {level ?? "none"}
                   </span>
                   <button
@@ -885,7 +893,7 @@ function CardPanel(props: {
               .filter((circle) => !holding.includes(circle))
               .map((circle) => (
                 <button key={circle.id} class="btn" onClick={() => props.onReshare(resource, circle, true)}>
-                  <b style={{ color: circle.color }}>●</b> {circle.name}
+                  <span class="swatch" style={{ background: circle.color }} /> {circle.name}
                 </button>
               ))}
           </div>

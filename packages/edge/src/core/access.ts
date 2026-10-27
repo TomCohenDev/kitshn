@@ -49,6 +49,10 @@ export const peoplePolicyName = (circle: Pick<Circle, "name">) =>
   `${ACCESS_NAME_PREFIX}circle ${circle.name}`;
 export const tokenPolicyName = (circle: Pick<Circle, "name">) =>
   `${ACCESS_NAME_PREFIX}circle ${circle.name} (devices and networks)`;
+/** K-113: the reusable policy on the App Launcher, so people of passkey circles can enroll a passkey. */
+export const ENROLLMENT_KEY = "policy:enrollment";
+export const ENROLLMENT_POLICY_NAME = `${ACCESS_NAME_PREFIX}passkey enrollment`;
+
 export const appName = (resourceName: string) =>
   resourceName.startsWith(ACCESS_NAME_PREFIX) ? resourceName : `${ACCESS_NAME_PREFIX}${resourceName}`;
 
@@ -198,6 +202,21 @@ export function desiredAccess(state: State, now: number): DesiredAccess {
         policyKeys,
       });
     }
+  }
+  // K-113: the people of every passkey circle may open the App Launcher, where Access enrolls a passkey.
+  const enrolling = new Map<string, Rule>();
+  for (const circle of state.circles.values()) {
+    if (!circle.needsPasskey) continue;
+    for (const rule of present(circle.members.map(personRule))) enrolling.set(JSON.stringify(rule), rule);
+  }
+  if (enrolling.size > 0) {
+    policies.set(ENROLLMENT_KEY, {
+      name: ENROLLMENT_POLICY_NAME,
+      decision: "allow",
+      include: [...enrolling.values()],
+      require: [],
+      exclude: [],
+    });
   }
   return { policies, apps };
 }

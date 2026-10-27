@@ -1,0 +1,48 @@
+#!/bin/sh
+# kitshn join (SPEC K-602): installs the kitshn daemon for this user, joins the machine with a one-time
+# code, and starts the daemon as a user service (K-601). "Add machine" on the map prints the command:
+#
+#   curl -fsSL https://kit.example.com/join | sh -s -- <code> https://kit.example.com
+#
+# Optional: KITSHN_DAEMON (a local kitshn binary instead of the release download).
+set -eu
+
+code=${1:-}
+server=${2:-}
+[ -n "$code" ] && [ -n "$server" ] || {
+  echo "usage: curl -fsSL <kitshn address>/join | sh -s -- <code> <kitshn address>" >&2
+  exit 1
+}
+
+case "$(uname -s)" in
+Linux) os=linux ;;
+Darwin) os=darwin ;;
+*)
+  echo "kitshn: the daemon runs on Linux and macOS (K-601), not on $(uname -s)." >&2
+  exit 1
+  ;;
+esac
+case "$(uname -m)" in
+aarch64 | arm64) cpu=arm64 ;;
+x86_64 | amd64) cpu=x64 ;;
+*)
+  echo "kitshn: no daemon build for the CPU $(uname -m)." >&2
+  exit 1
+  ;;
+esac
+
+bin="$HOME/.local/bin"
+mkdir -p "$bin"
+if [ -n "${KITSHN_DAEMON:-}" ]; then
+  cp "$KITSHN_DAEMON" "$bin/kitshn.new"
+else
+  url="https://github.com/Yarden-zamir/kitshn/releases/download/edge/kitshn-$os-$cpu"
+  echo "Downloading the kitshn daemon from $url"
+  curl -fsSL "$url" -o "$bin/kitshn.new"
+fi
+chmod 755 "$bin/kitshn.new"
+mv "$bin/kitshn.new" "$bin/kitshn"
+
+"$bin/kitshn" join "$code" --server "$server"
+"$bin/kitshn" service install
+echo "Done. To remove kitshn from this machine: $bin/kitshn service uninstall"

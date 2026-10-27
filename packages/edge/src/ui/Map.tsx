@@ -12,8 +12,9 @@ import {
   shareKey,
   shareLevel,
 } from "../core/model.ts";
-import type { AccessState } from "../core/protocol.ts";
+import type { AccessState, MachineView } from "../core/protocol.ts";
 import { KINDS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
+import { PresenceSticker } from "./Machines.tsx";
 
 export interface View {
   readonly x: number;
@@ -61,6 +62,7 @@ export function stacksOf(state: State): Map<string, Array<string>> {
 interface Props {
   readonly state: State;
   readonly access: Readonly<Record<string, AccessState>>;
+  readonly machines: ReadonlyMap<string, MachineView>;
   readonly selection: Selection;
   readonly onSelect: (selection: Selection) => void;
   readonly hidden: ReadonlySet<ResourceKind>;
@@ -314,6 +316,7 @@ export function MapView(props: Props) {
               count={stack && index === 0 ? stack[1].length : null}
               open={open}
               access={props.access[resource.id] ?? null}
+              machine={props.machines.get(resource.id) ?? null}
             />
           );
         })}
@@ -435,6 +438,7 @@ function CardView(props: {
   count: number | null;
   open: boolean;
   access: AccessState | null;
+  machine: MachineView | null;
 }) {
   const { resource, state } = props;
   const kind = KINDS[resource.kind];
@@ -465,6 +469,7 @@ function CardView(props: {
         <span class="sticker" style={{ "--tilt": kind.tilt, background: kind.color }}>
           {resource.kind}
         </span>
+        {props.machine ? <PresenceSticker view={props.machine} /> : null}
         {holding.map((circle) => {
           const level = shareLevel(state, resource, circle);
           return (

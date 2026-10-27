@@ -1,3 +1,4 @@
+import type { Machine } from "./machine.ts";
 import { ADMIN_RESOURCE_ID, type Circle, type Member, type State, activeShares } from "./model.ts";
 
 /** An Access rule, in the shape of the Cloudflare API. */
@@ -58,9 +59,13 @@ const personRule = (member: Member): Rule | null =>
       ? { email_domain: { domain: member.domain } }
       : null;
 
-/** Machines get a service token in milestone 2 (K-107); until then they compile to no rule (closed). */
-const tokenRule = (member: Member): Rule | null =>
-  member._tag === "device" ? { service_token: { token_id: member.tokenId } } : null;
+/** A device or a machine is its service token (K-106, K-107). An unknown machine compiles to no rule. */
+const tokenRule = (member: Member, machines: ReadonlyMap<string, Machine>): Rule | null => {
+  if (member._tag === "device") return { service_token: { token_id: member.tokenId } };
+  if (member._tag !== "machine") return null;
+  const machine = machines.get(member.machineId);
+  return machine ? { service_token: { token_id: machine.serviceTokenId } } : null;
+};
 
 const networkRule = (member: Member): Rule | null =>
   member._tag === "ip" ? { ip: { ip: member.range } } : null;
@@ -72,10 +77,13 @@ const present = <T>(values: ReadonlyArray<T | null>): Array<T> => values.filter(
  * networks without login, so a circle makes up to two policies: people (allow, with the passkey check of
  * K-103) and devices and networks (non_identity). "Everyone" makes one Bypass policy (K-403).
  */
-export function circlePolicies(circle: Circle): Map<string, PolicyBody> {
+export function circlePolicies(
+  circle: Circle,
+  machines: ReadonlyMap<string, Machine>,
+): Map<string, PolicyBody> {
   const policies = new Map<string, PolicyBody>();
   const people = present(circle.members.map(personRule));
-  const tokens = present(circle.members.map(tokenRule));
+  const tokens = present(circle.members.map((member) => tokenRule(member, machines)));
   const networks = present(circle.members.map(networkRule));
   const base = { exclude: [] as Array<Rule> };
   const mfa = circle.needsPasskey ? { mfa_config: PASSKEY_MFA } : {};
@@ -116,9 +124,9 @@ export function circlePolicies(circle: Circle): Map<string, PolicyBody> {
 
   // "All must match": the first rule includes, the others require. "Everyone" adds nothing here.
   // A member that cannot become a require rule would widen the circle, so such a circle gets no
-  // policy (K-006): a machine (no token before milestone 2), people with a token, or two tokens.
+  // policy (K-006): an unknown machine, people with a token, or two tokens.
   const impossible =
-    circle.members.some((member) => member._tag === "machine") ||
+    circle.members.some((member) => member._tag === "machine" && !machines.has(member.machineId)) ||
     (people.length > 0 && tokens.length > 0) ||
     tokens.length > 1;
   if (impossible) return policies;
@@ -169,7 +177,7 @@ export function desiredAccess(state: State, now: number): DesiredAccess {
     if (WORKER_CHECKED.has(resource.kind) || resource.addresses.length === 0) continue;
     const policyKeys: Array<string> = [];
     for (const share of activeShares(state, resource, now)) {
-      for (const [key, body] of circlePolicies(share.circle)) {
+      for (const [key, body] of circlePolicies(share.circle, state.machines)) {
         // K-1504: during a pause only people pass; the devices and networks policy of Owner drops out.
         if (state.paused && !key.endsWith(":people")) continue;
         policies.set(key, body);

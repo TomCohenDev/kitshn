@@ -143,7 +143,7 @@ export function applyChanges(state: State, changes: ReadonlyArray<Change>): Stat
     else if (change._tag === "shareSetting") put(shareSettings, change.id, change.after);
     else paused = change.after;
   }
-  return { circles, resources: state.resources, places, shareSettings, paused };
+  return { ...state, circles, places, shareSettings, paused };
 }
 
 /**

@@ -21,14 +21,30 @@ export default {
       headers.set("x-kitshn-caller", JSON.stringify(caller));
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
     }
-    if (url.pathname === "/connect" || url.pathname.startsWith("/connect/")) {
-      // Daemons connect here in milestone 2 (K-604). Until then it only checks the Access token.
+    if (url.pathname === "/connect") {
+      // K-604: a daemon, with its machine's service token. Access checked it; the Worker checks the JWT.
       const caller = await callerOf(request, env, env.ACCESS_CONNECT_AUD);
       if (typeof caller === "string") return Response.json({ error: caller }, { status: 401 });
-      return Response.json(
-        { error: "Machines join kitshn in milestone 2. No daemon can connect yet.", caller: caller.actor },
-        { status: 501 },
-      );
+      if (caller.visitor.clientId === null) {
+        return Response.json({ error: "Only a machine's service token can connect." }, { status: 403 });
+      }
+      const headers = new Headers(request.headers);
+      headers.set("x-kitshn-caller", JSON.stringify(caller));
+      return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
+    }
+    if (url.pathname === "/join/exchange" && request.method === "POST") {
+      // A cheap shape check keeps junk away from the Durable Object; the code itself is the secret.
+      const body = (await request
+        .clone()
+        .json()
+        .catch(() => null)) as { code?: unknown } | null;
+      if (typeof body?.code !== "string" || !/^[23456789abcdefghjkmnpqrstuvwxyz]{20}$/.test(body.code)) {
+        return Response.json({ error: "This is not a kitshn join code." }, { status: 400 });
+      }
+      // K-602: public; the one-time join code is the secret. The Durable Object ignores any caller header.
+      const headers = new Headers(request.headers);
+      headers.delete("x-kitshn-caller");
+      return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
     }
     return env.ASSETS.fetch(request);
   },

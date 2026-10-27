@@ -8,6 +8,7 @@ import {
   RuleError,
   applyChanges,
   conflictOf,
+  deepEqual,
   invert,
   resolveEdits,
   ruleViolation,
@@ -23,12 +24,23 @@ import {
   type State,
   circlesHolding,
 } from "../core/model.ts";
+import {
+  type Command,
+  type DaemonMessage,
+  type Machine,
+  type MachineStatus,
+  type Sample,
+  type ServerToDaemon,
+  joinLookup,
+  newJoinCode,
+  sealJoin,
+} from "../core/machine.ts";
 import { placeInside } from "../core/place.ts";
-import type { RevisionView, ServerMessage, Snapshot } from "../core/protocol.ts";
+import type { MachineView, RevisionView, ServerMessage, Snapshot } from "../core/protocol.ts";
 import { ClientMessage } from "../core/schema.ts";
 import { demo } from "../core/demo.ts";
 import { seed } from "../core/seed.ts";
-import { visitorLevel } from "../core/visitor.ts";
+import { type Visitor, visitorLevel } from "../core/visitor.ts";
 import {
   type AccessRow,
   type AccessStore,
@@ -41,7 +53,19 @@ import {
   verifyPasskeys,
 } from "./access-sync.ts";
 import type { Caller } from "./auth.ts";
-import { cloudflare } from "./cloudflare.ts";
+import { CloudflareError, cloudflare } from "./cloudflare.ts";
+import {
+  JOB_EXPIRY_MS,
+  JOIN_CODE_MS,
+  type Job,
+  OUTPUT_LIMIT,
+  PING_TIMEOUT_MS,
+  machineIdFor,
+  parseCommand,
+  parseLabels,
+  pickMachine,
+  tunnelConfig,
+} from "./machines.ts";
 import type { Env } from "./env.ts";
 
 const SCHEMA = [
@@ -53,7 +77,28 @@ const SCHEMA = [
     actor TEXT NOT NULL, summary TEXT NOT NULL, changes TEXT NOT NULL, undoes INTEGER)`,
   "CREATE TABLE IF NOT EXISTS access_objects (key TEXT PRIMARY KEY, cf_id TEXT NOT NULL, body TEXT NOT NULL, tried TEXT NOT NULL, error TEXT)",
   "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS presence (id TEXT PRIMARY KEY, online INTEGER NOT NULL, last_seen INTEGER NOT NULL)",
+  `CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, machine_id TEXT, labels TEXT NOT NULL,
+    command TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+    actor TEXT NOT NULL, visitor TEXT NOT NULL, exit_code INTEGER, output TEXT NOT NULL)`,
+  "CREATE INDEX IF NOT EXISTS jobs_state ON jobs (state, expires_at)",
+  `CREATE TABLE IF NOT EXISTS join_codes (lookup TEXT PRIMARY KEY, machine_id TEXT NOT NULL, iv TEXT NOT NULL,
+    sealed TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
+  "CREATE TABLE IF NOT EXISTS tunnel_objects (machine_id TEXT PRIMARY KEY, body TEXT NOT NULL, error TEXT)",
 ];
+
+/** What a WebSocket of this Durable Object belongs to. */
+type Attachment =
+  | { readonly kind: "map"; readonly caller: Caller }
+  | {
+      readonly kind: "machine";
+      readonly machineId: string;
+      readonly since: number;
+      /** K-605, K-606: kept on the socket, so they survive hibernation and cost no row writes. */
+      readonly status: MachineStatus | null;
+      readonly sample: Sample | null;
+    };
 
 /** The map keeps this many recent revisions in memory; History reads them (K-519). */
 const RECENT_REVISIONS = 200;
@@ -74,6 +119,8 @@ export class Kitshn extends DurableObject<Env> {
   /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
   private stuckShares = new Set<string>();
   private accessWarnings: Array<string> = [];
+  /** K-606: presence is stored on change; status and the latest sample live on the socket. */
+  private presence = new Map<string, { online: boolean; lastSeen: number }>();
 
   private meta(key: string): string | null {
     const [row] = this.sql<{ value: string }>("SELECT value FROM meta WHERE key = ?", key);
@@ -88,11 +135,14 @@ export class Kitshn extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    // K-604: a daemon ping never wakes the Durable Object.
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
     void ctx.blockConcurrencyWhile(async () => {
       for (const statement of SCHEMA) ctx.storage.sql.exec(statement);
       this.load();
       if (this.state.circles.size === 0) this.seed();
       this.syncAdminAddress();
+      this.reconcilePresence();
       await this.scheduleAlarm();
     });
   }
@@ -115,7 +165,13 @@ export class Kitshn extends DurableObject<Env> {
       ),
       shareSettings: json<ShareSetting>(this.sql("SELECT id, body FROM share_settings")),
       paused: this.meta("paused") === "true",
+      machines: json<Machine>(this.sql("SELECT id, body FROM machines")),
     };
+    this.presence = new Map(
+      this.sql<{ id: string; online: number; last_seen: number }>(
+        "SELECT id, online, last_seen FROM presence",
+      ).map((row) => [row.id, { online: row.online === 1, lastSeen: row.last_seen }]),
+    );
     this.accessWarnings = JSON.parse(this.meta("access_warnings") ?? "[]") as Array<string>;
     this.access = new Map(
       this.sql<{ key: string; cf_id: string; body: string; tried: string; error: string | null }>(
@@ -125,8 +181,15 @@ export class Kitshn extends DurableObject<Env> {
         { key: row.key, cfId: row.cf_id, body: row.body, tried: row.tried, error: row.error },
       ]),
     );
-    const rows = this.sql<{ id: number; at: number; actor: string; summary: string; undoes: number | null }>(
-      "SELECT id, at, actor, summary, undoes FROM revisions ORDER BY id DESC LIMIT ?",
+    const rows = this.sql<{
+      id: number;
+      at: number;
+      actor: string;
+      summary: string;
+      undoes: number | null;
+      empty: number;
+    }>(
+      "SELECT id, at, actor, summary, undoes, changes = '[]' AS empty FROM revisions ORDER BY id DESC LIMIT ?",
       RECENT_REVISIONS,
     );
     const undone = new Map(
@@ -142,6 +205,7 @@ export class Kitshn extends DurableObject<Env> {
       summary: row.summary,
       undoes: row.undoes,
       undoneBy: undone.get(row.id) ?? null,
+      undoable: row.empty === 0,
     }));
   }
 
@@ -259,7 +323,7 @@ export class Kitshn extends DurableObject<Env> {
         for (const id of this.stuckShares) if (id.startsWith(`${change.id}/`)) this.stuckShares.delete(id);
     }
     this.revisions = [
-      { id, at: Date.now(), actor, summary, undoes, undoneBy: null },
+      { id, at: Date.now(), actor, summary, undoes, undoneBy: null, undoable: changes.length > 0 },
       ...this.revisions.map((revision) =>
         revision.id === undoes ? { ...revision, undoneBy: id } : revision,
       ),
@@ -279,6 +343,10 @@ export class Kitshn extends DurableObject<Env> {
     if (!row)
       throw new RuleError(`Revision #${revisionId} does not exist, or it is older than the history keeps.`);
     const changes = invert(JSON.parse(row.changes) as Array<Change>);
+    if (changes.length === 0)
+      throw new RuleError(
+        `Revision #${revisionId} records an action, not a change, so it has nothing to undo.`,
+      );
     // This also refuses a second undo of the same revision: its changes are no longer current.
     const conflict = conflictOf(this.state, changes);
     if (conflict) throw new RuleError(`A later revision changed ${conflict}. Undo that revision first.`);
@@ -300,13 +368,42 @@ export class Kitshn extends DurableObject<Env> {
       access: accessStates(desiredAccess(this.state, Date.now()), this.access),
       accessWarnings: this.accessWarnings,
       paused: this.state.paused,
+      machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
+      jobs: this.recentJobs(10, 2000),
       me,
     };
   }
 
+  private machineView(machine: Machine): MachineView {
+    const socket = this.openSocket(machine.id);
+    const attachment = socket?.deserializeAttachment() as Attachment | undefined;
+    const live = attachment?.kind === "machine" ? attachment : null;
+    return {
+      machine,
+      online: socket !== null,
+      lastSeen: this.presence.get(machine.id)?.lastSeen ?? null,
+      status: live?.status ?? null,
+      sample: live?.sample ?? null,
+    };
+  }
+
+  /** The newest open socket of a machine, or null. */
+  private openSocket(machineId: string): WebSocket | null {
+    const open = this.ctx.getWebSockets(machineId).filter((socket) => socket.readyState === WebSocket.OPEN);
+    return open.at(-1) ?? null;
+  }
+
+  /** Sends one changed machine to every open map, instead of a whole snapshot. */
+  private sendMachine(machine: Machine) {
+    const message: ServerMessage = { type: "machine", view: this.machineView(machine) };
+    for (const socket of this.ctx.getWebSockets("map")) send(socket, message);
+  }
+
   private broadcast() {
-    for (const socket of this.ctx.getWebSockets()) {
-      const caller = socket.deserializeAttachment() as Caller;
+    for (const socket of this.ctx.getWebSockets("map")) {
+      const attachment = socket.deserializeAttachment() as Attachment;
+      if (attachment.kind !== "map") continue;
+      const caller = attachment.caller;
       if (!this.authorized(caller)) {
         socket.close(4003, "You lost access to the kitshn admin.");
         continue;
@@ -329,27 +426,43 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname;
+    // The join exchange is public: the join code itself is the secret (K-602).
+    if (path === "/join/exchange" && request.method === "POST") return this.exchangeJoin(request);
     const header = request.headers.get("x-kitshn-caller");
     if (!header) return new Response("The Worker sent no caller.", { status: 500 });
     const caller = JSON.parse(header) as Caller;
+    if (path === "/connect") return this.connectMachine(request, caller);
     if (!this.authorized(caller)) {
       return Response.json(
         { error: "You have no control level on the kitshn admin (K-104)." },
         { status: 403 },
       );
     }
-    const path = new URL(request.url).pathname;
     if (path === "/api/ws") {
       if (request.headers.get("upgrade") !== "websocket")
         return new Response("Expected a WebSocket.", { status: 426 });
       const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
-      this.ctx.acceptWebSocket(server);
-      server.serializeAttachment(caller);
+      this.ctx.acceptWebSocket(server, ["map"]);
+      server.serializeAttachment({ kind: "map", caller } satisfies Attachment);
       send(server, { type: "snapshot", snapshot: this.snapshot(caller.actor) });
       return new Response(null, { status: 101, webSocket: client });
     }
     if (path === "/api/state" && request.method === "GET") return Response.json(this.snapshot(caller.actor));
     if (path === "/api/sign-out" && request.method === "POST") return this.signOut();
+    if (path === "/api/machines" && request.method === "POST")
+      return this.addMachine(caller, await request.json().catch(() => null), new URL(request.url).origin);
+    if (path.startsWith("/api/machines/") && request.method === "POST")
+      return this.updateMachine(
+        caller,
+        decodeURIComponent(path.slice("/api/machines/".length)),
+        await request.json().catch(() => null),
+      );
+    if (path.startsWith("/api/machines/") && request.method === "DELETE")
+      return this.removeMachine(caller, decodeURIComponent(path.slice("/api/machines/".length)));
+    if (path === "/api/jobs" && request.method === "POST")
+      return this.addJob(caller, await request.json().catch(() => null));
+    if (path === "/api/jobs" && request.method === "GET") return Response.json(this.recentJobs(100));
     if (path === "/api/devices" && request.method === "GET") return this.listDevices();
     if (path === "/api/devices" && request.method === "POST")
       return this.addDevice(await request.json().catch(() => null));
@@ -372,7 +485,16 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   override async webSocketMessage(socket: WebSocket, data: string | ArrayBuffer) {
-    const caller = socket.deserializeAttachment() as Caller;
+    const attachment = socket.deserializeAttachment() as Attachment;
+    if (attachment.kind === "machine") {
+      this.machineMessage(
+        socket,
+        attachment,
+        typeof data === "string" ? data : new TextDecoder().decode(data),
+      );
+      return;
+    }
+    const caller = attachment.caller;
     if (!this.authorized(caller)) {
       socket.close(4003, "You lost access to the kitshn admin.");
       return;
@@ -389,10 +511,498 @@ export class Kitshn extends DurableObject<Env> {
     send(socket, this.handle(caller, message));
   }
 
+  override async webSocketClose(socket: WebSocket) {
+    this.socketGone(socket);
+  }
+
+  override async webSocketError(socket: WebSocket) {
+    this.socketGone(socket);
+  }
+
+  private socketGone(socket: WebSocket) {
+    const attachment = socket.deserializeAttachment() as Attachment | null;
+    if (attachment?.kind !== "machine") return;
+    const others = this.ctx.getWebSockets(attachment.machineId).filter((other) => other !== socket);
+    if (others.length > 0) return;
+    // A job that the machine had when its connection ended has no result coming.
+    this.sql(
+      `UPDATE jobs SET state = 'failed', output = '${OFFLINE_OUTPUT}' WHERE machine_id = ? AND state = 'sent'`,
+      attachment.machineId,
+    );
+    this.setPresence(attachment.machineId, false);
+  }
+
+  /** K-605: presence rows change only when a machine goes online or offline (K-1302). */
+  private setPresence(machineId: string, online: boolean) {
+    const now = Date.now();
+    if (this.presence.get(machineId)?.online === online) return;
+    this.presence.set(machineId, { online, lastSeen: now });
+    this.sql(
+      "INSERT OR REPLACE INTO presence (id, online, last_seen) VALUES (?, ?, ?)",
+      machineId,
+      online ? 1 : 0,
+      now,
+    );
+    this.broadcast();
+  }
+
+  /** Machines with an open socket. Presence rows can be stale after a deploy; sockets are not. */
+  private onlineMachines() {
+    return new Set([...this.state.machines.keys()].filter((id) => this.openSocket(id) !== null));
+  }
+
+  /** After a restart, a presence row says online although its socket is gone; set it offline once. */
+  private reconcilePresence() {
+    for (const [id, value] of this.presence)
+      if (value.online && this.openSocket(id) === null) this.setPresence(id, false);
+  }
+
+  /** K-604: a daemon connects with its machine's service token; the Worker checked the Access JWT. */
+  private connectMachine(request: Request, caller: Caller) {
+    if (request.headers.get("upgrade") !== "websocket")
+      return new Response("Expected a WebSocket.", { status: 426 });
+    const machine = [...this.state.machines.values()].find(
+      (item) => item.clientId === caller.visitor.clientId,
+    );
+    if (!machine)
+      return Response.json({ error: "This service token belongs to no joined machine." }, { status: 403 });
+    for (const old of this.ctx.getWebSockets(machine.id))
+      old.close(4001, "A newer connection of this machine replaced it.");
+    const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
+    this.ctx.acceptWebSocket(server, [machine.id, "machines"]);
+    server.serializeAttachment({
+      kind: "machine",
+      machineId: machine.id,
+      since: Date.now(),
+      status: null,
+      sample: null,
+    } satisfies Attachment);
+    if (this.presence.get(machine.id)?.online) this.sendMachine(machine);
+    else this.setPresence(machine.id, true);
+    this.deliverJobs();
+    void this.scheduleAlarm();
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private machineMessage(
+    socket: WebSocket,
+    attachment: Extract<Attachment, { kind: "machine" }>,
+    text: string,
+  ) {
+    const machine = this.state.machines.get(attachment.machineId);
+    if (!machine) return;
+    let message: DaemonMessage;
+    try {
+      message = JSON.parse(text) as DaemonMessage;
+    } catch {
+      return;
+    }
+    if (message.type === "status" && isRecord(message.status)) {
+      const status: MachineStatus = {
+        version: String(message.status.version).slice(0, 40),
+        os: String(message.status.os).slice(0, 80),
+        arch: String(message.status.arch).slice(0, 20),
+        hostname: String(message.status.hostname).slice(0, 80),
+        tunnel: ["starting", "running", "stopped"].includes(String(message.status.tunnel))
+          ? message.status.tunnel
+          : "stopped",
+      };
+      socket.serializeAttachment({ ...attachment, status } satisfies Attachment);
+      this.sendMachine(machine);
+    } else if (message.type === "sample" && isRecord(message.sample)) {
+      const share = (value: unknown) => (typeof value === "number" && value >= 0 && value <= 1 ? value : 0);
+      const sample: Sample = {
+        at: Date.now(),
+        cpu: share(message.sample.cpu),
+        memory: share(message.sample.memory),
+        disk: share(message.sample.disk),
+      };
+      socket.serializeAttachment({ ...attachment, sample } satisfies Attachment);
+      this.sendMachine(machine);
+    } else if (message.type === "jobResult" && typeof message.id === "number" && isRecord(message.result)) {
+      const result = message.result;
+      this.sql(
+        // A job failed only because the connection dropped still takes its real result.
+        `UPDATE jobs SET state = ?, exit_code = ?, output = ? WHERE id = ? AND machine_id = ?
+         AND (state = 'sent' OR (state = 'failed' AND output = '${OFFLINE_OUTPUT}'))`,
+        result.ok === true ? "done" : "failed",
+        typeof result.exitCode === "number" ? result.exitCode : null,
+        String(result.output ?? "").slice(0, OUTPUT_LIMIT),
+        message.id,
+        attachment.machineId,
+      );
+      this.broadcast();
+    }
+  }
+
+  /** K-602: a new machine gets a service token, a tunnel and a one-time join code. */
+  private async addMachine(caller: Caller, body: unknown, origin: string) {
+    const api = this.api();
+    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+    const name = typeof input["name"] === "string" ? input["name"].trim() : "";
+    if (!name || name.length > 60)
+      return Response.json({ error: "Give the machine a name of 1 to 60 characters." }, { status: 400 });
+    const labels = parseLabels(input["labels"] ?? []);
+    if (typeof labels === "string") return Response.json({ error: labels }, { status: 400 });
+    const id = machineIdFor(name);
+    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+    let token: { id: string; client_id: string; client_secret: string } | null = null;
+    let tunnel: { id: string } | null = null;
+    try {
+      const madeToken = await api<{ id: string; client_id: string; client_secret: string }>(
+        "POST",
+        `${account}/access/service_tokens`,
+        { name: `kitshn machine ${id}`, duration: "forever" },
+      );
+      token = madeToken;
+      const secret = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
+      const madeTunnel = await api<{ id: string }>("POST", `${account}/cfd_tunnel`, {
+        name: `kitshn ${id}`,
+        config_src: "cloudflare",
+        tunnel_secret: secret,
+      });
+      tunnel = madeTunnel;
+      const tunnelToken = await api<string>("GET", `${account}/cfd_tunnel/${madeTunnel.id}/token`);
+      const machine: Machine = {
+        id,
+        name,
+        labels,
+        order: Math.max(0, ...[...this.state.machines.values()].map((item) => item.order + 1)),
+        serviceTokenId: madeToken.id,
+        clientId: madeToken.client_id,
+        tunnelId: madeTunnel.id,
+      };
+      const code = newJoinCode();
+      const box = await sealJoin(code, {
+        server: origin,
+        machineId: id,
+        clientId: madeToken.client_id,
+        clientSecret: madeToken.client_secret,
+        tunnelToken,
+      });
+      const expiresAt = Date.now() + JOIN_CODE_MS;
+      const lookup = await joinLookup(code);
+      const resource: Resource = {
+        id,
+        kind: "machine",
+        name,
+        addresses: [],
+        status: "unknown",
+        group: null,
+        machine: id,
+      };
+      this.ctx.storage.transactionSync(() => {
+        this.sql("INSERT INTO machines (id, body) VALUES (?, ?)", id, JSON.stringify(machine));
+        this.putResource(resource);
+        this.sql(
+          "INSERT INTO join_codes (lookup, machine_id, iv, sealed, expires_at) VALUES (?, ?, ?, ?, ?)",
+          lookup,
+          id,
+          box.iv,
+          box.sealed,
+          expiresAt,
+        );
+        this.insertRevision(caller.actor, `Added machine ${name}`, [], null);
+      });
+      this.load();
+      this.broadcast();
+      void this.scheduleAlarm();
+      return Response.json({
+        machineId: id,
+        code,
+        expiresAt,
+        command: `curl -fsSL ${origin}/join | sh -s -- ${code} ${origin}`,
+      });
+    } catch (error) {
+      // Leave nothing half made behind.
+      if (tunnel) await api("DELETE", `${account}/cfd_tunnel/${tunnel.id}`).catch(() => undefined);
+      if (token) await api("DELETE", `${account}/access/service_tokens/${token.id}`).catch(() => undefined);
+      return Response.json({ error: String(error) }, { status: 502 });
+    }
+  }
+
+  /** K-602: trades a join code, once and within 10 minutes, for the sealed machine secrets. */
+  private async exchangeJoin(request: Request) {
+    const body = (await request.json().catch(() => null)) as { code?: unknown } | null;
+    const code = typeof body?.code === "string" ? body.code.trim() : "";
+    if (!code) return Response.json({ error: "Send the join code." }, { status: 400 });
+    const lookup = await joinLookup(code);
+    const [row] = this.sql<{ machine_id: string; iv: string; sealed: string; expires_at: number }>(
+      "SELECT machine_id, iv, sealed, expires_at FROM join_codes WHERE lookup = ?",
+      lookup,
+    );
+    if (!row)
+      return Response.json(
+        { error: "This join code is not valid, or someone used it already." },
+        { status: 404 },
+      );
+    this.sql("DELETE FROM join_codes WHERE lookup = ?", lookup);
+    if (row.expires_at < Date.now()) {
+      return Response.json(
+        { error: "This join code expired. Make a new one with Add machine." },
+        { status: 410 },
+      );
+    }
+    return Response.json({ iv: row.iv, sealed: row.sealed });
+  }
+
+  /** K-615: removes the service token, the tunnel and the queue of a machine. */
+  private async removeMachine(caller: Caller, id: string) {
+    const machine = this.state.machines.get(id);
+    if (!machine) return Response.json({ error: `No machine "${id}" exists.` }, { status: 404 });
+    const api = this.api();
+    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+    for (const socket of this.ctx.getWebSockets(id)) socket.close(4002, "The owner removed this machine.");
+    const notFound = (error: unknown) =>
+      error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error);
+    try {
+      await api("DELETE", `${account}/access/service_tokens/${machine.serviceTokenId}`).catch(notFound);
+      await api("DELETE", `${account}/cfd_tunnel/${machine.tunnelId}/connections`).catch(notFound);
+      await api("DELETE", `${account}/cfd_tunnel/${machine.tunnelId}`).catch(notFound);
+    } catch (error) {
+      return Response.json(
+        { error: `kitshn could not remove the machine in Cloudflare: ${String(error)}` },
+        { status: 502 },
+      );
+    }
+    this.ctx.storage.transactionSync(() => {
+      for (const table of ["machines", "resources", "places", "presence"])
+        this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
+      this.sql("DELETE FROM jobs WHERE machine_id = ? AND state IN ('queued', 'sent')", id);
+      this.sql("DELETE FROM join_codes WHERE machine_id = ?", id);
+      this.sql("DELETE FROM tunnel_objects WHERE machine_id = ?", id);
+      this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);
+      this.insertRevision(caller.actor, `Removed machine ${machine.name}`, [], null);
+    });
+    this.presence.delete(id);
+    this.load();
+    this.broadcast();
+    void this.scheduleAlarm();
+    return Response.json({ removed: id });
+  }
+
+  /** K-614: the sender of a command needs control on the machine card itself, not only on the admin. */
+  private canControl(visitor: Visitor, machineId: string) {
+    const resource = this.state.resources.get(machineId);
+    return resource !== undefined && visitorLevel(this.state, resource, visitor, Date.now()) === "control";
+  }
+
+  /** K-610 to K-614: a job runs on one machine, or on the first online machine with its labels. */
+  private addJob(caller: Caller, body: unknown) {
+    const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+    const command = parseCommand(input["command"]);
+    if (typeof command === "string") return Response.json({ error: command }, { status: 400 });
+    const labels = parseLabels(input["labels"] ?? []);
+    if (typeof labels === "string") return Response.json({ error: labels }, { status: 400 });
+    const machineId = typeof input["machineId"] === "string" ? input["machineId"] : null;
+    const target = machineId === null ? null : this.state.machines.get(machineId);
+    if (machineId !== null && !target) {
+      return Response.json({ error: `No machine "${machineId}" exists.` }, { status: 404 });
+    }
+    if (machineId !== null && !this.canControl(caller.visitor, machineId)) {
+      return Response.json(
+        {
+          error:
+            "Commands need the control level on the machine. Put its card in a circle that gives you control.",
+        },
+        { status: 403 },
+      );
+    }
+    if (machineId === null && labels.length === 0) {
+      return Response.json({ error: "A job needs a machine or labels." }, { status: 400 });
+    }
+    const now = Date.now();
+    const [row] = this.ctx.storage.transactionSync(() => {
+      const inserted = this.sql<{ id: number }>(
+        `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
+         VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, NULL, '') RETURNING id`,
+        machineId,
+        JSON.stringify(labels),
+        JSON.stringify(command),
+        now,
+        now + JOB_EXPIRY_MS,
+        JSON.stringify(caller.actor),
+        JSON.stringify(caller.visitor),
+      );
+      // K-614: the history names the member that sent a shell command.
+      if (command.kind === "shell") {
+        const where = target ? target.name : `a machine with ${labels.join(", ")}`;
+        this.insertRevision(caller.actor, `Ran on ${where}: ${command.script.slice(0, 80)}`, [], null);
+      }
+      return inserted;
+    });
+    if (command.kind === "shell") this.load();
+    this.deliverJobs();
+    this.broadcast();
+    void this.scheduleAlarm();
+    return Response.json({ id: row?.id ?? null });
+  }
+
+  /**
+   * Sends each queued job to its machine when that machine is online (K-613 "when online"). A label job
+   * goes to the first fitting machine in the order on which its sender has control (K-610, K-614).
+   */
+  private deliverJobs() {
+    const online = this.onlineMachines();
+    const queued = this.sql<{
+      id: number;
+      machine_id: string | null;
+      labels: string;
+      command: string;
+      visitor: string;
+    }>(
+      "SELECT id, machine_id, labels, command, visitor FROM jobs WHERE state = 'queued' AND expires_at > ? ORDER BY id",
+      Date.now(),
+    );
+    for (const job of queued) {
+      const visitor = JSON.parse(job.visitor) as Visitor;
+      const allowed = new Set([...online].filter((id) => this.canControl(visitor, id)));
+      const machine =
+        job.machine_id !== null
+          ? allowed.has(job.machine_id)
+            ? (this.state.machines.get(job.machine_id) ?? null)
+            : null
+          : pickMachine(this.state.machines.values(), allowed, JSON.parse(job.labels) as Array<string>);
+      if (!machine) continue;
+      const socket = this.openSocket(machine.id);
+      if (!socket) continue;
+      send(socket, { type: "job", id: job.id, command: JSON.parse(job.command) as Command });
+      this.sql("UPDATE jobs SET state = 'sent', machine_id = ? WHERE id = ?", machine.id, job.id);
+    }
+  }
+
+  /** K-609: the owner sets the labels and the order of a machine. */
+  private updateMachine(caller: Caller, id: string, body: unknown) {
+    const machine = this.state.machines.get(id);
+    if (!machine) return Response.json({ error: `No machine "${id}" exists.` }, { status: 404 });
+    const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+    const labels = input["labels"] === undefined ? machine.labels : parseLabels(input["labels"]);
+    if (typeof labels === "string") return Response.json({ error: labels }, { status: 400 });
+    const order = input["order"] === undefined ? machine.order : Number(input["order"]);
+    if (!Number.isInteger(order) || order < 0 || order > 10_000) {
+      return Response.json({ error: "The order is a whole number from 0 to 10,000." }, { status: 400 });
+    }
+    const updated: Machine = { ...machine, labels: [...labels], order };
+    if (deepEqual(updated, machine)) return Response.json(updated);
+    this.ctx.storage.transactionSync(() => {
+      this.sql("UPDATE machines SET body = ? WHERE id = ?", JSON.stringify(updated), id);
+      this.insertRevision(
+        caller.actor,
+        `Changed machine ${machine.name}: labels ${labels.join(", ") || "none"}, order ${order}`,
+        [],
+        null,
+      );
+    });
+    this.load();
+    this.deliverJobs();
+    this.broadcast();
+    return Response.json(updated);
+  }
+
+  private recentJobs(limit: number, outputLimit = 4000): Array<Job> {
+    return this.sql<{
+      id: number;
+      machine_id: string | null;
+      labels: string;
+      command: string;
+      state: Job["state"];
+      created_at: number;
+      expires_at: number;
+      actor: string;
+      exit_code: number | null;
+      output: string;
+    }>(
+      "SELECT id, machine_id, labels, command, state, created_at, expires_at, actor, exit_code, output FROM jobs ORDER BY id DESC LIMIT ?",
+      limit,
+    ).map((row) => ({
+      id: row.id,
+      machineId: row.machine_id,
+      labels: JSON.parse(row.labels) as Array<string>,
+      command: JSON.parse(row.command) as Command,
+      state: row.state,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      actor: row.actor,
+      exitCode: row.exit_code,
+      output: row.output.slice(0, outputLimit),
+    }));
+  }
+
+  /** K-1107: closes machine sockets that answered no ping for 30 seconds. */
+  private checkLiveness(now: number) {
+    for (const socket of this.ctx.getWebSockets("machines")) {
+      const attachment = socket.deserializeAttachment() as Attachment;
+      if (attachment.kind !== "machine") continue;
+      const last = this.ctx.getWebSocketAutoResponseTimestamp(socket)?.getTime() ?? attachment.since;
+      if (now - last > PING_TIMEOUT_MS) {
+        socket.close(4008, "No ping for 30 seconds.");
+        this.socketGone(socket);
+      }
+    }
+  }
+
+  /** Returns how many jobs expired. */
+  private expireJobs(now: number) {
+    return this.sql(
+      "UPDATE jobs SET state = 'expired' WHERE state IN ('queued', 'sent') AND expires_at <= ? RETURNING id",
+      now,
+    ).length;
+  }
+
+  /** K-603: kitshn owns each tunnel's ingress and writes it from the alarm queue. */
+  private async syncTunnels(api: NonNullable<ReturnType<Kitshn["api"]>>, budget: number) {
+    let calls = 0;
+    const rows = new Map(
+      this.sql<{ machine_id: string; body: string; error: string | null }>(
+        "SELECT machine_id, body, error FROM tunnel_objects",
+      ).map((row) => [row.machine_id, row]),
+    );
+    for (const machine of this.state.machines.values()) {
+      const body = JSON.stringify(tunnelConfig());
+      if (rows.get(machine.id)?.body === body) continue;
+      if (calls++ >= budget) return;
+      try {
+        await api(
+          "PUT",
+          `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${machine.tunnelId}/configurations`,
+          tunnelConfig(),
+        );
+        this.sql(
+          "INSERT OR REPLACE INTO tunnel_objects (machine_id, body, error) VALUES (?, ?, NULL)",
+          machine.id,
+          body,
+        );
+      } catch (error) {
+        // Stored with the failed body, so it waits for the daily run, which clears it for a retry.
+        this.sql(
+          "INSERT OR REPLACE INTO tunnel_objects (machine_id, body, error) VALUES (?, ?, ?)",
+          machine.id,
+          body,
+          String(error),
+        );
+      }
+    }
+  }
+
+  private tunnelWork() {
+    const done = new Set(
+      this.sql<{ machine_id: string }>("SELECT machine_id FROM tunnel_objects").map((row) => row.machine_id),
+    );
+    return [...this.state.machines.keys()].some((id) => !done.has(id));
+  }
+
   /** K-1302: one alarm for the next due item. Access work, share end dates, and the daily run. */
   private async scheduleAlarm() {
     const now = Date.now();
     let next = this.dailyAt();
+    if (this.ctx.getWebSockets("machines").length > 0) next = Math.min(next, now + PING_TIMEOUT_MS);
+    if (this.env.CLOUDFLARE_API_TOKEN && this.tunnelWork()) next = now;
+    const [job] = this.sql<{ expires_at: number }>(
+      "SELECT MIN(expires_at) AS expires_at FROM jobs WHERE state IN ('queued', 'sent')",
+    );
+    if (job?.expires_at) next = Math.min(next, Math.max(job.expires_at, now));
     const desired = desiredAccess(this.state, now);
     if (this.env.CLOUDFLARE_API_TOKEN && hasAccessWork(desired, this.access)) next = now;
     const ends = [
@@ -401,8 +1011,9 @@ export class Kitshn extends DurableObject<Env> {
     ];
     for (const end of ends) if (end !== null && end > now && end < next) next = end;
     if (ends.some((end) => end !== null && end <= now) && this.expiredShares(now).length > 0) next = now;
+    // Never move a pending alarm later: frequent wake-ups would otherwise push it away for good.
     const current = await this.ctx.storage.getAlarm();
-    if (current !== next) await this.ctx.storage.setAlarm(next);
+    if (current === null || current <= now || next < current) await this.ctx.storage.setAlarm(next);
   }
 
   private dailyAt() {
@@ -458,6 +1069,12 @@ export class Kitshn extends DurableObject<Env> {
       );
       // K-408: retry what failed once a day.
       this.sql("UPDATE access_objects SET error = NULL WHERE error IS NOT NULL");
+      this.sql("DELETE FROM tunnel_objects WHERE error IS NOT NULL");
+      // K-1503 style clean-up: keep the newest 1,000 finished jobs.
+      this.sql(
+        "DELETE FROM jobs WHERE state NOT IN ('queued', 'sent') AND id <= (SELECT id FROM jobs ORDER BY id DESC LIMIT 1 OFFSET 1000)",
+      );
+      this.sql("DELETE FROM join_codes WHERE expires_at < ?", now);
       this.sql(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('daily_at', ?)",
         String(nextUtcMidnight(now)),
@@ -550,6 +1167,10 @@ export class Kitshn extends DurableObject<Env> {
 
   override async alarm() {
     const now = Date.now();
+    this.checkLiveness(now);
+    // The alarm runs every 30 s while a daemon is connected, so it tells the maps only about real changes.
+    let changed = this.expireJobs(now) > 0;
+    const before = JSON.stringify(accessStates(desiredAccess(this.state, now), this.access));
     this.endShares(now);
     const daily = this.dailyAt() <= now;
     if (daily) this.daily(now);
@@ -579,10 +1200,14 @@ export class Kitshn extends DurableObject<Env> {
         this.accessStore(),
         api,
         this.env.CLOUDFLARE_ACCOUNT_ID,
-        CALLS_PER_RUN - spent,
+        // Ten calls stay free for the tunnels (K-406, K-603).
+        CALLS_PER_RUN - spent - 10,
       );
-      this.broadcast();
+      await this.syncTunnels(api, 10);
+      changed ||=
+        daily || JSON.stringify(accessStates(desiredAccess(this.state, now), this.access)) !== before;
     }
+    if (changed) this.broadcast();
     await this.scheduleAlarm();
   }
 }
@@ -605,4 +1230,11 @@ function ownerDevices(text: string | undefined): Array<Extract<Member, { _tag: "
   });
 }
 
-const send = (socket: WebSocket, message: ServerMessage) => socket.send(JSON.stringify(message));
+/** The output of a job whose machine went offline; a later real result replaces it. */
+const OFFLINE_OUTPUT = "The machine went offline during the job. kitshn takes its result if it comes later.";
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+const send = (socket: WebSocket, message: ServerMessage | ServerToDaemon) =>
+  socket.send(JSON.stringify(message));

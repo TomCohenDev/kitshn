@@ -7,3 +7,4 @@ dist/
 node_modules/
 .wrangler/
 .dev.vars
+*.bun-build

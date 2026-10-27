@@ -1,3 +1,4 @@
+import type { Machine } from "./machine.ts";
 import {
   type Circle,
   type Level,
@@ -51,7 +52,11 @@ export function ipInRange(ip: string, range: string): boolean {
   return true;
 }
 
-export function memberMatches(member: Member, visitor: Visitor): boolean {
+export function memberMatches(
+  member: Member,
+  visitor: Visitor,
+  machines: ReadonlyMap<string, Machine>,
+): boolean {
   const email = visitor.email?.toLowerCase() ?? null;
   switch (member._tag) {
     case "email":
@@ -62,20 +67,25 @@ export function memberMatches(member: Member, visitor: Visitor): boolean {
       return visitor.ip !== null && ipInRange(visitor.ip, member.range);
     case "device":
       return visitor.clientId !== null && visitor.clientId === member.clientId;
-    // Machines join in milestone 2 and carry their own service token (K-107).
-    case "machine":
-      return false;
+    case "machine": {
+      const machine = machines.get(member.machineId);
+      return machine !== undefined && visitor.clientId === machine.clientId;
+    }
     case "everyone":
       return true;
   }
 }
 
 /** K-203. An empty circle matches nobody. The passkey check runs in Access, not here (K-103). */
-export function circleMatches(circle: Circle, visitor: Visitor): boolean {
+export function circleMatches(
+  circle: Circle,
+  visitor: Visitor,
+  machines: ReadonlyMap<string, Machine>,
+): boolean {
   if (circle.members.length === 0) return false;
   return circle.match === "all"
-    ? circle.members.every((member) => memberMatches(member, visitor))
-    : circle.members.some((member) => memberMatches(member, visitor));
+    ? circle.members.every((member) => memberMatches(member, visitor, machines))
+    : circle.members.some((member) => memberMatches(member, visitor, machines));
 }
 
 /** K-207: the highest level of the shares whose circle matches the visitor, or null. */
@@ -84,7 +94,7 @@ export function visitorLevel(state: State, resource: Resource, visitor: Visitor,
   if (state.paused && visitor.email === null) return null;
   let best: Level | null = null;
   for (const share of activeShares(state, resource, now)) {
-    if (!circleMatches(share.circle, visitor)) continue;
+    if (!circleMatches(share.circle, visitor, state.machines)) continue;
     if (best === null || levelRank(share.level) > levelRank(best)) best = share.level;
   }
   return best;

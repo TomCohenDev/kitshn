@@ -220,6 +220,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-814** The deploy ends with a route check: kitshn requests the address and records status and content type, as KitSHn 1 does.
 - **K-815** `kitshn try` builds and runs a recipe on the machine of the developer with a temporary socket, as KitSHn 1 `try`. It touches no environment.
 - **K-816** kitshn creates a GitHub deployment and its status for each environment, with the address.
+- **K-817** Planned ([#60](https://github.com/Yarden-zamir/kitshn/issues/60)). An environment can have several addresses: `address` takes one address or a list. An address may be on another Cloudflare zone of the account, including an apex such as `onion-climbers.com`. An extra address can redirect (301) to the first one, for example `www.onion-climbers.com`. Every address gets the share of the card, with one Access application and one tunnel route each. The move of an app with data follows the same steps as any data copy: stop the old app, copy, check, then switch the address.
 
 ## 9. Previews
 

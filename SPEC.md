@@ -42,7 +42,7 @@ The architecture, the request paths and the budget are in [docs/architecture.md]
 - **K-107** A machine proves itself with its own service token (K-602). A machine is a circle member too, so a share can give one machine access to another resource.
 - **K-108** Browser approvals of the machine map (browser keys, the Clients approval flow) do not exist in kitshn. A passkey or a device token replaces them.
 - **K-109** Access sessions of the admin resource last 24 hours. Sessions of other resources last 30 days unless a circle sets a shorter time.
-- **K-110** "Sign out everywhere" ends every Access session of the account through the Cloudflare API.
+- **K-110** "Sign out everywhere" ends every Access session of every application that kitshn made, through the Cloudflare API. It does not end sessions of other applications (K-408).
 - **K-111** Zero Trust Free counts one seat per person who logs in, up to 50. kitshn turns on seat expiration in Zero Trust admin controls, set to 1 month, so guests who stop coming free their seat. [Seat management](https://developers.cloudflare.com/cloudflare-one/team-and-resources/users/seat-management/) runs the expiry once a day.
 - **K-112** The admin view shows the seats in use, with a warning at 40. The view can also remove a seat. Checked on 2026-10-27: `GET /accounts/{id}/access/users` lists each user with `seat_uid` and `access_seat`. VERIFY: the [seat API](https://developers.cloudflare.com/api/resources/zero_trust/subresources/seats/methods/edit/) `PATCH /accounts/{id}/access/seats` turns a seat off. Milestone 2 tests it with the Seats view.
 

@@ -3,7 +3,15 @@ import { desiredAccess } from "../core/access.ts";
 import { applyChanges, resolveEdits } from "../core/changes.ts";
 import type { State } from "../core/model.ts";
 import { seed } from "../core/seed.ts";
-import { type AccessRow, type Api, accessStates, hasAccessWork, syncAccess } from "./access-sync.ts";
+import {
+  type AccessRow,
+  type Api,
+  accessStates,
+  hasAccessWork,
+  signOutEverywhere,
+  syncAccess,
+  verifyAccess,
+} from "./access-sync.ts";
 
 function start(): State {
   const s = seed(["owner@example.com"], "kit.example.com");
@@ -12,6 +20,7 @@ function start(): State {
     resources: new Map(s.resources.map((resource) => [resource.id, resource])),
     places: new Map(s.places),
     shareSettings: new Map(),
+    paused: false,
   };
 }
 
@@ -150,5 +159,67 @@ describe("Access sync (K-406, K-408)", () => {
     cf.calls.length = 0;
     await syncAccess(desired, cf.store, cf.api, "a");
     expect(cf.calls).toEqual(["PUT /policies/id1"]);
+  });
+});
+
+describe("daily compare and sessions (K-408, K-409, K-110)", () => {
+  it("rewrites an object that someone changed, and warns about a foreign application", async () => {
+    const cf = fakeCloudflare();
+    const desired = desiredAccess(start(), 0);
+    await syncAccess(desired, cf.store, cf.api, "a");
+    const live: Api = async <T>(method: string, path: string) => {
+      if (path.includes("/policies?"))
+        return [
+          {
+            id: "id1",
+            name: "kitshn circle Owner",
+            decision: "allow",
+            include: [{ everyone: {} }],
+            require: [],
+            exclude: [],
+          },
+        ] as T;
+      if (path.includes("/apps?"))
+        return [
+          {
+            id: "id2",
+            name: "kitshn admin",
+            domain: "kit.example.com",
+            session_duration: "24h",
+            policies: [{ id: "id1" }],
+          },
+          { id: "x", name: "Someone else", domain: "kit.example.com" },
+        ] as T;
+      return cf.api(method as "GET", path);
+    };
+    const warnings = await verifyAccess(desired, cf.store, live, "a");
+    expect(warnings).toEqual([expect.stringContaining("Someone else")]);
+    expect(hasAccessWork(desired, cf.rows)).toBe(true);
+    cf.calls.length = 0;
+    await syncAccess(desired, cf.store, cf.api, "a");
+    expect(cf.calls).toEqual(["PUT /policies/id1"]);
+  });
+
+  it("ends the sessions of an application that loses a policy, and of every kitshn application on sign out", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    const owner = state.circles.get("owner")!;
+    const two = applyChanges(
+      state,
+      resolveEdits(state, [
+        { _tag: "circle", id: "b", after: { ...owner, id: "b", name: "B", x: 0, y: 0, r: 100 } },
+      ]),
+    );
+    await syncAccess(desiredAccess(two, 0), cf.store, cf.api, "a");
+    cf.calls.length = 0;
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    expect(cf.calls).toContain(
+      `POST /apps/${cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId}/revoke_tokens`,
+    );
+    cf.calls.length = 0;
+    expect(await signOutEverywhere(cf.store, cf.api, "a")).toBe(1);
+    expect(cf.calls).toEqual([
+      `POST /apps/${cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId}/revoke_tokens`,
+    ]);
   });
 });

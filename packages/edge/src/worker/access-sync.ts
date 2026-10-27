@@ -1,4 +1,5 @@
 import { ACCESS_NAME_PREFIX, type AppBody, type DesiredAccess, type PolicyBody } from "../core/access.ts";
+import { deepEqual } from "../core/changes.ts";
 import type { AccessState } from "../core/protocol.ts";
 
 /**
@@ -98,10 +99,119 @@ const isNotFound = (error: unknown) =>
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
+const policyIds = (body: string) =>
+  (JSON.parse(body) as { policies?: ReadonlyArray<{ id: string }> }).policies?.map((policy) => policy.id) ??
+  [];
+
+const removesPolicy = (before: string, after: string) => {
+  const kept = new Set(policyIds(after));
+  return policyIds(before).some((id) => !kept.has(id));
+};
+
 interface Named {
   readonly id: string;
   readonly name: string;
   readonly domain?: string;
+}
+
+interface LivePolicy extends Named {
+  readonly decision: string;
+  readonly include: unknown;
+  readonly require: unknown;
+  readonly exclude: unknown;
+}
+
+interface LiveApp extends Named {
+  readonly session_duration?: string;
+  readonly policies?: ReadonlyArray<{ readonly id: string }>;
+}
+
+/**
+ * K-408, the daily run: reads Access in two calls and marks each object that someone changed or deleted,
+ * so the next sync writes it again. The lists carry no MFA settings, so a changed passkey setting is not
+ * seen here; revisit if the list API adds `mfa_config`. Returns warnings for applications that kitshn did
+ * not make but that cover a kitshn address; kitshn never changes those.
+ */
+export async function verifyAccess(
+  desired: DesiredAccess,
+  store: AccessStore,
+  api: Api,
+  accountId: string,
+): Promise<Array<string>> {
+  const base = `/accounts/${accountId}/access`;
+  const policies = await api<ReadonlyArray<LivePolicy>>("GET", `${base}/policies?per_page=1000`);
+  const apps = await api<ReadonlyArray<LiveApp>>("GET", `${base}/apps?per_page=1000`);
+  for (const row of store.rows.values()) {
+    if (!row.cfId || !row.body) continue;
+    const ours = JSON.parse(row.body) as Record<string, unknown>;
+    let same: boolean;
+    if (row.key.startsWith("policy:")) {
+      const live = policies.find((policy) => policy.id === row.cfId);
+      same =
+        live !== undefined &&
+        deepEqual(
+          {
+            name: live.name,
+            decision: live.decision,
+            include: live.include,
+            require: live.require,
+            exclude: live.exclude,
+          },
+          {
+            name: ours["name"],
+            decision: ours["decision"],
+            include: ours["include"],
+            require: ours["require"],
+            exclude: ours["exclude"],
+          },
+        );
+      if (!live) store.put({ ...row, cfId: "", body: "", tried: "", error: null });
+      else if (!same) store.put({ ...row, body: "", tried: "", error: null });
+      continue;
+    }
+    const live = apps.find((app) => app.id === row.cfId);
+    same =
+      live !== undefined &&
+      deepEqual(
+        {
+          name: live.name,
+          domain: live.domain,
+          session: live.session_duration,
+          policies: live.policies?.map((p) => p.id) ?? [],
+        },
+        {
+          name: ours["name"],
+          domain: ours["domain"],
+          session: ours["session_duration"],
+          policies: policyIds(row.body),
+        },
+      );
+    if (!live) store.put({ ...row, cfId: "", body: "", tried: "", error: null });
+    else if (!same) store.put({ ...row, body: "", tried: "", error: null });
+  }
+  const ours = new Set([...store.rows.values()].map((row) => row.cfId));
+  const warnings: Array<string> = [];
+  for (const app of desired.apps.values()) {
+    for (const live of apps) {
+      if (live.domain === app.domain && !ours.has(live.id)) {
+        warnings.push(
+          `The Access application "${live.name}" also covers ${app.domain}. kitshn did not make it and does not change it.`,
+        );
+      }
+    }
+  }
+  return warnings;
+}
+
+/** K-110: ends the sessions of every application that kitshn made. It never touches other applications. */
+export async function signOutEverywhere(store: AccessStore, api: Api, accountId: string): Promise<number> {
+  let ended = 0;
+  for (const row of store.rows.values()) {
+    if (!row.key.startsWith("app:") || !row.cfId) continue;
+    await api("POST", `/accounts/${accountId}/access/apps/${row.cfId}/revoke_tokens`);
+    ended++;
+  }
+  return ended;
 }
 
 /**
@@ -149,6 +259,12 @@ export async function syncAccess(
         ? await api<Named>("PUT", `${base}/${kind}/${cfId}`, request)
         : await api<Named>("POST", `${base}/${kind}`, request);
       store.put({ key, cfId: result.id, body, tried: body, error: null });
+      // K-409: a removed share takes effect at once, so the sessions of the application end.
+      if (kind === "apps" && row?.body && removesPolicy(row.body, body) && spend()) {
+        await api("POST", `${base}/apps/${result.id}/revoke_tokens`).catch((error: unknown) => {
+          console.warn(`kitshn could not end the sessions of ${key}: ${message(error)}`);
+        });
+      }
     } catch (error) {
       // Someone deleted the object: forget its id, so the next run creates it again.
       if (isNotFound(error) && cfId) store.put({ key, cfId: "", body: "", tried: "", error: null });

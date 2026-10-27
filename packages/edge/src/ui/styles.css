@@ -676,3 +676,29 @@ select {
     display: none;
   }
 }
+
+.banner {
+  position: fixed;
+  top: 112px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 11;
+  padding: 4px 12px;
+  font-weight: 800;
+  color: var(--error-fg);
+  background: var(--error-surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.secret {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  margin: 6px 0;
+  background: var(--raised);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  overflow-wrap: anywhere;
+}

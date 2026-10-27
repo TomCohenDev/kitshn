@@ -1,4 +1,4 @@
-import { ADMIN_RESOURCE_ID, type Circle, type Member, type State, shareKey, sharesOf } from "./model.ts";
+import { ADMIN_RESOURCE_ID, type Circle, type Member, type State, activeShares } from "./model.ts";
 
 /** An Access rule, in the shape of the Cloudflare API. */
 export type Rule =
@@ -168,10 +168,7 @@ export function desiredAccess(state: State, now: number): DesiredAccess {
   for (const resource of state.resources.values()) {
     if (WORKER_CHECKED.has(resource.kind) || resource.addresses.length === 0) continue;
     const policyKeys: Array<string> = [];
-    for (const share of sharesOf(state, resource)) {
-      if (share.circle.endsAt !== null && share.circle.endsAt <= now) continue;
-      const shareEnds = state.shareSettings.get(shareKey(resource.id, share.circle.id))?.endsAt ?? null;
-      if (shareEnds !== null && shareEnds <= now) continue;
+    for (const share of activeShares(state, resource, now)) {
       for (const [key, body] of circlePolicies(share.circle)) {
         policies.set(key, body);
         policyKeys.push(key);

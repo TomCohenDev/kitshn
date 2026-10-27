@@ -23,6 +23,9 @@ export interface Snapshot {
   readonly shareSettings: Readonly<Record<string, ShareSetting>>;
   readonly revisions: ReadonlyArray<RevisionView>;
   readonly access: Readonly<Record<string, AccessState>>;
+  /** K-408: Access applications that kitshn did not make but that cover a kitshn address. */
+  readonly accessWarnings: ReadonlyArray<string>;
+  readonly paused: boolean;
   readonly me: Actor;
 }
 

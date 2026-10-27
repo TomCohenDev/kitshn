@@ -19,7 +19,7 @@ import { placeInside } from "../core/place.ts";
 import type { RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, MEMBER_ICONS } from "./kinds.ts";
 import { MapView, type Selection, type View } from "./Map.tsx";
-import { applyEdits, explainRefusal, toState, undoRevision, useStore } from "./store.ts";
+import { applyEdits, callApi, explainRefusal, toState, undoRevision, useStore } from "./store.ts";
 
 const VIEW_KEY = "kitshn.view";
 const UNDO_MS = 10_000;
@@ -356,7 +356,44 @@ export function App() {
           if (to) void commit([{ _tag: "place", id: resource.id, after: to }], []);
         }}
         onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
+        paused={store.snapshot.paused}
+        warnings={store.snapshot.accessWarnings}
+        onPause={async (pause) => {
+          const text = pause
+            ? "Pause sets every share to none, except the Owner circle's share of the admin. Pause now?"
+            : "Resume gives every share back. Resume now?";
+          if (!(await ask(text))) return;
+          const result = await applyEdits([{ _tag: "pause", after: pause }]);
+          showToast(
+            result.ok
+              ? {
+                  text: pause ? "Paused. Only the Owner circle opens the admin." : "Resumed.",
+                  error: false,
+                  undo: result.revision,
+                }
+              : { text: result.error, error: true, undo: null },
+          );
+        }}
+        onSignOut={async () => {
+          if (!(await ask("End every session of every kitshn application? Everyone logs in again, you too.")))
+            return;
+          const result = await callApi<{ ended: number }>("POST", "/api/sign-out", {});
+          showToast(
+            "error" in result
+              ? { text: result.error, error: true, undo: null }
+              : {
+                  text: `Ended the sessions of ${plural(result.ended, "application")}.`,
+                  error: false,
+                  undo: null,
+                },
+          );
+        }}
       />
+      {store.snapshot.paused ? (
+        <div class="banner" role="status">
+          Paused: only the Owner circle opens the admin. Everything else is closed.
+        </div>
+      ) : null}
       {palette ? (
         <Palette
           state={state}
@@ -472,6 +509,10 @@ function Panel(props: {
   onDeleteCircle: (circle: Circle) => void;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean) => void;
+  paused: boolean;
+  warnings: ReadonlyArray<string>;
+  onPause: (pause: boolean) => void;
+  onSignOut: () => void;
 }) {
   const { state, selection } = props;
   const [sheetOpen, setSheetOpen] = useState(true);
@@ -539,6 +580,25 @@ function Panel(props: {
           ))}
         </ul>
         <p class="muted">You are {actorLabel(props.me)}.</p>
+        {props.warnings.length > 0 ? (
+          <>
+            <div class="label">Access warnings</div>
+            <ul>
+              {props.warnings.map((warning) => (
+                <li key={warning}>{warning}</li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+        <div class="label">Safety</div>
+        <div class="row">
+          <button class="btn danger" onClick={() => props.onPause(!props.paused)}>
+            {props.paused ? "Resume" : "Emergency pause"}
+          </button>
+          <button class="btn" onClick={props.onSignOut}>
+            Sign out everywhere
+          </button>
+        </div>
       </section>
     );
   }
@@ -691,6 +751,92 @@ function CardPanel(props: {
   );
 }
 
+type DeviceMember = Extract<Member, { _tag: "device" }>;
+
+/** K-106: pick an Access service token as a device member, or make a new one. */
+function DevicePicker(props: { onAdd: (member: DeviceMember) => void }) {
+  const [devices, setDevices] = useState<Array<Omit<DeviceMember, "_tag">> | null>(null);
+  const [picked, setPicked] = useState("");
+  const [name, setName] = useState("");
+  const [secret, setSecret] = useState<{ clientId: string; clientSecret: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  if (devices === null) {
+    return (
+      <div class="row">
+        <button
+          class="btn"
+          onClick={async () => {
+            const result = await callApi<Array<Omit<DeviceMember, "_tag">>>("GET", "/api/devices");
+            if ("error" in result) setError(result.error);
+            else setDevices(result);
+          }}
+        >
+          📱 Add a device…
+        </button>
+        {error ? <span class="muted">{error}</span> : null}
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div class="row">
+        <select value={picked} onChange={(event) => setPicked((event.target as HTMLSelectElement).value)}>
+          <option value="">Pick a service token</option>
+          {devices.map((device) => (
+            <option key={device.tokenId} value={device.tokenId}>
+              {device.name}
+            </option>
+          ))}
+        </select>
+        <button
+          class="btn"
+          disabled={!picked}
+          onClick={() => {
+            const device = devices.find((item) => item.tokenId === picked);
+            if (device) props.onAdd({ _tag: "device", ...device });
+          }}
+        >
+          Add
+        </button>
+      </div>
+      <form
+        class="row"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          const result = await callApi<DeviceMember & { clientSecret: string }>("POST", "/api/devices", {
+            name,
+          });
+          if ("error" in result) return setError(result.error);
+          setError(null);
+          setName("");
+          setSecret({ clientId: result.clientId, clientSecret: result.clientSecret });
+          props.onAdd({
+            _tag: "device",
+            tokenId: result.tokenId,
+            clientId: result.clientId,
+            name: result.name,
+          });
+        }}
+      >
+        <input
+          value={name}
+          placeholder="New device, for example Her phone"
+          onInput={(event) => setName((event.target as HTMLInputElement).value)}
+        />
+        <button class="btn">Make a token</button>
+      </form>
+      {secret ? (
+        <div class="secret">
+          <div class="label">Shown once. Put it on the device now.</div>
+          <code>CF-Access-Client-Id: {secret.clientId}</code>
+          <code>CF-Access-Client-Secret: {secret.clientSecret}</code>
+        </div>
+      ) : null}
+      {error ? <p class="muted">{error}</p> : null}
+    </div>
+  );
+}
+
 const MEMBER_KINDS = ["email", "domain", "ip", "everyone"] as const;
 type AddableKind = (typeof MEMBER_KINDS)[number];
 
@@ -835,6 +981,7 @@ function CircleEditor(props: {
         <button class="btn">Add</button>
       </form>
       {error ? <p class="muted">{error}</p> : null}
+      <DevicePicker onAdd={(member) => put({ members: [...circle.members, member] })} />
       <div class="label" style={{ marginTop: "10px" }}>
         What it opens ({inside.length})
       </div>

@@ -77,6 +77,8 @@ export interface State {
   /** Card centres. A resource without a place sits in the tray (K-509). */
   readonly places: ReadonlyMap<string, Point>;
   readonly shareSettings: ReadonlyMap<string, ShareSetting>;
+  /** K-1504: while paused, only the Owner circle keeps its share of the admin. */
+  readonly paused: boolean;
 }
 
 export const levelRank = (level: Level) => LEVELS.indexOf(level);
@@ -115,6 +117,19 @@ export function sharesOf(state: State, resource: Resource): Array<Share> {
   return circlesHolding(state, resource.id).flatMap((circle) => {
     const level = shareLevel(state, resource, circle);
     return level ? [{ circle, level }] : [];
+  });
+}
+
+/**
+ * The shares that give access now: not past an end date (K-209, K-201), and during a pause only the
+ * admin share of the Owner circle (K-1504).
+ */
+export function activeShares(state: State, resource: Resource, now: number): Array<Share> {
+  return sharesOf(state, resource).filter((share) => {
+    if (share.circle.endsAt !== null && share.circle.endsAt <= now) return false;
+    const shareEnds = state.shareSettings.get(shareKey(resource.id, share.circle.id))?.endsAt ?? null;
+    if (shareEnds !== null && shareEnds <= now) return false;
+    return !state.paused || (resource.id === ADMIN_RESOURCE_ID && share.circle.id === OWNER_CIRCLE_ID);
   });
 }
 

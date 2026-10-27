@@ -5,8 +5,7 @@ import {
   type Resource,
   type State,
   levelRank,
-  shareKey,
-  sharesOf,
+  activeShares,
 } from "./model.ts";
 
 /** Who sent a request, as Access and Cloudflare tell the Worker (K-404). */
@@ -82,11 +81,7 @@ export function circleMatches(circle: Circle, visitor: Visitor): boolean {
 /** K-207: the highest level of the shares whose circle matches the visitor, or null. */
 export function visitorLevel(state: State, resource: Resource, visitor: Visitor, now: number): Level | null {
   let best: Level | null = null;
-  for (const share of sharesOf(state, resource)) {
-    if (share.circle.endsAt !== null && share.circle.endsAt <= now) continue;
-    // An expired share counts as gone before the alarm moves the card out (K-209).
-    const shareEnds = state.shareSettings.get(shareKey(resource.id, share.circle.id))?.endsAt ?? null;
-    if (shareEnds !== null && shareEnds <= now) continue;
+  for (const share of activeShares(state, resource, now)) {
     if (!circleMatches(share.circle, visitor)) continue;
     if (best === null || levelRank(share.level) > levelRank(best)) best = share.level;
   }

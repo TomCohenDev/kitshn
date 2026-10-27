@@ -55,6 +55,7 @@ function start(): State {
     resources: new Map([...s.resources, site].map((resource) => [resource.id, resource])),
     places: new Map([...s.places, ["riffle", { x: 0, y: -200 }]]),
     shareSettings: new Map(),
+    paused: false,
   };
 }
 
@@ -313,5 +314,29 @@ describe("Access compile (K-401 to K-403)", () => {
       resolveEdits(state, [{ _tag: "place", id: "riffle", after: { x: 3000, y: 3000 } }]),
     );
     expect(desiredAccess(moved, 0).apps.get("app:riffle:riffle.example.com")?.policyKeys).toEqual([]);
+  });
+});
+
+describe("pause (K-1504)", () => {
+  it("closes every share except the Owner circle's share of the admin", () => {
+    const state = start();
+    const { after } = edit(state, [{ _tag: "pause", after: true }]);
+    expect(ruleViolation(after)).toBeNull();
+    const access = desiredAccess(after, 0);
+    expect(access.apps.get("app:riffle:riffle.example.com")?.policyKeys).toEqual([]);
+    expect(access.apps.get("app:kitshn-admin:kit.example.com")?.policyKeys).toEqual(["policy:owner:people"]);
+    const owner = { email: OWNER, clientId: null, ip: null };
+    expect(visitorLevel(after, after.resources.get("riffle")!, owner, 0)).toBeNull();
+    expect(visitorLevel(after, after.resources.get(ADMIN_RESOURCE_ID)!, owner, 0)).toBe("control");
+  });
+
+  it("refuses a pause when only another circle guards the admin", () => {
+    const state = start();
+    const owner = circle(state, OWNER_CIRCLE_ID);
+    const moved = edit(state, [
+      { _tag: "circle", id: "admins", after: { ...owner, id: "admins", name: "Admins", x: 2000, y: 2000 } },
+      { _tag: "place", id: ADMIN_RESOURCE_ID, after: { x: 2000, y: 2000 } },
+    ]);
+    expect(ruleViolation(edit(moved.after, [{ _tag: "pause", after: true }]).after)).toMatch(/pause/);
   });
 });

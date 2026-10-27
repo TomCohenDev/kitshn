@@ -128,32 +128,47 @@ export async function callApi<T>(
   return data;
 }
 
-/** K-1101: an HTML file becomes a page (section 10); any other file stays a file. */
-export async function upload(file: File): Promise<{ id: string; address: string } | { error: string }> {
+/** The JSON answer of an upload, or null when it is not JSON, for example an Access login page. */
+function parseAnswer(text: string): { id?: string; address?: string; error?: string } | null {
+  try {
+    return JSON.parse(text) as { id?: string; address?: string; error?: string };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * K-1101: an HTML file becomes a page (section 10); any other file stays a file. With `at`, the card lands
+ * there on the map, so it gets the shares of the circles around that point (K-204); without, in the tray.
+ * XMLHttpRequest, not fetch, because only it reports upload progress.
+ */
+export function upload(
+  file: File,
+  at: { readonly x: number; readonly y: number } | null = null,
+  onProgress: (fraction: number) => void = () => undefined,
+): Promise<{ id: string; address: string } | { error: string }> {
   const lower = file.name.toLowerCase();
   const extension = [".html", ".htm"].find((ending) => lower.endsWith(ending));
-  const page = extension !== undefined;
   const name = extension ? file.name.slice(0, -extension.length) : file.name;
-  let response: Response;
-  try {
-    response = await fetch(page ? "/api/pages" : "/api/files", {
-      method: "POST",
-      headers: {
-        "content-type": file.type || "application/octet-stream",
-        "x-kitshn-name": encodeURIComponent(name),
-      },
-      body: file,
-    });
-  } catch (error) {
-    return { error: `kitshn is not reachable: ${String(error)}` };
-  }
-  const data = (await response.json().catch(() => null)) as {
-    id: string;
-    address: string;
-    error?: string;
-  } | null;
-  if (!response.ok || data === null) return { error: data?.error ?? `kitshn answered ${response.status}.` };
-  return data;
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", extension ? "/api/pages" : "/api/files");
+    xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+    xhr.setRequestHeader("x-kitshn-name", encodeURIComponent(name));
+    if (at) {
+      xhr.setRequestHeader("x-kitshn-x", String(Math.round(at.x)));
+      xhr.setRequestHeader("x-kitshn-y", String(Math.round(at.y)));
+    }
+    xhr.upload.onprogress = (event) => event.lengthComputable && onProgress(event.loaded / event.total);
+    xhr.onerror = () => resolve({ error: `kitshn is not reachable for ${file.name}.` });
+    xhr.onload = () => {
+      const data = parseAnswer(xhr.responseText);
+      if (xhr.status >= 200 && xhr.status < 300 && data?.id && data.address)
+        resolve({ id: data.id, address: data.address });
+      else resolve({ error: data?.error ?? `kitshn answered ${xhr.status} for ${file.name}.` });
+    };
+    xhr.send(file);
+  });
 }
 
 /**

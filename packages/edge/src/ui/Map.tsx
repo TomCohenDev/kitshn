@@ -60,6 +60,8 @@ export function stacksOf(state: State): Map<string, Array<string>> {
 }
 
 interface Props {
+  /** K-1101: files dropped from the computer, with the map point under the pointer. */
+  onDropFiles: (files: Array<File>, at: Point) => void;
   readonly state: State;
   readonly access: Readonly<Record<string, AccessState>>;
   readonly machines: ReadonlyMap<string, MachineView>;
@@ -273,6 +275,17 @@ export function MapView(props: Props) {
       onPointerCancel={onPointerUp}
       onWheel={onWheel}
       onContextMenu={(event) => event.preventDefault()}
+      onDragOver={(event) => {
+        if (!event.dataTransfer?.types.includes("Files")) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      }}
+      onDrop={(event) => {
+        const files = [...(event.dataTransfer?.files ?? [])];
+        if (files.length === 0) return;
+        event.preventDefault();
+        props.onDropFiles(files, toWorld(event.clientX, event.clientY));
+      }}
     >
       <div class="world" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})` }}>
         {[...shown.circles.values()].map((circle) => (

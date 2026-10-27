@@ -1037,3 +1037,18 @@ a > code {
   color: var(--accent);
   text-decoration: underline;
 }
+
+/* Upload progress as text, no animation (tick3d). */
+.progress {
+  position: fixed;
+  left: 50%;
+  bottom: 60px;
+  transform: translateX(-50%);
+  z-index: 30;
+  padding: 6px 12px;
+  font-weight: 700;
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}

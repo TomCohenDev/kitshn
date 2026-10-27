@@ -247,9 +247,11 @@ function runJob(command: Command): Promise<{ ok: boolean; exitCode: number | nul
       resolve(result);
     };
     // Its own process group, so a timeout also ends the children that the script starts.
+    // `$KITSHN` is this daemon's binary, so a job can run `"$KITSHN" expose …` (K-1104).
     const child = spawn("/bin/sh", ["-c", command.script], {
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
+      env: { ...process.env, KITSHN: process.execPath },
     });
     if (child.pid) runningGroups.add(child.pid);
     const add = (chunk: Buffer) => {

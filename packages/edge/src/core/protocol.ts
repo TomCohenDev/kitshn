@@ -36,6 +36,8 @@ export interface Snapshot {
   readonly version: string;
   /** The Zero Trust team domain; people enroll a passkey at `https://<team>/AddMfaDevice` (K-103). */
   readonly accessTeam: string;
+  /** The zone that sites, pages and files live on (K-1111). */
+  readonly zone: string;
   readonly me: Actor;
   /** The newest revision in this snapshot; a map shows a held edit until a snapshot reaches it. */
   readonly revision: number;

@@ -426,6 +426,7 @@ export class Kitshn extends DurableObject<Env> {
       jobs: this.recentJobs(10, 2000),
       version: this.env.KITSHN_VERSION,
       accessTeam: this.env.ACCESS_TEAM_DOMAIN,
+      zone: this.env.KITSHN_ZONE,
       revision: this.lastRevision(),
       me,
     };
@@ -2061,6 +2062,17 @@ export class Kitshn extends DurableObject<Env> {
     const createdAt = Number(header("x-kitshn-created-at") ?? Date.now());
     if (!Number.isFinite(createdAt) || createdAt <= 0)
       return refuse("X-Kitshn-Created-At is not a time in ms.");
+    // A file dropped on the map lands where it was dropped, and so in the circles there (K-204).
+    const [x, y] = [header("x-kitshn-x"), header("x-kitshn-y")].map((value) =>
+      value === null ? null : Number(value),
+    );
+    const place =
+      x === null || y === null || x === undefined || y === undefined
+        ? null
+        : Number.isFinite(x) && Number.isFinite(y) && Math.abs(x) < 1e6 && Math.abs(y) < 1e6
+          ? { x: Math.round(x), y: Math.round(y) }
+          : undefined;
+    if (place === undefined) return refuse("X-Kitshn-X and X-Kitshn-Y are not a point on the map.");
     const item: LibraryItem = {
       id: newLibraryId(),
       kind,
@@ -2112,7 +2124,11 @@ export class Kitshn extends DurableObject<Env> {
         source,
       );
       this.putResource(resource);
-      this.insertRevision(caller.actor, `Added the ${kind} ${title} to the tray`, [], null);
+      if (place) {
+        const changes: Array<Change> = [{ _tag: "place", id: item.id, before: null, after: place }];
+        this.persist(changes);
+        this.insertRevision(caller.actor, `Added the ${kind} ${title} on the map`, changes, null);
+      } else this.insertRevision(caller.actor, `Added the ${kind} ${title} to the tray`, [], null);
     });
     this.load();
     this.broadcast();

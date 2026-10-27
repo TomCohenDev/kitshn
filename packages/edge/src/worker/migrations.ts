@@ -65,6 +65,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       state TEXT NOT NULL CHECK (state IN ('waiting', 'allowed', 'blocked')), first_seen INTEGER NOT NULL, branch TEXT)`,
     "ALTER TABLE deploys ADD COLUMN repo_id TEXT",
   ],
+  // 7: the audience tag of each Access application, for the Access check on tunnel ingress (K-603).
+  ["ALTER TABLE access_objects ADD COLUMN aud TEXT NOT NULL DEFAULT ''"],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

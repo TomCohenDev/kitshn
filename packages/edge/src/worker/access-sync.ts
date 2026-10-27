@@ -15,6 +15,8 @@ import type { AccessState } from "../core/protocol.ts";
 export interface AccessRow {
   readonly key: string;
   readonly cfId: string;
+  /** The audience tag of an application with `cfId` ("" for a policy, or until Cloudflare returns it). */
+  readonly aud: string;
   readonly body: string;
   readonly tried: string;
   readonly error: string | null;
@@ -179,6 +181,7 @@ interface Named {
   readonly id: string;
   readonly name: string;
   readonly domain?: string;
+  readonly aud?: string;
 }
 
 interface LivePolicy extends Named {
@@ -238,7 +241,7 @@ export async function verifyAccess(
             exclude: ours["exclude"],
           },
         );
-      if (!live) store.put({ ...row, cfId: "", body: "", tried: "", error: null });
+      if (!live) store.put({ ...row, cfId: "", aud: "", body: "", tried: "", error: null });
       else if (!same) store.put({ ...row, body: "", tried: "", error: null });
       continue;
     }
@@ -259,7 +262,7 @@ export async function verifyAccess(
           policies: policyIds(row.body),
         },
       );
-    if (!live) store.put({ ...row, cfId: "", body: "", tried: "", error: null });
+    if (!live) store.put({ ...row, cfId: "", aud: "", body: "", tried: "", error: null });
     else if (!same) store.put({ ...row, body: "", tried: "", error: null });
   }
   const ours = new Set([...store.rows.values()].map((row) => row.cfId));
@@ -348,6 +351,60 @@ export async function verifyPasskeys(
 }
 
 /**
+ * K-403, K-603: whether the application that Cloudflare last accepted has a Bypass policy. Null when
+ * kitshn does not know: the accepted body of the application, or of one of its policies, is unknown
+ * (the daily compare clears a changed one, K-408) and no known policy is Bypass.
+ */
+export function appliesBypass(app: AccessRow, rows: ReadonlyMap<string, AccessRow>): boolean | null {
+  if (app.body === "") return null;
+  const policies = [...rows.values()].filter((row) => row.key.startsWith("policy:"));
+  let unknown = false;
+  for (const id of policyIds(app.body)) {
+    const policy = policies.find((row) => row.cfId === id);
+    if (!policy?.body) unknown = true;
+    else if ((JSON.parse(policy.body) as { decision?: string }).decision === "bypass") return true;
+  }
+  return unknown ? null : false;
+}
+
+/** The application rows that have a Cloudflare id but no audience tag yet (K-603). */
+export const rowsWithoutAud = (rows: ReadonlyMap<string, AccessRow>) =>
+  [...rows.values()].filter((row) => row.key.startsWith("app:") && row.cfId !== "" && row.aud === "");
+
+/**
+ * K-603: reads the audience tag of each application row that has an id but no tag, from the list of
+ * applications, matched by id. An id that the full list does not have was deleted in Cloudflare: the row
+ * forgets it, as the daily compare does (K-408), so the next sync makes the application again. Returns
+ * the number of calls. An account has at most 500 applications (K-402), so this is one call; the loop
+ * reads further pages only if that limit grows.
+ */
+export async function fillAudiences(store: AccessStore, api: Api, accountId: string): Promise<number> {
+  const missing = rowsWithoutAud(store.rows);
+  if (missing.length === 0) return 0;
+  const auds = new Map<string, string>();
+  let calls = 0;
+  // The loop ends only after a short page, so `auds` holds every application of the account.
+  for (let page = 1; ; page++) {
+    const apps = await api<ReadonlyArray<Named>>(
+      "GET",
+      `/accounts/${accountId}/access/apps?per_page=${PAGE}&page=${page}`,
+    );
+    calls++;
+    for (const app of apps) auds.set(app.id, app.aud ?? "");
+    if (apps.length < PAGE) break;
+  }
+  for (const { key, cfId } of missing) {
+    // The row as it is now: the calls above wait, and a sync may have changed it meanwhile.
+    const row = store.rows.get(key);
+    if (!row || row.cfId !== cfId || row.aud) continue;
+    const aud = auds.get(cfId);
+    if (aud === undefined) store.put({ ...row, cfId: "", aud: "", body: "", tried: "", error: null });
+    else if (aud) store.put({ ...row, aud });
+  }
+  return calls;
+}
+
+/**
  * K-406: brings Access to the desired state in at most `budget` calls. Returns true when no work is left.
  * It adopts an object that it did not record only when its name starts with "kitshn " (K-408).
  */
@@ -396,11 +453,13 @@ export async function syncAccess(
       const result = cfId
         ? await api<Named>("PUT", `${base}/${kind}/${cfId}`, request)
         : await api<Named>("POST", `${base}/${kind}`, request);
+      // A missing tag is read again from the list of applications (K-603).
+      const aud = kind === "apps" ? (result.aud ?? "") : "";
       // K-409: a removed share takes effect at once, so the sessions of the application end. Until the
       // revoke succeeds, the row keeps its old body, so the next run writes and revokes again.
       if (kind === "apps" && row?.body && removesPolicy(row.body, body)) {
         if (!spend()) {
-          store.put({ key, cfId: result.id, body: row.body, tried: "", error: null });
+          store.put({ key, cfId: result.id, aud, body: row.body, tried: "", error: null });
           return false;
         }
         try {
@@ -409,6 +468,7 @@ export async function syncAccess(
           store.put({
             key,
             cfId: result.id,
+            aud,
             body: row.body,
             tried: body,
             error: `sessions not ended: ${message(error)}`,
@@ -416,11 +476,14 @@ export async function syncAccess(
           return true;
         }
       }
-      store.put({ key, cfId: result.id, body, tried: body, error: null });
+      store.put({ key, cfId: result.id, aud, body, tried: body, error: null });
     } catch (error) {
       // Someone deleted the object: forget its id, so the next run creates it again.
-      if (isNotFound(error) && cfId) store.put({ key, cfId: "", body: "", tried: "", error: null });
-      else store.put({ key, cfId, body: row?.body ?? "", tried: body, error: message(error) });
+      if (isNotFound(error) && cfId) store.put({ key, cfId: "", aud: "", body: "", tried: "", error: null });
+      else {
+        const aud = cfId === row?.cfId ? row.aud : "";
+        store.put({ key, cfId, aud, body: row?.body ?? "", tried: body, error: message(error) });
+      }
     }
     return true;
   };

@@ -8,20 +8,31 @@
     ".": "./src/index.ts",
     "./recipe": "./src/recipe.ts"
   },
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "files": [
+    "dist/*.js",
+    "dist/*.mjs",
+    "dist/*.d.ts"
+  ],
   "bin": {
     "kitshn": "./dist/kitshn.mjs"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "build": "bun build src/cli.ts --target=node --outfile=dist/kitshn.mjs"
-  },
-  "dependencies": {
-    "@babel/parser": "8.0.8",
-    "effect": "4.0.6"
+    "build": "rm -rf dist && bun build src/cli.ts --target=node --outfile=dist/kitshn.mjs && tsc -p tsconfig.build.json"
   },
   "devDependencies": {
+    "@babel/parser": "8.0.8",
     "@types/node": "24.19.2",
+    "effect": "4.0.6",
     "typescript": "7.0.2",
     "vitest": "5.0.5"
   }

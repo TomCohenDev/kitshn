@@ -1,4 +1,10 @@
-import { ACCESS_NAME_PREFIX, type AppBody, type DesiredAccess, type PolicyBody } from "../core/access.ts";
+import {
+  ACCESS_NAME_PREFIX,
+  type AppBody,
+  type DesiredAccess,
+  ENROLLMENT_KEY,
+  type PolicyBody,
+} from "../core/access.ts";
 import { deepEqual } from "../core/changes.ts";
 import type { AccessState } from "../core/protocol.ts";
 
@@ -435,4 +441,49 @@ export async function syncAccess(
     }
   }
   return true;
+}
+
+interface LauncherApp {
+  readonly id: string;
+  readonly type?: string;
+  readonly policies?: ReadonlyArray<{ readonly id: string; readonly precedence?: number }>;
+  readonly [field: string]: unknown;
+}
+
+/** Fields that Cloudflare sets itself; a PUT of the App Launcher sends the rest back unchanged. */
+const READ_ONLY = new Set(["id", "uid", "aud", "created_at", "updated_at", "policies"]);
+
+/**
+ * K-113: adds the passkey enrollment policy to the App Launcher application, next to the policies that
+ * are already there, and takes back only the one that kitshn attached before. `attached` is the policy id
+ * that kitshn last attached; the result is the new one. It calls Cloudflare only when the wanted id
+ * differs from `attached`, or when `force` is set (the daily compare of K-408).
+ */
+export async function syncLauncher(
+  desired: DesiredAccess,
+  store: AccessStore,
+  api: Api,
+  accountId: string,
+  attached: string | null,
+  force: boolean,
+): Promise<{ readonly attached: string | null; readonly calls: number }> {
+  const want = desired.policies.has(ENROLLMENT_KEY) ? store.rows.get(ENROLLMENT_KEY)?.cfId || null : null;
+  if (!force && want === attached) return { attached, calls: 0 };
+  const base = `/accounts/${accountId}/access/apps`;
+  const apps = await api<ReadonlyArray<LauncherApp>>("GET", `${base}?per_page=${PAGE}`);
+  const found = apps.find((app) => app.type === "app_launcher");
+  if (!found) throw new Error("The account has no App Launcher application, so nobody can enroll a passkey.");
+  const launcher = await api<LauncherApp>("GET", `${base}/${found.id}`);
+  // Other policies keep their own precedence; the kitshn policy goes after all of them.
+  const live = (launcher.policies ?? []).map((policy, index) => ({
+    id: policy.id,
+    precedence: policy.precedence ?? index + 1,
+  }));
+  const next = live.filter((policy) => policy.id === want || policy.id !== attached);
+  if (want && !next.some((policy) => policy.id === want))
+    next.push({ id: want, precedence: Math.max(0, ...next.map((policy) => policy.precedence)) + 1 });
+  if (deepEqual(next, live)) return { attached: want, calls: 2 };
+  const body = Object.fromEntries(Object.entries(launcher).filter(([field]) => !READ_ONLY.has(field)));
+  await api("PUT", `${base}/${found.id}`, { ...body, policies: next });
+  return { attached: want, calls: 3 };
 }

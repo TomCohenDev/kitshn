@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { Schema } from "effect";
-import { ACCESS_NAME_PREFIX, desiredAccess } from "../core/access.ts";
+import { ACCESS_NAME_PREFIX, ENROLLMENT_KEY, desiredAccess } from "../core/access.ts";
 import {
   type Actor,
   type Change,
@@ -60,6 +60,7 @@ import {
   hasAccessWork,
   signOutEverywhere,
   syncAccess,
+  syncLauncher,
   verifyAccess,
   verifyPasskeys,
 } from "./access-sync.ts";
@@ -1511,7 +1512,10 @@ export class Kitshn extends DurableObject<Env> {
     );
     if (job?.expires_at) next = Math.min(next, Math.max(job.expires_at, now));
     const desired = desiredAccess(this.state, now);
-    if (this.env.CLOUDFLARE_API_TOKEN && hasAccessWork(desired, this.access, this.reachableAddresses()))
+    if (
+      this.env.CLOUDFLARE_API_TOKEN &&
+      (hasAccessWork(desired, this.access, this.reachableAddresses()) || this.launcherWork())
+    )
       next = now;
     // A failed tunnel, DNS or route write tries again after five minutes (K-410). Only a future retry
     // time counts here; a row that is due counts through tunnelWork, and only when there is work for it.
@@ -1586,6 +1590,7 @@ export class Kitshn extends DurableObject<Env> {
       );
       // K-408: retry what failed once a day.
       this.sql("UPDATE access_objects SET error = NULL WHERE error IS NOT NULL");
+      this.sql("DELETE FROM meta WHERE key = 'launcher_failed'");
       // A refused address may be free now, for example after the other machine let it go.
       this.sql("UPDATE live_sites SET state = 'checking' WHERE state = 'refused'");
       // K-1503 style clean-up: keep the newest 1,000 finished jobs.
@@ -2154,6 +2159,42 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ deleted: id });
   }
 
+  /** K-113: returns the Cloudflare calls it made. */
+  private async syncLauncher(api: Api, force: boolean) {
+    if (!force && this.meta("launcher_failed") === `failed:${this.launcherWant()}`) return 0;
+    try {
+      const result = await syncLauncher(
+        desiredAccess(this.state, Date.now()),
+        this.accessStore(),
+        api,
+        this.env.CLOUDFLARE_ACCOUNT_ID,
+        this.meta("launcher_policy") || null,
+        force,
+      );
+      this.setMeta("launcher_policy", result.attached ?? "");
+      this.setMeta("launcher_failed", "none");
+      return result.calls;
+    } catch (error) {
+      // K-408: a failed write waits for the daily retry, so the alarm does not loop on it.
+      console.warn(`kitshn could not update the App Launcher: ${String(error)}`);
+      this.setMeta("launcher_failed", `failed:${this.launcherWant()}`);
+      return 3;
+    }
+  }
+
+  /** K-113: the enrollment policy id that the App Launcher should have, or "" for none. */
+  private launcherWant() {
+    return desiredAccess(this.state, Date.now()).policies.has(ENROLLMENT_KEY)
+      ? this.access.get(ENROLLMENT_KEY)?.cfId || ""
+      : "";
+  }
+
+  /** K-113: the App Launcher lacks the wanted policy, and that change did not fail since the daily retry. */
+  private launcherWork() {
+    const want = this.launcherWant();
+    return want !== (this.meta("launcher_policy") ?? "") && this.meta("launcher_failed") !== `failed:${want}`;
+  }
+
   private accessLock: Promise<unknown> = Promise.resolve();
 
   /** Runs one Access sync at a time, so a deploy and the alarm never both create the same object. */
@@ -2228,6 +2269,8 @@ export class Kitshn extends DurableObject<Env> {
       spent += await this.checkSites(api, 6);
       await this.syncDns(api, 5);
       await this.syncRoutes(api, 5);
+      // K-113: take an unwanted enrollment policy off the App Launcher before the sync deletes it.
+      spent += await this.syncLauncher(api, daily);
       await this.withAccessLock(() =>
         // The state can change while the daily compare waits, so the sync reads it inside the lock.
         syncAccess(
@@ -2235,11 +2278,14 @@ export class Kitshn extends DurableObject<Env> {
           this.accessStore(),
           api,
           this.env.CLOUDFLARE_ACCOUNT_ID,
-          // The tunnels, DNS records and offline routes above used at most 16 calls (K-406).
-          CALLS_PER_RUN - spent - 16,
+          // The tunnels, DNS records and offline routes above used at most 16 calls, and the
+          // launcher step below needs 3 (K-406).
+          CALLS_PER_RUN - spent - 19,
           this.reachableAddresses(),
         ),
       );
+      // A policy that the sync just made goes on the App Launcher in the same run.
+      await this.syncLauncher(api, false);
 
       changed ||=
         daily || JSON.stringify(accessStates(desiredAccess(this.state, now), this.access)) !== before;

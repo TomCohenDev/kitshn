@@ -10,6 +10,7 @@ import {
   hasAccessWork,
   signOutEverywhere,
   syncAccess,
+  syncLauncher,
   verifyAccess,
 } from "./access-sync.ts";
 
@@ -49,8 +50,10 @@ describe("Access sync (K-406, K-408)", () => {
     const cf = fakeCloudflare();
     const desired = desiredAccess(start(), 0);
     expect(await syncAccess(desired, cf.store, cf.api, "a")).toBe(true);
+    // The Owner policy and the passkey enrollment policy (K-113), then the admin application.
     expect(cf.calls).toEqual([
       "GET /policies?per_page=1000",
+      "POST /policies",
       "POST /policies",
       "GET /apps?per_page=1000",
       "POST /apps",
@@ -80,9 +83,12 @@ describe("Access sync (K-406, K-408)", () => {
     await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
     const withoutAdmin: State = { ...state, resources: new Map() };
     cf.calls.length = 0;
+    const appId = cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId;
+    const ownerId = cf.rows.get("policy:owner:people")!.cfId;
     await syncAccess(desiredAccess(withoutAdmin, 0), cf.store, cf.api, "a");
-    expect(cf.calls).toEqual(["DELETE /apps/id2", "DELETE /policies/id1"]);
-    expect(cf.rows.size).toBe(0);
+    expect(cf.calls).toEqual([`DELETE /apps/${appId}`, `DELETE /policies/${ownerId}`]);
+    // The Owner circle still needs a passkey, so its people keep the enrollment policy (K-113).
+    expect([...cf.rows.keys()]).toEqual(["policy:enrollment"]);
   });
 
   it("stops at the call budget and reports work left", async () => {
@@ -159,7 +165,11 @@ describe("Access sync (K-406, K-408)", () => {
     expect(accessStates(desired, cf.rows)["kitshn-admin"]).toEqual({ state: "applying" });
     cf.calls.length = 0;
     await syncAccess(desired, cf.store, cf.api, "a");
-    expect(cf.calls).toEqual(["PUT /policies/id1"]);
+    // The new domain also may enroll a passkey (K-113).
+    expect(cf.calls).toEqual([
+      `PUT /policies/${cf.rows.get("policy:owner:people")!.cfId}`,
+      `PUT /policies/${cf.rows.get("policy:enrollment")!.cfId}`,
+    ]);
   });
 });
 
@@ -168,6 +178,8 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
     const cf = fakeCloudflare();
     const desired = desiredAccess(start(), 0);
     await syncAccess(desired, cf.store, cf.api, "a");
+    const adminId = cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId;
+    const enrollment = cf.rows.get("policy:enrollment")!;
     const live: Api = async <T>(method: string, path: string) => {
       if (path.includes("/policies?"))
         return [
@@ -179,11 +191,12 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
             require: [],
             exclude: [],
           },
+          { id: enrollment.cfId, ...JSON.parse(enrollment.body) },
         ] as T;
       if (path.includes("/apps?"))
         return [
           {
-            id: "id2",
+            id: adminId,
             name: "kitshn admin",
             domain: "kit.example.com",
             session_duration: "24h",
@@ -268,10 +281,12 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
     expect(cf.calls.filter((call) => call.startsWith("DELETE"))).toEqual([]);
     expect(hasAccessWork(desired, cf.rows, reachable)).toBe(false);
     // Once the route is confirmed gone, the app goes, and then its policy.
+    const appId = cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId;
+    const ownerId = cf.rows.get("policy:owner:people")!.cfId;
     await syncAccess(desired, cf.store, cf.api, "a", 40, new Set());
     expect(cf.calls.filter((call) => call.startsWith("DELETE"))).toEqual([
-      "DELETE /apps/id2",
-      "DELETE /policies/id1",
+      `DELETE /apps/${appId}`,
+      `DELETE /policies/${ownerId}`,
     ]);
   });
 
@@ -285,5 +300,120 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
     cf.calls.length = 0;
     await syncAccess(desired, cf.store, cf.api, "a", 40, new Set(["kit.example.com"]));
     expect(cf.calls.filter((call) => call.startsWith("DELETE"))).toEqual([]);
+  });
+});
+
+describe("passkey enrollment on the App Launcher (K-113)", () => {
+  function launcherCloudflare(policies: Array<{ id: string; precedence?: number }>) {
+    const cf = fakeCloudflare();
+    const puts: Array<unknown> = [];
+    const launcher = {
+      id: "launcher",
+      uid: "u",
+      type: "app_launcher",
+      name: "App Launcher",
+      domain: "team",
+      policies,
+    };
+    const api: Api = async <T>(method: string, path: string, body?: unknown) => {
+      if (path.endsWith("/apps/launcher") && method === "GET") return launcher as T;
+      if (path.includes("/apps?")) return [{ id: "other", type: "self_hosted" }, launcher] as T;
+      if (method === "PUT" && path.endsWith("/apps/launcher")) {
+        puts.push(body);
+        return {} as T;
+      }
+      return cf.api(method as "GET", path, body);
+    };
+    return { ...cf, api, puts };
+  }
+
+  it("keeps the precedence of the other policies and goes after them", async () => {
+    const cf = launcherCloudflare([
+      { id: "block", precedence: 3 },
+      { id: "t3-owner", precedence: 1 },
+    ]);
+    const state = start();
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    const enrollment = cf.rows.get("policy:enrollment")!.cfId;
+    await syncLauncher(desiredAccess(state, 0), cf.store, cf.api, "a", null, false);
+    expect(cf.puts).toEqual([
+      expect.objectContaining({
+        policies: [
+          { id: "block", precedence: 3 },
+          { id: "t3-owner", precedence: 1 },
+          { id: enrollment, precedence: 4 },
+        ],
+      }),
+    ]);
+  });
+
+  it("leaves out circles that would let in more people, and keeps only Owner during a pause", () => {
+    const state = start();
+    const owner = state.circles.get("owner")!;
+    const strict = {
+      ...owner,
+      id: "strict",
+      name: "Strict",
+      match: "all" as const,
+      members: [{ _tag: "domain" as const, domain: "corp.com" }],
+    };
+    const withStrict = { ...state, circles: new Map(state.circles).set("strict", strict) };
+    expect(desiredAccess(withStrict, 0).policies.get("policy:enrollment")?.include).toEqual([
+      { email: { email: "owner@example.com" } },
+    ]);
+    const guests = {
+      ...owner,
+      id: "guests",
+      name: "Guests",
+      members: [{ _tag: "email" as const, email: "g@x.com" }],
+    };
+    const paused = { ...state, paused: true, circles: new Map(state.circles).set("guests", guests) };
+    expect(desiredAccess(paused, 0).policies.get("policy:enrollment")?.include).toEqual([
+      { email: { email: "owner@example.com" } },
+    ]);
+  });
+
+  it("adds the policy next to the old ones, keeps every other field, and takes back only its own", async () => {
+    const cf = launcherCloudflare([{ id: "t3-owner" }]);
+    const state = start();
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    const enrollment = cf.rows.get("policy:enrollment")!.cfId;
+    const added = await syncLauncher(desiredAccess(state, 0), cf.store, cf.api, "a", null, false);
+    expect(added.attached).toBe(enrollment);
+    expect(cf.puts).toEqual([
+      {
+        type: "app_launcher",
+        name: "App Launcher",
+        domain: "team",
+        policies: [
+          { id: "t3-owner", precedence: 1 },
+          { id: enrollment, precedence: 2 },
+        ],
+      },
+    ]);
+    // Nothing changed: no Cloudflare call.
+    expect(await syncLauncher(desiredAccess(state, 0), cf.store, cf.api, "a", enrollment, false)).toEqual({
+      attached: enrollment,
+      calls: 0,
+    });
+    // No passkey circle any more: only the kitshn policy leaves the App Launcher.
+    const owner = state.circles.get("owner")!;
+    const relaxed = {
+      ...state,
+      circles: new Map(state.circles).set("owner", { ...owner, needsPasskey: false }),
+    };
+    const launcher = launcherCloudflare([{ id: "t3-owner" }, { id: enrollment }]);
+    const removed = await syncLauncher(
+      desiredAccess(relaxed, 0),
+      cf.store,
+      launcher.api,
+      "a",
+      enrollment,
+      false,
+    );
+    expect(removed.attached).toBeNull();
+    expect(launcher.puts).toEqual([
+      expect.objectContaining({ policies: [{ id: "t3-owner", precedence: 1 }] }),
+    ]);
   });
 });

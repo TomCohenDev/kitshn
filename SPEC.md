@@ -44,7 +44,7 @@ The architecture, the request paths and the budget are in [docs/architecture.md]
 - **K-109** Access sessions of the admin resource last 24 hours. Sessions of other resources last 30 days unless a circle sets a shorter time.
 - **K-110** "Sign out everywhere" ends every Access session of the account through the Cloudflare API.
 - **K-111** Zero Trust Free counts one seat per person who logs in, up to 50. kitshn turns on seat expiration in Zero Trust admin controls, set to 1 month, so guests who stop coming free their seat. [Seat management](https://developers.cloudflare.com/cloudflare-one/team-and-resources/users/seat-management/) runs the expiry once a day.
-- **K-112** The admin view shows the seats in use, with a warning at 40. The view can also remove a seat. Checked on 2026-10-27: `GET /accounts/{id}/access/users` lists each user with `seat_uid` and `access_seat`, and the [seat API](https://developers.cloudflare.com/api/resources/zero_trust/subresources/seats/methods/edit/) `PATCH /accounts/{id}/access/seats` turns a seat off. The PATCH is not run yet; the milestone that builds the Seats view tests it.
+- **K-112** The admin view shows the seats in use, with a warning at 40. The view can also remove a seat. Checked on 2026-10-27: `GET /accounts/{id}/access/users` lists each user with `seat_uid` and `access_seat`. VERIFY: the [seat API](https://developers.cloudflare.com/api/resources/zero_trust/subresources/seats/methods/edit/) `PATCH /accounts/{id}/access/seats` turns a seat off. Milestone 2 tests it with the Seats view.
 
 ## 2. Circles and shares
 
@@ -230,7 +230,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-1001** Every HTML page from T3 threads on every machine goes into one library in R2. The provider sends each new `html_render` page with `publishPage` (K-708), with its thread title, machine and time.
 - **K-1002** A new page is private: it sits in the tray (K-509).
 - **K-1003** The Worker serves a page at `pages.<zone>/<id>`, with the sandbox of the T3 render route (no same-origin scripts). The id is random, 16 characters or more.
-- **K-1004** The Worker checks shares for each page request (K-404). A page in "Everyone" opens with no login. Other pages need a login through an Access application on `pages.<zone>/login`, which sends the visitor back. VERIFY (milestone 3): the Worker can read the Access JWT cookie that the login path sets, on the other paths of the same host.
+- **K-1004** The Worker checks shares for each page request (K-404). A page in "Everyone" opens with no login. Other pages need a login through an Access application on `pages.<zone>/login`, which sends the visitor back. VERIFY: the Worker can read the Access JWT cookie that the login path sets, on the other paths of the same host. Milestone 3 tests it.
 - **K-1005** The Library view lists all pages with a search by title, thread and machine, and a preview. It reads the index in the Durable Object, not R2.
 - **K-1006** Deleting a thread does not delete its library page. "Delete" in the library removes the page from R2 and the map.
 - **K-1007** An MCP App page is not shared, because its buttons need its live MCP server. The library keeps it private and says why.
@@ -252,7 +252,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
   - The machine is off: its daemon socket closes, or misses pings for 30 seconds.
   - The machine is on, but the local server is off: the daemon tries the socket or port of each exposed site every 10 seconds, on the machine only, and reports a change.
 - **K-1108** While an origin is down, kitshn adds a Worker route for the site address to the kitshn Worker. When the origin is back, it removes the route. So visits to a healthy site never run the Worker and cost no Worker request. Custom error rules would do this with no Worker, but the free plan has none ([Custom Errors](https://developers.cloudflare.com/rules/custom-errors/)).
-- **K-1109** While the route exists, the Worker first passes the request to the origin. It shows the offline page only when the answer is status 502 or 530, or a Cloudflare 1033 error. So a site that comes back before kitshn removes the route works at once. VERIFY (milestone 3): a fetch from a Worker on a route to the same hostname reaches the origin and does not run the Worker again.
+- **K-1109** While the route exists, the Worker first passes the request to the origin. It shows the offline page only when the answer is status 502 or 530, or a Cloudflare 1033 error. So a site that comes back before kitshn removes the route works at once. VERIFY: a fetch from a Worker on a route to the same hostname reaches the origin and does not run the Worker again. Milestone 3 tests it.
 - **K-1110** The Worker reads the site name and the last seen time from the Durable Object, and keeps them for 60 seconds in the Cache API.
 - **K-1111** Domains: kitshn publishes only on zones that the owner adds to it. Each address must be in one of them.
 
@@ -264,7 +264,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-1204** The script creates, or reuses when present: the Worker with its Durable Object, the R2 bucket, the Worker secrets, the Access applications of the admin resource and of `/connect`, the Owner circle policy with the owner email and "needs passkey", the One-time PIN login method, the GitHub login method (K-102), and seat expiration (K-111).
 - **K-1205** A second run changes nothing that is already right. It prints what it changed.
 - **K-1206** At the end, the script prints the admin address and a one-time link to register the first passkey in the Access App Launcher.
-- **K-1207** The Zero Trust organization (the team domain and the free plan) exists on the owner's account. On a new account, the script tests whether the API can create it. When it cannot, the script stops with the dashboard link, and continues on the next run after one dashboard visit. Checked on 2026-10-27: `POST /accounts/{id}/access/organizations` exists; on an account with an organization it answers `account_has_existing_organization`. Not tried yet on an account without one, so the script still stops with the dashboard link there.
+- **K-1207** The Zero Trust organization (the team domain and the free plan) exists on the owner's account. When the account has no organization, the script stops with the dashboard link, and continues on the next run after one dashboard visit. Checked on 2026-10-27: `POST /accounts/{id}/access/organizations` exists; on an account with an organization it answers `account_has_existing_organization`. VERIFY: the POST creates an organization on an account without one. The first install on a new account tests it; then the script can create the organization itself.
 - **K-1208** The admin and the map live at `kit.yarden-zamir.com`. The KitSHn 1 website moves from `kitshn.yarden-zamir.com` to `kitshn-legacy.yarden-zamir.com`. KitSHn 1 serves it from the `kitshn-meta` repo.
 
 ## 13. Free plan budget
@@ -278,7 +278,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 
 - **K-1401** The machine map portal and KitSHn 1 keep running until each piece moves. [docs/migration.md](docs/migration.md) holds the order.
 - **K-1402** `.github/workflows/deploy.yml` in this repo forwards to KitSHn 1 and stays until the last app moves. `.github/workflows/host.yml` stays until no app needs the host Caddy.
-- **K-1403** An import reads a machine map export and creates: a machine card for each machine, keeping its tunnel, its hostname and its service token; a circle for each arrow source, with the machine as member; Guests rules as circles; shared settings as `t3.settings` desired state; the machine map presets as kitshn presets (K-716). It does not import history or browser keys.
+- **K-1403** An import reads a machine map export and creates: a machine card for each machine, keeping its tunnel, its hostname and its service token; a circle for each arrow source, with the machine as member; Guests rules as circles; shared settings as `t3.settings` desired state; each machine map preset as a kitshn preset (K-716), with its arrows converted by the same rule as the live arrows. It does not import history or browser keys.
 - **K-1404** A KitSHn 1 app moves with `kitshn adopt owner/repo`: it writes `kitshn.config.ts` from `.kitshn.yaml`, `compose.yml` and `Caddyfile.j2`, and changes the workflow file. The first deploy with kitshn 2 reuses the persistent data folder of KitSHn 1 on the same machine, then the DNS record moves from the VPS address to the tunnel.
 
 ## 15. History and safety

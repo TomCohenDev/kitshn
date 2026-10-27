@@ -170,6 +170,48 @@ export function MachinePanel(props: {
         />
         <button class="btn">Save</button>
       </form>
+      <form
+        class="allow-list"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          const input = (event.currentTarget as HTMLFormElement).elements.namedItem(
+            "allow",
+          ) as HTMLTextAreaElement;
+          const lines = input.value
+            .split("\n")
+            .map((line) => line.trim().split(/\s+/))
+            .filter((words) => words[0]);
+          const long = lines.find((words) => words.length > 2);
+          if (long) {
+            props.onToast(`"${long.join(" ")}" has more than a repo and one setting; write one setting per line.`, true);
+            return;
+          }
+          const allow = lines.map(([repo = "", setting = ""]) => ({ repo, setting }));
+          const result = await callApi<{ id: string }>(
+            "POST",
+            `/api/machines/${encodeURIComponent(view.machine.id)}`,
+            { allow },
+          );
+          props.onToast(
+            "error" in result ? String(result.error) : "Saved the allowed Compose settings.",
+            "error" in result,
+          );
+        }}
+      >
+        <span class="label">Allowed Compose settings (K-818)</span>
+        <p class="help">
+          One line per repo and setting, for example <code>Yarden-zamir/dozzle bind:/var/run/docker.sock</code>. A
+          deploy names the setting it needs when it stops.
+        </p>
+        <textarea
+          name="allow"
+          rows={3}
+          class="mono"
+          key={(view.machine.allow ?? []).map((entry) => `${entry.repo} ${entry.setting}`).join("|")}
+          defaultValue={(view.machine.allow ?? []).map((entry) => `${entry.repo} ${entry.setting}`).join("\n")}
+        />
+        <button class="btn">Save</button>
+      </form>
       <div class="label" style={{ marginTop: "10px" }}>
         Commands
       </div>

@@ -1,0 +1,146 @@
+{
+  "name": "dozzle-prod",
+  "networks": {
+    "default": {
+      "name": "dozzle-prod_default",
+      "ipam": {}
+    }
+  },
+  "services": {
+    "dozzle": {
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "DOZZLE_HOSTNAME": "placeholder",
+        "KITSHN_DATA_DIR": "placeholder",
+        "KITSHN_DEFAULT_SOCKET": "placeholder",
+        "KITSHN_DEPLOYMENT": "placeholder",
+        "KITSHN_ENVIRONMENT": "placeholder",
+        "KITSHN_LOG_DIR": "placeholder",
+        "KITSHN_PARAMS_FILE": "placeholder",
+        "KITSHN_RECIPE": "placeholder",
+        "KITSHN_SOCKET_DIR": "placeholder"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/dozzle",
+          "healthcheck"
+        ],
+        "timeout": "10s",
+        "interval": "30s",
+        "retries": 5,
+        "start_period": "30s"
+      },
+      "image": "amir20/dozzle:latest",
+      "networks": {
+        "default": null
+      },
+      "pull_policy": "always",
+      "restart": "unless-stopped",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/var/run/docker.sock",
+          "target": "/var/run/docker.sock",
+          "read_only": true,
+          "bind": {
+            "create_host_path": true
+          }
+        },
+        {
+          "type": "bind",
+          "source": "/apps/dozzle-prod/data",
+          "target": "/data",
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ]
+    },
+    "oauth2-proxy": {
+      "command": [
+        "--http-address=unix:///apps/dozzle-prod/sockets/auth.sock,mode=0666",
+        "--provider=github",
+        "--proxy-prefix=/auth",
+        "--redirect-url=https://dozzle.yarden-zamir.com/auth/callback",
+        "--whitelist-domain=dozzle.yarden-zamir.com",
+        "--reverse-proxy=true",
+        "--github-user=Yarden-zamir",
+        "--email-domain=*",
+        "--skip-provider-button=true",
+        "--cookie-name=_dozzle_oauth",
+        "--cookie-secure=true",
+        "--cookie-samesite=lax",
+        "--cookie-expire=168h",
+        "--upstream=static://202"
+      ],
+      "entrypoint": null,
+      "environment": {
+        "KITSHN_DEPLOYMENT": "placeholder",
+        "KITSHN_ENVIRONMENT": "placeholder",
+        "KITSHN_RECIPE": "placeholder",
+        "OAUTH2_PROXY_CLIENT_ID": "placeholder",
+        "OAUTH2_PROXY_CLIENT_SECRET": "placeholder",
+        "OAUTH2_PROXY_COOKIE_SECRET": "placeholder"
+      },
+      "image": "quay.io/oauth2-proxy/oauth2-proxy:v7.15.5",
+      "networks": {
+        "default": null
+      },
+      "pull_policy": "always",
+      "restart": "unless-stopped",
+      "user": "0:0",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/apps/dozzle-prod/sockets",
+          "target": "/apps/dozzle-prod/sockets",
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ]
+    },
+    "socket-proxy": {
+      "command": [
+        "UNIX-LISTEN:/apps/dozzle-prod/sockets/default.sock,fork,unlink-early,mode=666",
+        "TCP:dozzle:8080"
+      ],
+      "depends_on": {
+        "dozzle": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "test",
+          "-S",
+          "/apps/dozzle-prod/sockets/default.sock"
+        ],
+        "timeout": "5s",
+        "interval": "30s",
+        "retries": 3
+      },
+      "image": "alpine/socat:latest",
+      "networks": {
+        "default": null
+      },
+      "pull_policy": "always",
+      "restart": "unless-stopped",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/apps/dozzle-prod/sockets",
+          "target": "/apps/dozzle-prod/sockets",
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ]
+    }
+  }
+}

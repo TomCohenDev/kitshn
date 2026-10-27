@@ -42,6 +42,8 @@ export interface AppBody {
 export interface DesiredAccess {
   readonly policies: ReadonlyMap<string, PolicyBody>;
   readonly apps: ReadonlyMap<string, AppBody>;
+  /** K-1004: keys of `policies` for the login applications of pages and files, in precedence order. */
+  readonly logins: { readonly login: ReadonlyArray<string>; readonly passkey: ReadonlyArray<string> };
 }
 
 export const PASSKEY_MFA = {
@@ -210,6 +212,29 @@ export function desiredAccess(state: State, now: number): DesiredAccess {
       });
     }
   }
+  // K-1004: only the people of circles that can open a page or a file may log in, so a stranger cannot
+  // take a Zero Trust seat (K-111). The admin opens every item (K-104), so its circles count too.
+  const login: Array<string> = [];
+  const passkey: Array<string> = [];
+  const seen = new Set<string>();
+  for (const resource of state.resources.values()) {
+    if (!WORKER_CHECKED.has(resource.kind) && resource.id !== ADMIN_RESOURCE_ID) continue;
+    for (const { circle } of activeShares(state, resource, now)) {
+      if (seen.has(circle.id)) continue;
+      seen.add(circle.id);
+      const people = circlePolicies(circle, state.machines).get(`policy:${circle.id}:people`);
+      // "Everyone" compiles to a Bypass: its items open without a login, and a Bypass would let in anyone.
+      if (people?.decision !== "allow") continue;
+      // The login applications get their own copies, so a stuck login step never holds back a policy of a
+      // site (K-409). The plain login comes before the passkey step, so its copy has no passkey check.
+      const { mfa_config: _, ...plain } = people;
+      policies.set(`policy:${circle.id}:login`, { ...plain, name: `${people.name} (login)` });
+      login.push(`policy:${circle.id}:login`);
+      if (!circle.needsPasskey) continue;
+      policies.set(`policy:${circle.id}:login-passkey`, { ...people, name: `${people.name} (passkey login)` });
+      passkey.push(`policy:${circle.id}:login-passkey`);
+    }
+  }
   // K-113: the people of every passkey circle may open the App Launcher, where Access enrolls a passkey.
   // An "all must match" circle is left out: its rules joined with "or" would let in more people than the
   // circle does. Revisit if such a circle needs a passkey and its people have no other way in.
@@ -230,5 +255,5 @@ export function desiredAccess(state: State, now: number): DesiredAccess {
       exclude: [],
     });
   }
-  return { policies, apps };
+  return { policies, apps, logins: { login, passkey } };
 }

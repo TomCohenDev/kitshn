@@ -1,0 +1,145 @@
+{
+  "name": "tick3d-prod",
+  "networks": {
+    "default": {
+      "name": "tick3d-prod_default",
+      "ipam": {}
+    }
+  },
+  "services": {
+    "api": {
+      "build": {
+        "context": "/apps/tick3d-prod/src",
+        "dockerfile": "Dockerfile",
+        "args": {
+          "KITSHN_ENVIRONMENT": "placeholder"
+        },
+        "additional_contexts": {
+          "git": "/apps/tick3d-prod/src/.git"
+        },
+        "target": "api"
+      },
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "AUTH_ORIGIN": "placeholder",
+        "AUTH_SECRET": "placeholder",
+        "COOKIE_DOMAIN": "placeholder",
+        "GITHUB_CLIENT_ID": "placeholder",
+        "GITHUB_CLIENT_SECRET": "placeholder",
+        "KITSHN_ENVIRONMENT": "placeholder",
+        "PREVIEWS_DOMAIN": "placeholder",
+        "PREVIEWS_REPO": "placeholder",
+        "TESTER_CODES": "placeholder"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "wget",
+          "-qO-",
+          "http://127.0.0.1:8080/api/health"
+        ],
+        "timeout": "5s",
+        "interval": "30s",
+        "retries": 5,
+        "start_period": "5s",
+        "start_interval": "1s"
+      },
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "10m"
+        }
+      },
+      "networks": {
+        "default": null
+      },
+      "pull_policy": "build",
+      "restart": "unless-stopped",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "sessions",
+          "target": "/data",
+          "volume": {}
+        }
+      ]
+    },
+    "site": {
+      "build": {
+        "context": "/apps/tick3d-prod/src",
+        "dockerfile": "Dockerfile",
+        "args": {
+          "KITSHN_ENVIRONMENT": "placeholder"
+        },
+        "additional_contexts": {
+          "git": "/apps/tick3d-prod/src/.git"
+        },
+        "target": "site"
+      },
+      "command": null,
+      "depends_on": {
+        "api": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "KITSHN_DEFAULT_SOCKET": "placeholder",
+        "KITSHN_DEPLOYMENT": "placeholder",
+        "KITSHN_ENVIRONMENT": "placeholder",
+        "KITSHN_RECIPE": "placeholder",
+        "KITSHN_SOCKET_DIR": "placeholder"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "test",
+          "-S",
+          "/apps/tick3d-prod/sockets/default.sock"
+        ],
+        "timeout": "5s",
+        "interval": "30s",
+        "retries": 5,
+        "start_period": "10s",
+        "start_interval": "1s"
+      },
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "10m"
+        }
+      },
+      "networks": {
+        "default": null
+      },
+      "pull_policy": "build",
+      "restart": "unless-stopped",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/apps/tick3d-prod/sockets",
+          "target": "/apps/tick3d-prod/sockets",
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "sessions": {
+      "name": "tick3d-prod_sessions"
+    }
+  },
+  "x-logging": {
+    "driver": "json-file",
+    "options": {
+      "max-file": "3",
+      "max-size": "10m"
+    }
+  }
+}

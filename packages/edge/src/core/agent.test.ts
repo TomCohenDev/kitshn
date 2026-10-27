@@ -158,7 +158,7 @@ describe("agent keys (K-718)", () => {
       name: "app",
       composeFile: null,
     };
-    const ready = { canRedeploy: true, takesDeploys: true, runsCard: true };
+    const ready = { canRedeploy: true, takesDeploys: true, runsCard: true, allowed: [] };
     expect(agentDeployPlan(last, "redeploy", ready)).toMatchObject({
       kind: "redeploy",
       command: { kind: "compose-redeploy", project: "app-o-1-prod", name: "app" },

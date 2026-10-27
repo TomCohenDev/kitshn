@@ -8,6 +8,7 @@ import {
 } from "@kitshn/edge/machine";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import {
   chmodSync,
   existsSync,
@@ -185,17 +186,18 @@ async function updateDaemon(
   // A daemon run from source has the runtime as its execPath; replacing that would break the runtime.
   if (VERSION === "dev") return failed("This daemon runs from source; update it from the repo.");
   if (version === VERSION) return { ok: true, exitCode: 0, output: `Already at ${version}.` };
-  const name = releaseAsset(platform, arch());
+  const name = `${releaseAsset(platform, arch())}.gz`;
   const base = `${RELEASES}/edge-${version}`;
   try {
     const sums = await fetch(`${base}/SHA256SUMS`);
     const binary = await fetch(`${base}/${name}`);
     if (!sums.ok || !binary.ok) return failed(`The release edge-${version} has no ${name}.`);
     const expected = expectedHash(await sums.text(), name);
-    const bytes = new Uint8Array(await binary.arrayBuffer());
-    const actual = createHash("sha256").update(bytes).digest("hex");
+    const packed = new Uint8Array(await binary.arrayBuffer());
+    const actual = createHash("sha256").update(packed).digest("hex");
     if (!expected || expected !== actual)
       return failed(`${name} of edge-${version} does not match its SHA256SUMS.`);
+    const bytes = gunzipSync(packed);
     const next = `${process.execPath}.new`;
     // A leftover file keeps its old mode, so start fresh and set the mode explicitly.
     rmSync(next, { force: true });
@@ -443,7 +445,7 @@ function report() {
   const message: DaemonMessage = {
     type: "status",
     status: {
-      capabilities: ["update", "compose"],
+      capabilities: ["update", "update-gz", "compose"],
       version: VERSION,
       os: `${osPlatform()} ${release()}`,
       arch: arch(),

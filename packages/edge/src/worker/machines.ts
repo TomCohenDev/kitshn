@@ -57,7 +57,7 @@ export function legacyUpdateScript(version: string, os: string, arch: string): s
   const platform = os.startsWith("linux") ? "linux" : os.startsWith("darwin") ? "darwin" : null;
   const cpu = arch === "arm64" || arch === "x64" ? arch : null;
   if (!platform || !cpu || !/^[0-9a-f]{12}$/.test(version)) return null;
-  const file = `kitshn-${platform}-${cpu}`;
+  const file = `kitshn-${platform}-${cpu}.gz`;
   return [
     "set -e",
     `base=https://github.com/Yarden-zamir/kitshn/releases/download/edge-${version}`,
@@ -69,6 +69,7 @@ export function legacyUpdateScript(version: string, os: string, arch: string): s
     `expected=$(curl -fsSL "$base/SHA256SUMS" | awk -v f=${file} '$2 == f || $2 == "*" f { print $1 }')`,
     `actual=$( (sha256sum "$tmp" 2>/dev/null || shasum -a 256 "$tmp") | awk '{ print $1 }')`,
     'if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then rm -f "$tmp"; echo "The file does not match SHA256SUMS."; exit 1; fi',
+    'gzip -dc "$tmp" > "$tmp.bin" && mv "$tmp.bin" "$tmp"',
     'chmod 755 "$tmp"',
     'mv "$tmp" "$bin"',
     platform === "linux"

@@ -92,7 +92,8 @@ describe("machine members (K-107)", () => {
   it("updates an old daemon with a checked shell script, only for a known platform (K-617)", () => {
     const script = legacyUpdateScript("f5d93ff436db", "linux 6.17.0-1020-oracle", "arm64");
     expect(script).toContain("edge-f5d93ff436db");
-    expect(script).toContain("kitshn-linux-arm64");
+    expect(script).toContain("kitshn-linux-arm64.gz");
+    expect(script).toContain("gzip -dc");
     expect(script).toContain("SHA256SUMS");
     expect(legacyUpdateScript("f5d93ff436db", "win32 10", "x64")).toBeNull();
     expect(legacyUpdateScript("local", "linux", "x64")).toBeNull();

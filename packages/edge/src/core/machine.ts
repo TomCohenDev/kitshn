@@ -42,11 +42,21 @@ export interface JobResult {
   readonly output: string;
 }
 
+/** K-1104, K-1107: a live site that a machine exposes, and whether its local server answers. */
+export interface LiveSiteReport {
+  readonly name: string;
+  readonly target: string;
+  readonly dev: boolean;
+  readonly up: boolean;
+}
+
 /** Messages from a daemon to kitshn over `/connect`. The text "ping" is answered by the auto response. */
 export type DaemonMessage =
   | { readonly type: "status"; readonly status: MachineStatus }
   | { readonly type: "sample"; readonly sample: Sample }
-  | { readonly type: "jobResult"; readonly id: number; readonly result: JobResult };
+  | { readonly type: "jobResult"; readonly id: number; readonly result: JobResult }
+  /** The whole list of live sites, sent on connect and on each change (K-1107). */
+  | { readonly type: "sites"; readonly sites: ReadonlyArray<LiveSiteReport> };
 
 /** Messages from kitshn to a daemon. */
 export type ServerToDaemon = { readonly type: "job"; readonly id: number; readonly command: Command };

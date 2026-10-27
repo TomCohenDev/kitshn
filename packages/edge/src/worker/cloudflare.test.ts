@@ -14,7 +14,10 @@ describe("Cloudflare API calls", () => {
   it("still refuses an empty answer to other methods, and an error envelope", async () => {
     vi.stubGlobal("fetch", answer(200, ""));
     await expect(cloudflare("t", "GET", "/x")).rejects.toBeInstanceOf(CloudflareError);
-    vi.stubGlobal("fetch", answer(404, JSON.stringify({ success: false, errors: [{ code: 7003, message: "no route" }] })));
+    vi.stubGlobal(
+      "fetch",
+      answer(404, JSON.stringify({ success: false, errors: [{ code: 7003, message: "no route" }] })),
+    );
     await expect(cloudflare("t", "DELETE", "/x")).rejects.toThrow(/7003: no route/);
   });
 });

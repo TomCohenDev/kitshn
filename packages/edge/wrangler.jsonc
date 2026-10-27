@@ -11,7 +11,8 @@
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/connect", "/join/exchange", "/deploy/*"],
+    // The offline routes of live sites (K-1108) need the Worker before any asset; the map costs a few requests.
+    "run_worker_first": true,
   },
   "durable_objects": { "bindings": [{ "name": "KITSHN", "class_name": "Kitshn" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Kitshn"] }],

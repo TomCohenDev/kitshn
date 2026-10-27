@@ -24,9 +24,6 @@ export function pickMachine(
   return fitting[0] ?? null;
 }
 
-/** K-603: the ingress of a machine's tunnel. Live sites add rules in milestone 3 (K-1104). */
-export const tunnelConfig = () => ({ config: { ingress: [{ service: "http_status:404" }] } });
-
 const LABEL = /^[a-z0-9][a-z0-9-]{0,30}$/;
 
 export function parseLabels(value: unknown): Array<string> | string {

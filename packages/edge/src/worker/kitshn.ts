@@ -65,6 +65,14 @@ import {
 } from "./deploys.ts";
 import { type Recipe, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
 import {
+  type LiveSite,
+  liveSiteId,
+  offlineReason,
+  parseSites,
+  sitesNeedingRoutes,
+  tunnelConfig,
+} from "./live.ts";
+import {
   JOB_EXPIRY_MS,
   JOIN_CODE_MS,
   type Job,
@@ -74,7 +82,6 @@ import {
   parseCommand,
   parseLabels,
   pickMachine,
-  tunnelConfig,
 } from "./machines.ts";
 import type { Env } from "./env.ts";
 
@@ -96,6 +103,11 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS join_codes (lookup TEXT PRIMARY KEY, machine_id TEXT NOT NULL, iv TEXT NOT NULL,
     sealed TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
   "CREATE TABLE IF NOT EXISTS tunnel_objects (machine_id TEXT PRIMARY KEY, body TEXT NOT NULL, error TEXT)",
+  `CREATE TABLE IF NOT EXISTS live_sites (id TEXT PRIMARY KEY, machine_id TEXT NOT NULL, name TEXT NOT NULL,
+    address TEXT NOT NULL, target TEXT NOT NULL, dev INTEGER NOT NULL, up INTEGER NOT NULL, last_up INTEGER NOT NULL,
+    state TEXT NOT NULL)`,
+  "CREATE TABLE IF NOT EXISTS dns_objects (address TEXT PRIMARY KEY, record_id TEXT NOT NULL, content TEXT NOT NULL, error TEXT)",
+  "CREATE TABLE IF NOT EXISTS route_objects (address TEXT PRIMARY KEY, route_id TEXT NOT NULL, error TEXT)",
   `CREATE TABLE IF NOT EXISTS deploys (id TEXT PRIMARY KEY, repo TEXT NOT NULL, environment TEXT NOT NULL,
     resource_id TEXT NOT NULL, address TEXT NOT NULL, script TEXT NOT NULL, starts_in TEXT, kind TEXT NOT NULL,
     sha TEXT NOT NULL, state TEXT NOT NULL, expires_at INTEGER NOT NULL, branch TEXT NOT NULL DEFAULT '')`,
@@ -134,6 +146,10 @@ export class Kitshn extends DurableObject<Env> {
   private accessWarnings: Array<string> = [];
   /** K-606: presence is stored on change; status and the latest sample live on the socket. */
   private presence = new Map<string, { online: boolean; lastSeen: number }>();
+  /** K-1104: live sites of the machines. */
+  private liveSites = new Map<string, LiveSite>();
+  /** Address checks that failed, and when to try them again. Memory only; a restart retries at once. */
+  private checkRetryAt = new Map<string, number>();
 
   private meta(key: string): string | null {
     const [row] = this.sql<{ value: string }>("SELECT value FROM meta WHERE key = ?", key);
@@ -180,6 +196,32 @@ export class Kitshn extends DurableObject<Env> {
       paused: this.meta("paused") === "true",
       machines: json<Machine>(this.sql("SELECT id, body FROM machines")),
     };
+    this.liveSites = new Map(
+      this.sql<{
+        id: string;
+        machine_id: string;
+        name: string;
+        address: string;
+        target: string;
+        dev: number;
+        up: number;
+        last_up: number;
+        state: LiveSite["state"];
+      }>("SELECT * FROM live_sites").map((row) => [
+        row.id,
+        {
+          id: row.id,
+          machineId: row.machine_id,
+          name: row.name,
+          address: row.address,
+          target: row.target,
+          dev: row.dev === 1,
+          up: row.up === 1,
+          lastUp: row.last_up,
+          state: row.state,
+        },
+      ]),
+    );
     this.presence = new Map(
       this.sql<{ id: string; online: number; last_seen: number }>(
         "SELECT id, online, last_seen FROM presence",
@@ -442,6 +484,8 @@ export class Kitshn extends DurableObject<Env> {
     const path = new URL(request.url).pathname;
     // The join exchange is public: the join code itself is the secret (K-602).
     if (path === "/join/exchange" && request.method === "POST") return this.exchangeJoin(request);
+    if (path === "/internal/offline")
+      return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
     if (path.startsWith("/deploy/")) {
       const header = request.headers.get("x-kitshn-deployer");
       if (!header) return new Response("The Worker sent no deployer.", { status: 500 });
@@ -562,6 +606,8 @@ export class Kitshn extends DurableObject<Env> {
       now,
     );
     this.broadcast();
+    // K-1108: a machine that goes off or comes back changes the offline routes of its live sites.
+    void this.scheduleAlarm();
   }
 
   /** Machines with an open socket. Presence rows can be stale after a deploy; sockets are not. */
@@ -637,6 +683,8 @@ export class Kitshn extends DurableObject<Env> {
       };
       socket.serializeAttachment({ ...attachment, sample } satisfies Attachment);
       this.sendMachine(machine);
+    } else if (message.type === "sites") {
+      this.updateLiveSites(machine, message.sites);
     } else if (message.type === "jobResult" && typeof message.id === "number" && isRecord(message.result)) {
       const result = message.result;
       this.sql(
@@ -791,6 +839,11 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("DELETE FROM jobs WHERE machine_id = ? AND state IN ('queued', 'sent')", id);
       this.sql("DELETE FROM join_codes WHERE machine_id = ?", id);
       this.sql("DELETE FROM tunnel_objects WHERE machine_id = ?", id);
+      for (const site of this.sitesOf(id)) {
+        for (const table of ["live_sites", "resources", "places"])
+          this.sql(`DELETE FROM ${table} WHERE id = ?`, site.id);
+        this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${site.id}/%`);
+      }
       this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);
       this.insertRevision(caller.actor, `Removed machine ${machine.name}`, [], null);
     });
@@ -970,6 +1023,10 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-603: kitshn owns each tunnel's ingress and writes it from the alarm queue. */
+  /**
+   * K-603: kitshn owns each tunnel's ingress and writes it from the alarm queue. A site gets ingress only
+   * once its Access application exists, so it is never on the internet without Access (K-006).
+   */
   private async syncTunnels(api: NonNullable<ReturnType<Kitshn["api"]>>, budget: number) {
     let calls = 0;
     const rows = new Map(
@@ -978,14 +1035,15 @@ export class Kitshn extends DurableObject<Env> {
       ).map((row) => [row.machine_id, row]),
     );
     for (const machine of this.state.machines.values()) {
-      const body = JSON.stringify(tunnelConfig());
+      const config = tunnelConfig(this.protectedSites(machine.id));
+      const body = JSON.stringify(config);
       if (rows.get(machine.id)?.body === body) continue;
       if (calls++ >= budget) return;
       try {
         await api(
           "PUT",
           `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${machine.tunnelId}/configurations`,
-          tunnelConfig(),
+          config,
         );
         this.sql(
           "INSERT OR REPLACE INTO tunnel_objects (machine_id, body, error) VALUES (?, ?, NULL)",
@@ -1004,11 +1062,318 @@ export class Kitshn extends DurableObject<Env> {
     }
   }
 
+  /** True when a site check, a tunnel, a DNS record or an offline route waits for the alarm. */
   private tunnelWork() {
-    const done = new Set(
-      this.sql<{ machine_id: string }>("SELECT machine_id FROM tunnel_objects").map((row) => row.machine_id),
+    const tunnels = new Map(
+      this.sql<{ machine_id: string; body: string }>("SELECT machine_id, body FROM tunnel_objects").map(
+        (row) => [row.machine_id, row.body],
+      ),
     );
-    return [...this.state.machines.keys()].some((id) => !done.has(id));
+    const stale = [...this.state.machines.values()].some(
+      (machine) => tunnels.get(machine.id) !== JSON.stringify(tunnelConfig(this.protectedSites(machine.id))),
+    );
+    const checking = [...this.liveSites.values()].some(
+      (site) => site.state === "checking" && (this.checkRetryAt.get(site.id) ?? 0) <= Date.now(),
+    );
+    return stale || checking || this.dnsWork().length > 0 || this.routeWork().length > 0;
+  }
+
+  private sitesOf(machineId: string) {
+    return [...this.liveSites.values()].filter((site) => site.machineId === machineId);
+  }
+
+  /** Live sites whose address is checked and whose Access application exists in Cloudflare. */
+  private protectedSites(machineId?: string) {
+    return [...this.liveSites.values()].filter((site) => {
+      if (site.state !== "ok" || (machineId !== undefined && site.machineId !== machineId)) return false;
+      // The application exists in Cloudflare; a later failed update of it does not take the site down.
+      return Boolean(this.access.get(`app:${site.id}:${site.address}`)?.cfId);
+    });
+  }
+
+  /**
+   * K-1104: takes the full list of live sites of one machine. A new site waits for an address check
+   * (K-1111, K-408) before it becomes a card in the tray (K-509).
+   */
+  private updateLiveSites(machine: Machine, reported: unknown) {
+    const { sites, refused } = parseSites(reported);
+    const now = Date.now();
+    const keep = new Set<string>();
+    let changed = false;
+    this.ctx.storage.transactionSync(() => {
+      for (const report of sites) {
+        const id = liveSiteId(machine.id, report.name);
+        const address = `${report.name}.${this.env.KITSHN_ZONE}`;
+        const other = [...this.state.resources.values()].find(
+          (resource) => resource.id !== id && resource.addresses.includes(address),
+        );
+        const otherSite = [...this.liveSites.values()].find(
+          (site) => site.id !== id && site.address === address,
+        );
+        if (other || otherSite) {
+          refused.push(`${address} belongs to ${other ? `the card ${other.name}` : "another machine"}.`);
+          continue;
+        }
+        keep.add(id);
+        const old = this.liveSites.get(id);
+        if (old && old.target === report.target && old.dev === report.dev && old.up === report.up) continue;
+        changed = true;
+        // lastUp records the moment a site was last seen up, so it changes when the site goes down.
+        const lastUp = report.up || !old ? now : old.up ? now : old.lastUp;
+        this.sql(
+          `INSERT OR REPLACE INTO live_sites (id, machine_id, name, address, target, dev, up, last_up, state)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id,
+          machine.id,
+          report.name,
+          address,
+          report.target,
+          report.dev ? 1 : 0,
+          report.up ? 1 : 0,
+          lastUp,
+          old?.state ?? "checking",
+        );
+        const resource = this.state.resources.get(id);
+        if (resource) this.putResource({ ...resource, status: report.up ? "running" : "stopped" });
+      }
+      for (const site of this.sitesOf(machine.id)) {
+        if (keep.has(site.id)) continue;
+        changed = true;
+        for (const table of ["live_sites", "resources", "places"])
+          this.sql(`DELETE FROM ${table} WHERE id = ?`, site.id);
+        this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${site.id}/%`);
+        if (site.state === "ok") {
+          this.insertRevision(
+            { _tag: "kitshn", reason: `live site on ${machine.name}` },
+            `${machine.name} stopped exposing ${site.address}`,
+            [],
+            null,
+          );
+        }
+      }
+    });
+    for (const reason of refused) console.warn(`kitshn refused a live site of ${machine.name}: ${reason}`);
+    if (!changed) return;
+    this.load();
+    this.broadcast();
+    void this.scheduleAlarm();
+  }
+
+  /**
+   * K-1111, K-408: a new live site gets its card only when nothing else uses its address: no DNS record
+   * and no Worker custom domain. Otherwise kitshn refuses it and makes nothing for it.
+   */
+  private async checkSites(api: Api, budget: number) {
+    let calls = 0;
+    let changed = false;
+    const ours = new Set(
+      this.sql<{ record_id: string }>("SELECT record_id FROM dns_objects").map((row) => row.record_id),
+    );
+    for (const site of [...this.liveSites.values()].filter((item) => item.state === "checking")) {
+      if ((this.checkRetryAt.get(site.id) ?? 0) > Date.now()) continue;
+      if (calls + 2 > budget) break;
+      calls += 2;
+      let used: boolean;
+      try {
+        const records = await api<Array<{ id: string }>>(
+          "GET",
+          `/zones/${this.env.CLOUDFLARE_ZONE_ID}/dns_records?name=${encodeURIComponent(site.address)}`,
+        );
+        const domains = await api<Array<unknown>>(
+          "GET",
+          `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/domains?hostname=${encodeURIComponent(site.address)}`,
+        );
+        // A record that kitshn made itself (for a site that moved) does not count.
+        used = records.some((record) => !ours.has(record.id)) || domains.length > 0;
+      } catch (error) {
+        // Try again in five minutes; the rest of the alarm run goes on.
+        this.checkRetryAt.set(site.id, Date.now() + 5 * 60_000);
+        console.warn(`kitshn could not check ${site.address}: ${String(error)}`);
+        continue;
+      }
+      this.checkRetryAt.delete(site.id);
+      // The site may have changed while the checks waited; act only on the row as it is now.
+      const [row] = this.sql<{ state: string }>("SELECT state FROM live_sites WHERE id = ?", site.id);
+      if (row?.state !== "checking") continue;
+      changed = true;
+      if (used) {
+        this.sql("UPDATE live_sites SET state = 'refused' WHERE id = ?", site.id);
+        console.warn(`kitshn refused ${site.address}: something else already uses the address.`);
+        continue;
+      }
+      const machine = this.state.machines.get(site.machineId);
+      this.ctx.storage.transactionSync(() => {
+        this.sql("UPDATE live_sites SET state = 'ok' WHERE id = ?", site.id);
+        this.putResource({
+          id: site.id,
+          kind: "site.live",
+          name: site.name,
+          addresses: [site.address],
+          status: site.up ? "running" : "stopped",
+          group: null,
+          machine: site.machineId,
+        });
+        this.insertRevision(
+          { _tag: "kitshn", reason: `live site on ${machine?.name ?? site.machineId}` },
+          `${machine?.name ?? site.machineId} exposed ${site.address} (K-1104)`,
+          [],
+          null,
+        );
+      });
+    }
+    if (changed) {
+      this.load();
+      this.broadcast();
+    }
+    return calls;
+  }
+
+  /** Live site addresses whose DNS record kitshn still has to make, point elsewhere, or delete. */
+  private dnsWork() {
+    const rows = new Map(
+      this.sql<{ address: string; record_id: string; content: string; error: string | null }>(
+        "SELECT * FROM dns_objects",
+      ).map((row) => [row.address, row]),
+    );
+    const wanted = new Map(
+      this.protectedSites().flatMap((site) => {
+        const machine = this.state.machines.get(site.machineId);
+        return machine ? [[site.address, `${machine.tunnelId}.cfargotunnel.com`] as const] : [];
+      }),
+    );
+    return [
+      ...[...wanted]
+        .filter(([address, content]) => {
+          const row = rows.get(address);
+          return !row || (row.error === null && row.content !== content);
+        })
+        .map(([address, content]) => ({ address, content: content as string | null })),
+      ...[...rows.values()]
+        .filter((row) => !wanted.has(row.address) && row.error === null)
+        .map((row) => ({ address: row.address, content: null })),
+    ];
+  }
+
+  /** K-1108: addresses whose offline route kitshn still has to add or remove. */
+  private routeWork() {
+    const rows = new Map(
+      this.sql<{ address: string; route_id: string; error: string | null }>(
+        "SELECT * FROM route_objects",
+      ).map((row) => [row.address, row]),
+    );
+    const wanted = new Set(
+      sitesNeedingRoutes(this.protectedSites(), this.onlineMachines()).map((site) => site.address),
+    );
+    return [
+      ...[...wanted].filter((address) => !rows.has(address)).map((address) => ({ address, add: true })),
+      ...[...rows.values()]
+        .filter((row) => !wanted.has(row.address) && row.error === null)
+        .map((row) => ({ address: row.address, add: false })),
+    ];
+  }
+
+  /** K-1104: a proxied CNAME per live site to its machine's tunnel. kitshn deletes only records it made. */
+  private async syncDns(api: Api, budget: number) {
+    let calls = 0;
+    const zone = `/zones/${this.env.CLOUDFLARE_ZONE_ID}/dns_records`;
+    for (const work of this.dnsWork()) {
+      if (calls >= budget) return;
+      calls++;
+      const [row] = this.sql<{ record_id: string }>(
+        "SELECT record_id FROM dns_objects WHERE address = ?",
+        work.address,
+      );
+      try {
+        if (work.content !== null) {
+          const body = {
+            type: "CNAME",
+            name: work.address,
+            content: work.content,
+            proxied: true,
+            comment: "kitshn live site (K-1104)",
+          };
+          const record = row?.record_id
+            ? await api<{ id: string }>("PUT", `${zone}/${row.record_id}`, body)
+            : await api<{ id: string }>("POST", zone, body);
+          this.sql(
+            "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error) VALUES (?, ?, ?, NULL)",
+            work.address,
+            record.id,
+            work.content,
+          );
+        } else {
+          if (row?.record_id) {
+            await api("DELETE", `${zone}/${row.record_id}`).catch((error: unknown) =>
+              error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error),
+            );
+          }
+          this.sql("DELETE FROM dns_objects WHERE address = ?", work.address);
+        }
+      } catch (error) {
+        this.sql(
+          "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error) VALUES (?, ?, ?, ?)",
+          work.address,
+          row?.record_id ?? "",
+          work.content ?? "",
+          String(error),
+        );
+      }
+    }
+  }
+
+  /** K-1108: a Worker route on a live site only while its origin is down, so healthy visits cost nothing. */
+  private async syncRoutes(api: Api, budget: number) {
+    let calls = 0;
+    const routes = `/zones/${this.env.CLOUDFLARE_ZONE_ID}/workers/routes`;
+    for (const work of this.routeWork()) {
+      if (calls++ >= budget) return;
+      try {
+        if (work.add) {
+          const route = await api<{ id: string }>("POST", routes, {
+            pattern: `${work.address}/*`,
+            script: "kitshn",
+          });
+          this.sql(
+            "INSERT OR REPLACE INTO route_objects (address, route_id, error) VALUES (?, ?, NULL)",
+            work.address,
+            route.id,
+          );
+        } else {
+          const [row] = this.sql<{ route_id: string }>(
+            "SELECT route_id FROM route_objects WHERE address = ?",
+            work.address,
+          );
+          if (row?.route_id) {
+            await api("DELETE", `${routes}/${row.route_id}`).catch((error: unknown) =>
+              error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error),
+            );
+          }
+          this.sql("DELETE FROM route_objects WHERE address = ?", work.address);
+        }
+      } catch (error) {
+        this.sql(
+          "INSERT OR REPLACE INTO route_objects (address, route_id, error) VALUES (?, COALESCE((SELECT route_id FROM route_objects WHERE address = ?), ''), ?)",
+          work.address,
+          work.address,
+          String(error),
+        );
+      }
+    }
+  }
+
+  /** K-1110: what the offline page of an address shows. */
+  private offlineInfo(address: string) {
+    const site = [...this.liveSites.values()].find((item) => item.address === address);
+    if (!site) return Response.json({ error: "No live site has this address." }, { status: 404 });
+    const machine = this.state.machines.get(site.machineId);
+    const online = this.onlineMachines().has(site.machineId);
+    const seen = online ? site.lastUp : (this.presence.get(site.machineId)?.lastSeen ?? site.lastUp);
+    return Response.json({
+      site: site.address,
+      machine: machine?.name ?? "the machine",
+      reason: offlineReason(machine?.name ?? "the machine", online),
+      seen,
+    });
   }
 
   /** K-1302: one alarm for the next due item. Access work, share end dates, and the daily run. */
@@ -1088,6 +1453,12 @@ export class Kitshn extends DurableObject<Env> {
       // K-408: retry what failed once a day.
       this.sql("UPDATE access_objects SET error = NULL WHERE error IS NOT NULL");
       this.sql("DELETE FROM tunnel_objects WHERE error IS NOT NULL");
+      this.sql("DELETE FROM dns_objects WHERE error IS NOT NULL AND record_id = ''");
+      this.sql("UPDATE dns_objects SET error = NULL, content = '' WHERE error IS NOT NULL");
+      this.sql("DELETE FROM route_objects WHERE error IS NOT NULL AND route_id = ''");
+      this.sql("UPDATE route_objects SET error = NULL WHERE error IS NOT NULL");
+      // A refused address may be free now, for example after the other machine let it go.
+      this.sql("UPDATE live_sites SET state = 'checking' WHERE state = 'refused'");
       // K-1503 style clean-up: keep the newest 1,000 finished jobs.
       this.sql(
         "DELETE FROM jobs WHERE state NOT IN ('queued', 'sent') AND id <= (SELECT id FROM jobs ORDER BY id DESC LIMIT 1 OFFSET 1000)",
@@ -1201,7 +1572,9 @@ export class Kitshn extends DurableObject<Env> {
     const existing = this.state.resources.get(resourceId);
     if (existing && !existing.addresses.includes(result.address)) {
       return Response.json(
-        { error: `${result.environment} lives at ${existing.addresses[0]}. To move it, remove its card on the map first.` },
+        {
+          error: `${result.environment} lives at ${existing.addresses[0]}. To move it, remove its card on the map first.`,
+        },
         { status: 409 },
       );
     }
@@ -1222,13 +1595,21 @@ export class Kitshn extends DurableObject<Env> {
       );
       const foreign = domains.find((domain) => domain.service !== script);
       if (foreign) {
-        return Response.json({ error: `${result.address} already serves the Worker ${foreign.service}.` }, { status: 409 });
+        return Response.json(
+          { error: `${result.address} already serves the Worker ${foreign.service}.` },
+          { status: 409 },
+        );
       }
-      const apps = await api<Array<{ name: string; domain?: string }>>("GET", `${account}/access/apps?per_page=1000`);
+      const apps = await api<Array<{ name: string; domain?: string }>>(
+        "GET",
+        `${account}/access/apps?per_page=1000`,
+      );
       const foreignApp = apps.find((app) => app.domain === result.address && !app.name.startsWith("kitshn "));
       if (foreignApp) {
         return Response.json(
-          { error: `The Access application "${foreignApp.name}" covers ${result.address}; kitshn does not change it.` },
+          {
+            error: `The Access application "${foreignApp.name}" covers ${result.address}; kitshn does not change it.`,
+          },
           { status: 409 },
         );
       }
@@ -1264,7 +1645,9 @@ export class Kitshn extends DurableObject<Env> {
       );
       if (first && first.branch !== event.branch) {
         return Response.json(
-          { error: `${result.environment} deploys only from the branch ${first.branch}, not ${event.branch}.` },
+          {
+            error: `${result.environment} deploys only from the branch ${first.branch}, not ${event.branch}.`,
+          },
           { status: 403 },
         );
       }
@@ -1342,13 +1725,15 @@ export class Kitshn extends DurableObject<Env> {
       }
     } else card = "The card keeps its place; the map decides who opens it (K-807).";
     // Fail closed: the Access application exists before the address does.
-    await this.withAccessLock(() => syncAccess(
-      desiredAccess(this.state, Date.now()),
-      this.accessStore(),
-      api,
-      this.env.CLOUDFLARE_ACCOUNT_ID,
-      20,
-    ));
+    await this.withAccessLock(() =>
+      syncAccess(
+        desiredAccess(this.state, Date.now()),
+        this.accessStore(),
+        api,
+        this.env.CLOUDFLARE_ACCOUNT_ID,
+        20,
+      ),
+    );
     const app = this.access.get(`app:${row.resource_id}:${row.address}`);
     if (!app?.cfId || app.error) {
       return Response.json(
@@ -1391,7 +1776,8 @@ export class Kitshn extends DurableObject<Env> {
         previews_enabled: false,
       });
     } catch (error) {
-      if (isNew) await api("DELETE", `${account}/workers/scripts/${row.script}?force=true`).catch(() => undefined);
+      if (isNew)
+        await api("DELETE", `${account}/workers/scripts/${row.script}?force=true`).catch(() => undefined);
       throw error;
     }
     const domains = await api<Array<{ id: string; service: string }>>(
@@ -1438,12 +1824,13 @@ export class Kitshn extends DurableObject<Env> {
         this.sql(`DELETE FROM ${table} WHERE id = ?`, row.resource_id);
       this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${row.resource_id}/%`);
       this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
-      if (resource) this.insertRevision(
-        { _tag: "kitshn", reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}` },
-        `Removed ${resource?.name ?? row.environment}, its preview closed (K-904)`,
-        [],
-        null,
-      );
+      if (resource)
+        this.insertRevision(
+          { _tag: "kitshn", reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}` },
+          `Removed ${resource?.name ?? row.environment}, its preview closed (K-904)`,
+          [],
+          null,
+        );
     });
     this.load();
     this.broadcast();
@@ -1519,6 +1906,12 @@ export class Kitshn extends DurableObject<Env> {
           spent = 12;
         }
       }
+      // Removals first: ingress and DNS go before an Access application does. Additions wait for the next
+      // run, because ingress and DNS need the application that the Access sync makes (K-006).
+      await this.syncTunnels(api, 6);
+      spent += await this.checkSites(api, 6);
+      await this.syncDns(api, 5);
+      await this.syncRoutes(api, 5);
       await this.withAccessLock(() =>
         // The state can change while the daily compare waits, so the sync reads it inside the lock.
         syncAccess(
@@ -1526,11 +1919,11 @@ export class Kitshn extends DurableObject<Env> {
           this.accessStore(),
           api,
           this.env.CLOUDFLARE_ACCOUNT_ID,
-          // Ten calls stay free for the tunnels (K-406, K-603).
-          CALLS_PER_RUN - spent - 10,
+          // The tunnels, DNS records and offline routes above used at most 16 calls (K-406).
+          CALLS_PER_RUN - spent - 16,
         ),
       );
-      await this.syncTunnels(api, 10);
+
       changed ||=
         daily || JSON.stringify(accessStates(desiredAccess(this.state, now), this.access)) !== before;
     }

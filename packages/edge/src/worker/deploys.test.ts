@@ -11,14 +11,24 @@ describe("deploys (K-811, K-903)", () => {
       action: null,
     });
     const pull = { eventName: "pull_request", branch: "x", pr: 7 };
-    expect(eventOf(pull, { action: "closed", pr: 1 })).toEqual({ name: "pull_request", branch: "x", pr: 7, action: "closed" });
-    expect(eventOf({ eventName: "workflow_dispatch", branch: "main", pr: null }, {})).toMatch(/push and pull_request/);
+    expect(eventOf(pull, { action: "closed", pr: 1 })).toEqual({
+      name: "pull_request",
+      branch: "x",
+      pr: 7,
+      action: "closed",
+    });
+    expect(eventOf({ eventName: "workflow_dispatch", branch: "main", pr: null }, {})).toMatch(
+      /push and pull_request/,
+    );
   });
 
   it("keeps repos with similar names apart", () => {
-    expect(environmentNames("1", "me/my.site", "prod").script).not.toBe(environmentNames("2", "me/my-site", "prod").script);
+    expect(environmentNames("1", "me/my.site", "prod").script).not.toBe(
+      environmentNames("2", "me/my-site", "prod").script,
+    );
     expect(environmentNames("1", "me/hello", "prod").script.length).toBeLessThanOrEqual(63);
-    const long = (env: string) => environmentNames("1061234567", "me/a-fairly-long-repository-name", env).resourceId;
+    const long = (env: string) =>
+      environmentNames("1061234567", "me/a-fairly-long-repository-name", env).resourceId;
     expect(long("preview-branch-101")).not.toBe(long("preview-branch-102"));
     expect(long("preview-branch-101").length).toBeLessThanOrEqual(56);
   });

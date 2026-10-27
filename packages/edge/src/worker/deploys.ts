@@ -42,7 +42,8 @@ export function eventOf(
     return `kitshn deploys on push and pull_request, not on ${deployer.eventName}.`;
   }
   if (deployer.eventName === "push") return { name: "push", branch: deployer.branch, pr: null, action: null };
-  const action = typeof value === "object" && value !== null ? (value as Record<string, unknown>)["action"] : null;
+  const action =
+    typeof value === "object" && value !== null ? (value as Record<string, unknown>)["action"] : null;
   if (typeof action !== "string") return "A pull request deploy needs its action.";
   return { name: "pull_request", branch: deployer.branch, pr: deployer.pr, action };
 }

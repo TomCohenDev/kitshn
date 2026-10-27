@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>{{site}} is off · kitshn</title>
+    <style>
+      /* K-1106: the kitshn offline page in the tick3d look, light and dark. No continuous animation. */
+      @import url("https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,800&family=JetBrains+Mono:wght@400;600&display=swap");
+      :root {
+        color-scheme: light;
+        --canvas: #e4e7ff;
+        --dots: #00000026;
+        --surface: #ffffff;
+        --ink: #000000;
+        --muted: #3d3d5c;
+        --border: #000000;
+        --shadow-ink: #000000;
+        --accent: #6c5ce7;
+        --select: #ffe14d;
+        --select-fg: #000000;
+        --warning: #ffb347;
+        --sans: "Bricolage Grotesque", system-ui, sans-serif;
+        --mono: "JetBrainsMono Nerd Font Mono", "JetBrains Mono", monospace;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          color-scheme: dark;
+          --canvas: #15122b;
+          --dots: #f3f0ff22;
+          --surface: #262147;
+          --ink: #f3f0ff;
+          --muted: #bdb6e6;
+          --border: #f3f0ff;
+          --shadow-ink: #b9a8ff;
+          --select: #6c5ce7;
+          --select-fg: #ffffff;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        font-size: 18px;
+      }
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        display: grid;
+        place-items: center;
+        padding: 20px;
+        font: 1rem/1.5 var(--sans);
+        color: var(--ink);
+        background-color: var(--canvas);
+        background-image: radial-gradient(var(--dots) 1.2px, transparent 1.2px);
+        background-size: 16px 16px;
+      }
+      main {
+        position: relative;
+        width: min(470px, 100%);
+        padding: 26px 24px 18px;
+        text-align: center;
+        background: var(--surface);
+        border: 2px solid var(--border);
+        border-radius: 0.25rem;
+        box-shadow: 6px 6px 0 0 var(--shadow-ink);
+      }
+      .pot {
+        font-size: 3rem;
+        line-height: 1;
+      }
+      h1 {
+        margin: 10px 0 6px;
+        font-size: 1.9rem;
+        font-weight: 800;
+        line-height: 1.05;
+        letter-spacing: -0.02em;
+      }
+      .site {
+        display: inline-block;
+        padding: 1px 6px;
+        font: 600 0.75rem var(--mono);
+        color: var(--select-fg);
+        background: var(--select);
+        border: 2px solid var(--shadow-ink);
+        border-radius: 4px;
+        overflow-wrap: anywhere;
+      }
+      p {
+        margin: 12px 0;
+        color: var(--muted);
+      }
+      .sticker {
+        position: absolute;
+        top: -14px;
+        right: -14px;
+        padding: 0 8px;
+        font-size: 0.65rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: #000000;
+        background: var(--warning);
+        border: 2px solid var(--shadow-ink);
+        border-radius: 4px;
+        box-shadow: 2px 2px 0 0 var(--shadow-ink);
+        transform: rotate(6deg);
+      }
+      button {
+        margin-top: 4px;
+        padding: 6px 18px;
+        font: 800 1rem var(--sans);
+        color: #ffffff;
+        background: var(--accent);
+        border: 2px solid var(--border);
+        border-radius: 0.25rem;
+        box-shadow: 4px 4px 0 0 var(--shadow-ink);
+        cursor: pointer;
+        transition:
+          transform 80ms,
+          box-shadow 80ms;
+      }
+      button:hover {
+        transform: translate(-1px, -1px);
+        box-shadow: 5px 5px 0 0 var(--shadow-ink);
+      }
+      button:active {
+        transform: translate(4px, 4px);
+        box-shadow: none;
+      }
+      button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+      }
+      .foot {
+        margin: 16px 0 0;
+        font-size: 0.7rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <span class="sticker">back soon</span>
+      <div class="pot" aria-hidden="true">🍳</div>
+      <h1>The kitchen is closed.</h1>
+      <span class="site">{{site}}</span>
+      <p>{{reason}}</p>
+      <button type="button" onclick="location.reload()">Knock again</button>
+      <p class="foot">Last seen {{seen}} · served by kitshn</p>
+    </main>
+  </body>
+</html>

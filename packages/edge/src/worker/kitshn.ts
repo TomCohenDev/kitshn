@@ -1767,6 +1767,23 @@ export class Kitshn extends DurableObject<Env> {
     if (result.kind === "skip") return Response.json({ deployId: null, plan: result });
     const { resourceId, script } = environmentNames(deployer.repoId, deployer.repo, result.environment);
     const existing = this.state.resources.get(resourceId);
+    // K-811: a number that only the request names may close a preview, and only the one that this head
+    // branch deployed itself.
+    if ("claimed" in event && event.claimed) {
+      const [own] = this.sql<{ id: string }>(
+        "SELECT id FROM deploys WHERE resource_id = ? AND kind = 'deploy' AND branch = ? LIMIT 1",
+        resourceId,
+        event.branch,
+      );
+      if (result.kind !== "teardown" || !own) {
+        return Response.json(
+          {
+            error: `The token names no pull request, and ${event.branch} deployed no preview pr-${event.pr}.`,
+          },
+          { status: 403 },
+        );
+      }
+    }
     const compose = "compose" in recipe ? recipe.compose : null;
     // K-610, K-611: a new Compose app goes to the first online machine with all labels; a running one stays.
     let machineId: string | null = null;
@@ -1897,7 +1914,8 @@ export class Kitshn extends DurableObject<Env> {
       result.kind,
       deployer.sha,
       Date.now() + DEPLOY_MS,
-      event.name === "push" ? event.branch : "",
+      // A push binds its environment to the branch (K-807); a preview records its head branch for its close.
+      event.branch,
       compose ? "compose" : "static",
       machineId,
       compose?.file ?? null,

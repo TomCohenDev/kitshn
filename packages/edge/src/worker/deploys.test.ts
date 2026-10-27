@@ -17,6 +17,21 @@ describe("deploys (K-811, K-903)", () => {
       pr: 7,
       action: "closed",
     });
+    // A closed pull request's token has no number; the request's number is only a claim to check.
+    expect(
+      eventOf({ eventName: "pull_request", branch: "x", pr: null }, { action: "closed", pr: 7 }),
+    ).toEqual({
+      name: "pull_request",
+      branch: "x",
+      pr: 7,
+      action: "closed",
+      claimed: true,
+    });
+    expect(
+      eventOf({ eventName: "pull_request", branch: "x", pr: null }, { action: "opened", pr: 7 }),
+    ).toMatchObject({
+      pr: null,
+    });
     expect(eventOf({ eventName: "workflow_dispatch", branch: "main", pr: null }, {})).toMatch(
       /push and pull_request/,
     );

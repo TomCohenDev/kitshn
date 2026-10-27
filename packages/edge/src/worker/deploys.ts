@@ -37,7 +37,7 @@ function fnv(text: string): string {
 export function eventOf(
   deployer: { eventName: string; branch: string; pr: number | null },
   value: unknown,
-): DeployEvent | string {
+): (DeployEvent & { readonly claimed?: true }) | string {
   if (deployer.eventName !== "push" && deployer.eventName !== "pull_request") {
     return `kitshn deploys on push and pull_request, not on ${deployer.eventName}.`;
   }
@@ -45,7 +45,13 @@ export function eventOf(
   const action =
     typeof value === "object" && value !== null ? (value as Record<string, unknown>)["action"] : null;
   if (typeof action !== "string") return "A pull request deploy needs its action.";
-  return { name: "pull_request", branch: deployer.branch, pr: deployer.pr, action };
+  if (deployer.pr !== null) return { name: "pull_request", branch: deployer.branch, pr: deployer.pr, action };
+  // A closed pull request has no `refs/pull/<n>/` ref in its token, so its number comes from the request.
+  // kitshn trusts it only to close the preview that the token's own head branch deployed (planDeploy).
+  const pr = (value as Record<string, unknown>)["pr"];
+  if (action !== "closed" || typeof pr !== "number" || !Number.isInteger(pr) || pr <= 0)
+    return { name: "pull_request", branch: deployer.branch, pr: null, action };
+  return { name: "pull_request", branch: deployer.branch, pr, action, claimed: true };
 }
 
 /** The asset manifest of the direct upload flow: paths to a 32-hex hash and a size. */

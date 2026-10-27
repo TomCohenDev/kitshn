@@ -2782,6 +2782,8 @@ export class Kitshn extends DurableObject<Env> {
           );
       } else if (result.kind === "deploy") {
         const labels = compose.runsOn ?? [];
+        // K-1708: a machine without a key is online for status only and gets no job.
+        const ready = this.jobMachines();
         const pick = [...this.state.machines.values()]
           // Only a machine that the owner labels "deploy" runs the apps of repos (K-610).
           .filter((machine) => ["deploy", ...labels].every((label) => machine.labels.includes(label)))
@@ -2789,11 +2791,11 @@ export class Kitshn extends DurableObject<Env> {
           .filter((machine) => this.machineView(machine).status?.capabilities?.includes("compose-guard"))
           .filter((machine) => mayDeployOn(this.state, allowedBy?.clientId ?? null, machine.id, Date.now()))
           .sort((a, b) => a.order - b.order)
-          .find((machine) => this.presence.get(machine.id)?.online);
+          .find((machine) => ready.has(machine.id));
         if (!pick) {
           return Response.json(
             {
-              error: `No online machine with a Compose-ready daemon has the labels ${["deploy", ...labels].join(", ")}. Label a machine "deploy", update its daemon, or start it.${agentLimit}`,
+              error: `No online machine with a Compose-ready daemon has the labels ${["deploy", ...labels].join(", ")}. Label a machine "deploy", update its daemon, start it, or give it a key (K-1708).${agentLimit}`,
             },
             { status: 409 },
           );

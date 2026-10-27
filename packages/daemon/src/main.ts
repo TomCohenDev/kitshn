@@ -122,10 +122,10 @@ function writeKey(file: string, key: MachinePrivateKey) {
 /** K-602: trades the join code for the machine secrets and saves them for the daemon user only. */
 async function joinCommand(code: string | undefined, server: string | undefined) {
   if (!code || !server) fail("usage: kitshn join <code> --server https://kit.example.com");
-  // K-1703: the key pair comes first, on disk before kitshn stores its public half; then it goes with the code.
+  // K-1703: the key pair comes first, in machine.key.next before kitshn stores its public half, so a wrong code
+  // never replaces a valid key. The next challenge that names it promotes it, as after a rotation.
   const key = await newMachineKey();
-  writeKey(keyFile, key);
-  rmSync(nextKeyFile, { force: true });
+  writeKey(nextKeyFile, key);
   const response = await fetch(new URL("/join/exchange", server), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -136,13 +136,16 @@ async function joinCommand(code: string | undefined, server: string | undefined)
     sealed?: string;
     error?: string;
   } | null;
-  if (!response.ok || !body?.iv || !body.sealed)
+  if (!response.ok || !body?.iv || !body.sealed) {
+    rmSync(nextKeyFile, { force: true });
     fail(body?.error ?? `the server answered ${response.status}.`);
+  }
   const secrets = await openJoin(code, { iv: body.iv, sealed: body.sealed });
   mkdirSync(dirname(paths.config), { recursive: true, mode: 0o700 });
   // An older file can have looser permissions; tighten them before the secrets go in.
   if (existsSync(paths.config)) chmodSync(paths.config, 0o600);
   writeFileSync(paths.config, `${JSON.stringify(secrets, null, 2)}\n`, { mode: 0o600 });
+  renameSync(nextKeyFile, keyFile);
   console.log(`Joined as machine ${secrets.machineId} with the key ${await fingerprintOf(key.x)}.`);
 }
 

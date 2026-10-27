@@ -151,6 +151,15 @@ export function withStackMates(state: State, changes: ReadonlyArray<Change>): Ar
   const mates: Array<Change> = [];
   for (const change of changes) {
     if (change._tag !== "place") continue;
+    // A card that goes back to the tray leaves its stack, as a deleted card does; the stack stays put.
+    if (change.after === null) {
+      for (const left of stacksWithout(stacks.values(), change.id)) {
+        mates.push({ _tag: "stack", id: left.id, before: stacks.get(left.id) ?? null, after: left.after });
+        if (left.after) stacks.set(left.id, left.after);
+        else stacks.delete(left.id);
+      }
+      continue;
+    }
     const stack = [...stacks.values()].find((candidate) => candidate.members.includes(change.id));
     for (const mate of stack?.members ?? []) {
       if (placed.has(mate)) continue;

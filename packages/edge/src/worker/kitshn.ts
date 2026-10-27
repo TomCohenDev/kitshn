@@ -12,12 +12,14 @@ import {
   invert,
   resolveEdits,
   ruleViolation,
+  shareDiff,
   stacksWithout,
   summarize,
   withStackMates,
 } from "../core/changes.ts";
 import {
   ADMIN_RESOURCE_ID,
+  isPublicCircle,
   type Circle,
   type Member,
   type Point,
@@ -414,8 +416,18 @@ export class Kitshn extends DurableObject<Env> {
     // This also refuses a second undo of the same revision: its changes are no longer current.
     const conflict = conflictOf(this.state, inverted);
     if (conflict) throw new RuleError(`A later revision changed ${conflict}. Undo that revision first.`);
-    // A card that joined a stack since then takes its stack along (K-521).
-    return this.commit(actor, withStackMates(this.state, inverted), revisionId);
+    // A card that joined a stack since then takes its stack along (K-521), but never into a public circle
+    // without the question of K-210, which an undo does not ask.
+    const changes = withStackMates(this.state, inverted);
+    const own = new Set(inverted.flatMap((change) => (change._tag === "place" ? [change.id] : [])));
+    const goingPublic = shareDiff(this.state, applyChanges(this.state, changes)).find(
+      (diff) => !own.has(diff.resource.id) && diff.to && !diff.from && isPublicCircle(diff.circle),
+    );
+    if (goingPublic)
+      throw new RuleError(
+        `This undo would make ${goingPublic.resource.name} public through its stack. Move the stack by hand.`,
+      );
+    return this.commit(actor, changes, revisionId);
   }
 
   private authorized(caller: Caller) {

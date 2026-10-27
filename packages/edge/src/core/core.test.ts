@@ -434,6 +434,22 @@ describe("stacks (K-521, K-522)", () => {
     expect(undone.places.get("kitshn-admin")).toEqual(undone.places.get("riffle"));
   });
 
+  it("takes a card out of its stack when an undo sends it back to the tray", () => {
+    const point = { x: 0, y: 40 };
+    const first = edit(start(), [{ _tag: "place", id: "riffle", after: point }]);
+    const second = edit(first.after, [
+      { _tag: "place", id: "kitshn-admin", after: point },
+      { _tag: "stack", id: "s1", after: stack },
+    ]);
+    const undone = applyChanges(
+      second.after,
+      withStackMates(second.after, [{ _tag: "place", id: "riffle", before: point, after: null }]),
+    );
+    expect(undone.places.get("kitshn-admin")).toEqual(point);
+    expect(undone.stacks.size).toBe(0);
+    expect(ruleViolation(undone) ?? "").not.toMatch(/stack/);
+  });
+
   it("keeps the rules true when a stacked card is deleted outside an edit", () => {
     const point = { x: 0, y: 40 };
     const { after } = edit(start(), [

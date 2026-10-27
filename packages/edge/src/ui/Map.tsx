@@ -32,7 +32,7 @@ type Drag =
       readonly origins: ReadonlyMap<string, Point>;
       readonly clicked: string;
       /** The card under the grab point, which a drop never stacks onto, so a nudge stays a move. */
-      readonly under: string | null;
+      under: string | null;
       moved: boolean;
     }
   | {
@@ -270,6 +270,8 @@ export function MapView(props: Props) {
       ]);
       preview(placeChanges(moves), pointer);
       const target = stackTargetAt(event.clientX, event.clientY, new Set(drag.origins.keys()));
+      // Once the pointer leaves the card it was grabbed over, that card is a target like any other.
+      if (target !== drag.under) drag.under = null;
       setStackTarget(target === drag.under ? null : target);
       return;
     }
@@ -495,7 +497,12 @@ export function MapView(props: Props) {
       ) : null}
       {draft && stackTarget ? (
         <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
-          <span>Stack with {state.resources.get(stackTarget)?.name ?? "this card"}</span>
+          <span>
+            Stack with{" "}
+            {[...state.stacks.values()].find((stack) => stack.members.includes(stackTarget))?.name ??
+              state.resources.get(stackTarget)?.name ??
+              "this card"}
+          </span>
         </div>
       ) : draft && draft.diffs.length > 0 ? (
         <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>

@@ -320,6 +320,12 @@ export class Kitshn extends DurableObject<Env> {
     }
   }
 
+  /** The newest revision id ever made. It never goes down, also after the cleanup of K-1503. */
+  private lastRevision(): number {
+    const [row] = this.sql<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'revisions'");
+    return row?.seq ?? 0;
+  }
+
   private insertRevision(
     actor: Actor,
     summary: string,
@@ -408,6 +414,7 @@ export class Kitshn extends DurableObject<Env> {
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
       version: this.env.KITSHN_VERSION,
+      revision: this.lastRevision(),
       me,
     };
   }
@@ -553,7 +560,18 @@ export class Kitshn extends DurableObject<Env> {
       socket.close(4000, `kitshn cannot read the message: ${String(error).slice(0, 100)}`);
       return;
     }
-    send(socket, this.handle(caller, message));
+    try {
+      send(socket, this.handle(caller, message));
+    } catch (error) {
+      // Every request gets an answer, so a map never waits forever on an edit it shows (held.ts).
+      console.error(`kitshn could not handle a ${message.type} request: ${String(error)}`);
+      send(socket, {
+        type: "result",
+        requestId: message.requestId,
+        ok: false,
+        error: "kitshn could not save this change. Try again.",
+      });
+    }
   }
 
   override async webSocketClose(socket: WebSocket) {
@@ -651,7 +669,9 @@ export class Kitshn extends DurableObject<Env> {
         arch: String(message.status.arch).slice(0, 20),
         hostname: String(message.status.hostname).slice(0, 80),
         capabilities: Array.isArray(message.status.capabilities)
-          ? message.status.capabilities.filter((item): item is string => typeof item === "string").slice(0, 20)
+          ? message.status.capabilities
+              .filter((item): item is string => typeof item === "string")
+              .slice(0, 20)
           : [],
         tunnel: ["starting", "running", "stopped"].includes(String(message.status.tunnel))
           ? message.status.tunnel
@@ -944,15 +964,19 @@ export class Kitshn extends DurableObject<Env> {
         const status = this.machineView(machine).status;
         // The daemon sends its status just after it connects; the job waits for it.
         if (!status) continue;
-        const fail = (output: string) => this.sql("UPDATE jobs SET state = 'failed', output = ? WHERE id = ?", output, job.id);
+        const fail = (output: string) =>
+          this.sql("UPDATE jobs SET state = 'failed', output = ? WHERE id = ?", output, job.id);
         if (!/^[0-9a-f]{12}$/.test(command.version)) {
           fail(`This kitshn runs the build "${command.version}", which has no release to update to.`);
           continue;
         }
         if (!status.capabilities?.includes("update")) {
-          const script = status.version === "dev" ? null : legacyUpdateScript(command.version, status.os, status.arch);
+          const script =
+            status.version === "dev" ? null : legacyUpdateScript(command.version, status.os, status.arch);
           if (!script) {
-            fail("This daemon runs from source, or kitshn does not know its platform. Update it by hand or join the machine again.");
+            fail(
+              "This daemon runs from source, or kitshn does not know its platform. Update it by hand or join the machine again.",
+            );
             continue;
           }
           command = { kind: "shell", script };

@@ -35,6 +35,8 @@ export interface Snapshot {
   /** K-617: the release of this kitshn; "Update daemon" installs the daemon of this release. */
   readonly version: string;
   readonly me: Actor;
+  /** The newest revision in this snapshot; a map shows a held edit until a snapshot reaches it. */
+  readonly revision: number;
 }
 
 export type ServerMessage =

@@ -126,6 +126,7 @@ export function App() {
     () => new Map((store.snapshot?.machines ?? []).map((view) => [view.machine.id, view])),
     [store.snapshot],
   );
+  const deployed = useMemo(() => new Set(store.snapshot?.deployedCards ?? []), [store.snapshot]);
 
   useEffect(() => {
     const onHash = () => setRoute(routeFromHash());
@@ -804,6 +805,7 @@ export function App() {
         }}
         onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
         onRemoveApp={(resource) => void removeApp(resource)}
+        deployed={deployed}
         paused={store.snapshot.paused !== null}
         machines={machines}
         version={store.snapshot.version}
@@ -858,7 +860,7 @@ export function App() {
       {palette !== null ? (
         <Palette
           state={state}
-          deployed={new Set(store.snapshot.repos.flatMap((repo) => repo.resourceIds))}
+          deployed={deployed}
           initialQuery={palette}
           onClose={() => setPalette(null)}
           actions={{
@@ -982,6 +984,8 @@ function Panel(props: {
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean) => void;
   onRemoveApp: (resource: Resource) => void;
+  /** K-909 */
+  deployed: ReadonlySet<string>;
   paused: boolean;
   warnings: ReadonlyArray<string>;
   machines: ReadonlyMap<string, MachineView>;
@@ -1029,6 +1033,7 @@ function Panel(props: {
         onPlace={props.onPlace}
         onReshare={props.onReshare}
         onRemoveApp={props.onRemoveApp}
+        deployed={props.deployed.has(cards[0].id)}
         machine={props.machines.get(cards[0].id) ?? null}
         version={props.version}
         jobs={props.jobs}
@@ -1201,6 +1206,8 @@ function CardPanel(props: {
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean) => void;
   onRemoveApp: (resource: Resource) => void;
+  /** K-909: a deploy made this card, so "Remove app" applies. */
+  deployed: boolean;
   machine: MachineView | null;
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
@@ -1267,7 +1274,7 @@ function CardPanel(props: {
           Place on the map
         </button>
       ) : null}
-      {isAppCard(resource) && props.repo ? (
+      {isAppCard(resource) && props.deployed ? (
         <button
           class="btn danger"
           title="Takes down what the deploy made and keeps the volumes. Undo starts it again (K-909)."

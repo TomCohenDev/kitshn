@@ -33,11 +33,10 @@ export function appTeardown(card: AppCard, zone: string): Teardown {
 export type DownJob = { readonly state: "queued" | "sent" | "done" | "failed" | "expired" } | null;
 
 /**
- * K-909: what the undo of a Compose removal does with its `compose-down`. A queued one goes, and the app,
- * which never stopped, needs no start. One that the machine runs now refuses the undo until it ends.
+ * K-909: the undo of a Compose removal waits while the machine runs its `compose-down`. Otherwise it cancels a
+ * queued one and starts the app; the daemon runs a down that is still under way first (one job per app).
  */
-export function composeUndo(down: DownJob): "start" | "cancel" | "refuse" {
-  if (down?.state === "queued") return "cancel";
+export function composeUndo(down: DownJob): "refuse" | "start" {
   return down?.state === "sent" ? "refuse" : "start";
 }
 

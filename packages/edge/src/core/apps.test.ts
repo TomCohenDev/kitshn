@@ -60,11 +60,9 @@ describe("app removal (K-909)", () => {
     });
   });
 
-  it("cancels a compose-down that waits, refuses while the machine runs it, and starts the app after it", () => {
-    expect(composeUndo({ state: "queued" })).toBe("cancel");
+  it("refuses an undo only while the machine runs the compose-down", () => {
     expect(composeUndo({ state: "sent" })).toBe("refuse");
-    expect(composeUndo({ state: "done" })).toBe("start");
-    expect(composeUndo({ state: "failed" })).toBe("start");
+    for (const state of ["queued", "done", "failed", "expired"] as const) expect(composeUndo({ state })).toBe("start");
     expect(composeUndo(null)).toBe("start");
   });
 

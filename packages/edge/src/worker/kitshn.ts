@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { Schema } from "effect";
 import { ACCESS_NAME_PREFIX, ENROLLMENT_KEY, desiredAccess } from "../core/access.ts";
-import { type DownJob, appRestart, appTeardown, composeUndo, orphanVolumes } from "../core/apps.ts";
+import { appRestart, appTeardown, composeUndo, orphanVolumes } from "../core/apps.ts";
 import {
   type Actor,
   type AppCard,
@@ -113,6 +113,7 @@ import {
 import type { Caller, Deployer } from "./auth.ts";
 import { CloudflareError, cloudflare } from "./cloudflare.ts";
 import { dispatchDeploy } from "./github.ts";
+import { REPLACED, failQueuedDowns, removalDown, requeueDowns } from "./downs.ts";
 import { REPO_GATE_MIGRATION, migrate } from "./migrations.ts";
 import {
   DEPLOY_MS,
@@ -226,6 +227,9 @@ export class Kitshn extends DurableObject<Env> {
   private sql<T extends Record<string, SqlStorageValue>>(query: string, ...bindings: Array<SqlStorageValue>) {
     return this.ctx.storage.sql.exec<T>(query, ...bindings).toArray();
   }
+
+  /** The SQL of the job helpers in downs.ts, which tests run on node:sqlite. */
+  private query = (query: string, ...bindings: Array<string | number | null>) => this.sql(query, ...bindings);
 
   private load() {
     const json = <T>(rows: Array<{ id: string; body: string }>) =>
@@ -549,8 +553,7 @@ export class Kitshn extends DurableObject<Env> {
   /** K-909: removes a deployed app; the card panel, the palette and `DELETE /api/apps/<card>` all come here. */
   private async removeApp(caller: Caller, id: string) {
     try {
-      // The card panel offers "Remove app" by the same check: a repo lists the card (K-819).
-      if (!this.repoViews().some((repo) => repo.resourceIds.includes(id)))
+      if (!this.deployedCards(id).includes(id))
         return Response.json(
           { error: `A deploy did not make the card "${id}", so it is not an app (K-909).` },
           { status: 409 },
@@ -585,27 +588,21 @@ export class Kitshn extends DurableObject<Env> {
     // The state can change while Cloudflare answers.
     const conflict = conflictOf(this.state, changes);
     if (conflict) throw new RuleError(`${conflict._tag} "${conflict.id}" changed meanwhile. Try again.`);
-    // K-909: a Compose app whose compose-down has not run yet never stopped, so its undo cancels that job.
-    const cancelled = new Map<string, number>();
-    for (const { after } of apps) {
-      if (after?.kind !== "site.compose") continue;
-      const down = this.removalDown(after.id);
-      const step = composeUndo(down);
-      if (step === "refuse")
-        throw new RuleError(`The machine is stopping ${after.name} now; undo after it finishes (K-909).`);
-      if (step === "cancel" && down) cancelled.set(after.id, down.id);
-    }
+    // K-909: the stop of a removed Compose app that the machine runs now ends first. A closed preview has its
+    // own teardown (K-904), which the undo leaves alone.
+    const restored = apps.flatMap(({ after }) =>
+      after?.kind === "site.compose" && !this.closedPreview(after.id) ? [after] : [],
+    );
+    for (const card of restored)
+      if (composeUndo(removalDown(this.query, card.id)) === "refuse")
+        throw new RuleError(`The machine is stopping ${card.name} now; undo after it finishes (K-909).`);
     const revision = this.commit(actor, changes, undoes);
-    for (const jobId of cancelled.values())
-      this.sql(
-        "UPDATE jobs SET state = 'failed', output = 'The undo of the removal cancelled this job (K-909).' WHERE id = ?",
-        jobId,
-      );
+    // A stop that still waits goes; the app then starts again, or runs on where it never stopped.
+    for (const card of restored)
+      failQueuedDowns(this.query, card.id, "The undo of the removal replaced this job (K-909).");
     const notes: Array<string> = [];
     for (const { before, after } of apps) {
-      if (after && cancelled.has(after.id))
-        notes.push(`${after.name} never stopped: kitshn cancelled its compose-down.`);
-      else if (after) notes.push(await this.restartApp(actor, after));
+      if (after) notes.push(await this.restartApp(actor, after));
       else if (before?.kind === "site.compose") notes.push(this.stopCompose(actor, before));
     }
     if (apps.length > 0) {
@@ -615,15 +612,19 @@ export class Kitshn extends DurableObject<Env> {
     return { revision, notes };
   }
 
-  /** K-909: the newest `compose-down` of a removal (it keeps the data) for this project, or null. */
-  private removalDown(project: string) {
-    const [row] = this.sql<{ id: number; state: NonNullable<DownJob>["state"] }>(
-      `SELECT id, state FROM jobs WHERE json_extract(command, '$.kind') = 'compose-down'
-       AND json_extract(command, '$.project') = ? AND json_extract(command, '$.removeData') = 0
-       ORDER BY id DESC LIMIT 1`,
-      project,
-    );
-    return row ?? null;
+  /**
+   * K-909: the cards that a deploy made, which "Remove app" accepts: a deploy with a repo id, or a finished one
+   * from before the repo id (K-819). With an id, only that card. The card panel reads the same list.
+   */
+  private deployedCards(id: string | null = null): Array<string> {
+    return this.sql<{ resource_id: string }>(
+      `SELECT DISTINCT resource_id FROM deploys WHERE kind = 'deploy' AND (repo_id IS NOT NULL OR state = 'done')
+       AND (? IS NULL OR resource_id = ?)`,
+      id,
+      id,
+    )
+      .map((row) => row.resource_id)
+      .filter((card) => this.state.resources.has(card));
   }
 
   /** K-718, K-909: the newest finished deploy of a card, or null. */
@@ -737,6 +738,7 @@ export class Kitshn extends DurableObject<Env> {
       ],
       paused: this.state.paused,
       repos,
+      deployedCards: this.deployedCards(),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
@@ -944,11 +946,7 @@ export class Kitshn extends DurableObject<Env> {
     const others = this.ctx.getWebSockets(attachment.machineId).filter((other) => other !== socket);
     if (others.length > 0) return;
     // A job that the machine had when its connection ended has no result coming.
-    // A compose-down can run twice without harm, so it goes out again when the machine comes back (K-909).
-    this.sql(
-      `UPDATE jobs SET state = 'queued' WHERE machine_id = ? AND state = 'sent' AND json_extract(command, '$.kind') = 'compose-down'`,
-      attachment.machineId,
-    );
+    requeueDowns(this.query, attachment.machineId);
     this.sql(
       `UPDATE jobs SET state = 'failed', output = '${OFFLINE_OUTPUT}' WHERE machine_id = ? AND state = 'sent'`,
       attachment.machineId,
@@ -1005,6 +1003,9 @@ export class Kitshn extends DurableObject<Env> {
     } satisfies Attachment);
     if (this.presence.get(machine.id)?.online) this.sendMachine(machine);
     else this.setPresence(machine.id, true);
+    // K-909: after a fast reconnect the old socket's close finds this one and requeues nothing, and a removal
+    // down never expires, so its result that may never come must not keep it sent.
+    requeueDowns(this.query, machine.id);
     this.deliverJobs();
     void this.scheduleAlarm();
     return new Response(null, { status: 101, webSocket: client });
@@ -2978,6 +2979,8 @@ export class Kitshn extends DurableObject<Env> {
   /** A job that kitshn makes itself, so it needs no member with control (K-614). Returns the job id. */
   private queueKitshnJob(machineId: string, command: Command, actor: Actor, expiresAt: number) {
     const now = Date.now();
+    if (command.kind === "compose" || command.kind === "compose-redeploy")
+      failQueuedDowns(this.query, command.project, REPLACED);
     const [row] = this.sql<{ id: number }>(
       `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
        VALUES (?, '[]', ?, 'queued', ?, ?, ?, '${KITSHN_JOB}', NULL, '') RETURNING id`,
@@ -3021,7 +3024,7 @@ export class Kitshn extends DurableObject<Env> {
     // K-718: the cards of repos that this key allowed (K-819); only these may become public.
     const added = new Set(
       this.sql<{ resource_id: string }>(
-        `SELECT DISTINCT deploys.resource_id FROM deploys JOIN repos ON repos.repo_id = deploys.repo_id
+        `SELECT DISTINCT deploys.resource_id FROM deploys JOIN repos ON repos.repo_id = deploys.repo_id AND deploys.kind = 'deploy'
          WHERE repos.allowed_by_client = ?`,
         caller.visitor.clientId,
       ).map((row) => row.resource_id),
@@ -3187,6 +3190,7 @@ export class Kitshn extends DurableObject<Env> {
   private agentRedeploy(caller: Caller, machineId: string, command: Extract<Command, { kind: "compose-redeploy" }>) {
     const now = Date.now();
     const id = this.ctx.storage.transactionSync(() => {
+      failQueuedDowns(this.query, command.project, REPLACED);
       const [inserted] = this.sql<{ id: number }>(
         `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
          VALUES (?, '[]', ?, 'queued', ?, ?, ?, ?, NULL, '') RETURNING id`,

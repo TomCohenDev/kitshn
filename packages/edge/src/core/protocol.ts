@@ -40,6 +40,8 @@ export interface Snapshot {
   readonly paused: PauseMode | null;
   /** K-819: the repos that deployed or wait to deploy, newest first. */
   readonly repos: ReadonlyArray<RepoView>;
+  /** K-909: the cards that a deploy made; only these show "Remove app". */
+  readonly deployedCards: ReadonlyArray<string>;
   /** K-1504: who paused and when, while paused. */
   readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;

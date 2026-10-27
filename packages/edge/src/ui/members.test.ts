@@ -16,6 +16,9 @@ describe("the Add member input", () => {
     expect(memberFrom("email", "qlik.com")).toBeTypeOf("string");
     expect(memberFrom("ip", "10.0.0.0/40")).toBeTypeOf("string");
     expect(memberFrom("auto", "")).toBeTypeOf("string");
+    // A broken address is a broken network, not a domain.
+    for (const text of ["999.1.1.1", "10.0.0.0/33", "1.2.3", "10.0.0.0/", "1.2.3.4/8/9", "10.0.0.0/8.0"])
+      expect(memberFrom("auto", text)).toBe("A network looks like 10.0.0.0/8 or 203.0.113.9.");
   });
 
   it("adds everyone without text", () => {

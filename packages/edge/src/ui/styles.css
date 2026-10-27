@@ -903,7 +903,7 @@ select:focus-visible {
   box-shadow: 2px 2px 0 0 var(--shadow-ink);
 }
 .swatches button[aria-checked="true"] {
-  outline: 3px solid var(--select);
+  outline: 3px solid var(--border);
   outline-offset: 2px;
   transform: translate(-1px, -1px);
   box-shadow: 3px 3px 0 0 var(--shadow-ink);
@@ -1030,4 +1030,10 @@ select:focus-visible {
   background: var(--select);
   color: var(--select-fg);
   box-shadow: 2px 2px 0 0 var(--shadow-ink);
+}
+
+/* A link around inline code keeps looking like a link. */
+a > code {
+  color: var(--accent);
+  text-decoration: underline;
 }

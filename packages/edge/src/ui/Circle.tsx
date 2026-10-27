@@ -1,5 +1,5 @@
-import { useEffect, useState } from "preact/hooks";
-import type { Edit } from "../core/changes.ts";
+import { useEffect, useRef, useState } from "preact/hooks";
+import { type Edit, deepEqual } from "../core/changes.ts";
 import {
   type Circle,
   LEVELS,
@@ -25,6 +25,15 @@ const MEMBER_STICKERS: Record<Member["_tag"], { readonly label: string; readonly
   device: { label: "device", color: "var(--pink)" },
   machine: { label: "machine", color: "var(--yellow)" },
   everyone: { label: "everyone", color: "var(--green)" },
+};
+
+const COLOR_NAMES: Record<string, string> = {
+  "#6C5CE7": "purple",
+  "#FF5277": "red",
+  "#00B3FF": "blue",
+  "#FFB347": "orange",
+  "#7CFF8A": "green",
+  "#14B8A6": "teal",
 };
 
 const KIND_LABELS: Record<TypedKind | "device", string> = {
@@ -66,6 +75,11 @@ export function Toggle(props: { checked: boolean; label: string; onChange: (chec
 }
 
 /** K-209, K-201: an end date from presets; Custom picks a day. */
+const localDay = (time: number) => {
+  const date = new Date(time);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+};
+
 export function EndsPicker(props: { endsAt: number | null; onChange: (endsAt: number | null) => void }) {
   const [custom, setCustom] = useState(false);
   return (
@@ -76,6 +90,7 @@ export function EndsPicker(props: { endsAt: number | null; onChange: (endsAt: nu
             key={preset.label}
             type="button"
             aria-pressed={!custom && preset.after === null && props.endsAt === null}
+            title={preset.after === null ? "No end date" : `Ends ${preset.label} from now`}
             onClick={() => {
               setCustom(false);
               props.onChange(preset.after === null ? null : Date.now() + preset.after);
@@ -84,7 +99,7 @@ export function EndsPicker(props: { endsAt: number | null; onChange: (endsAt: nu
             {preset.label}
           </button>
         ))}
-        <button type="button" aria-pressed={custom} onClick={() => setCustom(true)}>
+        <button type="button" aria-pressed={custom || props.endsAt !== null} onClick={() => setCustom(true)}>
           Custom…
         </button>
       </div>
@@ -92,7 +107,8 @@ export function EndsPicker(props: { endsAt: number | null; onChange: (endsAt: nu
         <input
           type="date"
           class="field"
-          min={new Date().toISOString().slice(0, 10)}
+          min={localDay(Date.now())}
+          value={props.endsAt === null ? "" : localDay(props.endsAt)}
           onChange={(event) => {
             const value = (event.target as HTMLInputElement).value;
             if (value) props.onChange(new Date(`${value}T23:59`).getTime());
@@ -175,23 +191,18 @@ type DeviceMember = Extract<Member, { _tag: "device" }>;
 type Device = Omit<DeviceMember, "_tag">;
 
 /** K-106: the service tokens of the account, and a new one; its secret shows once. */
-function DeviceList(props: {
-  taken: ReadonlySet<string>;
-  onAdd: (member: DeviceMember) => Promise<string | null>;
-}) {
-  const [devices, setDevices] = useState<ReadonlyArray<Device> | null>(null);
-  const [name, setName] = useState("");
-  const [secret, setSecret] = useState<{ name: string; clientId: string; clientSecret: string } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    void callApi<Array<Device>>("GET", "/api/devices").then((result) => {
-      if ("error" in result) setError(result.error);
-      else setDevices(result);
-    });
-  }, []);
-  if (secret) {
-    return (
-      <div class="secret">
+export interface DeviceSecret {
+  readonly name: string;
+  readonly clientId: string;
+  readonly clientSecret: string;
+}
+
+/** K-106: a new token's secret, in a dialog that only "I saved it" closes; kitshn cannot show it again. */
+export function SecretDialog(props: { secret: DeviceSecret; onClose: () => void }) {
+  const { secret } = props;
+  return (
+    <div class="scrim">
+      <div class="dialog secret" role="dialog" aria-label={`Secret of ${secret.name}`}>
         <div class="row">
           <span class="sticker">shown once</span>
           <b>{secret.name}</b>
@@ -210,16 +221,60 @@ function DeviceList(props: {
             </button>
           </div>
         ))}
-        <button type="button" class="btn primary" onClick={() => setSecret(null)}>
+        <button type="button" class="btn primary" onClick={props.onClose}>
           I saved it
         </button>
       </div>
-    );
-  }
+    </div>
+  );
+}
+
+function DeviceList(props: {
+  taken: ReadonlySet<string>;
+  onAdd: (member: DeviceMember) => Promise<string | null>;
+  onSecret: (secret: DeviceSecret) => void;
+}) {
+  const [devices, setDevices] = useState<ReadonlyArray<Device> | null>(null);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    void callApi<Array<Device>>("GET", "/api/devices").then((result) => {
+      if ("error" in result) setError(result.error);
+      else setDevices(result);
+    });
+  }, [attempt]);
+  const run = async (work: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await work();
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <div>
-      {error ? <p class="error">{error}</p> : null}
-      {devices === null ? <p class="help">Loading the devices…</p> : null}
+      {error ? (
+        <p class="error">
+          {error}{" "}
+          {devices === null ? (
+            <button
+              type="button"
+              class="btn"
+              onClick={() => {
+                setError(null);
+                setAttempt(attempt + 1);
+              }}
+            >
+              Try again
+            </button>
+          ) : null}
+        </p>
+      ) : devices === null ? (
+        <p class="help">Loading the devices…</p>
+      ) : null}
       <ul class="picks">
         {(devices ?? [])
           .filter((device) => !props.taken.has(device.tokenId))
@@ -227,7 +282,10 @@ function DeviceList(props: {
             <li key={device.tokenId}>
               <button
                 type="button"
-                onClick={() => void props.onAdd({ _tag: "device", ...device }).then(setError)}
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => setError(await props.onAdd({ _tag: "device", ...device })))
+                }
               >
                 📱 {device.name}
               </button>
@@ -236,27 +294,37 @@ function DeviceList(props: {
         <li>
           <form
             class="row"
-            onSubmit={async (event) => {
+            onSubmit={(event) => {
               event.preventDefault();
               if (!name.trim()) return setError("Name the new device, for example Her phone.");
-              const result = await callApi<DeviceMember & { clientSecret: string }>("POST", "/api/devices", {
-                name: name.trim(),
+              void run(async () => {
+                const result = await callApi<DeviceMember & { clientSecret: string }>(
+                  "POST",
+                  "/api/devices",
+                  {
+                    name: name.trim(),
+                  },
+                );
+                if ("error" in result) return setError(result.error);
+                setError(null);
+                setName("");
+                props.onSecret({
+                  name: result.name,
+                  clientId: result.clientId,
+                  clientSecret: result.clientSecret,
+                });
+                setDevices([
+                  ...(devices ?? []),
+                  { tokenId: result.tokenId, clientId: result.clientId, name: result.name },
+                ]);
+                const refused = await props.onAdd({
+                  _tag: "device",
+                  tokenId: result.tokenId,
+                  clientId: result.clientId,
+                  name: result.name,
+                });
+                if (refused) setError(`The token exists, but the circle did not take it: ${refused}`);
               });
-              if ("error" in result) return setError(result.error);
-              setError(null);
-              setName("");
-              setDevices([
-                ...(devices ?? []),
-                { tokenId: result.tokenId, clientId: result.clientId, name: result.name },
-              ]);
-              setSecret({ name: result.name, clientId: result.clientId, clientSecret: result.clientSecret });
-              const refused = await props.onAdd({
-                _tag: "device",
-                tokenId: result.tokenId,
-                clientId: result.clientId,
-                name: result.name,
-              });
-              if (refused) setError(`The token exists, but the circle did not take it: ${refused}`);
             }}
           >
             <input
@@ -265,7 +333,9 @@ function DeviceList(props: {
               placeholder="+ New device, for example Her phone"
               onInput={(event) => setName((event.target as HTMLInputElement).value)}
             />
-            <button class="btn">Make</button>
+            <button class="btn" disabled={busy}>
+              Make
+            </button>
           </form>
         </li>
       </ul>
@@ -274,9 +344,14 @@ function DeviceList(props: {
 }
 
 /** One control for every member kind: the text decides the kind, the segment overrides it. */
-function AddMember(props: { circle: Circle; onAdd: (member: Member) => Promise<string | null> }) {
+function AddMember(props: {
+  circle: Circle;
+  onAdd: (member: Member) => Promise<string | null>;
+  onSecret: (secret: DeviceSecret) => void;
+}) {
   const [kind, setKind] = useState<TypedKind | "device">("auto");
   const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const preview =
     kind === "device" || kind === "everyone" || value.trim() === "" ? null : memberFrom(kind, value);
@@ -284,13 +359,16 @@ function AddMember(props: { circle: Circle; onAdd: (member: Member) => Promise<s
     if (kind === "device") return;
     const member = memberFrom(kind, value);
     if (typeof member === "string") return setError(member);
+    if (busy) return;
+    setBusy(true);
+    // A server refusal shows as a toast; the input keeps the text so the owner can fix it.
     const refused = await props.onAdd(member);
-    setError(refused);
+    setBusy(false);
     if (!refused) setValue("");
   };
   return (
     <div class="add-member">
-      <div class="pills" aria-label="Member kind">
+      <div class="pills" role="group" aria-label="Member kind">
         {[...TYPED_KINDS, "device" as const].map((option) => (
           <button
             key={option}
@@ -313,6 +391,7 @@ function AddMember(props: { circle: Circle; onAdd: (member: Member) => Promise<s
             )
           }
           onAdd={props.onAdd}
+          onSecret={props.onSecret}
         />
       ) : (
         <form
@@ -336,7 +415,9 @@ function AddMember(props: { circle: Circle; onAdd: (member: Member) => Promise<s
           ) : (
             <span class="help grow">Anyone who can reach the address, with no login.</span>
           )}
-          <button class="btn primary">Add</button>
+          <button class="btn primary" disabled={busy}>
+            Add
+          </button>
         </form>
       )}
       {error ? (
@@ -357,10 +438,20 @@ export function CircleEditor(props: {
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onDelete: (circle: Circle) => void;
   onSelectCard: (id: string) => void;
+  onSecret: (secret: DeviceSecret) => void;
 }) {
   const { circle, state } = props;
+  // Edits that finish after a wait (a new device token) build on the circle as it is then, not as it was.
+  const latest = useRef(circle);
+  latest.current = circle;
   const put = (next: Partial<Circle>) =>
-    props.onEdit([{ _tag: "circle", id: circle.id, after: { ...circle, ...next } }]);
+    props.onEdit([{ _tag: "circle", id: circle.id, after: { ...latest.current, ...next } }]);
+  const addMember = (member: Member) => {
+    if (latest.current.members.some((other) => deepEqual(other, member)))
+      return Promise.resolve(`${memberLabel(member)} is in ${latest.current.name} already.`);
+    return put({ members: [...latest.current.members, member] });
+  };
+  const [draft, setDraft] = useState<string | null>(null);
   const inside = [...state.resources.values()].filter((resource) =>
     circlesHolding(state, resource.id).includes(circle),
   );
@@ -372,12 +463,20 @@ export function CircleEditor(props: {
       <input
         class="title"
         aria-label="Circle name"
-        value={circle.name}
-        onKeyDown={(event) => event.key === "Enter" && (event.target as HTMLInputElement).blur()}
-        onBlur={(event) => {
-          const name = (event.target as HTMLInputElement).value.trim();
+        value={draft ?? circle.name}
+        onFocus={() => setDraft(circle.name)}
+        onInput={(event) => setDraft((event.target as HTMLInputElement).value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") (event.target as HTMLInputElement).blur();
+          if (event.key === "Escape") {
+            setDraft(null);
+            event.stopPropagation();
+          }
+        }}
+        onBlur={() => {
+          const name = draft?.trim();
+          setDraft(null);
           if (name && name !== circle.name) void put({ name });
-          else (event.target as HTMLInputElement).value = circle.name;
         }}
       />
       <div class="swatches" role="radiogroup" aria-label="Colour">
@@ -387,7 +486,7 @@ export function CircleEditor(props: {
             type="button"
             role="radio"
             aria-checked={circle.color.toUpperCase() === color}
-            aria-label={color}
+            aria-label={COLOR_NAMES[color] ?? color}
             style={{ background: color }}
             onClick={() => void put({ color })}
           />
@@ -398,7 +497,7 @@ export function CircleEditor(props: {
       <ul class="members">
         {circle.members.map((member, index) => (
           <MemberSticker
-            key={`${member._tag}-${memberLabel(member)}`}
+            key={member._tag === "device" ? member.tokenId : `${member._tag}-${memberLabel(member)}`}
             member={member}
             onRemove={() => void put({ members: circle.members.filter((_, other) => other !== index) })}
           />
@@ -407,7 +506,7 @@ export function CircleEditor(props: {
           <li class="help">Nobody yet. A circle with no members matches nobody.</li>
         ) : null}
       </ul>
-      <AddMember circle={circle} onAdd={(member) => put({ members: [...circle.members, member] })} />
+      <AddMember circle={circle} onAdd={addMember} onSecret={props.onSecret} />
 
       <h3 class="label">Access</h3>
       <div class="field-row">

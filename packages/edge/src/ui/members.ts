@@ -7,10 +7,21 @@ export type TypedKind = (typeof TYPED_KINDS)[number];
 
 /** An address or a CIDR range that the Worker can match (K-202). */
 function networkRange(text: string): string | null {
-  const range = text.includes("/") ? text : `${text}/${text.includes(":") ? 128 : 32}`;
-  const base = range.split("/")[0] ?? "";
+  const parts = text.split("/");
+  if (parts.length > 2) return null;
+  const [base = "", bits] = parts;
+  if (
+    bits !== undefined &&
+    (bits.length === 0 || bits.length > 3 || ![...bits].every((c) => c >= "0" && c <= "9"))
+  )
+    return null;
+  const range = `${base}/${bits ?? (base.includes(":") ? 128 : 32)}`;
   return ipInRange(base, range) ? range : null;
 }
+
+/** Text that can only be meant as a network: digits and dots, or a colon or a slash. */
+const looksLikeNetwork = (text: string) =>
+  text.includes(":") || text.includes("/") || [...text].every((c) => c === "." || (c >= "0" && c <= "9"));
 
 /**
  * What the owner typed, as a member. With `auto`, the text decides: `name@x.com` is a person, `@x.com` or
@@ -27,7 +38,7 @@ export function memberFrom(kind: TypedKind, value: string): Member | string {
       ? kind
       : at > 0
         ? "email"
-        : network
+        : network || looksLikeNetwork(text)
           ? "ip"
           : at === 0 || text.includes(".")
             ? "domain"

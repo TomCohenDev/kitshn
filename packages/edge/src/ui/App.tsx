@@ -16,7 +16,7 @@ import {
 import { placeInside } from "../core/place.ts";
 import type { JobView, MachineView, RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
-import { CircleEditor, EndsPicker, LevelOverride } from "./Circle.tsx";
+import { CircleEditor, type DeviceSecret, EndsPicker, LevelOverride, SecretDialog } from "./Circle.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
 import { MapView, type Selection, type View } from "./Map.tsx";
@@ -85,6 +85,7 @@ export function App() {
   const [toast, setToast] = useState<Toast | null>(null);
   const [palette, setPalette] = useState(false);
   const [addingMachine, setAddingMachine] = useState(false);
+  const [secret, setSecret] = useState<DeviceSecret | null>(null);
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
   const [route, setRoute] = useState(routeFromHash);
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -322,6 +323,7 @@ export function App() {
         <History revisions={store.snapshot.revisions} onUndo={(id) => void undo(id)} />
       )}
       {addingMachine ? <AddMachine onClose={() => setAddingMachine(false)} /> : null}
+      {secret ? <SecretDialog secret={secret} onClose={() => setSecret(null)} /> : null}
       <header class="bar">
         <h1>kitshn</h1>
         <div class="seg">
@@ -435,6 +437,7 @@ export function App() {
         accessTeam={store.snapshot.accessTeam}
         onSelectCard={(id) => setSelection({ cards: new Set([id]), circle: null })}
         onSelectCircle={(id) => setSelection({ cards: new Set(), circle: id })}
+        onSecret={setSecret}
         onEdit={async (edits) => {
           const result = await applyEdits(edits);
           if (result.ok) return null;
@@ -623,7 +626,6 @@ function History(props: { revisions: ReadonlyArray<RevisionView>; onUndo: (id: n
   );
 }
 
-
 function Panel(props: {
   state: State;
   selection: Selection;
@@ -645,6 +647,7 @@ function Panel(props: {
   accessTeam: string;
   onSelectCard: (id: string) => void;
   onSelectCircle: (id: string) => void;
+  onSecret: (secret: DeviceSecret) => void;
 }) {
   const { state, selection } = props;
   const [sheetOpen, setSheetOpen] = useState(true);
@@ -664,6 +667,7 @@ function Panel(props: {
         onEdit={props.onEdit}
         onDelete={props.onDeleteCircle}
         onSelectCard={props.onSelectCard}
+        onSecret={props.onSecret}
       />
     );
   else if (cards.length === 1 && cards[0]) {

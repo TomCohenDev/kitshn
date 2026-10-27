@@ -80,13 +80,24 @@ export type Command =
       readonly repo: string;
       readonly file: string | null;
     }
-  /** K-904: stop a Compose app and stop exposing it; a preview also loses its data. */
+  /** K-904, K-909: stop a Compose app and stop exposing it; a closed preview also loses its data. */
   | {
       readonly kind: "compose-down";
       readonly project: string;
       readonly name: string;
       readonly removeData: boolean;
-    };
+    }
+  /**
+   * K-909: delete one orphaned volume. kitshn fills in the project from the daemon's report; the daemon
+   * deletes only a volume that it still reports as idle.
+   */
+  | { readonly kind: "compose-volume-remove"; readonly project: string; readonly volume: string };
+
+/** K-909: a Docker volume with the Compose project label of a kitshn app that runs no container. */
+export interface ProjectVolume {
+  readonly name: string;
+  readonly project: string;
+}
 
 export interface JobResult {
   readonly ok: boolean;
@@ -108,7 +119,9 @@ export type DaemonMessage =
   | { readonly type: "sample"; readonly sample: Sample }
   | { readonly type: "jobResult"; readonly id: number; readonly result: JobResult }
   /** The whole list of live sites, sent on connect and on each change (K-1107). */
-  | { readonly type: "sites"; readonly sites: ReadonlyArray<LiveSiteReport> };
+  | { readonly type: "sites"; readonly sites: ReadonlyArray<LiveSiteReport> }
+  /** K-909: the idle volumes of kitshn apps, sent on connect and after each Compose job. */
+  | { readonly type: "volumes"; readonly volumes: ReadonlyArray<ProjectVolume> };
 
 /** Messages from kitshn to a daemon. */
 export type ServerToDaemon = { readonly type: "job"; readonly id: number; readonly command: Command };

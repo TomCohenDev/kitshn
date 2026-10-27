@@ -32,6 +32,20 @@ export type Edit =
   | { readonly _tag: "pause"; readonly after: PauseMode | null }
   | { readonly _tag: "stack"; readonly id: string; readonly after: Stack | null };
 
+/** K-909: the card kinds that a deploy makes; only these come and go as an app. */
+export const APP_KINDS = ["site.static", "site.worker", "site.compose"] as const;
+
+/** K-909: the card of a deployed app as History keeps it. Its status is live data, so History leaves it out. */
+export type AppCard = Omit<Resource, "status"> & { readonly kind: (typeof APP_KINDS)[number] };
+
+export const isAppCard = (card: Omit<Resource, "status">): card is AppCard =>
+  (APP_KINDS as ReadonlyArray<string>).includes(card.kind);
+
+const withoutStatus = ({ status: _status, ...card }: Resource): Omit<Resource, "status"> => card;
+
+/** K-909: a restored app card; the next report or deploy sets its status. */
+export const restoredResource = (card: AppCard): Resource => ({ ...card, status: "unknown" });
+
 /** One stored change of a revision. Undo swaps `before` and `after`. */
 export type Change =
   | {
@@ -58,6 +72,13 @@ export type Change =
       readonly id: string;
       readonly before: Stack | null;
       readonly after: Stack | null;
+    }
+  /** K-909: an app card goes (removal) or comes back (its undo). The worker runs the teardown or the start. */
+  | {
+      readonly _tag: "app";
+      readonly id: string;
+      readonly before: AppCard | null;
+      readonly after: AppCard | null;
     };
 
 export type Actor =
@@ -100,6 +121,10 @@ const current = (state: State, change: Pick<Change, "_tag" | "id">) => {
       return state.paused;
     case "stack":
       return state.stacks.get(change.id) ?? null;
+    case "app": {
+      const resource = state.resources.get(change.id);
+      return resource ? withoutStatus(resource) : null;
+    }
   }
 };
 
@@ -176,19 +201,35 @@ export function withStackMates(state: State, changes: ReadonlyArray<Change>): Ar
   return [...changes, ...mates];
 }
 
+/**
+ * K-909: the changes that remove a deployed app: its card, its place, its share settings and its place in a
+ * stack. Undo of them restores the card in the same place and circles.
+ */
+export function removeAppChanges(state: State, id: string): Array<Change> {
+  const resource = state.resources.get(id);
+  if (!resource) throw new RuleError(`No card "${id}" exists.`);
+  const card = withoutStatus(resource);
+  if (!isAppCard(card)) throw new RuleError(`${resource.name} is not an app that a deploy made (K-909).`);
+  const edits: Array<Edit> = [
+    ...(state.places.has(id) ? [{ _tag: "place", id, after: null } as const] : []),
+    ...[...state.shareSettings.keys()]
+      .filter((key) => key.startsWith(`${id}/`))
+      .map((key): Edit => ({ _tag: "shareSetting", resourceId: id, circleId: key.slice(id.length + 1), after: null })),
+  ];
+  return [...resolveEdits(state, edits), { _tag: "app", id, before: card, after: null }];
+}
+
 export const invert = (changes: ReadonlyArray<Change>): Array<Change> =>
   changes.map((change) => ({ ...change, before: change.after, after: change.before }) as Change);
 
-/** Names the first change whose current value is not its `before`, or null. */
-export function conflictOf(state: State, changes: ReadonlyArray<Change>): string | null {
-  for (const change of changes) {
-    if (!deepEqual(current(state, change), change.before)) return `${change._tag} "${change.id}"`;
-  }
-  return null;
+/** The first change whose current value is not its `before`, or null. */
+export function conflictOf(state: State, changes: ReadonlyArray<Change>): Change | null {
+  return changes.find((change) => !deepEqual(current(state, change), change.before)) ?? null;
 }
 
 export function applyChanges(state: State, changes: ReadonlyArray<Change>): State {
   const circles = new Map(state.circles);
+  const resources = new Map(state.resources);
   const places = new Map(state.places);
   const shareSettings = new Map(state.shareSettings);
   const stacks = new Map(state.stacks);
@@ -200,9 +241,10 @@ export function applyChanges(state: State, changes: ReadonlyArray<Change>): Stat
     else if (change._tag === "place") put(places, change.id, change.after);
     else if (change._tag === "shareSetting") put(shareSettings, change.id, change.after);
     else if (change._tag === "stack") put(stacks, change.id, change.after);
+    else if (change._tag === "app") put(resources, change.id, change.after && restoredResource(change.after));
     else paused = change.after;
   }
-  return { ...state, circles, places, shareSettings, stacks, paused };
+  return { ...state, circles, resources, places, shareSettings, stacks, paused };
 }
 
 /**
@@ -294,6 +336,9 @@ export const describeDiff = (diff: ShareDiff) =>
     : `${diff.resource.name}: − ${diff.circle.name}`;
 
 export function summarize(before: State, after: State, changes: ReadonlyArray<Change>): string {
+  const app = changes.find((change) => change._tag === "app");
+  if (app?.after) return `Restored the app ${app.after.name} (K-909)`;
+  if (app?.before) return `Removed the app ${app.before.name} (K-909)`;
   const pause = changes.find((change) => change._tag === "pause");
   if (pause) {
     if (pause.after === null) return "Resumed all shares";

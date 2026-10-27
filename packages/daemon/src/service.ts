@@ -12,16 +12,20 @@ export interface Paths {
   readonly service: string;
   /** K-603: the service file of the tunnel, a second user service next to the daemon. */
   readonly tunnelService: string;
+  /** K-701: the local socket of the daemon. */
+  readonly socket: string;
 }
 
 export function pathsFor(
   platform: Platform,
   env: Record<string, string | undefined>,
   home = homedir(),
+  uid = process.getuid!(),
 ): Paths {
   if (platform === "darwin") {
     const support = join(home, "Library", "Application Support", "kitshn");
     return {
+      socket: join(support, "kitshn.sock"),
       config: join(support, "machine.json"),
       data: support,
       service: join(home, "Library", "LaunchAgents", "com.kitshn.daemon.plist"),
@@ -30,7 +34,10 @@ export function pathsFor(
   }
   const config = env["XDG_CONFIG_HOME"] || join(home, ".config");
   const data = env["XDG_DATA_HOME"] || join(home, ".local", "share");
+  // systemd sets XDG_RUNTIME_DIR for a user service; a shell without a login session may not.
+  const runtime = env["XDG_RUNTIME_DIR"] || `/run/user/${uid}`;
   return {
+    socket: join(runtime, "kitshn", "kitshn.sock"),
     config: join(config, "kitshn", "machine.json"),
     data: join(data, "kitshn"),
     service: join(config, "systemd", "user", "kitshn.service"),

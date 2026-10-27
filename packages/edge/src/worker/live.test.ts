@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { type LiveSite, escapeHtml, liveSiteId, offlineReason, parseSites, seenText, sitesNeedingRoutes, tunnelConfig } from "./live.ts";
+import {
+  type LiveSite,
+  escapeHtml,
+  liveSiteId,
+  offlineReason,
+  parseSites,
+  seenText,
+  sitesNeedingRoutes,
+  tunnelConfig,
+} from "./live.ts";
 
 const site = (name: string, machineId: string, up: boolean, dev = false): LiveSite => ({
   id: `live-${machineId}-${name}`,
@@ -17,7 +26,11 @@ describe("live sites (K-1104 to K-1108)", () => {
   it("routes each site through the tunnel, with Host localhost for a dev server", () => {
     expect(tunnelConfig([site("b", "m", true, true), site("a", "m", true)]).config.ingress).toEqual([
       { hostname: "a.example.com", service: "http://localhost:5173" },
-      { hostname: "b.example.com", service: "http://localhost:5173", originRequest: { httpHostHeader: "localhost" } },
+      {
+        hostname: "b.example.com",
+        service: "http://localhost:5173",
+        originRequest: { httpHostHeader: "localhost" },
+      },
       { service: "http_status:404" },
     ]);
   });

@@ -148,6 +148,8 @@ export class Kitshn extends DurableObject<Env> {
   private presence = new Map<string, { online: boolean; lastSeen: number }>();
   /** K-1104: live sites of the machines. */
   private liveSites = new Map<string, LiveSite>();
+  /** Address checks that failed, and when to try them again. Memory only; a restart retries at once. */
+  private checkRetryAt = new Map<string, number>();
 
   private meta(key: string): string | null {
     const [row] = this.sql<{ value: string }>("SELECT value FROM meta WHERE key = ?", key);
@@ -1043,7 +1045,11 @@ export class Kitshn extends DurableObject<Env> {
           `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${machine.tunnelId}/configurations`,
           config,
         );
-        this.sql("INSERT OR REPLACE INTO tunnel_objects (machine_id, body, error) VALUES (?, ?, NULL)", machine.id, body);
+        this.sql(
+          "INSERT OR REPLACE INTO tunnel_objects (machine_id, body, error) VALUES (?, ?, NULL)",
+          machine.id,
+          body,
+        );
       } catch (error) {
         // Stored with the failed body, so it waits for the daily run, which clears it for a retry.
         this.sql(
@@ -1066,7 +1072,9 @@ export class Kitshn extends DurableObject<Env> {
     const stale = [...this.state.machines.values()].some(
       (machine) => tunnels.get(machine.id) !== JSON.stringify(tunnelConfig(this.protectedSites(machine.id))),
     );
-    const checking = [...this.liveSites.values()].some((site) => site.state === "checking");
+    const checking = [...this.liveSites.values()].some(
+      (site) => site.state === "checking" && (this.checkRetryAt.get(site.id) ?? 0) <= Date.now(),
+    );
     return stale || checking || this.dnsWork().length > 0 || this.routeWork().length > 0;
   }
 
@@ -1074,12 +1082,12 @@ export class Kitshn extends DurableObject<Env> {
     return [...this.liveSites.values()].filter((site) => site.machineId === machineId);
   }
 
-  /** Live sites whose address is checked and whose Access application exists without an error. */
+  /** Live sites whose address is checked and whose Access application exists in Cloudflare. */
   private protectedSites(machineId?: string) {
     return [...this.liveSites.values()].filter((site) => {
       if (site.state !== "ok" || (machineId !== undefined && site.machineId !== machineId)) return false;
-      const app = this.access.get(`app:${site.id}:${site.address}`);
-      return Boolean(app?.cfId && app.body && app.error === null);
+      // The application exists in Cloudflare; a later failed update of it does not take the site down.
+      return Boolean(this.access.get(`app:${site.id}:${site.address}`)?.cfId);
     });
   }
 
@@ -1099,7 +1107,9 @@ export class Kitshn extends DurableObject<Env> {
         const other = [...this.state.resources.values()].find(
           (resource) => resource.id !== id && resource.addresses.includes(address),
         );
-        const otherSite = [...this.liveSites.values()].find((site) => site.id !== id && site.address === address);
+        const otherSite = [...this.liveSites.values()].find(
+          (site) => site.id !== id && site.address === address,
+        );
         if (other || otherSite) {
           refused.push(`${address} belongs to ${other ? `the card ${other.name}` : "another machine"}.`);
           continue;
@@ -1129,7 +1139,8 @@ export class Kitshn extends DurableObject<Env> {
       for (const site of this.sitesOf(machine.id)) {
         if (keep.has(site.id)) continue;
         changed = true;
-        for (const table of ["live_sites", "resources", "places"]) this.sql(`DELETE FROM ${table} WHERE id = ?`, site.id);
+        for (const table of ["live_sites", "resources", "places"])
+          this.sql(`DELETE FROM ${table} WHERE id = ?`, site.id);
         this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${site.id}/%`);
         if (site.state === "ok") {
           this.insertRevision(
@@ -1154,23 +1165,43 @@ export class Kitshn extends DurableObject<Env> {
    */
   private async checkSites(api: Api, budget: number) {
     let calls = 0;
+    let changed = false;
+    const ours = new Set(
+      this.sql<{ record_id: string }>("SELECT record_id FROM dns_objects").map((row) => row.record_id),
+    );
     for (const site of [...this.liveSites.values()].filter((item) => item.state === "checking")) {
-      if (calls + 2 > budget) return calls;
+      if ((this.checkRetryAt.get(site.id) ?? 0) > Date.now()) continue;
+      if (calls + 2 > budget) break;
       calls += 2;
-      const records = await api<Array<unknown>>(
-        "GET",
-        `/zones/${this.env.CLOUDFLARE_ZONE_ID}/dns_records?name=${encodeURIComponent(site.address)}`,
-      );
-      const domains = await api<Array<unknown>>(
-        "GET",
-        `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/domains?hostname=${encodeURIComponent(site.address)}`,
-      );
-      const machine = this.state.machines.get(site.machineId);
-      if (records.length > 0 || domains.length > 0) {
+      let used: boolean;
+      try {
+        const records = await api<Array<{ id: string }>>(
+          "GET",
+          `/zones/${this.env.CLOUDFLARE_ZONE_ID}/dns_records?name=${encodeURIComponent(site.address)}`,
+        );
+        const domains = await api<Array<unknown>>(
+          "GET",
+          `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/domains?hostname=${encodeURIComponent(site.address)}`,
+        );
+        // A record that kitshn made itself (for a site that moved) does not count.
+        used = records.some((record) => !ours.has(record.id)) || domains.length > 0;
+      } catch (error) {
+        // Try again in five minutes; the rest of the alarm run goes on.
+        this.checkRetryAt.set(site.id, Date.now() + 5 * 60_000);
+        console.warn(`kitshn could not check ${site.address}: ${String(error)}`);
+        continue;
+      }
+      this.checkRetryAt.delete(site.id);
+      // The site may have changed while the checks waited; act only on the row as it is now.
+      const [row] = this.sql<{ state: string }>("SELECT state FROM live_sites WHERE id = ?", site.id);
+      if (row?.state !== "checking") continue;
+      changed = true;
+      if (used) {
         this.sql("UPDATE live_sites SET state = 'refused' WHERE id = ?", site.id);
         console.warn(`kitshn refused ${site.address}: something else already uses the address.`);
         continue;
       }
+      const machine = this.state.machines.get(site.machineId);
       this.ctx.storage.transactionSync(() => {
         this.sql("UPDATE live_sites SET state = 'ok' WHERE id = ?", site.id);
         this.putResource({
@@ -1190,8 +1221,10 @@ export class Kitshn extends DurableObject<Env> {
         );
       });
     }
-    this.load();
-    this.broadcast();
+    if (changed) {
+      this.load();
+      this.broadcast();
+    }
     return calls;
   }
 
@@ -1224,9 +1257,9 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1108: addresses whose offline route kitshn still has to add or remove. */
   private routeWork() {
     const rows = new Map(
-      this.sql<{ address: string; route_id: string; error: string | null }>("SELECT * FROM route_objects").map(
-        (row) => [row.address, row],
-      ),
+      this.sql<{ address: string; route_id: string; error: string | null }>(
+        "SELECT * FROM route_objects",
+      ).map((row) => [row.address, row]),
     );
     const wanted = new Set(
       sitesNeedingRoutes(this.protectedSites(), this.onlineMachines()).map((site) => site.address),
@@ -1246,7 +1279,10 @@ export class Kitshn extends DurableObject<Env> {
     for (const work of this.dnsWork()) {
       if (calls >= budget) return;
       calls++;
-      const [row] = this.sql<{ record_id: string }>("SELECT record_id FROM dns_objects WHERE address = ?", work.address);
+      const [row] = this.sql<{ record_id: string }>(
+        "SELECT record_id FROM dns_objects WHERE address = ?",
+        work.address,
+      );
       try {
         if (work.content !== null) {
           const body = {
@@ -1421,6 +1457,8 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("UPDATE dns_objects SET error = NULL, content = '' WHERE error IS NOT NULL");
       this.sql("DELETE FROM route_objects WHERE error IS NOT NULL AND route_id = ''");
       this.sql("UPDATE route_objects SET error = NULL WHERE error IS NOT NULL");
+      // A refused address may be free now, for example after the other machine let it go.
+      this.sql("UPDATE live_sites SET state = 'checking' WHERE state = 'refused'");
       // K-1503 style clean-up: keep the newest 1,000 finished jobs.
       this.sql(
         "DELETE FROM jobs WHERE state NOT IN ('queued', 'sent') AND id <= (SELECT id FROM jobs ORDER BY id DESC LIMIT 1 OFFSET 1000)",
@@ -1534,7 +1572,9 @@ export class Kitshn extends DurableObject<Env> {
     const existing = this.state.resources.get(resourceId);
     if (existing && !existing.addresses.includes(result.address)) {
       return Response.json(
-        { error: `${result.environment} lives at ${existing.addresses[0]}. To move it, remove its card on the map first.` },
+        {
+          error: `${result.environment} lives at ${existing.addresses[0]}. To move it, remove its card on the map first.`,
+        },
         { status: 409 },
       );
     }
@@ -1555,13 +1595,21 @@ export class Kitshn extends DurableObject<Env> {
       );
       const foreign = domains.find((domain) => domain.service !== script);
       if (foreign) {
-        return Response.json({ error: `${result.address} already serves the Worker ${foreign.service}.` }, { status: 409 });
+        return Response.json(
+          { error: `${result.address} already serves the Worker ${foreign.service}.` },
+          { status: 409 },
+        );
       }
-      const apps = await api<Array<{ name: string; domain?: string }>>("GET", `${account}/access/apps?per_page=1000`);
+      const apps = await api<Array<{ name: string; domain?: string }>>(
+        "GET",
+        `${account}/access/apps?per_page=1000`,
+      );
       const foreignApp = apps.find((app) => app.domain === result.address && !app.name.startsWith("kitshn "));
       if (foreignApp) {
         return Response.json(
-          { error: `The Access application "${foreignApp.name}" covers ${result.address}; kitshn does not change it.` },
+          {
+            error: `The Access application "${foreignApp.name}" covers ${result.address}; kitshn does not change it.`,
+          },
           { status: 409 },
         );
       }
@@ -1597,7 +1645,9 @@ export class Kitshn extends DurableObject<Env> {
       );
       if (first && first.branch !== event.branch) {
         return Response.json(
-          { error: `${result.environment} deploys only from the branch ${first.branch}, not ${event.branch}.` },
+          {
+            error: `${result.environment} deploys only from the branch ${first.branch}, not ${event.branch}.`,
+          },
           { status: 403 },
         );
       }
@@ -1675,13 +1725,15 @@ export class Kitshn extends DurableObject<Env> {
       }
     } else card = "The card keeps its place; the map decides who opens it (K-807).";
     // Fail closed: the Access application exists before the address does.
-    await this.withAccessLock(() => syncAccess(
-      desiredAccess(this.state, Date.now()),
-      this.accessStore(),
-      api,
-      this.env.CLOUDFLARE_ACCOUNT_ID,
-      20,
-    ));
+    await this.withAccessLock(() =>
+      syncAccess(
+        desiredAccess(this.state, Date.now()),
+        this.accessStore(),
+        api,
+        this.env.CLOUDFLARE_ACCOUNT_ID,
+        20,
+      ),
+    );
     const app = this.access.get(`app:${row.resource_id}:${row.address}`);
     if (!app?.cfId || app.error) {
       return Response.json(
@@ -1724,7 +1776,8 @@ export class Kitshn extends DurableObject<Env> {
         previews_enabled: false,
       });
     } catch (error) {
-      if (isNew) await api("DELETE", `${account}/workers/scripts/${row.script}?force=true`).catch(() => undefined);
+      if (isNew)
+        await api("DELETE", `${account}/workers/scripts/${row.script}?force=true`).catch(() => undefined);
       throw error;
     }
     const domains = await api<Array<{ id: string; service: string }>>(
@@ -1771,12 +1824,13 @@ export class Kitshn extends DurableObject<Env> {
         this.sql(`DELETE FROM ${table} WHERE id = ?`, row.resource_id);
       this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${row.resource_id}/%`);
       this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
-      if (resource) this.insertRevision(
-        { _tag: "kitshn", reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}` },
-        `Removed ${resource?.name ?? row.environment}, its preview closed (K-904)`,
-        [],
-        null,
-      );
+      if (resource)
+        this.insertRevision(
+          { _tag: "kitshn", reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}` },
+          `Removed ${resource?.name ?? row.environment}, its preview closed (K-904)`,
+          [],
+          null,
+        );
     });
     this.load();
     this.broadcast();

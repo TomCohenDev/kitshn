@@ -324,7 +324,11 @@ async function composeUp(command: Extract<Command, { kind: "compose" }>): Promis
       KITSHN_DEPLOYMENT: command.project,
       KITSHN_SOCKET_DIR: sockets,
       KITSHN_DEFAULT_SOCKET: socketPath,
+      KITSHN_DATA_DIR: join(dir, "data"),
+      KITSHN_LOG_DIR: join(dir, "logs"),
+      KITSHN_PARAMS_FILE: join(dir, "params.env"),
     };
+    for (const folder of [env.KITSHN_DATA_DIR, env.KITSHN_LOG_DIR]) mkdirSync(folder, { recursive: true });
     // KitSHn 1 apps join this network; it exists on a KitSHn 1 host and is made elsewhere.
     if (!(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok)
       await step("make the kitshn-edge network", "docker", ["network", "create", "kitshn-edge"]);

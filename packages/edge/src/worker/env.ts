@@ -16,6 +16,11 @@ export interface Env {
   /** Optional JSON list of service tokens that join the Owner circle on the first start, for agents (K-106). */
   readonly OWNER_DEVICES?: string;
   readonly CLOUDFLARE_ACCOUNT_ID: string;
+  /** The zone that kitshn publishes on (K-1111), and its id. */
+  readonly KITSHN_ZONE: string;
+  readonly CLOUDFLARE_ZONE_ID: string;
+  /** K-811: comma-separated GitHub user ids whose repos may deploy. Empty refuses every deploy. */
+  readonly DEPLOY_OWNER_IDS: string;
   /** The API token that writes Access changes (K-406). Missing in local development. */
   readonly CLOUDFLARE_API_TOKEN?: string;
   /** Local development only: the email to act as. The Worker honours it only on localhost. */

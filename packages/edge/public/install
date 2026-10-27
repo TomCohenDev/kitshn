@@ -9,7 +9,8 @@
 # local path of kitshn-edge.tar.gz), KITSHN_SET_TOKEN=1 (store a new API token in the Worker),
 # KITSHN_GITHUB_CLIENT_ID and KITSHN_GITHUB_CLIENT_SECRET (add GitHub login, K-102),
 # KITSHN_OWNER_DEVICES (a JSON list of {tokenId, clientId, name} service tokens that join the Owner
-# circle when kitshn starts for the first time, for agents; K-106).
+# circle when kitshn starts for the first time, for agents; K-106), KITSHN_DEPLOY_OWNERS (comma-separated
+# GitHub user names whose repos may deploy, K-811; a second run keeps the list when it is not set).
 set -eu
 
 API=https://api.cloudflare.com/client/v4
@@ -85,7 +86,8 @@ zones=$(api GET "/zones?account.id=$ACCOUNT&per_page=50")
 ZONE=$(printf '%s' "$zones" | jq -r --arg host "$KITSHN_HOST" \
   '[.[] | . as $z | select($z.name == $host or ($host | endswith("." + $z.name)))] | sort_by(.name | length) | last | .id // empty')
 [ -n "$ZONE" ] || die "no zone of this account contains $KITSHN_HOST. Add the domain to Cloudflare first (K-1111)."
-kept "account $ACCOUNT, zone $ZONE"
+ZONE_NAME=$(printf '%s' "$zones" | jq -r --arg id "$ZONE" '.[] | select(.id == $id) | .name')
+kept "account $ACCOUNT, zone $ZONE_NAME"
 
 say "2. Zero Trust organization (K-1207)"
 NEED="Access: Organizations, Identity Providers, and Groups: Edit"
@@ -185,6 +187,8 @@ ADMIN_AUD=$(app "$KITSHN_HOST" "kitshn admin" 24h "$owner_policy")
 app "$KITSHN_HOST/install" "kitshn install (public)" 24h "$public_policy" >/dev/null
 # K-602: the join script and the join code exchange. The one-time code protects the exchange.
 app "$KITSHN_HOST/join" "kitshn join (public)" 24h "$public_policy" >/dev/null
+# K-811: GitHub Actions deploys here; the Worker checks its OIDC token.
+app "$KITSHN_HOST/deploy" "kitshn deploy (public)" 24h "$public_policy" >/dev/null
 CONNECT_AUD=$(app "$KITSHN_HOST/connect" "kitshn connect" 24h "$machines_policy")
 
 say "6. R2 bucket"
@@ -228,23 +232,37 @@ for bucket in $(printf '%s' "$session" | jq -r '.buckets[]? | join(",")'); do
   [ -n "$next" ] && assets_jwt=$next
 done
 migrations='{"new_tag":"v1","new_sqlite_classes":["Kitshn"]}'
+settings="{}"
 scripts=$(api GET "/accounts/$ACCOUNT/workers/scripts")
 if printf '%s' "$scripts" | jq -e --arg s "$SCRIPT" 'any(.[]; .id == $s)' >/dev/null; then
   settings=$(api GET "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/settings")
   printf '%s' "$settings" | jq -e 'any(.bindings[]?; .type == "durable_object_namespace" and .class_name == "Kitshn")' >/dev/null ||
     die "a Worker named $SCRIPT exists and it is not kitshn. kitshn does not overwrite it."
 fi
+# K-811: the GitHub owners that may deploy, as user ids, which never change hands like a name can.
+DEPLOY_OWNER_IDS=$(printf "%s" "$settings" | jq -r '[.bindings[]? | select(.name == "DEPLOY_OWNER_IDS") | .text][0] // ""')
+if [ -n "${KITSHN_DEPLOY_OWNERS:-}" ]; then
+  DEPLOY_OWNER_IDS=""
+  for login in $(printf '%s' "$KITSHN_DEPLOY_OWNERS" | tr ',' ' '); do
+    # K-811: user accounts only; an organization is not on the list for now.
+    id=$(curl -fsS "https://api.github.com/users/$login" | jq -r 'select(.type == "User") | .id // empty') || die "GitHub knows no user $login."
+    [ -n "$id" ] || die "$login is not a GitHub user account (K-811)."
+    DEPLOY_OWNER_IDS="${DEPLOY_OWNER_IDS:+$DEPLOY_OWNER_IDS,}$id"
+  done
+  kept "deploys from GitHub owners $KITSHN_DEPLOY_OWNERS ($DEPLOY_OWNER_IDS)"
+fi
 if [ "$(printf '%s' "$scripts" | jq -r --arg s "$SCRIPT" 'map(select(.id == $s)) | .[0].migration_tag // empty')" = v1 ]; then
   migrations=null
 fi
 metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --argjson migrations "$migrations" \
   --arg host "$KITSHN_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" \
-  --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" '
+  --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" \
+  --arg zone "$ZONE" --arg zone_name "$ZONE_NAME" --arg deployers "$DEPLOY_OWNER_IDS" '
   {
     main_module: "worker.js",
     compatibility_date: $date,
     compatibility_flags: ["nodejs_compat"],
-    assets: {jwt: $jwt, config: {not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/connect", "/join/exchange"]}},
+    assets: {jwt: $jwt, config: {not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/connect", "/join/exchange", "/deploy/*"]}},
     bindings: [
       {type: "assets", name: "ASSETS"},
       {type: "durable_object_namespace", name: "KITSHN", class_name: "Kitshn"},
@@ -254,7 +272,10 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
       {type: "plain_text", name: "ACCESS_CONNECT_AUD", text: $connect_aud},
       {type: "plain_text", name: "OWNER_EMAILS", text: $owners},
       {type: "plain_text", name: "OWNER_DEVICES", text: $devices},
-      {type: "plain_text", name: "CLOUDFLARE_ACCOUNT_ID", text: $account}
+      {type: "plain_text", name: "CLOUDFLARE_ACCOUNT_ID", text: $account},
+      {type: "plain_text", name: "CLOUDFLARE_ZONE_ID", text: $zone},
+      {type: "plain_text", name: "KITSHN_ZONE", text: $zone_name},
+      {type: "plain_text", name: "DEPLOY_OWNER_IDS", text: $deployers}
     ],
     keep_bindings: ["secret_text"]
   } + (if $migrations == null then {} else {migrations: $migrations} end)')

@@ -183,9 +183,9 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 
 ## 8. Recipes and deploys
 
-- **K-801** A recipe is `kitshn.config.ts` with `export default defineApp({...})`. The value is one object literal. The `kitshn` npm package exports `defineApp` and its types.
+- **K-801** A recipe is `kitshn.config.ts` with `export default defineApp({...})`. The value is one object literal. The `kitshn` npm package exports `defineApp` and its types. Until it is on the npm registry, an app installs it from the `kitshn.tgz` asset of the `edge` release.
 - **K-802** Recipes do not compute. A lint rule in `kitshn check` refuses loops, conditions, function calls other than `defineApp`, and imports other than `kitshn`. The lint rule is enough, because kitshn never runs repo code (K-803).
-- **K-803** GitHub Actions evaluates the recipe and sends JSON. kitshn checks the JSON with the same schema. kitshn never runs repo code.
+- **K-803** GitHub Actions reads the recipe without running it: `kitshn check` turns the literal object into JSON. kitshn checks the JSON with the same schema. kitshn never runs repo code. The reusable workflow is `.github/workflows/kitshn2-deploy.yml` in this repo.
 - **K-804** Kinds: a Compose app (`compose`), a static site (`static`), a Worker app (`worker`). A recipe has exactly one kind.
 
   ```ts
@@ -203,7 +203,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 
 - **K-805** A static site names a build command and an output folder. Actions builds it and uploads the files. kitshn deploys them as Workers static assets, with no Worker code, so their requests are free ([static assets billing](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/)).
 - **K-806** A Worker app names its `wrangler.jsonc`. kitshn refuses fields that name a place: `account_id`, `name`, `routes`, `env`, and fixed storage ids. kitshn sets the name, the routes and the storage for each environment.
-- **K-807** `deploy` maps triggers to environments as in KitSHn 1: the first matching entry wins. `startsIn` names the circle of a new environment. After that, the map decides (K-518).
+- **K-807** `deploy` maps triggers to environments as in KitSHn 1: the first matching entry wins. `startsIn` names the circle of a new environment. After that, the map decides (K-518). A `pull_request` entry is named `pr-{pr}`, and the number comes from the signed GitHub token, so a pull request reaches only its own preview. A push environment deploys only from the branch that first deployed it.
 - **K-808** `needs.vars` and `needs.secrets` list names. Values come from the kitshn store, per app and environment. A `KITSHN_<NAME>` GitHub variable or secret forwards into the store as `<NAME>` on each deploy and wins over the store. A deploy fails before any work when a needed name has no value, and it names each missing name.
 - **K-809** The kitshn store encrypts secret values with AES-GCM under a Worker secret. The map shows names and "set" or "missing", never a value.
 - **K-810** The workflow file is the same few lines for every app. It needs `permissions: id-token: write` and calls the kitshn action.

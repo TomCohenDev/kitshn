@@ -48,3 +48,57 @@ export async function callerOf(request: Request, env: Env, audience: string): Pr
     return `The Access token is not valid: ${error instanceof Error ? error.message : String(error)}`;
   }
 }
+
+/** Who deploys: the repo of a GitHub Actions run, from its OIDC token (K-811). */
+export interface Deployer {
+  readonly repo: string;
+  /** GitHub's id of the repo; unlike the name, it never changes or clashes. */
+  readonly repoId: string;
+  readonly ownerId: string;
+  readonly sha: string;
+  /** The event, the branch and the pull request come from the signed token, never from the request. */
+  readonly eventName: string;
+  readonly branch: string;
+  readonly pr: number | null;
+}
+
+const github = createRemoteJWKSet(new URL("https://token.actions.githubusercontent.com/.well-known/jwks"));
+
+/**
+ * K-811: accepts a GitHub Actions OIDC token for this kitshn, from a repo of a listed owner account.
+ * Returns a reason string for any other request.
+ */
+export async function deployerOf(request: Request, env: Env): Promise<Deployer | string> {
+  const header = request.headers.get("authorization") ?? "";
+  if (!header.startsWith("Bearer "))
+    return "A deploy needs the GitHub Actions OIDC token (permissions: id-token: write).";
+  const owners = env.DEPLOY_OWNER_IDS.split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  if (owners.length === 0)
+    return "This kitshn trusts no GitHub owner yet. Run the bootstrap with KITSHN_DEPLOY_OWNERS.";
+  try {
+    const { payload } = await jwtVerify(header.slice("Bearer ".length), github, {
+      issuer: "https://token.actions.githubusercontent.com",
+      audience: new URL(request.url).origin,
+    });
+    const text = (name: string) => (typeof payload[name] === "string" ? (payload[name] as string) : "");
+    const [repo, repoId, ownerId, sha, eventName, ref] = [
+      "repository",
+      "repository_id",
+      "repository_owner_id",
+      "sha",
+      "event_name",
+      "ref",
+    ].map(text) as [string, string, string, string, string, string];
+    if (!repo || !repoId || !ownerId || !sha || !eventName) {
+      return "The GitHub token has no repository, owner, commit or event.";
+    }
+    if (!owners.includes(ownerId)) return `kitshn does not trust the GitHub owner of ${repo} (K-811).`;
+    const pull = /^refs\/pull\/(\d+)\//.exec(ref);
+    const branch = eventName === "pull_request" ? text("head_ref") : ref.replace(/^refs\/heads\//, "");
+    return { repo, repoId, ownerId, sha, eventName, branch, pr: pull ? Number(pull[1]) : null };
+  } catch (error) {
+    return `The GitHub token is not valid: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}

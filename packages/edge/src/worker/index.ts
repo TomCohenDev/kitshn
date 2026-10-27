@@ -1,4 +1,4 @@
-import { callerOf } from "./auth.ts";
+import { callerOf, deployerOf } from "./auth.ts";
 import type { Env } from "./env.ts";
 
 export { Kitshn } from "./kitshn.ts";
@@ -30,6 +30,15 @@ export default {
       }
       const headers = new Headers(request.headers);
       headers.set("x-kitshn-caller", JSON.stringify(caller));
+      return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
+    }
+    if (url.pathname.startsWith("/deploy/") && request.method === "POST") {
+      // K-811: GitHub Actions deploys here with its OIDC token; Access lets the path through.
+      const deployer = await deployerOf(request, env);
+      if (typeof deployer === "string") return Response.json({ error: deployer }, { status: 401 });
+      const headers = new Headers(request.headers);
+      headers.delete("x-kitshn-caller");
+      headers.set("x-kitshn-deployer", JSON.stringify(deployer));
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
     }
     if (url.pathname === "/join/exchange" && request.method === "POST") {

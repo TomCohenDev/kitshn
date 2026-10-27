@@ -60,6 +60,12 @@ jobs:
       - name: Build the daemon for each platform (K-601)
         working-directory: packages/daemon
         run: node scripts/build.ts
+      - name: Build the kitshn CLI and pack the kitshn package (K-801, K-803)
+        working-directory: packages/kitshn
+        run: |
+          bun build src/cli.ts --target=node --outfile=dist/kitshn.mjs
+          npm pack --pack-destination dist
+          mv dist/kitshn-*.tgz dist/kitshn.tgz
       - uses: actions/download-artifact@v8
         with:
           name: kitshn-edge
@@ -69,11 +75,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          files="kitshn-edge.tar.gz packages/daemon/dist/kitshn-linux-arm64 packages/daemon/dist/kitshn-linux-x64 packages/daemon/dist/kitshn-darwin-arm64 packages/daemon/dist/kitshn-darwin-x64"
+          files="kitshn-edge.tar.gz packages/daemon/dist/kitshn-linux-arm64 packages/daemon/dist/kitshn-linux-x64 packages/daemon/dist/kitshn-darwin-arm64 packages/daemon/dist/kitshn-darwin-x64 packages/kitshn/dist/kitshn.mjs packages/kitshn/dist/kitshn.tgz"
           if gh release view edge >/dev/null 2>&1; then
             gh release upload edge $files --clobber
-            gh release edit edge --target "$GITHUB_SHA" --notes "kitshn 2 Worker bundle and daemon from $GITHUB_SHA."
+            gh release edit edge --target "$GITHUB_SHA" --notes "kitshn 2 Worker bundle, daemon and CLI from $GITHUB_SHA."
           else
             gh release create edge $files --prerelease --latest=false --target "$GITHUB_SHA" \
-              --title "kitshn 2 edge" --notes "kitshn 2 Worker bundle and daemon from $GITHUB_SHA."
+              --title "kitshn 2 edge" --notes "kitshn 2 Worker bundle, daemon and CLI from $GITHUB_SHA."
           fi

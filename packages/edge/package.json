@@ -11,7 +11,8 @@
   "dependencies": {
     "effect": "4.0.6",
     "jose": "6.2.13",
-    "preact": "11.0.2"
+    "preact": "11.0.2",
+    "kitshn": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.65.0",

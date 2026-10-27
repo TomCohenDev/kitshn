@@ -1,0 +1,45 @@
+name: kitshn 2 deploy
+
+# The reusable deploy workflow of kitshn 2 (K-803, K-810). An app repo calls it with:
+#
+#   on:
+#     push:
+#     pull_request:
+#       types: [opened, synchronize, reopened, closed]
+#   permissions:
+#     contents: read
+#     id-token: write
+#   jobs:
+#     kitshn:
+#       uses: Yarden-zamir/kitshn/.github/workflows/kitshn2-deploy.yml@main
+#
+# It reads kitshn.config.ts without running it, and sends it with the GitHub OIDC token (K-811).
+# KitSHn 1 apps keep calling deploy.yml in this repo.
+on:
+  workflow_call:
+    inputs:
+      server:
+        description: The kitshn address.
+        type: string
+        default: https://kit.yarden-zamir.com
+
+jobs:
+  deploy:
+    # A pull request from a fork gets no OIDC token, so kitshn cannot deploy it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # One deploy at a time per pull request and per branch; kitshn binds each push environment to one branch.
+    concurrency:
+      group: kitshn-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: kitshn deploy
+        env:
+          SERVER: ${{ inputs.server }}
+        run: |
+          curl -fsSL https://github.com/Yarden-zamir/kitshn/releases/download/edge/kitshn.mjs -o "$RUNNER_TEMP/kitshn.mjs"
+          node "$RUNNER_TEMP/kitshn.mjs" deploy --server "$SERVER"

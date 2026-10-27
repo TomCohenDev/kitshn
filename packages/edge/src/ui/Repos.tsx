@@ -89,7 +89,8 @@ export function RepoList(props: {
                 <span class="muted">Allow starts {repo.branch}</span>
               ) : null}
               {/* An Allow whose start failed or met the pause keeps the branch to start again. */}
-              {repo.state === "allowed" && repo.branch !== null ? (
+              {/* Take over already starts the branch of a repo that a key allowed. */}
+              {repo.state === "allowed" && repo.branch !== null && !repo.allowedBy ? (
                 <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "allowed")}>
                   Start {repo.branch}
                 </button>

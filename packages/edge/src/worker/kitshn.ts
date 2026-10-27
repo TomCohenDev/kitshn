@@ -2214,7 +2214,7 @@ export class Kitshn extends DurableObject<Env> {
             { status: 409 },
           );
         }
-        // A teardown always runs (K-819).
+        // A teardown skips the agent machine check (K-819); the label and address checks still apply.
         if (result.kind === "deploy" && !mayDeployOn(this.state, allowedBy?.clientId ?? null, existing.machine, Date.now()))
           return Response.json({ error: `${existing.name} runs on a machine that it may no longer use.${agentLimit}` }, { status: 409 });
         machineId = existing.machine;

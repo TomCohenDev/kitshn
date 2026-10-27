@@ -222,12 +222,9 @@ export function removeAppChanges(state: State, id: string): Array<Change> {
 export const invert = (changes: ReadonlyArray<Change>): Array<Change> =>
   changes.map((change) => ({ ...change, before: change.after, after: change.before }) as Change);
 
-/** Names the first change whose current value is not its `before`, or null. */
-export function conflictOf(state: State, changes: ReadonlyArray<Change>): string | null {
-  for (const change of changes) {
-    if (!deepEqual(current(state, change), change.before)) return `${change._tag} "${change.id}"`;
-  }
-  return null;
+/** The first change whose current value is not its `before`, or null. */
+export function conflictOf(state: State, changes: ReadonlyArray<Change>): Change | null {
+  return changes.find((change) => !deepEqual(current(state, change), change.before)) ?? null;
 }
 
 export function applyChanges(state: State, changes: ReadonlyArray<Change>): State {

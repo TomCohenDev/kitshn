@@ -182,8 +182,22 @@ export function circlePolicies(
 /** Resource kinds that the Worker serves and checks itself (K-404) get no Access application. */
 const WORKER_CHECKED = new Set(["page", "file"]);
 
-/** K-401, K-402: the Access objects that the shares compile to. */
-export function desiredAccess(state: State, now: number): DesiredAccess {
+/** K-909: the address of a removed app that its machine still serves; `id` was its card id. */
+export interface RemovedSite {
+  readonly id: string;
+  readonly name: string;
+  readonly address: string;
+}
+
+/**
+ * K-401, K-402: the Access objects that the shares compile to. K-909: while a removed app still answers, its
+ * application lets in only the people of the Owner circle, also during the pause, so it fails closed.
+ */
+export function desiredAccess(
+  state: State,
+  now: number,
+  removed: ReadonlyArray<RemovedSite> = [],
+): DesiredAccess {
   const policies = new Map<string, PolicyBody>();
   const apps = new Map<string, AppBody>();
   for (const resource of state.resources.values()) {
@@ -211,6 +225,22 @@ export function desiredAccess(state: State, now: number): DesiredAccess {
         policyKeys,
       });
     }
+  }
+  const ownerKey = `policy:${OWNER_CIRCLE_ID}:people`;
+  const owner = state.circles.get(OWNER_CIRCLE_ID);
+  const ownerPeople = owner ? circlePolicies(owner, state.machines).get(ownerKey) : undefined;
+  // Never a Bypass; without people, the application has no policy and lets no one in (K-006).
+  const removedKeys = ownerPeople?.decision === "allow" ? [ownerKey] : [];
+  if (ownerPeople && removed.length > 0 && removedKeys.length > 0) policies.set(ownerKey, ownerPeople);
+  for (const site of removed) {
+    apps.set(`app:${site.id}:${site.address}`, {
+      name: appName(site.name),
+      type: "self_hosted",
+      domain: site.address,
+      session_duration: "720h",
+      same_site_cookie_attribute: "lax",
+      policyKeys: removedKeys,
+    });
   }
   // K-1004: only the people of circles that can open a page or a file may log in, so a stranger cannot
   // take a Zero Trust seat (K-111). The admin opens every item (K-104), so its circles count too.

@@ -15,13 +15,30 @@ export type Teardown =
       readonly command: Extract<Command, { kind: "compose-down" }>;
     };
 
-export function appTeardown(card: AppCard, script: string, zone: string): Teardown {
+export function appTeardown(card: AppCard, zone: string): Teardown {
   const address = card.addresses[0];
   if (address === undefined) throw new Error(`The app ${card.name} has no address.`);
-  if (card.kind !== "site.compose") return { kind: "worker", address, script };
+  // The Worker script of an environment is `kitshn-<card id>` (environmentNames in worker/deploys.ts).
+  if (card.kind !== "site.compose") return { kind: "worker", address, script: `kitshn-${card.id}` };
   // K-909: a removal keeps the volumes and the last good build on the machine, so undo can start it again.
   const name = address.slice(0, -zone.length - 1);
-  return { kind: "compose", machineId: card.machine, command: { kind: "compose-down", project: card.id, name, removeData: false } };
+  return {
+    kind: "compose",
+    machineId: card.machine,
+    command: { kind: "compose-down", project: card.id, name, removeData: false },
+  };
+}
+
+/** K-909: the newest `compose-down` job of a removal, as the jobs table holds it. */
+export type DownJob = { readonly state: "queued" | "sent" | "done" | "failed" | "expired" } | null;
+
+/**
+ * K-909: what the undo of a Compose removal does with its `compose-down`. A queued one goes, and the app,
+ * which never stopped, needs no start. One that the machine runs now refuses the undo until it ends.
+ */
+export function composeUndo(down: DownJob): "start" | "cancel" | "refuse" {
+  if (down?.state === "queued") return "cancel";
+  return down?.state === "sent" ? "refuse" : "start";
 }
 
 /** K-909: how the undo of a removal starts the app again, or why it does not. */
@@ -31,18 +48,21 @@ export type Restart =
   | { readonly kind: "none"; readonly reason: string };
 
 /**
- * K-909: a Compose app starts its last good build on its machine, a static or Worker site builds again on its
- * branch, and a static preview waits for the next push to its pull request. `refusal` is why kitshn starts
- * nothing now, such as the pause or the repo gate.
+ * K-909: a Compose app starts its last good build on its machine, and a static or Worker site builds again on
+ * its branch. A static preview waits for the next push to its pull request; a preview whose pull request
+ * closed does not come back. `refusal` is why kitshn starts nothing now, such as the pause or the repo gate.
  */
 export function appRestart(
   last: LastDeploy | null,
   refusal: string | null,
+  closed: boolean,
   machine: Parameters<typeof agentDeployPlan>[2],
 ): Restart {
   const none = (reason: string) => ({ kind: "none", reason }) as const;
   if (refusal !== null) return none(refusal);
   if (!last) return none("kitshn has no finished deploy of this app; the next deploy starts it.");
+  if (isPreview(last.environment) && closed)
+    return none(`The pull request of the preview ${last.environment} is closed, so the preview does not come back.`);
   if (last.app === "static" && isPreview(last.environment))
     return none(`The preview ${last.environment} comes back on the next push to its pull request.`);
   const plan = agentDeployPlan(last, last.app === "compose" ? "redeploy" : "build", machine);

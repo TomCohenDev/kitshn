@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LastDeploy } from "./agent.ts";
-import { appRestart, appTeardown, orphanVolumes } from "./apps.ts";
+import { appRestart, appTeardown, composeUndo, orphanVolumes } from "./apps.ts";
 import type { AppCard } from "./changes.ts";
 import { seed } from "./seed.ts";
 
@@ -25,12 +25,12 @@ const ready = { canRedeploy: true, takesDeploys: true, runsCard: true, allowed: 
 
 describe("app removal (K-909)", () => {
   it("takes down the Worker of a site, and stops a Compose app with its data kept", () => {
-    expect(appTeardown({ ...compose, kind: "site.static", machine: null }, "kitshn-x", "example.com")).toEqual({
+    expect(appTeardown({ ...compose, kind: "site.static", machine: null }, "example.com")).toEqual({
       kind: "worker",
       address: "riffle.example.com",
-      script: "kitshn-x",
+      script: `kitshn-${compose.id}`,
     });
-    expect(appTeardown(compose, "", "example.com")).toEqual({
+    expect(appTeardown(compose, "example.com")).toEqual({
       kind: "compose",
       machineId: "vps",
       command: { kind: "compose-down", project: compose.id, name: "riffle", removeData: false },
@@ -38,22 +38,34 @@ describe("app removal (K-909)", () => {
   });
 
   it("starts a Compose app from its last good build and builds a site again on its branch", () => {
-    expect(appRestart(last, null, ready)).toMatchObject({
+    expect(appRestart(last, null, false, ready)).toMatchObject({
       kind: "redeploy",
       command: { kind: "compose-redeploy", project: compose.id, name: "riffle" },
     });
-    expect(appRestart({ ...last, environment: "pr-3" }, null, ready)).toMatchObject({ kind: "redeploy" });
-    expect(appRestart({ ...last, app: "static" }, null, null)).toEqual({ kind: "build", repo: "o/riffle", branch: "main" });
+    expect(appRestart({ ...last, environment: "pr-3" }, null, false, ready)).toMatchObject({ kind: "redeploy" });
+    expect(appRestart({ ...last, app: "static" }, null, false, null)).toEqual({ kind: "build", repo: "o/riffle", branch: "main" });
   });
 
   it("says why it starts nothing", () => {
-    expect(appRestart({ ...last, app: "static", environment: "pr-3" }, null, null)).toEqual({
+    expect(appRestart({ ...last, app: "static", environment: "pr-3" }, null, false, null)).toEqual({
       kind: "none",
       reason: "The preview pr-3 comes back on the next push to its pull request.",
     });
-    expect(appRestart(last, "kitshn is paused.", ready)).toEqual({ kind: "none", reason: "kitshn is paused." });
-    expect(appRestart(last, null, { ...ready, takesDeploys: false })).toMatchObject({ kind: "none", reason: /label deploy/ });
-    expect(appRestart(null, null, null)).toMatchObject({ kind: "none", reason: /next deploy/ });
+    expect(appRestart(last, "kitshn is paused.", false, ready)).toEqual({ kind: "none", reason: "kitshn is paused." });
+    expect(appRestart(last, null, false, { ...ready, takesDeploys: false })).toMatchObject({ kind: "none", reason: /label deploy/ });
+    expect(appRestart(null, null, false, null)).toMatchObject({ kind: "none", reason: /next deploy/ });
+    expect(appRestart({ ...last, environment: "pr-3" }, null, true, ready)).toMatchObject({
+      kind: "none",
+      reason: /closed, so the preview does not come back/,
+    });
+  });
+
+  it("cancels a compose-down that waits, refuses while the machine runs it, and starts the app after it", () => {
+    expect(composeUndo({ state: "queued" })).toBe("cancel");
+    expect(composeUndo({ state: "sent" })).toBe("refuse");
+    expect(composeUndo({ state: "done" })).toBe("start");
+    expect(composeUndo({ state: "failed" })).toBe("start");
+    expect(composeUndo(null)).toBe("start");
   });
 
   it("lists as orphaned only the idle volumes whose app has no card", () => {

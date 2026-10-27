@@ -184,7 +184,7 @@ describe("changes and undo (K-1501, K-1502)", () => {
     expect(applyChanges(first.after, undo).places.get("riffle")).toEqual({ x: 0, y: -200 });
 
     const second = edit(first.after, [{ _tag: "place", id: "riffle", after: { x: 900, y: 900 } }]);
-    expect(conflictOf(second.after, undo)).toBe('place "riffle"');
+    expect(conflictOf(second.after, undo)).toMatchObject({ _tag: "place", id: "riffle" });
   });
 
   it("names share changes in the summary (K-502, K-503)", () => {
@@ -264,7 +264,10 @@ describe("app removal and its undo (K-909, K-1502)", () => {
   it("refuses an undo once a later deploy made the card again, and a card that is no app", () => {
     const state = shared();
     const removal = removeAppChanges(state, "riffle");
-    expect(conflictOf(applyChanges(state, removal.slice(0, -1)), invert(removal))).toBe('app "riffle"');
+    expect(conflictOf(applyChanges(state, removal.slice(0, -1)), invert(removal))).toMatchObject({
+      _tag: "app",
+      id: "riffle",
+    });
     expect(() => removeAppChanges(state, "kitshn-admin")).toThrow(/not an app/);
     expect(() => removeAppChanges(state, "gone")).toThrow(/No card/);
   });
@@ -339,6 +342,16 @@ describe("Access compile (K-401 to K-403)", () => {
     expect(body.decision).toBe("allow");
     expect(body.include).toEqual([{ email: { email: OWNER } }]);
     expect(body.mfa_config?.allowed_authenticators).toContain("biometrics");
+  });
+
+  it("lets only the Owner circle's people into a removed app that still answers, also in a pause (K-909)", () => {
+    const removed = [{ id: "app-gone-1-prod", name: "gone", address: "gone.example.com" }];
+    for (const state of [start(), { ...start(), paused: "keep-public" as const }]) {
+      const desired = desiredAccess(state, 0, removed);
+      const keys = desired.apps.get("app:app-gone-1-prod:gone.example.com")?.policyKeys;
+      expect(keys).toEqual(["policy:owner:people"]);
+      expect(desired.policies.get("policy:owner:people")?.decision).toBe("allow");
+    }
   });
 
   it("compiles Everyone to a bypass and devices to Service Auth", () => {

@@ -858,6 +858,7 @@ export function App() {
       {palette !== null ? (
         <Palette
           state={state}
+          deployed={new Set(store.snapshot.repos.flatMap((repo) => repo.resourceIds))}
           initialQuery={palette}
           onClose={() => setPalette(null)}
           actions={{
@@ -1266,7 +1267,7 @@ function CardPanel(props: {
           Place on the map
         </button>
       ) : null}
-      {isAppCard(resource) ? (
+      {isAppCard(resource) && props.repo ? (
         <button
           class="btn danger"
           title="Takes down what the deploy made and keeps the volumes. Undo starts it again (K-909)."
@@ -1379,6 +1380,8 @@ interface PaletteActions {
 
 function Palette(props: {
   state: State;
+  /** K-909: the cards that a deploy made, which a repo lists (K-819). */
+  deployed: ReadonlySet<string>;
   initialQuery: string;
   onClose: () => void;
   actions: PaletteActions;
@@ -1401,7 +1404,7 @@ function Palette(props: {
         label: `${KINDS[resource.kind].icon} ${resource.name}`,
         run: () => actions.select({ cards: new Set([resource.id]), circle: null }),
       });
-      if (isAppCard(resource))
+      if (isAppCard(resource) && props.deployed.has(resource.id))
         all.push({ label: `Remove the app ${resource.name}`, run: () => actions.removeApp(resource) });
       if (!state.places.has(resource.id)) continue;
       const holding = new Set(circlesHolding(state, resource.id).map((circle) => circle.id));
@@ -1430,7 +1433,7 @@ function Palette(props: {
       });
     }
     return all;
-  }, [state, actions]);
+  }, [state, actions, props.deployed]);
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const matches = entries
     .filter((entry) => words.every((word) => entry.label.toLowerCase().includes(word)))

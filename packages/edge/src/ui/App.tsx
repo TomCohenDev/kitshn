@@ -217,10 +217,6 @@ export function App() {
     });
   };
 
-  /**
-   * K-509: cards dragged from the tray land at the drop point, each in exactly the circles there, so they
-   * get those shares; a public circle asks first, as for any drag (K-210).
-   */
   /** K-521, K-522: stack actions; each is one revision through `commit`, so a public circle asks first. */
   const stacks: StackActions = {
     stackOnto: async (ids, target) => {
@@ -306,6 +302,10 @@ export function App() {
     },
   };
 
+  /**
+   * K-509: cards dragged from the tray land at the drop point, each in exactly the circles there, so they
+   * get those shares; a public circle asks first, as for any drag (K-210).
+   */
   const placeFromTray = async (ids: Array<string>, at: Point) => {
     if (!state) return;
     const wanted = new Set(
@@ -983,7 +983,9 @@ function Panel(props: {
         </button>
       </section>
     );
-    if (stackOfAll) body = <StackPanel stack={stackOfAll} state={state} actions={props.stacks} />;
+    if (stackOfAll) body = (
+      <StackPanel stack={stackOfAll} state={state} actions={props.stacks} onSelectCard={props.onSelectCard} />
+    );
   } else {
     body = (
       <section>
@@ -1056,7 +1058,12 @@ interface StackActions {
 }
 
 /** K-521: one stack of the owner: its name, its cards with "Pull out", and "Unstack". */
-function StackPanel(props: { stack: Stack; state: State; actions: StackActions }) {
+function StackPanel(props: {
+  stack: Stack;
+  state: State;
+  actions: StackActions;
+  onSelectCard: (id: string) => void;
+}) {
   const { stack, state } = props;
   const holding = circlesHolding(state, stack.members[0] ?? "");
   return (
@@ -1081,7 +1088,10 @@ function StackPanel(props: { stack: Stack; state: State; actions: StackActions }
           return (
             <li key={id}>
               <div class="open-card">
-                <span class="name">{resource ? `${KINDS[resource.kind].icon} ${resource.name}` : id}</span>
+                {/* One card's own level and end date (K-205, K-209) are in its panel. */}
+                <button type="button" class="name link" onClick={() => props.onSelectCard(id)}>
+                  {resource ? `${KINDS[resource.kind].icon} ${resource.name}` : id}
+                </button>
                 <button type="button" class="btn" onClick={() => void props.actions.pullOut(stack.id, id)}>
                   Pull out
                 </button>

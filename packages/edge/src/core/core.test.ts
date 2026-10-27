@@ -10,6 +10,7 @@ import {
   shareDiff,
   stacksWithout,
   summarize,
+  withStackMates,
 } from "./changes.ts";
 import {
   ADMIN_RESOURCE_ID,
@@ -420,6 +421,17 @@ describe("stacks (K-521, K-522)", () => {
     );
     expect(left.places.get("kitshn-admin")).toEqual(point);
     expect(left.stacks.size).toBe(0);
+  });
+
+  it("undoes an older move of a card that joined a stack since then, with its stack", () => {
+    const first = edit(start(), [{ _tag: "place", id: "riffle", after: { x: 0, y: 40 } }]);
+    const second = edit(first.after, [
+      { _tag: "place", id: "kitshn-admin", after: { x: 0, y: 40 } },
+      { _tag: "stack", id: "s1", after: stack },
+    ]);
+    const undone = applyChanges(second.after, withStackMates(second.after, invert(first.changes)));
+    expect(ruleViolation(undone) ?? "").not.toMatch(/share one place/);
+    expect(undone.places.get("kitshn-admin")).toEqual(undone.places.get("riffle"));
   });
 
   it("keeps the rules true when a stacked card is deleted outside an edit", () => {

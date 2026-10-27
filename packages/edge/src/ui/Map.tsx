@@ -31,6 +31,8 @@ type Drag =
       readonly start: Point;
       readonly origins: ReadonlyMap<string, Point>;
       readonly clicked: string;
+      /** The card under the grab point, which a drop never stacks onto, so a nudge stays a move. */
+      readonly under: string | null;
       moved: boolean;
     }
   | {
@@ -207,7 +209,9 @@ export function MapView(props: Props) {
         props.onSelect({ cards: whole ? new Set(ids) : new Set([id]), circle: null });
       const origins = new Map<string, Point>();
       for (const card of ids) origins.set(card, state.places.get(card) ?? world);
-      const start = () => setDrag({ type: "cards", start: world, origins, clicked: id, moved: false });
+      const under = stackTargetAt(event.clientX, event.clientY, ids);
+      const start = () =>
+        setDrag({ type: "cards", start: world, origins, clicked: id, under, moved: false });
       // K-516: on touch, a long press starts the drag, so a swipe still pans.
       if (event.pointerType === "touch") {
         setDrag({ type: "pan", sx: event.clientX, sy: event.clientY, view });
@@ -265,7 +269,8 @@ export function MapView(props: Props) {
         { x: Math.round(origin.x + dx), y: Math.round(origin.y + dy) },
       ]);
       preview(placeChanges(moves), pointer);
-      setStackTarget(stackTargetAt(event.clientX, event.clientY, new Set(drag.origins.keys())));
+      const target = stackTargetAt(event.clientX, event.clientY, new Set(drag.origins.keys()));
+      setStackTarget(target === drag.under ? null : target);
       return;
     }
     if (drag.type === "circle") {
@@ -299,7 +304,8 @@ export function MapView(props: Props) {
     // K-522: cards let go over another card stack with it instead of moving.
     if (drag?.type === "cards" && drag.moved) {
       const dragged = new Set(drag.origins.keys());
-      const target = stackTargetAt(event.clientX, event.clientY, dragged);
+      const found = stackTargetAt(event.clientX, event.clientY, dragged);
+      const target = found === drag.under ? null : found;
       setStackTarget(null);
       if (target) {
         props.onStackOnto([...dragged], target);
@@ -487,7 +493,11 @@ export function MapView(props: Props) {
           }}
         />
       ) : null}
-      {draft && draft.diffs.length > 0 ? (
+      {draft && stackTarget ? (
+        <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
+          <span>Stack with {state.resources.get(stackTarget)?.name ?? "this card"}</span>
+        </div>
+      ) : draft && draft.diffs.length > 0 ? (
         <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
           {draft.diffs.slice(0, 6).map((diff) => (
             <span key={`${diff.resource.id}/${diff.circle.id}`} class={diff.to ? "" : "minus"}>

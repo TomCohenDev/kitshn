@@ -1131,3 +1131,15 @@ a > code {
   outline: 3px dashed var(--accent);
   outline-offset: 2px;
 }
+.open-card button.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.open-card button.link:hover {
+  text-decoration: underline;
+}

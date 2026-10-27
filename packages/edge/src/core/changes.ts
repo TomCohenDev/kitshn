@@ -133,25 +133,33 @@ export function resolveEdits(state: State, edits: ReadonlyArray<Edit>): Array<Ch
     if (deepEqual(before, edit.after)) continue;
     changes.push({ _tag: edit._tag, id, before, after: edit.after } as Change);
   }
-  // K-521: a stack moves as one, so moving one of its cards moves the others of the stack after this change.
+  return withStackMates(state, changes);
+}
+
+/**
+ * K-521: a stack moves as one, so a change that moves one of its cards also moves the others of the stack
+ * after the change. Edits and undo both go through this.
+ */
+export function withStackMates(state: State, changes: ReadonlyArray<Change>): Array<Change> {
   const stacks = new Map(state.stacks);
-  for (const edit of edits) {
-    if (edit._tag !== "stack") continue;
-    if (edit.after) stacks.set(edit.id, edit.after);
-    else stacks.delete(edit.id);
+  for (const change of changes) {
+    if (change._tag !== "stack") continue;
+    if (change.after) stacks.set(change.id, change.after);
+    else stacks.delete(change.id);
   }
-  const placed = new Set(edits.flatMap((edit) => (edit._tag === "place" ? [edit.id] : [])));
-  for (const edit of edits) {
-    if (edit._tag !== "place") continue;
-    const stack = [...stacks.values()].find((candidate) => candidate.members.includes(edit.id));
+  const placed = new Set(changes.flatMap((change) => (change._tag === "place" ? [change.id] : [])));
+  const mates: Array<Change> = [];
+  for (const change of changes) {
+    if (change._tag !== "place") continue;
+    const stack = [...stacks.values()].find((candidate) => candidate.members.includes(change.id));
     for (const mate of stack?.members ?? []) {
       if (placed.has(mate)) continue;
       placed.add(mate);
-      const before = current(state, { _tag: "place", id: mate });
-      if (!deepEqual(before, edit.after)) changes.push({ _tag: "place", id: mate, before, after: edit.after } as Change);
+      const before = state.places.get(mate) ?? null;
+      if (!deepEqual(before, change.after)) mates.push({ _tag: "place", id: mate, before, after: change.after });
     }
   }
-  return changes;
+  return [...changes, ...mates];
 }
 
 export const invert = (changes: ReadonlyArray<Change>): Array<Change> =>

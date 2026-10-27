@@ -14,6 +14,7 @@ import {
   ruleViolation,
   stacksWithout,
   summarize,
+  withStackMates,
 } from "../core/changes.ts";
 import {
   ADMIN_RESOURCE_ID,
@@ -405,15 +406,16 @@ export class Kitshn extends DurableObject<Env> {
     const [row] = this.sql<{ changes: string }>("SELECT changes FROM revisions WHERE id = ?", revisionId);
     if (!row)
       throw new RuleError(`Revision #${revisionId} does not exist, or it is older than the history keeps.`);
-    const changes = invert(JSON.parse(row.changes) as Array<Change>);
-    if (changes.length === 0)
+    const inverted = invert(JSON.parse(row.changes) as Array<Change>);
+    if (inverted.length === 0)
       throw new RuleError(
         `Revision #${revisionId} records an action, not a change, so it has nothing to undo.`,
       );
     // This also refuses a second undo of the same revision: its changes are no longer current.
-    const conflict = conflictOf(this.state, changes);
+    const conflict = conflictOf(this.state, inverted);
     if (conflict) throw new RuleError(`A later revision changed ${conflict}. Undo that revision first.`);
-    return this.commit(actor, changes, revisionId);
+    // A card that joined a stack since then takes its stack along (K-521).
+    return this.commit(actor, withStackMates(this.state, inverted), revisionId);
   }
 
   private authorized(caller: Caller) {

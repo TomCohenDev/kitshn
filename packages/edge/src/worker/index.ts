@@ -103,7 +103,7 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
   if (request.method !== "GET" && request.method !== "HEAD") return text("Use GET.", 405);
   const [, id = "", ...rest] = url.pathname.split("/");
   if (!isLibraryId(id)) return text(`kitshn has no ${kind} here.`, 404);
-  const { visitor, problem } = await contentVisitorOf(request, env, logins);
+  const { visitor, problem, seen } = await contentVisitorOf(request, env, logins);
   const answer = (await (
     await env.KITSHN.getByName("kitshn").fetch("https://kitshn.internal/internal/content", {
       method: "POST",
@@ -111,10 +111,8 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
     })
   ).json()) as ContentAnswer;
   const back = `?next=${encodeURIComponent(url.pathname)}`;
-  const step = loginStep(
-    answer.decision,
-    cookieValues(request.headers.get("cookie"), RETURN_MARK)[0] ?? null,
-  );
+  const cameBack = cookieValues(request.headers.get("cookie"), RETURN_MARK)[0] ?? null;
+  const step = loginStep(answer.decision, cameBack);
   if (step === "explain") {
     const reason = answer.stale
       ? `: this login is from before "Sign out everywhere" (K-110)`
@@ -123,7 +121,9 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
         : `${visitor.email ? ` as ${visitor.email}` : ""}${visitor.passkey ? " with a passkey" : ""}.`;
     const response = text(
       `Access let you in, but kitshn could not use the login on ${url.host}${reason}` +
-        ` Log out at https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/logout, then open ${url.origin}${url.pathname} again.`,
+        ` Log out at https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/logout, then open ${url.origin}${url.pathname} again.` +
+        `\n\nWhat kitshn saw: kitshn wanted the ${answer.decision === "passkey" ? "passkey login" : "login"} after the ${cameBack} step;` +
+        ` tokens: ${seen.length > 0 ? seen.join("; ") : "none"}.`,
       401,
     );
     // The next try starts clean: no old login, no return mark.

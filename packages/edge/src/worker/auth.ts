@@ -119,13 +119,19 @@ export async function contentVisitorOf(
   request: Request,
   env: Env,
   logins: ContentLogins,
-): Promise<{ readonly visitor: ContentVisitor; readonly problem: string | null }> {
+): Promise<{
+  readonly visitor: ContentVisitor;
+  readonly problem: string | null;
+  /** What each token was, for the loop guard text: "login", "passkey", or the reason it failed. */
+  readonly seen: ReadonlyArray<string>;
+}> {
   const ip = request.headers.get("cf-connecting-ip");
   const anonymous: ContentVisitor = { email: null, clientId: null, ip, passkey: false, issuedAt: null };
   if (env.DEV_IDENTITY && isLocal(new URL(request.url)))
     return {
       visitor: { email: env.DEV_IDENTITY, clientId: null, ip, passkey: true, issuedAt: null },
       problem: null,
+      seen: [],
     };
   const header = request.headers.get("cf-access-jwt-assertion");
   const tokens = [
@@ -135,12 +141,16 @@ export async function contentVisitorOf(
   let problem: string | null = null;
   // A passkey login wins over a plain one, because it gives the higher level (K-103).
   let best: ContentVisitor | null = null;
-  for (const token of tokens) {
+  const seen: Array<string> = [];
+  for (const [index, token] of tokens.entries()) {
+    const source = index === 0 && header ? "header" : "cookie";
     const identity = await accessIdentity(token, env, [logins.login, logins.passkey]);
     if (typeof identity === "string") {
       problem = identity;
+      seen.push(`${source}: ${identity}`);
       continue;
     }
+    seen.push(`${source}: ${identity.audience === logins.passkey ? "passkey" : "login"} login`);
     const visitor: ContentVisitor = {
       email: identity.email,
       clientId: identity.clientId,
@@ -150,7 +160,7 @@ export async function contentVisitorOf(
     };
     if (!best || (visitor.passkey && !best.passkey)) best = visitor;
   }
-  return { visitor: best ?? anonymous, problem: best ? null : problem };
+  return { visitor: best ?? anonymous, problem: best ? null : problem, seen };
 }
 
 /** Who deploys: the repo of a GitHub Actions run, from its OIDC token (K-811). */

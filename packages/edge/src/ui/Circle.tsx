@@ -216,6 +216,7 @@ function MemberSticker(props: {
               />
             </span>
           ))}
+          <span class="help">A right counts from any agent circle of this key.</span>
         </div>
       ) : null}
     </li>
@@ -226,8 +227,8 @@ type DeviceMember = Extract<Member, { _tag: "device" }>;
 
 const RIGHT_STICKERS: Record<AgentRight, string> = { addsApps: "adds apps", publishes: "publishes" };
 const RIGHT_HELP: Record<AgentRight, string> = {
-  addsApps: "It may allow a waiting repo; its cards start in this circle (K-819)",
-  publishes: "It may move the sites that it added into the overlap of this circle and Everyone",
+  addsApps: "The key allows waiting repos. Their new cards start in its first agent circle at control (K-819).",
+  publishes: "The key puts the apps that it added into the overlap of an agent circle and Everyone (K-718).",
 };
 
 /** K-718: a sticker for each right of an agent key, on its chip in the circle editor and on the map. */

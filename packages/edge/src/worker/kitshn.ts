@@ -48,7 +48,14 @@ import {
 } from "../core/machine.ts";
 import { placeInside } from "../core/place.ts";
 import type { MachineView, RepoView, RevisionView, ServerMessage, Snapshot } from "../core/protocol.ts";
-import { type AllowingAgent, type RepoGate, type RepoState, agentAllowRefusal, gateDecision } from "../core/repos.ts";
+import {
+  type AllowingAgent,
+  type RepoGate,
+  type RepoState,
+  agentAllowRefusal,
+  gateDecision,
+  keyRemoved,
+} from "../core/repos.ts";
 import { ClientMessage } from "../core/schema.ts";
 import {
   agentDeployPlan,
@@ -1926,14 +1933,16 @@ export class Kitshn extends DurableObject<Env> {
   /** K-819: refuses a deploy step of a repo that waits for the owner or that the owner blocked. */
   private repoGate(deployer: Deployer): Response | null {
     const [row] = this.sql<RepoRow>("SELECT * FROM repos WHERE repo_id = ?", deployer.repoId);
+    const gate = row ? repoGateOf(row) : undefined;
     const decision = gateDecision(
-      row ? repoGateOf(row) : undefined,
+      gate,
       {
         repoId: deployer.repoId,
         name: deployer.repo,
         branch: deployer.eventName === "push" ? deployer.branch : null,
       },
       Date.now(),
+      gate !== undefined && this.keyRemoved(gate),
     );
     const record = decision.record;
     if (record) {
@@ -1971,10 +1980,17 @@ export class Kitshn extends DurableObject<Env> {
     ))
       if (this.state.resources.has(resource_id))
         cards.set(repo_id, [...(cards.get(repo_id) ?? []), resource_id]);
-    return this.sql<RepoRow>("SELECT * FROM repos ORDER BY first_seen DESC").map((row) => ({
-      ...repoGateOf(row),
-      resourceIds: cards.get(row.repo_id) ?? [],
-    }));
+    return this.sql<RepoRow>("SELECT * FROM repos ORDER BY first_seen DESC").map((row) => {
+      const gate = repoGateOf(row);
+      const removed = this.keyRemoved(gate);
+      // K-819: the repo of a removed key shows as waiting, so the owner sees it and takes it over.
+      return { ...gate, state: removed ? "waiting" : gate.state, keyRemoved: removed, resourceIds: cards.get(row.repo_id) ?? [] };
+    });
+  }
+
+  /** K-819: the agent key that allowed this repo has no agent circle anymore (keyRemoved). */
+  private keyRemoved(gate: RepoGate) {
+    return keyRemoved(gate, (clientId) => circlesOf(this.state, { email: null, clientId, ip: null }, Date.now()).size > 0);
   }
 
   /** K-819: the repo id of a card that a deploy made, or null when kitshn does not know it. */
@@ -1995,11 +2011,8 @@ export class Kitshn extends DurableObject<Env> {
   /** K-819: why kitshn may not deploy this repo now, or null. A repo without a known id or a row waits. */
   private repoRefusal(repoId: string | null): string | null {
     if (repoId === null) return "kitshn does not know the repo of this deploy. Deploy it once from GitHub.";
-    const [row] = this.sql<{ name: string; state: RepoState }>(
-      "SELECT name, state FROM repos WHERE repo_id = ?",
-      repoId,
-    );
-    if (row?.state === "allowed") return null;
+    const [row] = this.sql<RepoRow>("SELECT * FROM repos WHERE repo_id = ?", repoId);
+    if (row?.state === "allowed" && !this.keyRemoved(repoGateOf(row))) return null;
     return row?.state === "blocked"
       ? `The owner blocked deploys of ${row.name} on the kitshn map.`
       : `The repo ${row?.name ?? repoId} waits for the owner on the kitshn map.`;
@@ -2201,7 +2214,8 @@ export class Kitshn extends DurableObject<Env> {
             { status: 409 },
           );
         }
-        if (!mayDeployOn(this.state, allowedBy?.clientId ?? null, existing.machine, Date.now()))
+        // A teardown always runs (K-819).
+        if (result.kind === "deploy" && !mayDeployOn(this.state, allowedBy?.clientId ?? null, existing.machine, Date.now()))
           return Response.json({ error: `${existing.name} runs on a machine that it may no longer use.${agentLimit}` }, { status: 409 });
         machineId = existing.machine;
         const running = this.state.machines.get(existing.machine);
@@ -2824,8 +2838,10 @@ export class Kitshn extends DurableObject<Env> {
         return Response.json({ error: 'Send {"card": <id>, "public": true | false}.' }, { status: 400 });
       if (!managed.has(card))
         return Response.json({ error: `This key has no control on the card "${card}".` }, { status: 403 });
-      const place = publishPlace(this.state, caller.visitor, card, publish, now);
+      const place = publishPlace(this.state, caller.visitor, card, publish, now, added);
       if (typeof place === "string") return Response.json({ error: place }, { status: 409 });
+      // The card is not in Everyone, so there is nothing to take out.
+      if (place === null) return Response.json({ revision: null });
       return move([{ _tag: "place", id: card, after: place }]);
     }
     if (path === "/agent/jobs" && request.method === "POST") {

@@ -135,6 +135,12 @@ export function levelForKind(kind: ResourceKind, wanted: Level): Level | null {
   return best;
 }
 
+/** K-504: the modifier key that drags a circle head without the cards inside. */
+export const CIRCLE_ALONE_KEY = { property: "altKey", label: "Alt" } as const satisfies {
+  readonly property: "altKey" | "ctrlKey" | "metaKey" | "shiftKey";
+  readonly label: string;
+};
+
 export const insideCircle = (point: Point, circle: Circle) =>
   Math.hypot(point.x - circle.x, point.y - circle.y) < circle.r;
 

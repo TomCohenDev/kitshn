@@ -18,7 +18,7 @@ export async function setRepoState(
   if ("error" in result) return { text: result.error, error: true };
   if (state === "forget") return { text: `Forgot ${repo.name}.`, error: false };
   if (state === "blocked") return { text: `Blocked deploys of ${repo.name}.`, error: false };
-  if (repo.state === "allowed" && repo.allowedBy)
+  if (state === "allowed" && repo.allowedBy)
     return { text: `Took over ${repo.name} from ${repo.allowedBy.name}.`, error: false };
   if (result.dispatched)
     return { text: `Allowed ${repo.name} and started its deploy from ${result.dispatched}.`, error: false };
@@ -70,16 +70,17 @@ export function RepoList(props: {
               <span class={`sticker ${STICKERS[repo.state]}`}>{repo.state}</span>
               {repo.allowedBy ? (
                 <span class="muted" title="An agent key allowed this repo; its apps stay in its circles (K-819)">
-                  by {repo.allowedBy.name}
+                  allowed by {repo.allowedBy.name}
+                  {repo.keyRemoved ? ", key removed" : ""}
                 </span>
               ) : null}
-              {repo.state !== "allowed" ? (
+              {repo.state !== "allowed" && !repo.keyRemoved ? (
                 <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "allowed")}>
                   Allow
                 </button>
               ) : null}
               {/* K-819: the owner takes over a repo that an agent key allowed; its apps then follow the owner's rules. */}
-              {repo.state === "allowed" && repo.allowedBy ? (
+              {repo.allowedBy ? (
                 <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "allowed")}>
                   Take over
                 </button>
@@ -98,7 +99,7 @@ export function RepoList(props: {
                   Block
                 </button>
               ) : null}
-              {repo.state === "waiting" ? (
+              {repo.state === "waiting" && !repo.keyRemoved ? (
                 <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "forget")}>
                   Forget
                 </button>

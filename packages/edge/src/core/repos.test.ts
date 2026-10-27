@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentAllowRefusal, gateDecision } from "./repos.ts";
+import { agentAllowRefusal, gateDecision, keyRemoved } from "./repos.ts";
 
 const repo = { repoId: "42", name: "o/new", branch: "main" };
 
@@ -54,5 +54,19 @@ describe("the repo gate (K-819)", () => {
     expect(agentAllowRefusal(undefined, "allowed", true)?.status).toBe(404);
     expect(agentAllowRefusal({ ...waiting, state: "blocked" }, "allowed", true)?.status).toBe(409);
     expect(agentAllowRefusal({ ...waiting, state: "allowed" }, "allowed", true)?.status).toBe(409);
+  });
+  it("lets a repo wait again while the agent key that allowed it has no agent circle", () => {
+    const agent = { clientId: "agent-1", name: "Builder" };
+    const allowed = { ...repo, state: "allowed" as const, firstSeen: 1, branch: null, allowedBy: agent };
+    expect(keyRemoved(allowed, () => true)).toBe(false);
+    expect(keyRemoved(allowed, () => false)).toBe(true);
+    expect(keyRemoved({ ...allowed, allowedBy: null }, () => false)).toBe(false);
+    expect(keyRemoved({ ...allowed, state: "blocked" }, () => false)).toBe(false);
+    // The row stays allowed, so the repo deploys again when the key comes back; the push waits for Take over.
+    expect(gateDecision(allowed, repo, 7, true)).toMatchObject({
+      allow: false,
+      record: { state: "allowed", allowedBy: agent, branch: "main" },
+      error: expect.stringMatching(/takes it over/),
+    });
   });
 });

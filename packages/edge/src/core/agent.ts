@@ -3,6 +3,7 @@ import type { Command } from "./machine.ts";
 import {
   ADMIN_RESOURCE_ID,
   type AgentRight,
+  CIRCLE_ALONE_KEY,
   type Circle,
   EVERYONE_CIRCLE_ID,
   type Member,
@@ -171,12 +172,13 @@ function publishRefusal(state: State, visitor: Visitor, now: number) {
   );
   return overlaps
     ? "Publish into the overlap of an agent circle and Everyone, so the key keeps managing the card."
-    : "No agent circle of this key overlaps Everyone. Ask the owner to drag the Agents circle so it overlaps Everyone.";
+    : `No agent circle of this key overlaps Everyone. Ask the owner to ${CIRCLE_ALONE_KEY.label}-drag the head of the Agents circle, which moves the circle alone, so it overlaps Everyone and its cards stay in place.`;
 }
 
 /**
  * K-718: where a card goes when the key publishes it (into the overlap of one of its agent circles at
- * `control` and Everyone) or takes it back (into that agent circle alone). A string names why not.
+ * `control` and Everyone), or when it takes the card out of Everyone (the same circles without Everyone).
+ * Null: the card is not in Everyone, so there is nothing to take out. A string names why not.
  * The caller still runs agentRefusal on the move.
  */
 export function publishPlace(
@@ -185,19 +187,32 @@ export function publishPlace(
   cardId: string,
   publish: boolean,
   now: number,
-): Point | string {
+  added: ReadonlySet<string>,
+): Point | null | string {
   const from = state.places.get(cardId);
-  if (!from) return "The card is in the tray. Move it into an agent circle first.";
   const everyone = [...state.circles.values()].find(isEveryoneCircle);
+  if (!publish) {
+    const holding = circlesHolding(state, cardId);
+    if (!from || !everyone || !holding.some((circle) => circle.id === everyone.id)) return null;
+    const rest = new Set(holding.filter((circle) => circle.id !== everyone.id).map((circle) => circle.id));
+    return placeInside(state, from, rest) ?? "kitshn finds no place in the same circles without Everyone. Ask the owner.";
+  }
+  if (!agentHas(state, visitor, "publishes", now))
+    return 'This key may not publish. The owner turns on "may publish" for it (K-718).';
+  if (!added.has(cardId)) return "This key publishes only the apps of repos that it allowed (K-819).";
+  const kind = state.resources.get(cardId)?.kind;
+  if (kind === undefined || !PUBLISHABLE.has(kind))
+    return "Only a static site, a Worker site or a Compose app can be published, never a live site.";
+  if (!from) return "The card is in the tray. Move it into an agent circle first.";
   if (!everyone) return "The map has no Everyone circle.";
   const homes = controlCircles(state, visitor, now);
   // The circle that holds the card now comes first, so the card moves as little as possible.
   const ordered = [...homes.filter((circle) => insideCircle(from, circle)), ...homes];
   for (const home of ordered) {
-    const place = placeInside(state, from, new Set(publish ? [home.id, everyone.id] : [home.id]));
+    const place = placeInside(state, from, new Set([home.id, everyone.id]));
     if (place) return place;
   }
-  return publish ? publishRefusal(state, visitor, now) : "No agent circle of this key at control has room for the card.";
+  return publishRefusal(state, visitor, now);
 }
 
 /** K-718: a device member in an agent circle, without the admin card. The map calls it an agent. */

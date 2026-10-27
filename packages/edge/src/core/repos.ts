@@ -28,6 +28,8 @@ export function gateDecision(
   gate: RepoGate | undefined,
   repo: { readonly repoId: string; readonly name: string; readonly branch: string | null },
   now: number,
+  /** The agent key that allowed the repo has no agent circle anymore (keyRemoved); the repo then waits. */
+  removed = false,
 ):
   | { readonly allow: true; readonly record: RepoGate | null }
   | { readonly allow: false; readonly record: RepoGate | null; readonly error: string } {
@@ -40,12 +42,18 @@ export function gateDecision(
   const next: RepoGate = {
     ...gate,
     name: repo.name,
-    branch: gate.state === "waiting" ? (gate.branch ?? repo.branch) : null,
+    branch: gate.state === "waiting" || removed ? (gate.branch ?? repo.branch) : null,
   };
   const record = next.name !== gate.name || next.branch !== gate.branch ? next : null;
   switch (gate.state) {
     case "allowed":
-      return { allow: true, record };
+      return removed
+        ? {
+            allow: false,
+            record,
+            error: `The agent key that allowed ${repo.name} is gone. The repo waits on the kitshn map until the owner takes it over.`,
+          }
+        : { allow: true, record };
     case "blocked":
       return { allow: false, record, error: `The owner blocked deploys of ${repo.name} on the kitshn map.` };
     case "waiting":
@@ -55,6 +63,13 @@ export function gateDecision(
 
 const waiting = (name: string) =>
   `kitshn has not deployed ${name} before. It waits on the kitshn map until the owner allows it.`;
+
+/**
+ * K-819: a repo that an agent key allowed waits again while that key has no agent circle, for example after
+ * the owner removed the key. This fails closed until the owner takes the repo over or blocks it.
+ */
+export const keyRemoved = (gate: RepoGate, hasAgentCircle: (clientId: string) => boolean) =>
+  gate.state === "allowed" && gate.allowedBy !== null && !hasAgentCircle(gate.allowedBy.clientId);
 
 /**
  * K-819: why an agent key may not allow this repo, with the HTTP status, or null. It needs the right "adds

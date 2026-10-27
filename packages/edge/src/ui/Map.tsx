@@ -6,6 +6,7 @@ import {
   type Resource,
   type ResourceKind,
   type State,
+  CIRCLE_ALONE_KEY,
   circlesHolding,
   insideCircle,
   memberLabel,
@@ -180,9 +181,9 @@ export function MapView(props: Props) {
       const origin = state.circles.get(head.dataset["head"] ?? "");
       if (!origin) return;
       props.onSelect({ cards: new Set(), circle: origin.id });
-      // K-504: the head carries the cards inside the circle; Alt moves the circle alone.
+      // K-504: the head carries the cards inside the circle; the modifier moves the circle alone.
       const carry = new Map<string, Point>();
-      if (!event.altKey) {
+      if (!event[CIRCLE_ALONE_KEY.property]) {
         for (const [id, place] of state.places) if (insideCircle(place, origin)) carry.set(id, place);
       }
       setDrag({ type: "circle", start: world, origin, carry, moved: false });

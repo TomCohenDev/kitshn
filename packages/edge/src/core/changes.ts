@@ -1,5 +1,7 @@
 import {
   ADMIN_RESOURCE_ID,
+  AGENT_RIGHTS,
+  AGENT_RIGHT_NAMES,
   type Circle,
   type Level,
   type Member,
@@ -305,6 +307,8 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
   }
   const circles = changes.filter((change) => change._tag === "circle");
   if (circles.length === 1 && circles[0]) {
+    const rights = rightChanges(circles[0].before, circles[0].after);
+    if (rights.length > 0) return rights.join("; ");
     const circle = circles[0].after ?? circles[0].before;
     const verb = !circles[0].before ? "Created" : !circles[0].after ? "Deleted" : "Changed";
     return `${verb} circle ${circle?.name ?? circles[0].id}`;
@@ -328,6 +332,21 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
   const moved = changes.filter((change) => change._tag === "place").length;
   if (moved > 0 && moved === changes.length) return moved === 1 ? "Moved a card" : `Moved ${moved} cards`;
   return `Changed ${changes.length} items`;
+}
+
+/** K-718: "Gave Bot may publish in Agents" for each agent right that a circle edit turns on or off. */
+function rightChanges(before: Circle | null, after: Circle | null): Array<string> {
+  if (!before || !after) return [];
+  return after.members.flatMap((member) => {
+    if (member._tag !== "device") return [];
+    const old = before.members.find((other) => other._tag === "device" && other.tokenId === member.tokenId);
+    if (old?._tag !== "device") return [];
+    return AGENT_RIGHTS.filter((right) => old[right] !== member[right]).map((right) =>
+      member[right]
+        ? `Gave ${member.name} ${AGENT_RIGHT_NAMES[right]} in ${after.name}`
+        : `Took ${AGENT_RIGHT_NAMES[right]} from ${member.name} in ${after.name}`,
+    );
+  });
 }
 
 /** K-522: the stacks that change when a card is gone; a stack left with fewer than two cards goes. */
@@ -371,11 +390,17 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
   for (const circle of after.circles.values()) {
     const old = before.circles.get(circle.id);
     if (!old) continue;
-    const key = (member: Member) => JSON.stringify(member);
-    const had = new Set(old.members.map(key));
+    // A device stays the same member when its name or an agent right changes; only a right that turns on raises.
+    const key = (member: Member) =>
+      JSON.stringify(member._tag === "device" ? { tokenId: member.tokenId, clientId: member.clientId } : member);
+    const rights = (members: ReadonlyArray<Member>) =>
+      members.flatMap((member) =>
+        member._tag === "device" ? AGENT_RIGHTS.filter((right) => member[right]).map((right) => `${key(member)}/${right}`) : [],
+      );
+    const had = new Set([...old.members.map(key), ...rights(old.members)]);
     const has = new Set(circle.members.map(key));
     if (
-      circle.members.some((member) => !had.has(key(member))) ||
+      [...circle.members.map(key), ...rights(circle.members)].some((entry) => !had.has(entry)) ||
       // In an "all must match" circle, a member that goes lets more visitors in.
       (old.match === "all" && old.members.some((member) => !has.has(key(member)))) ||
       (old.needsPasskey && !circle.needsPasskey) ||

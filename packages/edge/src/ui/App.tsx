@@ -17,6 +17,7 @@ import {
   type State,
   type PauseMode,
   type Point,
+  CIRCLE_ALONE_KEY,
   circlesHolding,
   insideCircle,
   isPublicCircle,
@@ -902,7 +903,7 @@ export function App() {
       ) : null}
       {route.tab === "map" ? (
         <div class="hint">
-          Drag a card into a circle to share it · Shift-click or drag empty space to select many · Alt-drag a
+          Drag a card into a circle to share it · Shift-click or drag empty space to select many · {CIRCLE_ALONE_KEY.label}-drag a
           circle head to move it alone · Ctrl or ⌘ + wheel zooms
         </div>
       ) : null}

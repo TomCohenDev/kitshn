@@ -21,6 +21,7 @@ import {
 } from "../core/changes.ts";
 import {
   ADMIN_RESOURCE_ID,
+  AGENT_RIGHTS,
   isPublicCircle,
   type Circle,
   type Member,
@@ -47,9 +48,27 @@ import {
 } from "../core/machine.ts";
 import { placeInside } from "../core/place.ts";
 import type { MachineView, RepoView, RevisionView, ServerMessage, Snapshot } from "../core/protocol.ts";
-import { type RepoGate, type RepoState, gateDecision } from "../core/repos.ts";
+import {
+  type AllowingAgent,
+  type RepoGate,
+  type RepoState,
+  agentAllowRefusal,
+  gateDecision,
+  keyRemoved,
+} from "../core/repos.ts";
 import { ClientMessage } from "../core/schema.ts";
-import { agentDeployPlan, agentMayRunOn, agentRefusal, cardsControlledBy, circlesOf } from "../core/agent.ts";
+import {
+  agentDeployPlan,
+  agentHas,
+  agentHomeCircle,
+  agentMayRunOn,
+  agentRefusal,
+  cardsControlledBy,
+  circlesOf,
+  isEveryoneCircle,
+  mayDeployOn,
+  publishPlace,
+} from "../core/agent.ts";
 import { demo } from "../core/demo.ts";
 import {
   contentSecurityPolicy,
@@ -1914,25 +1933,30 @@ export class Kitshn extends DurableObject<Env> {
   /** K-819: refuses a deploy step of a repo that waits for the owner or that the owner blocked. */
   private repoGate(deployer: Deployer): Response | null {
     const [row] = this.sql<RepoRow>("SELECT * FROM repos WHERE repo_id = ?", deployer.repoId);
+    const gate = row ? repoGateOf(row) : undefined;
     const decision = gateDecision(
-      row ? repoGateOf(row) : undefined,
+      gate,
       {
         repoId: deployer.repoId,
         name: deployer.repo,
         branch: deployer.eventName === "push" ? deployer.branch : null,
       },
       Date.now(),
+      gate !== undefined && this.keyRemoved(gate),
     );
     const record = decision.record;
     if (record) {
       this.ctx.storage.transactionSync(() => {
         this.sql(
-          "INSERT OR REPLACE INTO repos (repo_id, name, state, first_seen, branch) VALUES (?, ?, ?, ?, ?)",
+          `INSERT OR REPLACE INTO repos (repo_id, name, state, first_seen, branch, allowed_by_client, allowed_by_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
           record.repoId,
           record.name,
           record.state,
           record.firstSeen,
           record.branch,
+          record.allowedBy?.clientId ?? null,
+          record.allowedBy?.name ?? null,
         );
         if (!row)
           this.insertRevision(
@@ -1956,10 +1980,17 @@ export class Kitshn extends DurableObject<Env> {
     ))
       if (this.state.resources.has(resource_id))
         cards.set(repo_id, [...(cards.get(repo_id) ?? []), resource_id]);
-    return this.sql<RepoRow>("SELECT * FROM repos ORDER BY first_seen DESC").map((row) => ({
-      ...repoGateOf(row),
-      resourceIds: cards.get(row.repo_id) ?? [],
-    }));
+    return this.sql<RepoRow>("SELECT * FROM repos ORDER BY first_seen DESC").map((row) => {
+      const gate = repoGateOf(row);
+      const removed = this.keyRemoved(gate);
+      // K-819: the repo of a removed key shows as waiting, so the owner sees it and takes it over.
+      return { ...gate, state: removed ? "waiting" : gate.state, keyRemoved: removed, resourceIds: cards.get(row.repo_id) ?? [] };
+    });
+  }
+
+  /** K-819: the agent key that allowed this repo has no agent circle anymore (keyRemoved). */
+  private keyRemoved(gate: RepoGate) {
+    return keyRemoved(gate, (clientId) => circlesOf(this.state, { email: null, clientId, ip: null }, Date.now()).size > 0);
   }
 
   /** K-819: the repo id of a card that a deploy made, or null when kitshn does not know it. */
@@ -1971,14 +2002,17 @@ export class Kitshn extends DurableObject<Env> {
     return row?.repo_id ?? null;
   }
 
+  /** K-819: the agent key that allowed this repo, or null when the owner allowed it. */
+  private allowingAgent(repoId: string | null): AllowingAgent | null {
+    const [row] = repoId === null ? [] : this.sql<RepoRow>("SELECT * FROM repos WHERE repo_id = ?", repoId);
+    return row ? repoGateOf(row).allowedBy : null;
+  }
+
   /** K-819: why kitshn may not deploy this repo now, or null. A repo without a known id or a row waits. */
   private repoRefusal(repoId: string | null): string | null {
     if (repoId === null) return "kitshn does not know the repo of this deploy. Deploy it once from GitHub.";
-    const [row] = this.sql<{ name: string; state: RepoState }>(
-      "SELECT name, state FROM repos WHERE repo_id = ?",
-      repoId,
-    );
-    if (row?.state === "allowed") return null;
+    const [row] = this.sql<RepoRow>("SELECT * FROM repos WHERE repo_id = ?", repoId);
+    if (row?.state === "allowed" && !this.keyRemoved(repoGateOf(row))) return null;
     return row?.state === "blocked"
       ? `The owner blocked deploys of ${row.name} on the kitshn map.`
       : `The repo ${row?.name ?? repoId} waits for the owner on the kitshn map.`;
@@ -1987,8 +2021,9 @@ export class Kitshn extends DurableObject<Env> {
   /**
    * K-819: the owner allows, blocks or forgets one repo. Allow starts the first refused push through the
    * GitHub App, except during the pause. Block fails the repo's deploys and jobs that have not finished.
+   * An agent key with "adds apps" allows a waiting repo too (K-718); `allowedBy` then names it.
    */
-  private async setRepoState(caller: Caller, repoId: string, body: unknown) {
+  private async setRepoState(caller: Caller, repoId: string, body: unknown, allowedBy: AllowingAgent | null = null) {
     const state = isRecord(body) ? body["state"] : null;
     if (state !== "allowed" && state !== "blocked" && state !== "forget")
       return Response.json({ error: 'Send {"state": "allowed" | "blocked" | "forget"}.' }, { status: 400 });
@@ -2005,13 +2040,26 @@ export class Kitshn extends DurableObject<Env> {
         this.insertRevision(caller.actor, `Forgot ${row.name} (K-819)`, [], null);
         return [];
       }
-      if (row.state === state) return [];
-      if (state === "allowed") this.sql("UPDATE repos SET state = 'allowed' WHERE repo_id = ?", repoId);
+      // K-819: the owner's Allow takes over a repo that an agent key allowed, and clears the key.
+      const takeOver = state === "allowed" && allowedBy === null && row.allowed_by_client !== null;
+      if (row.state === state && !takeOver) return [];
+      if (state === "allowed")
+        this.sql(
+          "UPDATE repos SET state = 'allowed', allowed_by_client = ?, allowed_by_name = ? WHERE repo_id = ?",
+          allowedBy?.clientId ?? null,
+          allowedBy?.name ?? null,
+          repoId,
+        );
       if (state === "blocked")
-        this.sql("UPDATE repos SET state = 'blocked', branch = NULL WHERE repo_id = ?", repoId);
+        this.sql(
+          "UPDATE repos SET state = 'blocked', branch = NULL, allowed_by_client = NULL, allowed_by_name = NULL WHERE repo_id = ?",
+          repoId,
+        );
       this.insertRevision(
         caller.actor,
-        `${state === "allowed" ? "Allowed" : "Blocked"} deploys of ${row.name} (K-819)`,
+        takeOver && row.state === "allowed"
+          ? `Took over deploys of ${row.name} from ${row.allowed_by_name ?? "an agent key"} (K-819)`
+          : `${state === "allowed" ? "Allowed" : "Blocked"} deploys of ${row.name} (K-819)`,
         [],
         null,
       );
@@ -2148,6 +2196,11 @@ export class Kitshn extends DurableObject<Env> {
       }
     }
     const compose = "compose" in recipe ? recipe.compose : null;
+    // K-819: the Compose apps of a repo that an agent key allowed run only where that key may run jobs.
+    const allowedBy = this.allowingAgent(deployer.repoId);
+    const agentLimit = allowedBy
+      ? ` The agent key ${allowedBy.name} allowed this repo, so it deploys only to a machine whose card, and every card on it, that key manages (K-819).`
+      : "";
     // K-610, K-611: a new Compose app goes to the first online machine with all labels; a running one stays.
     let machineId: string | null = null;
     if (compose) {
@@ -2161,6 +2214,9 @@ export class Kitshn extends DurableObject<Env> {
             { status: 409 },
           );
         }
+        // A teardown skips the agent machine check (K-819); the label and address checks still apply.
+        if (result.kind === "deploy" && !mayDeployOn(this.state, allowedBy?.clientId ?? null, existing.machine, Date.now()))
+          return Response.json({ error: `${existing.name} runs on a machine that it may no longer use.${agentLimit}` }, { status: 409 });
         machineId = existing.machine;
         const running = this.state.machines.get(existing.machine);
         if (result.kind === "deploy" && running && !this.machineView(running).status?.capabilities?.includes("compose-guard"))
@@ -2175,12 +2231,13 @@ export class Kitshn extends DurableObject<Env> {
           .filter((machine) => ["deploy", ...labels].every((label) => machine.labels.includes(label)))
           // K-818: only a daemon that checks Compose settings runs the apps of repos.
           .filter((machine) => this.machineView(machine).status?.capabilities?.includes("compose-guard"))
+          .filter((machine) => mayDeployOn(this.state, allowedBy?.clientId ?? null, machine.id, Date.now()))
           .sort((a, b) => a.order - b.order)
           .find((machine) => this.presence.get(machine.id)?.online);
         if (!pick) {
           return Response.json(
             {
-              error: `No online machine with a Compose-ready daemon has the labels ${["deploy", ...labels].join(", ")}. Label a machine "deploy", update its daemon, or start it.`,
+              error: `No online machine with a Compose-ready daemon has the labels ${["deploy", ...labels].join(", ")}. Label a machine "deploy", update its daemon, or start it.${agentLimit}`,
             },
             { status: 409 },
           );
@@ -2334,11 +2391,15 @@ export class Kitshn extends DurableObject<Env> {
       machine,
     });
     this.load();
-    const circle = row.starts_in
-      ? [...this.state.circles.values()].find((item) =>
-          [item.id, item.name.toLowerCase()].includes(row.starts_in!.toLowerCase()),
-        )
-      : undefined;
+    // K-819: the card of a repo that an agent key allowed starts in that key's circle, never in `startsIn`.
+    const allowedBy = this.allowingAgent(row.repo_id);
+    const circle = allowedBy
+      ? agentHomeCircle(this.state, allowedBy.clientId, Date.now())
+      : row.starts_in
+        ? [...this.state.circles.values()].find((item) =>
+            [item.id, item.name.toLowerCase()].includes(row.starts_in!.toLowerCase()),
+          )
+        : undefined;
     const place = circle ? placeInside(this.state, { x: circle.x, y: circle.y }, new Set([circle.id])) : null;
     // K-1504: a deploy that was running when the pause started finishes with its card in the tray.
     if (circle && place && !this.state.paused) {
@@ -2347,7 +2408,9 @@ export class Kitshn extends DurableObject<Env> {
         resolveEdits(this.state, [{ _tag: "place", id: row.resource_id, after: place }]),
         null,
       );
-      return `The card starts in ${circle.name} (K-807).`;
+      return allowedBy
+        ? `The card starts in ${circle.name}, a circle of the agent key ${allowedBy.name} that allowed the repo (K-819).`
+        : `The card starts in ${circle.name} (K-807).`;
     }
     this.insertRevision(actor, `Deployed ${row.repo} ${row.environment}`, [], null);
     this.load();
@@ -2434,6 +2497,13 @@ export class Kitshn extends DurableObject<Env> {
   private async startCompose(api: Api, row: DeployRow, deployer: Deployer) {
     const machine = row.machine_id ? this.state.machines.get(row.machine_id) : undefined;
     if (!machine) return Response.json({ error: "The machine of this deploy is gone." }, { status: 409 });
+    // K-819: the plan checked the machine; the key can lose it before the start. Check before the card exists.
+    const allowedBy = this.allowingAgent(row.repo_id);
+    if (!mayDeployOn(this.state, allowedBy?.clientId ?? null, machine.id, Date.now()))
+      return Response.json(
+        { error: `The agent key ${allowedBy?.name} that allowed this repo no longer manages ${machine.name} (K-819).` },
+        { status: 409 },
+      );
     const card = this.ensureCard(row, deployer, "site.compose", machine.id);
     // Fail closed: the Access application exists before the tunnel sends the address to the app (K-410).
     await this.syncAccessLocked(api, 20);
@@ -2677,18 +2747,52 @@ export class Kitshn extends DurableObject<Env> {
         { status: 403 },
       );
     const managed = cardsControlledBy(this.state, caller.visitor, now);
-    // K-614: the history names the device by its member name, not by its token id.
-    const device = [...this.state.circles.values()]
-      .flatMap((circle) => circle.members)
+    // K-614: the history names the device by its member name in its agent circle, not by its token id.
+    const device = [...own]
+      .flatMap((id) => this.state.circles.get(id)?.members ?? [])
       .find((member) => member._tag === "device" && member.clientId === caller.visitor.clientId);
     const agent: Caller =
       caller.actor._tag === "device" && device?._tag === "device"
         ? { ...caller, actor: { ...caller.actor, name: device.name } }
         : caller;
+    const rights = AGENT_RIGHTS.filter((right) => agentHas(this.state, caller.visitor, right, now));
+    // A key that publishes also sees the Everyone circle, where its published cards sit.
+    const visible = (id: string) => {
+      const circle = this.state.circles.get(id);
+      return own.has(id) || (rights.includes("publishes") && circle !== undefined && isEveryoneCircle(circle));
+    };
+    // K-718: the cards of repos that this key allowed (K-819); only these may become public.
+    const added = new Set(
+      this.sql<{ resource_id: string }>(
+        `SELECT DISTINCT deploys.resource_id FROM deploys JOIN repos ON repos.repo_id = deploys.repo_id
+         WHERE repos.allowed_by_client = ?`,
+        caller.visitor.clientId,
+      ).map((row) => row.resource_id),
+    );
+    const move = (edits: ReadonlyArray<Edit>) => {
+      try {
+        const changes = resolveEdits(this.state, edits);
+        const refusal = agentRefusal(this.state, applyChanges(this.state, changes), caller.visitor, changes, now, added);
+        if (refusal) return Response.json({ error: refusal }, { status: 403 });
+        return Response.json({ revision: this.commit(agent.actor, changes, null) });
+      } catch (error) {
+        if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
+        throw error;
+      }
+    };
     if (path === "/agent/state" && request.method === "GET") {
       return Response.json({
+        rights,
+        // K-819: with "may add apps", the waiting repos that the key may allow.
+        repos: rights.includes("addsApps")
+          ? this.sql<RepoRow>("SELECT * FROM repos WHERE state = 'waiting' ORDER BY first_seen DESC").map((row) => ({
+              repoId: row.repo_id,
+              name: row.name,
+              branch: row.branch,
+            }))
+          : [],
         circles: [...this.state.circles.values()]
-          .filter((circle) => own.has(circle.id))
+          .filter((circle) => visible(circle.id))
           .map(({ id, name, level, x, y, r }) => ({ id, name, level, x, y, r })),
         cards: [...managed].flatMap((id) => {
           const resource = this.state.resources.get(id);
@@ -2702,9 +2806,10 @@ export class Kitshn extends DurableObject<Env> {
               addresses,
               status,
               place: this.state.places.get(id) ?? null,
+              added: added.has(id),
               circles: circlesHolding(this.state, id)
                 .map((c) => c.id)
-                .filter((circle) => own.has(circle)),
+                .filter(visible),
             },
           ];
         }),
@@ -2723,21 +2828,21 @@ export class Kitshn extends DurableObject<Env> {
       } catch (error) {
         return Response.json({ error: String(error) }, { status: 400 });
       }
-      try {
-        const changes = resolveEdits(this.state, edits);
-        const refusal = agentRefusal(
-          this.state,
-          applyChanges(this.state, changes),
-          caller.visitor,
-          changes,
-          now,
-        );
-        if (refusal) return Response.json({ error: refusal }, { status: 403 });
-        return Response.json({ revision: this.commit(agent.actor, changes, null) });
-      } catch (error) {
-        if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
-        throw error;
-      }
+      return move(edits);
+    }
+    if (path === "/agent/publish" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      const card = isRecord(body) && typeof body["card"] === "string" ? body["card"] : null;
+      const publish = isRecord(body) ? body["public"] : null;
+      if (card === null || typeof publish !== "boolean")
+        return Response.json({ error: 'Send {"card": <id>, "public": true | false}.' }, { status: 400 });
+      if (!managed.has(card))
+        return Response.json({ error: `This key has no control on the card "${card}".` }, { status: 403 });
+      const place = publishPlace(this.state, caller.visitor, card, publish, now, added);
+      if (typeof place === "string") return Response.json({ error: place }, { status: 409 });
+      // The card is not in Everyone, so there is nothing to take out.
+      if (place === null) return Response.json({ revision: null });
+      return move([{ _tag: "place", id: card, after: place }]);
     }
     if (path === "/agent/jobs" && request.method === "POST") {
       const body: unknown = await request.json().catch(() => null);
@@ -2765,6 +2870,23 @@ export class Kitshn extends DurableObject<Env> {
       if (!job)
         return Response.json({ error: `This key sent no job ${id}.` }, { status: 404 });
       return Response.json(job);
+    }
+    if (path.startsWith("/agent/repos/") && request.method === "POST") {
+      // K-1504: the pause stops agent keys.
+      if (this.state.paused)
+        return Response.json({ error: "kitshn is paused (Emergency pause). Agent keys wait until Resume." }, { status: 423 });
+      const repoId = decodeURIComponent(path.slice("/agent/repos/".length));
+      const body: unknown = await request.json().catch(() => null);
+      const [row] = this.sql<RepoRow>("SELECT * FROM repos WHERE repo_id = ?", repoId);
+      const refusal = agentAllowRefusal(
+        row ? repoGateOf(row) : undefined,
+        isRecord(body) ? body["state"] : null,
+        agentHas(this.state, caller.visitor, "addsApps", Date.now()),
+      );
+      if (refusal) return Response.json({ error: refusal.error }, { status: refusal.status });
+      // An agent circle names this key, so its device member exists.
+      if (device?._tag !== "device") throw new Error("An agent key without its device member allowed a repo.");
+      return this.setRepoState(agent, repoId, { state: "allowed" }, { clientId: device.clientId, name: device.name });
     }
     if (path === "/agent/deploy" && request.method === "POST") {
       const body: unknown = await request.json().catch(() => null);
@@ -3287,6 +3409,8 @@ interface RepoRow extends Record<string, SqlStorageValue> {
   state: RepoState;
   first_seen: number;
   branch: string | null;
+  allowed_by_client: string | null;
+  allowed_by_name: string | null;
 }
 
 const repoGateOf = (row: RepoRow): RepoGate => ({
@@ -3295,6 +3419,8 @@ const repoGateOf = (row: RepoRow): RepoGate => ({
   state: row.state,
   firstSeen: row.first_seen,
   branch: row.branch,
+  allowedBy:
+    row.allowed_by_client === null ? null : { clientId: row.allowed_by_client, name: row.allowed_by_name ?? "" },
 });
 
 interface DeployRow extends Record<string, SqlStorageValue> {

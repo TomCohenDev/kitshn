@@ -6,6 +6,7 @@ import {
   type Resource,
   type ResourceKind,
   type State,
+  CIRCLE_ALONE_KEY,
   circlesHolding,
   insideCircle,
   memberLabel,
@@ -14,6 +15,7 @@ import {
 } from "../core/model.ts";
 import type { AccessState, MachineView } from "../core/protocol.ts";
 import { isAgentKey } from "../core/agent.ts";
+import { RightStickers } from "./Circle.tsx";
 import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { PresenceSticker } from "./Machines.tsx";
 
@@ -179,9 +181,9 @@ export function MapView(props: Props) {
       const origin = state.circles.get(head.dataset["head"] ?? "");
       if (!origin) return;
       props.onSelect({ cards: new Set(), circle: origin.id });
-      // K-504: the head carries the cards inside the circle; Alt moves the circle alone.
+      // K-504: the head carries the cards inside the circle; the modifier moves the circle alone.
       const carry = new Map<string, Point>();
-      if (!event.altKey) {
+      if (!event[CIRCLE_ALONE_KEY.property]) {
         for (const [id, place] of state.places) if (insideCircle(place, origin)) carry.set(id, place);
       }
       setDrag({ type: "circle", start: world, origin, carry, moved: false });
@@ -542,6 +544,8 @@ function CircleView(props: {
 }) {
   const { circle } = props;
   const shown = circle.members.slice(0, 4);
+  // K-718: rights count only in a circle of devices only.
+  const agentCircle = circle.members.every((member) => member._tag === "device");
   const extra = circle.members.length - shown.length;
   const counts = new Map<ResourceKind, number>();
   if (props.zoomedOut) {
@@ -586,7 +590,12 @@ function CircleView(props: {
           {shown.map((member, index) => (
             <span class="chip" key={index}>
               {MEMBER_ICONS[member._tag]} {memberLabel(member)}
-              {isAgentKey(props.state, member, Date.now()) ? <span class="sticker agent">agent</span> : null}
+              {member._tag === "device" && isAgentKey(props.state, member, Date.now()) ? (
+                <>
+                  <span class="sticker agent">agent</span>
+                  {agentCircle ? <RightStickers member={member} /> : null}
+                </>
+              ) : null}
             </span>
           ))}
           {extra > 0 ? (

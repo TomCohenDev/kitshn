@@ -197,6 +197,19 @@ describe("changes and undo (K-1501, K-1502)", () => {
     expect(summarize(state, after, changes)).toBe("riffle: − Owner; riffle: + Her · view");
   });
 
+  it("names an agent right that a circle edit gives or takes (K-718)", () => {
+    const state = start();
+    const owner = state.circles.get("owner")!;
+    const bot = { _tag: "device" as const, tokenId: "t", clientId: "c", name: "Bot" };
+    const withBot = edit(state, [{ _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, bot] } }]).after;
+    const gave = edit(withBot, [
+      { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, { ...bot, publishes: true }] } },
+    ]);
+    expect(summarize(withBot, gave.after, gave.changes)).toBe("Gave Bot may publish in Owner");
+    const took = edit(gave.after, [{ _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, bot] } }]);
+    expect(summarize(gave.after, took.after, took.changes)).toBe("Took may publish from Bot in Owner");
+  });
+
   it("uses a share override over the circle default (K-205)", () => {
     const state = start();
     const { after } = edit(state, [
@@ -663,5 +676,13 @@ describe("emergency pause (K-1504)", () => {
     expect(() => refuseRaiseWhilePaused(strict, looser)).toThrow(/only goes down/);
     const ending = { ...paused, shareSettings: new Map([["kitshn-admin/owner", { level: null, endsAt: 5 }]]) };
     expect(() => refuseRaiseWhilePaused(ending, { ...ending, shareSettings: new Map() })).toThrow(/end later/);
+    // K-718: an agent right that turns on raises access; one that turns off lowers it.
+    const device = { _tag: "device" as const, tokenId: "t", clientId: "c", name: "Bot" };
+    const withDevice = (member: typeof device & { publishes?: true }) => ({
+      ...paused,
+      circles: new Map(paused.circles).set("owner", { ...owner, members: [...owner.members, member] }),
+    });
+    expect(() => refuseRaiseWhilePaused(withDevice(device), withDevice({ ...device, publishes: true }))).toThrow(/only goes down/);
+    expect(() => refuseRaiseWhilePaused(withDevice({ ...device, publishes: true }), withDevice(device))).not.toThrow();
   });
 });

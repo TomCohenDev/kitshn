@@ -9,6 +9,14 @@ export interface RepoGate {
   readonly firstSeen: number;
   /** The first pushed branch that waits; Allow starts the workflow there. Null without a waiting push. */
   readonly branch: string | null;
+  /** The agent key that allowed the repo (K-718), or null when the owner allowed it or nobody did yet. */
+  readonly allowedBy: AllowingAgent | null;
+}
+
+export interface AllowingAgent {
+  readonly clientId: string;
+  /** The member name of the key when it allowed the repo. */
+  readonly name: string;
 }
 
 /**
@@ -20,20 +28,32 @@ export function gateDecision(
   gate: RepoGate | undefined,
   repo: { readonly repoId: string; readonly name: string; readonly branch: string | null },
   now: number,
+  /** The agent key that allowed the repo has no agent circle anymore (keyRemoved); the repo then waits. */
+  removed = false,
 ):
   | { readonly allow: true; readonly record: RepoGate | null }
   | { readonly allow: false; readonly record: RepoGate | null; readonly error: string } {
   if (!gate)
-    return { allow: false, record: { ...repo, state: "waiting", firstSeen: now }, error: waiting(repo.name) };
+    return {
+      allow: false,
+      record: { ...repo, state: "waiting", firstSeen: now, allowedBy: null },
+      error: waiting(repo.name),
+    };
   const next: RepoGate = {
     ...gate,
     name: repo.name,
-    branch: gate.state === "waiting" ? (gate.branch ?? repo.branch) : null,
+    branch: gate.state === "waiting" || removed ? (gate.branch ?? repo.branch) : null,
   };
   const record = next.name !== gate.name || next.branch !== gate.branch ? next : null;
   switch (gate.state) {
     case "allowed":
-      return { allow: true, record };
+      return removed
+        ? {
+            allow: false,
+            record,
+            error: `The agent key that allowed ${repo.name} is gone. The repo waits on the kitshn map until the owner takes it over.`,
+          }
+        : { allow: true, record };
     case "blocked":
       return { allow: false, record, error: `The owner blocked deploys of ${repo.name} on the kitshn map.` };
     case "waiting":
@@ -43,3 +63,28 @@ export function gateDecision(
 
 const waiting = (name: string) =>
   `kitshn has not deployed ${name} before. It waits on the kitshn map until the owner allows it.`;
+
+/**
+ * K-819: a repo that an agent key allowed waits again while that key has no agent circle, for example after
+ * the owner removed the key. This fails closed until the owner takes the repo over or blocks it.
+ */
+export const keyRemoved = (gate: RepoGate, hasAgentCircle: (clientId: string) => boolean) =>
+  gate.state === "allowed" && gate.allowedBy !== null && !hasAgentCircle(gate.allowedBy.clientId);
+
+/**
+ * K-819: why an agent key may not allow this repo, with the HTTP status, or null. It needs the right "adds
+ * apps" (K-718) and allows only a waiting repo: it never unblocks a blocked repo or takes over an allowed one.
+ */
+export function agentAllowRefusal(
+  gate: RepoGate | undefined,
+  state: unknown,
+  addsApps: boolean,
+): { readonly status: 400 | 403 | 404 | 409; readonly error: string } | null {
+  if (state !== "allowed") return { status: 400, error: 'Send {"state": "allowed"}.' };
+  if (!addsApps)
+    return { status: 403, error: "This key may not add apps. The owner turns on \"may add apps\" for it (K-718)." };
+  if (!gate) return { status: 404, error: "kitshn knows no such repo. Its first deploy step records it (K-819)." };
+  if (gate.state !== "waiting")
+    return { status: 409, error: `${gate.name} is ${gate.state}; an agent key allows only a waiting repo (K-819).` };
+  return null;
+}

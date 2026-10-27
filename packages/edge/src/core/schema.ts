@@ -18,7 +18,13 @@ export const Member = Schema.Union([
     domain: Schema.String.check(Schema.isPattern(/^[a-z0-9.-]+\.[a-z]{2,}$/)),
   }),
   Schema.TaggedStruct("ip", { range: Schema.String.check(Schema.isPattern(/^[0-9a-fA-F:.]+\/\d{1,3}$/)) }),
-  Schema.TaggedStruct("device", { tokenId: Schema.String, clientId: Schema.String, name: Name }),
+  Schema.TaggedStruct("device", {
+    tokenId: Schema.String,
+    clientId: Schema.String,
+    name: Name,
+    addsApps: Schema.optionalKey(Schema.Literal(true)),
+    publishes: Schema.optionalKey(Schema.Literal(true)),
+  }),
   Schema.TaggedStruct("machine", { machineId: Id }),
   Schema.TaggedStruct("everyone", {}),
 ]);

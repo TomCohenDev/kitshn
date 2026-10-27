@@ -28,10 +28,25 @@ export type Member =
   | { readonly _tag: "email"; readonly email: string }
   | { readonly _tag: "domain"; readonly domain: string }
   | { readonly _tag: "ip"; readonly range: string }
-  /** An Access service token (K-106). `tokenId` is the token id; `clientId` is what the JWT carries. */
-  | { readonly _tag: "device"; readonly tokenId: string; readonly clientId: string; readonly name: string }
+  /**
+   * An Access service token (K-106). `tokenId` is the token id; `clientId` is what the JWT carries.
+   * An agent key (K-718) may also add apps and publish them; a missing right is off.
+   */
+  | {
+      readonly _tag: "device";
+      readonly tokenId: string;
+      readonly clientId: string;
+      readonly name: string;
+      readonly addsApps?: true;
+      readonly publishes?: true;
+    }
   | { readonly _tag: "machine"; readonly machineId: string }
   | { readonly _tag: "everyone" };
+
+/** K-718: the rights that the owner can give an agent key on its device member. */
+export const AGENT_RIGHTS = ["addsApps", "publishes"] as const;
+export type AgentRight = (typeof AGENT_RIGHTS)[number];
+export const AGENT_RIGHT_NAMES: Record<AgentRight, string> = { addsApps: "may add apps", publishes: "may publish" };
 
 export interface Circle {
   readonly id: string;
@@ -119,6 +134,12 @@ export function levelForKind(kind: ResourceKind, wanted: Level): Level | null {
   for (const level of levels) if (levelRank(level) <= levelRank(wanted)) best = level;
   return best;
 }
+
+/** K-504: the modifier key that drags a circle head without the cards inside. */
+export const CIRCLE_ALONE_KEY = { property: "altKey", label: "Alt" } as const satisfies {
+  readonly property: "altKey" | "ctrlKey" | "metaKey" | "shiftKey";
+  readonly label: string;
+};
 
 export const insideCircle = (point: Point, circle: Circle) =>
   Math.hypot(point.x - circle.x, point.y - circle.y) < circle.r;

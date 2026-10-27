@@ -4,7 +4,11 @@ import type { Circle, PauseMode, Point, Resource, ShareSetting, Stack } from "./
 import type { RepoGate } from "./repos.ts";
 
 /** K-819: `resourceIds` are the cards that this repo deployed, which the card panel matches. */
-export type RepoView = RepoGate & { readonly resourceIds: ReadonlyArray<string> };
+export type RepoView = RepoGate & {
+  readonly resourceIds: ReadonlyArray<string>;
+  /** K-819: the agent key that allowed the repo is gone, so the repo waits; `state` then reads "waiting". */
+  readonly keyRemoved: boolean;
+};
 
 export interface RevisionView {
   readonly id: number;

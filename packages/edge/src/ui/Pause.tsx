@@ -1,13 +1,17 @@
+import { useState } from "preact/hooks";
+import type { PauseMode } from "../core/model.ts";
+import { Toggle } from "./Circle.tsx";
 /** K-1504: what one press of the emergency pause stops, in the order the owner reads it. */
 const STOPS = [
-  "Every share closes, except the Owner circle's people on the kitshn admin: sites, Compose apps, live sites, pages and files, public ones too.",
+  "Every share that is not public closes, except the Owner circle's people on the kitshn admin: sites, Compose apps, live sites, pages and files.",
   "Devices, agent keys and machines lose every share, so agent keys stop moving, deploying and running jobs.",
   "New deploys from GitHub wait until Resume.",
   "Agents in T3 Code get “stop all agents” once the T3 provider is on (milestone 5).",
 ] as const;
 
 /** The confirm of the big red button: one press after this pauses at once. */
-export function PauseDialog(props: { onCancel: () => void; onPause: () => void }) {
+export function PauseDialog(props: { onCancel: () => void; onPause: (mode: PauseMode) => void }) {
+  const [lockdown, setLockdown] = useState(false);
   return (
     <div class="scrim" onClick={(event) => event.target === event.currentTarget && props.onCancel()}>
       <div class="card dialog pause-dialog" role="alertdialog" aria-labelledby="pause-title">
@@ -18,7 +22,15 @@ export function PauseDialog(props: { onCancel: () => void; onPause: () => void }
             <li key={line}>{line}</li>
           ))}
         </ul>
+        <Toggle
+          checked={lockdown}
+          label="Also close public sites"
+          onChange={setLockdown}
+        />
         <p class="help">
+          {lockdown
+            ? "Lockdown: public sites, apps and pages close too."
+            : "Public sites, apps and pages of the Everyone circle stay open."}{" "}
           Machines stay connected and their apps keep running behind closed doors. You keep the admin. Resume needs
           your passkey again.
         </p>
@@ -26,8 +38,8 @@ export function PauseDialog(props: { onCancel: () => void; onPause: () => void }
           <button type="button" class="btn" onClick={props.onCancel}>
             Cancel
           </button>
-          <button type="button" class="btn big-red" autoFocus onClick={props.onPause}>
-            Pause everything
+          <button type="button" class="btn big-red" autoFocus onClick={() => props.onPause(lockdown ? "lockdown" : "keep-public")}>
+            {lockdown ? "Lock down everything" : "Pause"}
           </button>
         </div>
       </div>
@@ -35,18 +47,29 @@ export function PauseDialog(props: { onCancel: () => void; onPause: () => void }
   );
 }
 
-/** While paused: a hazard frame around the page and a banner with who paused, when, and Resume. */
-export function PausedBanner(props: { by: string | null; since: string | null; onResume: () => void }) {
+/** While paused: a hazard frame around the page and a banner with the kind of pause, who paused, when, and Resume. */
+export function PausedBanner(props: {
+  mode: PauseMode;
+  by: string | null;
+  since: string | null;
+  onLockdown: () => void;
+  onResume: () => void;
+}) {
   return (
     <>
       <div class="hazard-frame" aria-hidden="true" />
       <div class="paused-banner" role="status">
-        <strong>Everything is paused</strong>
+        <strong>{props.mode === "lockdown" ? "Lockdown" : "Paused, public sites open"}</strong>
         {props.by ? (
           <span>
             by {props.by}
             {props.since ? ` · ${props.since}` : ""}
           </span>
+        ) : null}
+        {props.mode === "keep-public" ? (
+          <button type="button" class="btn danger" onClick={props.onLockdown}>
+            Close public sites too
+          </button>
         ) : null}
         <button type="button" class="btn" onClick={props.onResume}>
           Resume with passkey

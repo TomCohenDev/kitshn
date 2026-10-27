@@ -53,7 +53,7 @@ function start(): State {
     places: new Map([...s.places, ["site", { x: 0, y: 1000 }], ["nas", { x: 2400, y: 1000 }]]),
     shareSettings: new Map(),
     stacks: new Map(),
-    paused: false,
+    paused: null,
     machines: new Map(),
   };
 }
@@ -95,7 +95,7 @@ describe("agent keys (K-718)", () => {
     const device = { _tag: "device", tokenId: "t2", clientId: "owner-phone", name: "Phone" } as const;
     const circles = new Map(base.circles).set("owner", { ...owner, members: [...owner.members, device] });
     const state = { ...base, circles };
-    expect(isAgentKey({ ...state, paused: true }, device, 0)).toBe(false);
+    expect(isAgentKey({ ...state, paused: "lockdown" as const }, device, 0)).toBe(false);
     expect(isAgentKey(state, { ...device, clientId: "agent-1" }, 0)).toBe(true);
   });
   it("counts only circles of devices that have not ended, and may take a card out of every circle", () => {

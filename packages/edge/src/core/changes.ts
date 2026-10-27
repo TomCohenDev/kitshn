@@ -4,6 +4,7 @@ import {
   type Level,
   type Member,
   OWNER_CIRCLE_ID,
+  type PauseMode,
   type Point,
   type Resource,
   type ShareSetting,
@@ -26,7 +27,7 @@ export type Edit =
       readonly circleId: string;
       readonly after: ShareSetting | null;
     }
-  | { readonly _tag: "pause"; readonly after: boolean }
+  | { readonly _tag: "pause"; readonly after: PauseMode | null }
   | { readonly _tag: "stack"; readonly id: string; readonly after: Stack | null };
 
 /** One stored change of a revision. Undo swaps `before` and `after`. */
@@ -49,7 +50,7 @@ export type Change =
       readonly before: ShareSetting | null;
       readonly after: ShareSetting | null;
     }
-  | { readonly _tag: "pause"; readonly id: "pause"; readonly before: boolean; readonly after: boolean }
+  | { readonly _tag: "pause"; readonly id: "pause"; readonly before: PauseMode | null; readonly after: PauseMode | null }
   | {
       readonly _tag: "stack";
       readonly id: string;
@@ -335,9 +336,14 @@ export function stacksWithout(stacks: Iterable<Stack>, id: string): Array<{ id: 
     });
 }
 
-/** K-1504: only "Resume" with a fresh passkey ends a pause; an edit or an undo never does. */
+/**
+ * K-1504: only "Resume" with a fresh passkey ends a pause or reopens public sites after a lockdown; an edit or
+ * an undo never does.
+ */
 export function refuseResume(changes: Array<Change>): Array<Change> {
-  if (changes.some((change) => change._tag === "pause" && !change.after))
+  const opens = (change: Change) =>
+    change._tag === "pause" && (!change.after || (change.before === "lockdown" && change.after === "keep-public"));
+  if (changes.some(opens))
     throw new RuleError("Resume needs your passkey again: press Resume on the map.");
   return changes;
 }

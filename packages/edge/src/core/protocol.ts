@@ -1,6 +1,6 @@
 import type { Actor } from "./changes.ts";
 import type { Command, Machine, MachineStatus, Sample } from "./machine.ts";
-import type { Circle, Point, Resource, ShareSetting } from "./model.ts";
+import type { Circle, Point, Resource, ShareSetting, Stack } from "./model.ts";
 
 export interface RevisionView {
   readonly id: number;
@@ -24,6 +24,7 @@ export interface Snapshot {
   readonly resources: ReadonlyArray<Resource>;
   readonly places: Readonly<Record<string, Point>>;
   readonly shareSettings: Readonly<Record<string, ShareSetting>>;
+  readonly stacks: ReadonlyArray<Stack>;
   readonly revisions: ReadonlyArray<RevisionView>;
   readonly access: Readonly<Record<string, AccessState>>;
   /** K-408: Access applications that kitshn did not make but that cover a kitshn address. */

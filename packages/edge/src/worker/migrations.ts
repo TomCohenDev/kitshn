@@ -56,6 +56,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "ALTER TABLE deploys ADD COLUMN job_id INTEGER",
     "ALTER TABLE deploys ADD COLUMN compose_file TEXT",
   ],
+  // 5: stacks that the owner makes (K-521).
+  ["CREATE TABLE stacks (id TEXT PRIMARY KEY, body TEXT NOT NULL)"],
 ];
 
 /** Runs the migrations after `from`. Returns the new version. The caller provides the transaction. */

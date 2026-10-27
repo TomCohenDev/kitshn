@@ -12,15 +12,20 @@ import {
   invert,
   resolveEdits,
   ruleViolation,
+  shareDiff,
+  stacksWithout,
   summarize,
+  withStackMates,
 } from "../core/changes.ts";
 import {
   ADMIN_RESOURCE_ID,
+  isPublicCircle,
   type Circle,
   type Member,
   type Point,
   type Resource,
   type ShareSetting,
+  type Stack,
   type State,
   circlesHolding,
 } from "../core/model.ts";
@@ -186,6 +191,7 @@ export class Kitshn extends DurableObject<Env> {
         ]),
       ),
       shareSettings: json<ShareSetting>(this.sql("SELECT id, body FROM share_settings")),
+      stacks: json<Stack>(this.sql("SELECT id, body FROM stacks")),
       paused: this.meta("paused") === "true",
       machines: json<Machine>(this.sql("SELECT id, body FROM machines")),
     };
@@ -313,7 +319,13 @@ export class Kitshn extends DurableObject<Env> {
         continue;
       }
       const table =
-        change._tag === "circle" ? "circles" : change._tag === "place" ? "places" : "share_settings";
+        change._tag === "circle"
+          ? "circles"
+          : change._tag === "place"
+            ? "places"
+            : change._tag === "stack"
+              ? "stacks"
+              : "share_settings";
       if (change.after === null) this.sql(`DELETE FROM ${table} WHERE id = ?`, change.id);
       else if (change._tag === "place") {
         this.sql(
@@ -396,14 +408,25 @@ export class Kitshn extends DurableObject<Env> {
     const [row] = this.sql<{ changes: string }>("SELECT changes FROM revisions WHERE id = ?", revisionId);
     if (!row)
       throw new RuleError(`Revision #${revisionId} does not exist, or it is older than the history keeps.`);
-    const changes = invert(JSON.parse(row.changes) as Array<Change>);
-    if (changes.length === 0)
+    const inverted = invert(JSON.parse(row.changes) as Array<Change>);
+    if (inverted.length === 0)
       throw new RuleError(
         `Revision #${revisionId} records an action, not a change, so it has nothing to undo.`,
       );
     // This also refuses a second undo of the same revision: its changes are no longer current.
-    const conflict = conflictOf(this.state, changes);
+    const conflict = conflictOf(this.state, inverted);
     if (conflict) throw new RuleError(`A later revision changed ${conflict}. Undo that revision first.`);
+    // A card that joined a stack since then takes its stack along (K-521), but never into a public circle
+    // without the question of K-210, which an undo does not ask.
+    const changes = withStackMates(this.state, inverted);
+    const own = new Set(inverted.flatMap((change) => (change._tag === "place" ? [change.id] : [])));
+    const goingPublic = shareDiff(this.state, applyChanges(this.state, changes)).find(
+      (diff) => !own.has(diff.resource.id) && diff.to && !diff.from && isPublicCircle(diff.circle),
+    );
+    if (goingPublic)
+      throw new RuleError(
+        `This undo would make ${goingPublic.resource.name} public through its stack. Move the stack by hand.`,
+      );
     return this.commit(actor, changes, revisionId);
   }
 
@@ -418,6 +441,7 @@ export class Kitshn extends DurableObject<Env> {
       resources: [...this.state.resources.values()],
       places: Object.fromEntries(this.state.places) as Record<string, Point>,
       shareSettings: Object.fromEntries(this.state.shareSettings) as Record<string, ShareSetting>,
+      stacks: [...this.state.stacks.values()],
       revisions: this.revisions,
       access: accessStates(desiredAccess(this.state, Date.now()), this.access),
       accessWarnings: this.accessWarnings,
@@ -889,17 +913,15 @@ export class Kitshn extends DurableObject<Env> {
       );
     }
     this.ctx.storage.transactionSync(() => {
-      for (const table of ["machines", "resources", "places", "presence"])
-        this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
+      for (const table of ["machines", "presence"]) this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
+      this.forgetCard(id);
       this.sql("DELETE FROM jobs WHERE machine_id = ? AND state IN ('queued', 'sent')", id);
       this.sql("DELETE FROM join_codes WHERE machine_id = ?", id);
       this.sql("DELETE FROM tunnel_objects WHERE machine_id = ?", id);
       for (const site of this.sitesOf(id)) {
-        for (const table of ["live_sites", "resources", "places"])
-          this.sql(`DELETE FROM ${table} WHERE id = ?`, site.id);
-        this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${site.id}/%`);
+        this.sql("DELETE FROM live_sites WHERE id = ?", site.id);
+        this.forgetCard(site.id);
       }
-      this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);
       this.insertRevision(caller.actor, `Removed machine ${machine.name}`, [], null);
     });
     this.presence.delete(id);
@@ -1194,6 +1216,20 @@ export class Kitshn extends DurableObject<Env> {
     return stale || checking || this.dnsWork().length > 0 || this.routeWork().length > 0;
   }
 
+  /** Deletes a card's rows and takes it out of its stack, inside the caller's transaction (K-522). */
+  private forgetCard(id: string) {
+    for (const table of ["resources", "places"]) this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
+    this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);
+    const stacks = this.sql<{ id: string; body: string }>("SELECT id, body FROM stacks").map(
+      (row) => JSON.parse(row.body) as Stack,
+    );
+    for (const change of stacksWithout(stacks, id)) {
+      if (change.after) this.sql("UPDATE stacks SET body = ? WHERE id = ?", JSON.stringify(change.after), change.id);
+      else this.sql("DELETE FROM stacks WHERE id = ?", change.id);
+    }
+  }
+
+
   private sitesOf(machineId: string) {
     return [...this.liveSites.values()].filter((site) => site.machineId === machineId);
   }
@@ -1262,9 +1298,8 @@ export class Kitshn extends DurableObject<Env> {
       for (const site of this.sitesOf(machine.id)) {
         if (keep.has(site.id)) continue;
         changed = true;
-        for (const table of ["live_sites", "resources", "places"])
-          this.sql(`DELETE FROM ${table} WHERE id = ?`, site.id);
-        this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${site.id}/%`);
+        this.sql("DELETE FROM live_sites WHERE id = ?", site.id);
+        this.forgetCard(site.id);
         if (site.state === "ok") {
           this.insertRevision(
             { _tag: "kitshn", reason: `live site on ${machine.name}` },
@@ -1608,6 +1643,10 @@ export class Kitshn extends DurableObject<Env> {
         this.commit(
           { _tag: "kitshn", reason: `share with ${circle?.name ?? circleId} ended` },
           resolveEdits(this.state, [
+            // K-521: the card leaves its stack, so the rest of the stack stays where it is.
+            ...stacksWithout(this.state.stacks.values(), resourceId).map(
+              (change): Edit => ({ _tag: "stack", ...change }),
+            ),
             { _tag: "place", id: resourceId, after: to },
             { _tag: "shareSetting", resourceId, circleId, after: { ...setting, endsAt: null } },
           ]),
@@ -2152,11 +2191,8 @@ export class Kitshn extends DurableObject<Env> {
         );
       this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
       // A preview that never came up has no live site to take its card away.
-      if (resource && ![...this.liveSites.values()].some((site) => site.id === row.resource_id)) {
-        for (const table of ["resources", "places"])
-          this.sql(`DELETE FROM ${table} WHERE id = ?`, row.resource_id);
-        this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${row.resource_id}/%`);
-      }
+      if (resource && ![...this.liveSites.values()].some((site) => site.id === row.resource_id))
+        this.forgetCard(row.resource_id);
     });
     this.load();
     this.deliverJobs();
@@ -2274,9 +2310,7 @@ export class Kitshn extends DurableObject<Env> {
     );
     const resource = this.state.resources.get(row.resource_id);
     this.ctx.storage.transactionSync(() => {
-      for (const table of ["resources", "places"])
-        this.sql(`DELETE FROM ${table} WHERE id = ?`, row.resource_id);
-      this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${row.resource_id}/%`);
+      this.forgetCard(row.resource_id);
       this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
       if (resource)
         this.insertRevision(
@@ -2460,9 +2494,8 @@ export class Kitshn extends DurableObject<Env> {
         "INSERT OR IGNORE INTO library_deleted (source) SELECT source FROM library WHERE id = ? AND source IS NOT NULL",
         id,
       );
-      for (const table of ["library", "resources", "places"])
-        this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
-      this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);
+      this.sql("DELETE FROM library WHERE id = ?", id);
+      this.forgetCard(id);
       this.insertRevision(caller.actor, `Deleted the ${item.kind} ${item.title}`, [], null);
     });
     this.load();

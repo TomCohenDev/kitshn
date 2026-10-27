@@ -8,7 +8,9 @@ import {
   resolveEdits,
   ruleViolation,
   shareDiff,
+  stacksWithout,
   summarize,
+  withStackMates,
 } from "./changes.ts";
 import {
   ADMIN_RESOURCE_ID,
@@ -55,6 +57,7 @@ function start(): State {
     resources: new Map([...s.resources, site].map((resource) => [resource.id, resource])),
     places: new Map([...s.places, ["riffle", { x: 0, y: -200 }]]),
     shareSettings: new Map(),
+    stacks: new Map(),
     paused: false,
     machines: new Map(),
   };
@@ -367,5 +370,102 @@ describe("pause (K-1504)", () => {
       { _tag: "place", id: ADMIN_RESOURCE_ID, after: { x: 2000, y: 2000 } },
     ]);
     expect(ruleViolation(edit(moved.after, [{ _tag: "pause", after: true }]).after)).toMatch(/pause/);
+  });
+});
+
+describe("stacks (K-521, K-522)", () => {
+  const stack = { id: "s1", name: "Sites", members: ["kitshn-admin", "riffle"] };
+  it("refuses a stack of one card or of a missing card", () => {
+    expect(() =>
+      edit(start(), [{ _tag: "stack", id: "s1", after: { ...stack, members: ["riffle"] } }]),
+    ).toThrow(/at least two/);
+    expect(() =>
+      edit(start(), [{ _tag: "stack", id: "s1", after: { ...stack, members: ["riffle", "gone"] } }]),
+    ).toThrow(/No card/);
+  });
+
+  it("keeps a card in one stack, on the point of its stack, and undoes a stack in one step", () => {
+    const point = { x: 0, y: 40 };
+    const { changes, after } = edit(start(), [
+      { _tag: "place", id: "riffle", after: point },
+      { _tag: "stack", id: "s1", after: stack },
+    ]);
+    expect(ruleViolation(after)).toBeNull();
+    expect(
+      ruleViolation(
+        applyChanges(after, [{ _tag: "place", id: "riffle", before: point, after: { x: 9, y: 9 } }]),
+      ),
+    ).toMatch(/share one place/);
+    const second = { id: "s2", name: "Other", members: ["riffle", "kitshn-admin"] };
+    expect(
+      ruleViolation(applyChanges(after, [{ _tag: "stack", id: "s2", before: null, after: second }])),
+    ).toMatch(/two stacks/);
+    expect(applyChanges(after, invert(changes)).stacks.size).toBe(0);
+  });
+
+  it("moves the whole stack when one of its cards moves, and lets a card leave in the same change", () => {
+    const point = { x: 0, y: 40 };
+    const { after } = edit(start(), [
+      { _tag: "place", id: "riffle", after: point },
+      { _tag: "stack", id: "s1", after: stack },
+    ]);
+    const moved = applyChanges(after, resolveEdits(after, [{ _tag: "place", id: "riffle", after: { x: 5, y: 5 } }]));
+    expect(moved.places.get("kitshn-admin")).toEqual({ x: 5, y: 5 });
+    expect(ruleViolation(moved) ?? "").not.toMatch(/share one place/);
+    const left = applyChanges(
+      after,
+      resolveEdits(after, [
+        ...stacksWithout(after.stacks.values(), "riffle").map((change): Edit => ({ _tag: "stack", ...change })),
+        { _tag: "place", id: "riffle", after: { x: 5, y: 5 } },
+      ]),
+    );
+    expect(left.places.get("kitshn-admin")).toEqual(point);
+    expect(left.stacks.size).toBe(0);
+  });
+
+  it("undoes an older move of a card that joined a stack since then, with its stack", () => {
+    const first = edit(start(), [{ _tag: "place", id: "riffle", after: { x: 0, y: 40 } }]);
+    const second = edit(first.after, [
+      { _tag: "place", id: "kitshn-admin", after: { x: 0, y: 40 } },
+      { _tag: "stack", id: "s1", after: stack },
+    ]);
+    const undone = applyChanges(second.after, withStackMates(second.after, invert(first.changes)));
+    expect(ruleViolation(undone) ?? "").not.toMatch(/share one place/);
+    expect(undone.places.get("kitshn-admin")).toEqual(undone.places.get("riffle"));
+  });
+
+  it("takes a card out of its stack when an undo sends it back to the tray", () => {
+    const point = { x: 0, y: 40 };
+    const first = edit(start(), [{ _tag: "place", id: "riffle", after: point }]);
+    const second = edit(first.after, [
+      { _tag: "place", id: "kitshn-admin", after: point },
+      { _tag: "stack", id: "s1", after: stack },
+    ]);
+    const undone = applyChanges(
+      second.after,
+      withStackMates(second.after, [{ _tag: "place", id: "riffle", before: point, after: null }]),
+    );
+    expect(undone.places.get("kitshn-admin")).toEqual(point);
+    expect(undone.stacks.size).toBe(0);
+    expect(ruleViolation(undone) ?? "").not.toMatch(/stack/);
+  });
+
+  it("keeps the rules true when a stacked card is deleted outside an edit", () => {
+    const point = { x: 0, y: 40 };
+    const { after } = edit(start(), [
+      { _tag: "place", id: "riffle", after: point },
+      { _tag: "stack", id: "s1", after: stack },
+    ]);
+    const resources = new Map(after.resources);
+    const places = new Map(after.places);
+    resources.delete("riffle");
+    places.delete("riffle");
+    const stacks = new Map(after.stacks);
+    for (const change of stacksWithout(after.stacks.values(), "riffle")) {
+      if (change.after) stacks.set(change.id, change.after);
+      else stacks.delete(change.id);
+    }
+    expect(stacks.size).toBe(0);
+    expect(ruleViolation({ ...after, resources, places, stacks })).toBeNull();
   });
 });

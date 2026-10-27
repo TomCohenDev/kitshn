@@ -1,5 +1,5 @@
 import {
-  CONTENT_SECURITY_POLICY,
+  contentSecurityPolicy,
   type ContentVisitor,
   type LibraryItem,
   isLibraryId,
@@ -117,7 +117,7 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
   const headers = new Headers({
     "content-type": kind === "page" ? "text/html; charset=utf-8" : item.contentType,
     "content-length": String(item.size),
-    "content-security-policy": CONTENT_SECURITY_POLICY,
+    "content-security-policy": contentSecurityPolicy(env.KITSHN_HOST),
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
     "cache-control": "private, no-store",

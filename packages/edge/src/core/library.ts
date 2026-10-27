@@ -106,4 +106,6 @@ export function contentAccess(
 }
 
 /** The HTML page header of the T3 render route: an opaque origin with scripts, so a page reads no cookie. */
-export const CONTENT_SECURITY_POLICY = "sandbox allow-scripts allow-forms allow-popups allow-downloads";
+export const contentSecurityPolicy = (adminHost: string) =>
+  // Only the map may frame a page or a file (its live previews), so no other site can overlay one.
+  `sandbox allow-scripts allow-forms allow-popups allow-downloads; frame-ancestors 'self' https://${adminHost}`;

@@ -39,6 +39,16 @@ import { placeInside } from "../core/place.ts";
 import type { MachineView, RevisionView, ServerMessage, Snapshot } from "../core/protocol.ts";
 import { ClientMessage } from "../core/schema.ts";
 import { demo } from "../core/demo.ts";
+import {
+  CONTENT_SECURITY_POLICY,
+  type ContentVisitor,
+  type LibraryItem,
+  MAX_UPLOAD_BYTES,
+  contentAccess,
+  fileNameError,
+  newLibraryId,
+  objectKey,
+} from "../core/library.ts";
 import { seed } from "../core/seed.ts";
 import { type Visitor, visitorLevel } from "../core/visitor.ts";
 import {
@@ -476,6 +486,7 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/join/exchange" && request.method === "POST") return this.exchangeJoin(request);
     if (path === "/internal/offline")
       return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
+    if (path === "/internal/content") return this.contentDecision((await request.json()) as ContentRequest);
     if (path.startsWith("/deploy/")) {
       const header = request.headers.get("x-kitshn-deployer");
       if (!header) return new Response("The Worker sent no deployer.", { status: 500 });
@@ -516,6 +527,13 @@ export class Kitshn extends DurableObject<Env> {
       return this.addJob(caller, await request.json().catch(() => null));
     if (path === "/api/jobs" && request.method === "GET") return Response.json(this.recentJobs(100));
     if (path === "/api/devices" && request.method === "GET") return this.listDevices();
+    if (path === "/api/library" && request.method === "GET") return Response.json(this.libraryItems());
+    if ((path === "/api/pages" || path === "/api/files") && request.method === "POST")
+      return this.upload(caller, request, path === "/api/pages" ? "page" : "file");
+    if (path.startsWith("/api/library/") && path.endsWith("/content") && request.method === "GET")
+      return this.preview(decodeURIComponent(path.slice("/api/library/".length, -"/content".length)));
+    if (path.startsWith("/api/library/") && request.method === "DELETE")
+      return this.deleteItem(caller, decodeURIComponent(path.slice("/api/library/".length)));
     if (path === "/api/devices" && request.method === "POST")
       return this.addDevice(await request.json().catch(() => null));
     if (path === "/api/apply" || path === "/api/undo") {
@@ -1954,6 +1972,139 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ removed: row.address });
   }
 
+  private libraryItems(): Array<LibraryItem> {
+    return this.sql<LibraryRow>("SELECT * FROM library ORDER BY created_at DESC").map(libraryItem);
+  }
+
+  /** K-1004: the Worker asks here before it serves a page or a file. */
+  private contentDecision({ id, visitor }: ContentRequest) {
+    const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", id);
+    const resource = this.state.resources.get(id);
+    if (!row || !resource) return Response.json({ decision: "missing" });
+    const decision = contentAccess(this.state, resource, visitor, Date.now());
+    return Response.json(decision === "allow" ? { decision, item: libraryItem(row) } : { decision });
+  }
+
+  /**
+   * K-1101, K-1002: puts a page or a file into R2 and its card into the tray. The metadata comes in
+   * URI-encoded headers. An import names a `source`, and a second upload of the same source changes nothing.
+   */
+  private async upload(caller: Caller, request: Request, kind: "page" | "file") {
+    const header = (name: string) => {
+      const value = request.headers.get(name);
+      return value === null ? null : decodeURIComponent(value).trim();
+    };
+    const refuse = (error: string, status = 400) => Response.json({ error }, { status });
+    const bucket = this.env.BUCKET;
+    if (!bucket) return refuse("R2 is off for this kitshn. Run the bootstrap again after R2 is on.", 503);
+    const size = Number(request.headers.get("content-length"));
+    if (!request.body || !Number.isInteger(size) || size <= 0)
+      return refuse("Send the bytes with a Content-Length.", 411);
+    if (size > MAX_UPLOAD_BYTES) return refuse("A page or a file is at most 100 MB (K-1101).", 413);
+    const name = header("x-kitshn-name") ?? "";
+    if (kind === "file") {
+      const error = fileNameError(name);
+      if (error) return refuse(error);
+    }
+    const title = (kind === "page" ? name : (header("x-kitshn-title") ?? name)).slice(0, 200);
+    if (title === "") return refuse("Give the page a title in X-Kitshn-Name.");
+    const source = header("x-kitshn-source");
+    if (source) {
+      const [known] = this.sql<{ id: string }>("SELECT id FROM library WHERE source = ?", source);
+      if (known) return Response.json({ id: known.id, existing: true });
+    }
+    const createdAt = Number(header("x-kitshn-created-at") ?? Date.now());
+    if (!Number.isFinite(createdAt) || createdAt <= 0)
+      return refuse("X-Kitshn-Created-At is not a time in ms.");
+    const item: LibraryItem = {
+      id: newLibraryId(),
+      kind,
+      title,
+      fileName: kind === "file" ? name : null,
+      thread: header("x-kitshn-thread") || null,
+      machine: header("x-kitshn-machine") || null,
+      size,
+      contentType:
+        kind === "page" ? "text/html" : request.headers.get("content-type") || "application/octet-stream",
+      createdAt,
+    };
+    // The stream fails when the body is not exactly Content-Length bytes, so the limit holds.
+    const { readable, writable } = new FixedLengthStream(size);
+    const piped = request.body.pipeTo(writable);
+    await bucket.put(objectKey(item), readable, { httpMetadata: { contentType: item.contentType } });
+    await piped;
+    const resource: Resource = {
+      id: item.id,
+      kind,
+      name: title,
+      addresses: [
+        kind === "page"
+          ? `pages.${this.env.KITSHN_ZONE}/${item.id}`
+          : `files.${this.env.KITSHN_ZONE}/${item.id}/${encodeURIComponent(name)}`,
+      ],
+      status: "running",
+      group: null,
+      machine: null,
+    };
+    this.ctx.storage.transactionSync(() => {
+      this.sql(
+        `INSERT INTO library (id, kind, title, file_name, thread, machine, size, content_type, created_at, source)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        item.id,
+        item.kind,
+        item.title,
+        item.fileName,
+        item.thread,
+        item.machine,
+        item.size,
+        item.contentType,
+        item.createdAt,
+        source,
+      );
+      this.putResource(resource);
+      this.insertRevision(caller.actor, `Added the ${kind} ${title} to the tray`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    return Response.json({ id: item.id, address: resource.addresses[0] }, { status: 201 });
+  }
+
+  /**
+   * K-1005: the preview of the Library view, for the admin only. The sandbox header gives it an opaque
+   * origin, so a page cannot read the admin cookie or call the API.
+   */
+  private async preview(id: string) {
+    const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", id);
+    const object = row && (await this.env.BUCKET?.get(objectKey(libraryItem(row))));
+    if (!row || !object) return new Response("kitshn has no such item.", { status: 404 });
+    return new Response(object.body, {
+      headers: {
+        "content-type": row.kind === "page" ? "text/html; charset=utf-8" : row.content_type,
+        "content-security-policy": CONTENT_SECURITY_POLICY,
+        "x-content-type-options": "nosniff",
+        "cache-control": "private, no-store",
+      },
+    });
+  }
+
+  /** K-1006: removes the bytes from R2 first, then the card and the index row. */
+  private async deleteItem(caller: Caller, id: string) {
+    const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", id);
+    if (!row) return Response.json({ error: `The library has no item ${id}.` }, { status: 404 });
+    const item = libraryItem(row);
+    if (!this.env.BUCKET) return Response.json({ error: "R2 is off for this kitshn." }, { status: 503 });
+    await this.env.BUCKET.delete(objectKey(item));
+    this.ctx.storage.transactionSync(() => {
+      for (const table of ["library", "resources", "places"])
+        this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
+      this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);
+      this.insertRevision(caller.actor, `Deleted the ${item.kind} ${item.title}`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    return Response.json({ deleted: id });
+  }
+
   private accessLock: Promise<unknown> = Promise.resolve();
 
   /** Runs one Access sync at a time, so a deploy and the alarm never both create the same object. */
@@ -2092,3 +2243,32 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const send = (socket: WebSocket, message: ServerMessage | ServerToDaemon) =>
   socket.send(JSON.stringify(message));
+
+interface ContentRequest {
+  readonly id: string;
+  readonly visitor: ContentVisitor;
+}
+
+interface LibraryRow extends Record<string, SqlStorageValue> {
+  id: string;
+  kind: string;
+  title: string;
+  file_name: string | null;
+  thread: string | null;
+  machine: string | null;
+  size: number;
+  content_type: string;
+  created_at: number;
+}
+
+const libraryItem = (row: LibraryRow): LibraryItem => ({
+  id: row.id,
+  kind: row.kind === "file" ? "file" : "page",
+  title: row.title,
+  fileName: row.file_name,
+  thread: row.thread,
+  machine: row.machine,
+  size: row.size,
+  contentType: row.content_type,
+  createdAt: row.created_at,
+});

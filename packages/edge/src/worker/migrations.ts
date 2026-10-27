@@ -41,6 +41,13 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "ALTER TABLE dns_objects ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE route_objects ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0",
   ],
+  // 3: pages and files in R2 (sections 10 and 11). `source` names where an imported page came from, so
+  // an import adds each page once (K-1008).
+  [
+    `CREATE TABLE library (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, file_name TEXT,
+      thread TEXT, machine TEXT, size INTEGER NOT NULL, content_type TEXT NOT NULL, created_at INTEGER NOT NULL,
+      source TEXT UNIQUE)`,
+  ],
 ];
 
 /** Runs the migrations after `from`. Returns the new version. The caller provides the transaction. */

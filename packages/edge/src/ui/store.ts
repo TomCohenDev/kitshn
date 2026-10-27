@@ -76,7 +76,8 @@ export function connect() {
       resolve({
         ok: false,
         lost: true,
-        error: "The connection closed before kitshn answered. The map shows what kitshn saved when it reconnects.",
+        error:
+          "The connection closed before kitshn answered. The map shows what kitshn saved when it reconnects.",
       });
     }
     waiting.clear();
@@ -127,6 +128,34 @@ export async function callApi<T>(
   return data;
 }
 
+/** K-1101: an HTML file becomes a page (section 10); any other file stays a file. */
+export async function upload(file: File): Promise<{ id: string; address: string } | { error: string }> {
+  const lower = file.name.toLowerCase();
+  const extension = [".html", ".htm"].find((ending) => lower.endsWith(ending));
+  const page = extension !== undefined;
+  const name = extension ? file.name.slice(0, -extension.length) : file.name;
+  let response: Response;
+  try {
+    response = await fetch(page ? "/api/pages" : "/api/files", {
+      method: "POST",
+      headers: {
+        "content-type": file.type || "application/octet-stream",
+        "x-kitshn-name": encodeURIComponent(name),
+      },
+      body: file,
+    });
+  } catch (error) {
+    return { error: `kitshn is not reachable: ${String(error)}` };
+  }
+  const data = (await response.json().catch(() => null)) as {
+    id: string;
+    address: string;
+    error?: string;
+  } | null;
+  if (!response.ok || data === null) return { error: data?.error ?? `kitshn answered ${response.status}.` };
+  return data;
+}
+
 /**
  * Sends edits and shows them at once: they stay on the map until a snapshot reaches the revision that
  * saved them, and go only when the server refuses them (the caller shows the reason).
@@ -136,7 +165,9 @@ export async function applyEdits(edits: ReadonlyArray<Edit>, requestId = hold(ed
   const others = current.held.filter((item) => item.requestId !== requestId);
   if (!result.ok && result.lost) {
     // Saved or not is unknown: keep the edit in its place until the next snapshot shows what kitshn has.
-    set({ held: current.held.map((item) => (item.requestId === requestId ? { ...item, revision: 0 } : item)) });
+    set({
+      held: current.held.map((item) => (item.requestId === requestId ? { ...item, revision: 0 } : item)),
+    });
   } else if (!result.ok || result.revision === null) set({ held: others });
   else {
     const saved: Held = { requestId, edits, revision: result.revision };

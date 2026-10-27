@@ -1,4 +1,11 @@
-import { callerOf, deployerOf } from "./auth.ts";
+import {
+  CONTENT_SECURITY_POLICY,
+  type ContentVisitor,
+  type LibraryItem,
+  isLibraryId,
+  objectKey,
+} from "../core/library.ts";
+import { type ContentLogins, callerOf, contentVisitorOf, deployerOf } from "./auth.ts";
 import { escapeHtml, originDown, seenText } from "./live.ts";
 import type { Env } from "./env.ts";
 
@@ -38,6 +45,69 @@ async function offline(request: Request, env: Env, ctx: ExecutionContext): Promi
   });
 }
 
+/** What the Durable Object decides for one page or file request (K-1004). */
+type ContentAnswer =
+  | { readonly decision: "allow"; readonly item: LibraryItem }
+  | { readonly decision: "login" | "passkey" | "deny" | "missing" };
+
+const text = (body: string, status: number) =>
+  new Response(body, {
+    status,
+    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+  });
+
+/** K-1003, K-1004, K-1102: a page at `pages.<zone>/<id>` or a file at `files.<zone>/<id>/<name>`. */
+async function content(request: Request, env: Env, kind: "page" | "file"): Promise<Response> {
+  const url = new URL(request.url);
+  const logins: ContentLogins =
+    kind === "page"
+      ? { login: env.PAGES_LOGIN_AUD, passkey: env.PAGES_PASSKEY_AUD }
+      : { login: env.FILES_LOGIN_AUD, passkey: env.FILES_PASSKEY_AUD };
+  if (url.pathname === "/login" || url.pathname === "/login/passkey") {
+    // Access let the visitor through and set the cookie for the whole host; go back to the item.
+    const next = new URL(url.searchParams.get("next") ?? "/", url.origin);
+    return Response.redirect(next.origin === url.origin ? next.href : url.origin, 302);
+  }
+  if (request.method !== "GET" && request.method !== "HEAD") return text("Use GET.", 405);
+  const [, id = "", ...rest] = url.pathname.split("/");
+  if (!isLibraryId(id)) return text(`kitshn has no ${kind} here.`, 404);
+  const visitor: ContentVisitor = await contentVisitorOf(request, env, logins);
+  const answer = (await (
+    await env.KITSHN.getByName("kitshn").fetch("https://kitshn.internal/internal/content", {
+      method: "POST",
+      body: JSON.stringify({ id, visitor }),
+    })
+  ).json()) as ContentAnswer;
+  const back = `?next=${encodeURIComponent(url.pathname)}`;
+  if (answer.decision === "login") return Response.redirect(`${url.origin}/login${back}`, 302);
+  if (answer.decision === "passkey") return Response.redirect(`${url.origin}/login/passkey${back}`, 302);
+  if (answer.decision === "deny")
+    return text(
+      `${visitor.email ?? visitor.clientId} has no access to this ${kind}. Ask its owner to share it.`,
+      403,
+    );
+  if (answer.decision !== "allow" || answer.item.kind !== kind)
+    return text(`kitshn has no ${kind} here.`, 404);
+  const item = answer.item;
+  if (kind === "file" && decodeURIComponent(rest.join("/")) !== item.fileName) {
+    return Response.redirect(`${url.origin}/${id}/${encodeURIComponent(item.fileName ?? "")}`, 302);
+  }
+  if (!env.BUCKET) return text("R2 is off for this kitshn. Run the bootstrap again after R2 is on.", 503);
+  const object = request.method === "HEAD" ? null : await env.BUCKET.get(objectKey(item));
+  if (request.method === "GET" && !object) return text(`The bytes of this ${kind} are missing in R2.`, 404);
+  const headers = new Headers({
+    "content-type": kind === "page" ? "text/html; charset=utf-8" : item.contentType,
+    "content-length": String(item.size),
+    "content-security-policy": CONTENT_SECURITY_POLICY,
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "cache-control": "private, no-store",
+  });
+  if (kind === "file")
+    headers.set("content-disposition", `inline; filename*=UTF-8''${encodeURIComponent(item.fileName ?? "")}`);
+  return new Response(object?.body ?? null, { headers });
+}
+
 interface OfflineInfo {
   readonly site: string;
   readonly reason: string;
@@ -47,6 +117,8 @@ interface OfflineInfo {
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
+    if (url.hostname === `pages.${env.KITSHN_ZONE}`) return content(request, env, "page");
+    if (url.hostname === `files.${env.KITSHN_ZONE}`) return content(request, env, "file");
     if (url.hostname !== env.KITSHN_HOST && url.hostname.endsWith(`.${env.KITSHN_ZONE}`)) {
       return offline(request, env, ctx);
     }
@@ -56,7 +128,16 @@ export default {
       if (origin !== null && origin !== url.origin) {
         return Response.json({ error: `kitshn refuses requests from ${origin}.` }, { status: 403 });
       }
-      if (request.method === "POST" && !request.headers.get("content-type")?.startsWith("application/json")) {
+      // K-1101: an upload sends its bytes; its metadata headers make a browser ask first (CORS preflight).
+      const upload = url.pathname === "/api/pages" || url.pathname === "/api/files";
+      if (upload && !request.headers.has("x-kitshn-name")) {
+        return Response.json({ error: "Send the name in the X-Kitshn-Name header." }, { status: 400 });
+      }
+      if (
+        !upload &&
+        request.method === "POST" &&
+        !request.headers.get("content-type")?.startsWith("application/json")
+      ) {
         return Response.json({ error: "Send JSON with Content-Type: application/json." }, { status: 415 });
       }
       const caller = await callerOf(request, env, env.ACCESS_ADMIN_AUD);

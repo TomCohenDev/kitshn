@@ -327,7 +327,8 @@ async function composeUp(
       writeFileSync(join(dir, "source.tgz"), await deployFile(command.deployId, "source.tgz"));
       writeFileSync(join(dir, "params.env"), await deployFile(command.deployId, "params.env"), { mode: 0o600 });
     }
-    rmSync(source, { recursive: true, force: true });
+    // The last build's containers may have written into the source as root (a bind mount of `.`).
+    output += await removeAsRoot(source, `${command.project}-src`);
     mkdirSync(source, { recursive: true });
     await step("unpack the source", "tar", ["-xzf", join(dir, "source.tgz"), "-C", source]);
     // The container user may not be the daemon user; the socket directory must take its socket.
@@ -405,6 +406,29 @@ async function composeUp(
   }
 }
 
+/** Short root jobs on app folders (copy, clean-up); busybox has `cp -a` and `find -delete` and is a few MB. */
+const HELPER_IMAGE = "busybox:1.38";
+
+/**
+ * Removes a folder that an app's containers wrote into, often as root, which the daemon user cannot remove.
+ * A short container with the same folder deletes what is inside; nothing widens the permissions of files.
+ * Returns the output, or throws when the folder stays.
+ */
+async function removeAsRoot(dir: string, name: string): Promise<string> {
+  if (!existsSync(dir)) return "";
+  const inside = await runProgram(
+    "docker",
+    ["run", "--rm", "--name", `kitshn-clean-${name}`, "--network", "none", "-v", `${dir}:/app`, HELPER_IMAGE, "find", "/app", "-mindepth", "1", "-delete"],
+    { timeoutMs: COMPOSE_TIMEOUT_MS },
+  );
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch (error) {
+    throw new Error(`${dir} stays: ${error instanceof Error ? error.message : String(error)}\n${inside.output}`);
+  }
+  return `$ remove ${dir}\n${inside.output}`;
+}
+
 /** K-904: stops the app, stops exposing it, and for a preview removes its volumes and files. */
 async function composeDown(command: Extract<Command, { kind: "compose-down" }>): Promise<JobOutcome> {
   const sites = readSites();
@@ -424,8 +448,13 @@ async function composeDown(command: Extract<Command, { kind: "compose-down" }>):
     // Compose reads the app's own files, not a compose.yml in the daemon's folder.
     { timeoutMs: COMPOSE_TIMEOUT_MS, cwd: existsSync(join(dir, "src")) ? join(dir, "src") : paths.data },
   );
-  if (command.removeData) rmSync(dir, { recursive: true, force: true });
-  return result;
+  // Containers that may still run could write while the files go, so a failed down keeps them for a retry.
+  if (!command.removeData || !result.ok) return result;
+  try {
+    return { ...result, output: result.output + (await removeAsRoot(dir, command.project)) };
+  } catch (error) {
+    return { ok: false, exitCode: null, output: `${result.output}\n[kitshn: ${error instanceof Error ? error.message : String(error)}]` };
+  }
 }
 
 /** One Compose job per app at a time: a teardown never runs during the build of the same app. */

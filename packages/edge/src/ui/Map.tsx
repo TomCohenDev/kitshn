@@ -46,8 +46,15 @@ type Drag =
 /** Cards with one group stack when they share the same circles (K-508). */
 export function stacksOf(state: State): Map<string, Array<string>> {
   const stacks = new Map<string, Array<string>>();
+  // K-521: the owner's stacks come first; their cards leave the stacks by group.
+  const owned = new Set<string>();
+  for (const stack of state.stacks.values()) {
+    const placed = stack.members.filter((id) => state.places.has(id));
+    for (const id of placed) owned.add(id);
+    if (placed.length > 1) stacks.set(`${USER_STACK}${stack.id}`, placed);
+  }
   for (const resource of state.resources.values()) {
-    if (!resource.group || !state.places.has(resource.id)) continue;
+    if (!resource.group || owned.has(resource.id) || !state.places.has(resource.id)) continue;
     const circles = circlesHolding(state, resource.id)
       .map((circle) => circle.id)
       .sort()
@@ -58,6 +65,9 @@ export function stacksOf(state: State): Map<string, Array<string>> {
   for (const [key, ids] of stacks) if (ids.length < 2) stacks.delete(key);
   return stacks;
 }
+
+/** The key prefix of a stack that the owner made, as opposed to a stack by group (K-508). */
+export const USER_STACK = "stack:";
 
 interface Props {
   /** K-1101: files dropped from the computer, with the map point under the pointer. */
@@ -77,6 +87,8 @@ interface Props {
   readonly openStacks: ReadonlySet<string>;
   readonly onToggleStack: (key: string) => void;
   readonly onCommit: (edits: Array<Edit>, diffs: Array<ShareDiff>) => void;
+  /** K-522: cards dropped on another card become one stack with it. */
+  readonly onStackOnto: (ids: Array<string>, target: string) => void;
 }
 
 const LONG_PRESS_MS = 350;
@@ -84,6 +96,11 @@ const LONG_PRESS_MS = 350;
 const px = (value: number) => `${value}px`;
 /** An open stack spaces its cards by this much: the card width (styles.css) plus a gap. */
 const STACK_GAP = 205;
+/** The half size of a card (styles.css), to find the card under a drop; and the row step of an open stack. */
+const CARD_HALF_WIDTH = 95;
+const CARD_HALF_HEIGHT = 40;
+const STACK_ROW = 100;
+
 /** Live previews: at most this many frames, for these kinds, from this zoom on. */
 const MAX_PREVIEWS = 4;
 const PREVIEW_SCALE = 0.8;
@@ -168,7 +185,10 @@ export function MapView(props: Props) {
       const ids = new Set(props.selection.cards.has(id) ? props.selection.cards : [id]);
       const stack = stackOf(id);
       if (stack && !props.openStacks.has(stack[0])) for (const member of stack[1]) ids.add(member);
-      if (!props.selection.cards.has(id)) props.onSelect({ cards: new Set([id]), circle: null });
+      // A closed stack of the owner is selected whole, so its panel shows (K-521).
+      const whole = stack && !props.openStacks.has(stack[0]) && stack[0].startsWith(USER_STACK);
+      if (!props.selection.cards.has(id))
+        props.onSelect({ cards: whole ? new Set(ids) : new Set([id]), circle: null });
       const origins = new Map<string, Point>();
       for (const card of ids) origins.set(card, state.places.get(card) ?? world);
       const start = () => setDrag({ type: "cards", start: world, origins, clicked: id, moved: false });
@@ -254,10 +274,27 @@ export function MapView(props: Props) {
     );
   };
 
-  const onPointerUp = () => {
+  const onPointerUp = (event: PointerEvent) => {
     if (longPress.current !== null) {
       window.clearTimeout(longPress.current);
       longPress.current = null;
+    }
+    // K-522: cards let go over another card stack with it instead of moving.
+    if (drag?.type === "cards" && drag.moved) {
+      const at = toWorld(event.clientX, event.clientY);
+      const dragged = new Set(drag.origins.keys());
+      const target = [...state.places].find(
+        ([id, place]) =>
+          !dragged.has(id) &&
+          Math.abs(place.x - at.x) < CARD_HALF_WIDTH &&
+          Math.abs(place.y - at.y) < CARD_HALF_HEIGHT,
+      )?.[0];
+      if (target) {
+        props.onStackOnto([...dragged], target);
+        setDrag(null);
+        setDraft(null);
+        return;
+      }
     }
     if (drag?.type === "cards" && !drag.moved) {
       const stack = stackOf(drag.clicked);
@@ -358,7 +395,14 @@ export function MapView(props: Props) {
           const index = stack ? stack[1].indexOf(resource.id) : 0;
           if (stack && !open && index > 0) return null;
           const head = stack ? shown.places.get(stack[1][0] ?? "") : undefined;
-          const at = stack && open && head ? { x: head.x + index * STACK_GAP, y: head.y } : place;
+          const own = stack?.[0].startsWith(USER_STACK) ?? false;
+          // An owner's stack opens downwards, as a list; a stack by group opens in a row (K-508, K-521).
+          const at =
+            stack && open && head
+              ? own
+                ? { x: head.x, y: head.y + index * STACK_ROW }
+                : { x: head.x + index * STACK_GAP, y: head.y }
+              : place;
           const selected = props.selection.cards.has(resource.id);
           if (zoomedOut) {
             return (
@@ -368,6 +412,21 @@ export function MapView(props: Props) {
                 class={`mini${selected ? " sel" : ""}`}
                 style={{ left: px(at.x), top: px(at.y), background: KINDS[resource.kind].color }}
                 title={resource.name}
+              />
+            );
+          }
+          if (stack && own && !open) {
+            const userStack = shown.stacks.get(stack[0].slice(USER_STACK.length));
+            return (
+              <StackCard
+                key={resource.id}
+                id={resource.id}
+                name={userStack?.name ?? "Stack"}
+                members={stack[1].flatMap((id) => shown.resources.get(id) ?? [])}
+                state={shown}
+                at={at}
+                selected={stack[1].some((id) => props.selection.cards.has(id))}
+                dragging={draggedIds.has(resource.id)}
               />
             );
           }
@@ -589,6 +648,42 @@ function CardPreview(props: { address: string }) {
         </a>
       </div>
       <div class="help">Blank? Open the site once to log in.</div>
+    </div>
+  );
+}
+
+/** K-521: a closed stack of the owner, as one card that lists its cards. A click opens it. */
+function StackCard(props: {
+  id: string;
+  name: string;
+  members: ReadonlyArray<Resource>;
+  state: State;
+  at: Point;
+  selected: boolean;
+  dragging: boolean;
+}) {
+  const holding = circlesHolding(props.state, props.id);
+  return (
+    <div
+      class={`card stack-card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}`}
+      data-card={props.id}
+      style={{ left: px(props.at.x), top: px(props.at.y) }}
+    >
+      <span class="sticker count">{props.members.length} ▸</span>
+      <div class="name">🗃 {props.name}</div>
+      <ul>
+        {props.members.slice(0, 6).map((member) => (
+          <li key={member.id}>
+            {KINDS[member.kind].icon} {member.name}
+          </li>
+        ))}
+        {props.members.length > 6 ? <li class="muted">and {props.members.length - 6} more</li> : null}
+      </ul>
+      <div class="foot">
+        {holding.map((circle) => (
+          <span key={circle.id} class="dot" title={circle.name} style={{ background: circle.color }} />
+        ))}
+      </div>
     </div>
   );
 }

@@ -55,6 +55,7 @@ function start(): State {
     resources: new Map([...s.resources, site].map((resource) => [resource.id, resource])),
     places: new Map([...s.places, ["riffle", { x: 0, y: -200 }]]),
     shareSettings: new Map(),
+    stacks: new Map(),
     paused: false,
     machines: new Map(),
   };
@@ -367,5 +368,36 @@ describe("pause (K-1504)", () => {
       { _tag: "place", id: ADMIN_RESOURCE_ID, after: { x: 2000, y: 2000 } },
     ]);
     expect(ruleViolation(edit(moved.after, [{ _tag: "pause", after: true }]).after)).toMatch(/pause/);
+  });
+});
+
+describe("stacks (K-521, K-522)", () => {
+  const stack = { id: "s1", name: "Sites", members: ["kitshn-admin", "riffle"] };
+  it("refuses a stack of one card or of a missing card", () => {
+    expect(() =>
+      edit(start(), [{ _tag: "stack", id: "s1", after: { ...stack, members: ["riffle"] } }]),
+    ).toThrow(/at least two/);
+    expect(() =>
+      edit(start(), [{ _tag: "stack", id: "s1", after: { ...stack, members: ["riffle", "gone"] } }]),
+    ).toThrow(/No card/);
+  });
+
+  it("keeps a card in one stack, on the point of its stack, and undoes a stack in one step", () => {
+    const point = { x: 0, y: 40 };
+    const { changes, after } = edit(start(), [
+      { _tag: "place", id: "riffle", after: point },
+      { _tag: "stack", id: "s1", after: stack },
+    ]);
+    expect(ruleViolation(after)).toBeNull();
+    expect(
+      ruleViolation(
+        applyChanges(after, [{ _tag: "place", id: "riffle", before: point, after: { x: 9, y: 9 } }]),
+      ),
+    ).toMatch(/share one place/);
+    const second = { id: "s2", name: "Other", members: ["riffle", "kitshn-admin"] };
+    expect(
+      ruleViolation(applyChanges(after, [{ _tag: "stack", id: "s2", before: null, after: second }])),
+    ).toMatch(/two stacks/);
+    expect(applyChanges(after, invert(changes)).stacks.size).toBe(0);
   });
 });

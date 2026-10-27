@@ -1099,3 +1099,25 @@ a > code {
   font-size: 0.75rem;
   padding: 1px 6px;
 }
+
+/* K-521: an owner's stack, as one card with a list of its cards. */
+.stack-card ul {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+.stack-card li {
+  padding: 2px 0;
+  border-top: var(--bw) dashed var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stack-card {
+  box-shadow:
+    var(--shadow),
+    8px 8px 0 0 var(--surface),
+    10px 10px 0 0 var(--shadow-ink);
+}

@@ -13,6 +13,7 @@ import {
   RESOURCE_KINDS,
   type Resource,
   type ResourceKind,
+  type Stack,
   type State,
   type Point,
   circlesHolding,
@@ -220,6 +221,71 @@ export function App() {
    * K-509: cards dragged from the tray land at the drop point, each in exactly the circles there, so they
    * get those shares; a public circle asks first, as for any drag (K-210).
    */
+  /** K-521, K-522: stack actions; each is one revision through `commit`, so a public circle asks first. */
+  const stacks: StackActions = {
+    stackOnto: async (ids, target) => {
+      if (!state) return;
+      const place = state.places.get(target);
+      if (!place) return;
+      const into = [...state.stacks.values()].find((stack) => stack.members.includes(target));
+      const moving = ids.filter((id) => id !== target && !into?.members.includes(id));
+      if (moving.length === 0) return;
+      const edits: Array<Edit> = moving.map((id) => ({ _tag: "place", id, after: place }));
+      // A card leaves its old stack; a stack left with one card goes.
+      for (const stack of state.stacks.values()) {
+        if (stack === into || !stack.members.some((id) => moving.includes(id))) continue;
+        const rest = stack.members.filter((id) => !moving.includes(id));
+        edits.push({
+          _tag: "stack",
+          id: stack.id,
+          after: rest.length > 1 ? { ...stack, members: rest } : null,
+        });
+      }
+      const id = into?.id ?? `s-${crypto.randomUUID().slice(0, 8)}`;
+      edits.push({
+        _tag: "stack",
+        id,
+        after: { id, name: into?.name ?? "Stack", members: [...(into?.members ?? [target]), ...moving] },
+      });
+      await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
+    },
+    pullOut: async (stackId, id) => {
+      const stack = state?.stacks.get(stackId);
+      const place = state?.places.get(id);
+      if (!state || !stack || !place) return;
+      const rest = stack.members.filter((member) => member !== id);
+      const wanted = new Set(circlesHolding(state, id).map((circle) => circle.id));
+      // Next to the stack, in the same circles, so pulling a card out changes no share.
+      const after = placeInside(state, { x: place.x + 230, y: place.y }, wanted) ?? place;
+      const edits: Array<Edit> = [
+        { _tag: "stack", id: stackId, after: rest.length > 1 ? { ...stack, members: rest } : null },
+        { _tag: "place", id, after },
+      ];
+      await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
+    },
+    unstack: async (stackId) => {
+      const stack = state?.stacks.get(stackId);
+      if (!state || !stack) return;
+      const first = state.places.get(stack.members[0] ?? "");
+      if (!first) return;
+      const wanted = new Set(circlesHolding(state, stack.members[0] ?? "").map((circle) => circle.id));
+      const edits: Array<Edit> = [
+        { _tag: "stack", id: stackId, after: null },
+        ...stack.members.slice(1).map((id, index): Edit => ({
+          _tag: "place",
+          id,
+          after: placeInside(state, { x: first.x, y: first.y + (index + 1) * 100 }, wanted) ?? first,
+        })),
+      ];
+      await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
+    },
+    rename: async (stackId, name) => {
+      const stack = state?.stacks.get(stackId);
+      if (!stack || !name.trim() || name.trim() === stack.name) return;
+      await commit([{ _tag: "stack", id: stackId, after: { ...stack, name: name.trim().slice(0, 80) } }], []);
+    },
+  };
+
   const placeFromTray = async (ids: Array<string>, at: Point) => {
     if (!state) return;
     const wanted = new Set(
@@ -412,6 +478,7 @@ export function App() {
         <MapView
           onDropFiles={(files, at) => void uploadFiles(files, at)}
           onDropCards={(ids, at) => void placeFromTray(ids, at)}
+          onStackOnto={(ids, target) => void stacks.stackOnto(ids, target)}
           previews={previews}
           state={state}
           access={store.snapshot.access}
@@ -608,6 +675,7 @@ export function App() {
         accessTeam={store.snapshot.accessTeam}
         onSelectCard={(id) => setSelection({ cards: new Set([id]), circle: null })}
         onSelectCircle={(id) => setSelection({ cards: new Set(), circle: id })}
+        stacks={stacks}
         onSecret={setSecret}
         onEdit={async (edits) => {
           const result = await applyEdits(edits);
@@ -828,6 +896,7 @@ function Panel(props: {
   accessTeam: string;
   onSelectCard: (id: string) => void;
   onSelectCircle: (id: string) => void;
+  stacks: StackActions;
   onSecret: (secret: DeviceSecret) => void;
 }) {
   const { state, selection } = props;
@@ -868,11 +937,15 @@ function Panel(props: {
       />
     );
   } else if (cards.length > 1) {
+    const ids = new Set(cards.map((card) => card.id));
+    const stackOfAll = [...state.stacks.values()].find(
+      (stack) => stack.members.length === ids.size && stack.members.every((id) => ids.has(id)),
+    );
     body = (
       <section>
         <div class="label">Selection</div>
         <h2>{cards.length} cards</h2>
-        <p>Drag them together into or out of a circle.</p>
+        <p>Drag them together into or out of a circle, or stack them to keep them together.</p>
         <ul>
           {cards.map((resource) => (
             <li key={resource.id}>
@@ -880,8 +953,20 @@ function Panel(props: {
             </li>
           ))}
         </ul>
+        <button
+          class="btn primary"
+          onClick={() =>
+            void props.stacks.stackOnto(
+              cards.slice(1).map((card) => card.id),
+              cards[0]?.id ?? "",
+            )
+          }
+        >
+          Stack these
+        </button>
       </section>
     );
+    if (stackOfAll) body = <StackPanel stack={stackOfAll} state={state} actions={props.stacks} />;
   } else {
     body = (
       <section>
@@ -943,6 +1028,55 @@ function Panel(props: {
       <div class="handle" onClick={() => setSheetOpen(!sheetOpen)} />
       {body}
     </aside>
+  );
+}
+
+interface StackActions {
+  stackOnto: (ids: Array<string>, target: string) => Promise<void>;
+  pullOut: (stackId: string, id: string) => Promise<void>;
+  unstack: (stackId: string) => Promise<void>;
+  rename: (stackId: string, name: string) => Promise<void>;
+}
+
+/** K-521: one stack of the owner: its name, its cards with "Pull out", and "Unstack". */
+function StackPanel(props: { stack: Stack; state: State; actions: StackActions }) {
+  const { stack, state } = props;
+  const holding = circlesHolding(state, stack.members[0] ?? "");
+  return (
+    <section class="editor">
+      <div class="label">Stack</div>
+      <input
+        class="title"
+        aria-label="Stack name"
+        key={stack.name}
+        defaultValue={stack.name}
+        onKeyDown={(event) => event.key === "Enter" && (event.target as HTMLInputElement).blur()}
+        onBlur={(event) => void props.actions.rename(stack.id, (event.target as HTMLInputElement).value)}
+      />
+      <p class="help">
+        Its {stack.members.length} cards move as one and share every circle:{" "}
+        {holding.length > 0 ? holding.map((circle) => circle.name).join(", ") : "none, so they are private"}.
+      </p>
+      <h3 class="label">Cards</h3>
+      <ul class="opens">
+        {stack.members.map((id) => {
+          const resource = state.resources.get(id);
+          return (
+            <li key={id}>
+              <div class="open-card">
+                <span class="name">{resource ? `${KINDS[resource.kind].icon} ${resource.name}` : id}</span>
+                <button type="button" class="btn" onClick={() => void props.actions.pullOut(stack.id, id)}>
+                  Pull out
+                </button>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      <button type="button" class="btn" onClick={() => void props.actions.unstack(stack.id)}>
+        Unstack
+      </button>
+    </section>
   );
 }
 

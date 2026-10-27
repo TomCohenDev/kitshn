@@ -50,6 +50,16 @@ export const Edit_ = Schema.Union([
     after: Schema.NullOr(ShareSetting),
   }),
   Schema.TaggedStruct("pause", { after: Schema.Boolean }),
+  Schema.TaggedStruct("stack", {
+    id: Schema.String,
+    after: Schema.NullOr(
+      Schema.Struct({
+        id: Schema.String,
+        name: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(80)),
+        members: Schema.Array(Schema.String).check(Schema.isMaxLength(200)),
+      }),
+    ),
+  }),
 ]);
 
 export const Actor_ = Schema.Union([

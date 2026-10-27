@@ -21,6 +21,7 @@ import {
   type Point,
   type Resource,
   type ShareSetting,
+  type Stack,
   type State,
   circlesHolding,
 } from "../core/model.ts";
@@ -186,6 +187,7 @@ export class Kitshn extends DurableObject<Env> {
         ]),
       ),
       shareSettings: json<ShareSetting>(this.sql("SELECT id, body FROM share_settings")),
+      stacks: json<Stack>(this.sql("SELECT id, body FROM stacks")),
       paused: this.meta("paused") === "true",
       machines: json<Machine>(this.sql("SELECT id, body FROM machines")),
     };
@@ -313,7 +315,13 @@ export class Kitshn extends DurableObject<Env> {
         continue;
       }
       const table =
-        change._tag === "circle" ? "circles" : change._tag === "place" ? "places" : "share_settings";
+        change._tag === "circle"
+          ? "circles"
+          : change._tag === "place"
+            ? "places"
+            : change._tag === "stack"
+              ? "stacks"
+              : "share_settings";
       if (change.after === null) this.sql(`DELETE FROM ${table} WHERE id = ?`, change.id);
       else if (change._tag === "place") {
         this.sql(
@@ -418,6 +426,7 @@ export class Kitshn extends DurableObject<Env> {
       resources: [...this.state.resources.values()],
       places: Object.fromEntries(this.state.places) as Record<string, Point>,
       shareSettings: Object.fromEntries(this.state.shareSettings) as Record<string, ShareSetting>,
+      stacks: [...this.state.stacks.values()],
       revisions: this.revisions,
       access: accessStates(desiredAccess(this.state, Date.now()), this.access),
       accessWarnings: this.accessWarnings,

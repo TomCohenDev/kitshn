@@ -1,11 +1,21 @@
 # AGENTS.md
 
-## Project Shape
+## kitshn 2 (TypeScript)
+- kitshn 2 lives next to the KitSHn 1 Python code. `SPEC.md` holds its numbered `K-` requirements, `docs/architecture.md` and `docs/migration.md` the design and the order of work.
+- It is a pnpm workspace: `packages/edge` is the Worker, its Durable Object and the map UI (Preact). Run `pnpm install`, then `pnpm run check` (format, lint, typecheck, tests) before a push. CI runs the same in `.github/workflows/edge.yml`.
+- `src/core` is pure logic shared by the Worker and the UI: the model, changes and the K-105 guard, placement, visitor levels and the Access compile. Test it there. `src/core/schema.ts` decodes wire input with Effect Schema and keeps the UI bundle free of `effect`.
+- Local development: `pnpm --filter @kitshn/edge dev`. Put `DEV_IDENTITY=you@example.com` and optionally `DEV_DEMO=1` in `packages/edge/.dev.vars`; the Worker honours them only on localhost.
+- `packages/edge/public/install` is the bootstrap script (K-1201). It deploys the bundle that `pnpm run build` writes to `packages/edge/dist/kitshn-edge.tar.gz`; pass a local bundle with `KITSHN_BUNDLE=<path>`.
+- Everything kitshn makes in Access has a name that starts with `kitshn `. Never change or delete other Access objects.
+
+## KitSHn 1 (Python)
+
+### Project Shape
 - Python 3.14 `uv` project; use `uv run ...` for project commands and do not use raw `python`/`pip`.
 - CLI entrypoint is `kitshn = kitshn.cli:main`; command definitions live in `src/kitshn/cli.py`.
-- There is no Makefile, pre-commit config, or test/lint GitHub workflow. `.github/workflows/deploy.yml` is the reusable deploy workflow that recipe repos call. `.github/workflows/release.yml` tags, releases, and syncs the Homebrew tap on every push to `main` with a new `pyproject.toml` version; see `specs/release.md`. `.github/workflows/host.yml` bootstraps the maintainer VPS host Caddy (DNS module build, ACME options, Cloudflare token) from the `host` environment secrets; see `specs/caddy.md`.
+- There is no Makefile, pre-commit config, or Python test/lint GitHub workflow. `.github/workflows/deploy.yml` is the reusable deploy workflow that recipe repos call. `.github/workflows/release.yml` tags, releases, and syncs the Homebrew tap on every push to `main` with a new `pyproject.toml` version; see `specs/release.md`. `.github/workflows/host.yml` bootstraps the maintainer VPS host Caddy (DNS module build, ACME options, Cloudflare token) from the `host` environment secrets; see `specs/caddy.md`.
 
-## Commands
+### Commands
 - Install/sync deps: `uv sync`.
 - Lint: `uv run ruff check .`.
 - Type-check: `uv run ty check`.
@@ -16,7 +26,7 @@
 - Local users may install the CLI with Homebrew from `Yarden-zamir/homebrew-tap` or run `uvx --from git+https://github.com/Yarden-zamir/kitshn.git kitshn ...`; remote CI/VPS commands always use hosted `uvx`, not a persistent VPS `kitshn` install.
 - Formula behavior belongs in `.homebrew/kitshn.rb`, then the tap sync renders `Formula/kitshn.rb`.
 
-## Implementation Contracts
+### Implementation Contracts
 - `src/kitshn/models.py` owns recipe/deployment identity and path rules: recipes must be `owner/repo`; environments are sanitized to lowercase dash names and truncated to 63 chars.
 - `src/kitshn/resolve.py` resolves `.kitshn.yaml`; first matching entry wins, `workflow_dispatch` uses the requested environment directly, and the unquoted YAML key `on` is intentionally normalized from PyYAML's boolean parse.
 - `src/kitshn/repo_init.py` owns generated recipe files (`.kitshn.yaml`, `.github/workflows/kitshn.yml`, `kitshn.md`, optional `compose.yml`, `Caddyfile.j2`, `.gitignore`). Tests assert exact generated snippets.
@@ -36,10 +46,10 @@
 - `src/kitshn/remote.py` forwards a CLI invocation to the VPS (`--vps-host`) as `bash -lc` plus the hosted `uvx` CLI; `src/kitshn/try_recipe.py` and `src/kitshn/track.py` own `kitshn try` and `kitshn track`; `src/kitshn/version_check.py` owns `kitshn self-check`.
 - `tests/test_version.py` asserts that `pyproject.toml`, `src/kitshn/__init__.py`, and `uv.lock` agree; bump all three (run `uv lock`) together.
 
-## Testing Notes
+### Testing Notes
 - Unit tests use fake `CommandRunner` implementations and temp `Roots`; do not add tests that require real Docker, Caddy, SSH, or GitHub auth unless explicitly making an integration suite.
 - When changing subprocess behavior, update tests around `CommandRunner` call order and exact arguments instead of shelling out in tests.
 - When changing generated contract files, update `tests/test_repo_init.py` alongside the templates.
 
-## Related Guidance
+### Related Guidance
 - `.claude/skills/kitshn-deploy-service` is a symlink to `src/kitshn/resources/kitshn-deploy-service`, the skill for downstream service repos deployed with KitSHn, not for this CLI implementation itself. Edit the bundled copy.

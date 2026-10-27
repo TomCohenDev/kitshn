@@ -16,7 +16,7 @@ The machine map portal (in the T3 Code fork, `apps/machine-map`) and KitSHn 1 (`
 
 ## Risks to watch
 
-- 🔴 `release.yml` and `homebrew.yml` still run on this repo's `main`. A merge here that bumps `pyproject.toml` publishes a KitSHn 1 release from this repo and points the Homebrew formula back at `Yarden-zamir/kitshn`, which overwrites the formula of kitshn-1. Proposal: delete both workflows from this repo in milestone 1, or earlier. This draft does not change them.
+- `release.yml` and `homebrew.yml` are in this repo, but both are disabled in GitHub (checked on 2026-10-27), so a merge here publishes no KitSHn 1 release. kitshn-1 has its own copies. Proposal: delete both files from this repo in milestone 7.
 - Each moved app changes one line in its own workflow file: `permissions: id-token: write`. A reusable workflow cannot raise the permissions of its caller, so `deploy.yml` here cannot do it for the apps.
 - The address: the admin of kitshn 2 is `kit.yarden-zamir.com` (K-1208). The KitSHn 1 website moves from `kitshn.yarden-zamir.com` to `kitshn-legacy.yarden-zamir.com`, served by KitSHn 1 from the `kitshn-meta` repo. Links to the old address, for example in the KitSHn 1 README, need an update.
 - During milestone 4, one VPS serves both KitSHn 1 apps (Caddy on ports 80 and 443) and kitshn 2 apps (tunnel). They do not clash, because kitshn 2 needs no inbound port. A moved app changes its DNS record from the VPS address to the tunnel, so the move has a short window of DNS caching.

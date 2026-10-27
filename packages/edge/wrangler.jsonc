@@ -1,0 +1,26 @@
+// Local development and tests only. The bootstrap script (public/install) uploads the release
+// bundle through the Cloudflare API and sets the real vars; it does not read this file.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "kitshn",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-10-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/connect", "/connect/*"],
+  },
+  "durable_objects": { "bindings": [{ "name": "KITSHN", "class_name": "Kitshn" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Kitshn"] }],
+  "vars": {
+    "KITSHN_HOST": "localhost",
+    "ACCESS_TEAM_DOMAIN": "",
+    "ACCESS_ADMIN_AUD": "",
+    "ACCESS_CONNECT_AUD": "",
+    "OWNER_EMAILS": "owner@example.com",
+    "CLOUDFLARE_ACCOUNT_ID": "",
+  },
+}

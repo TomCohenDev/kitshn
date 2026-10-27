@@ -1,0 +1,64 @@
+name: kitshn 2
+
+# Checks the TypeScript code of kitshn 2. On main, it also publishes the Worker bundle as the rolling
+# release "edge", which the bootstrap script downloads (K-1203).
+on:
+  pull_request:
+    paths: [packages/**, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, tsconfig.base.json, .github/workflows/edge.yml]
+  push:
+    branches: [main]
+    paths: [packages/**, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, tsconfig.base.json, .github/workflows/edge.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run format:check
+      - run: pnpm run lint
+      - run: pnpm run typecheck
+      - run: pnpm run test
+      - run: sh -n packages/edge/public/install
+      - run: pnpm run build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kitshn-edge
+          path: packages/edge/dist/kitshn-edge.tar.gz
+
+  release:
+    if: github.event_name == 'push'
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: kitshn-edge
+      # A release made with GITHUB_TOKEN triggers no other workflow, so homebrew.yml stays quiet.
+      - name: Publish the rolling edge release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view edge >/dev/null 2>&1; then
+            gh release upload edge kitshn-edge.tar.gz --clobber
+            gh release edit edge --target "$GITHUB_SHA" --notes "kitshn 2 Worker bundle from $GITHUB_SHA."
+          else
+            gh release create edge kitshn-edge.tar.gz --prerelease --latest=false --target "$GITHUB_SHA" \
+              --title "kitshn 2 edge" --notes "kitshn 2 Worker bundle from $GITHUB_SHA."
+          fi

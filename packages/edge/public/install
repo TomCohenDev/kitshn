@@ -1,0 +1,292 @@
+#!/bin/sh
+# kitshn bootstrap (SPEC K-1201 to K-1207). It sets up kitshn on a Cloudflare account, and a second
+# run changes only what is not right yet (K-1205). It uses only sh, curl, jq and tar (K-1203).
+#
+#   curl -fsSL https://kit.yarden-zamir.com/install | \
+#     CLOUDFLARE_API_TOKEN=... KITSHN_HOST=kit.example.com KITSHN_OWNER_EMAILS=you@example.com sh
+#
+# Optional: KITSHN_ACCOUNT_ID (when the token sees more than one account), KITSHN_BUNDLE (a URL or a
+# local path of kitshn-edge.tar.gz), KITSHN_SET_TOKEN=1 (store a new API token in the Worker),
+# KITSHN_GITHUB_CLIENT_ID and KITSHN_GITHUB_CLIENT_SECRET (add GitHub login, K-102).
+set -eu
+
+API=https://api.cloudflare.com/client/v4
+SCRIPT=kitshn
+BUNDLE=${KITSHN_BUNDLE:-https://github.com/Yarden-zamir/kitshn/releases/download/edge/kitshn-edge.tar.gz}
+COMPATIBILITY_DATE=2026-10-20
+MFA='{"allowed_authenticators":["biometrics","security_key"],"session_duration":"24h"}'
+TOKEN_LINK='https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_r2%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22access%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22access_acct%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%5D&accountId=%2A&zoneId=all&name=kitshn'
+
+say() { printf '%s\n' "$*"; }
+changed() { printf '  changed: %s\n' "$*"; }
+kept() { printf '  ok:      %s\n' "$*"; }
+die() {
+  printf 'kitshn: %s\n' "$*" >&2
+  exit 1
+}
+
+for tool in curl jq tar base64; do
+  command -v "$tool" >/dev/null 2>&1 || die "this script needs $tool. Install it and run the script again."
+done
+[ -n "${CLOUDFLARE_API_TOKEN:-}" ] || die "set CLOUDFLARE_API_TOKEN. Make a token with this link: $TOKEN_LINK"
+[ -n "${KITSHN_HOST:-}" ] || die "set KITSHN_HOST to the admin address, for example kit.example.com."
+[ -n "${KITSHN_OWNER_EMAILS:-}" ] || die "set KITSHN_OWNER_EMAILS to your email (a comma-separated list for more)."
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+# api METHOD PATH [JSON]: prints the result. On an error it prints the Cloudflare errors and the
+# permission that the call needs ($NEED), then stops.
+NEED=""
+api() {
+  method=$1
+  path=$2
+  if [ $# -ge 3 ]; then
+    printf '%s' "$3" >"$WORK/body"
+    curl -sS -X "$method" "$API$path" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+      -H "Content-Type: application/json" --data-binary "@$WORK/body" >"$WORK/out" || die "$method $path: no answer from Cloudflare."
+  else
+    curl -sS -X "$method" "$API$path" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" >"$WORK/out" ||
+      die "$method $path: no answer from Cloudflare."
+  fi
+  if [ "$(jq -r '.success // false' "$WORK/out" 2>/dev/null)" != "true" ]; then
+    errors=$(jq -r '[.errors[]? | "\(.code): \(.message)" + ([.error_chain[]?.message] | if length > 0 then " (" + join("; ") + ")" else "" end)] | join("; ")' "$WORK/out" 2>/dev/null || head -c 300 "$WORK/out")
+    hint=""
+    [ -n "$NEED" ] && hint=" The token needs \"$NEED\". Make a new token with this link: $TOKEN_LINK"
+    die "$method $path failed: $errors.$hint"
+  fi
+  jq -c '.result' "$WORK/out"
+}
+# try METHOD PATH: like api, but prints nothing and returns 1 on an error. The errors stay in $WORK/out.
+try() {
+  curl -sS -X "$1" "$API$2" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" >"$WORK/out" 2>/dev/null &&
+    [ "$(jq -r '.success // false' "$WORK/out" 2>/dev/null)" = "true" ]
+}
+
+say "kitshn bootstrap for $KITSHN_HOST"
+
+say "1. API token and account"
+NEED="any valid API token"
+verify=$(api GET /user/tokens/verify)
+[ "$(printf '%s' "$verify" | jq -r .status)" = active ] || die "the API token is not active."
+NEED="Account Settings: Read, or any account permission"
+if [ -n "${KITSHN_ACCOUNT_ID:-}" ]; then
+  ACCOUNT=$KITSHN_ACCOUNT_ID
+else
+  accounts=$(api GET /accounts)
+  [ "$(printf '%s' "$accounts" | jq length)" = 1 ] ||
+    die "the token sees $(printf '%s' "$accounts" | jq length) accounts. Set KITSHN_ACCOUNT_ID to one of: $(printf '%s' "$accounts" | jq -r 'map("\(.id) (\(.name))") | join(", ")')"
+  ACCOUNT=$(printf '%s' "$accounts" | jq -r '.[0].id')
+fi
+NEED="Zone: Read"
+zones=$(api GET "/zones?account.id=$ACCOUNT&per_page=50")
+ZONE=$(printf '%s' "$zones" | jq -r --arg host "$KITSHN_HOST" \
+  '[.[] | . as $z | select($z.name == $host or ($host | endswith("." + $z.name)))] | sort_by(.name | length) | last | .id // empty')
+[ -n "$ZONE" ] || die "no zone of this account contains $KITSHN_HOST. Add the domain to Cloudflare first (K-1111)."
+kept "account $ACCOUNT, zone $ZONE"
+
+say "2. Zero Trust organization (K-1207)"
+NEED="Access: Organizations, Identity Providers, and Groups: Edit"
+if ! try GET "/accounts/$ACCOUNT/access/organizations"; then
+  die "this account has no Zero Trust organization yet. Open https://one.dash.cloudflare.com/$ACCOUNT once, pick a team name and the Free plan, then run this script again."
+fi
+ORG=$(jq -c .result "$WORK/out")
+TEAM=$(printf '%s' "$ORG" | jq -r .auth_domain)
+kept "team domain $TEAM"
+
+say "3. One-time PIN login (K-102) and GitHub login"
+IDPS=$(api GET "/accounts/$ACCOUNT/access/identity_providers")
+if printf '%s' "$IDPS" | jq -e 'any(.[]; .type == "onetimepin")' >/dev/null; then
+  kept "One-time PIN login"
+else
+  api POST "/accounts/$ACCOUNT/access/identity_providers" '{"name":"Email one-time code","type":"onetimepin","config":{}}' >/dev/null
+  changed "added the One-time PIN login"
+fi
+if [ -n "${KITSHN_GITHUB_CLIENT_ID:-}" ] && [ -n "${KITSHN_GITHUB_CLIENT_SECRET:-}" ]; then
+  if printf '%s' "$IDPS" | jq -e 'any(.[]; .type == "github")' >/dev/null; then
+    kept "GitHub login"
+  else
+    body=$(jq -nc --arg id "$KITSHN_GITHUB_CLIENT_ID" --arg secret "$KITSHN_GITHUB_CLIENT_SECRET" \
+      '{name:"GitHub",type:"github",config:{client_id:$id,client_secret:$secret}}')
+    api POST "/accounts/$ACCOUNT/access/identity_providers" "$body" >/dev/null
+    changed "added the GitHub login"
+  fi
+else
+  say "  later:   GitHub login. Make a GitHub OAuth app with the callback https://$TEAM/cdn-cgi/access/callback,"
+  say "           then run this script again with KITSHN_GITHUB_CLIENT_ID and KITSHN_GITHUB_CLIENT_SECRET."
+fi
+
+say "4. Passkeys (K-103) and seat expiration (K-111)"
+# The API refuses its own empty service_token_inactivity block in a PUT, so the script drops it.
+wanted=$(printf '%s' "$ORG" | jq -c --argjson mfa "$MFA" '
+  (if .service_token_inactivity.inactivity_threshold_days == null then del(.service_token_inactivity) else . end) + {
+    user_seat_expiration_inactive_time: "730h",
+    mfa_config: {
+      allowed_authenticators: (((.mfa_config.allowed_authenticators // []) + $mfa.allowed_authenticators) | unique),
+      session_duration: (.mfa_config.session_duration // $mfa.session_duration)
+    }
+  }')
+if [ "$(printf '%s' "$ORG" | jq -S '{a: .user_seat_expiration_inactive_time, b: .mfa_config}')" = \
+  "$(printf '%s' "$wanted" | jq -S '{a: .user_seat_expiration_inactive_time, b: .mfa_config}')" ]; then
+  kept "passkeys and security keys allowed, seats expire after 1 month without a login"
+else
+  api PUT "/accounts/$ACCOUNT/access/organizations" "$wanted" >/dev/null
+  changed "allowed passkeys and security keys, and set seat expiration to 1 month"
+fi
+
+say "5. Access applications (K-104, K-1204)"
+NEED="Access: Apps and Policies: Edit"
+APPS=$(api GET "/accounts/$ACCOUNT/access/apps?per_page=1000")
+POLICIES=$(api GET "/accounts/$ACCOUNT/access/policies?per_page=1000")
+# policy NAME JSON: prints the id of the reusable policy NAME, and creates it when it is missing.
+policy() {
+  id=$(printf '%s' "$POLICIES" | jq -r --arg name "$1" 'map(select(.name == $name)) | .[0].id // empty')
+  if [ -n "$id" ]; then
+    kept "policy \"$1\"" >&2
+  else
+    created=$(api POST "/accounts/$ACCOUNT/access/policies" "$2")
+    id=$(printf '%s' "$created" | jq -r .id)
+    changed "created the policy \"$1\"" >&2
+  fi
+  printf '%s' "$id"
+}
+# app DOMAIN NAME SESSION POLICY_ID: prints the audience tag of the application on DOMAIN. It never
+# changes an application that it did not make (K-408).
+app() {
+  found=$(printf '%s' "$APPS" | jq -c --arg domain "$1" 'map(select(.domain == $domain)) | .[0] // empty')
+  if [ -n "$found" ]; then
+    name=$(printf '%s' "$found" | jq -r .name)
+    case "$name" in
+    kitshn*) kept "application \"$name\" on $1" >&2 ;;
+    *) die "the Access application \"$name\" already covers $1. kitshn does not change it. Remove it or pick another KITSHN_HOST." ;;
+    esac
+    printf '%s' "$found" | jq -r .aud
+    return
+  fi
+  body=$(jq -nc --arg domain "$1" --arg name "$2" --arg session "$3" --arg policy "$4" \
+    '{name:$name,type:"self_hosted",domain:$domain,session_duration:$session,same_site_cookie_attribute:"lax",policies:[{id:$policy,precedence:1}]}')
+  created=$(api POST "/accounts/$ACCOUNT/access/apps" "$body")
+  changed "created the application \"$2\" on $1" >&2
+  printf '%s' "$created" | jq -r .aud
+}
+# After the first run the Worker owns the admin application and the Owner policy, and it may rename
+# the policy with the circle. So the script makes the Owner policy only with a new admin application.
+owner_policy=""
+if ! printf '%s' "$APPS" | jq -e --arg d "$KITSHN_HOST" 'any(.[]; .domain == $d)' >/dev/null; then
+  owner_rules=$(printf '%s' "$KITSHN_OWNER_EMAILS" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0) | {email: {email: .}})')
+  owner_policy=$(policy "kitshn circle Owner" "$(jq -nc --argjson include "$owner_rules" --argjson mfa "$MFA" \
+    '{name:"kitshn circle Owner",decision:"allow",include:$include,require:[],exclude:[],mfa_config:$mfa}')")
+fi
+public_policy=$(policy "kitshn public paths" '{"name":"kitshn public paths","decision":"bypass","include":[{"everyone":{}}],"require":[],"exclude":[]}')
+machines_policy=$(policy "kitshn machines" '{"name":"kitshn machines","decision":"non_identity","include":[{"any_valid_service_token":{}}],"require":[],"exclude":[]}')
+ADMIN_AUD=$(app "$KITSHN_HOST" "kitshn admin" 24h "$owner_policy")
+app "$KITSHN_HOST/install" "kitshn install (public)" 24h "$public_policy" >/dev/null
+CONNECT_AUD=$(app "$KITSHN_HOST/connect" "kitshn connect" 24h "$machines_policy")
+
+say "6. R2 bucket"
+NEED="Workers R2 Storage: Edit"
+if try GET "/accounts/$ACCOUNT/r2/buckets"; then
+  if jq -e '.result.buckets // [] | any(.name == "kitshn")' "$WORK/out" >/dev/null; then
+    kept "R2 bucket kitshn"
+  else
+    api POST "/accounts/$ACCOUNT/r2/buckets" '{"name":"kitshn"}' >/dev/null
+    changed "created the R2 bucket kitshn"
+  fi
+elif grep -q "enable R2" "$WORK/out"; then
+  say "  later:   R2 is off on this account. Turn it on at https://dash.cloudflare.com/$ACCOUNT/r2/overview,"
+  say "           then run this script again. Pages and files (milestone 3) need it; the map does not."
+else
+  die "the R2 check failed: $(jq -r '[.errors[]?.message] | join("; ")' "$WORK/out")"
+fi
+
+say "7. Worker (K-1203)"
+NEED="Workers Scripts: Edit"
+case "$BUNDLE" in
+http*) curl -fsSL "$BUNDLE" -o "$WORK/bundle.tar.gz" || die "cannot download the kitshn bundle from $BUNDLE." ;;
+*) cp "$BUNDLE" "$WORK/bundle.tar.gz" ;;
+esac
+mkdir "$WORK/bundle"
+tar -xzf "$WORK/bundle.tar.gz" -C "$WORK/bundle"
+say "  bundle version $(cat "$WORK/bundle/version")"
+manifest=$(jq -c 'map_values({hash, size})' "$WORK/bundle/assets.json")
+session=$(api POST "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/assets-upload-session" "$(jq -nc --argjson m "$manifest" '{manifest:$m}')")
+assets_jwt=$(printf '%s' "$session" | jq -r .jwt)
+for bucket in $(printf '%s' "$session" | jq -r '.buckets[]? | join(",")'); do
+  set --
+  for hash in $(printf '%s' "$bucket" | tr ',' ' '); do
+    type=$(jq -r --arg h "$hash" 'to_entries[] | select(.value.hash == $h) | .value.type' "$WORK/bundle/assets.json" | head -1)
+    base64 <"$WORK/bundle/assets/$(printf '%s' "$hash" | cut -c1-2)/$hash" | tr -d '\n' >"$WORK/$hash.b64"
+    set -- "$@" -F "$hash=@$WORK/$hash.b64;filename=$hash;type=$type"
+  done
+  curl -sS -X POST "$API/accounts/$ACCOUNT/workers/assets/upload?base64=true" -H "Authorization: Bearer $assets_jwt" "$@" >"$WORK/out"
+  [ "$(jq -r .success "$WORK/out")" = true ] || die "the asset upload failed: $(head -c 300 "$WORK/out")"
+  next=$(jq -r '.result.jwt // empty' "$WORK/out")
+  [ -n "$next" ] && assets_jwt=$next
+done
+migrations='{"new_tag":"v1","new_sqlite_classes":["Kitshn"]}'
+scripts=$(api GET "/accounts/$ACCOUNT/workers/scripts")
+if printf '%s' "$scripts" | jq -e --arg s "$SCRIPT" 'any(.[]; .id == $s)' >/dev/null; then
+  settings=$(api GET "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/settings")
+  printf '%s' "$settings" | jq -e 'any(.bindings[]?; .type == "durable_object_namespace" and .class_name == "Kitshn")' >/dev/null ||
+    die "a Worker named $SCRIPT exists and it is not kitshn. kitshn does not overwrite it."
+fi
+if [ "$(printf '%s' "$scripts" | jq -r --arg s "$SCRIPT" 'map(select(.id == $s)) | .[0].migration_tag // empty')" = v1 ]; then
+  migrations=null
+fi
+metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --argjson migrations "$migrations" \
+  --arg host "$KITSHN_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" \
+  --arg owners "$KITSHN_OWNER_EMAILS" --arg account "$ACCOUNT" '
+  {
+    main_module: "worker.js",
+    compatibility_date: $date,
+    compatibility_flags: ["nodejs_compat"],
+    assets: {jwt: $jwt, config: {not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/connect", "/connect/*"]}},
+    bindings: [
+      {type: "assets", name: "ASSETS"},
+      {type: "durable_object_namespace", name: "KITSHN", class_name: "Kitshn"},
+      {type: "plain_text", name: "KITSHN_HOST", text: $host},
+      {type: "plain_text", name: "ACCESS_TEAM_DOMAIN", text: $team},
+      {type: "plain_text", name: "ACCESS_ADMIN_AUD", text: $admin_aud},
+      {type: "plain_text", name: "ACCESS_CONNECT_AUD", text: $connect_aud},
+      {type: "plain_text", name: "OWNER_EMAILS", text: $owners},
+      {type: "plain_text", name: "CLOUDFLARE_ACCOUNT_ID", text: $account}
+    ],
+    keep_bindings: ["secret_text"]
+  } + (if $migrations == null then {} else {migrations: $migrations} end)')
+printf '%s' "$metadata" >"$WORK/metadata.json"
+curl -sS -X PUT "$API/accounts/$ACCOUNT/workers/scripts/$SCRIPT" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  -F "metadata=@$WORK/metadata.json;type=application/json" \
+  -F "worker.js=@$WORK/bundle/worker.js;type=application/javascript+module" >"$WORK/out"
+[ "$(jq -r .success "$WORK/out")" = true ] || die "the Worker upload failed: $(jq -r '[.errors[]? | "\(.code): \(.message)"] | join("; ")' "$WORK/out")"
+changed "uploaded the Worker $SCRIPT"
+secrets=$(api GET "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/secrets")
+if printf '%s' "$secrets" | jq -e 'any(.[]; .name == "CLOUDFLARE_API_TOKEN")' >/dev/null && [ "${KITSHN_SET_TOKEN:-}" != 1 ]; then
+  kept "Worker secret CLOUDFLARE_API_TOKEN (set KITSHN_SET_TOKEN=1 to replace it)"
+else
+  api PUT "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/secrets" \
+    "$(jq -nc --arg token "$CLOUDFLARE_API_TOKEN" '{name:"CLOUDFLARE_API_TOKEN",text:$token,type:"secret_text"}')" >/dev/null
+  changed "stored the API token as the Worker secret CLOUDFLARE_API_TOKEN (K-406)"
+fi
+# The workers.dev address would skip Access. The Worker refuses requests without an Access token
+# anyway, but kitshn keeps that address off.
+api POST "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/subdomain" '{"enabled":false,"previews_enabled":false}' >/dev/null
+kept "workers.dev address off"
+
+say "8. Address (K-1208)"
+NEED="Workers Routes: Edit and DNS: Edit"
+domains=$(api GET "/accounts/$ACCOUNT/workers/domains?hostname=$KITSHN_HOST")
+domain=$(printf '%s' "$domains" | jq -r --arg h "$KITSHN_HOST" 'map(select(.hostname == $h)) | .[0].service // empty')
+if [ "$domain" = "$SCRIPT" ]; then
+  kept "$KITSHN_HOST serves the Worker"
+elif [ -n "$domain" ]; then
+  die "$KITSHN_HOST already serves the Worker \"$domain\". kitshn does not take it over."
+else
+  api PUT "/accounts/$ACCOUNT/workers/domains" \
+    "$(jq -nc --arg h "$KITSHN_HOST" --arg z "$ZONE" --arg s "$SCRIPT" '{hostname:$h,zone_id:$z,service:$s,environment:"production"}')" >/dev/null
+  changed "$KITSHN_HOST now serves the Worker"
+fi
+
+say ""
+say "kitshn is ready: https://$KITSHN_HOST"
+say "First login: register a passkey or a security key in the App Launcher, https://$TEAM (K-1206)."
+say "Then open https://$KITSHN_HOST and log in with your email code and the passkey."

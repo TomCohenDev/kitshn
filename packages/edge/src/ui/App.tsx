@@ -26,11 +26,12 @@ import {
 } from "../core/model.ts";
 import { MAX_UPLOAD_BYTES } from "../core/library.ts";
 import { placeInside } from "../core/place.ts";
-import type { JobView, MachineView, RevisionView } from "../core/protocol.ts";
+import type { JobView, MachineView, RepoView, RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
 import { CircleEditor, type DeviceSecret, EndsPicker, LevelOverride, SecretDialog } from "./Circle.tsx";
 import { AddSite } from "./Add.tsx";
 import { PauseDialog, PausedBanner } from "./Pause.tsx";
+import { RepoList, setRepoState } from "./Repos.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
 import { MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
@@ -528,6 +529,7 @@ export function App() {
     await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
   };
 
+  const waitingRepos = store.snapshot?.repos.filter((repo) => repo.state === "waiting").length ?? 0;
   return (
     <>
       {route.tab === "map" ? (
@@ -672,6 +674,18 @@ export function App() {
           </>
         ) : null}
         <span class="grow" />
+        {waitingRepos > 0 ? (
+          <button
+            class="btn"
+            title="Repos that wait for you to allow their first deploy (K-819)"
+            onClick={() => {
+              location.hash = "map";
+              setSelection({ cards: new Set(), circle: null });
+            }}
+          >
+            <span class="sticker wait">{plural(waitingRepos, "repo")} waiting</span>
+          </button>
+        ) : null}
         {store.snapshot?.paused ? (
           <button class="btn resume" onClick={startResume} title="Resume needs your passkey again">
             Resume
@@ -739,6 +753,7 @@ export function App() {
       ) : null}
       <Panel
         state={state}
+        repos={store.snapshot.repos}
         selection={selection}
         access={store.snapshot.access}
         me={store.snapshot.me}
@@ -938,6 +953,8 @@ function History(props: { revisions: ReadonlyArray<RevisionView>; onUndo: (id: n
 
 function Panel(props: {
   state: State;
+  /** K-819: the repos that deploy or wait to deploy. */
+  repos: ReadonlyArray<RepoView>;
   selection: Selection;
   access: Readonly<Record<string, import("../core/protocol.ts").AccessState>>;
   me: Actor;
@@ -986,6 +1003,7 @@ function Panel(props: {
       <CardPanel
         resource={cards[0]}
         state={state}
+        repo={props.repos.find((repo) => repo.resourceIds.includes(cards[0]?.id ?? "")) ?? null}
         access={props.access[cards[0].id] ?? null}
         onEdit={props.onEdit}
         onPlace={props.onPlace}
@@ -1063,6 +1081,7 @@ function Panel(props: {
             </li>
           ))}
         </ul>
+        <RepoList repos={props.repos} onToast={props.onToast} />
         <p class="muted">You are {actorLabel(props.me)}.</p>
         {props.warnings.length > 0 ? (
           <>
@@ -1154,6 +1173,8 @@ function StackPanel(props: {
 function CardPanel(props: {
   resource: Resource;
   state: State;
+  /** K-819: the repo gate of the repo that deploys this card, when it has one. */
+  repo: RepoView | null;
   access: import("../core/protocol.ts").AccessState | null;
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onPlace: (resource: Resource) => void;
@@ -1182,6 +1203,26 @@ function CardPanel(props: {
           <a class="btn" href={`https://${address}`} target="_blank" rel="noreferrer">
             Open
           </a>
+        </div>
+      ) : null}
+      {props.repo ? (
+        <div class="row">
+          <span class="label">Deploys</span>
+          <span class={`sticker ${props.repo.state === "allowed" ? "ok" : props.repo.state === "waiting" ? "wait" : ""}`}>
+            {props.repo.state}
+          </span>
+          <button
+            type="button"
+            class={props.repo.state === "blocked" ? "btn" : "btn danger"}
+            onClick={async () => {
+              if (!props.repo) return;
+              const next = props.repo.state === "blocked" ? "allowed" : "blocked";
+              const { text, error } = await setRepoState(props.repo, next);
+              props.onToast(text, error);
+            }}
+          >
+            {props.repo.state === "blocked" ? "Allow deploys" : "Block deploys"}
+          </button>
         </div>
       ) : null}
       {props.access ? (

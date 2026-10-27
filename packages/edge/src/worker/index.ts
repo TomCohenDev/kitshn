@@ -284,7 +284,8 @@ export default {
       headers.set("x-kitshn-deployer", JSON.stringify(deployer));
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
     }
-    if (url.pathname === "/join/exchange" && request.method === "POST") {
+    // K-1706: "kitshn rekey" trades its one-time code in the same way.
+    if ((url.pathname === "/join/exchange" || url.pathname === "/join/rekey") && request.method === "POST") {
       // A cheap shape check keeps junk away from the Durable Object; the code itself is the secret.
       const body = (await request
         .clone()
@@ -293,7 +294,7 @@ export default {
       if (typeof body?.code !== "string" || !/^[23456789abcdefghjkmnpqrstuvwxyz]{20}$/.test(body.code)) {
         return Response.json({ error: "This is not a kitshn join code." }, { status: 400 });
       }
-      // K-602: public; the one-time join code is the secret. The Durable Object ignores any caller header.
+      // K-602: public; the one-time code is the secret. The Durable Object ignores any caller header.
       const headers = new Headers(request.headers);
       headers.delete("x-kitshn-caller");
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));

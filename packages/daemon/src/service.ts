@@ -109,30 +109,39 @@ WantedBy=default.target
 `;
 }
 
-/** K-603: start (idempotent), restart, stop and read the tunnel service. */
+/** One step of a service command; `mayFail` for a step whose failure means "already so". */
+export interface Step {
+  readonly argv: ReadonlyArray<string>;
+  readonly mayFail: boolean;
+}
+
+/**
+ * K-603: start (idempotent), restart with a changed service file, stop and read the tunnel service. On macOS a
+ * changed plist needs `bootout` and `bootstrap`; `kickstart` would run the old definition.
+ */
 export function tunnelCommands(platform: Platform, file: string, uid: number) {
   if (platform === "darwin") {
-    const label = `gui/${uid}/com.kitshn.tunnel`;
+    const bootstrap = { argv: ["launchctl", "bootstrap", `gui/${uid}`, file], mayFail: false };
+    const bootout = { argv: ["launchctl", "bootout", `gui/${uid}`, file], mayFail: true };
     return {
-      /** `bootstrap` fails when the agent is loaded already; the caller ignores that. */
-      start: [["launchctl", "bootstrap", `gui/${uid}`, file]],
-      restart: [["launchctl", "kickstart", "-k", label]],
-      stop: [["launchctl", "bootout", `gui/${uid}`, file]],
-      state: ["launchctl", "print", label],
-    };
+      // `bootstrap` fails when the agent is loaded already.
+      start: [{ ...bootstrap, mayFail: true }],
+      restart: [bootout, bootstrap],
+      stop: [bootout],
+      state: ["launchctl", "print", `gui/${uid}/com.kitshn.tunnel`],
+    } satisfies Record<string, ReadonlyArray<Step> | ReadonlyArray<string>>;
   }
+  const reload = { argv: ["systemctl", "--user", "daemon-reload"], mayFail: false };
   return {
-    start: [
-      ["systemctl", "--user", "daemon-reload"],
-      ["systemctl", "--user", "enable", "--now", "kitshn-tunnel.service"],
-    ],
+    start: [reload, { argv: ["systemctl", "--user", "enable", "--now", "kitshn-tunnel.service"], mayFail: false }],
     restart: [
-      ["systemctl", "--user", "daemon-reload"],
-      ["systemctl", "--user", "restart", "kitshn-tunnel.service"],
+      reload,
+      { argv: ["systemctl", "--user", "enable", "kitshn-tunnel.service"], mayFail: false },
+      { argv: ["systemctl", "--user", "restart", "kitshn-tunnel.service"], mayFail: false },
     ],
-    stop: [["systemctl", "--user", "disable", "--now", "kitshn-tunnel.service"]],
+    stop: [{ argv: ["systemctl", "--user", "disable", "--now", "kitshn-tunnel.service"], mayFail: true }],
     state: ["systemctl", "--user", "is-active", "kitshn-tunnel.service"],
-  };
+  } satisfies Record<string, ReadonlyArray<Step> | ReadonlyArray<string>>;
 }
 
 /** K-605: the tunnel state for the status report, from the output of the state command. */
@@ -143,17 +152,15 @@ export function tunnelStateOf(platform: Platform, output: string): "starting" | 
   return state === "activating" || state === "reloading" ? "starting" : "stopped";
 }
 
-/** The commands that start, stop and restart the service of the platform. */
+/** The commands that start and stop the service of the platform. */
 export function serviceCommands(platform: Platform, file: string, uid: number) {
   if (platform === "darwin") {
     return {
       start: [["launchctl", "bootstrap", `gui/${uid}`, file]],
       stop: [["launchctl", "bootout", `gui/${uid}`, file]],
-      restart: [["launchctl", "kickstart", "-k", `gui/${uid}/com.kitshn.daemon`]],
     };
   }
   return {
-    restart: [["systemctl", "--user", "restart", "kitshn.service"]],
     start: [
       ["systemctl", "--user", "daemon-reload"],
       ["systemctl", "--user", "enable", "--now", "kitshn.service"],

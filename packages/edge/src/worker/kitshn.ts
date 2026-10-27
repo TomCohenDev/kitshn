@@ -155,6 +155,7 @@ import {
   type MachineCheck,
   answerCheck,
   pickMachine,
+  rekeyDecision,
   socketStart,
 } from "./machines.ts";
 import type { Env } from "./env.ts";
@@ -1430,11 +1431,16 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-1706: trades a rekey code, once and within 10 minutes, for a new key of a machine that waits for one. */
   private async rekey(request: Request) {
-    const body = (await request.json().catch(() => null)) as { code?: unknown; publicKey?: unknown } | null;
+    const body = (await request.json().catch(() => null)) as {
+      code?: unknown;
+      publicKey?: unknown;
+      machineId?: unknown;
+    } | null;
     const code = typeof body?.code === "string" ? body.code.trim() : "";
     const publicKey = parsePublicKey(body?.publicKey);
-    if (!code || publicKey === null)
-      return Response.json({ error: "Send the rekey code and the public key." }, { status: 400 });
+    const machineId = typeof body?.machineId === "string" ? body.machineId : "";
+    if (!code || publicKey === null || !machineId)
+      return Response.json({ error: "Send the rekey code, the machine id and the public key." }, { status: 400 });
     const key = await this.publicKey(publicKey);
     const lookup = await joinLookup(code);
     const [row] = this.sql<{ machine_id: string; expires_at: number }>(
@@ -1445,10 +1451,12 @@ export class Kitshn extends DurableObject<Env> {
       return Response.json({ error: "This rekey code is not valid, or someone used it already." }, { status: 404 });
     const machine = this.state.machines.get(row.machine_id);
     const used = () => this.sql("DELETE FROM rekey_codes WHERE lookup = ?", lookup);
-    if (row.expires_at < Date.now() || !machine || machine.key?.kind === "public") {
-      used();
-      return Response.json({ error: "This rekey code expired. Press Reset key again." }, { status: 410 });
+    const decision = rekeyDecision({ machineId: row.machine_id, expiresAt: row.expires_at }, machineId, machine, Date.now());
+    if (decision.kind === "refuse") {
+      if (!decision.keepCode) used();
+      return Response.json({ error: decision.reason }, { status: decision.status });
     }
+    if (!machine) throw new Error(`rekeyDecision stored a key for the unknown machine ${row.machine_id}.`);
     // The key and the use of the code are one step, so a failed write keeps the code.
     this.setKey(machine, key, deviceActor(machine), `${machine.name} got the key ${key.fingerprint} with a rekey code`, used);
     // K-1708: a connection on the token alone ends; the daemon connects again and signs.

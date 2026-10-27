@@ -13,7 +13,10 @@ export interface Machine {
   readonly tunnelId: string;
   /** K-818: risky Compose settings that the owner allows for one repo on this machine. */
   readonly allow?: ReadonlyArray<ComposeAllowance>;
-  /** K-1702. Absent on a machine that joined before machine keys; it sends its first key (K-1708). */
+  /**
+   * K-1702. Absent on a machine that joined before machine keys: it reports status only and gets no job until
+   * `kitshn rekey` gives it its first key (K-1708).
+   */
   readonly key?: MachineKey;
 }
 

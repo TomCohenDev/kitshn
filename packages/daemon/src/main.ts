@@ -18,6 +18,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
+import { keyPlan } from "./keys.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
 import {
   chmodSync,
@@ -97,6 +98,8 @@ function readConfig(): JoinSecrets {
  */
 const keyFile = join(dirname(paths.config), "machine.key");
 const nextKeyFile = `${keyFile}.next`;
+/** K-1703, K-1706: a key from a join or rekey code waits here until kitshn takes it. */
+const codeKeyFile = `${keyFile}.rekey`;
 /** K-1705: `kitshn rotate-key` leaves this file; the running daemon rotates and removes it. */
 const rotateRequestFile = join(dirname(paths.config), "rotate-key");
 /** K-1706, K-1708: `kitshn rekey` leaves this file; the running daemon connects again with the new key. */
@@ -119,13 +122,16 @@ function writeKey(file: string, key: MachinePrivateKey) {
   renameSync(temporary, file);
 }
 
-/** K-602: trades the join code for the machine secrets and saves them for the daemon user only. */
+/**
+ * K-602, K-1703: trades the join code and the public half of a new machine key for the machine secrets, and saves
+ * both for the daemon user only.
+ */
 async function joinCommand(code: string | undefined, server: string | undefined) {
   if (!code || !server) fail("usage: kitshn join <code> --server https://kit.example.com");
-  // K-1703: the key pair comes first, in machine.key.next before kitshn stores its public half, so a wrong code
-  // never replaces a valid key. The next challenge that names it promotes it, as after a rotation.
+  // K-1703: the key pair comes first, in machine.key.rekey before kitshn stores its public half, so a wrong code
+  // never replaces a valid key. The next challenge that names it promotes it.
   const key = await newMachineKey();
-  writeKey(nextKeyFile, key);
+  writeKey(codeKeyFile, key);
   const response = await fetch(new URL("/join/exchange", server), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -137,7 +143,7 @@ async function joinCommand(code: string | undefined, server: string | undefined)
     error?: string;
   } | null;
   if (!response.ok || !body?.iv || !body.sealed) {
-    rmSync(nextKeyFile, { force: true });
+    rmSync(codeKeyFile, { force: true });
     fail(body?.error ?? `the server answered ${response.status}.`);
   }
   const secrets = await openJoin(code, { iv: body.iv, sealed: body.sealed });
@@ -145,7 +151,7 @@ async function joinCommand(code: string | undefined, server: string | undefined)
   // An older file can have looser permissions; tighten them before the secrets go in.
   if (existsSync(paths.config)) chmodSync(paths.config, 0o600);
   writeFileSync(paths.config, `${JSON.stringify(secrets, null, 2)}\n`, { mode: 0o600 });
-  renameSync(nextKeyFile, keyFile);
+  renameSync(codeKeyFile, keyFile);
   console.log(`Joined as machine ${secrets.machineId} with the key ${await fingerprintOf(key.x)}.`);
 }
 
@@ -156,21 +162,22 @@ async function joinCommand(code: string | undefined, server: string | undefined)
 async function rekeyCommand(code: string | undefined) {
   if (!code) fail("usage: kitshn rekey <code>");
   const config = readConfig();
-  // In machine.key.next before kitshn stores its public half, so a failed write cannot lock the machine out and
-  // a wrong code cannot replace a valid key. The next challenge that names it promotes it, as after a rotation.
+  // In its own file before kitshn stores its public half, so a failed write cannot lock the machine out, a wrong
+  // code cannot replace a valid key, and a rotation or a reconnect never touches it. The next challenge that
+  // names it promotes it.
   const key = await newMachineKey();
-  writeKey(nextKeyFile, key);
+  writeKey(codeKeyFile, key);
   const response = await fetch(new URL("/join/rekey", config.server), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, publicKey: key.x }),
+    body: JSON.stringify({ code, machineId: config.machineId, publicKey: key.x }),
   });
   const body = (await response.json().catch(() => null)) as { fingerprint?: string; error?: string } | null;
   if (!response.ok || !body?.fingerprint) {
-    rmSync(nextKeyFile, { force: true });
+    rmSync(codeKeyFile, { force: true });
     fail(body?.error ?? `the server answered ${response.status}.`);
   }
-  renameSync(nextKeyFile, keyFile);
+  renameSync(codeKeyFile, keyFile);
   rmSync(rotateRequestFile, { force: true });
   console.log(`Saved the new key ${body?.fingerprint} in ${keyFile}.`);
   writeFileSync(reconnectRequestFile, "");
@@ -227,9 +234,18 @@ async function ensureTunnel(config: JoinSecrets) {
   const tokenFile = join(paths.data, "tunnel-token");
   const tokenChanged = writeChanged(tokenFile, config.tunnelToken, 0o600);
   const unitChanged = writeChanged(paths.tunnelService, tunnelServiceFile(platform, binary, tokenFile), 0o644);
-  // launchd `bootstrap` fails for an agent that runs already.
-  for (const argv of tunnel.start) run(argv, platform === "darwin");
-  if (fresh || tokenChanged || unitChanged) for (const argv of tunnel.restart) run(argv);
+  const steps = fresh || tokenChanged || unitChanged ? tunnel.restart : tunnel.start;
+  for (const step of steps) run(step.argv, step.mayFail);
+}
+
+/**
+ * K-603, K-615: stops and removes the tunnel service and its token file, after "Remove machine" or on
+ * `kitshn service uninstall`. The cloudflared binary stays in the data folder.
+ */
+function removeTunnel() {
+  for (const step of tunnel.stop) run(step.argv, step.mayFail);
+  rmSync(paths.tunnelService, { force: true });
+  rmSync(join(paths.data, "tunnel-token"), { force: true });
 }
 
 async function serviceCommand(action: string | undefined) {
@@ -249,11 +265,14 @@ async function serviceCommand(action: string | undefined) {
       console.log("For a start without a login, the user needs lingering: loginctl enable-linger $USER");
     }
   } else if (action === "uninstall") {
-    for (const argv of [...commands.stop, ...tunnel.stop]) run(argv, true);
+    for (const argv of commands.stop) run(argv, true);
     rmSync(file, { force: true });
-    rmSync(paths.tunnelService, { force: true });
+    removeTunnel();
+    const folders = [...new Set([dirname(paths.config), paths.data])];
     console.log(
-      `Removed ${file}. The tokens stay in ${paths.config}; delete them with: rm -r "${dirname(paths.config)}"`,
+      `Removed ${file}, ${paths.tunnelService} and the tunnel token. These folders stay: ${folders.join(", ")}` +
+        ` (${paths.config} and machine.key hold the machine token and key; the data folder holds cloudflared,` +
+        ` the apps and the sample history). Delete them with: rm -r ${folders.map((folder) => `"${folder}"`).join(" ")}`,
     );
   } else fail("usage: kitshn service install|uninstall");
 }
@@ -884,12 +903,21 @@ async function answerChallenge(
   config: JoinSecrets,
   message: Extract<ServerToDaemon, { type: "challenge" }>,
 ): Promise<"answered" | "wrong-key" | "no-key" | "token-only"> {
-  const next = readKey(nextKeyFile);
-  if (next && message.fingerprint !== null && (await fingerprintOf(next.x)) === message.fingerprint) {
-    // kitshn took the rotation, but its close with 4004 never arrived (K-1705).
-    renameSync(nextKeyFile, keyFile);
-    rmSync(rotateRequestFile, { force: true });
-  } else if (next) rmSync(nextKeyFile); // A rotation that kitshn never took; a request file asks again.
+  const fingerprint = async (file: string) => {
+    const key = readKey(file);
+    return key ? fingerprintOf(key.x) : null;
+  };
+  const plan = keyPlan(message.fingerprint, {
+    current: await fingerprint(keyFile),
+    next: await fingerprint(nextKeyFile),
+    fromCode: await fingerprint(codeKeyFile),
+  });
+  // kitshn took the key, but the end of its command or the 4004 close never came (K-1705, K-1706).
+  if (plan.promote === "fromCode") renameSync(codeKeyFile, keyFile);
+  if (plan.promote === "next") renameSync(nextKeyFile, keyFile);
+  if (plan.promote !== null) rmSync(rotateRequestFile, { force: true });
+  // A rotation that kitshn never took; a request file asks again.
+  if (plan.dropNext) rmSync(nextKeyFile, { force: true });
   if (message.fingerprint === null) {
     log("kitshn has no key for this machine, so it gets status only and no job. Run kitshn rekey with the key code of its panel.");
     return "token-only";
@@ -899,12 +927,12 @@ async function answerChallenge(
     log(`kitshn expects the key ${message.fingerprint}, and ${keyFile} is missing. Use Reset key on the map, then kitshn rekey <code>.`);
     return "no-key";
   }
-  const fingerprint = await fingerprintOf(key.x);
+  const signing = await fingerprintOf(key.x);
   const signature = await signText(key, connectText(config.server, config.machineId, message.challenge));
   ws.send(JSON.stringify({ type: "answer", signature } satisfies DaemonMessage));
   challenge = message.challenge;
-  if (message.fingerprint === fingerprint) return "answered";
-  log(`kitshn expects the key ${message.fingerprint}, but this machine has ${fingerprint}. Use Reset key on the map, then kitshn rekey <code>.`);
+  if (message.fingerprint === signing) return "answered";
+  log(`kitshn expects the key ${message.fingerprint}, but this machine has ${signing}. Use Reset key on the map, then kitshn rekey <code>.`);
   return "wrong-key";
 }
 
@@ -1047,6 +1075,11 @@ function connect(config: JoinSecrets) {
       // owner reset its key. Like a key that cannot pass, they would repeat forever with a short backoff, so
       // they wait long (a removed machine also needs a new join, a reset one `kitshn rekey`).
       if (event.code === 4001 || event.code === 4002 || event.code === 4005 || wrongKey) stopped = true;
+      // K-615: kitshn deleted the tunnel of this machine; its service has nothing left to serve.
+      if (event.code === 4002) {
+        log("the owner removed this machine; removing the tunnel service. Run kitshn service uninstall to stop the daemon.");
+        removeTunnel();
+      }
       if (current === ws) current = null;
       const wait = soon || event.code === 4004 ? 0 : stopped ? 60 * 60_000 : delay;
       soon = false;

@@ -10,6 +10,7 @@ import {
   parseCommand,
   parseLabels,
   pickMachine,
+  rekeyDecision,
   socketStart,
 } from "./machines.ts";
 
@@ -132,5 +133,25 @@ describe("the check of a machine socket (K-1704, K-1706, K-1708)", () => {
   it("takes one answer per socket", () => {
     expect(answerCheck(key, { check: "waiting", answered: true }).kind).toBe("refuse");
     expect(answerCheck(key, { check: "signed", answered: true }).kind).toBe("refuse");
+  });
+});
+
+describe("key codes (K-1706, K-1708)", () => {
+  const keyless = machine("m1", 0, []);
+  const code = { machineId: "m1", expiresAt: 100 };
+
+  it("gives a key to the machine of the code", () => {
+    expect(rekeyDecision(code, "m1", keyless, 50)).toEqual({ kind: "store" });
+  });
+
+  it("refuses another machine and keeps the code for its own machine", () => {
+    expect(rekeyDecision(code, "m2", keyless, 50)).toMatchObject({ kind: "refuse", keepCode: true });
+  });
+
+  it("uses up an expired code and a code of a machine that has a key again", () => {
+    expect(rekeyDecision(code, "m1", keyless, 200)).toMatchObject({ kind: "refuse", keepCode: false });
+    const keyed = { ...keyless, key: { kind: "public", publicKey: "p", fingerprint: "f", since: 1 } } as const;
+    expect(rekeyDecision(code, "m1", keyed, 50)).toMatchObject({ kind: "refuse", keepCode: false });
+    expect(rekeyDecision(code, "m1", undefined, 50)).toMatchObject({ kind: "refuse", keepCode: false });
   });
 });

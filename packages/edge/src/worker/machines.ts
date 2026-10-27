@@ -139,3 +139,22 @@ export function answerCheck(
   if (key.kind === "waiting") return { kind: "refuse", reason: "This machine waits for its key code." };
   return { kind: "verify", publicKey: key.publicKey, fingerprint: key.fingerprint };
 }
+
+/** K-1706, K-1708: what a rekey code does for the machine that sends it. */
+export type RekeyDecision =
+  | { readonly kind: "store" }
+  /** `keepCode`: a code of another machine stays valid for its own machine. */
+  | { readonly kind: "refuse"; readonly status: number; readonly reason: string; readonly keepCode: boolean };
+
+export function rekeyDecision(
+  code: { readonly machineId: string; readonly expiresAt: number },
+  senderMachineId: string,
+  machine: Machine | undefined,
+  now: number,
+): RekeyDecision {
+  if (code.machineId !== senderMachineId)
+    return { kind: "refuse", status: 403, reason: "This key code belongs to another machine.", keepCode: true };
+  if (code.expiresAt < now || !machine || machine.key?.kind === "public")
+    return { kind: "refuse", status: 410, reason: "This key code expired. Make a new one in the panel.", keepCode: false };
+  return { kind: "store" };
+}

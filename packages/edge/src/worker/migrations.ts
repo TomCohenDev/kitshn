@@ -58,6 +58,10 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   ],
   // 5: stacks that the owner makes (K-521).
   ["CREATE TABLE stacks (id TEXT PRIMARY KEY, body TEXT NOT NULL)"],
+  // 6: the repo gate (K-819), by GitHub repository id.
+  [
+    "CREATE TABLE repos (repo_id TEXT PRIMARY KEY, name TEXT NOT NULL, state TEXT NOT NULL, first_seen INTEGER NOT NULL)",
+  ],
 ];
 
 /** Runs the migrations after `from`. Returns the new version. The caller provides the transaction. */

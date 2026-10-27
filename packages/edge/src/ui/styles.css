@@ -1150,3 +1150,17 @@ a > code {
 .open-card button.link:hover {
   text-decoration: underline;
 }
+/* K-819: the repos that deploy, in the map panel. */
+.repo-list {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+.repo-list li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}

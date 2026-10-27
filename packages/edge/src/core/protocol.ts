@@ -1,3 +1,7 @@
+import type { RepoGate } from "./repos.ts";
+
+/** K-819: a repo gate with the slug that groups the repo's cards (K-508). */
+export type RepoView = RepoGate & { readonly slug: string };
 import type { Actor } from "./changes.ts";
 import type { Command, Machine, MachineStatus, Sample } from "./machine.ts";
 import type { Circle, Point, Resource, ShareSetting, Stack } from "./model.ts";
@@ -30,6 +34,8 @@ export interface Snapshot {
   /** K-408: Access applications that kitshn did not make but that cover a kitshn address. */
   readonly accessWarnings: ReadonlyArray<string>;
   readonly paused: boolean;
+  /** K-819: the repos that deployed or wait to deploy, newest first. */
+  readonly repos: ReadonlyArray<RepoView>;
   readonly machines: ReadonlyArray<MachineView>;
   /** The newest jobs, with their output cut to 4,000 characters. */
   readonly jobs: ReadonlyArray<JobView>;

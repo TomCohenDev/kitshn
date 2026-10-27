@@ -41,6 +41,7 @@ import {
   sealJoin,
 } from "../core/machine.ts";
 import { placeInside } from "../core/place.ts";
+import { type RepoState, gateDecision } from "../core/repos.ts";
 import type { MachineView, RevisionView, ServerMessage, Snapshot } from "../core/protocol.ts";
 import { ClientMessage } from "../core/schema.ts";
 import { agentDeployPlan, agentMayRunOn, agentRefusal, cardsControlledBy, circlesOf } from "../core/agent.ts";
@@ -292,6 +293,13 @@ export class Kitshn extends DurableObject<Env> {
         })),
       ];
       this.persist(changes);
+      // The local demo shows the repo gate (K-819): one repo that deploys, one that waits.
+      if (extra.resources.length > 0)
+        for (const [id, name, state] of [
+          ["1001", "Yarden-zamir/riffle", "allowed"],
+          ["1002", "Yarden-zamir/new-app", "waiting"],
+        ] as const)
+          this.sql("INSERT OR IGNORE INTO repos (repo_id, name, state, first_seen) VALUES (?, ?, ?, ?)", id, name, state, Date.now());
       this.insertRevision({ _tag: "kitshn", reason: "setup" }, "Set up kitshn", changes, null);
     });
     this.load();
@@ -452,6 +460,15 @@ export class Kitshn extends DurableObject<Env> {
       access: accessStates(desiredAccess(this.state, Date.now()), this.access),
       accessWarnings: this.accessWarnings,
       paused: this.state.paused,
+      repos: this.sql<{ repo_id: string; name: string; state: RepoState; first_seen: number }>(
+        "SELECT * FROM repos ORDER BY first_seen DESC",
+      ).map((row) => ({
+        repoId: row.repo_id,
+        name: row.name,
+        state: row.state,
+        firstSeen: row.first_seen,
+        slug: repoSlug(row.name),
+      })),
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
       version: this.env.KITSHN_VERSION,
@@ -560,6 +577,8 @@ export class Kitshn extends DurableObject<Env> {
       );
     if (path.startsWith("/api/machines/") && request.method === "DELETE")
       return this.removeMachine(caller, decodeURIComponent(path.slice("/api/machines/".length)));
+    if (path.startsWith("/api/repos/") && request.method === "POST")
+      return this.setRepoState(caller, decodeURIComponent(path.slice("/api/repos/".length)), await request.json().catch(() => null));
     if (path === "/api/jobs" && request.method === "POST")
       return this.addJob(caller, await request.json().catch(() => null));
     if (path === "/api/jobs" && request.method === "GET") return Response.json(this.recentJobs(100));
@@ -1788,11 +1807,59 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-803 to K-807, K-901 to K-904: the steps of a static site deploy from GitHub Actions. */
+  /** K-819: refuses a deploy step of a repo that waits for the owner or that the owner blocked. */
+  private repoGate(deployer: Deployer): Response | null {
+    const [row] = this.sql<{ repo_id: string; name: string; state: RepoState; first_seen: number }>(
+      "SELECT * FROM repos WHERE repo_id = ?",
+      deployer.repoId,
+    );
+    const gate = row ? { repoId: row.repo_id, name: row.name, state: row.state, firstSeen: row.first_seen } : undefined;
+    const [seen] = this.sql<{ n: number }>("SELECT count(*) AS n FROM deploys WHERE repo = ?", deployer.repo);
+    const decision = gateDecision(gate, { repoId: deployer.repoId, name: deployer.repo }, (seen?.n ?? 0) > 0, Date.now());
+    if (decision.record) {
+      const record = decision.record;
+      this.ctx.storage.transactionSync(() => {
+        this.sql(
+          "INSERT INTO repos (repo_id, name, state, first_seen) VALUES (?, ?, ?, ?)",
+          record.repoId,
+          record.name,
+          record.state,
+          record.firstSeen,
+        );
+        if (record.state === "waiting")
+          this.insertRevision({ _tag: "kitshn", reason: "repo gate" }, `${record.name} waits to deploy (K-819)`, [], null);
+      });
+      this.load();
+      this.broadcast();
+    } else if (row && row.name !== deployer.repo) {
+      this.sql("UPDATE repos SET name = ? WHERE repo_id = ?", deployer.repo, deployer.repoId);
+    }
+    return decision.allow ? null : Response.json({ error: decision.error }, { status: 403 });
+  }
+
+  /** K-819: the owner allows or blocks the deploys of one repo. */
+  private setRepoState(caller: Caller, repoId: string, body: unknown) {
+    const state = typeof body === "object" && body !== null ? (body as Record<string, unknown>)["state"] : null;
+    if (state !== "allowed" && state !== "blocked")
+      return Response.json({ error: 'Send {"state": "allowed" | "blocked"}.' }, { status: 400 });
+    const [row] = this.sql<{ name: string }>("SELECT name FROM repos WHERE repo_id = ?", repoId);
+    if (!row) return Response.json({ error: `kitshn knows no repo ${repoId}.` }, { status: 404 });
+    this.ctx.storage.transactionSync(() => {
+      this.sql("UPDATE repos SET state = ? WHERE repo_id = ?", state, repoId);
+      this.insertRevision(caller.actor, `${state === "allowed" ? "Allowed" : "Blocked"} deploys of ${row.name} (K-819)`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    return Response.json({ repoId, state });
+  }
+
   private async deployStep(path: string, deployer: Deployer, body: unknown): Promise<Response> {
     const api = this.api();
     if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
     const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
     const fail = (status: number, error: string) => Response.json({ error }, { status });
+    const gate = this.repoGate(deployer);
+    if (gate) return gate;
     try {
       if (path === "/deploy/plan") return await this.planDeploy(api, deployer, input);
       if (path === "/deploy/status") return this.composeStatus(deployer, String(input["deployId"] ?? ""));
@@ -2060,6 +2127,8 @@ export class Kitshn extends DurableObject<Env> {
   /** K-812: the source archive and the params of a Compose deploy go to R2 until the job ends. */
   private async deployFile(path: string, deployer: Deployer, request: Request) {
     const fail = (status: number, error: string) => Response.json({ error }, { status });
+    const gate = this.repoGate(deployer);
+    if (gate) return gate;
     const [row] = this.sql<DeployRow>(
       "SELECT * FROM deploys WHERE id = ?",
       request.headers.get("x-kitshn-deploy") ?? "",

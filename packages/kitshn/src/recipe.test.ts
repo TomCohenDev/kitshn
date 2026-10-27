@@ -31,6 +31,10 @@ describe("recipe reader (K-802, K-803)", () => {
     expect(() =>
       decodeRecipe(readRecipe(source.replace('output: "site"', 'output: "site", extra: 1'))),
     ).toThrow();
+    const compose = (file: string) => ({ compose: { file }, deploy: [{ on: "push", name: "prod" }] });
+    expect(decodeRecipe(compose("deploy/compose.yml"))).toMatchObject(compose("deploy/compose.yml"));
+    expect(() => decodeRecipe(compose("/etc/compose.yml"))).toThrow(/inside the repo/);
+    expect(() => decodeRecipe(compose("../other/compose.yml"))).toThrow(/inside the repo/);
   });
 });
 

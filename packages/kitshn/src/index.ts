@@ -28,7 +28,7 @@ export interface StaticApp {
 export interface ComposeApp {
   /** At most 10 machine labels. */
   readonly runsOn?: ReadonlyArray<string>;
-  /** The Compose file. Without it, Compose looks for its default file names. */
+  /** The Compose file, a path inside the repo. Without it, kitshn takes the file names that Compose finds. */
   readonly file?: string;
 }
 

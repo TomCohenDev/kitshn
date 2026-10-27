@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bindSources, composeRisks, rawRisks, realpathOf } from "./guard.ts";
+import { bindSources, composeFiles, composeRisks, rawRisks, realpathOf } from "./guard.ts";
 
 const roots = ["/apps/a/src", "/apps/a/data", "/apps/a/logs", "/apps/a/sockets"];
 const same = (path: string) => path;
@@ -13,7 +13,7 @@ describe("risky Compose settings (K-818)", () => {
         web: {
           build: { context: "/apps/a/src", dockerfile: "Dockerfile" },
           environment: { A: "1" },
-          networks: { default: null, "kitshn-edge": null },
+          networks: { default: null },
           volumes: [
             { type: "bind", source: "/apps/a/data/state", target: "/data" },
             { type: "volume", source: "cache", target: "/cache" },
@@ -22,7 +22,7 @@ describe("risky Compose settings (K-818)", () => {
         },
       },
       volumes: { cache: { name: "a_cache" } },
-      networks: { default: { name: "a_default" }, "kitshn-edge": { name: "kitshn-edge", external: true } },
+      networks: { default: { name: "a_default" } },
     };
     expect(risks(config, { services: { web: { env_file: [{ path: "/apps/a/src/.env" }] } } })).toEqual([]);
   });
@@ -55,7 +55,7 @@ describe("risky Compose settings (K-818)", () => {
       "cap_add",
       "env_file:/apps/b/params.env",
       "file:/home/kitshn/.config/kitshn/join.json",
-      "network:other_default",
+      "network:b_default",
       "pid",
       "ports",
       "post_start",
@@ -99,9 +99,67 @@ describe("risky Compose settings (K-818)", () => {
       "image",
       "logging",
       "network:inner",
+      "network:kitshn-edge",
       "networks.options",
       "secrets.environment",
     ]);
-    expect(rawRisks("include:\n  - ../other.yml\nservices:\n  web:\n    extends:\n      file: /x.yml\n")).toEqual(["include", "extends"]);
+  });
+  it("names only the app's own service as an image, container or build tag", () => {
+    const named = (name: string, tag: string) => ({
+      services: { web: { build: { context: "/apps/a/src", tags: [tag] }, image: name, container_name: name } },
+    });
+    const preview = (config: unknown) => composeRisks(config, {}, "a-pr-1", roots, same);
+    expect(preview(named("a-pr-1-web", "a-pr-1-web:v2"))).toEqual([]);
+    // Another app's project starts with this one's name: a-pr-12 owns a-pr-12-web.
+    expect(preview(named("a-pr-12-web", "a-pr-12-web:latest"))).toEqual(["build.tags", "container_name", "image"]);
+    expect(preview(named("a-pr-1-db", "a-pr-1-web:5000/x"))).toEqual(["build.tags", "container_name", "image"]);
+  });
+  it("needs an allowance for the shared kitshn-edge network, also under another key", () => {
+    const config = {
+      services: { web: { networks: { edge: null } } },
+      networks: { edge: { name: "kitshn-edge", external: true } },
+    };
+    expect(risks(config)).toEqual(["network:kitshn-edge"]);
+  });
+});
+
+describe("raw Compose files (K-818)", () => {
+  it("finds include and extends in every YAML form that Compose reads", () => {
+    const files = [
+      "include:\n  - ../other.yml\nservices:\n  web:\n    extends:\n      file: /x.yml\n",
+      '"include":\n  - ../other.yml\nservices:\n  web:\n    "extends": {file: /x.yml, service: a}\n',
+      "include :\n  - ../other.yml\nservices:\n  web:\n    extends :\n      file: /x.yml\n",
+      "{include: [../other.yml], services: {web: {extends: {file: /x.yml, service: a}}}}",
+      '{"include": ["../other.yml"], "services": {"web": {"extends": {"file": "/x.yml", "service": "a"}}}}',
+      "x-base: &base\n  extends: {file: /x.yml, service: a}\n<<: {include: [../other.yml]}\nservices:\n  web:\n    <<: *base\n",
+    ];
+    for (const file of files) expect(rawRisks(file)).toEqual(["include", "extends"]);
+    expect(rawRisks("services:\n  web:\n    image: a-web\n")).toEqual([]);
+  });
+  it("refuses a file that is not one YAML mapping", () => {
+    expect(() => rawRisks("services: [\n")).toThrow();
+    expect(() => rawRisks("services: {}\n---\ninclude: [../other.yml]\n")).toThrow();
+    expect(() => rawRisks("<<: 5\nservices: {}\n")).toThrow();
+  });
+});
+
+describe("Compose files of an app (K-818)", () => {
+  const source = "/apps/a/src";
+  const files = (present: ReadonlyArray<string>, file: string | null = null) =>
+    composeFiles(source, file, (path) => present.includes(path), same);
+  it("picks the files that Compose picks on its own: one main file and its override", () => {
+    expect(files(["/apps/a/src/compose.yml", "/apps/a/src/docker-compose.yml", "/apps/a/src/compose.override.yaml"])).toEqual([
+      "/apps/a/src/compose.yml",
+      "/apps/a/src/compose.override.yaml",
+    ]);
+    expect(() => files([])).toThrow();
+  });
+  it("takes a named file only inside the source, and only when it exists", () => {
+    expect(files(["/apps/a/src/deploy/compose.yml"], "deploy/compose.yml")).toEqual(["/apps/a/src/deploy/compose.yml"]);
+    expect(() => files(["/apps/a/src/deploy/compose.yml"], "compose.yml")).toThrow();
+    expect(() => files(["/apps/b/src/compose.yml"], "../../b/src/compose.yml")).toThrow();
+    expect(() => files(["/etc/compose.yml"], "/etc/compose.yml")).toThrow();
+    const linked = (path: string) => (path === "/apps/a/src/compose.yml" ? "/apps/b/src/compose.yml" : path);
+    expect(() => composeFiles(source, "compose.yml", () => true, linked)).toThrow();
   });
 });

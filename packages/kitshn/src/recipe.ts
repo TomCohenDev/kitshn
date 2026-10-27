@@ -36,7 +36,14 @@ export const StaticApp = Schema.Struct({
  */
 export const ComposeApp = Schema.Struct({
   runsOn: Schema.optionalKey(Schema.Array(Schema.String).check(Schema.isMaxLength(10))),
-  file: Schema.optionalKey(Schema.String),
+  /** K-818: a path inside the repo; the daemon checks it again after symlinks. */
+  file: Schema.optionalKey(
+    Schema.String.check(
+      Schema.makeFilter((file) =>
+        file.startsWith("/") || file.split("/").includes("..") ? "file must be a path inside the repo" : undefined,
+      ),
+    ),
+  ),
 });
 
 const deploy = Schema.Array(DeployEntry).check(Schema.isMinLength(1), Schema.isMaxLength(20));

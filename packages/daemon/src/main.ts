@@ -9,13 +9,14 @@ import {
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { bindSources, composeRisks, fileSources, rawRisks, realpathOf } from "./guard.ts";
+import { bindSources, composeFiles, composeRisks, fileSources, rawRisks, realpathOf } from "./guard.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
 import {
   chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -35,7 +36,7 @@ import {
   totalmem,
   uptime,
 } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   type Platform,
   RELEASES,
@@ -307,7 +308,9 @@ async function composeUp(
   command: Extract<Command, { kind: "compose" | "compose-redeploy" }>,
 ): Promise<JobOutcome> {
   const dir = join(paths.data, "apps", command.project);
-  const source = join(dir, "src");
+  // K-818: each deploy unpacks into a new folder that no running container mounts, so the old app runs on
+  // while the new one is read, checked and built. A job of the same app never runs at the same time.
+  const source = join(dir, `src-${Date.now().toString(36)}`);
   const sockets = join(dir, "sockets");
   const socketPath = join(sockets, "default.sock");
   let output = "";
@@ -315,6 +318,9 @@ async function composeUp(
   let stoppedKitshn1: string | null = null;
   /** The volumes that the takeover made, which a failure removes so a retry copies fresh. */
   const madeVolumes: Array<string> = [];
+  /** K-818: the containers of the old app that this job stopped, which a failure before `up` starts again. */
+  let stoppedIds: Array<string> = [];
+  let upStarted = false;
   const step = async (title: string, program: string, args: ReadonlyArray<string>, options = {}) => {
     output += `$ ${title}\n`;
     const result = await runProgram(program, args, { timeoutMs: COMPOSE_TIMEOUT_MS, ...options });
@@ -337,14 +343,7 @@ async function composeUp(
       writeFileSync(join(dir, "source.tgz"), await deployFile(command.deployId, "source.tgz"));
       writeFileSync(join(dir, "params.env"), await deployFile(command.deployId, "params.env"), { mode: 0o600 });
     }
-    // K-818: no container of the app runs while its files change, are checked and start, so none can swap a
-    // path or rewrite the Compose file between the check and `up`. Orphans and one-off runs count too.
-    const running = await runProgram("docker", ["ps", "-q", "--filter", `label=com.docker.compose.project=${command.project}`]);
-    const ids = running.output.split("\n").map((id) => id.trim()).filter(Boolean);
-    if (ids.length > 0) await step("stop the app", "docker", ["stop", ...ids]);
-    // The last build's containers may have written into the source as root (a bind mount of `.`).
-    output += await removeAsRoot(source, `${command.project}-src`);
-    mkdirSync(source, { recursive: true });
+    mkdirSync(source);
     await step("unpack the source", "tar", ["-xzf", join(dir, "source.tgz"), "-C", source]);
     // K-1404: the first deploy of an app on this machine takes over the data of its KitSHn 1 deployment.
     // KitSHn 1 stops first, so no write lands after the copy; root-owned files need a short container.
@@ -422,15 +421,17 @@ async function composeUp(
         throw new Error(`docker network create kitshn-edge failed: ${made.output}`);
     }
     // K-818: risky Compose settings run only when the owner allows them for this repo on this machine.
+    const real = (path: string) => realpathOf(path, realpathSync, existsSync);
+    // Explicit files, so a `COMPOSE_FILE` in the params cannot add a file that the check never reads.
+    const files = composeFiles(source, command.file, existsSync, real);
     const composeArgs = [
       "compose",
       "-p",
       command.project,
-      ...(command.file ? ["-f", command.file] : []),
+      ...files.flatMap((file) => ["-f", file]),
       "--env-file",
-      join(dir, "params.env"),
+      env.KITSHN_PARAMS_FILE,
     ];
-    const real = (path: string) => realpathOf(path, realpathSync, existsSync);
     const roots = [source, env.KITSHN_DATA_DIR, env.KITSHN_LOG_DIR, sockets].map(real);
     const readConfig = async (extra: ReadonlyArray<string>) => {
       const file = join(dir, "compose.config.json");
@@ -446,10 +447,13 @@ async function composeUp(
       }
     };
     const config = await readConfig([]);
-    const raw = (command.file ? [command.file] : COMPOSE_FILES)
-      .map((name) => join(source, name))
-      .filter((path) => existsSync(path))
-      .flatMap((path) => rawRisks(readFileSync(path, "utf8")));
+    const raw = files.flatMap((path) => {
+      try {
+        return rawRisks(readFileSync(path, "utf8"));
+      } catch (error) {
+        throw new Error(`${path}: ${error instanceof Error ? error.message : String(error)} (K-818)`);
+      }
+    });
     const refused = [
       ...raw,
       ...composeRisks(config, await readConfig(["--no-interpolate"]), command.project, roots, real),
@@ -462,8 +466,32 @@ async function composeUp(
     const checked = join(dir, "compose.checked.json");
     writeFileSync(checked, JSON.stringify(config), { mode: 0o600 });
     try {
-      const run = ["compose", "-p", command.project, "--project-directory", source, "-f", checked];
+      // The params file again: without it Compose reads the repo's `.env`, and `COMPOSE_PROFILES` is lost.
+      const run = [
+        "compose",
+        "-p",
+        command.project,
+        "--project-directory",
+        source,
+        "-f",
+        checked,
+        "--env-file",
+        env.KITSHN_PARAMS_FILE,
+      ];
       await step("docker compose build", "nice", ["-n", "19", "docker", ...run, "build"], { cwd: source, env });
+      // K-818: no container of the app runs from here to `up`, so none can swap a path in the data, log or
+      // sockets folder between the check below and `up`. Orphans and one-off runs count too.
+      const running = await runProgram("docker", [
+        "ps",
+        "-q",
+        "--filter",
+        `label=com.docker.compose.project=${command.project}`,
+      ]);
+      if (!running.ok) throw new Error(`docker ps failed: ${running.output}`);
+      const ids = running.output.split("\n").map((id) => id.trim()).filter(Boolean);
+      // Set first: a stop that fails half-way still gets its start back.
+      stoppedIds = ids;
+      if (ids.length > 0) await step("stop the app", "docker", ["stop", ...ids]);
       const moved = [...bindSources(config), ...fileSources(config)].filter((path) => {
         const resolved = real(path);
         return (
@@ -473,6 +501,7 @@ async function composeUp(
         );
       });
       if (moved.length > 0) throw new Error(`a path left the app's folders after the check: ${moved.join(", ")} (K-818)`);
+      upStarted = true;
       await step("docker compose up", "docker", [...run, "up", "-d", "--no-build", "--remove-orphans"], { cwd: source, env });
     } finally {
       // The checked config holds the values of the params.
@@ -500,10 +529,27 @@ async function composeUp(
     if (existsSync(good)) renameSync(good, `${good}.old`);
     renameSync(staged, good);
     rmSync(`${good}.old`, { recursive: true, force: true });
+    // The containers of the last build may have written into their source as root (a bind mount of `.`).
+    // A folder that stays costs disk only; the app is up, so the deploy still succeeds.
+    for (const old of sourceFolders(dir).filter((folder) => folder !== source))
+      output += await removeAsRoot(old, `${command.project}-${basename(old)}`).catch(
+        (cleanup: unknown) => `${String(cleanup)}\n`,
+      );
     output += `\nThe app answers on its socket; the tunnel sends ${command.name} there.\n`;
     return { ok: true, exitCode: 0, output };
   } catch (error) {
     output += `\n[kitshn: ${error instanceof Error ? error.message : String(error)}]`;
+    // K-818: before `up`, the old containers and their source are as they were, so the old app runs again.
+    // After `up` started, Compose replaced them; the app stays down until a deploy or redeploy comes up.
+    if (!upStarted) {
+      if (stoppedIds.length > 0) {
+        const started = await runProgram("docker", ["start", ...stoppedIds]);
+        output += `$ start the app again\n${started.output}`;
+      }
+      output += await removeAsRoot(source, `${command.project}-${basename(source)}`).catch(
+        (cleanup: unknown) => `${String(cleanup)}\n`,
+      );
+    }
     // A takeover that did not end in a running app gives the site back to KitSHn 1, and the next deploy
     // copies its data again, so no write of KitSHn 1 is lost.
     if (stoppedKitshn1 !== null) {
@@ -524,17 +570,13 @@ async function composeUp(
 /** Short root jobs on app folders (copy, clean-up); busybox has `cp -a` and `find -delete` and is a few MB. */
 // Pinned by digest, so no app can take the name with an image of its own (K-818).
 const HELPER_IMAGE = "busybox:1.38@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e";
-/** The Compose files that Compose reads without `-f`, in its own order. */
-const COMPOSE_FILES = [
-  "compose.yaml",
-  "compose.yml",
-  "docker-compose.yaml",
-  "docker-compose.yml",
-  "compose.override.yaml",
-  "compose.override.yml",
-  "docker-compose.override.yaml",
-  "docker-compose.override.yml",
-];
+/** K-818: the source folders of an app: the one of its last deploy, and any of a deploy that failed in `up`. */
+const sourceFolders = (dir: string): Array<string> =>
+  existsSync(dir)
+    ? readdirSync(dir)
+        .filter((name) => name === "src" || name.startsWith("src-"))
+        .map((name) => join(dir, name))
+    : [];
 
 /**
  * Removes a folder that an app's containers wrote into, often as root, which the daemon user cannot remove.
@@ -573,7 +615,7 @@ async function composeDown(command: Extract<Command, { kind: "compose-down" }>):
       ...(command.removeData ? ["--volumes", "--rmi", "local"] : []),
     ],
     // Compose reads the app's own files, not a compose.yml in the daemon's folder.
-    { timeoutMs: COMPOSE_TIMEOUT_MS, cwd: existsSync(join(dir, "src")) ? join(dir, "src") : paths.data },
+    { timeoutMs: COMPOSE_TIMEOUT_MS, cwd: sourceFolders(dir)[0] ?? paths.data },
   );
   // Containers that may still run could write while the files go, so a failed down keeps them for a retry.
   if (!command.removeData || !result.ok) return result;

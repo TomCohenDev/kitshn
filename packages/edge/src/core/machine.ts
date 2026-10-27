@@ -64,7 +64,7 @@ export type Command =
       readonly name: string;
       readonly environment: string;
       readonly repo: string;
-      /** The Compose file of the recipe; null lets Compose find `compose.yml` and its override file. */
+      /** The Compose file of the recipe; with null, the daemon takes the files that Compose finds on its own. */
       readonly file: string | null;
     }
   /**

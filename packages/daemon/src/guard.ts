@@ -46,8 +46,6 @@ const SAFE_SERVICE_KEYS = new Set([
 ]);
 const SAFE_BUILD_KEYS = new Set(["context", "dockerfile", "args", "target", "labels", "cache_from", "tags", "platforms"]);
 const SAFE_TOP_KEYS = new Set(["name", "services", "volumes", "networks", "secrets", "configs"]);
-/** The network that KitSHn 1 apps join; every app on a machine shares it, as in KitSHn 1. */
-const SHARED_NETWORK = "kitshn-edge";
 
 type Json = Record<string, unknown>;
 const record = (value: unknown): Json =>
@@ -84,13 +82,20 @@ export function composeRisks(
   };
   const top = record(config);
   for (const key of Object.keys(top)) if (!SAFE_TOP_KEYS.has(key) && !key.startsWith("x-")) risks.add(`top:${key}`);
-  for (const service of Object.values(record(top["services"]))) {
+  for (const [serviceName, service] of Object.entries(record(top["services"]))) {
     const s = record(service);
     for (const key of Object.keys(s)) if (!SAFE_SERVICE_KEYS.has(key) && !key.startsWith("x-")) risks.add(key);
-    const own = (name: unknown) => typeof name === "string" && name.startsWith(`${project}-`);
-    // A built image or a container name of another app would take its place on this machine.
+    // A built image or a container name of another app would take its place on this machine. A plain
+    // prefix is not enough: the project a-pr-1 is a prefix of the project a-pr-12.
+    const ownName = `${project}-${serviceName}`;
+    const own = (name: unknown) => {
+      if (name === ownName) return true;
+      if (typeof name !== "string" || !name.startsWith(`${ownName}:`)) return false;
+      const tag = name.slice(ownName.length + 1);
+      return tag !== "" && !tag.includes(":") && !tag.includes("/") && !tag.includes("@");
+    };
     if (s["build"] !== undefined && s["image"] !== undefined && !own(s["image"])) risks.add("image");
-    if (s["container_name"] !== undefined && !own(s["container_name"])) risks.add("container_name");
+    if (s["container_name"] !== undefined && s["container_name"] !== ownName) risks.add("container_name");
     const logging = record(s["logging"]);
     if (logging["driver"] !== undefined && logging["driver"] !== "json-file" && logging["driver"] !== "local")
       risks.add("logging");
@@ -115,7 +120,7 @@ export function composeRisks(
       if (typeof source !== "string" || (source.includes("type=") && !source.includes("type=registry")))
         risks.add("build.cache_from");
     for (const name of Object.keys(record(s["networks"])))
-      if (name !== "default" && name !== SHARED_NETWORK && !Object.hasOwn(record(top["networks"]), name))
+      if (name !== "default" && !Object.hasOwn(record(top["networks"]), name))
         risks.add(`network:${name}`);
     const deploy = record(s["deploy"]);
     for (const key of Object.keys(deploy))
@@ -140,11 +145,14 @@ export function composeRisks(
   }
   for (const [name, network] of Object.entries(record(top["networks"]))) {
     const n = record(network);
+    // The setting names the Docker network, so `network:kitshn-edge` holds whatever key the file uses.
+    // Compose gives each service its name as an alias on a shared network such as kitshn-edge, so a
+    // service there can take the traffic of another app's service of the same name.
+    const risk = `network:${typeof n["name"] === "string" ? n["name"] : name}`;
     // Only a name and labels; ipam, ipv6 and drivers can change routing on the host.
-    if (Object.keys(n).some((key) => !["name", "labels", "external"].includes(key))) risks.add(`network:${name}`);
-    if (n["name"] === SHARED_NETWORK) continue;
+    if (Object.keys(n).some((key) => !["name", "labels", "external"].includes(key))) risks.add(risk);
     const own = typeof n["name"] !== "string" || n["name"] === `${project}_${name}`;
-    if (!own || n["external"] === true) risks.add(`network:${name}`);
+    if (!own || n["external"] === true) risks.add(risk);
   }
   for (const section of ["secrets", "configs"])
     for (const entry of Object.values(record(top[section]))) {
@@ -165,17 +173,64 @@ export function bindSources(config: unknown): Array<string> {
   );
 }
 
+const isMapping = (value: unknown): value is Json =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
 /**
  * K-818: `docker compose config` inlines `include` and `extends`, so their files and env files never show
- * in its output. The raw Compose files of the app must not use them without an allowance.
+ * in its output. The raw Compose files of the app must not use them without an allowance. A real YAML
+ * parse sees them in every form: quoted keys, flow style, JSON and merge keys. Throws on a file that is
+ * not one YAML mapping, also on more than one document.
  */
 export function rawRisks(text: string): Array<string> {
-  const risks = new Set<string>();
-  for (const line of text.split("\n")) {
-    if (line.startsWith("include:")) risks.add("include");
-    if (line.trimStart().startsWith("extends:")) risks.add("extends");
+  const document: unknown = Bun.YAML.parse(text);
+  if (!isMapping(document)) throw new Error("a Compose file must be one YAML mapping");
+  const services = record(document["services"]);
+  // Bun expands merge keys; one that stays is a form that Compose may read differently.
+  if ("<<" in document || Object.values(services).some((service) => "<<" in record(service)))
+    throw new Error("a Compose file has a merge key that does not expand");
+  const risks: Array<string> = [];
+  if ("include" in document) risks.push("include");
+  if (Object.values(services).some((service) => "extends" in record(service))) risks.push("extends");
+  return risks;
+}
+
+/** K-818: the Compose file names that Compose finds on its own, in its order; it takes the first of each. */
+const DEFAULT_FILES = ["compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"];
+const OVERRIDE_FILES = [
+  "compose.override.yml",
+  "compose.override.yaml",
+  "docker-compose.override.yml",
+  "docker-compose.override.yaml",
+];
+
+/**
+ * K-818: the Compose files of an app, as absolute paths. The daemon passes them with `-f`, so a
+ * `COMPOSE_FILE` in the params cannot add files. `file` is the recipe's file, relative to the source.
+ * Throws when a file is missing or resolves out of the source.
+ */
+export function composeFiles(
+  source: string,
+  file: string | null,
+  exists: (path: string) => boolean,
+  real: (path: string) => string,
+): Array<string> {
+  const inSource = (path: string) => path.startsWith(`${source}/`);
+  if (file !== null) {
+    const path = resolve(source, file);
+    if (file.startsWith("/") || !inSource(path)) throw new Error(`the Compose file ${file} is not inside the repo`);
+    if (!exists(path)) throw new Error(`the repo has no Compose file ${file}`);
+    if (!inSource(real(path))) throw new Error(`the Compose file ${file} links out of the repo`);
+    return [path];
   }
-  return [...risks];
+  const first = (names: ReadonlyArray<string>) => names.map((name) => join(source, name)).find(exists);
+  const main = first(DEFAULT_FILES);
+  if (main === undefined) throw new Error(`the repo has none of the Compose files ${DEFAULT_FILES.join(", ")}`);
+  const override = first(OVERRIDE_FILES);
+  const files = override === undefined ? [main] : [main, override];
+  for (const path of files)
+    if (!inSource(real(path))) throw new Error(`the Compose file ${path} links out of the repo`);
+  return files;
 }
 
 /** K-818: the secret and config files of a config, checked again right before `up`. */

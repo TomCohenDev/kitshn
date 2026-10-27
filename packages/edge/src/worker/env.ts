@@ -11,6 +11,8 @@ export interface Env {
   readonly ACCESS_ADMIN_AUD: string;
   /** The audience tag of the `/connect` Access application (daemons, K-604). */
   readonly ACCESS_CONNECT_AUD: string;
+  /** K-718: the audience tag of the `/agent` Access application (service tokens of agent keys). */
+  readonly ACCESS_AGENT_AUD?: string;
   /** K-1004: the audience tags of the login applications of `pages.<zone>` and `files.<zone>`. */
   readonly PAGES_LOGIN_AUD: string;
   readonly PAGES_PASSKEY_AUD: string;

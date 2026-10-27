@@ -15,6 +15,7 @@ import {
 } from "../core/model.ts";
 import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { TYPED_KINDS, type TypedKind, memberFrom } from "./members.ts";
+import { isAgentKey } from "../core/agent.ts";
 import { callApi } from "./store.ts";
 
 /** The sticker of each member kind: its name and a light sticker colour with black text. */
@@ -165,13 +166,22 @@ export function LevelOverride(props: {
   );
 }
 
-function MemberSticker(props: { member: Member; onRemove: () => void }) {
+function MemberSticker(props: { member: Member; agent: boolean; onRemove: () => void }) {
   const kind = MEMBER_STICKERS[props.member._tag];
   return (
     <li class="member">
       <span class="sticker" style={{ background: kind.color }}>
         {kind.label}
       </span>
+      {props.agent ? (
+        <span
+          class="sticker"
+          style={{ background: "var(--yellow)" }}
+          title="A device without the admin card: it manages only the cards of its circles (K-718)"
+        >
+          agent
+        </span>
+      ) : null}
       <span class="who">
         {MEMBER_ICONS[props.member._tag]} {memberLabel(props.member)}
       </span>
@@ -499,6 +509,7 @@ export function CircleEditor(props: {
           <MemberSticker
             key={member._tag === "device" ? member.tokenId : `${member._tag}-${memberLabel(member)}`}
             member={member}
+            agent={isAgentKey(state, member, Date.now())}
             onRemove={() => void put({ members: circle.members.filter((_, other) => other !== index) })}
           />
         ))}

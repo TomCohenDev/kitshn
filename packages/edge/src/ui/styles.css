@@ -1099,3 +1099,10 @@ a > code {
   font-size: 0.75rem;
   padding: 1px 6px;
 }
+
+/* K-718: an agent key among the members of a circle. */
+.chip .sticker.agent {
+  margin-left: 4px;
+  font-size: 0.6rem;
+  background: var(--yellow);
+}

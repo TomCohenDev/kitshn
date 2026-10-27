@@ -38,6 +38,7 @@ import {
 import { placeInside } from "../core/place.ts";
 import type { MachineView, RevisionView, ServerMessage, Snapshot } from "../core/protocol.ts";
 import { ClientMessage } from "../core/schema.ts";
+import { agentRefusal, cardsControlledBy, circlesOf } from "../core/agent.ts";
 import { demo } from "../core/demo.ts";
 import {
   contentSecurityPolicy,
@@ -501,6 +502,7 @@ export class Kitshn extends DurableObject<Env> {
     if (!header) return new Response("The Worker sent no caller.", { status: 500 });
     const caller = JSON.parse(header) as Caller;
     if (path === "/connect") return this.connectMachine(request, caller);
+    if (path.startsWith("/agent/")) return this.agentRequest(path, request, caller);
     if (path.startsWith("/connect/deploys/")) return this.deploySource(path, caller);
     if (!this.authorized(caller)) {
       return Response.json(
@@ -2290,6 +2292,66 @@ export class Kitshn extends DurableObject<Env> {
     this.broadcast();
     void this.scheduleAlarm();
     return Response.json({ removed: row.address });
+  }
+
+  /**
+   * K-718: an agent key sees the cards that it manages and the circles that it is in (no members), moves
+   * those cards between those circles, and runs jobs on the machines that it controls (K-614).
+   */
+  private async agentRequest(path: string, request: Request, caller: Caller) {
+    const now = Date.now();
+    const own = circlesOf(this.state, caller.visitor);
+    const managed = cardsControlledBy(this.state, caller.visitor, now);
+    if (path === "/agent/state" && request.method === "GET") {
+      return Response.json({
+        circles: [...this.state.circles.values()]
+          .filter((circle) => own.has(circle.id))
+          .map(({ id, name, level, x, y, r }) => ({ id, name, level, x, y, r })),
+        cards: [...managed].flatMap((id) => {
+          const resource = this.state.resources.get(id);
+          if (!resource) return [];
+          return [
+            {
+              ...resource,
+              place: this.state.places.get(id) ?? null,
+              circles: circlesHolding(this.state, id).map((c) => c.id),
+            },
+          ];
+        }),
+      });
+    }
+    if (path === "/agent/apply" && request.method === "POST") {
+      let edits: ReadonlyArray<Edit>;
+      try {
+        const message = decodeClientMessage({
+          ...((await request.json()) as object),
+          type: "apply",
+          requestId: "agent",
+        });
+        if (message.type !== "apply") throw new Error("Send edits.");
+        edits = message.edits;
+      } catch (error) {
+        return Response.json({ error: String(error) }, { status: 400 });
+      }
+      try {
+        const changes = resolveEdits(this.state, edits);
+        const refusal = agentRefusal(
+          this.state,
+          applyChanges(this.state, changes),
+          caller.visitor,
+          edits,
+          now,
+        );
+        if (refusal) return Response.json({ error: refusal }, { status: 403 });
+        return Response.json({ revision: this.commit(caller.actor, changes, null) });
+      } catch (error) {
+        if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
+        throw error;
+      }
+    }
+    if (path === "/agent/jobs" && request.method === "POST")
+      return this.addJob(caller, await request.json().catch(() => null));
+    return Response.json({ error: `The agent path has no ${request.method} ${path}.` }, { status: 404 });
   }
 
   private libraryItems(): Array<LibraryItem> {

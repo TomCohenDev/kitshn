@@ -38,7 +38,28 @@ export type Command =
   | { readonly kind: "diagnostics" }
   | { readonly kind: "restart" }
   /** K-612, K-617: replace the daemon with the release that the Worker names, then restart. */
-  | { readonly kind: "update"; readonly version: string };
+  | { readonly kind: "update"; readonly version: string }
+  /**
+   * K-812: build and start a Compose app from the source of a deploy, then expose its socket as `name`
+   * (K-607). Only kitshn makes this job, never the jobs API.
+   */
+  | {
+      readonly kind: "compose";
+      readonly deployId: string;
+      readonly project: string;
+      readonly name: string;
+      readonly environment: string;
+      readonly repo: string;
+      /** The Compose file of the recipe; null lets Compose find `compose.yml` and its override file. */
+      readonly file: string | null;
+    }
+  /** K-904: stop a Compose app and stop exposing it; a preview also loses its data. */
+  | {
+      readonly kind: "compose-down";
+      readonly project: string;
+      readonly name: string;
+      readonly removeData: boolean;
+    };
 
 export interface JobResult {
   readonly ok: boolean;

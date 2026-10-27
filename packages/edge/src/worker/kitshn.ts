@@ -493,12 +493,15 @@ export class Kitshn extends DurableObject<Env> {
     if (path.startsWith("/deploy/")) {
       const header = request.headers.get("x-kitshn-deployer");
       if (!header) return new Response("The Worker sent no deployer.", { status: 500 });
+      if (path === "/deploy/archive" || path === "/deploy/params")
+        return this.deployFile(path, JSON.parse(header) as Deployer, request);
       return this.deployStep(path, JSON.parse(header) as Deployer, await request.json().catch(() => null));
     }
     const header = request.headers.get("x-kitshn-caller");
     if (!header) return new Response("The Worker sent no caller.", { status: 500 });
     const caller = JSON.parse(header) as Caller;
     if (path === "/connect") return this.connectMachine(request, caller);
+    if (path.startsWith("/connect/deploys/")) return this.deploySource(path, caller);
     if (!this.authorized(caller)) {
       return Response.json(
         { error: "You have no control level on the kitshn admin (K-104)." },
@@ -725,10 +728,30 @@ export class Kitshn extends DurableObject<Env> {
          AND (state = 'sent' OR (state = 'failed' AND output = '${OFFLINE_OUTPUT}'))`,
         result.ok === true ? "done" : "failed",
         typeof result.exitCode === "number" ? result.exitCode : null,
-        String(result.output ?? "").slice(0, OUTPUT_LIMIT),
+        // The end of the output holds the error of a failed build.
+        String(result.output ?? "").slice(-OUTPUT_LIMIT),
         message.id,
         attachment.machineId,
       );
+      // Only a result that this machine's job took counts; a stray or late one changes no deploy.
+      const [{ taken } = { taken: 0 }] = this.sql<{ taken: number }>("SELECT changes() AS taken");
+      // K-812: the source and params of a Compose deploy live only as long as its job.
+      const [job] = taken
+        ? this.sql<{ command: string }>("SELECT command FROM jobs WHERE id = ?", message.id)
+        : [];
+      const command = job ? (JSON.parse(job.command) as Command) : null;
+      if (command?.kind === "compose")
+        this.sql(
+          "UPDATE deploys SET state = ? WHERE job_id = ? AND state = 'running'",
+          result.ok === true ? "done" : "failed",
+          message.id,
+        );
+      if (command?.kind === "compose" && this.env.BUCKET) {
+        void this.env.BUCKET.delete([
+          deployObject(command.deployId, "source.tgz"),
+          deployObject(command.deployId, "params.env"),
+        ]);
+      }
       this.broadcast();
     }
   }
@@ -970,8 +993,11 @@ export class Kitshn extends DurableObject<Env> {
       Date.now(),
     );
     for (const job of queued) {
-      const visitor = JSON.parse(job.visitor) as Visitor;
-      const allowed = new Set([...online].filter((id) => this.canControl(visitor, id)));
+      const visitor = JSON.parse(job.visitor) as Visitor & { readonly kitshn?: true };
+      // A job that kitshn makes itself (a deploy) needs no member with control (K-614).
+      const allowed = new Set(
+        visitor.kitshn ? online : [...online].filter((id) => this.canControl(visitor, id)),
+      );
       const machine =
         job.machine_id !== null
           ? allowed.has(job.machine_id)
@@ -1191,8 +1217,15 @@ export class Kitshn extends DurableObject<Env> {
     let changed = false;
     this.ctx.storage.transactionSync(() => {
       for (const report of sites) {
-        const id = liveSiteId(machine.id, report.name);
         const address = `${report.name}.${this.env.KITSHN_ZONE}`;
+        // K-812: the socket of a Compose app on this machine is the address of its card.
+        const app = [...this.state.resources.values()].find(
+          (resource) =>
+            resource.kind === "site.compose" &&
+            resource.machine === machine.id &&
+            resource.addresses.includes(address),
+        );
+        const id = app?.id ?? liveSiteId(machine.id, report.name);
         const other = [...this.state.resources.values()].find(
           (resource) => resource.id !== id && resource.addresses.includes(address),
         );
@@ -1293,15 +1326,20 @@ export class Kitshn extends DurableObject<Env> {
       const machine = this.state.machines.get(site.machineId);
       this.ctx.storage.transactionSync(() => {
         this.sql("UPDATE live_sites SET state = 'ok' WHERE id = ?", site.id);
-        this.putResource({
-          id: site.id,
-          kind: "site.live",
-          name: site.name,
-          addresses: [site.address],
-          status: site.up ? "running" : "stopped",
-          group: null,
-          machine: site.machineId,
-        });
+        const card = this.state.resources.get(site.id);
+        this.putResource(
+          card
+            ? { ...card, status: site.up ? "running" : "stopped" }
+            : {
+                id: site.id,
+                kind: "site.live",
+                name: site.name,
+                addresses: [site.address],
+                status: site.up ? "running" : "stopped",
+                group: null,
+                machine: site.machineId,
+              },
+        );
         this.insertRevision(
           { _tag: "kitshn", reason: `live site on ${machine?.name ?? site.machineId}` },
           `${machine?.name ?? site.machineId} exposed ${site.address} (K-1104)`,
@@ -1684,6 +1722,7 @@ export class Kitshn extends DurableObject<Env> {
     const fail = (status: number, error: string) => Response.json({ error }, { status });
     try {
       if (path === "/deploy/plan") return await this.planDeploy(api, deployer, input);
+      if (path === "/deploy/status") return this.composeStatus(deployer, String(input["deployId"] ?? ""));
       const [row] = this.sql<DeployRow>(
         "SELECT * FROM deploys WHERE id = ?",
         String(input["deployId"] ?? ""),
@@ -1695,6 +1734,13 @@ export class Kitshn extends DurableObject<Env> {
         return await this.deployAssets(api, row, input["manifest"]);
       if (path === "/deploy/finish" && row.kind === "deploy")
         return await this.finishDeploy(api, row, deployer, input["jwt"]);
+      if (row.app === "compose") {
+        if (path === "/deploy/start" && row.kind === "deploy")
+          return await this.startCompose(api, row, deployer);
+        if (path === "/deploy/teardown" && row.kind === "teardown")
+          return this.teardownCompose(row, deployer);
+        return fail(400, `${path} does not fit a Compose deploy.`);
+      }
       if (path === "/deploy/teardown" && row.kind === "teardown")
         return await this.teardown(api, row, deployer);
       return fail(400, `${path} does not fit this deploy.`);
@@ -1721,6 +1767,40 @@ export class Kitshn extends DurableObject<Env> {
     if (result.kind === "skip") return Response.json({ deployId: null, plan: result });
     const { resourceId, script } = environmentNames(deployer.repoId, deployer.repo, result.environment);
     const existing = this.state.resources.get(resourceId);
+    const compose = "compose" in recipe ? recipe.compose : null;
+    // K-610, K-611: a new Compose app goes to the first online machine with all labels; a running one stays.
+    let machineId: string | null = null;
+    if (compose) {
+      if (existing?.machine) {
+        // K-611: a running app stays on its machine, but only while the owner still offers it (K-610).
+        if (!this.state.machines.get(existing.machine)?.labels.includes("deploy")) {
+          return Response.json(
+            {
+              error: `${existing.name} runs on a machine without the label "deploy". Label it again, or remove the card to deploy elsewhere.`,
+            },
+            { status: 409 },
+          );
+        }
+        machineId = existing.machine;
+      } else if (result.kind === "deploy") {
+        const labels = compose.runsOn ?? [];
+        const pick = [...this.state.machines.values()]
+          // Only a machine that the owner labels "deploy" runs the apps of repos (K-610).
+          .filter((machine) => ["deploy", ...labels].every((label) => machine.labels.includes(label)))
+          .filter((machine) => this.machineView(machine).status?.capabilities?.includes("compose"))
+          .sort((a, b) => a.order - b.order)
+          .find((machine) => this.presence.get(machine.id)?.online);
+        if (!pick) {
+          return Response.json(
+            {
+              error: `No online machine with a Compose-ready daemon has the labels ${["deploy", ...labels].join(", ")}. Label a machine "deploy", update its daemon, or start it.`,
+            },
+            { status: 409 },
+          );
+        }
+        machineId = pick.id;
+      }
+    }
     if (existing && !existing.addresses.includes(result.address)) {
       return Response.json(
         {
@@ -1773,7 +1853,7 @@ export class Kitshn extends DurableObject<Env> {
       );
       if (records.length > 0)
         return Response.json({ error: `${result.address} already has a DNS record.` }, { status: 409 });
-      if (result.ephemeral) {
+      if (result.ephemeral && !compose) {
         const scripts = await api<Array<unknown>>(
           "GET",
           `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/scripts`,
@@ -1805,8 +1885,8 @@ export class Kitshn extends DurableObject<Env> {
     }
     const deployId = crypto.randomUUID();
     this.sql(
-      `INSERT INTO deploys (id, repo, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)`,
+      `INSERT INTO deploys (id, repo, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?)`,
       deployId,
       deployer.repo,
       result.environment,
@@ -1818,6 +1898,9 @@ export class Kitshn extends DurableObject<Env> {
       deployer.sha,
       Date.now() + DEPLOY_MS,
       event.name === "push" ? event.branch : "",
+      compose ? "compose" : "static",
+      machineId,
+      compose?.file ?? null,
     );
     return Response.json({ deployId, plan: result });
   }
@@ -1838,43 +1921,231 @@ export class Kitshn extends DurableObject<Env> {
     });
   }
 
+  /**
+   * The card of a deployed environment: new cards start in the `startsIn` circle (K-807) or wait in the tray
+   * (K-509); an existing card keeps its place. Returns a line for the deploy log.
+   */
+  private ensureCard(
+    row: DeployRow,
+    deployer: Deployer,
+    kind: "site.static" | "site.compose",
+    machine: string | null,
+  ) {
+    const actor: Actor = { _tag: "kitshn", reason: `deploy of ${row.repo} ${deployer.sha.slice(0, 7)}` };
+    if (this.state.resources.has(row.resource_id))
+      return "The card keeps its place; the map decides who opens it (K-807).";
+    const slug = repoSlug(row.repo);
+    this.putResource({
+      id: row.resource_id,
+      kind,
+      name: row.environment === "prod" ? slug : `${slug} ${row.environment}`,
+      addresses: [row.address],
+      status: "deploying",
+      group: slug,
+      machine,
+    });
+    this.load();
+    const circle = row.starts_in
+      ? [...this.state.circles.values()].find((item) =>
+          [item.id, item.name.toLowerCase()].includes(row.starts_in!.toLowerCase()),
+        )
+      : undefined;
+    const place = circle ? placeInside(this.state, { x: circle.x, y: circle.y }, new Set([circle.id])) : null;
+    if (circle && place) {
+      this.commit(
+        actor,
+        resolveEdits(this.state, [{ _tag: "place", id: row.resource_id, after: place }]),
+        null,
+      );
+      return `The card starts in ${circle.name} (K-807).`;
+    }
+    this.insertRevision(actor, `Deployed ${row.repo} ${row.environment}`, [], null);
+    this.load();
+    return "The card waits in the tray, so the site is private until you share it on the map (K-509).";
+  }
+
+  /** K-812: the source archive and the params of a Compose deploy go to R2 until the job ends. */
+  private async deployFile(path: string, deployer: Deployer, request: Request) {
+    const fail = (status: number, error: string) => Response.json({ error }, { status });
+    const [row] = this.sql<DeployRow>(
+      "SELECT * FROM deploys WHERE id = ?",
+      request.headers.get("x-kitshn-deploy") ?? "",
+    );
+    if (!row || row.repo !== deployer.repo || row.app !== "compose" || row.kind !== "deploy")
+      return fail(404, "kitshn knows no such Compose deploy of this repo.");
+    if (row.state !== "planned" || row.expires_at < Date.now())
+      return fail(410, "This deploy expired or started.");
+    const bucket = this.env.BUCKET;
+    if (!bucket || !request.body) return fail(503, "R2 is off, or the request has no body.");
+    const limit = path === "/deploy/archive" ? 95 * 1024 * 1024 : 256 * 1024;
+    const size = Number(request.headers.get("content-length"));
+    if (!Number.isInteger(size) || size < 0) return fail(411, "Send a Content-Length.");
+    if (size > limit) return fail(413, `${path} takes at most ${limit} bytes.`);
+    const { readable, writable } = new FixedLengthStream(size);
+    const piped = request.body.pipeTo(writable);
+    try {
+      await bucket.put(
+        deployObject(row.id, path === "/deploy/archive" ? "source.tgz" : "params.env"),
+        readable,
+      );
+      await piped;
+    } catch (error) {
+      await piped.catch(() => undefined);
+      return fail(502, `The upload did not reach R2: ${String(error)}`);
+    }
+    return Response.json({ ok: true });
+  }
+
+  /** K-812: a daemon reads the files of a deploy only while it runs that deploy's job. */
+  private async deploySource(path: string, caller: Caller) {
+    const [deployId = "", file = ""] = path.slice("/connect/deploys/".length).split("/");
+    const machine = [...this.state.machines.values()].find(
+      (item) => item.clientId === caller.visitor.clientId,
+    );
+    const [row] = this.sql<DeployRow>("SELECT * FROM deploys WHERE id = ?", deployId);
+    const [job] = row?.job_id
+      ? this.sql<{ state: string; machine_id: string }>(
+          "SELECT state, machine_id FROM jobs WHERE id = ?",
+          row.job_id,
+        )
+      : [];
+    if (
+      !machine ||
+      !row ||
+      job?.machine_id !== machine.id ||
+      job.state !== "sent" ||
+      !["source.tgz", "params.env"].includes(file)
+    )
+      return new Response("This machine runs no such deploy now.", { status: 404 });
+    const object = await this.env.BUCKET?.get(deployObject(deployId, file));
+    if (!object) return new Response("The file of this deploy is gone.", { status: 404 });
+    return new Response(object.body);
+  }
+
+  /** K-812: makes the card and its Access application, then sends the Compose job to the chosen machine. */
+  private async startCompose(api: Api, row: DeployRow, deployer: Deployer) {
+    const machine = row.machine_id ? this.state.machines.get(row.machine_id) : undefined;
+    if (!machine) return Response.json({ error: "The machine of this deploy is gone." }, { status: 409 });
+    const card = this.ensureCard(row, deployer, "site.compose", machine.id);
+    // Fail closed: the Access application exists before the tunnel sends the address to the app (K-410).
+    await this.withAccessLock(() =>
+      syncAccess(
+        desiredAccess(this.state, Date.now()),
+        this.accessStore(),
+        api,
+        this.env.CLOUDFLARE_ACCOUNT_ID,
+        20,
+        this.reachableAddresses(),
+      ),
+    );
+    const app = this.access.get(`app:${row.resource_id}:${row.address}`);
+    if (!app?.cfId || app.error)
+      return Response.json(
+        {
+          error: `The Access application of ${row.address} is not ready: ${app?.error ?? "pending"}. Run the deploy again.`,
+        },
+        { status: 503 },
+      );
+    const command: Command = {
+      kind: "compose",
+      deployId: row.id,
+      project: row.resource_id,
+      name: row.address.slice(0, -this.env.KITSHN_ZONE.length - 1),
+      environment: row.environment,
+      repo: row.repo,
+      file: row.compose_file,
+    };
+    const now = Date.now();
+    const jobId = this.ctx.storage.transactionSync(() => {
+      const [inserted] = this.sql<{ id: number }>(
+        `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
+         VALUES (?, '[]', ?, 'queued', ?, ?, ?, '${KITSHN_JOB}', NULL, '') RETURNING id`,
+        machine.id,
+        JSON.stringify(command),
+        now,
+        now + DEPLOY_MS,
+        JSON.stringify({ _tag: "kitshn", reason: `deploy of ${row.repo}` }),
+      );
+      this.sql("UPDATE deploys SET state = 'running', job_id = ? WHERE id = ?", inserted?.id ?? null, row.id);
+      return inserted?.id ?? null;
+    });
+    if (jobId === null) throw new Error("The job insert returned no id.");
+    this.deliverJobs();
+    this.broadcast();
+    return Response.json({ machine: machine.name, card });
+  }
+
+  /** K-813: the state and output of a Compose deploy, for the Actions step that waits on it. */
+  private composeStatus(deployer: Deployer, deployId: string) {
+    const [row] = this.sql<DeployRow>("SELECT * FROM deploys WHERE id = ?", deployId);
+    if (!row || row.repo !== deployer.repo || row.job_id === null)
+      return Response.json({ error: "kitshn knows no such running deploy of this repo." }, { status: 404 });
+    const [job] = this.sql<{ state: string; output: string; exit_code: number | null; expires_at: number }>(
+      "SELECT state, output, exit_code, expires_at FROM jobs WHERE id = ?",
+      row.job_id,
+    );
+    // A dropped connection fails the job only for now: kitshn still takes its real result (OFFLINE_OUTPUT),
+    // until the job would have expired; a daemon that restarted never sends it.
+    const waiting = job?.state === "failed" && job.output === OFFLINE_OUTPUT && job.expires_at > Date.now();
+    const state =
+      job?.state === "done"
+        ? "done"
+        : (job?.state === "failed" && !waiting) || job?.state === "expired"
+          ? job.state
+          : "running";
+    if (state !== "running" && row.state === "running")
+      this.sql("UPDATE deploys SET state = ? WHERE id = ?", state === "done" ? "done" : "failed", row.id);
+    return Response.json({
+      state,
+      output: waiting ? "" : (job?.output ?? ""),
+      exitCode: job?.exit_code ?? null,
+    });
+  }
+
+  /** K-904: a closed pull request stops its Compose preview; its card goes once the machine stops exposing it. */
+  private teardownCompose(row: DeployRow, deployer: Deployer) {
+    const resource = this.state.resources.get(row.resource_id);
+    const machineId = resource?.machine ?? row.machine_id;
+    const name = row.address.slice(0, -this.env.KITSHN_ZONE.length - 1);
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      if (machineId)
+        this.sql(
+          `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
+           VALUES (?, '[]', ?, 'queued', ?, ?, ?, '${KITSHN_JOB}', NULL, '')`,
+          machineId,
+          JSON.stringify({
+            kind: "compose-down",
+            project: row.resource_id,
+            name,
+            removeData: true,
+          } satisfies Command),
+          now,
+          now + JOB_EXPIRY_MS,
+          JSON.stringify({
+            _tag: "kitshn",
+            reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}`,
+          }),
+        );
+      this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
+      // A preview that never came up has no live site to take its card away.
+      if (resource && ![...this.liveSites.values()].some((site) => site.id === row.resource_id)) {
+        for (const table of ["resources", "places"])
+          this.sql(`DELETE FROM ${table} WHERE id = ?`, row.resource_id);
+        this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${row.resource_id}/%`);
+      }
+    });
+    this.load();
+    this.deliverJobs();
+    this.broadcast();
+    void this.scheduleAlarm();
+    return Response.json({ removed: row.address });
+  }
+
   private async finishDeploy(api: Api, row: DeployRow, deployer: Deployer, jwt: unknown) {
     if (typeof jwt !== "string" || !jwt)
       return Response.json({ error: "The deploy needs the upload completion token." }, { status: 400 });
-    const actor: Actor = { _tag: "kitshn", reason: `deploy of ${row.repo} ${deployer.sha.slice(0, 7)}` };
-    let card = "The card waits in the tray, so the site is private until you share it on the map (K-509).";
-    if (!this.state.resources.has(row.resource_id)) {
-      const slug = repoSlug(row.repo);
-      this.putResource({
-        id: row.resource_id,
-        kind: "site.static",
-        name: row.environment === "prod" ? slug : `${slug} ${row.environment}`,
-        addresses: [row.address],
-        status: "deploying",
-        group: slug,
-        machine: null,
-      });
-      this.load();
-      const circle = row.starts_in
-        ? [...this.state.circles.values()].find((item) =>
-            [item.id, item.name.toLowerCase()].includes(row.starts_in!.toLowerCase()),
-          )
-        : undefined;
-      const place = circle
-        ? placeInside(this.state, { x: circle.x, y: circle.y }, new Set([circle.id]))
-        : null;
-      if (circle && place) {
-        this.commit(
-          actor,
-          resolveEdits(this.state, [{ _tag: "place", id: row.resource_id, after: place }]),
-          null,
-        );
-        card = `The card starts in ${circle.name} (K-807).`;
-      } else {
-        this.insertRevision(actor, `Deployed ${row.repo} ${row.environment}`, [], null);
-        this.load();
-      }
-    } else card = "The card keeps its place; the map decides who opens it (K-807).";
+    const card = this.ensureCard(row, deployer, "site.static", null);
     // Fail closed: the Access application exists before the address does.
     await this.withAccessLock(() =>
       syncAccess(
@@ -2345,6 +2616,10 @@ interface DeployRow extends Record<string, SqlStorageValue> {
   sha: string;
   state: string;
   expires_at: number;
+  app: "static" | "compose";
+  machine_id: string | null;
+  job_id: number | null;
+  compose_file: string | null;
 }
 
 /** A failed tunnel, DNS or route write tries again after this time. */
@@ -2384,3 +2659,9 @@ const libraryItem = (row: LibraryRow): LibraryItem => ({
   contentType: row.content_type,
   createdAt: row.created_at,
 });
+
+/** The R2 key of a file of a Compose deploy (K-812). */
+const deployObject = (deployId: string, file: string) => `deploys/${deployId}/${file}`;
+
+/** The requester of a job that kitshn makes itself, such as a deploy (K-614). */
+const KITSHN_JOB = JSON.stringify({ email: null, clientId: null, ip: null, kitshn: true });

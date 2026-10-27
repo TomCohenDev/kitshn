@@ -12,6 +12,10 @@ name: kitshn 2 deploy
 #   jobs:
 #     kitshn:
 #       uses: Yarden-zamir/kitshn/.github/workflows/kitshn2-deploy.yml@main
+#       secrets: inherit
+#
+# A Compose app gets each KITSHN_<NAME> secret and variable as <NAME> (K-808), from the GitHub Environment
+# "prod" for pushes and "pr-<number>" for pull requests, as in KitSHn 1.
 #
 # It reads kitshn.config.ts without running it, and sends it with the GitHub OIDC token (K-811).
 # KitSHn 1 apps keep calling deploy.yml in this repo.
@@ -28,18 +32,34 @@ jobs:
     # A pull request from a fork gets no OIDC token, so kitshn cannot deploy it.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
+    environment: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'prod' }}
     # One deploy at a time per pull request and per branch; kitshn binds each push environment to one branch.
     concurrency:
       group: kitshn-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
     steps:
+      # The source of a Compose app goes to the machine with .git, so the checkout keeps no token in it.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+      # Only KITSHN_* names leave this step, in a file; the build commands of the next step see no secrets.
+      - name: kitshn params
+        env:
+          SECRETS: ${{ toJSON(secrets) }}
+          VARS: ${{ toJSON(vars) }}
+        run: |
+          umask 077
+          node -e '
+            const pick = (text) => Object.fromEntries(Object.entries(JSON.parse(text || "{}")).filter(([key]) => key.startsWith("KITSHN_")));
+            require("fs").writeFileSync(process.argv[1], JSON.stringify({ secrets: pick(process.env.SECRETS), vars: pick(process.env.VARS) }));
+          ' "$RUNNER_TEMP/kitshn-params.json"
       - name: kitshn deploy
         env:
           SERVER: ${{ inputs.server }}
+          KITSHN_PARAMS_JSON: ${{ runner.temp }}/kitshn-params.json
         # K-617: the CLI of the release that the kitshn server names, checked against its SHA256SUMS.
         run: |
           version=$(curl -fsSL "$SERVER/deploy/version")

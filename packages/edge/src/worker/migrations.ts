@@ -49,6 +49,13 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       source TEXT UNIQUE)`,
     "CREATE TABLE library_deleted (source TEXT PRIMARY KEY)",
   ],
+  // 4: Compose deploys (K-812) run as a job on one machine.
+  [
+    "ALTER TABLE deploys ADD COLUMN app TEXT NOT NULL DEFAULT 'static'",
+    "ALTER TABLE deploys ADD COLUMN machine_id TEXT",
+    "ALTER TABLE deploys ADD COLUMN job_id INTEGER",
+    "ALTER TABLE deploys ADD COLUMN compose_file TEXT",
+  ],
 ];
 
 /** Runs the migrations after `from`. Returns the new version. The caller provides the transaction. */

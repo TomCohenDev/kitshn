@@ -225,6 +225,15 @@ if try GET "/accounts/$ACCOUNT/r2/buckets"; then
     changed "created the R2 bucket kitshn"
   fi
   R2=kitshn
+  # K-812: the files of a Compose deploy go when its job ends; a rule removes any left after a day.
+  rules=$(api GET "/accounts/$ACCOUNT/r2/buckets/kitshn/lifecycle")
+  if printf '%s' "$rules" | jq -e '.rules // [] | any(.id == "kitshn deploys")' >/dev/null; then
+    kept "R2 rule: deploy files expire after a day"
+  else
+    wanted=$(printf '%s' "$rules" | jq -c '{rules: ((.rules // []) + [{id: "kitshn deploys", enabled: true, conditions: {prefix: "deploys/"}, deleteObjectsTransition: {condition: {type: "Age", maxAge: 86400}}}])}')
+    api PUT "/accounts/$ACCOUNT/r2/buckets/kitshn/lifecycle" "$wanted" >/dev/null
+    changed "R2 rule: deploy files expire after a day"
+  fi
 elif grep -q "enable R2" "$WORK/out"; then
   say "  later:   R2 is off on this account. Turn it on at https://dash.cloudflare.com/$ACCOUNT/r2/overview,"
   say "           then run this script again. Pages and files (milestone 3) need it; the map does not."

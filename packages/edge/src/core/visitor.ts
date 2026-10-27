@@ -64,7 +64,7 @@ export function memberMatches(
     case "domain":
       return email !== null && email.endsWith(`@${member.domain.toLowerCase()}`);
     case "ip":
-      return visitor.ip !== null && ipInRange(visitor.ip, member.range);
+      return typeof visitor.ip === "string" && ipInRange(visitor.ip, member.range);
     case "device":
       return visitor.clientId !== null && visitor.clientId === member.clientId;
     case "machine": {

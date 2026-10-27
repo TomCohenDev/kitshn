@@ -165,7 +165,8 @@ export default {
       headers.set("x-kitshn-caller", JSON.stringify(caller));
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
     }
-    if (url.pathname === "/connect") {
+    // K-604, K-812: the daemon connection, and the files of a deploy that the daemon runs.
+    if (url.pathname === "/connect" || url.pathname.startsWith("/connect/deploys/")) {
       // K-604: a daemon, with its machine's service token. Access checked it; the Worker checks the JWT.
       const caller = await callerOf(request, env, env.ACCESS_CONNECT_AUD);
       if (typeof caller === "string") return Response.json({ error: caller }, { status: 401 });

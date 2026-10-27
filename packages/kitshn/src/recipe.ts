@@ -24,11 +24,22 @@ export const StaticApp = Schema.Struct({
   output: Schema.String,
 });
 
-/** K-801, K-804: a recipe has exactly one kind. Milestone 3 deploys `static`; Compose and Worker apps follow. */
-export const Recipe = Schema.Struct({
-  static: StaticApp,
-  deploy: Schema.Array(DeployEntry).check(Schema.isMinLength(1), Schema.isMaxLength(20)),
+/**
+ * K-804, K-812: a Compose app. A machine with all `runsOn` labels builds and runs `file`. The app listens on
+ * the socket `$KITSHN_DEFAULT_SOCKET` (K-607), as in KitSHn 1, and the tunnel sends the address there.
+ */
+export const ComposeApp = Schema.Struct({
+  runsOn: Schema.optionalKey(Schema.Array(Schema.String).check(Schema.isMaxLength(10))),
+  file: Schema.optionalKey(Schema.String),
 });
+
+const deploy = Schema.Array(DeployEntry).check(Schema.isMinLength(1), Schema.isMaxLength(20));
+
+/** K-801, K-804: a recipe has exactly one kind. Worker apps follow later. */
+export const Recipe = Schema.Union([
+  Schema.Struct({ static: StaticApp, deploy }),
+  Schema.Struct({ compose: ComposeApp, deploy }),
+]);
 export type Recipe = typeof Recipe.Type;
 
 export const decodeRecipe = Schema.decodeUnknownSync(Recipe, { onExcessProperty: "error" });
@@ -95,7 +106,10 @@ export function plan(recipe: Recipe, repo: string, event: DeployEvent, zone: str
   }
   // K-901: one level under the zone, so the free Universal SSL certificate covers it.
   if (!LABEL.test(label))
-    return { kind: "error", reason: `The address ${label}.${zone} must be one name of at most 63 letters, digits or dashes under ${zone} (K-901).` };
+    return {
+      kind: "error",
+      reason: `The address ${label}.${zone} must be one name of at most 63 letters, digits or dashes under ${zone} (K-901).`,
+    };
   const ephemeral = entry.ephemeral === true;
   const closing = event.name === "pull_request" && event.action === "closed";
   if (closing && !ephemeral)

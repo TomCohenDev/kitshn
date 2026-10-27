@@ -7,16 +7,20 @@ import {
   type Resource,
   type ResourceKind,
   type State,
+  type Point,
   circlesHolding,
+  insideCircle,
   isPublicCircle,
   memberLabel,
   shareKey,
   shareLevel,
 } from "../core/model.ts";
+import { MAX_UPLOAD_BYTES } from "../core/library.ts";
 import { placeInside } from "../core/place.ts";
 import type { JobView, MachineView, RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
 import { CircleEditor, type DeviceSecret, EndsPicker, LevelOverride, SecretDialog } from "./Circle.tsx";
+import { AddSite } from "./Add.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
 import { MapView, type Selection, type View } from "./Map.tsx";
@@ -46,6 +50,8 @@ interface Toast {
   readonly text: string;
   readonly error: boolean;
   readonly undo: number | null;
+  /** More revisions that the same Undo takes back after `undo`, newest first (a drop of several files). */
+  readonly alsoUndo?: ReadonlyArray<number>;
 }
 
 const loadView = (): View => {
@@ -83,9 +89,13 @@ export function App() {
   const [view, setView] = useState<View>(loadView);
   const [openStacks, setOpenStacks] = useState<ReadonlySet<string>>(new Set());
   const [toast, setToast] = useState<Toast | null>(null);
-  const [palette, setPalette] = useState(false);
+  /** The palette's first query, or null while it is closed. */
+  const [palette, setPalette] = useState<string | null>(null);
   const [addingMachine, setAddingMachine] = useState(false);
   const [secret, setSecret] = useState<DeviceSecret | null>(null);
+  const [progress, setProgress] = useState<string | null>(null);
+  const [addingSite, setAddingSite] = useState(false);
+  const uploadInput = useRef<HTMLInputElement>(null);
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
   const [route, setRoute] = useState(routeFromHash);
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -108,17 +118,25 @@ export function App() {
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setPalette((open) => !open);
+        setPalette((open) => (open === null ? "" : null));
       } else if (event.key === "Escape") {
-        setPalette(false);
+        setPalette(null);
         setSelection({ cards: new Set(), circle: null });
       }
     };
+    // A file dropped outside the map would make the browser open it and leave kitshn.
+    const keepFiles = (event: DragEvent) => {
+      if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
+    };
     addEventListener("hashchange", onHash);
     addEventListener("keydown", onKey);
+    addEventListener("dragover", keepFiles);
+    addEventListener("drop", keepFiles);
     return () => {
       removeEventListener("hashchange", onHash);
       removeEventListener("keydown", onKey);
+      removeEventListener("dragover", keepFiles);
+      removeEventListener("drop", keepFiles);
     };
   }, []);
 
@@ -131,6 +149,69 @@ export function App() {
   const changeView = (next: View) => {
     setView(next);
     localStorage.setItem(VIEW_KEY, JSON.stringify(next));
+  };
+
+  /**
+   * K-1101: uploads one file after the other. With `at` (a drop on the map), the cards land there and so get
+   * the shares of the circles around that point; a public circle asks first (K-210). Without, they wait
+   * in the tray, private.
+   */
+  const uploadFiles = async (files: Array<File>, at: Point | null) => {
+    const tooBig = files.filter((file) => file.size > MAX_UPLOAD_BYTES);
+    const fitting = files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
+    const refused =
+      tooBig.length > 0 ? `${tooBig.map((file) => file.name).join(", ")}: kitshn takes at most 100 MB a file.` : "";
+    if (fitting.length === 0 || !state) {
+      if (refused) showToast({ text: refused, error: true, undo: null });
+      return;
+    }
+    // Every card lands in exactly the circles of the drop point, also when several fan out (K-204).
+    const circles = [...state.circles.values()];
+    const wanted = new Set(at ? circles.filter((circle) => insideCircle(at, circle)).map((circle) => circle.id) : []);
+    const publicHere = circles.filter((circle) => wanted.has(circle.id) && isPublicCircle(circle));
+    if (publicHere.length > 0) {
+      const what = fitting.length === 1 ? fitting[0]?.name : plural(fitting.length, "file");
+      const where = publicHere.map((circle) => circle.name).join(", ");
+      if (!(await ask(`This makes ${what} public in ${where}. Anyone with the address can open it.`))) return;
+    }
+    const added: Array<{ id: string; revision: number }> = [];
+    const errors: Array<string> = [];
+    for (const [index, file] of fitting.entries()) {
+      const spot = at ? { x: at.x + (index % 2) * 30, y: at.y + index * 90 } : null;
+      const point = spot && at ? (placeInside(state, spot, wanted) ?? at) : null;
+      const step = `${index + 1} of ${fitting.length}: ${file.name}`;
+      setProgress(`Uploading ${step}`);
+      const result = await upload(file, point, (fraction) =>
+        setProgress(`Uploading ${step} · ${Math.round(fraction * 100)}%`),
+      );
+      if ("error" in result) errors.push(result.error);
+      else added.push(result);
+    }
+    setProgress(null);
+    if (added.length > 0) setSelection({ cards: new Set(added.map((item) => item.id)), circle: null });
+    const done =
+      added.length === 0
+        ? ""
+        : at
+          ? `Added ${plural(added.length, "card")} where you dropped them.`
+          : `Uploaded ${plural(added.length, "file")}. They wait in the tray, private.`;
+    // K-503: a drop changes shares, so one Undo takes back the whole drop, newest first.
+    const [last, ...earlier] = at ? added.map((item) => item.revision).reverse() : [];
+    showToast({
+      text: [done, ...errors, refused].filter(Boolean).join(" "),
+      error: errors.length > 0 || refused !== "",
+      undo: last ?? null,
+      alsoUndo: earlier,
+    });
+  };
+
+  /** Opens the circle editor with its Add member input ready. */
+  const addMemberTo = (circleId: string) => {
+    setSelection({ cards: new Set(), circle: circleId });
+    location.hash = "map";
+    queueMicrotask(() =>
+      setTimeout(() => document.querySelector<HTMLInputElement>(".add-member input")?.focus()),
+    );
   };
 
   const showToast = (next: Toast) => {
@@ -289,6 +370,7 @@ export function App() {
     <>
       {route.tab === "map" ? (
         <MapView
+          onDropFiles={(files, at) => void uploadFiles(files, at)}
           state={state}
           access={store.snapshot.access}
           selection={selection}
@@ -323,7 +405,20 @@ export function App() {
         <History revisions={store.snapshot.revisions} onUndo={(id) => void undo(id)} />
       )}
       {addingMachine ? <AddMachine onClose={() => setAddingMachine(false)} /> : null}
+      {addingSite ? (
+        <AddSite
+          zone={store.snapshot.zone}
+          machines={store.snapshot.machines}
+          onClose={() => setAddingSite(false)}
+          onDone={(text) => showToast({ text, error: false, undo: null })}
+        />
+      ) : null}
       {secret ? <SecretDialog secret={secret} onClose={() => setSecret(null)} /> : null}
+      {progress ? (
+        <div class="progress" role="status">
+          <span class="sticker wait">upload</span> {progress}
+        </div>
+      ) : null}
       <header class="bar">
         <h1>kitshn</h1>
         <div class="seg">
@@ -368,29 +463,30 @@ export function App() {
             <button class="btn" onClick={() => setAddingMachine(true)}>
               + Machine
             </button>
+            <button
+              class="btn"
+              title="Add a person, a domain, a device or a network to a circle"
+              onClick={() => setPalette("add a member to ")}
+            >
+              + Member
+            </button>
+            <button class="btn" onClick={() => setAddingSite(true)}>
+              + Site
+            </button>
             <label
               class="btn"
-              title="An HTML file becomes a page; any other file stays a file (at most 100 MB)"
+              title="An HTML file becomes a page; any other file stays a file (at most 100 MB). You can also drop files on the map."
             >
               Upload
               <input
+                ref={uploadInput}
                 type="file"
+                multiple
                 hidden
                 onChange={(event) => {
-                  const file = event.currentTarget.files?.[0];
+                  const files = [...(event.currentTarget.files ?? [])];
                   event.currentTarget.value = "";
-                  if (!file) return;
-                  void upload(file).then((result) =>
-                    showToast(
-                      "error" in result
-                        ? { text: result.error, error: true, undo: null }
-                        : {
-                            text: `Uploaded ${file.name}. It waits in the tray, private.`,
-                            error: false,
-                            undo: null,
-                          },
-                    ),
-                  );
+                  void uploadFiles(files, null);
                 }}
               />
             </label>
@@ -400,7 +496,7 @@ export function App() {
           </>
         ) : null}
         <span class="grow" />
-        <button class="btn" onClick={() => setPalette(true)} title="Command palette (Cmd+K or Ctrl+K)">
+        <button class="btn" onClick={() => setPalette("")} title="Command palette (Cmd+K or Ctrl+K)">
           ⌘K
         </button>
         <span class={`sticker ${store.connection === "live" ? "ok" : "wait"}`} style={{ "--tilt": "3deg" }}>
@@ -524,10 +620,11 @@ export function App() {
           Paused: only the Owner circle opens the admin. Everything else is closed.
         </div>
       ) : null}
-      {palette ? (
+      {palette !== null ? (
         <Palette
           state={state}
-          onClose={() => setPalette(false)}
+          initialQuery={palette}
+          onClose={() => setPalette(null)}
           actions={{
             select: (selected) => {
               setSelection(selected);
@@ -537,6 +634,13 @@ export function App() {
             newCircle: () => void newCircle(),
             fit,
             history: () => (location.hash = "history"),
+            addMachine: () => setAddingMachine(true),
+            addSite: () => setAddingSite(true),
+            upload: () => {
+              location.hash = "map";
+              setTimeout(() => uploadInput.current?.click());
+            },
+            addMember: addMemberTo,
           }}
         />
       ) : null}
@@ -562,9 +666,11 @@ export function App() {
             <button
               class="btn primary"
               onClick={() => {
-                const revision = toast.undo;
+                const revisions = [...(toast.undo === null ? [] : [toast.undo]), ...(toast.alsoUndo ?? [])];
                 setToast(null);
-                if (revision !== null) void undo(revision);
+                void (async () => {
+                  for (const revision of revisions) await undo(revision);
+                })();
               }}
             >
               Undo
@@ -910,15 +1016,27 @@ interface PaletteActions {
   newCircle: () => void;
   fit: () => void;
   history: () => void;
+  addMachine: () => void;
+  addSite: () => void;
+  upload: () => void;
+  addMember: (circleId: string) => void;
 }
 
-function Palette(props: { state: State; onClose: () => void; actions: PaletteActions }) {
-  const [query, setQuery] = useState("");
+function Palette(props: {
+  state: State;
+  initialQuery: string;
+  onClose: () => void;
+  actions: PaletteActions;
+}) {
+  const [query, setQuery] = useState(props.initialQuery);
   const [active, setActive] = useState(0);
   const { state, actions } = props;
   const entries = useMemo(() => {
     const all: Array<{ label: string; run: () => void }> = [
       { label: "New circle", run: actions.newCircle },
+      { label: "Add a machine (join code)", run: actions.addMachine },
+      { label: "Add a site, live from a machine or static from a repo", run: actions.addSite },
+      { label: "Upload a page or a file", run: actions.upload },
       { label: "Fit the map", run: actions.fit },
       { label: "Open History", run: actions.history },
     ];
@@ -944,6 +1062,10 @@ function Palette(props: { state: State; onClose: () => void; actions: PaletteAct
       }
     }
     for (const circle of state.circles.values()) {
+      all.push({
+        label: `Add a member to ${circle.name}: a person, a domain, a device or a network`,
+        run: () => actions.addMember(circle.id),
+      });
       all.push({
         label: `⭕ ${circle.name}`,
         run: () => actions.select({ cards: new Set(), circle: circle.id }),

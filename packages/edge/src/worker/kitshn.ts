@@ -426,6 +426,7 @@ export class Kitshn extends DurableObject<Env> {
       jobs: this.recentJobs(10, 2000),
       version: this.env.KITSHN_VERSION,
       accessTeam: this.env.ACCESS_TEAM_DOMAIN,
+      zone: this.env.KITSHN_ZONE,
       revision: this.lastRevision(),
       me,
     };
@@ -2061,6 +2062,17 @@ export class Kitshn extends DurableObject<Env> {
     const createdAt = Number(header("x-kitshn-created-at") ?? Date.now());
     if (!Number.isFinite(createdAt) || createdAt <= 0)
       return refuse("X-Kitshn-Created-At is not a time in ms.");
+    // A file dropped on the map lands where it was dropped, and so in the circles there (K-204).
+    const [x, y] = [header("x-kitshn-x"), header("x-kitshn-y")].map((value) =>
+      value === null ? null : value === "" ? Number.NaN : Number(value),
+    );
+    const place =
+      x === null || y === null || x === undefined || y === undefined
+        ? null
+        : Number.isFinite(x) && Number.isFinite(y) && Math.abs(x) < 1e6 && Math.abs(y) < 1e6
+          ? { x: Math.round(x), y: Math.round(y) }
+          : undefined;
+    if (place === undefined) return refuse("X-Kitshn-X and X-Kitshn-Y are not a point on the map.");
     const item: LibraryItem = {
       id: newLibraryId(),
       kind,
@@ -2096,7 +2108,7 @@ export class Kitshn extends DurableObject<Env> {
       group: null,
       machine: null,
     };
-    this.ctx.storage.transactionSync(() => {
+    const revision = this.ctx.storage.transactionSync(() => {
       this.sql(
         `INSERT INTO library (id, kind, title, file_name, thread, machine, size, content_type, created_at, source)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -2112,11 +2124,15 @@ export class Kitshn extends DurableObject<Env> {
         source,
       );
       this.putResource(resource);
-      this.insertRevision(caller.actor, `Added the ${kind} ${title} to the tray`, [], null);
+      if (!place) return this.insertRevision(caller.actor, `Added the ${kind} ${title} to the tray`, [], null);
+      // The UI asks before a drop makes a card public (K-210); an agent tool must ask the same way (K-715).
+      const changes: Array<Change> = [{ _tag: "place", id: item.id, before: null, after: place }];
+      this.persist(changes);
+      return this.insertRevision(caller.actor, `Added the ${kind} ${title} on the map`, changes, null);
     });
     this.load();
     this.broadcast();
-    return Response.json({ id: item.id, address: resource.addresses[0] }, { status: 201 });
+    return Response.json({ id: item.id, address: resource.addresses[0], revision }, { status: 201 });
   }
 
   /**

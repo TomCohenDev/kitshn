@@ -1,3 +1,4 @@
+import { RESERVED_SITE_NAMES } from "../core/library.ts";
 import type { LiveSiteReport } from "../core/machine.ts";
 
 /** One live site of a machine (K-1104), as the Durable Object keeps it. */
@@ -42,6 +43,8 @@ export function parseSites(value: unknown): { sites: Array<LiveSiteReport>; refu
     const site = item as Partial<Record<keyof LiveSiteReport, unknown>>;
     if (typeof site.name !== "string" || !LABEL.test(site.name))
       refused.push(`The name ${String(site.name)} is not valid.`);
+    else if (RESERVED_SITE_NAMES.has(site.name))
+      refused.push(`${site.name}: kitshn itself uses this name on the zone.`);
     else if (typeof site.target !== "string" || !validTarget(site.target))
       refused.push(`${site.name}: the target is not valid.`);
     else sites.push({ name: site.name, target: site.target, dev: site.dev === true, up: site.up === true });

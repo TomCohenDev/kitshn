@@ -38,7 +38,7 @@ import {
 import { placeInside } from "../core/place.ts";
 import type { MachineView, RevisionView, ServerMessage, Snapshot } from "../core/protocol.ts";
 import { ClientMessage } from "../core/schema.ts";
-import { agentRefusal, cardsControlledBy, circlesOf } from "../core/agent.ts";
+import { agentMayRunOn, agentRefusal, cardsControlledBy, circlesOf } from "../core/agent.ts";
 import { demo } from "../core/demo.ts";
 import {
   contentSecurityPolicy,
@@ -922,7 +922,7 @@ export class Kitshn extends DurableObject<Env> {
   private mayRunOn(visitor: Visitor, machineId: string) {
     return this.hasAdmin(visitor)
       ? this.canControl(visitor, machineId)
-      : cardsControlledBy(this.state, visitor, Date.now()).has(machineId);
+      : agentMayRunOn(this.state, visitor, machineId, Date.now());
   }
 
   /** K-614: the sender of a command needs control on the machine card itself, not only on the admin. */
@@ -1082,7 +1082,7 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json(updated);
   }
 
-  private recentJobs(limit: number, outputLimit = 4000): Array<Job> {
+  private recentJobs(limit: number, outputLimit = 4000, id: number | null = null): Array<Job> {
     return this.sql<{
       id: number;
       machine_id: string | null;
@@ -1095,7 +1095,9 @@ export class Kitshn extends DurableObject<Env> {
       exit_code: number | null;
       output: string;
     }>(
-      "SELECT id, machine_id, labels, command, state, created_at, expires_at, actor, exit_code, output FROM jobs ORDER BY id DESC LIMIT ?",
+      "SELECT id, machine_id, labels, command, state, created_at, expires_at, actor, exit_code, output FROM jobs WHERE ? IS NULL OR id = ? ORDER BY id DESC LIMIT ?",
+      id,
+      id,
       limit,
     ).map((row) => ({
       id: row.id,
@@ -2321,6 +2323,14 @@ export class Kitshn extends DurableObject<Env> {
         { status: 403 },
       );
     const managed = cardsControlledBy(this.state, caller.visitor, now);
+    // K-614: the history names the device by its member name, not by its token id.
+    const device = [...this.state.circles.values()]
+      .flatMap((circle) => circle.members)
+      .find((member) => member._tag === "device" && member.clientId === caller.visitor.clientId);
+    const agent: Caller =
+      caller.actor._tag === "device" && device?._tag === "device"
+        ? { ...caller, actor: { ...caller.actor, name: device.name } }
+        : caller;
     if (path === "/agent/state" && request.method === "GET") {
       return Response.json({
         circles: [...this.state.circles.values()]
@@ -2369,7 +2379,7 @@ export class Kitshn extends DurableObject<Env> {
           now,
         );
         if (refusal) return Response.json({ error: refusal }, { status: 403 });
-        return Response.json({ revision: this.commit(caller.actor, changes, null) });
+        return Response.json({ revision: this.commit(agent.actor, changes, null) });
       } catch (error) {
         if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
         throw error;
@@ -2380,12 +2390,25 @@ export class Kitshn extends DurableObject<Env> {
       const machineId =
         typeof body === "object" && body !== null && "machineId" in body ? body.machineId : undefined;
       // Only the machines whose cards it manages; a label job could land on any machine.
-      if (typeof machineId !== "string" || !cardsControlledBy(this.state, caller.visitor, Date.now()).has(machineId))
+      if (typeof machineId !== "string" || !agentMayRunOn(this.state, caller.visitor, machineId, Date.now()))
         return Response.json(
-          { error: "An agent key runs jobs only on a machine whose card it manages (K-718)." },
+          {
+            error:
+              "An agent key runs jobs only on a machine whose card, and every card that runs on it, it manages (K-718).",
+          },
           { status: 403 },
         );
-      return this.addJob(caller, body);
+      return this.addJob(agent, body);
+    }
+    if (path.startsWith("/agent/jobs/") && request.method === "GET") {
+      const id = Number(path.slice("/agent/jobs/".length));
+      const [job] = this.recentJobs(1, 4000, id);
+      const [row] = this.sql<{ visitor: string }>("SELECT visitor FROM jobs WHERE id = ?", id);
+      const sender = row ? (JSON.parse(row.visitor) as Visitor).clientId : null;
+      // Only its own jobs: their state, exit code and output.
+      if (!job || sender !== caller.visitor.clientId)
+        return Response.json({ error: `This key sent no job ${id}.` }, { status: 404 });
+      return Response.json(job);
     }
     return Response.json({ error: `The agent path has no ${request.method} ${path}.` }, { status: 404 });
   }

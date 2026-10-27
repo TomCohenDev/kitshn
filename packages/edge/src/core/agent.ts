@@ -1,6 +1,7 @@
 import type { Edit } from "./changes.ts";
 import {
   ADMIN_RESOURCE_ID,
+  type Circle,
   type Member,
   type State,
   activeShares,
@@ -40,13 +41,26 @@ export function cardsControlledBy(state: State, visitor: Visitor, now: number) {
     [...state.resources.values()]
       .filter((resource) =>
         activeShares(state, resource, now).some(
-          (share) =>
-            own.has(share.circle.id) &&
-            (state.shareSettings.get(shareKey(resource.id, share.circle.id))?.level ?? share.circle.level) ===
-              "control",
+          (share) => own.has(share.circle.id) && levelIn(state, resource.id, share.circle) === "control",
         ),
       )
       .map((resource) => resource.id),
+  );
+}
+
+/** The level a circle gives a card: its override, or the circle level, before the kind cuts it down. */
+const levelIn = (state: State, resourceId: string, circle: Circle) =>
+  state.shareSettings.get(shareKey(resourceId, circle.id))?.level ?? circle.level;
+
+/**
+ * K-718: an agent key runs jobs on a machine only when it manages the machine card and every card that runs
+ * on that machine, because a shell on the machine reaches all of them.
+ */
+export function agentMayRunOn(state: State, visitor: Visitor, machineId: string, now: number) {
+  const managed = cardsControlledBy(state, visitor, now);
+  return (
+    managed.has(machineId) &&
+    [...state.resources.values()].every((resource) => resource.machine !== machineId || managed.has(resource.id))
   );
 }
 
@@ -70,7 +84,7 @@ export function agentRefusal(
       return `This key has no control on the card "${state.resources.get(edit.id)?.name ?? edit.id}".`;
     for (const side of [state, after]) {
       const foreign = circlesHolding(side, edit.id).find(
-        (circle) => !own.has(circle.id) || circle.level !== "control",
+        (circle) => !own.has(circle.id) || levelIn(side, edit.id, circle) !== "control",
       );
       if (foreign)
         return `An agent key moves cards only between its own agent circles with control, and "${foreign.name}" is not one of them.`;
@@ -79,14 +93,15 @@ export function agentRefusal(
   return null;
 }
 
-/** K-718: a device member that cannot run kitshn: no control on the admin card. The map calls it an agent. */
+/** K-718: a device member in an agent circle, without the admin card. The map calls it an agent. */
 export function isAgentKey(state: State, member: Member, now: number): boolean {
   if (member._tag !== "device") return false;
+  const visitor = { email: null, clientId: member.clientId, ip: null };
   const admin = state.resources.get(ADMIN_RESOURCE_ID);
   // The pause takes every device off the admin for a while; that does not make the owner's devices agents.
   const unpaused = { ...state, paused: false };
   return (
-    !admin ||
-    visitorLevel(unpaused, admin, { email: null, clientId: member.clientId, ip: null }, now) !== "control"
+    circlesOf(state, visitor, now).size > 0 &&
+    (!admin || visitorLevel(unpaused, admin, visitor, now) !== "control")
   );
 }

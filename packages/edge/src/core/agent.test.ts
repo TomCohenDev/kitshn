@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 const as = (clientId: string) => ({ email: null, clientId, ip: null });
-import { agentRefusal, cardsControlledBy, isAgentKey } from "./agent.ts";
+import { agentMayRunOn, agentRefusal, cardsControlledBy, isAgentKey } from "./agent.ts";
 import { type Edit, applyChanges, resolveEdits } from "./changes.ts";
 import type { Circle, Resource, State } from "./model.ts";
 import { seed } from "./seed.ts";
@@ -103,5 +103,19 @@ describe("agent keys (K-718)", () => {
     const ended = { ...agents, endsAt: 1 };
     expect(cardsControlledBy({ ...base, circles: new Map(base.circles).set("agents", ended) }, as("agent-1"), 5).size).toBe(0);
     expect(check(base, [{ _tag: "place", id: "site", after: null }])).toBeNull();
+  });
+  it("runs jobs on a machine only when it manages every card on it", () => {
+    const base = start();
+    const machine = { ...base.resources.get("site")!, id: "m1", name: "m1", kind: "machine" as const };
+    const app = { ...base.resources.get("site")!, id: "app", machine: "m1" };
+    const resources = new Map(base.resources).set("m1", machine).set("app", app);
+    const places = new Map(base.places).set("m1", { x: 0, y: 1000 }).set("app", { x: -5000, y: 0 });
+    const state = { ...base, resources, places };
+    expect(agentMayRunOn(state, as("agent-1"), "m1", 0)).toBe(false);
+    const inside = { ...state, places: new Map(places).set("app", { x: 0, y: 1000 }) };
+    expect(agentMayRunOn(inside, as("agent-1"), "m1", 0)).toBe(true);
+  });
+  it("calls a device an agent only when it has an agent circle", () => {
+    expect(isAgentKey(start(), { _tag: "device", tokenId: "t9", clientId: "tv", name: "TV" }, 0)).toBe(false);
   });
 });

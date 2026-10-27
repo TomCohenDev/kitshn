@@ -1005,7 +1005,7 @@ export class Kitshn extends DurableObject<Env> {
 
   /**
    * K-603: kitshn owns each tunnel's ingress and writes it from the alarm queue. A site gets ingress only
-   * once its Access application exists (K-006). A row keeps the ingress that Cloudflare last accepted;
+   * once its Access application exists (K-410). A row keeps the ingress that Cloudflare last accepted;
    * a failed write tries again after five minutes.
    */
   private async syncTunnels(api: NonNullable<ReturnType<Kitshn["api"]>>, budget: number) {
@@ -1233,7 +1233,7 @@ export class Kitshn extends DurableObject<Env> {
 
   /**
    * Live site addresses whose DNS record kitshn still has to make, point elsewhere, or delete. A record
-   * goes only after the ingress and the offline route of its address are gone (K-006).
+   * goes only after the ingress and the offline route of its address are gone (K-410).
    */
   private dnsWork() {
     const now = Date.now();
@@ -1356,6 +1356,13 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1108: a Worker route on a live site only while its origin is down, so healthy visits cost nothing. */
   private async syncRoutes(api: Api, budget: number) {
     let calls = 0;
+    // A route that failed to go but is wanted again simply stays; its old error no longer applies.
+    for (const site of sitesNeedingRoutes(this.protectedSites(), this.onlineMachines())) {
+      this.sql(
+        "UPDATE route_objects SET error = NULL, retry_at = 0 WHERE address = ? AND route_id != '' AND error IS NOT NULL",
+        site.address,
+      );
+    }
     const routes = `/zones/${this.env.CLOUDFLARE_ZONE_ID}/workers/routes`;
     for (const work of this.routeWork()) {
       if (calls++ >= budget) return;
@@ -1422,13 +1429,15 @@ export class Kitshn extends DurableObject<Env> {
     const desired = desiredAccess(this.state, now);
     if (this.env.CLOUDFLARE_API_TOKEN && hasAccessWork(desired, this.access, this.reachableAddresses()))
       next = now;
-    // A failed tunnel, DNS or route write tries again after five minutes (K-006).
+    // A failed tunnel, DNS or route write tries again after five minutes (K-410). Only a future retry
+    // time counts here; a row that is due counts through tunnelWork, and only when there is work for it.
     const [retry] = this.sql<{ at: number | null }>(
       `SELECT MIN(retry_at) AS at FROM (SELECT retry_at FROM tunnel_objects WHERE error IS NOT NULL
        UNION ALL SELECT retry_at FROM dns_objects WHERE error IS NOT NULL
-       UNION ALL SELECT retry_at FROM route_objects WHERE error IS NOT NULL)`,
+       UNION ALL SELECT retry_at FROM route_objects WHERE error IS NOT NULL) WHERE retry_at > ?`,
+      now,
     );
-    if (retry?.at) next = Math.min(next, Math.max(retry.at, now));
+    if (retry?.at) next = Math.min(next, retry.at);
     const ends = [
       ...[...this.state.shareSettings.values()].map((setting) => setting.endsAt),
       ...[...this.state.circles.values()].map((circle) => circle.endsAt),
@@ -1952,7 +1961,7 @@ export class Kitshn extends DurableObject<Env> {
         }
       }
       // Removals first: ingress and DNS go before an Access application does. Additions wait for the next
-      // run, because ingress and DNS need the application that the Access sync makes (K-006).
+      // run, because ingress and DNS need the application that the Access sync makes (K-410).
       await this.syncTunnels(api, 6);
       spent += await this.checkSites(api, 6);
       await this.syncDns(api, 5);

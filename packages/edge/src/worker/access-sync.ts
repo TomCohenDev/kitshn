@@ -96,8 +96,11 @@ export function hasAccessWork(
   return false;
 }
 
-const appDomain = (row: AccessRow) =>
-  row.body ? ((JSON.parse(row.body) as { domain?: string }).domain ?? null) : null;
+/** The address of an application row, from its key `app:<card>:<address>`, so it never depends on the body. */
+const appDomain = (row: AccessRow) => {
+  const domain = row.key.split(":").slice(2).join(":");
+  return domain || null;
+};
 
 /**
  * K-006: an application that kitshn no longer wants stays while a route (tunnel ingress, DNS record,
@@ -112,7 +115,10 @@ function keptPolicies(
   for (const row of rows.values()) {
     if (!row.key.startsWith("app:") || desired.apps.has(row.key)) continue;
     const domain = appDomain(row);
-    if (domain !== null && reachable.has(domain)) for (const id of policyIds(row.body)) kept.add(id);
+    if (domain === null || !reachable.has(domain)) continue;
+    // A kept app whose body the daily compare cleared has unknown policies: keep every policy for now.
+    if (!row.body) return null;
+    for (const id of policyIds(row.body)) kept.add(id);
   }
   return kept;
 }
@@ -122,14 +128,14 @@ const isStale = (
   desired: DesiredAccess,
   row: AccessRow,
   reachable: ReadonlySet<string>,
-  kept: ReadonlySet<string>,
+  kept: ReadonlySet<string> | null,
 ) => {
   if (desired.policies.has(row.key) || desired.apps.has(row.key) || row.error !== null) return false;
   if (row.key.startsWith("app:")) {
     const domain = appDomain(row);
     return domain === null || !reachable.has(domain);
   }
-  return !kept.has(row.cfId);
+  return kept !== null && !kept.has(row.cfId);
 };
 
 const isNotFound = (error: unknown) =>
@@ -137,9 +143,11 @@ const isNotFound = (error: unknown) =>
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
+/** The policy ids in an application body. An empty body (cleared by the daily compare) has none. */
 const policyIds = (body: string) =>
-  (JSON.parse(body) as { policies?: ReadonlyArray<{ id: string }> }).policies?.map((policy) => policy.id) ??
-  [];
+  body
+    ? ((JSON.parse(body) as { policies?: ReadonlyArray<{ id: string }> }).policies?.map((policy) => policy.id) ?? [])
+    : [];
 
 const removesPolicy = (before: string, after: string) => {
   const kept = new Set(policyIds(after));
@@ -350,7 +358,9 @@ export async function syncAccess(
           existingApps = await api<ReadonlyArray<Named>>("GET", `${base}/apps?per_page=1000`);
         }
         const found = find((kind === "policies" ? existingPolicies : existingApps) ?? []);
-        cfId = found && found.name.startsWith(ACCESS_NAME_PREFIX) ? found.id : "";
+        // Never adopt an object that another row holds: one Cloudflare object belongs to one row (K-410).
+        const held = new Set([...store.rows.values()].map((item) => item.cfId));
+        cfId = found && found.name.startsWith(ACCESS_NAME_PREFIX) && !held.has(found.id) ? found.id : "";
       }
       if (!spend()) return false;
       const request: unknown = JSON.parse(body);
@@ -401,7 +411,9 @@ export async function syncAccess(
   // Applications first: Access refuses to delete a policy that an application still uses.
   stale.sort((a, b) => Number(a.key.startsWith("policy:")) - Number(b.key.startsWith("policy:")));
   for (const row of stale) {
-    if (!row.cfId) {
+    // A row without an object, or one whose object another row now holds, goes without a call.
+    const shared = [...store.rows.values()].some((item) => item.key !== row.key && item.cfId === row.cfId);
+    if (!row.cfId || shared) {
       store.remove(row.key);
       continue;
     }

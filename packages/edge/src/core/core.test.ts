@@ -5,6 +5,7 @@ import {
   conflictOf,
   type Edit,
   invert,
+  refuseRaiseWhilePaused,
   refuseResume,
   resolveEdits,
   ruleViolation,
@@ -477,5 +478,15 @@ describe("emergency pause (K-1504)", () => {
     expect(refuseResume(paused.changes)).toEqual(paused.changes);
     expect(() => refuseResume(resolveEdits(paused.after, [{ _tag: "pause", after: false }]))).toThrow(/passkey/);
     expect(() => refuseResume(invert(paused.changes))).toThrow(/passkey/);
+  });
+  it("lets access only go down while paused (MM-711)", () => {
+    const paused = edit(start(), [{ _tag: "pause", after: true }]).after;
+    const owner = paused.circles.get("owner")!;
+    const wider = edit(paused, [
+      { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, { _tag: "everyone" }] } },
+    ]).after;
+    expect(() => refuseRaiseWhilePaused(paused, wider)).toThrow(/only goes down/);
+    const narrower = edit(paused, [{ _tag: "circle", id: "owner", after: { ...owner, needsPasskey: true } }]).after;
+    expect(() => refuseRaiseWhilePaused(paused, narrower)).not.toThrow();
   });
 });

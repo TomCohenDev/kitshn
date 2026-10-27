@@ -729,9 +729,14 @@ select {
   }
 }
 
-/* K-1504: the big red button. Red in both modes, so it never reads as an ordinary action. */
+/* K-1504: the big red button. */
+:root {
+  --hazard: #e5232e;
+  --hazard-dark: #c8101b;
+}
+/* The big red button. Red in both modes, so it never reads as an ordinary action. */
 .btn.big-red {
-  background: #e5232e;
+  background: var(--hazard);
   color: #ffffff;
   font-weight: 800;
   letter-spacing: 0.02em;
@@ -739,7 +744,7 @@ select {
   box-shadow: 3px 3px 0 0 var(--shadow-ink);
 }
 .btn.big-red:not(:disabled):hover {
-  background: #c8101b;
+  background: var(--hazard-dark);
 }
 .btn.resume {
   background: var(--green);
@@ -752,12 +757,13 @@ select {
   z-index: 30;
   pointer-events: none;
   border: 10px solid transparent;
-  border-image: repeating-linear-gradient(-45deg, #e5232e 0 14px, #000000 14px 28px) 10;
+  border-image: repeating-linear-gradient(-45deg, var(--hazard) 0 14px, #000000 14px 28px) 10;
 }
 .paused-banner {
   position: fixed;
   top: 112px;
-  left: 50%;
+  /* Centred over the map, left of the side panel. */
+  left: calc(50% - 190px);
   transform: translateX(-50%);
   z-index: 31;
   display: flex;
@@ -765,7 +771,7 @@ select {
   align-items: center;
   padding: 6px 8px 6px 14px;
   color: #ffffff;
-  background: #e5232e;
+  background: var(--hazard);
   border: var(--bw) solid var(--shadow-ink);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
@@ -780,11 +786,11 @@ select {
 }
 .pause-dialog {
   max-width: 34rem;
-  border-color: #e5232e;
-  box-shadow: 6px 6px 0 0 #e5232e;
+  border-color: var(--hazard);
+  box-shadow: 6px 6px 0 0 var(--hazard);
 }
 .pause-dialog h2 {
-  color: #e5232e;
+  color: var(--hazard);
 }
 .pause-dialog li {
   margin-bottom: 6px;

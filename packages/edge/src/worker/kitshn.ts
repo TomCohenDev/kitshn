@@ -10,6 +10,7 @@ import {
   conflictOf,
   deepEqual,
   invert,
+  refuseRaiseWhilePaused,
   refuseResume,
   resolveEdits,
   ruleViolation,
@@ -377,12 +378,22 @@ export class Kitshn extends DurableObject<Env> {
     const after = applyChanges(before, changes);
     const violation = ruleViolation(after);
     if (violation) throw new RuleError(violation);
+    refuseRaiseWhilePaused(before, after);
     const summary =
       undoes === null
         ? summarize(before, after, changes)
         : `Undo #${undoes}: ${summarize(before, after, changes)}`;
     const id = this.ctx.storage.transactionSync(() => {
       this.persist(changes);
+      if (changes.some((change) => change._tag === "pause" && change.after)) {
+        this.setMeta("paused_by", JSON.stringify(actor));
+        this.setMeta("paused_at", String(Date.now()));
+        // K-1504: jobs that devices and agent keys queued do not run after Resume.
+        this.sql(
+          `UPDATE jobs SET state = 'failed', output = 'The emergency pause ended this job.'
+           WHERE state = 'queued' AND json_extract(visitor, '$.email') IS NULL AND json_extract(visitor, '$.clientId') IS NOT NULL`,
+        );
+      }
       return this.insertRevision(actor, summary, changes, undoes);
     });
     this.state = after;
@@ -468,6 +479,7 @@ export class Kitshn extends DurableObject<Env> {
       access: accessStates(desiredAccess(this.state, Date.now()), this.access),
       accessWarnings: this.accessWarnings,
       paused: this.state.paused,
+      pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
       version: this.env.KITSHN_VERSION,
@@ -969,7 +981,10 @@ export class Kitshn extends DurableObject<Env> {
   /** K-614: the sender of a command needs control on the machine card itself, not only on the admin. */
   private canControl(visitor: Visitor, machineId: string) {
     const resource = this.state.resources.get(machineId);
-    return resource !== undefined && visitorLevel(this.state, resource, visitor, Date.now()) === "control";
+    if (!resource) return false;
+    // K-1504, MM-711: commands still work for the owner while paused; the pause takes no tool from them.
+    if (this.state.paused && this.hasAdmin(visitor)) return resource.kind === "machine";
+    return visitorLevel(this.state, resource, visitor, Date.now()) === "control";
   }
 
   /** K-610 to K-614: a job runs on one machine, or on the first online machine with its labels. */
@@ -1812,9 +1827,6 @@ export class Kitshn extends DurableObject<Env> {
     const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
     const fail = (status: number, error: string) => Response.json({ error }, { status });
     try {
-      // K-1504: no new deploy while paused; the workflow fails with the reason and runs again after Resume.
-      if (path === "/deploy/plan" && this.state.paused)
-        return fail(423, "kitshn is paused (Emergency pause). Deploys wait until the owner resumes.");
       if (path === "/deploy/plan") return await this.planDeploy(api, deployer, input);
       if (path === "/deploy/status") return this.composeStatus(deployer, String(input["deployId"] ?? ""));
       const [row] = this.sql<DeployRow>(
@@ -1859,6 +1871,12 @@ export class Kitshn extends DurableObject<Env> {
     const result = plan(recipe, deployer.repo, event, this.env.KITSHN_ZONE);
     if (result.kind === "error") return Response.json({ error: result.reason }, { status: 400 });
     if (result.kind === "skip") return Response.json({ deployId: null, plan: result });
+    // K-1504: no new deploy while paused; a teardown still runs, because it only lowers access.
+    if (result.kind === "deploy" && this.state.paused)
+      return Response.json(
+        { error: "kitshn is paused (Emergency pause). Deploys wait until the owner resumes." },
+        { status: 423 },
+      );
     const { resourceId, script } = environmentNames(deployer.repoId, deployer.repo, result.environment);
     const existing = this.state.resources.get(resourceId);
     // K-811: a number that only the request names may close a preview, and only the one that this head
@@ -2974,6 +2992,12 @@ const libraryItem = (row: LibraryRow): LibraryItem => ({
 const deployObject = (deployId: string, file: string) => `deploys/${deployId}/${file}`;
 
 /** The requester of a job that kitshn makes itself, such as a deploy (K-614). */
+/** K-1504: who paused and when, from the meta rows that a pause writes. */
+function parsePausedBy(actor: string | null, at: string | null): { readonly actor: Actor; readonly at: number } | null {
+  if (!actor || !at) return null;
+  return { actor: JSON.parse(actor) as Actor, at: Number(at) };
+}
+
 const KITSHN_JOB = JSON.stringify({ email: null, clientId: null, ip: null, kitshn: true });
 
 /** K-718: the workflow file that an agent key starts in an app repo, the one that the map's recipe shows. */

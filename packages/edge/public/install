@@ -199,7 +199,15 @@ AGENT_AUD=$(app "$KITSHN_HOST/agent" "kitshn agent keys" 24h "$machines_policy")
 fresh_rules=$(printf '%s' "$KITSHN_OWNER_EMAILS" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0) | {email: {email: .}})')
 fresh_policy=$(policy "kitshn fresh passkey" "$(jq -nc --argjson include "$fresh_rules" \
   '{name:"kitshn fresh passkey",decision:"allow",include:$include,require:[],exclude:[],mfa_config:{allowed_authenticators:["biometrics","security_key"],session_duration:"10m"}}')")
-FRESH_AUD=$(app "$KITSHN_HOST/api/fresh" "kitshn fresh passkey" 10m "$fresh_policy")
+# Its cookie stays on its path, so the admin application's cookie of the whole host does not replace it.
+FRESH_AUD=$(printf '%s' "$APPS" | jq -r --arg d "$KITSHN_HOST/api/fresh" 'map(select(.domain == $d)) | .[0].aud // empty')
+if [ -n "$FRESH_AUD" ]; then
+  kept "application \"kitshn fresh passkey\" on $KITSHN_HOST/api/fresh"
+else
+  FRESH_AUD=$(api POST "/accounts/$ACCOUNT/access/apps" "$(jq -nc --arg domain "$KITSHN_HOST/api/fresh" --arg policy "$fresh_policy" \
+    '{name:"kitshn fresh passkey",type:"self_hosted",domain:$domain,session_duration:"10m",same_site_cookie_attribute:"lax",path_cookie_attribute:true,policies:[{id:$policy,precedence:1}]}')" | jq -r .aud)
+  changed "created the application \"kitshn fresh passkey\" on $KITSHN_HOST/api/fresh"
+fi
 # K-1004: pages and files have no Access application on the whole host; the Worker checks the shares.
 # Only the login paths have one. It lets in anyone who logs in, and the passkey path adds the passkey
 # check (K-103). The Worker reads who logged in from the cookie that Access sets for the whole host.

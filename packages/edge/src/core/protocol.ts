@@ -30,6 +30,8 @@ export interface Snapshot {
   /** K-408: Access applications that kitshn did not make but that cover a kitshn address. */
   readonly accessWarnings: ReadonlyArray<string>;
   readonly paused: boolean;
+  /** K-1504: who paused and when, while paused. */
+  readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;
   /** The newest jobs, with their output cut to 4,000 characters. */
   readonly jobs: ReadonlyArray<JobView>;

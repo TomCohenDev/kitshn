@@ -31,7 +31,7 @@ import { CircleEditor, type DeviceSecret, EndsPicker, LevelOverride, SecretDialo
 import { AddSite } from "./Add.tsx";
 import { PauseDialog, PausedBanner } from "./Pause.tsx";
 import { LibraryView } from "./Library.tsx";
-import { AddMachine, MachinePanel, MachinesView, ago } from "./Machines.tsx";
+import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
 import { MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
 import { overlay } from "./held.ts";
 import {
@@ -352,6 +352,8 @@ export function App() {
 
   const finishResume = async () => {
     history.replaceState(null, "", location.pathname + location.search);
+    // MM-712: a link alone never resumes; the owner confirms once more after the passkey check.
+    if (!(await ask("Your passkey check passed. Resume everything now? Every share comes back."))) return;
     const result = await callApi<{ revision: number | null }>("POST", "/api/fresh/resume", {});
     showToast(
       "error" in result
@@ -360,12 +362,6 @@ export function App() {
     );
   };
 
-  const pausedBy = useMemo(() => {
-    const pause = [...(store.snapshot?.revisions ?? [])]
-      .filter((revision) => revision.summary.startsWith("Paused all shares"))
-      .sort((a, b) => b.id - a.id)[0];
-    return pause ? { by: actorLabel(pause.actor), at: pause.at } : null;
-  }, [store.snapshot?.revisions]);
 
   const showToast = (next: Toast) => {
     setToast(next);
@@ -810,7 +806,11 @@ export function App() {
         }}
       />
       {store.snapshot.paused ? (
-        <PausedBanner by={pausedBy?.by ?? null} since={pausedBy ? (Date.now() - pausedBy.at < 60_000 ? "just now" : `${ago(pausedBy.at)} ago`) : null} onResume={startResume} />
+        <PausedBanner
+          by={store.snapshot.pausedBy ? actorLabel(store.snapshot.pausedBy.actor) : null}
+          since={store.snapshot.pausedBy ? `since ${new Date(store.snapshot.pausedBy.at).toLocaleString()}` : null}
+          onResume={startResume}
+        />
       ) : null}
       {pausing ? <PauseDialog onCancel={() => setPausing(false)} onPause={() => void pauseNow()} /> : null}
       {palette !== null ? (

@@ -27,6 +27,7 @@ import {
   type Point,
   type Resource,
   type ShareSetting,
+  pauseModeOf,
   type Stack,
   type State,
   circlesHolding,
@@ -202,7 +203,7 @@ export class Kitshn extends DurableObject<Env> {
       ),
       shareSettings: json<ShareSetting>(this.sql("SELECT id, body FROM share_settings")),
       stacks: json<Stack>(this.sql("SELECT id, body FROM stacks")),
-      paused: this.meta("paused") === "true",
+      paused: pauseModeOf(this.meta("paused")),
       machines: json<Machine>(this.sql("SELECT id, body FROM machines")),
     };
     this.liveSites = new Map(
@@ -325,7 +326,7 @@ export class Kitshn extends DurableObject<Env> {
   private persist(changes: ReadonlyArray<Change>) {
     for (const change of changes) {
       if (change._tag === "pause") {
-        this.setMeta("paused", String(change.after));
+        this.setMeta("paused", change.after ?? "");
         continue;
       }
       const table =
@@ -391,7 +392,8 @@ export class Kitshn extends DurableObject<Env> {
         : `Undo #${undoes}: ${summarize(before, after, changes)}`;
     const id = this.ctx.storage.transactionSync(() => {
       this.persist(changes);
-      if (changes.some((change) => change._tag === "pause" && change.after)) {
+      // A switch to a lockdown keeps who paused first and when.
+      if (changes.some((change) => change._tag === "pause" && change.after && !change.before)) {
         this.setMeta("paused_by", JSON.stringify(actor));
         this.setMeta("paused_at", String(Date.now()));
         // K-1504: jobs that devices and agent keys queued do not run after Resume.
@@ -430,7 +432,7 @@ export class Kitshn extends DurableObject<Env> {
     if (!this.state.paused) return Response.json({ revision: null });
     try {
       return Response.json({
-        revision: this.commit(caller.actor, resolveEdits(this.state, [{ _tag: "pause", after: false }]), null),
+        revision: this.commit(caller.actor, resolveEdits(this.state, [{ _tag: "pause", after: null }]), null),
       });
     } catch (error) {
       if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
@@ -995,7 +997,7 @@ export class Kitshn extends DurableObject<Env> {
     const resource = this.state.resources.get(machineId);
     if (!resource) return false;
     // K-1504, MM-711: the owner keeps the commands they had; the pause takes no tool from them and gives none.
-    const state = this.state.paused && this.hasAdmin(visitor) ? { ...this.state, paused: false } : this.state;
+    const state = this.state.paused && this.hasAdmin(visitor) ? { ...this.state, paused: null } : this.state;
     return visitorLevel(state, resource, visitor, Date.now()) === "control";
   }
 
@@ -3046,6 +3048,7 @@ const libraryItem = (row: LibraryRow): LibraryItem => ({
 const deployObject = (deployId: string, file: string) => `deploys/${deployId}/${file}`;
 
 /** The requester of a job that kitshn makes itself, such as a deploy (K-614). */
+
 /** K-1504: who paused and when, from the meta rows that a pause writes. */
 function parsePausedBy(actor: string | null, at: string | null): { readonly actor: Actor; readonly at: number } | null {
   if (!actor || !at) return null;

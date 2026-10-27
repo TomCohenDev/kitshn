@@ -18,7 +18,10 @@ import {
   ADMIN_RESOURCE_ID,
   type Circle,
   EVERYONE_CIRCLE_ID,
+  pauseModeOf,
   OWNER_CIRCLE_ID,
+  RESOURCE_KINDS,
+  type ResourceKind,
   type Resource,
   type State,
   levelForKind,
@@ -60,7 +63,7 @@ function start(): State {
     places: new Map([...s.places, ["riffle", { x: 0, y: -200 }]]),
     shareSettings: new Map(),
     stacks: new Map(),
-    paused: false,
+    paused: null,
     machines: new Map(),
   };
 }
@@ -410,18 +413,20 @@ describe("page and file logins (K-1004)", () => {
       shareSettings: new Map([[shareKey("notes", "her"), { level: null, endsAt: 1 }]]),
     };
     expect(desiredAccess(shareEnded, 1).logins.login).toEqual(["policy:owner:login"]);
-    const { after } = edit(state, [{ _tag: "pause", after: true }]);
-    expect(desiredAccess(after, 0).logins).toEqual({
-      login: ["policy:owner:login"],
-      passkey: ["policy:owner:people"],
-    });
+    for (const mode of ["keep-public", "lockdown"] as const) {
+      const { after } = edit(state, [{ _tag: "pause", after: mode }]);
+      expect(desiredAccess(after, 0).logins).toEqual({
+        login: ["policy:owner:login"],
+        passkey: ["policy:owner:people"],
+      });
+    }
   });
 });
 
 describe("pause (K-1504)", () => {
   it("closes every share except the Owner circle's share of the admin", () => {
     const state = start();
-    const { after } = edit(state, [{ _tag: "pause", after: true }]);
+    const { after } = edit(state, [{ _tag: "pause", after: "lockdown" }]);
     expect(ruleViolation(after)).toBeNull();
     const access = desiredAccess(after, 0);
     expect(access.apps.get("app:riffle:riffle.example.com")?.policyKeys).toEqual([]);
@@ -438,7 +443,7 @@ describe("pause (K-1504)", () => {
     const withDevice = edit(state, [
       { _tag: "circle", id: OWNER_CIRCLE_ID, after: { ...owner, members: [...owner.members, device] } },
     ]);
-    const paused = edit(withDevice.after, [{ _tag: "pause", after: true }]).after;
+    const paused = edit(withDevice.after, [{ _tag: "pause", after: "lockdown" }]).after;
     const admin = paused.resources.get(ADMIN_RESOURCE_ID)!;
     expect(visitorLevel(paused, admin, { email: null, clientId: "c1.access", ip: null }, 0)).toBeNull();
     expect(desiredAccess(paused, 0).apps.get("app:kitshn-admin:kit.example.com")?.policyKeys).toEqual([
@@ -462,7 +467,7 @@ describe("pause (K-1504)", () => {
       { _tag: "circle", id: "admins", after: { ...owner, id: "admins", name: "Admins", x: 2000, y: 2000 } },
       { _tag: "place", id: ADMIN_RESOURCE_ID, after: { x: 2000, y: 2000 } },
     ]);
-    expect(ruleViolation(edit(moved.after, [{ _tag: "pause", after: true }]).after)).toMatch(/pause/);
+    expect(ruleViolation(edit(moved.after, [{ _tag: "pause", after: "lockdown" }]).after)).toMatch(/pause/);
   });
 });
 
@@ -565,13 +570,84 @@ describe("stacks (K-521, K-522)", () => {
 
 describe("emergency pause (K-1504)", () => {
   it("lets an edit or an undo pause, but never resume", () => {
-    const paused = edit(start(), [{ _tag: "pause", after: true }]);
+    const paused = edit(start(), [{ _tag: "pause", after: "lockdown" }]);
     expect(refuseResume(paused.changes)).toEqual(paused.changes);
-    expect(() => refuseResume(resolveEdits(paused.after, [{ _tag: "pause", after: false }]))).toThrow(/passkey/);
+    expect(() => refuseResume(resolveEdits(paused.after, [{ _tag: "pause", after: null }]))).toThrow(/passkey/);
     expect(() => refuseResume(invert(paused.changes))).toThrow(/passkey/);
   });
+  it("keeps public sites open unless the pause is a lockdown", () => {
+    const state = start();
+    const everyone = circle(state, EVERYONE_CIRCLE_ID);
+    const open = edit(state, [{ _tag: "place", id: "riffle", after: { x: everyone.x, y: everyone.y } }]).after;
+    const stranger = { email: null, clientId: null, ip: null };
+    const riffle = open.resources.get("riffle")!;
+    for (const [mode, level] of [
+      ["keep-public", "view"],
+      ["lockdown", null],
+    ] as const) {
+      const paused = edit(open, [{ _tag: "pause", after: mode }]).after;
+      expect(visitorLevel(paused, riffle, stranger, 0)).toBe(level);
+      expect(desiredAccess(paused, 0).apps.get("app:riffle:riffle.example.com")?.policyKeys ?? []).toEqual(
+        level === null ? [] : [`policy:${EVERYONE_CIRCLE_ID}:people`],
+      );
+    }
+  });
+  it("reads an old stored pause as a lockdown", () => {
+    expect([null, "", "false", "true", "keep-public", "lockdown"].map(pauseModeOf)).toEqual([
+      null,
+      null,
+      null,
+      "lockdown",
+      "keep-public",
+      "lockdown",
+    ]);
+  });
+  it("names the kind of each pause step in the history", () => {
+    const state = start();
+    const soft = edit(state, [{ _tag: "pause", after: "keep-public" }]);
+    const hard = edit(soft.after, [{ _tag: "pause", after: "lockdown" }]);
+    const direct = edit(state, [{ _tag: "pause", after: "lockdown" }]);
+    expect(summarize(state, soft.after, soft.changes)).toMatch(/except public/);
+    expect(summarize(soft.after, hard.after, hard.changes)).toMatch(/Closed public sites too/);
+    expect(summarize(state, direct.after, direct.changes)).toMatch(/Paused all shares: lockdown/);
+  });
+  it("keeps public shares open in a pause only on sites, pages and files", () => {
+    const state = start();
+    const everyone = circle(state, EVERYONE_CIRCLE_ID);
+    const base = state.resources.get("riffle")!;
+    const kinds = Object.keys(RESOURCE_KINDS).filter((kind) => kind !== "kitshn.admin") as Array<ResourceKind>;
+    for (const kind of kinds) {
+      const card = { ...base, id: "card", kind, addresses: [] };
+      const open = {
+        ...state,
+        resources: new Map(state.resources).set("card", card),
+        places: new Map(state.places).set("card", { x: everyone.x, y: everyone.y }),
+      };
+      const paused = edit(open, [{ _tag: "pause", after: "keep-public" }]).after;
+      const kept = visitorLevel(paused, card, { email: null, clientId: null, ip: null }, 0) !== null;
+      expect([kind, kept]).toEqual([kind, kind.startsWith("site.") || kind === "page" || kind === "file"]);
+    }
+  });
+  it("closes a public machine card in every pause", () => {
+    const state = start();
+    const everyone = circle(state, EVERYONE_CIRCLE_ID);
+    const machine = { ...state.resources.get("riffle")!, id: "box", kind: "machine" as const, addresses: [] };
+    const open = {
+      ...state,
+      resources: new Map(state.resources).set("box", machine),
+      places: new Map(state.places).set("box", { x: everyone.x, y: everyone.y }),
+    };
+    const paused = edit(open, [{ _tag: "pause", after: "keep-public" }]).after;
+    expect(visitorLevel(paused, machine, { email: null, clientId: null, ip: null }, 0)).toBeNull();
+  });
+  it("closes public sites during a pause, but reopens them only through Resume", () => {
+    const soft = edit(start(), [{ _tag: "pause", after: "keep-public" }]).after;
+    const hard = edit(soft, [{ _tag: "pause", after: "lockdown" }]);
+    expect(refuseResume(hard.changes)).toEqual(hard.changes);
+    expect(() => refuseResume(invert(hard.changes))).toThrow(/passkey/);
+  });
   it("lets access only go down while paused (MM-711)", () => {
-    const paused = edit(start(), [{ _tag: "pause", after: true }]).after;
+    const paused = edit(start(), [{ _tag: "pause", after: "lockdown" }]).after;
     const owner = paused.circles.get("owner")!;
     const wider = edit(paused, [
       { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, { _tag: "everyone" }] } },

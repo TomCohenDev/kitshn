@@ -12,7 +12,7 @@ function start(): State {
     places: new Map(s.places),
     shareSettings: new Map(),
     stacks: new Map(),
-    paused: false,
+    paused: null,
     machines: new Map(),
   };
 }

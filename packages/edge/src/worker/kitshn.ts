@@ -76,7 +76,7 @@ import {
 import type { Caller, Deployer } from "./auth.ts";
 import { CloudflareError, cloudflare } from "./cloudflare.ts";
 import { dispatchDeploy } from "./github.ts";
-import { migrate } from "./migrations.ts";
+import { REPO_GATE_MIGRATION, migrate } from "./migrations.ts";
 import {
   DEPLOY_MS,
   SCRIPT_LIMIT,
@@ -169,9 +169,11 @@ export class Kitshn extends DurableObject<Env> {
       const [version] = ctx.storage.sql
         .exec<{ value: string }>("SELECT value FROM meta WHERE key = 'schema_version'")
         .toArray();
+      const from = Number(version?.value ?? 0);
       ctx.storage.transactionSync(() => {
-        migrate((query) => ctx.storage.sql.exec(query), Number(version?.value ?? 0));
-        this.backfillRepoIds();
+        migrate((query) => ctx.storage.sql.exec(query), from);
+        // The rest of migration 6 needs code: the repo id comes out of each card id.
+        if (from < REPO_GATE_MIGRATION) this.backfillRepoIds();
       });
       this.load();
       if (this.state.circles.size === 0) this.seed();
@@ -484,7 +486,7 @@ export class Kitshn extends DurableObject<Env> {
     return admin !== undefined && visitorLevel(this.state, admin, visitor, Date.now()) === "control";
   }
 
-  private snapshot(me: Actor): Snapshot {
+  private snapshot(me: Actor, repos: ReadonlyArray<RepoView> = this.repoViews()): Snapshot {
     return {
       circles: [...this.state.circles.values()],
       resources: [...this.state.resources.values()],
@@ -495,7 +497,7 @@ export class Kitshn extends DurableObject<Env> {
       access: accessStates(desiredAccess(this.state, Date.now()), this.access),
       accessWarnings: this.accessWarnings,
       paused: this.state.paused,
-      repos: this.repoViews(),
+      repos,
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
@@ -533,6 +535,7 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private broadcast() {
+    const repos = this.repoViews();
     for (const socket of this.ctx.getWebSockets("map")) {
       const attachment = socket.deserializeAttachment() as Attachment;
       if (attachment.kind !== "map") continue;
@@ -541,7 +544,7 @@ export class Kitshn extends DurableObject<Env> {
         socket.close(4003, "You lost access to the kitshn admin.");
         continue;
       }
-      send(socket, { type: "snapshot", snapshot: this.snapshot(caller.actor) });
+      send(socket, { type: "snapshot", snapshot: this.snapshot(caller.actor, repos) });
     }
   }
 
@@ -1845,12 +1848,11 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /**
-   * K-819: once, gives the deploy rows from before the gate their repo id, and allows each repo that finished
-   * a deploy then. A row whose card id holds no repo id keeps none; kitshn logs it, and its repo waits for the
-   * owner like a new one. Crashing here instead would stop the whole Durable Object over one old row.
+   * K-819: part of migration 6. Gives the deploy rows from before the gate their repo id, and allows each
+   * repo that finished a deploy then. A row whose card id holds no repo id keeps none; kitshn logs it, and its
+   * repo waits for the owner like a new one. A crash here would stop the whole Durable Object over one old row.
    */
   private backfillRepoIds() {
-    if (this.meta("repo_ids_backfilled") !== null) return;
     const rows = this.sql<DeployRow>("SELECT * FROM deploys ORDER BY expires_at");
     const { repoIds, allowed, unknown } = legacyRepos(
       rows.map((row) => ({ ...row, resourceId: row.resource_id })),
@@ -1860,7 +1862,7 @@ export class Kitshn extends DurableObject<Env> {
     const now = Date.now();
     for (const [repoId, name] of allowed)
       this.sql(
-        "INSERT INTO repos (repo_id, name, state, first_seen) VALUES (?, ?, 'allowed', ?)",
+        "INSERT OR IGNORE INTO repos (repo_id, name, state, first_seen) VALUES (?, ?, 'allowed', ?)",
         repoId,
         name,
         now,
@@ -1869,7 +1871,6 @@ export class Kitshn extends DurableObject<Env> {
       console.error(
         `K-819: the card ids of the deploys ${unknown.join(", ")} hold no repo id; their repos wait.`,
       );
-    this.setMeta("repo_ids_backfilled", "true");
   }
 
   /** K-819: refuses a deploy step of a repo that waits for the owner or that the owner blocked. */
@@ -1985,21 +1986,21 @@ export class Kitshn extends DurableObject<Env> {
         `The owner blocked deploys of ${row.name} (K-819).`,
         repoId,
       );
-      return this.sql<{ id: string }>(
+      return this.sql<{ id: string; app: string }>(
         `UPDATE deploys SET state = 'failed' WHERE repo_id = ? AND kind = 'deploy' AND state IN ('planned', 'running')
-         AND app = 'compose' RETURNING id`,
+         RETURNING id, app`,
         repoId,
       );
     });
-    if (stopped.length > 0 && this.env.BUCKET)
-      void this.env.BUCKET.delete(
-        stopped.flatMap(({ id }) => [deployObject(id, "source.tgz"), deployObject(id, "params.env")]),
-      );
+    const files = stopped
+      .filter(({ app }) => app === "compose")
+      .flatMap(({ id }) => [deployObject(id, "source.tgz"), deployObject(id, "params.env")]);
+    if (files.length > 0 && this.env.BUCKET) void this.env.BUCKET.delete(files);
     this.load();
     this.broadcast();
     if (state !== "allowed" || row.branch === null) return Response.json({ repoId, state });
     if (this.state.paused) return Response.json({ repoId, state, paused: row.branch });
-    const started = await this.agentBuild(caller, row.name, row.branch);
+    const started = await this.agentBuild(caller, repoId, row.branch);
     if (!started.ok)
       return Response.json({
         repoId,
@@ -2295,6 +2296,19 @@ export class Kitshn extends DurableObject<Env> {
     return "The card waits in the tray, so the site is private until you share it on the map (K-509).";
   }
 
+  /**
+   * K-819: a step checks this after each wait on the network, because Block ends the repo's planned deploys
+   * meanwhile. Null while the deploy is still planned.
+   */
+  private endedRefusal(deployId: string): Response | null {
+    const [row] = this.sql<{ state: string }>("SELECT state FROM deploys WHERE id = ?", deployId);
+    if (row?.state === "planned") return null;
+    return Response.json(
+      { error: "This deploy ended during the step, for example because the owner blocked the repo (K-819)." },
+      { status: 409 },
+    );
+  }
+
   /** K-812: the source archive and the params of a Compose deploy go to R2 until the job ends. */
   private async deployFile(path: string, deployer: Deployer, request: Request) {
     const fail = (status: number, error: string) => Response.json({ error }, { status });
@@ -2316,17 +2330,18 @@ export class Kitshn extends DurableObject<Env> {
     if (size > limit) return fail(413, `${path} takes at most ${limit} bytes.`);
     const { readable, writable } = new FixedLengthStream(size);
     const piped = request.body.pipeTo(writable);
+    const object = deployObject(row.id, path === "/deploy/archive" ? "source.tgz" : "params.env");
     try {
-      await bucket.put(
-        deployObject(row.id, path === "/deploy/archive" ? "source.tgz" : "params.env"),
-        readable,
-      );
+      await bucket.put(object, readable);
       await piped;
     } catch (error) {
       await piped.catch(() => undefined);
       return fail(502, `The upload did not reach R2: ${String(error)}`);
     }
-    return Response.json({ ok: true });
+    // Block deletes the files of the deploys it ends; a file that lands after that goes too (K-819).
+    const ended = this.endedRefusal(row.id);
+    if (ended) await bucket.delete(object);
+    return ended ?? Response.json({ ok: true });
   }
 
   /** K-812: a daemon reads the files of a deploy only while it runs that deploy's job. */
@@ -2381,6 +2396,8 @@ export class Kitshn extends DurableObject<Env> {
         },
         { status: 503 },
       );
+    const ended = this.endedRefusal(row.id);
+    if (ended) return ended;
     const command: Command = {
       kind: "compose",
       deployId: row.id,
@@ -2500,6 +2517,8 @@ export class Kitshn extends DurableObject<Env> {
         { status: 503 },
       );
     }
+    const endedBeforeUpload = this.endedRefusal(row.id);
+    if (endedBeforeUpload) return endedBeforeUpload;
     const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
     const metadata = {
       main_module: "worker.js",
@@ -2542,6 +2561,8 @@ export class Kitshn extends DurableObject<Env> {
       `${account}/workers/domains?hostname=${encodeURIComponent(row.address)}`,
     );
     const attached = domains.find((domain) => domain.service === row.script);
+    const endedBeforeAddress = this.endedRefusal(row.id);
+    if (endedBeforeAddress) return endedBeforeAddress;
     if (!attached) {
       if (domains.length > 0) throw new Error(`${row.address} already serves another Worker.`);
       await api("PUT", `${account}/workers/domains`, {
@@ -2555,7 +2576,7 @@ export class Kitshn extends DurableObject<Env> {
     const check = await fetch(`https://${row.address}/`, { redirect: "manual" }).catch(() => null);
     const resource = this.state.resources.get(row.resource_id);
     if (resource) this.putResource({ ...resource, status: "running" });
-    this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
+    this.sql("UPDATE deploys SET state = 'done' WHERE id = ? AND state = 'planned'", row.id);
     this.load();
     this.broadcast();
     void this.scheduleAlarm();
@@ -2738,9 +2759,10 @@ export class Kitshn extends DurableObject<Env> {
           : null,
       );
       if (plan.kind === "refused") return Response.json({ error: plan.error }, { status: plan.status });
-      const refusal = this.repoRefusal(row?.repo_id ?? null);
-      if (refusal) return Response.json({ error: refusal }, { status: 403 });
-      if (plan.kind === "build") return this.agentBuild(agent, plan.repo, plan.branch);
+      const repoId = row?.repo_id ?? null;
+      const refusal = this.repoRefusal(repoId);
+      if (refusal !== null || repoId === null) return Response.json({ error: refusal }, { status: 403 });
+      if (plan.kind === "build") return this.agentBuild(agent, repoId, plan.branch);
       if (!machine) return Response.json({ error: "The machine of this app is gone." }, { status: 409 });
       return this.agentRedeploy(agent, machine.id, plan.command);
     }
@@ -2779,8 +2801,8 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ job: id });
   }
 
-  /** K-718, K-812: a new build runs the repo's own kitshn workflow on the environment's branch. */
-  private async agentBuild(caller: Caller, repo: string, branch: string) {
+  /** K-718, K-812, K-819: a new build runs the kitshn workflow of the repo with this id on one branch. */
+  private async agentBuild(caller: Caller, repoId: string, branch: string) {
     const appId = this.env.GITHUB_APP_ID;
     const key = this.env.GITHUB_APP_KEY;
     if (!appId || !key)
@@ -2788,14 +2810,16 @@ export class Kitshn extends DurableObject<Env> {
         { error: "This kitshn has no GitHub App. Run the bootstrap with KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY." },
         { status: 503 },
       );
+    let repo: string;
     try {
-      await dispatchDeploy({ id: appId, key }, repo, branch, AGENT_WORKFLOW);
+      repo = await dispatchDeploy({ id: appId, key }, repoId, branch, AGENT_WORKFLOW);
     } catch (error) {
       return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
     }
-    this.ctx.storage.transactionSync(() =>
-      this.insertRevision(caller.actor, `Started a deploy of ${repo} from ${branch}`, [], null),
-    );
+    this.ctx.storage.transactionSync(() => {
+      this.sql("UPDATE repos SET name = ? WHERE repo_id = ?", repo, repoId);
+      this.insertRevision(caller.actor, `Started a deploy of ${repo} from ${branch}`, [], null);
+    });
     this.load();
     this.broadcast();
     return Response.json({ dispatched: { repo, branch, workflow: AGENT_WORKFLOW } });

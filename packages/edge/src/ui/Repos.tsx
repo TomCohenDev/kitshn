@@ -1,3 +1,4 @@
+import { useState } from "preact/hooks";
 import type { RepoView } from "../core/protocol.ts";
 import type { RepoState } from "../core/repos.ts";
 import { callApi } from "./store.ts";
@@ -39,10 +40,21 @@ export function RepoList(props: {
   repos: ReadonlyArray<RepoView>;
   onToast: (text: string, error: boolean) => void;
 }) {
+  // The buttons of a repo wait for its request, so a double click never starts a workflow twice.
+  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   if (props.repos.length === 0) return null;
   const decide = async (repo: RepoView, state: RepoAction) => {
-    const { text, error } = await setRepoState(repo, state);
-    props.onToast(text, error);
+    setBusy((ids) => new Set(ids).add(repo.repoId));
+    try {
+      const { text, error } = await setRepoState(repo, state);
+      props.onToast(text, error);
+    } finally {
+      setBusy((ids) => {
+        const next = new Set(ids);
+        next.delete(repo.repoId);
+        return next;
+      });
+    }
   };
   return (
     <>
@@ -55,7 +67,7 @@ export function RepoList(props: {
               <code>{repo.name}</code>
               <span class={`sticker ${STICKERS[repo.state]}`}>{repo.state}</span>
               {repo.state !== "allowed" ? (
-                <button type="button" class="btn" onClick={() => void decide(repo, "allowed")}>
+                <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "allowed")}>
                   Allow
                 </button>
               ) : null}
@@ -64,17 +76,17 @@ export function RepoList(props: {
               ) : null}
               {/* An Allow whose start failed or met the pause keeps the branch to start again. */}
               {repo.state === "allowed" && repo.branch !== null ? (
-                <button type="button" class="btn" onClick={() => void decide(repo, "allowed")}>
+                <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "allowed")}>
                   Start {repo.branch}
                 </button>
               ) : null}
               {repo.state !== "blocked" ? (
-                <button type="button" class="btn danger" onClick={() => void decide(repo, "blocked")}>
+                <button type="button" class="btn danger" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "blocked")}>
                   Block
                 </button>
               ) : null}
               {repo.state === "waiting" ? (
-                <button type="button" class="btn" onClick={() => void decide(repo, "forget")}>
+                <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "forget")}>
                   Forget
                 </button>
               ) : null}

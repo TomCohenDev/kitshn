@@ -12,23 +12,33 @@ describe("GitHub App key (K-718)", () => {
     await expect(importPKCS8(pkcs8Pem(pkcs1), "RS256")).resolves.toBeDefined();
     expect(pkcs8Pem(pkcs8)).toBe(pkcs8);
   });
-  it("asks for a token for one repo and Actions only, then dispatches the branch ref", async () => {
+  it("reaches the repo by its id only: a token for that id, its current name, then the branch ref", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const key = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
     const calls: Array<{ url: string; body: unknown }> = [];
-    const answers = [{ id: 42 }, { token: "t" }, null];
+    // The first installation does not hold the repo; the repo has a new name since its last deploy.
+    const answers: Array<Response> = [
+      Response.json([{ id: 7 }, { id: 42 }]),
+      Response.json({ message: "not accessible" }, { status: 422 }),
+      Response.json({ token: "t" }),
+      Response.json({ total_count: 1, repositories: [{ id: 1001, full_name: "o/renamed" }] }),
+      new Response(null, { status: 204 }),
+    ];
     using _fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       calls.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
       const answer = answers[calls.length - 1];
-      return answer === null ? new Response(null, { status: 204 }) : Response.json(answer);
+      if (!answer) throw new Error(`No answer for ${String(url)}`);
+      return answer;
     });
-    await dispatchDeploy({ id: "1", key }, "o/app", "main", "kitshn.yml");
+    await expect(dispatchDeploy({ id: "1", key }, "1001", "main", "kitshn.yml")).resolves.toBe("o/renamed");
     expect(calls.map((call) => call.url)).toEqual([
-      "https://api.github.com/repos/o/app/installation",
+      "https://api.github.com/app/installations?per_page=100",
+      "https://api.github.com/app/installations/7/access_tokens",
       "https://api.github.com/app/installations/42/access_tokens",
-      "https://api.github.com/repos/o/app/actions/workflows/kitshn.yml/dispatches",
+      "https://api.github.com/installation/repositories",
+      "https://api.github.com/repos/o/renamed/actions/workflows/kitshn.yml/dispatches",
     ]);
-    expect(calls[1]?.body).toEqual({ repositories: ["app"], permissions: { actions: "write" } });
-    expect(calls[2]?.body).toEqual({ ref: "refs/heads/main" });
+    expect(calls[2]?.body).toEqual({ repository_ids: [1001], permissions: { actions: "write" } });
+    expect(calls[4]?.body).toEqual({ ref: "refs/heads/main" });
   });
 });

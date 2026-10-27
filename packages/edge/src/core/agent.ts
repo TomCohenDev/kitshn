@@ -135,20 +135,33 @@ export interface LastDeploy {
 export function agentDeployPlan(
   last: LastDeploy | null,
   mode: "redeploy" | "build",
-  daemonCanRedeploy: boolean,
+  machine: {
+    /** The daemon knows `compose-redeploy`. */
+    readonly canRedeploy: boolean;
+    /** The owner still lets deploys run there (K-610). */
+    readonly takesDeploys: boolean;
+    /** The card still runs on that machine (K-611). */
+    readonly runsCard: boolean;
+  } | null,
 ):
   | { readonly kind: "redeploy"; readonly command: Extract<Command, { kind: "compose-redeploy" }> }
   | { readonly kind: "build"; readonly repo: string; readonly branch: string }
   | { readonly kind: "refused"; readonly status: 409; readonly error: string } {
   const refused = (error: string) => ({ kind: "refused", status: 409, error }) as const;
   if (!last) return refused("kitshn has no finished deploy of this card to start again.");
-  if (mode === "build")
+  if (mode === "build") {
+    // A pull request environment is always `pr-<n>` (K-807); its build comes from a push to the pull request.
+    if (/^pr-\d+$/.test(last.environment))
+      return refused("A preview builds again on a new push to its pull request, not from an agent key.");
     return last.branch
       ? { kind: "build", repo: last.repo, branch: last.branch }
       : refused("kitshn does not know the branch of this environment.");
+  }
   if (last.app !== "compose")
     return refused("A static site keeps serving its last build; a new build comes from the repo (build).");
-  if (!daemonCanRedeploy) return refused("The daemon of this app cannot redeploy yet. Update the daemon first.");
+  if (!machine || !machine.runsCard) return refused("This app no longer runs on the machine of its last deploy.");
+  if (!machine.takesDeploys) return refused("The machine of this app no longer has the label deploy (K-610).");
+  if (!machine.canRedeploy) return refused("The daemon of this app cannot redeploy yet. Update the daemon first.");
   return {
     kind: "redeploy",
     command: {

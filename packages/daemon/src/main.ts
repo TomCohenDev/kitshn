@@ -313,12 +313,13 @@ async function composeUp(
   };
   try {
     mkdirSync(dir, { recursive: true });
-    // K-718: the last build that came up stays as good.tgz with its params; a redeploy starts it again.
+    // K-718: the last build that came up stays in good/ with its params; a redeploy starts it again.
+    const good = join(dir, "good");
     if (command.kind === "compose-redeploy") {
-      if (!existsSync(join(dir, "good.tgz")))
+      if (!existsSync(join(good, "source.tgz")) || !existsSync(join(good, "params.env")))
         throw new Error("this machine keeps no build of the app that came up; deploy it from the repo");
-      copyFileSync(join(dir, "good.tgz"), join(dir, "source.tgz"));
-      copyFileSync(join(dir, "good.params.env"), join(dir, "params.env"));
+      copyFileSync(join(good, "source.tgz"), join(dir, "source.tgz"));
+      copyFileSync(join(good, "params.env"), join(dir, "params.env"));
       chmodSync(join(dir, "params.env"), 0o600);
     } else {
       writeFileSync(join(dir, "source.tgz"), await deployFile(command.deployId, "source.tgz"));
@@ -380,9 +381,17 @@ async function composeUp(
     if (typeof next === "string") throw new Error(next);
     writeSites(next);
     void checkSites();
-    renameSync(join(dir, "source.tgz"), join(dir, "good.tgz"));
-    copyFileSync(join(dir, "params.env"), join(dir, "good.params.env"));
-    chmodSync(join(dir, "good.params.env"), 0o600);
+    // The build and its params change together: a stop in between leaves the old pair, the new pair or none.
+    const staged = join(dir, "good.next");
+    rmSync(staged, { recursive: true, force: true });
+    mkdirSync(staged, { mode: 0o700 });
+    renameSync(join(dir, "source.tgz"), join(staged, "source.tgz"));
+    copyFileSync(join(dir, "params.env"), join(staged, "params.env"));
+    chmodSync(join(staged, "params.env"), 0o600);
+    rmSync(`${good}.old`, { recursive: true, force: true });
+    if (existsSync(good)) renameSync(good, `${good}.old`);
+    renameSync(staged, good);
+    rmSync(`${good}.old`, { recursive: true, force: true });
     output += `\nThe app answers on its socket; the tunnel sends ${command.name} there.\n`;
     return { ok: true, exitCode: 0, output };
   } catch (error) {

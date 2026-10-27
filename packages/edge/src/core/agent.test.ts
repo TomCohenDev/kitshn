@@ -148,14 +148,19 @@ describe("agent keys (K-718)", () => {
       name: "app",
       composeFile: null,
     };
-    expect(agentDeployPlan(last, "redeploy", true)).toMatchObject({
+    const ready = { canRedeploy: true, takesDeploys: true, runsCard: true };
+    expect(agentDeployPlan(last, "redeploy", ready)).toMatchObject({
       kind: "redeploy",
       command: { kind: "compose-redeploy", project: "app-o-1-prod", name: "app" },
     });
-    expect(agentDeployPlan(last, "build", true)).toEqual({ kind: "build", repo: "o/app", branch: "main" });
-    expect(agentDeployPlan(last, "redeploy", false)).toMatchObject({ kind: "refused", error: /Update the daemon/ });
-    expect(agentDeployPlan({ ...last, app: "static" }, "redeploy", true)).toMatchObject({ kind: "refused" });
-    expect(agentDeployPlan({ ...last, branch: "" }, "build", true)).toMatchObject({ kind: "refused" });
-    expect(agentDeployPlan(null, "build", true)).toMatchObject({ kind: "refused", error: /no finished deploy/ });
+    expect(agentDeployPlan(last, "build", null)).toEqual({ kind: "build", repo: "o/app", branch: "main" });
+    expect(agentDeployPlan(last, "redeploy", { ...ready, canRedeploy: false })).toMatchObject({ error: /Update the daemon/ });
+    expect(agentDeployPlan(last, "redeploy", { ...ready, takesDeploys: false })).toMatchObject({ error: /label deploy/ });
+    expect(agentDeployPlan(last, "redeploy", { ...ready, runsCard: false })).toMatchObject({ error: /no longer runs/ });
+    expect(agentDeployPlan(last, "redeploy", null)).toMatchObject({ kind: "refused" });
+    expect(agentDeployPlan({ ...last, app: "static" }, "redeploy", ready)).toMatchObject({ kind: "refused" });
+    expect(agentDeployPlan({ ...last, branch: "" }, "build", null)).toMatchObject({ kind: "refused" });
+    expect(agentDeployPlan({ ...last, environment: "pr-7" }, "build", null)).toMatchObject({ error: /preview/ });
+    expect(agentDeployPlan(null, "build", null)).toMatchObject({ kind: "refused", error: /no finished deploy/ });
   });
 });

@@ -1033,6 +1033,17 @@ export class Kitshn extends DurableObject<Env> {
     );
     for (const job of queued) {
       const visitor = JSON.parse(job.visitor) as Visitor & { readonly kitshn?: true };
+      const queuedCommand = JSON.parse(job.command) as Command;
+      // K-718: a redeploy that an agent key asked for goes out only while the key still manages the card.
+      if (
+        visitor.kitshn &&
+        visitor.clientId !== null &&
+        !(
+          queuedCommand.kind === "compose-redeploy" &&
+          cardsControlledBy(this.state, visitor, Date.now()).has(queuedCommand.project)
+        )
+      )
+        continue;
       // A job that kitshn makes itself (a deploy) needs no member with control (K-614).
       const allowed = new Set(
         visitor.kitshn ? online : [...online].filter((id) => this.mayRunOn(visitor, id)),
@@ -2473,8 +2484,13 @@ export class Kitshn extends DurableObject<Env> {
             }
           : null,
         mode,
-        machine !== undefined &&
-          (this.machineView(machine).status?.capabilities?.includes("compose-redeploy") ?? false),
+        machine
+          ? {
+              canRedeploy: this.machineView(machine).status?.capabilities?.includes("compose-redeploy") ?? false,
+              takesDeploys: machine.labels.includes("deploy"),
+              runsCard: this.state.resources.get(card)?.machine === machine.id,
+            }
+          : null,
       );
       if (plan.kind === "refused") return Response.json({ error: plan.error }, { status: plan.status });
       if (plan.kind === "build") return this.agentBuild(agent, plan.repo, plan.branch);
@@ -2926,7 +2942,7 @@ const libraryItem = (row: LibraryRow): LibraryItem => ({
 const deployObject = (deployId: string, file: string) => `deploys/${deployId}/${file}`;
 
 /** The requester of a job that kitshn makes itself, such as a deploy (K-614). */
+const KITSHN_JOB = JSON.stringify({ email: null, clientId: null, ip: null, kitshn: true });
+
 /** K-718: the workflow file that an agent key starts in an app repo, the one that the map's recipe shows. */
 const AGENT_WORKFLOW = "kitshn.yml";
-
-const KITSHN_JOB = JSON.stringify({ email: null, clientId: null, ip: null, kitshn: true });

@@ -38,7 +38,7 @@ export function eventOf(
   deployer: { eventName: string; branch: string; pr: number | null },
   value: unknown,
 ): (DeployEvent & { readonly claimed?: true }) | string {
-  // K-718: a dispatch (from the map or an agent key, through the App) runs the repo's code of one branch,
+  // K-718: a dispatch (by an agent key through the App, or by a repo member) runs one branch's code,
   // so it plans as a push of that branch.
   if (deployer.eventName === "push" || deployer.eventName === "workflow_dispatch")
     return { name: "push", branch: deployer.branch, pr: null, action: null };

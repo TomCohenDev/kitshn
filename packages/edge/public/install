@@ -340,15 +340,19 @@ else
     "$(jq -nc --arg token "$CLOUDFLARE_API_TOKEN" '{name:"CLOUDFLARE_API_TOKEN",text:$token,type:"secret_text"}')" >/dev/null
   changed "stored the API token as the Worker secret CLOUDFLARE_API_TOKEN (K-406)"
 fi
-if [ -n "${KITSHN_GITHUB_APP_ID:-}" ] && [ -n "${KITSHN_GITHUB_APP_KEY:-}" ]; then
+if { [ -n "${KITSHN_GITHUB_APP_ID:-}" ] && [ -z "${KITSHN_GITHUB_APP_KEY:-}" ]; } || { [ -z "${KITSHN_GITHUB_APP_ID:-}" ] && [ -n "${KITSHN_GITHUB_APP_KEY:-}" ]; }; then
+  die "set both KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY, or neither"
+fi
+has_app=$(printf '%s' "$secrets" | jq 'any(.[]; .name == "GITHUB_APP_KEY") and any(.[]; .name == "GITHUB_APP_ID")')
+if [ -n "${KITSHN_GITHUB_APP_ID:-}" ] && { [ "$has_app" != true ] || [ "${KITSHN_SET_TOKEN:-}" = 1 ]; }; then
   [ -r "$KITSHN_GITHUB_APP_KEY" ] || die "KITSHN_GITHUB_APP_KEY names no readable file: $KITSHN_GITHUB_APP_KEY"
   api PUT "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/secrets" \
     "$(jq -nc --arg id "$KITSHN_GITHUB_APP_ID" '{name:"GITHUB_APP_ID",text:$id,type:"secret_text"}')" >/dev/null
   api PUT "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/secrets" \
     "$(jq -nc --rawfile key "$KITSHN_GITHUB_APP_KEY" '{name:"GITHUB_APP_KEY",text:$key,type:"secret_text"}')" >/dev/null
   changed "stored the GitHub App id and key as Worker secrets (K-718)"
-elif printf '%s' "$secrets" | jq -e 'any(.[]; .name == "GITHUB_APP_KEY")' >/dev/null; then
-  kept "Worker secrets GITHUB_APP_ID and GITHUB_APP_KEY"
+elif [ "$has_app" = true ]; then
+  kept "Worker secrets GITHUB_APP_ID and GITHUB_APP_KEY (set KITSHN_SET_TOKEN=1 to replace them)"
 else
   say "  note:    no GitHub App; agent keys cannot start builds until KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY are set"
 fi

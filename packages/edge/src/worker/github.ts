@@ -36,7 +36,14 @@ async function call(token: string, method: string, path: string, body?: object) 
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  if (!response.ok) throw new Error(`GitHub answered ${response.status} for ${method} ${path}: ${await response.text()}`);
+  if (!response.ok) {
+    const text = await response.text();
+    if (path.endsWith("/installation") && response.status === 404)
+      throw new Error("The kitshn GitHub App is not installed on this repo.");
+    if (path.endsWith("/dispatches") && response.status === 422)
+      throw new Error(`GitHub refused the dispatch; add workflow_dispatch to the repo's kitshn.yml. ${text}`);
+    throw new Error(`GitHub answered ${response.status} for ${method} ${path}: ${text}`);
+  }
   return response.status === 204 ? null : ((await response.json()) as Record<string, unknown>);
 }
 
@@ -53,12 +60,17 @@ export async function dispatchDeploy(app: GitHubApp, repo: string, branch: strin
     .setExpirationTime(now + 540)
     .sign(await importPKCS8(pkcs8Pem(app.key), "RS256"));
   const installation = await call(jwt, "GET", `/repos/${repo}/installation`);
+  const id = installation?.["id"];
+  if (typeof id !== "number") throw new Error("GitHub sent no installation id for this repo.");
   const name = repo.split("/")[1] ?? repo;
-  const access = await call(jwt, "POST", `/app/installations/${String(installation?.["id"])}/access_tokens`, {
+  const access = await call(jwt, "POST", `/app/installations/${id}/access_tokens`, {
     repositories: [name],
     permissions: { actions: "write" },
   });
-  await call(String(access?.["token"]), "POST", `/repos/${repo}/actions/workflows/${workflow}/dispatches`, {
-    ref: branch,
+  const token = access?.["token"];
+  if (typeof token !== "string") throw new Error("GitHub sent no installation token.");
+  // A full branch ref, so a tag with the same name never runs.
+  await call(token, "POST", `/repos/${repo}/actions/workflows/${workflow}/dispatches`, {
+    ref: `refs/heads/${branch}`,
   });
 }

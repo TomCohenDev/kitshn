@@ -11,7 +11,10 @@ import {
   signOutEverywhere,
   syncAccess,
   syncLauncher,
+  loginWant,
+  loginWarnings,
   syncLogins,
+  syncWithLogins,
   verifyAccess,
 } from "./access-sync.ts";
 
@@ -437,7 +440,7 @@ describe("page and file logins (K-1004)", () => {
   const anyLogin = { id: "any", name: "kitshn any login" };
   const anyPasskey = { id: "any-passkey", name: "kitshn any login (passkey)" };
 
-  function loginCloudflare(fail: (path: string) => boolean = () => false) {
+  function loginCloudflare(fail: (path: string) => boolean = () => false, attachMachines = true) {
     const cf = fakeCloudflare();
     const puts: Array<{ path: string; body: unknown }> = [];
     const machines = { id: "machines", name: "kitshn machines", precedence: 2 };
@@ -448,7 +451,8 @@ describe("page and file logins (K-1004)", () => {
         name: `kitshn ${host} login`,
         domain: `${host}.example.com/login`,
         self_hosted_domains: [`${host}.example.com/login`],
-        policies: [{ ...anyLogin, precedence: 1 }, machines],
+        allowed_idps: ["otp"],
+        policies: attachMachines ? [{ ...anyLogin, precedence: 1 }, machines] : [{ ...anyLogin, precedence: 1 }],
       },
       {
         id: `${host}-passkey`,
@@ -481,10 +485,9 @@ describe("page and file logins (K-1004)", () => {
         path: "/accounts/a/access/apps/pages-login",
         body: {
           name: "kitshn pages login",
-          type: "self_hosted",
           domain: "pages.example.com/login",
-          session_duration: "720h",
-          same_site_cookie_attribute: "lax",
+          self_hosted_domains: ["pages.example.com/login"],
+          allowed_idps: ["otp"],
           policies: [
             { id: "machines", precedence: 1 },
             { id: plain, precedence: 2 },
@@ -533,5 +536,71 @@ describe("page and file logins (K-1004)", () => {
     expect(cf.puts[0]).toEqual(
       expect.objectContaining({ body: expect.objectContaining({ policies: [{ id: "machines", precedence: 1 }] }) }),
     );
+  });
+
+  it("puts the machines policy back on /login when someone took it off", async () => {
+    const cf = loginCloudflare(undefined, false);
+    const desired = desiredAccess(start(), 0);
+    await syncAccess(desired, cf.store, cf.api, "a");
+    await syncLogins(desired, cf.store, cf.api, "a", "example.com", "", false);
+    expect(cf.puts[0]).toEqual(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          policies: [
+            { id: "machines", precedence: 1 },
+            { id: cf.rows.get("policy:owner:login")!.cfId, precedence: 2 },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it("keeps a passkey circle off the passkey login until Cloudflare holds its passkey check", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    const owner = state.circles.get("owner")!;
+    const relaxed = { ...state, circles: new Map(state.circles).set("owner", { ...owner, needsPasskey: false }) };
+    await syncAccess(desiredAccess(relaxed, 0), cf.store, cf.api, "a");
+    // "Needs passkey" turns on; the row still has the old body without the passkey check.
+    const desired = desiredAccess(state, 0);
+    expect(JSON.parse(loginWant(desired, cf.rows))).toEqual({ login: [], passkey: [] });
+    await syncAccess(desired, cf.store, cf.api, "a");
+    expect(JSON.parse(loginWant(desired, cf.rows))).toEqual({
+      login: [cf.rows.get("policy:owner:login")!.cfId],
+      passkey: [cf.rows.get("policy:owner:people")!.cfId],
+    });
+  });
+
+  it("warns on the map about a login policy that Cloudflare refused", async () => {
+    const cf = fakeCloudflare();
+    const desired = desiredAccess(start(), 0);
+    const failing: Api = async (method, path, body) => {
+      if (method === "POST" && path.endsWith("/policies")) throw new Error("refused");
+      return cf.api(method, path, body);
+    };
+    await syncAccess(desired, cf.store, failing, "a");
+    expect(loginWarnings(desired, cf.rows)).toEqual([
+      expect.stringContaining('"kitshn circle Owner (login)" of pages and files failed: refused'),
+      expect.stringContaining('"kitshn circle Owner" of pages and files failed: refused'),
+    ]);
+  });
+
+  it("runs the login step before the sync, inside one budget (K-406)", async () => {
+    const order: Array<string> = [];
+    const logins = async () => {
+      order.push("logins");
+      return 8;
+    };
+    const access = async (budget: number) => {
+      order.push(`access ${budget}`);
+      return true;
+    };
+    expect(await syncWithLogins(21, true, logins, access)).toBe(8);
+    expect(order).toEqual(["logins", "access 13"]);
+    order.length = 0;
+    // No room for the whole login step: it waits for the next alarm, and the sync keeps its budget.
+    expect(await syncWithLogins(7, true, logins, access)).toBe(0);
+    expect(await syncWithLogins(21, false, logins, access)).toBe(0);
+    expect(order).toEqual(["access 7", "access 21"]);
   });
 });

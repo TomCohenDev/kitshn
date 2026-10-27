@@ -488,7 +488,7 @@ export async function syncLauncher(
   return { attached: want, calls: 3 };
 }
 
-/** The bootstrap's policy that lets every service token log in (K-1204); it stays on the login applications. */
+/** The bootstrap's policy that lets every service token log in (K-1204); it is always on `/login`. */
 export const MACHINES_POLICY_NAME = `${ACCESS_NAME_PREFIX}machines`;
 
 /** Policies that let anyone log in, which older bootstraps made (K-1004). kitshn deletes them once unused. */
@@ -501,26 +501,51 @@ export const OLD_LOGIN_POLICY_NAMES: ReadonlySet<string> = new Set([
 export const LOGIN_CALLS = 8;
 
 /**
- * K-1004: the policy ids that the login applications should have. A policy waits until Cloudflare holds
- * it as written, so an id that someone deleted never goes into an application.
+ * K-1004: the policy ids that the login applications should have. A policy goes on only when Cloudflare
+ * holds the body that kitshn wants now, so a policy that still lacks a new passkey check never does.
  */
 export function loginWant(desired: DesiredAccess, rows: ReadonlyMap<string, AccessRow>): string {
   const ids = (keys: ReadonlyArray<string>) =>
-    keys.map((key) => rows.get(key)).flatMap((row) => (row?.cfId && row.body ? [row.cfId] : []));
+    keys.flatMap((key) => {
+      const row = rows.get(key);
+      const policy = desired.policies.get(key);
+      return row?.cfId && policy && row.body === policyBody(policy) ? [row.cfId] : [];
+    });
   return JSON.stringify({ login: ids(desired.logins.login), passkey: ids(desired.logins.passkey) });
 }
 
-interface LoginApp extends Named {
-  readonly policies?: ReadonlyArray<{ readonly id: string; readonly name?: string; readonly precedence?: number }>;
+/** K-1004: a login policy that Cloudflare refused, so the map shows why some people cannot log in. */
+export function loginWarnings(desired: DesiredAccess, rows: ReadonlyMap<string, AccessRow>): Array<string> {
+  const keys = new Set([...desired.logins.login, ...desired.logins.passkey]);
+  return [...keys].flatMap((key) => {
+    const error = rows.get(key)?.error;
+    const name = desired.policies.get(key)?.name ?? key;
+    return error ? [`The login policy "${name}" of pages and files failed: ${error}`] : [];
+  });
+}
+
+/**
+ * K-406, K-1004: the login step runs first and inside the budget, so the sync never deletes a policy that
+ * a login application still uses, and both together never pass the budget. Returns the login calls.
+ */
+export async function syncWithLogins(
+  budget: number,
+  loginWork: boolean,
+  logins: () => Promise<number>,
+  access: (budget: number) => Promise<boolean>,
+): Promise<number> {
+  // Without room for the whole login step it waits for the next alarm, which runs at once.
+  const spent = loginWork && budget >= LOGIN_CALLS ? await logins() : 0;
+  await access(Math.max(0, budget - spent));
+  return spent;
 }
 
 /**
  * K-1004: gives the four login applications of pages and files, which the bootstrap made, the policies of
- * the circles that may log in. It keeps only the machines policy of the bootstrap and drops every other
- * policy, then deletes the old policies that let anyone log in once no application uses them.
- * `attached` is the `loginWant` that kitshn last applied; it calls Cloudflare only when that differs, or
- * when `force` is set (the daily compare of K-408). Each application is written on its own; the errors
- * are thrown together at the end.
+ * the circles that may log in, and the machines policy on `/login`. It drops every other policy, then
+ * deletes the old policies that let anyone log in once no application uses them. `attached` is the
+ * `loginWant` that kitshn last applied; it calls Cloudflare only when that differs, or when `force` is set
+ * (the daily compare of K-408). Each application is written on its own; the errors are thrown together.
  */
 export async function syncLogins(
   desired: DesiredAccess,
@@ -535,41 +560,42 @@ export async function syncLogins(
   if (!force && want === attached) return { attached, calls: 0 };
   const ids = JSON.parse(want) as { login: Array<string>; passkey: Array<string> };
   const base = `/accounts/${accountId}/access`;
-  const apps = await api<ReadonlyArray<LoginApp>>("GET", `${base}/apps?per_page=${PAGE}`);
+  const apps = await api<ReadonlyArray<LauncherApp>>("GET", `${base}/apps?per_page=${PAGE}`);
   const policies = await api<ReadonlyArray<Named>>("GET", `${base}/policies?per_page=${PAGE}`);
   let calls = 2;
   const errors: Array<string> = [];
+  const machines = policies.find((policy) => policy.name === MACHINES_POLICY_NAME)?.id;
+  if (!machines) errors.push(`no policy "${MACHINES_POLICY_NAME}"; run the bootstrap again`);
   // The policy ids of each application after this run, to know which old policies are free to delete.
   const uses = new Map(apps.map((app) => [app.id, (app.policies ?? []).map((policy) => policy.id)]));
   for (const host of [`pages.${zone}`, `files.${zone}`]) {
-    for (const [path, wanted, session] of [
-      ["/login", ids.login, "720h"],
-      ["/login/passkey", ids.passkey, "24h"],
+    for (const [path, wanted] of [
+      ["/login", machines ? [machines, ...ids.login] : ids.login],
+      ["/login/passkey", ids.passkey],
     ] as const) {
       const domain = `${host}${path}`;
-      const app = apps.find((item) => item.domain === domain && item.name.startsWith(ACCESS_NAME_PREFIX));
+      const app = apps.find(
+        (item) =>
+          item["domain"] === domain &&
+          typeof item["name"] === "string" &&
+          item["name"].startsWith(ACCESS_NAME_PREFIX),
+      );
       if (!app) {
         errors.push(`no kitshn login application on ${domain}; run the bootstrap again`);
         continue;
       }
       const live = [...(app.policies ?? [])].sort((a, b) => (a.precedence ?? 0) - (b.precedence ?? 0));
-      const next = [
-        ...live.filter((policy) => policy.name === MACHINES_POLICY_NAME).map((policy) => policy.id),
-        ...wanted,
-      ];
-      if (deepEqual(next, live.map((policy) => policy.id))) continue;
+      if (deepEqual(wanted, live.map((policy) => policy.id))) continue;
       calls++;
       try {
-        // The same fields that the bootstrap sends, so nothing else of the application changes.
+        // The list holds whole applications (the same type as a single GET), so like the App Launcher,
+        // every other field goes back unchanged and only the policies change.
+        const body = Object.fromEntries(Object.entries(app).filter(([field]) => !READ_ONLY.has(field)));
         await api("PUT", `${base}/apps/${app.id}`, {
-          name: app.name,
-          type: "self_hosted",
-          domain,
-          session_duration: session,
-          same_site_cookie_attribute: "lax",
-          policies: next.map((id, index) => ({ id, precedence: index + 1 })),
+          ...body,
+          policies: wanted.map((id, index) => ({ id, precedence: index + 1 })),
         });
-        uses.set(app.id, next);
+        uses.set(app.id, wanted);
       } catch (error) {
         errors.push(`${domain}: ${message(error)}`);
       }

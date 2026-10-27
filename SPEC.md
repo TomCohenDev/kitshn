@@ -188,7 +188,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 
 ## 8. Recipes and deploys
 
-- **K-801** A recipe is `kitshn.config.ts` with `export default defineApp({...})`. The value is one object literal. The `kitshn` npm package exports `defineApp` and its types. Until it is on the npm registry, an app installs it from the `kitshn.tgz` asset of the `edge` release.
+- **K-801** A recipe is `kitshn.config.ts` with `export default defineApp({...})`. The value is one object literal. The `kitshn` npm package exports `defineApp` and its types as a `.d.ts` with no imports, so an editor shows recipe mistakes; it has no runtime dependencies, because its CLI is one bundled file. Until it is on the npm registry, an app installs it from the `kitshn.tgz` asset of the `edge` release.
 - **K-802** Recipes do not compute. A lint rule in `kitshn check` refuses loops, conditions, function calls other than `defineApp`, and imports other than `kitshn`. The lint rule is enough, because kitshn never runs repo code (K-803).
 - **K-803** GitHub Actions reads the recipe without running it: `kitshn check` turns the literal object into JSON. kitshn checks the JSON with the same schema. kitshn never runs repo code. The reusable workflow is `.github/workflows/kitshn2-deploy.yml` in this repo.
 - **K-804** Kinds: a Compose app (`compose`), a static site (`static`), a Worker app (`worker`). A recipe has exactly one kind.

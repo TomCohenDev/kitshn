@@ -1,4 +1,10 @@
 import { Schema } from "effect";
+import type {
+  ComposeApp as PublicComposeApp,
+  DeployEntry as PublicDeployEntry,
+  Recipe as PublicRecipe,
+  StaticApp as PublicStaticApp,
+} from "./index.ts";
 
 const Name = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9{}-]{0,40}$/));
 
@@ -41,6 +47,21 @@ export const Recipe = Schema.Union([
   Schema.Struct({ compose: ComposeApp, deploy }),
 ]);
 export type Recipe = typeof Recipe.Type;
+
+// The public types of index.ts and the schema accept the same recipes.
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+type Assert<T extends true> = T;
+export type PublicTypesMatch = Assert<
+  [
+  Same<typeof DeployEntry.Type, PublicDeployEntry>,
+  Same<typeof StaticApp.Type, PublicStaticApp>,
+  Same<typeof ComposeApp.Type, PublicComposeApp>,
+  Recipe extends PublicRecipe ? true : false,
+  PublicRecipe extends Recipe ? true : false,
+  ] extends Array<true>
+    ? true
+    : false
+>;
 
 export const decodeRecipe = Schema.decodeUnknownSync(Recipe, { onExcessProperty: "error" });
 

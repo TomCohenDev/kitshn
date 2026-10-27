@@ -63,9 +63,8 @@ jobs:
       - name: Build the kitshn CLI and pack the kitshn package (K-801, K-803)
         working-directory: packages/kitshn
         run: |
-          bun build src/cli.ts --target=node --outfile=dist/kitshn.mjs
-          npm pack --pack-destination dist
-          mv dist/kitshn-*.tgz dist/kitshn.tgz
+          pnpm run build
+          pnpm pack --out dist/kitshn.tgz
       - uses: actions/download-artifact@v8
         with:
           name: kitshn-edge

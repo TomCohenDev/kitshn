@@ -36,12 +36,19 @@ function start(): State {
   };
 }
 
-const anonymous: ContentVisitor = { email: null, clientId: null, ip: "203.0.113.9", passkey: false };
+const anonymous: ContentVisitor = {
+  email: null,
+  clientId: null,
+  ip: "203.0.113.9",
+  passkey: false,
+  issuedAt: null,
+};
 const person = (email: string, passkey = false): ContentVisitor => ({
   email,
   clientId: null,
   ip: null,
   passkey,
+  issuedAt: 1,
 });
 const at = (state: State, x: number) => ({ ...state, places: new Map(state.places).set("p", { x, y: 0 }) });
 const decide = (state: State, visitor: ContentVisitor) =>
@@ -67,6 +74,24 @@ describe("page and file access (K-1004)", () => {
     expect(decide(start(), person(OWNER))).toBe("passkey");
     expect(decide(start(), person(OWNER, true))).toBe("allow");
     expect(decide(start(), person("friend@example.com", true))).toBe("deny");
+  });
+
+  it("does not make an \"all must match\" circle with everyone public", () => {
+    const state = at(start(), 2000);
+    const friends = state.circles.get("friends")!;
+    const strict: Circle = { ...friends, match: "all", members: [{ _tag: "everyone" }, ...friends.members] };
+    const circles = new Map(state.circles).set("friends", strict);
+    expect(decide({ ...state, circles }, anonymous)).toBe("login");
+    expect(decide({ ...state, circles }, person("friend@example.com"))).toBe("allow");
+  });
+
+  it("asks no passkey of a visitor who matches a network member, logged in or not (K-402)", () => {
+    const state = at(start(), 2000);
+    const friends = state.circles.get("friends")!;
+    const office: Circle = { ...friends, needsPasskey: true, members: [{ _tag: "ip", range: "203.0.113.0/24" }] };
+    const circles = new Map(state.circles).set("friends", office);
+    expect(decide({ ...state, circles }, anonymous)).toBe("allow");
+    expect(decide({ ...state, circles }, { ...person("friend@example.com"), ip: "203.0.113.9" })).toBe("allow");
   });
 
   it("lets only people through during a pause (K-1504)", () => {

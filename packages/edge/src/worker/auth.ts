@@ -18,7 +18,9 @@ async function accessIdentity(
   token: string,
   env: Env,
   audiences: ReadonlyArray<string>,
-): Promise<{ email: string | null; clientId: string | null; audience: string } | string> {
+): Promise<
+  { email: string | null; clientId: string | null; audience: string; issuedAt: number | null } | string
+> {
   const wanted = audiences.filter(Boolean);
   if (!env.ACCESS_TEAM_DOMAIN || wanted.length === 0) return "kitshn has no Access configuration.";
   if (jwks?.team !== env.ACCESS_TEAM_DOMAIN) {
@@ -36,7 +38,7 @@ async function accessIdentity(
     const audience = wanted.find((tag) => tokenAudiences.includes(tag));
     if (!audience) return "The Access token has none of the expected audience tags.";
     if (!email && !clientId) return "The Access token names no email and no service token.";
-    return { email: email || null, clientId: email ? null : clientId, audience };
+    return { email: email || null, clientId: email ? null : clientId, audience, issuedAt: payload.iat ?? null };
   } catch (error) {
     return `The Access token is not valid: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -90,9 +92,9 @@ export async function contentVisitorOf(
   logins: ContentLogins,
 ): Promise<ContentVisitor> {
   const ip = request.headers.get("cf-connecting-ip");
-  const anonymous: ContentVisitor = { email: null, clientId: null, ip, passkey: false };
+  const anonymous: ContentVisitor = { email: null, clientId: null, ip, passkey: false, issuedAt: null };
   if (env.DEV_IDENTITY && isLocal(new URL(request.url)))
-    return { email: env.DEV_IDENTITY, clientId: null, ip, passkey: true };
+    return { email: env.DEV_IDENTITY, clientId: null, ip, passkey: true, issuedAt: null };
   const token = request.headers.get("cf-access-jwt-assertion") ?? cookie(request, "CF_Authorization");
   if (!token) return anonymous;
   const identity = await accessIdentity(token, env, [logins.login, logins.passkey]);
@@ -102,6 +104,7 @@ export async function contentVisitorOf(
     clientId: identity.clientId,
     ip,
     passkey: identity.audience === logins.passkey,
+    issuedAt: identity.issuedAt,
   };
 }
 

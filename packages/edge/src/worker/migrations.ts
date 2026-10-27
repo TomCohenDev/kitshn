@@ -47,6 +47,7 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `CREATE TABLE library (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, file_name TEXT,
       thread TEXT, machine TEXT, size INTEGER NOT NULL, content_type TEXT NOT NULL, created_at INTEGER NOT NULL,
       source TEXT UNIQUE)`,
+    "CREATE TABLE library_deleted (source TEXT PRIMARY KEY)",
   ],
 ];
 

@@ -50,6 +50,15 @@ type ContentAnswer =
   | { readonly decision: "allow"; readonly item: LibraryItem }
   | { readonly decision: "login" | "passkey" | "deny" | "missing" };
 
+/** The decoded path segment, or null for broken percent-encoding. */
+const decoded = (value: string) => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+};
+
 const text = (body: string, status: number) =>
   new Response(body, {
     status,
@@ -89,7 +98,7 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
   if (answer.decision !== "allow" || answer.item.kind !== kind)
     return text(`kitshn has no ${kind} here.`, 404);
   const item = answer.item;
-  if (kind === "file" && decodeURIComponent(rest.join("/")) !== item.fileName) {
+  if (kind === "file" && decoded(rest.join("/")) !== item.fileName) {
     return Response.redirect(`${url.origin}/${id}/${encodeURIComponent(item.fileName ?? "")}`, 302);
   }
   if (!env.BUCKET) return text("R2 is off for this kitshn. Run the bootstrap again after R2 is on.", 503);

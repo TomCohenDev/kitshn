@@ -529,11 +529,14 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/api/devices" && request.method === "GET") return this.listDevices();
     if (path === "/api/library" && request.method === "GET") return Response.json(this.libraryItems());
     if ((path === "/api/pages" || path === "/api/files") && request.method === "POST")
-      return this.upload(caller, request, path === "/api/pages" ? "page" : "file");
+      return this.upload(caller, request, path === "/api/pages" ? "page" : "file").catch((error: unknown) => {
+        if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 400 });
+        throw error;
+      });
     if (path.startsWith("/api/library/") && path.endsWith("/content") && request.method === "GET")
-      return this.preview(decodeURIComponent(path.slice("/api/library/".length, -"/content".length)));
+      return this.preview(path.slice("/api/library/".length, -"/content".length));
     if (path.startsWith("/api/library/") && request.method === "DELETE")
-      return this.deleteItem(caller, decodeURIComponent(path.slice("/api/library/".length)));
+      return this.deleteItem(caller, path.slice("/api/library/".length));
     if (path === "/api/devices" && request.method === "POST")
       return this.addDevice(await request.json().catch(() => null));
     if (path === "/api/apply" || path === "/api/undo") {
@@ -1600,6 +1603,8 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-110: ends every session of every application that kitshn made. */
   private async signOut() {
+    // K-110: the Worker checks pages and files itself, so it refuses every login from before this time.
+    this.setMeta("signed_out_at", String(Date.now()));
     const api = this.api();
     if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
     try {
@@ -1977,7 +1982,12 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-1004: the Worker asks here before it serves a page or a file. */
-  private contentDecision({ id, visitor }: ContentRequest) {
+  private contentDecision({ id, visitor: sent }: ContentRequest) {
+    const signedOutAt = Number(this.meta("signed_out_at") ?? 0);
+    const visitor: ContentVisitor =
+      sent.issuedAt !== null && sent.issuedAt * 1000 < signedOutAt
+        ? { email: null, clientId: null, ip: sent.ip, passkey: false, issuedAt: null }
+        : sent;
     const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", id);
     const resource = this.state.resources.get(id);
     if (!row || !resource) return Response.json({ decision: "missing" });
@@ -1992,7 +2002,12 @@ export class Kitshn extends DurableObject<Env> {
   private async upload(caller: Caller, request: Request, kind: "page" | "file") {
     const header = (name: string) => {
       const value = request.headers.get(name);
-      return value === null ? null : decodeURIComponent(value).trim();
+      if (value === null) return null;
+      try {
+        return decodeURIComponent(value).trim();
+      } catch {
+        throw new RuleError(`${name} is not URI-encoded.`);
+      }
     };
     const refuse = (error: string, status = 400) => Response.json({ error }, { status });
     const bucket = this.env.BUCKET;
@@ -2010,7 +2025,12 @@ export class Kitshn extends DurableObject<Env> {
     if (title === "") return refuse("Give the page a title in X-Kitshn-Name.");
     const source = header("x-kitshn-source");
     if (source) {
-      const [known] = this.sql<{ id: string }>("SELECT id FROM library WHERE source = ?", source);
+      const [known] = this.sql<{ id: string }>(
+        "SELECT id FROM library WHERE source = ? UNION ALL SELECT '' FROM library_deleted WHERE source = ?",
+        source,
+        source,
+      );
+      // An import adds a page once (K-1008), and never again after a delete in the Library.
       if (known) return Response.json({ id: known.id, existing: true });
     }
     const createdAt = Number(header("x-kitshn-created-at") ?? Date.now());
@@ -2031,8 +2051,13 @@ export class Kitshn extends DurableObject<Env> {
     // The stream fails when the body is not exactly Content-Length bytes, so the limit holds.
     const { readable, writable } = new FixedLengthStream(size);
     const piped = request.body.pipeTo(writable);
-    await bucket.put(objectKey(item), readable, { httpMetadata: { contentType: item.contentType } });
-    await piped;
+    try {
+      await bucket.put(objectKey(item), readable, { httpMetadata: { contentType: item.contentType } });
+      await piped;
+    } catch (error) {
+      await piped.catch(() => undefined);
+      return refuse(`The upload did not reach R2: ${String(error)}`, 502);
+    }
     const resource: Resource = {
       id: item.id,
       kind,
@@ -2095,6 +2120,10 @@ export class Kitshn extends DurableObject<Env> {
     if (!this.env.BUCKET) return Response.json({ error: "R2 is off for this kitshn." }, { status: 503 });
     await this.env.BUCKET.delete(objectKey(item));
     this.ctx.storage.transactionSync(() => {
+      this.sql(
+        "INSERT OR IGNORE INTO library_deleted (source) SELECT source FROM library WHERE id = ? AND source IS NOT NULL",
+        id,
+      );
       for (const table of ["library", "resources", "places"])
         this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
       this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);

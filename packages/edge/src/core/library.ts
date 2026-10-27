@@ -1,6 +1,14 @@
 import { newJoinCode } from "./machine.ts";
-import { ADMIN_RESOURCE_ID, type Resource, type State, activeShares, isPublicCircle } from "./model.ts";
-import { type Visitor, circleMatches } from "./visitor.ts";
+import {
+  ADMIN_RESOURCE_ID,
+  type Circle,
+  type Member,
+  type Resource,
+  type State,
+  activeShares,
+  isPublicCircle,
+} from "./model.ts";
+import { type Visitor, circleMatches, memberMatches } from "./visitor.ts";
 
 /** K-1101: the largest file or page that kitshn takes. */
 export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
@@ -40,6 +48,22 @@ export function fileNameError(name: string): string | null {
 /** A visitor of `pages.<zone>` or `files.<zone>`. `passkey` is true after the passkey login (K-103). */
 export interface ContentVisitor extends Visitor {
   readonly passkey: boolean;
+  /** When Access issued the login, in seconds; null for an anonymous visitor. K-110 ends older logins. */
+  readonly issuedAt: number | null;
+}
+
+const isPerson = (member: Member) => member._tag === "email" || member._tag === "domain";
+
+/**
+ * K-103, K-402: Access asks for the passkey only in the people policy. In an "any" circle, a visitor
+ * who matches a network, device or machine member comes in through the Service Auth policy, without it.
+ */
+function passkeyNeeded(circle: Circle, visitor: ContentVisitor, state: State): boolean {
+  if (!circle.needsPasskey || visitor.passkey) return false;
+  if (circle.match === "all") return circle.members.some(isPerson);
+  return !circle.members.some(
+    (member) => !isPerson(member) && memberMatches(member, visitor, state.machines),
+  );
 }
 
 /**
@@ -60,13 +84,16 @@ export function contentAccess(
   const admin = state.resources.get(ADMIN_RESOURCE_ID);
   const decisions = [resource, ...(admin ? [admin] : [])].map((target) => {
     const shares = activeShares(state, target, now);
-    if (target === resource && shares.some((share) => isPublicCircle(share.circle))) return "allow";
+    // In an "all must match" circle, "everyone" adds nothing, as in Access (access.ts).
+    if (
+      target === resource &&
+      shares.some((share) => isPublicCircle(share.circle) && share.circle.match === "any")
+    )
+      return "allow";
     // K-1504: during a pause only people pass, as in Access.
     if (state.paused && visitor.email === null) return "deny";
     const matching = shares.filter((share) => circleMatches(share.circle, visitor, state.machines));
-    // A device or a machine has no passkey; Access lets its token through without one, as in K-402.
-    if (matching.some((share) => !share.circle.needsPasskey || visitor.passkey || visitor.email === null))
-      return "allow";
+    if (matching.some((share) => !passkeyNeeded(share.circle, visitor, state))) return "allow";
     return matching.length > 0 ? "passkey" : "deny";
   });
   if (decisions.includes("allow")) return "allow";

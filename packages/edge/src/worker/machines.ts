@@ -48,6 +48,34 @@ export function parseCommand(value: unknown): Command | string {
   return `kitshn has no command "${String(value.kind)}".`;
 }
 
+/**
+ * K-617: the update as a shell job, for a daemon from before the "update" job kind. It does what the
+ * daemon would do: download the release file, check SHA256SUMS, replace the binary, then restart the
+ * service from outside the daemon, so the job result still goes out. Null when the platform is unknown.
+ */
+export function legacyUpdateScript(version: string, os: string, arch: string): string | null {
+  const platform = os.startsWith("linux") ? "linux" : os.startsWith("darwin") ? "darwin" : null;
+  const cpu = arch === "arm64" || arch === "x64" ? arch : null;
+  if (!platform || !cpu || !/^[0-9a-f]{12}$/.test(version)) return null;
+  const file = `kitshn-${platform}-${cpu}`;
+  return [
+    "set -e",
+    `base=https://github.com/Yarden-zamir/kitshn/releases/download/edge-${version}`,
+    'bin="$HOME/.local/bin/kitshn"',
+    'tmp=$(mktemp "$bin.XXXXXX")',
+    `curl -fsSL "$base/${file}" -o "$tmp"`,
+    `expected=$(curl -fsSL "$base/SHA256SUMS" | awk -v f=${file} '$2 == f || $2 == "*" f { print $1 }')`,
+    `actual=$( (sha256sum "$tmp" 2>/dev/null || shasum -a 256 "$tmp") | awk '{ print $1 }')`,
+    'if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then rm -f "$tmp"; echo "The file does not match SHA256SUMS."; exit 1; fi',
+    'chmod 755 "$tmp"',
+    'mv "$tmp" "$bin"',
+    platform === "linux"
+      ? "systemd-run --user --on-active=3 --collect systemctl --user restart kitshn.service >/dev/null"
+      : '(sleep 3; launchctl kickstart -k "gui/$(id -u)/com.kitshn.daemon") >/dev/null 2>&1 &',
+    `echo "Updated to ${version}; the daemon restarts in 3 seconds."`,
+  ].join("\n");
+}
+
 /** A machine id from its name: lowercase, dashes, and a random tail so two machines never collide. */
 export function machineIdFor(name: string): string {
   const base = name

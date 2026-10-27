@@ -180,6 +180,8 @@ function pruneSamples() {
 async function updateDaemon(version: string): Promise<{ ok: boolean; exitCode: number | null; output: string }> {
   const failed = (output: string) => ({ ok: false, exitCode: null, output });
   if (!/^[0-9a-f]{12}$/.test(version)) return failed(`kitshn named no valid release (${version}).`);
+  // A daemon run from source has the runtime as its execPath; replacing that would break the runtime.
+  if (VERSION === "dev") return failed("This daemon runs from source; update it from the repo.");
   if (version === VERSION) return { ok: true, exitCode: 0, output: `Already at ${version}.` };
   const name = releaseAsset(platform, arch());
   const base = `${RELEASES}/edge-${version}`;
@@ -192,7 +194,10 @@ async function updateDaemon(version: string): Promise<{ ok: boolean; exitCode: n
     const actual = createHash("sha256").update(bytes).digest("hex");
     if (!expected || expected !== actual) return failed(`${name} of edge-${version} does not match its SHA256SUMS.`);
     const next = `${process.execPath}.new`;
-    writeFileSync(next, bytes, { mode: 0o755 });
+    // A leftover file keeps its old mode, so start fresh and set the mode explicitly.
+    rmSync(next, { force: true });
+    writeFileSync(next, bytes);
+    chmodSync(next, 0o755);
     renameSync(next, process.execPath);
   } catch (error) {
     return failed(`The update failed: ${String(error)}`);
@@ -279,6 +284,7 @@ function report() {
   const message: DaemonMessage = {
     type: "status",
     status: {
+      capabilities: ["update"],
       version: VERSION,
       os: `${osPlatform()} ${release()}`,
       arch: arch(),

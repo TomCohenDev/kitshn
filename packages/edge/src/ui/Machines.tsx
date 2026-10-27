@@ -195,15 +195,16 @@ export function MachinePanel(props: {
         <button class="btn" onClick={() => void run({ kind: "restart" })}>
           Restart daemon
         </button>
-        <button
-          class={`btn${view.status && view.status.version !== props.version ? " primary" : ""}`}
-          title={`Install the daemon of release ${props.version}`}
-          onClick={() => void run({ kind: "update", version: props.version })}
-        >
-          {view.status && view.status.version !== props.version
-            ? `Update daemon to ${props.version}`
-            : "Update daemon"}
-        </button>
+        {/* A local build names no release, so there is nothing to update to (K-617). */}
+        {/^[0-9a-f]{12}$/.test(props.version) ? (
+          <button
+            class={`btn${view.status && view.status.version !== props.version ? " primary" : ""}`}
+            title={`Install the daemon of release ${props.version}`}
+            onClick={() => void run({ kind: "update", version: props.version })}
+          >
+            {view.status && view.status.version !== props.version ? `Update daemon to ${props.version}` : "Update daemon"}
+          </button>
+        ) : null}
       </div>
       <ul>
         {jobs.slice(0, 5).map((job) => (

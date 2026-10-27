@@ -20,6 +20,8 @@ export interface MachineStatus {
   readonly arch: string;
   readonly hostname: string;
   readonly tunnel: "starting" | "running" | "stopped";
+  /** Job kinds that this daemon knows beyond shell, diagnostics and restart. Old daemons send none. */
+  readonly capabilities?: ReadonlyArray<string>;
 }
 
 /** K-605, K-606: the latest resource sample. The Durable Object keeps it in memory only. */

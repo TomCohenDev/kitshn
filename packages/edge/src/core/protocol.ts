@@ -34,6 +34,8 @@ export interface Snapshot {
   readonly jobs: ReadonlyArray<JobView>;
   /** K-617: the release of this kitshn; "Update daemon" installs the daemon of this release. */
   readonly version: string;
+  /** The Zero Trust team domain; people enroll a passkey at `https://<team>/AddMfaDevice` (K-103). */
+  readonly accessTeam: string;
   readonly me: Actor;
   /** The newest revision in this snapshot; a map shows a held edit until a snapshot reaches it. */
   readonly revision: number;

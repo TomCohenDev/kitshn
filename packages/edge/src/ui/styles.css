@@ -74,7 +74,14 @@ h3 {
 }
 code {
   font-family: var(--mono);
-  font-size: 0.8em;
+  font-size: 0.85em;
+}
+/* tick3d highlighter: a select-colour marker band behind inline code, no box. */
+:not(pre) > code {
+  background: linear-gradient(transparent 35%, var(--select) 35%, var(--select) 88%, transparent 88%);
+  color: var(--select-fg);
+  padding: 0 2px;
+  overflow-wrap: anywhere;
 }
 :focus-visible {
   outline: 2px solid var(--accent);
@@ -169,9 +176,9 @@ code {
 }
 .seg button {
   font: inherit;
-  font-size: 0.85rem;
+  font-size: 0.95rem;
   font-weight: 800;
-  padding: 2px 12px;
+  padding: 3px 14px;
   cursor: pointer;
   border: 0;
   background: transparent;
@@ -184,12 +191,21 @@ code {
   background: var(--select);
   color: var(--select-fg);
 }
+/* The segment clips its children, so the focus ring goes inside the button. */
+.seg button:focus-visible {
+  outline-offset: -4px;
+  box-shadow: none;
+}
+.seg.small button {
+  font-size: 0.8rem;
+  padding: 1px 10px;
+}
 
 input,
 select {
   font: inherit;
-  font-size: 0.85rem;
-  padding: 2px 6px;
+  font-size: 1rem;
+  padding: 4px 8px;
   color: var(--ink);
   background: var(--surface);
   border: var(--bw) solid var(--border);
@@ -221,7 +237,7 @@ select {
   position: fixed;
   top: 10px;
   left: 10px;
-  right: 360px;
+  right: 400px;
   z-index: 10;
   display: flex;
   flex-wrap: wrap;
@@ -250,7 +266,7 @@ select {
   top: 10px;
   right: 10px;
   bottom: 10px;
-  width: 340px;
+  width: 380px;
   z-index: 10;
   overflow: auto;
   padding: 12px;
@@ -282,7 +298,7 @@ select {
   background: var(--raised);
   border: var(--bw) solid var(--border);
   border-radius: var(--radius);
-  font-size: 0.85rem;
+  font-size: 0.95rem;
 }
 .side section + section {
   margin-top: 14px;
@@ -555,7 +571,7 @@ select {
 }
 .dialog {
   width: min(560px, calc(100vw - 20px));
-  padding: 10px;
+  padding: 16px;
   background: var(--surface);
   border: var(--bw) solid var(--border);
   border-radius: var(--radius);
@@ -592,7 +608,7 @@ select {
   position: fixed;
   top: 112px;
   left: 10px;
-  right: 360px;
+  right: 400px;
   bottom: 10px;
   z-index: 9;
   overflow: auto;
@@ -605,7 +621,15 @@ select {
 .history table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 0.85rem;
+  font-size: 0.95rem;
+}
+.history th {
+  text-transform: uppercase;
+  font-weight: 800;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--raised);
 }
 .history td,
 .history th {
@@ -752,4 +776,264 @@ pre.output {
   border: var(--bw) solid var(--border);
   border-radius: 50%;
   vertical-align: -0.05em;
+}
+
+/* Forms (tick3d): ink borders, help lines in muted text, errors in the error colours. */
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+  box-shadow: 3px 3px 0 0 var(--shadow-ink);
+}
+.field {
+  display: block;
+  margin-top: 6px;
+}
+.grow {
+  flex: 1 1 auto;
+}
+.help {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.error {
+  margin: 6px 0 0;
+  padding: 4px 8px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--error-fg);
+  background: var(--error-surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+}
+.field-row {
+  display: grid;
+  grid-template-columns: 5rem 1fr;
+  gap: 8px;
+  align-items: start;
+  margin: 10px 0;
+}
+.field-row > .label {
+  padding-top: 6px;
+}
+
+/* A switch; the one round control of tick3d. */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: var(--ink);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.switch .knob {
+  position: relative;
+  width: 2.4rem;
+  height: 1.3rem;
+  background: var(--raised);
+  border: var(--bw) solid var(--border);
+  border-radius: 999px;
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
+  transition: background 120ms;
+}
+.switch .knob::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: calc(1.3rem - 6px);
+  height: calc(1.3rem - 6px);
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: 50%;
+  transition: transform 120ms;
+}
+.switch[aria-checked="true"] .knob {
+  background: var(--green);
+}
+.switch[aria-checked="true"] .knob::after {
+  transform: translateX(1.1rem);
+}
+
+/* Circle editor */
+.editor {
+  position: relative;
+}
+.editor .band {
+  height: 10px;
+  margin: -12px -12px 10px;
+  border-bottom: var(--bw) solid var(--border);
+}
+.editor h3.label {
+  margin: 18px 0 6px;
+  padding-top: 10px;
+  border-top: var(--bw) dashed var(--border);
+}
+.editor .title {
+  display: block;
+  width: 100%;
+  margin: 2px 0 8px;
+  padding: 2px 6px;
+  font-size: 1.4rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  border-color: transparent;
+  background: transparent;
+}
+.editor .title:hover {
+  border-color: var(--border);
+}
+.swatches {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.swatches button {
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  cursor: pointer;
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
+}
+.swatches button[aria-checked="true"] {
+  outline: 3px solid var(--border);
+  outline-offset: 2px;
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 0 var(--shadow-ink);
+}
+.side ul.members,
+.side ul.picks,
+.side ul.opens {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+.side ul.members li.member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--surface);
+  box-shadow: 3px 3px 0 0 var(--shadow-ink);
+}
+.member .who {
+  flex: 1 1 auto;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.member .remove {
+  width: 1.6rem;
+  height: 1.6rem;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+  color: var(--error-fg);
+  background: var(--error-surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+}
+.add-member {
+  padding: 8px;
+  background: var(--raised);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+}
+.add-member .row {
+  margin-top: 8px;
+}
+.side ul.picks li,
+.side ul.opens li {
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+}
+.picks button,
+.open-card {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  color: var(--ink);
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition:
+    transform 80ms,
+    box-shadow 80ms;
+}
+.picks button:hover,
+.open-card:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 0 var(--shadow-ink);
+}
+.opens .seg {
+  margin: 4px 0 0 8px;
+}
+.danger-zone {
+  margin-top: 18px;
+  padding: 8px;
+  background: var(--error-surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+}
+.danger-zone h3.label {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--error-fg);
+}
+.danger-zone .btn {
+  margin-top: 8px;
+}
+
+/* Choices that wrap in a narrow panel: separate small buttons; the chosen one has the select style. */
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pills button {
+  padding: 1px 10px;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 800;
+  color: var(--ink);
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition:
+    transform 80ms,
+    box-shadow 80ms;
+}
+.pills button:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
+}
+.pills button[aria-pressed="true"] {
+  background: var(--select);
+  color: var(--select-fg);
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
+}
+
+/* A link around inline code keeps looking like a link. */
+a > code {
+  color: var(--accent);
+  text-decoration: underline;
 }

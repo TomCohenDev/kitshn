@@ -42,7 +42,7 @@ const appRow = (key: string, policyIds: Array<string>, aud: string, body?: strin
 
 describe("live sites (K-1104 to K-1108)", () => {
   it("routes each site through the tunnel, with Host localhost for a dev server", () => {
-    expect(tunnelConfig([site("b", "m", true, true), site("a", "m", true)], () => bypass)?.config.ingress).toEqual([
+    expect(tunnelConfig([site("b", "m", true, true), site("a", "m", true)], () => bypass).config.ingress).toEqual([
       { hostname: "a.example.com", service: "http://localhost:5173" },
       {
         hostname: "b.example.com",
@@ -59,7 +59,7 @@ describe("live sites (K-1104 to K-1108)", () => {
       ["b", { kind: "check", teamName: "team", aud: "aud-b" }],
     ]);
     const sites = [site("a", "m", true), site("b", "m", true, true)];
-    expect(tunnelConfig(sites, (item) => access.get(item.name)!)?.config.ingress).toEqual([
+    expect(tunnelConfig(sites, (item) => access.get(item.name)!).config.ingress).toEqual([
       {
         hostname: "a.example.com",
         service: "http://localhost:5173",
@@ -92,7 +92,7 @@ describe("live sites (K-1104 to K-1108)", () => {
     expect(of("pub")).toEqual({ kind: "bypass" });
     expect(of("new")).toEqual({ kind: "bypass" });
     expect(of("priv")).toEqual({ kind: "check", teamName: "team", aud: "aud-priv" });
-    expect(of("wait")).toBeNull();
+    expect(of("wait")).toEqual({ kind: "pending" });
     expect(() => of("priv", "")).toThrow(/ACCESS_TEAM_DOMAIN/);
 
     // Everyone to a circle: the check comes on only after Cloudflare accepted the application without
@@ -106,17 +106,24 @@ describe("live sites (K-1104 to K-1108)", () => {
     expect(of("pub")).toEqual({ kind: "check", teamName: "team", aud: "aud-pub" });
   });
 
-  it("writes no ingress for a machine while one of its applications has no audience tag (K-603)", () => {
-    // At deploy, rows from before the audience tag column have an id but no tag. The tunnel keeps
-    // the ingress that Cloudflare has instead of dropping the sites.
+  it("keeps a site without a known audience tag in the tunnel, without the check (K-603)", () => {
+    // At deploy, rows from before the audience tag column have an id but no tag. Their rules stay,
+    // without the check, until the tag is stored; no site is dropped and the machine is not held up.
     const rows = new Map([
       policyRow("policy:owner:people", "p-allow", "allow"),
       appRow("app:live-m-a:a.example.com", ["p-allow"], "aud-a"),
       appRow("app:live-m-b:b.example.com", ["p-allow"], ""),
     ]);
     const accessOf = (item: LiveSite) => ingressAccess(item, rows, "team.cloudflareaccess.com");
-    expect(tunnelConfig([site("a", "m", true), site("b", "m", true)], accessOf)).toBeNull();
-    expect(tunnelConfig([site("a", "m", true)], accessOf)?.config.ingress).toHaveLength(2);
+    expect(tunnelConfig([site("a", "m", true), site("b", "m", true)], accessOf).config.ingress).toEqual([
+      {
+        hostname: "a.example.com",
+        service: "http://localhost:5173",
+        originRequest: { access: { required: true, teamName: "team", audTag: ["aud-a"] } },
+      },
+      { hostname: "b.example.com", service: "http://localhost:5173" },
+      { service: "http_status:404" },
+    ]);
   });
 
   it("needs an offline route when the site is down or its machine is offline", () => {

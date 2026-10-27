@@ -63,47 +63,42 @@ const validTarget = (target: string) => {
 /**
  * K-603: how cloudflared guards the ingress rule of a site. "check": it drops a request without a valid
  * Access JWT of the application. "bypass": the application lets everyone in and issues no JWT (K-403).
+ * "pending": kitshn does not know the audience tag yet, so the rule goes without the check until the
+ * next tunnel write after the tag is stored. A site never leaves the tunnel for a missing tag.
  */
 export type IngressAccess =
   | { readonly kind: "check"; readonly teamName: string; readonly aud: string }
-  | { readonly kind: "bypass" };
+  | { readonly kind: "bypass" }
+  | { readonly kind: "pending" };
 
 /**
  * K-603, K-403: the Access check of a site's ingress rule, from its application `app:<site>:<address>`
  * as Cloudflare last accepted it. The check comes on only once the application no longer bypasses, and
- * goes off only once it does. Null while kitshn does not know the audience tag of the application.
+ * goes off only once it does.
  */
 export function ingressAccess(
   site: LiveSite,
   rows: ReadonlyMap<string, AccessRow>,
   teamDomain: string,
-): IngressAccess | null {
+): IngressAccess {
   const row = rows.get(`app:${site.id}:${site.address}`);
-  if (!row?.cfId) return null;
+  if (!row?.cfId) return { kind: "pending" };
   if (appliesBypass(row, rows)) return { kind: "bypass" };
-  if (!row.aud) return null;
+  if (!row.aud) return { kind: "pending" };
   const teamName = teamDomain.split(".")[0];
   if (!teamName) throw new Error("ACCESS_TEAM_DOMAIN is empty, so kitshn cannot guard tunnel ingress.");
   return { kind: "check", teamName, aud: row.aud };
 }
 
-/**
- * K-603, K-607, K-1105: the ingress of a machine's tunnel from its live sites. Null while a site has no
- * known audience tag: the tunnel then keeps the ingress that Cloudflare has, so no rule goes away and no
- * rule gets written without its check.
- */
-export function tunnelConfig(sites: ReadonlyArray<LiveSite>, accessOf: (site: LiveSite) => IngressAccess | null) {
-  const guarded = [...sites]
-    .sort((a, b) => a.address.localeCompare(b.address))
-    .map((site) => ({ site, access: accessOf(site) }));
-  const ready = guarded.filter(
-    (item): item is { site: LiveSite; access: IngressAccess } => item.access !== null,
-  );
-  if (ready.length < guarded.length) return null;
+/** K-603, K-607, K-1105: the ingress of a machine's tunnel from its live sites. */
+export function tunnelConfig(sites: ReadonlyArray<LiveSite>, accessOf: (site: LiveSite) => IngressAccess) {
   return {
     config: {
       ingress: [
-        ...ready.map(({ site, access }) => {
+        ...[...sites]
+          .sort((a, b) => a.address.localeCompare(b.address))
+          .map((site) => {
+          const access = accessOf(site);
           const originRequest = {
             ...(site.dev ? { httpHostHeader: "localhost" } : {}),
             ...(access.kind === "check"

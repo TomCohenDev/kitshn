@@ -1236,11 +1236,13 @@ export class Kitshn extends DurableObject<Env> {
         );
         continue;
       }
-      // An application without its audience tag yet: the tunnel keeps the ingress that it has (K-603).
-      if (config === null) continue;
       const body = JSON.stringify(config);
       if (row?.applied === body && row.error === null) continue;
       if (calls++ >= budget) return;
+      for (const site of this.protectedSites(machine.id)) {
+        if (accessOf(site).kind === "pending")
+          console.warn(`kitshn writes the ingress of ${site.address} without the Access check: its audience tag is not known yet.`);
+      }
       try {
         await api(
           "PUT",
@@ -1297,8 +1299,7 @@ export class Kitshn extends DurableObject<Env> {
       const row = tunnels.get(machine.id);
       if (row?.error && row.retry_at > now) return false;
       try {
-        const config = tunnelConfig(this.protectedSites(machine.id), accessOf);
-        return config !== null && row?.applied !== JSON.stringify(config);
+        return row?.applied !== JSON.stringify(tunnelConfig(this.protectedSites(machine.id), accessOf));
       } catch {
         // syncTunnels records the error and its retry time.
         return true;

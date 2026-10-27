@@ -8,6 +8,7 @@ import {
   resolveEdits,
   ruleViolation,
   shareDiff,
+  stacksWithout,
   summarize,
 } from "./changes.ts";
 import {
@@ -399,5 +400,24 @@ describe("stacks (K-521, K-522)", () => {
       ruleViolation(applyChanges(after, [{ _tag: "stack", id: "s2", before: null, after: second }])),
     ).toMatch(/two stacks/);
     expect(applyChanges(after, invert(changes)).stacks.size).toBe(0);
+  });
+
+  it("keeps the rules true when a stacked card is deleted outside an edit", () => {
+    const point = { x: 0, y: 40 };
+    const { after } = edit(start(), [
+      { _tag: "place", id: "riffle", after: point },
+      { _tag: "stack", id: "s1", after: stack },
+    ]);
+    const resources = new Map(after.resources);
+    const places = new Map(after.places);
+    resources.delete("riffle");
+    places.delete("riffle");
+    const stacks = new Map(after.stacks);
+    for (const change of stacksWithout(after.stacks.values(), "riffle")) {
+      if (change.after) stacks.set(change.id, change.after);
+      else stacks.delete(change.id);
+    }
+    expect(stacks.size).toBe(0);
+    expect(ruleViolation({ ...after, resources, places, stacks })).toBeNull();
   });
 });

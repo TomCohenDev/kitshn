@@ -267,12 +267,32 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
     return `${verb} circle ${circle?.name ?? circles[0].id}`;
   }
   const stacks = changes.filter((change) => change._tag === "stack");
-  if (stacks.length === 1 && stacks[0]) {
-    const stack = stacks[0].after ?? stacks[0].before;
-    const verb = !stacks[0].before ? "Stacked" : !stacks[0].after ? "Unstacked" : "Changed the stack";
-    return `${verb} ${stack?.name ?? stacks[0].id}`;
+  if (stacks.length > 0) {
+    const name = (id: string) => after.resources.get(id)?.name ?? before.resources.get(id)?.name ?? id;
+    const names = (ids: ReadonlyArray<string>) => ids.map(name).join(", ");
+    return stacks
+      .map(({ before: was, after: is, id }) => {
+        if (!was) return `Stacked ${names(is?.members ?? [])}`;
+        if (!is) return `Unstacked ${was.name}`;
+        const added = is.members.filter((member) => !was.members.includes(member));
+        const removed = was.members.filter((member) => !is.members.includes(member));
+        if (added.length > 0) return `Added ${names(added)} to ${is.name}`;
+        if (removed.length > 0) return `Took ${names(removed)} out of ${is.name}`;
+        return was.name === is.name ? `Changed the stack ${is.name || id}` : `Renamed ${was.name} to ${is.name}`;
+      })
+      .join("; ");
   }
   const moved = changes.filter((change) => change._tag === "place").length;
   if (moved > 0 && moved === changes.length) return moved === 1 ? "Moved a card" : `Moved ${moved} cards`;
   return `Changed ${changes.length} items`;
+}
+
+/** K-522: the stacks that change when a card is gone; a stack left with fewer than two cards goes. */
+export function stacksWithout(stacks: Iterable<Stack>, id: string): Array<{ id: string; after: Stack | null }> {
+  return [...stacks]
+    .filter((stack) => stack.members.includes(id))
+    .map((stack) => {
+      const members = stack.members.filter((member) => member !== id);
+      return { id: stack.id, after: members.length > 1 ? { ...stack, members } : null };
+    });
 }

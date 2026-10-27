@@ -226,7 +226,10 @@ export function App() {
     stackOnto: async (ids, target) => {
       if (!state) return;
       const place = state.places.get(target);
-      if (!place) return;
+      if (!place) {
+        showToast({ text: "Put one of the cards on the map first.", error: true, undo: null });
+        return;
+      }
       const into = [...state.stacks.values()].find((stack) => stack.members.includes(target));
       const moving = ids.filter((id) => id !== target && !into?.members.includes(id));
       if (moving.length === 0) return;
@@ -247,7 +250,12 @@ export function App() {
         id,
         after: { id, name: into?.name ?? "Stack", members: [...(into?.members ?? [target]), ...moving] },
       });
-      await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
+      const names = moving.flatMap((card) => state.resources.get(card)?.name ?? []).join(", ");
+      await commit(
+        edits,
+        shareDiff(state, applyChanges(state, resolveEdits(state, edits))),
+        `Stacked ${names} with ${into?.name ?? state.resources.get(target)?.name ?? "the card"}.`,
+      );
     },
     pullOut: async (stackId, id) => {
       const stack = state?.stacks.get(stackId);
@@ -261,7 +269,11 @@ export function App() {
         { _tag: "stack", id: stackId, after: rest.length > 1 ? { ...stack, members: rest } : null },
         { _tag: "place", id, after },
       ];
-      await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
+      await commit(
+        edits,
+        shareDiff(state, applyChanges(state, resolveEdits(state, edits))),
+        `Pulled ${state.resources.get(id)?.name ?? "the card"} out of ${stack.name}.`,
+      );
     },
     unstack: async (stackId) => {
       const stack = state?.stacks.get(stackId);
@@ -277,12 +289,20 @@ export function App() {
           after: placeInside(state, { x: first.x, y: first.y + (index + 1) * 100 }, wanted) ?? first,
         })),
       ];
-      await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
+      await commit(
+        edits,
+        shareDiff(state, applyChanges(state, resolveEdits(state, edits))),
+        `Unstacked ${stack.name}.`,
+      );
     },
     rename: async (stackId, name) => {
       const stack = state?.stacks.get(stackId);
       if (!stack || !name.trim() || name.trim() === stack.name) return;
-      await commit([{ _tag: "stack", id: stackId, after: { ...stack, name: name.trim().slice(0, 80) } }], []);
+      await commit(
+        [{ _tag: "stack", id: stackId, after: { ...stack, name: name.trim().slice(0, 80) } }],
+        [],
+        `Renamed the stack to ${name.trim().slice(0, 80)}.`,
+      );
     },
   };
 
@@ -326,7 +346,7 @@ export function App() {
     });
 
   /** Sends edits. K-210: a card that enters a public circle asks first. K-503: a share change shows Undo. */
-  const commit = async (edits: Array<Edit>, diffs: Array<ShareDiff>) => {
+  const commit = async (edits: Array<Edit>, diffs: Array<ShareDiff>, done?: string) => {
     const goingPublic = diffs.filter((diff) => diff.to && !diff.from && isPublicCircle(diff.circle));
     // The drop stays where the owner let go while they answer; Cancel puts it back.
     const requestId = hold(edits);
@@ -353,7 +373,7 @@ export function App() {
         error: false,
         undo: result.revision,
       });
-    }
+    } else if (done) showToast({ text: done, error: false, undo: result.revision });
   };
 
   const undo = async (revision: number) => {
@@ -449,6 +469,10 @@ export function App() {
     else showToast({ text: result.error, error: true, undo: null });
   };
 
+  /** The cards of the owner's stack that holds a card, or the card alone (K-521). */
+  const stackMates = (id: string) =>
+    [...(state?.stacks.values() ?? [])].find((stack) => stack.members.includes(id))?.members ?? [id];
+
   /** K-511: share or unshare without a drag, by placing the card where exactly the wanted circles hold it. */
   const reshare = async (resource: Resource, circle: Circle, share: boolean) => {
     const current = new Set(circlesHolding(state, resource.id).map((held) => held.id));
@@ -464,11 +488,17 @@ export function App() {
       });
       return;
     }
-    const after: State = { ...state, places: new Map(state.places).set(resource.id, to) };
-    const level = shareLevel(after, resource, circle);
+    // K-521: a stacked card takes its stack along, so the stack keeps one place.
+    const cards = stackMates(resource.id).flatMap((id) => state.resources.get(id) ?? []);
+    const places = new Map(state.places);
+    for (const card of cards) places.set(card.id, to);
+    const after: State = { ...state, places };
     await commit(
-      [{ _tag: "place", id: resource.id, after: to }],
-      [{ resource, circle, from: share ? null : level, to: share ? level : null }],
+      cards.map((card): Edit => ({ _tag: "place", id: card.id, after: to })),
+      cards.map((card) => {
+        const level = shareLevel(after, card, circle);
+        return { resource: card, circle, from: share ? null : level, to: share ? level : null };
+      }),
     );
   };
 
@@ -699,7 +729,11 @@ export function App() {
         onPlace={(resource) => {
           const center = { x: (innerWidth / 2 - view.x) / view.s, y: (innerHeight / 2 - view.y) / view.s };
           const to = placeInside(state, center, new Set());
-          if (to) void commit([{ _tag: "place", id: resource.id, after: to }], []);
+          if (to)
+            void commit(
+              stackMates(resource.id).map((id): Edit => ({ _tag: "place", id, after: to })),
+              [],
+            );
         }}
         onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
         paused={store.snapshot.paused}
@@ -957,8 +991,8 @@ function Panel(props: {
           class="btn primary"
           onClick={() =>
             void props.stacks.stackOnto(
-              cards.slice(1).map((card) => card.id),
-              cards[0]?.id ?? "",
+              cards.map((card) => card.id),
+              cards.find((card) => state.places.has(card.id))?.id ?? cards[0]?.id ?? "",
             )
           }
         >

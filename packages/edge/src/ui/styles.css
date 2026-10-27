@@ -1121,3 +1121,9 @@ a > code {
     8px 8px 0 0 var(--surface),
     10px 10px 0 0 var(--shadow-ink);
 }
+
+/* K-522: the card that a drop stacks onto. */
+.card.stack-target {
+  outline: 3px dashed var(--accent);
+  outline-offset: 4px;
+}

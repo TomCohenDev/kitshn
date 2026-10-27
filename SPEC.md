@@ -188,7 +188,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 
 ## 8. Recipes and deploys
 
-- **K-801** A recipe is `kitshn.config.ts` with `export default defineApp({...})`. The value is one object literal. The `kitshn` npm package exports `defineApp` and its types as a `.d.ts` with no imports, so an editor shows recipe mistakes; it has no runtime dependencies, because its CLI is one bundled file. Until it is on the npm registry, an app does not need it: Actions runs `kitshn check` from the release. For editor types, install the `kitshn.tgz` asset of an `edge-<version>` release without saving it (`npm i --no-save <address>`), because the release workflow keeps only the newest releases.
+- **K-801** A recipe is `kitshn.config.ts` with `export default defineApp({...})`. The value is one object literal. The `kitshn` npm package exports `defineApp` and its types as a `.d.ts` with no imports, so an editor shows recipe mistakes; it has no runtime dependencies, because its CLI is one bundled file. Until it is on the npm registry, an app does not need it: Actions runs `kitshn check` from the release. For editor types, install the `kitshn.tgz` asset of an `edge-<version>` release without saving it (`npm i --no-save <address>`), because the release workflow keeps only the newest releases. A later `npm i` removes it again, so an app keeps `kitshn.config.ts` out of its own `tsc` run.
 - **K-802** Recipes do not compute. A lint rule in `kitshn check` refuses loops, conditions, function calls other than `defineApp`, and imports other than `kitshn`. The lint rule is enough, because kitshn never runs repo code (K-803).
 - **K-803** GitHub Actions reads the recipe without running it: `kitshn check` turns the literal object into JSON. kitshn checks the JSON with the same schema. kitshn never runs repo code. The reusable workflow is `.github/workflows/kitshn2-deploy.yml` in this repo.
 - **K-804** Kinds: a Compose app (`compose`), a static site (`static`), a Worker app (`worker`). A recipe has exactly one kind.
@@ -197,8 +197,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
   import { defineApp } from "kitshn";
 
   export default defineApp({
-    compose: { runsOn: ["docker", "server"], expose: { web: "riffle" } },
-    needs: { vars: ["RIFFLE_BASE_URL"], secrets: ["DATABASE_URL"] },
+    compose: { runsOn: ["docker", "server"] },
     deploy: [
       { on: "push", branch: "main", name: "prod", address: "riffle.example.com" },
       { on: "pull_request", name: "pr-{pr}", ephemeral: true, startsIn: "Owner" },

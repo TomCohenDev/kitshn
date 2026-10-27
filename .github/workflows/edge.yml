@@ -34,6 +34,11 @@ jobs:
       - run: pnpm run test
       - run: sh -n packages/edge/public/install && sh -n packages/edge/public/join
       - run: pnpm --filter @kitshn/edge run build
+      - name: The kitshn types build, and the .d.ts has no imports (K-801)
+        working-directory: packages/kitshn
+        run: |
+          pnpm exec tsc -p tsconfig.build.json
+          ! grep -q '^import' dist/index.d.ts
       - uses: actions/upload-artifact@v7
         with:
           name: kitshn-edge

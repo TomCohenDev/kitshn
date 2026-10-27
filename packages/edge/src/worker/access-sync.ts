@@ -337,18 +337,20 @@ export async function verifyPasskeys(
 }
 
 /**
- * K-403, K-603: true when the application that Cloudflare last accepted has a Bypass policy. A policy
- * whose accepted body kitshn does not know counts as no Bypass, so the Access check stays on.
+ * K-403, K-603: whether the application that Cloudflare last accepted has a Bypass policy. Null when
+ * kitshn does not know: the accepted body of the application, or of one of its policies, is unknown
+ * (the daily compare clears a changed one, K-408) and no known policy is Bypass.
  */
-export function appliesBypass(app: AccessRow, rows: ReadonlyMap<string, AccessRow>): boolean {
-  const ids = new Set(policyIds(app.body));
-  return [...rows.values()].some(
-    (row) =>
-      row.key.startsWith("policy:") &&
-      ids.has(row.cfId) &&
-      row.body !== "" &&
-      (JSON.parse(row.body) as { decision?: string }).decision === "bypass",
-  );
+export function appliesBypass(app: AccessRow, rows: ReadonlyMap<string, AccessRow>): boolean | null {
+  if (app.body === "") return null;
+  const policies = [...rows.values()].filter((row) => row.key.startsWith("policy:"));
+  let unknown = false;
+  for (const id of policyIds(app.body)) {
+    const policy = policies.find((row) => row.cfId === id);
+    if (!policy?.body) unknown = true;
+    else if ((JSON.parse(policy.body) as { decision?: string }).decision === "bypass") return true;
+  }
+  return unknown ? null : false;
 }
 
 /** The application rows that have a Cloudflare id but no audience tag yet (K-603). */
@@ -377,8 +379,11 @@ export async function fillAudiences(store: AccessStore, api: Api, accountId: str
     for (const app of apps) auds.set(app.id, app.aud ?? "");
     if (apps.length < PAGE) break;
   }
-  for (const row of missing) {
-    const aud = auds.get(row.cfId);
+  for (const { key, cfId } of missing) {
+    // The row as it is now: the calls above wait, and a sync may have changed it meanwhile.
+    const row = store.rows.get(key);
+    if (!row || row.cfId !== cfId || row.aud) continue;
+    const aud = auds.get(cfId);
     if (aud === undefined) store.put({ ...row, cfId: "", aud: "", body: "", tried: "", error: null });
     else if (aud) store.put({ ...row, aud });
   }

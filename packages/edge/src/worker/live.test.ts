@@ -92,8 +92,9 @@ describe("live sites (K-1104 to K-1108)", () => {
     expect(of("pub")).toEqual({ kind: "bypass" });
     expect(of("new")).toEqual({ kind: "bypass" });
     expect(of("priv")).toEqual({ kind: "check", teamName: "team", aud: "aud-priv" });
-    expect(of("wait")).toEqual({ kind: "pending" });
-    expect(() => of("priv", "")).toThrow(/ACCESS_TEAM_DOMAIN/);
+    expect(of("wait")).toMatchObject({ kind: "pending" });
+    // An empty team domain leaves the rule without the check instead of holding up the machine.
+    expect(of("priv", "")).toEqual({ kind: "pending", reason: "ACCESS_TEAM_DOMAIN is empty" });
 
     // Everyone to a circle: the check comes on only after Cloudflare accepted the application without
     // Bypass, so a failed update never locks out the members.
@@ -101,9 +102,28 @@ describe("live sites (K-1104 to K-1108)", () => {
     expect(of("pub")).toEqual({ kind: "bypass" });
     rows.set(...appRow(key, ["p-allow"], "aud-pub"));
     expect(of("pub")).toEqual({ kind: "check", teamName: "team", aud: "aud-pub" });
-    // The other way, the check stays while Cloudflare has not accepted the Bypass policy (fails closed).
-    rows.set(...appRow(key, ["p-bypass"], "aud-pub", ""));
+    // The other way, the check stays while Cloudflare still has the application without Bypass.
+    rows.set(...appRow(key, ["p-bypass"], "aud-pub", JSON.stringify({ policies: [{ id: "p-allow" }] })));
     expect(of("pub")).toEqual({ kind: "check", teamName: "team", aud: "aud-pub" });
+  });
+
+  it("writes no check while kitshn does not know if the application bypasses (K-403, K-603)", () => {
+    // The daily compare clears an accepted body that Cloudflare no longer matches (K-408). A check
+    // then could refuse every visitor of a public site, so the rule goes without it until the next sync.
+    const rows = new Map([
+      policyRow("policy:everyone:people", "p-bypass", "bypass"),
+      policyRow("policy:owner:people", "p-allow", "allow"),
+      appRow("app:live-m-app:app.example.com", ["p-allow"], "aud-app", ""),
+    ]);
+    const of = () => ingressAccess(site("app", "m", true), rows, "team.cloudflareaccess.com");
+    expect(of()).toMatchObject({ kind: "pending" });
+
+    rows.set(...appRow("app:live-m-app:app.example.com", ["p-allow", "p-bypass"], "aud-app"));
+    rows.set("policy:owner:people", { ...rows.get("policy:owner:people")!, body: "" });
+    // A known Bypass policy decides even when another policy body is unknown.
+    expect(of()).toEqual({ kind: "bypass" });
+    rows.set(...appRow("app:live-m-app:app.example.com", ["p-allow"], "aud-app"));
+    expect(of()).toMatchObject({ kind: "pending" });
   });
 
   it("keeps a site without a known audience tag in the tunnel, without the check (K-603)", () => {

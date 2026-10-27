@@ -63,13 +63,13 @@ const validTarget = (target: string) => {
 /**
  * K-603: how cloudflared guards the ingress rule of a site. "check": it drops a request without a valid
  * Access JWT of the application. "bypass": the application lets everyone in and issues no JWT (K-403).
- * "pending": kitshn does not know the audience tag yet, so the rule goes without the check until the
- * next tunnel write after the tag is stored. A site never leaves the tunnel for a missing tag.
+ * "pending": kitshn cannot build the check yet (`reason` says why), so the rule goes without it until a
+ * later tunnel write. A site never leaves the tunnel for this.
  */
 export type IngressAccess =
   | { readonly kind: "check"; readonly teamName: string; readonly aud: string }
   | { readonly kind: "bypass" }
-  | { readonly kind: "pending" };
+  | { readonly kind: "pending"; readonly reason: string };
 
 /**
  * K-603, K-403: the Access check of a site's ingress rule, from its application `app:<site>:<address>`
@@ -82,11 +82,14 @@ export function ingressAccess(
   teamDomain: string,
 ): IngressAccess {
   const row = rows.get(`app:${site.id}:${site.address}`);
-  if (!row?.cfId) return { kind: "pending" };
-  if (appliesBypass(row, rows)) return { kind: "bypass" };
-  if (!row.aud) return { kind: "pending" };
+  if (!row?.cfId) return { kind: "pending", reason: "its Access application is not made yet" };
+  const bypass = appliesBypass(row, rows);
+  if (bypass === true) return { kind: "bypass" };
+  // A check on a site that still bypasses would refuse every public visitor.
+  if (bypass === null) return { kind: "pending", reason: "kitshn does not know if its application bypasses" };
+  if (!row.aud) return { kind: "pending", reason: "its audience tag is not known yet" };
   const teamName = teamDomain.split(".")[0];
-  if (!teamName) throw new Error("ACCESS_TEAM_DOMAIN is empty, so kitshn cannot guard tunnel ingress.");
+  if (!teamName) return { kind: "pending", reason: "ACCESS_TEAM_DOMAIN is empty" };
   return { kind: "check", teamName, aud: row.aud };
 }
 

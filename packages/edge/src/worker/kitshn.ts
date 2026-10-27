@@ -1222,28 +1222,14 @@ export class Kitshn extends DurableObject<Env> {
     for (const machine of this.state.machines.values()) {
       const row = rows.get(machine.id);
       if (row?.error && row.retry_at > now) continue;
-      let config: ReturnType<typeof tunnelConfig>;
-      try {
-        config = tunnelConfig(this.protectedSites(machine.id), accessOf);
-      } catch (error) {
-        // A missing Access team stops the tunnel writes only, not the rest of the alarm.
-        console.warn(`kitshn could not build the ingress of ${machine.id}: ${String(error)}`);
-        this.sql(
-          "INSERT OR REPLACE INTO tunnel_objects (machine_id, body, applied, error, retry_at) VALUES (?, ?, ?, ?, ?)",
-          machine.id,
-          row?.body ?? "",
-          row?.applied ?? "",
-          String(error),
-          now + RETRY_MS,
-        );
-        continue;
-      }
+      const config = tunnelConfig(this.protectedSites(machine.id), accessOf);
       const body = JSON.stringify(config);
       if (row?.applied === body && row.error === null) continue;
       if (calls++ >= budget) return;
       for (const site of this.protectedSites(machine.id)) {
-        if (accessOf(site).kind === "pending")
-          console.warn(`kitshn writes the ingress of ${site.address} without the Access check: its audience tag is not known yet.`);
+        const access = accessOf(site);
+        if (access.kind === "pending")
+          console.warn(`kitshn writes the ingress of ${site.address} without the Access check: ${access.reason}.`);
       }
       try {
         await api(
@@ -1300,12 +1286,7 @@ export class Kitshn extends DurableObject<Env> {
     const stale = [...this.state.machines.values()].some((machine) => {
       const row = tunnels.get(machine.id);
       if (row?.error && row.retry_at > now) return false;
-      try {
-        return row?.applied !== JSON.stringify(tunnelConfig(this.protectedSites(machine.id), accessOf));
-      } catch {
-        // syncTunnels records the error and its retry time.
-        return true;
-      }
+      return row?.applied !== JSON.stringify(tunnelConfig(this.protectedSites(machine.id), accessOf));
     });
     const checking = [...this.liveSites.values()].some(
       (site) => site.state === "checking" && (this.checkRetryAt.get(site.id) ?? 0) <= Date.now(),
@@ -2856,7 +2837,8 @@ export class Kitshn extends DurableObject<Env> {
   private async fillAudiences(api: Api, now: number) {
     if (rowsWithoutAud(this.access).length === 0 || this.audRetryAt > now) return 0;
     try {
-      return await fillAudiences(this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID);
+      // In the lock, so a deploy's Access sync never writes a row between the read and the put.
+      return await this.withAccessLock(() => fillAudiences(this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID));
     } catch (error) {
       console.warn(`kitshn could not read the audience tags of Access: ${String(error)}`);
       return 1;

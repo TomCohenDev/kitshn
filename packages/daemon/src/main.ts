@@ -30,6 +30,7 @@ import {
 } from "node:os";
 import { dirname, join } from "node:path";
 import { type Platform, cloudflaredUrl, pathsFor, serviceCommands, serviceFile } from "./service.ts";
+import { type SiteEntry, addSite, probe, targetOf } from "./sites.ts";
 
 declare const KITSHN_VERSION: string;
 const VERSION = typeof KITSHN_VERSION === "string" ? KITSHN_VERSION : "dev";
@@ -306,6 +307,8 @@ function connect(config: JoinSecrets) {
       flushResults();
       lastPong = Date.now();
       report();
+      lastSites = "";
+      void checkSites();
       ws.send(JSON.stringify({ type: "sample", sample: sample() } satisfies DaemonMessage));
       ping = setInterval(() => {
         if (Date.now() - lastPong > PONG_TIMEOUT_MS) {
@@ -348,6 +351,54 @@ function connect(config: JoinSecrets) {
   open();
 }
 
+const sitesFile = () => join(paths.data, "sites.json");
+
+function readSites(): Array<SiteEntry> {
+  if (!existsSync(sitesFile())) return [];
+  return JSON.parse(readFileSync(sitesFile(), "utf8")) as Array<SiteEntry>;
+}
+
+function writeSites(sites: ReadonlyArray<SiteEntry>) {
+  mkdirSync(paths.data, { recursive: true });
+  writeFileSync(sitesFile(), `${JSON.stringify(sites, null, 2)}\n`);
+}
+
+/** K-1104: `kitshn expose <port or socket> --name <name> [--dev]`. The running daemon picks it up. */
+function exposeCommand(value: string | undefined, name: string | undefined, dev: boolean) {
+  const target = value ? targetOf(value) : null;
+  if (!target || !name) fail("usage: kitshn expose <port or /path/to.sock> --name <name> [--dev]");
+  const sites = addSite(readSites(), { name: name!, target: target!, dev });
+  if (typeof sites === "string") fail(sites);
+  writeSites(sites as Array<SiteEntry>);
+  console.log(
+    `Exposed ${target} as ${name}. Its card arrives in the tray of the map, private until you share it.`,
+  );
+}
+
+function unexposeCommand(name: string | undefined) {
+  const sites = readSites();
+  if (!name || !sites.some((site) => site.name === name)) fail(`no live site is named ${name ?? "(none)"}.`);
+  writeSites(sites.filter((site) => site.name !== name));
+  console.log(`Stopped exposing ${name}.`);
+}
+
+let lastSites = "";
+
+/** K-1107: tries each site every 10 seconds and reports the list only when it changes. */
+async function checkSites() {
+  let sites: Array<SiteEntry> = [];
+  try {
+    sites = readSites();
+  } catch (error) {
+    log(`sites.json is not valid: ${String(error)}`);
+  }
+  const reports = await Promise.all(sites.map(async (site) => ({ ...site, up: await probe(site.target) })));
+  const text = JSON.stringify({ type: "sites", sites: reports } satisfies DaemonMessage);
+  if (text === lastSites || socket?.readyState !== WebSocket.OPEN) return;
+  lastSites = text;
+  socket.send(text);
+}
+
 async function runCommand() {
   const config = readConfig();
   log(`kitshn ${VERSION} starts as machine ${config.machineId}`);
@@ -361,6 +412,7 @@ async function runCommand() {
       socket.send(JSON.stringify({ type: "sample", sample: value } satisfies DaemonMessage));
   }, SAMPLE_MS);
   setInterval(pruneSamples, 24 * 60 * 60_000);
+  setInterval(() => void checkSites(), 10_000);
 }
 
 const [command, ...args] = process.argv.slice(2);
@@ -382,6 +434,12 @@ switch (command) {
   case "version":
     console.log(VERSION);
     break;
+  case "expose":
+    exposeCommand(args[0], flag("--name"), args.includes("--dev"));
+    break;
+  case "unexpose":
+    unexposeCommand(args[0]);
+    break;
   default:
     console.log(`kitshn ${VERSION}
 
@@ -389,5 +447,7 @@ kitshn join <code> --server <address>   join this machine to kitshn (K-602)
 kitshn service install                  run the daemon as a user service (K-601)
 kitshn service uninstall                stop and remove the user service
 kitshn run                              run the daemon in the foreground
+kitshn expose <port|socket> --name <n>  share a local server at <n>.<zone> (K-1104); --dev sets Host localhost
+kitshn unexpose <name>                  stop sharing it
 kitshn version`);
 }

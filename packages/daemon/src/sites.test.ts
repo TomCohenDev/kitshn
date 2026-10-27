@@ -1,0 +1,30 @@
+import { createServer } from "node:net";
+import { describe, expect, it } from "vitest";
+import { addSite, probe, targetOf } from "./sites.ts";
+
+describe("exposed sites (K-1104, K-1107)", () => {
+  it("turns a port or a socket path into a tunnel target", () => {
+    expect(targetOf("5173")).toBe("http://localhost:5173");
+    expect(targetOf("/run/app.sock")).toBe("unix:/run/app.sock");
+    expect(targetOf("70000")).toBeNull();
+    expect(targetOf("example.com")).toBeNull();
+  });
+
+  it("replaces a site with the same name and refuses a bad name", () => {
+    const one = addSite([], { name: "demo", target: "http://localhost:1", dev: false });
+    expect(addSite(one as never, { name: "demo", target: "http://localhost:2", dev: true })).toEqual([
+      { name: "demo", target: "http://localhost:2", dev: true },
+    ]);
+    expect(addSite([], { name: "No", target: "http://localhost:1", dev: false })).toMatch(/name/);
+  });
+
+  it("reports a listening port up and a closed one down", async () => {
+    const server = createServer().listen(0, "127.0.0.1");
+    await new Promise((resolve) => server.once("listening", resolve));
+    const port = (server.address() as { port: number }).port;
+    expect(await probe(`http://localhost:${port}`)).toBe(true);
+    server.close();
+    await new Promise((resolve) => server.once("close", resolve));
+    expect(await probe(`http://localhost:${port}`)).toBe(false);
+  });
+});

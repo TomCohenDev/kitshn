@@ -1,11 +1,55 @@
 import { callerOf, deployerOf } from "./auth.ts";
+import { escapeHtml, originDown, seenText } from "./live.ts";
 import type { Env } from "./env.ts";
 
 export { Kitshn } from "./kitshn.ts";
 
+/**
+ * K-1106 to K-1110: the Worker runs on a live site only while kitshn has an offline route on it. It asks
+ * the origin first, so a site that came back works at once, and answers with the offline page only
+ * when the origin is down.
+ */
+async function offline(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(request.url);
+  const origin = await fetch(request).catch(() => null);
+  if (origin && !originDown(origin.status)) return origin;
+  const cache = caches.default;
+  const key = new Request(`https://kitshn-offline.internal/${url.hostname}`);
+  let info = (await cache.match(key)?.then((response) => response?.json())) as OfflineInfo | undefined;
+  if (!info) {
+    const answer = await env.KITSHN.getByName("kitshn").fetch(
+      `https://kitshn.internal/internal/offline?address=${encodeURIComponent(url.hostname)}`,
+    );
+    if (!answer.ok) return origin ?? new Response("The site is not reachable.", { status: 502 });
+    info = (await answer.json()) as OfflineInfo;
+    // K-1110: the name and the last seen time stay 60 seconds in the Cache API.
+    ctx.waitUntil(
+      cache.put(key, new Response(JSON.stringify(info), { headers: { "cache-control": "max-age=60" } })),
+    );
+  }
+  const page = await env.ASSETS.fetch(new Request(new URL("/offline.html", `https://${env.KITSHN_HOST}`)));
+  const html = (await page.text())
+    .replaceAll("{{site}}", escapeHtml(info.site))
+    .replaceAll("{{reason}}", escapeHtml(info.reason))
+    .replaceAll("{{seen}}", escapeHtml(seenText(info.seen, Date.now())));
+  return new Response(html, {
+    status: 503,
+    headers: { "content-type": "text/html; charset=utf-8", "retry-after": "60", "cache-control": "no-store" },
+  });
+}
+
+interface OfflineInfo {
+  readonly site: string;
+  readonly reason: string;
+  readonly seen: number | null;
+}
+
 export default {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
+    if (url.hostname !== env.KITSHN_HOST && url.hostname.endsWith(`.${env.KITSHN_ZONE}`)) {
+      return offline(request, env, ctx);
+    }
     if (url.pathname.startsWith("/api/")) {
       // A browser sends Origin on a WebSocket and a cross-site POST. Only the map's own page may call.
       const origin = request.headers.get("origin");

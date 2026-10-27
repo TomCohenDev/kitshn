@@ -18,6 +18,7 @@ const SAFE_SERVICE_KEYS = new Set([
   "environment",
   "env_file",
   "expose",
+  "extra_hosts",
   "healthcheck",
   "hostname",
   "image",
@@ -43,14 +44,22 @@ const SAFE_SERVICE_KEYS = new Set([
   "volumes",
   "working_dir",
   "platform",
+  "profiles",
+  "scale",
 ]);
-const SAFE_BUILD_KEYS = new Set(["context", "dockerfile", "args", "target", "labels", "cache_from", "tags", "platforms"]);
+const SAFE_BUILD_KEYS = new Set(["context", "additional_contexts", "dockerfile", "args", "target", "labels", "cache_from", "tags", "platforms"]);
 const SAFE_TOP_KEYS = new Set(["name", "services", "volumes", "networks", "secrets", "configs"]);
 
 type Json = Record<string, unknown>;
 const record = (value: unknown): Json =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Json) : {};
 const list = (value: unknown): Array<unknown> => (Array.isArray(value) ? value : []);
+/** Label names of a map or of a list of `name=value`. */
+const labelNames = (labels: unknown): Array<string> =>
+  Array.isArray(labels) ? labels.map((label) => String(label).split("=")[0] ?? "") : Object.keys(record(labels));
+/** Compose finds the containers, networks and volumes of a project by these labels. */
+const composeLabel = (labels: unknown) => labelNames(labels).some((name) => name.startsWith("com.docker.compose."));
+const under = (path: string, root: string) => path === root || path.startsWith(`${root}/`);
 
 /**
  * Follows symlinks of the longest part of a path that exists, then adds the rest, so a link in the repo or
@@ -71,15 +80,16 @@ export function composeRisks(
   config: unknown,
   uninterpolated: unknown,
   project: string,
-  /** The app's own folders: its source, data, logs and sockets, with symlinks resolved. */
-  roots: ReadonlyArray<string>,
+  /**
+   * The app's own folders, with symlinks resolved: first the new source, then data, logs and sockets.
+   * Build inputs and env files stay in the new source, which no running container of the app can change.
+   */
+  roots: readonly [source: string, ...others: Array<string>],
   real: (path: string) => string,
 ): Array<string> {
   const risks = new Set<string>();
-  const inside = (path: string) => {
-    const resolved = real(path);
-    return roots.some((root) => resolved === root || resolved.startsWith(`${root}/`));
-  };
+  const inside = (path: string) => roots.some((root) => under(real(path), root));
+  const inSource = (path: string) => under(real(path), roots[0]);
   const top = record(config);
   for (const key of Object.keys(top)) if (!SAFE_TOP_KEYS.has(key) && !key.startsWith("x-")) risks.add(`top:${key}`);
   for (const [serviceName, service] of Object.entries(record(top["services"]))) {
@@ -96,6 +106,7 @@ export function composeRisks(
     };
     if (s["build"] !== undefined && s["image"] !== undefined && !own(s["image"])) risks.add("image");
     if (s["container_name"] !== undefined && s["container_name"] !== ownName) risks.add("container_name");
+    if ([s["labels"], record(s["build"])["labels"], record(s["deploy"])["labels"]].some(composeLabel)) risks.add("labels");
     const logging = record(s["logging"]);
     if (logging["driver"] !== undefined && logging["driver"] !== "json-file" && logging["driver"] !== "local")
       risks.add("logging");
@@ -112,8 +123,10 @@ export function composeRisks(
     const build = record(s["build"]);
     for (const key of Object.keys(build)) if (!SAFE_BUILD_KEYS.has(key)) risks.add(`build.${key}`);
     const context = typeof build["context"] === "string" ? build["context"] : null;
-    if (context !== null && (context.includes("://") || !inside(context))) risks.add(`build:${context}`);
-    if (context !== null && typeof build["dockerfile"] === "string" && !inside(resolve(context, build["dockerfile"])))
+    for (const input of [context, ...Object.values(record(build["additional_contexts"]))])
+      if (input !== null && (typeof input !== "string" || input.includes("://") || !inSource(input)))
+        risks.add(`build:${String(input)}`);
+    if (context !== null && typeof build["dockerfile"] === "string" && !inSource(resolve(context, build["dockerfile"])))
       risks.add(`build:${build["dockerfile"]}`);
     for (const tag of list(build["tags"])) if (!own(tag)) risks.add("build.tags");
     for (const source of list(build["cache_from"]))
@@ -133,7 +146,7 @@ export function composeRisks(
     for (const key of ["env_file", "label_file"])
       for (const entry of list(s[key])) {
         const path = typeof entry === "string" ? entry : record(entry)["path"];
-        if (typeof path !== "string" || path.includes("$") || !inside(path)) risks.add(`${key}:${String(path)}`);
+        if (typeof path !== "string" || path.includes("$") || !inSource(path)) risks.add(`${key}:${String(path)}`);
       }
   }
   for (const [name, volume] of Object.entries(record(top["volumes"]))) {
@@ -142,6 +155,7 @@ export function composeRisks(
     const own = typeof v["name"] !== "string" || v["name"] === `${project}_${name}`;
     if (!own || v["external"] === true || v["driver"] !== undefined || v["driver_opts"] !== undefined)
       risks.add(`volume:${name}`);
+    if (composeLabel(v["labels"])) risks.add("labels");
   }
   for (const [name, network] of Object.entries(record(top["networks"]))) {
     const n = record(network);
@@ -149,8 +163,12 @@ export function composeRisks(
     // Compose gives each service its name as an alias on a shared network such as kitshn-edge, so a
     // service there can take the traffic of another app's service of the same name.
     const risk = `network:${typeof n["name"] === "string" ? n["name"] : name}`;
-    // Only a name and labels; ipam, ipv6 and drivers can change routing on the host.
-    if (Object.keys(n).some((key) => !["name", "labels", "external"].includes(key))) risks.add(risk);
+    // Only a name, labels and `internal`; ipam, ipv6 and drivers can change routing on the host. Compose
+    // writes an empty ipam on every network.
+    const plain = (key: string) =>
+      ["name", "labels", "external", "internal"].includes(key) || (key === "ipam" && Object.keys(record(n[key])).length === 0);
+    if (Object.keys(n).some((key) => !plain(key))) risks.add(risk);
+    if (composeLabel(n["labels"])) risks.add("labels");
     const own = typeof n["name"] !== "string" || n["name"] === `${project}_${name}`;
     if (!own || n["external"] === true) risks.add(risk);
   }
@@ -160,7 +178,27 @@ export function composeRisks(
       if (typeof file === "string" && !inside(file)) risks.add(`file:${resolve(file)}`);
       if (record(entry)["environment"] !== undefined) risks.add(`${section}.environment`);
     }
+  for (const path of nestedSources(config, real)) risks.add(`nested:${resolve(path)}`);
   return [...risks].sort();
+}
+
+/**
+ * K-818: bind and file sources under a writable bind source of the same app, after symlinks. Docker follows
+ * symlinks at each container start, so through the outer bind the app can turn the inner source into a link
+ * to any host path, and a restart mounts that path. The same path twice is fine: no container can replace
+ * the root of its own mount.
+ */
+export function nestedSources(config: unknown, real: (path: string) => string): Array<string> {
+  const writable = Object.values(record(record(config)["services"])).flatMap((service) =>
+    list(record(service)["volumes"]).flatMap((volume) => {
+      const v = record(volume);
+      return v["type"] === "bind" && typeof v["source"] === "string" && v["read_only"] !== true ? [real(v["source"])] : [];
+    }),
+  );
+  return [...bindSources(config), ...fileSources(config)].filter((path) => {
+    const resolved = real(path);
+    return writable.some((outer) => resolved.startsWith(`${outer}/`));
+  });
 }
 
 /** K-818: every bind source of a config, checked again right before `up` with nothing of the app running. */
@@ -215,12 +253,14 @@ export function composeFiles(
   exists: (path: string) => boolean,
   real: (path: string) => string,
 ): Array<string> {
-  const inSource = (path: string) => path.startsWith(`${source}/`);
+  const realSource = real(source);
+  const linksIn = (path: string) => real(path).startsWith(`${realSource}/`);
   if (file !== null) {
     const path = resolve(source, file);
-    if (file.startsWith("/") || !inSource(path)) throw new Error(`the Compose file ${file} is not inside the repo`);
+    if (file === "" || file.startsWith("/") || !path.startsWith(`${source}/`))
+      throw new Error(`the Compose file "${file}" is not inside the repo`);
     if (!exists(path)) throw new Error(`the repo has no Compose file ${file}`);
-    if (!inSource(real(path))) throw new Error(`the Compose file ${file} links out of the repo`);
+    if (!linksIn(path)) throw new Error(`the Compose file ${file} links out of the repo`);
     return [path];
   }
   const first = (names: ReadonlyArray<string>) => names.map((name) => join(source, name)).find(exists);
@@ -229,7 +269,7 @@ export function composeFiles(
   const override = first(OVERRIDE_FILES);
   const files = override === undefined ? [main] : [main, override];
   for (const path of files)
-    if (!inSource(real(path))) throw new Error(`the Compose file ${path} links out of the repo`);
+    if (!linksIn(path)) throw new Error(`the Compose file ${path} links out of the repo`);
   return files;
 }
 

@@ -35,6 +35,7 @@ describe("recipe reader (K-802, K-803)", () => {
     expect(decodeRecipe(compose("deploy/compose.yml"))).toMatchObject(compose("deploy/compose.yml"));
     expect(() => decodeRecipe(compose("/etc/compose.yml"))).toThrow(/inside the repo/);
     expect(() => decodeRecipe(compose("../other/compose.yml"))).toThrow(/inside the repo/);
+    expect(() => decodeRecipe(compose(""))).toThrow(/inside the repo/);
   });
 });
 

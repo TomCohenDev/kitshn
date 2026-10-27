@@ -9,7 +9,7 @@ import {
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { bindSources, composeFiles, composeRisks, fileSources, rawRisks, realpathOf } from "./guard.ts";
+import { bindSources, composeFiles, composeRisks, fileSources, nestedSources, rawRisks, realpathOf } from "./guard.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
 import {
   chmodSync,
@@ -313,6 +313,9 @@ async function composeUp(
   const source = join(dir, `src-${Date.now().toString(36)}`);
   const sockets = join(dir, "sockets");
   const socketPath = join(sockets, "default.sock");
+  /** K-818: the configs hold the values of the params, so they stay in a folder of the daemon user only. */
+  const scratch = join(dir, "private");
+  const checked = join(scratch, "compose.checked.json");
   let output = "";
   /** K-1404: the KitSHn 1 project that this job stopped, which a failure starts again. */
   let stoppedKitshn1: string | null = null;
@@ -361,6 +364,73 @@ async function composeUp(
           })
         : ({ kind: "skip", note: null } as const);
     if (takeover.kind === "skip" && takeover.note) output += `${takeover.note}\n`;
+    const env = {
+      ...process.env,
+      KITSHN_RECIPE: command.repo,
+      KITSHN_ENVIRONMENT: command.environment,
+      KITSHN_DEPLOYMENT: command.project,
+      KITSHN_SOCKET_DIR: sockets,
+      KITSHN_DEFAULT_SOCKET: socketPath,
+      KITSHN_DATA_DIR: data,
+      KITSHN_LOG_DIR: join(dir, "logs"),
+      KITSHN_PARAMS_FILE: join(dir, "params.env"),
+    };
+    // KitSHn 1 apps join this network; it exists on a KitSHn 1 host and is made elsewhere.
+    if (!(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok) {
+      // Another deploy may make it at the same moment; only a network that is still missing is an error.
+      const made = await runProgram("docker", ["network", "create", "kitshn-edge"]);
+      if (!made.ok && !(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok)
+        throw new Error(`docker network create kitshn-edge failed: ${made.output}`);
+    }
+    // K-818: risky Compose settings run only when the owner allows them for this repo on this machine. The
+    // check runs before the takeover, so a refused deploy leaves KitSHn 1 as it is.
+    const refuse = (risks: ReadonlyArray<string>) => {
+      const refused = risks.filter((risk) => !command.allowed.includes(risk));
+      if (refused.length > 0)
+        throw new Error(
+          `the Compose file asks for ${refused.join(", ")}; the owner allows each one for ${command.repo} in the panel of this machine (K-818)`,
+        );
+    };
+    const real = (path: string) => realpathOf(path, realpathSync, existsSync);
+    // Explicit files, so a `COMPOSE_FILE` in the params cannot add a file that the check never reads.
+    const files = composeFiles(source, command.file, existsSync, real);
+    // Before Compose reads the files, so it never fetches what `include` or `extends` names.
+    refuse(
+      files.flatMap((path) => {
+        try {
+          return rawRisks(readFileSync(path, "utf8"));
+        } catch (error) {
+          throw new Error(`${path}: ${error instanceof Error ? error.message : String(error)} (K-818)`);
+        }
+      }),
+    );
+    const composeArgs = [
+      "compose",
+      "-p",
+      command.project,
+      ...files.flatMap((file) => ["-f", file]),
+      "--env-file",
+      env.KITSHN_PARAMS_FILE,
+    ];
+    const roots = [real(source), real(data), real(env.KITSHN_LOG_DIR), real(sockets)] as const;
+    mkdirSync(scratch, { recursive: true, mode: 0o700 });
+    chmodSync(scratch, 0o700);
+    const readConfig = async (extra: ReadonlyArray<string>) => {
+      const file = join(scratch, "compose.config.json");
+      try {
+        await step("read the Compose settings", "docker", [...composeArgs, "config", "--format", "json", ...extra, "-o", file], {
+          cwd: source,
+          env,
+        });
+        return JSON.parse(readFileSync(file, "utf8")) as unknown;
+      } finally {
+        rmSync(file, { force: true });
+      }
+    };
+    // Without the params first, so an error in the files does not show their values.
+    const uninterpolated = await readConfig(["--no-interpolate"]);
+    const config = await readConfig([]);
+    refuse(composeRisks(config, uninterpolated, command.project, roots, real));
     if (takeover.kind === "take") {
       // Set first: a stop that fails half-way still gets its start back.
       stoppedKitshn1 = takeover.project;
@@ -401,112 +471,45 @@ async function composeUp(
     // The container user may not be the daemon user; the socket directory must take its socket.
     mkdirSync(sockets, { recursive: true });
     chmodSync(sockets, 0o777);
-    const env = {
-      ...process.env,
-      KITSHN_RECIPE: command.repo,
-      KITSHN_ENVIRONMENT: command.environment,
-      KITSHN_DEPLOYMENT: command.project,
-      KITSHN_SOCKET_DIR: sockets,
-      KITSHN_DEFAULT_SOCKET: socketPath,
-      KITSHN_DATA_DIR: join(dir, "data"),
-      KITSHN_LOG_DIR: join(dir, "logs"),
-      KITSHN_PARAMS_FILE: join(dir, "params.env"),
-    };
-    for (const folder of [env.KITSHN_DATA_DIR, env.KITSHN_LOG_DIR]) mkdirSync(folder, { recursive: true });
-    // KitSHn 1 apps join this network; it exists on a KitSHn 1 host and is made elsewhere.
-    if (!(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok) {
-      // Another deploy may make it at the same moment; only a network that is still missing is an error.
-      const made = await runProgram("docker", ["network", "create", "kitshn-edge"]);
-      if (!made.ok && !(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok)
-        throw new Error(`docker network create kitshn-edge failed: ${made.output}`);
-    }
-    // K-818: risky Compose settings run only when the owner allows them for this repo on this machine.
-    const real = (path: string) => realpathOf(path, realpathSync, existsSync);
-    // Explicit files, so a `COMPOSE_FILE` in the params cannot add a file that the check never reads.
-    const files = composeFiles(source, command.file, existsSync, real);
-    const composeArgs = [
+    for (const folder of [data, env.KITSHN_LOG_DIR]) mkdirSync(folder, { recursive: true });
+    // Build and start from the checked config itself, so the repo's files are not read again. It stays with
+    // the last good build, so a teardown reads the same services.
+    writeFileSync(checked, JSON.stringify(config), { mode: 0o600 });
+    // The params file again: without it Compose reads the repo's `.env`, and `COMPOSE_PROFILES` is lost.
+    const run = [
       "compose",
       "-p",
       command.project,
-      ...files.flatMap((file) => ["-f", file]),
+      "--project-directory",
+      source,
+      "-f",
+      checked,
       "--env-file",
       env.KITSHN_PARAMS_FILE,
     ];
-    const roots = [source, env.KITSHN_DATA_DIR, env.KITSHN_LOG_DIR, sockets].map(real);
-    const readConfig = async (extra: ReadonlyArray<string>) => {
-      const file = join(dir, "compose.config.json");
-      try {
-        await step("read the Compose settings", "docker", [...composeArgs, "config", "--format", "json", ...extra, "-o", file], {
-          cwd: source,
-          env,
-        });
-        return JSON.parse(readFileSync(file, "utf8")) as unknown;
-      } finally {
-        // The resolved config holds the values of the params.
-        rmSync(file, { force: true });
-      }
-    };
-    const config = await readConfig([]);
-    const raw = files.flatMap((path) => {
-      try {
-        return rawRisks(readFileSync(path, "utf8"));
-      } catch (error) {
-        throw new Error(`${path}: ${error instanceof Error ? error.message : String(error)} (K-818)`);
-      }
-    });
-    const refused = [
-      ...raw,
-      ...composeRisks(config, await readConfig(["--no-interpolate"]), command.project, roots, real),
-    ].filter((risk) => !command.allowed.includes(risk));
-    if (refused.length > 0)
-      throw new Error(
-        `the Compose file asks for ${refused.join(", ")}; the owner allows each one for ${command.repo} in the panel of this machine (K-818)`,
+    await step("docker compose build", "nice", ["-n", "19", "docker", ...run, "build"], { cwd: source, env });
+    // K-818: no container of the app runs from here to `up`, so none can swap a path in the data, log or
+    // sockets folder between the check below and `up`. Orphans and one-off runs count too.
+    const running = await runProgram("docker", ["ps", "-q", "--filter", `label=com.docker.compose.project=${command.project}`]);
+    if (!running.ok) throw new Error(`docker ps failed: ${running.output}`);
+    const ids = running.output.split("\n").map((id) => id.trim()).filter(Boolean);
+    // Set first: a stop that fails half-way still gets its start back.
+    stoppedIds = ids;
+    if (ids.length > 0) await step("stop the app", "docker", ["stop", ...ids]);
+    // The takeover may also have brought links into the data folder.
+    const moved = [...bindSources(config), ...fileSources(config)].filter((path) => {
+      const resolved = real(path);
+      return (
+        !roots.some((root) => resolved === root || resolved.startsWith(`${root}/`)) &&
+        !command.allowed.includes(`bind:${path}`) &&
+        !command.allowed.includes(`file:${path}`)
       );
-    // Build and start from the checked config itself, so the repo's files are not read again.
-    const checked = join(dir, "compose.checked.json");
-    writeFileSync(checked, JSON.stringify(config), { mode: 0o600 });
-    try {
-      // The params file again: without it Compose reads the repo's `.env`, and `COMPOSE_PROFILES` is lost.
-      const run = [
-        "compose",
-        "-p",
-        command.project,
-        "--project-directory",
-        source,
-        "-f",
-        checked,
-        "--env-file",
-        env.KITSHN_PARAMS_FILE,
-      ];
-      await step("docker compose build", "nice", ["-n", "19", "docker", ...run, "build"], { cwd: source, env });
-      // K-818: no container of the app runs from here to `up`, so none can swap a path in the data, log or
-      // sockets folder between the check below and `up`. Orphans and one-off runs count too.
-      const running = await runProgram("docker", [
-        "ps",
-        "-q",
-        "--filter",
-        `label=com.docker.compose.project=${command.project}`,
-      ]);
-      if (!running.ok) throw new Error(`docker ps failed: ${running.output}`);
-      const ids = running.output.split("\n").map((id) => id.trim()).filter(Boolean);
-      // Set first: a stop that fails half-way still gets its start back.
-      stoppedIds = ids;
-      if (ids.length > 0) await step("stop the app", "docker", ["stop", ...ids]);
-      const moved = [...bindSources(config), ...fileSources(config)].filter((path) => {
-        const resolved = real(path);
-        return (
-          !roots.some((root) => resolved === root || resolved.startsWith(`${root}/`)) &&
-          !command.allowed.includes(`bind:${path}`) &&
-          !command.allowed.includes(`file:${path}`)
-        );
-      });
-      if (moved.length > 0) throw new Error(`a path left the app's folders after the check: ${moved.join(", ")} (K-818)`);
-      upStarted = true;
-      await step("docker compose up", "docker", [...run, "up", "-d", "--no-build", "--remove-orphans"], { cwd: source, env });
-    } finally {
-      // The checked config holds the values of the params.
-      rmSync(checked, { force: true });
-    }
+    });
+    const nested = nestedSources(config, real).filter((path) => !command.allowed.includes(`nested:${path}`));
+    if (moved.length + nested.length > 0)
+      throw new Error(`a path left the app's folders after the check: ${[...moved, ...nested].join(", ")} (K-818)`);
+    upStarted = true;
+    await step("docker compose up", "docker", [...run, "up", "-d", "--no-build", "--remove-orphans"], { cwd: source, env });
     const until = Date.now() + SOCKET_WAIT_MS;
     while (!(await probe(`unix:${socketPath}`))) {
       if (Date.now() > until) throw new Error(`the app opened no socket at ${socketPath} within 3 minutes`);
@@ -525,6 +528,7 @@ async function composeUp(
     renameSync(join(dir, "source.tgz"), join(staged, "source.tgz"));
     copyFileSync(join(dir, "params.env"), join(staged, "params.env"));
     chmodSync(join(staged, "params.env"), 0o600);
+    renameSync(checked, join(staged, "compose.checked.json"));
     rmSync(`${good}.old`, { recursive: true, force: true });
     if (existsSync(good)) renameSync(good, `${good}.old`);
     renameSync(staged, good);
@@ -539,6 +543,7 @@ async function composeUp(
     return { ok: true, exitCode: 0, output };
   } catch (error) {
     output += `\n[kitshn: ${error instanceof Error ? error.message : String(error)}]`;
+    rmSync(checked, { force: true });
     // K-818: before `up`, the old containers and their source are as they were, so the old app runs again.
     // After `up` started, Compose replaced them; the app stays down until a deploy or redeploy comes up.
     if (!upStarted) {
@@ -575,6 +580,7 @@ const sourceFolders = (dir: string): Array<string> =>
   existsSync(dir)
     ? readdirSync(dir)
         .filter((name) => name === "src" || name.startsWith("src-"))
+        .sort()
         .map((name) => join(dir, name))
     : [];
 
@@ -604,18 +610,26 @@ async function composeDown(command: Extract<Command, { kind: "compose-down" }>):
   if (sites) writeSites(sites.filter((site) => site.name !== command.name));
   void checkSites();
   const dir = join(paths.data, "apps", command.project);
+  // K-818: the checked config of the last good build names the same services and profiles as `up`; the
+  // repo's own files are never read. Without one, Compose finds the app by its project label alone.
+  const good = join(dir, "good");
+  const kept = existsSync(join(good, "compose.checked.json")) && existsSync(join(good, "params.env"));
+  const files = kept
+    ? ["-f", join(good, "compose.checked.json"), "--env-file", join(good, "params.env")]
+    : [];
   const result = await runProgram(
     "docker",
     [
       "compose",
       "-p",
       command.project,
+      ...files,
       "down",
       "--remove-orphans",
       ...(command.removeData ? ["--volumes", "--rmi", "local"] : []),
     ],
-    // Compose reads the app's own files, not a compose.yml in the daemon's folder.
-    { timeoutMs: COMPOSE_TIMEOUT_MS, cwd: sourceFolders(dir)[0] ?? paths.data },
+    // The app's folder holds no Compose file, so Compose reads none of the repo's files.
+    { timeoutMs: COMPOSE_TIMEOUT_MS, cwd: existsSync(dir) ? dir : paths.data },
   );
   // Containers that may still run could write while the files go, so a failed down keeps them for a retry.
   if (!command.removeData || !result.ok) return result;

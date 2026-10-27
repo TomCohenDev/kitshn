@@ -177,11 +177,16 @@ export function MachinePanel(props: {
           const input = (event.currentTarget as HTMLFormElement).elements.namedItem(
             "allow",
           ) as HTMLTextAreaElement;
-          const allow = input.value
+          const lines = input.value
             .split("\n")
             .map((line) => line.trim().split(/\s+/))
-            .filter((words) => words[0])
-            .map(([repo = "", setting = ""]) => ({ repo, setting }));
+            .filter((words) => words[0]);
+          const long = lines.find((words) => words.length > 2);
+          if (long) {
+            props.onToast(`"${long.join(" ")}" has more than a repo and one setting; write one setting per line.`, true);
+            return;
+          }
+          const allow = lines.map(([repo = "", setting = ""]) => ({ repo, setting }));
           const result = await callApi<{ id: string }>(
             "POST",
             `/api/machines/${encodeURIComponent(view.machine.id)}`,

@@ -40,7 +40,9 @@ export const ComposeApp = Schema.Struct({
   file: Schema.optionalKey(
     Schema.String.check(
       Schema.makeFilter((file) =>
-        file.startsWith("/") || file.split("/").includes("..") ? "file must be a path inside the repo" : undefined,
+        file === "" || file.startsWith("/") || file.split("/").includes("..")
+          ? "file must be a path inside the repo"
+          : undefined,
       ),
     ),
   ),

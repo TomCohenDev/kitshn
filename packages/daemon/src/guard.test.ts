@@ -1,7 +1,8 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { bindSources, composeFiles, composeRisks, rawRisks, realpathOf } from "./guard.ts";
+import { bindSources, composeFiles, composeRisks, nestedSources, rawRisks, realpathOf } from "./guard.ts";
 
-const roots = ["/apps/a/src", "/apps/a/data", "/apps/a/logs", "/apps/a/sockets"];
+const roots = ["/apps/a/src", "/apps/a/data", "/apps/a/logs", "/apps/a/sockets"] as const;
 const same = (path: string) => path;
 const risks = (config: unknown, uninterpolated: unknown = {}) => composeRisks(config, uninterpolated, "a", roots, same);
 
@@ -50,7 +51,6 @@ describe("risky Compose settings (K-818)", () => {
     const uninterpolated = { services: { evil: { env_file: [{ path: "/apps/b/params.env" }] } } };
     expect(risks(config, uninterpolated)).toEqual([
       "bind:/var/run/docker.sock",
-      "build.additional_contexts",
       "build:/",
       "cap_add",
       "env_file:/apps/b/params.env",
@@ -123,6 +123,78 @@ describe("risky Compose settings (K-818)", () => {
   });
 });
 
+describe("real apps (K-818)", () => {
+  // `docker compose config --format json` of real repos, with placeholder params and values.
+  const real = (repo: string) => {
+    const project = `${repo}-prod`;
+    const config: unknown = JSON.parse(readFileSync(new URL(`fixtures/${repo}.config.json`, import.meta.url), "utf8"));
+    const folders = ["src", "data", "logs", "sockets"].map((folder) => `/apps/${project}/${folder}`);
+    return composeRisks(config, {}, project, [folders[0] ?? "", ...folders.slice(1)], same);
+  };
+  it("passes real apps, and names only the settings that they really need", () => {
+    expect(real("tick3d")).toEqual([]);
+    expect(real("riffle")).toEqual([]);
+    expect(real("dozzle")).toEqual(["bind:/var/run/docker.sock"]);
+    expect(real("gr52")).toEqual(["network:kitshn-edge"]);
+  });
+});
+
+describe("binds under other binds (K-818)", () => {
+  const bind = (source: string, readOnly = false) => ({ type: "bind", source, target: `/m${source}`, read_only: readOnly });
+  const app = (...services: Array<Array<ReturnType<typeof bind>>>) => ({
+    services: Object.fromEntries(services.map((volumes, index) => [`s${index}`, { volumes }])),
+  });
+  // Docker follows symlinks at each start: the app can turn data/x into a link to / through /m/apps/a/data.
+  it("refuses a bind or file source under a writable bind of any service", () => {
+    expect(risks(app([bind("/apps/a/data"), bind("/apps/a/data/x")]))).toEqual(["nested:/apps/a/data/x"]);
+    expect(risks(app([bind("/apps/a/src")], [bind("/apps/a/src/sub")]))).toEqual(["nested:/apps/a/src/sub"]);
+    const secret = { ...app([bind("/apps/a/data")]), secrets: { key: { file: "/apps/a/data/key" } } };
+    expect(risks(secret)).toEqual(["nested:/apps/a/data/key"]);
+  });
+  it("passes the same root twice, and paths under a read-only bind", () => {
+    expect(risks(app([bind("/apps/a/sockets")], [bind("/apps/a/sockets")]))).toEqual([]);
+    expect(risks(app([bind("/apps/a/data", true), bind("/apps/a/data/x")]))).toEqual([]);
+  });
+  it("compares the paths after symlinks", () => {
+    const real = (path: string) => (path === "/apps/a/data/link" ? "/apps/a/src/sub" : path);
+    const config = app([bind("/apps/a/src")], [bind("/apps/a/data/link")]);
+    expect(nestedSources(config, real)).toEqual(["/apps/a/data/link"]);
+  });
+});
+
+describe("settings that need no allowance (K-818)", () => {
+  it("passes scale, profiles, extra hosts, internal networks and build contexts in the source", () => {
+    const config = {
+      services: {
+        web: {
+          scale: 2,
+          profiles: ["web"],
+          extra_hosts: ["host.docker.internal:host-gateway"],
+          build: { context: "/apps/a/src", additional_contexts: { git: "/apps/a/src/.git" } },
+          networks: { inner: null },
+        },
+      },
+      networks: { inner: { name: "a_inner", internal: true, ipam: {} } },
+    };
+    expect(risks(config)).toEqual([]);
+  });
+  it("keeps build inputs and env files in the new source, which no running container can change", () => {
+    const config = {
+      services: { web: { build: { context: "/apps/a/data", additional_contexts: { up: "/apps/a/data/x" } } } },
+    };
+    const uninterpolated = { services: { web: { env_file: ["/apps/a/data/.env"] } } };
+    expect(risks(config, uninterpolated)).toEqual([
+      "build:/apps/a/data",
+      "build:/apps/a/data/x",
+      "env_file:/apps/a/data/.env",
+    ]);
+  });
+  it("refuses labels in the namespace of Compose", () => {
+    const config = { services: { web: { labels: { "com.docker.compose.project": "b" } } } };
+    expect(risks(config)).toEqual(["labels"]);
+  });
+});
+
 describe("raw Compose files (K-818)", () => {
   it("finds include and extends in every YAML form that Compose reads", () => {
     const files = [
@@ -161,5 +233,8 @@ describe("Compose files of an app (K-818)", () => {
     expect(() => files(["/etc/compose.yml"], "/etc/compose.yml")).toThrow();
     const linked = (path: string) => (path === "/apps/a/src/compose.yml" ? "/apps/b/src/compose.yml" : path);
     expect(() => composeFiles(source, "compose.yml", () => true, linked)).toThrow();
+    // The app folder itself may be a link, as /var is on macOS.
+    const moved = (path: string) => path.replace("/apps/", "/private/apps/");
+    expect(composeFiles(source, "compose.yml", () => true, moved)).toEqual(["/apps/a/src/compose.yml"]);
   });
 });

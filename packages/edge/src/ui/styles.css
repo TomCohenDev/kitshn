@@ -536,15 +536,14 @@ select {
   overscroll-behavior: contain;
   padding: 8px;
 }
-.tray .card {
-  user-select: none;
-  -webkit-user-select: none;
-  cursor: grab;
-}
+
 .tray .card {
   position: relative;
   margin: 0 0 10px;
   width: 100%;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
 }
 .toast {
   position: fixed;

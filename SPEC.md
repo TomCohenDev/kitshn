@@ -110,7 +110,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-506** A circle shows its members as chips on its edge, at most 4. A "+N" chip opens the full list.
 - **K-507** A card shows a dot for each circle that holds it, and a chip for each override (K-205). A hover on a dot names the circle and the level.
 - **K-508** Cards stack by group: the environments of one app, the pages of one thread, the files of one upload. A stack shows the top card and a count. A click spreads it in a row. A drag of a stack moves all its cards.
-- **K-509** New cards arrive in a tray at the edge of the map, outside every circle, so they start private (K-208). Cards that a recipe places (K-807) and files dropped on the map (K-1101) skip the tray.
+- **K-509** New cards arrive in a tray at the edge of the map, outside every circle, so they start private (K-208). Cards that a recipe places (K-807) and files dropped on the map (K-1101) skip the tray. The tray lists every such card, newest first, with a filter, and scrolls on its own. A card dragged from the tray, or several picked with Shift, lands where it is dropped, in exactly the circles there (K-204, K-210).
 - **K-510** Multiselect: a box drag on empty space, Shift and a click, and "Select all of this kind" in the context menu. A selection moves as one.
 - **K-511** The command palette (Cmd+K or Ctrl+K) finds every card, circle and action. "Share <card> with <circle>" works without a drag, also on a phone.
 - **K-512** The card panel shows who can open the card: each circle, its members, the level, and the address. It has "Copy address" and "Open".
@@ -121,6 +121,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-517** The map uses the tick3d look in light and dark mode (the `neo-brutalism` skill): lilac dotted canvas, ink borders, hard shadows, tilted stickers, Bricolage Grotesque.
 - **K-518** Map state (places, circles, members, shares, stacks) lives in the kitshn database, never in Git (K-001).
 - **K-519** Views next to the map: History (with presets, K-716), Queue, Seats, Machines (a table of status and health), Library (section 10). Each view and each selected item has its own link.
+- **K-520** "Previews" shows a live view of up to four site and page cards near the centre of the map, from zoom 80%. Each is a lazy, sandboxed frame that takes no clicks until "Interact". A site behind Access shows only when the browser has its Access session already, because the Access login refuses to load in a frame; the card offers "Open site" to log in.
 
 ## 6. Machines and the daemon
 
@@ -232,7 +233,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 
 - **K-1001** Every HTML page from T3 threads on every machine goes into one library in R2. The provider sends each new `html_render` page with `publishPage` (K-708), with its thread title, machine and time.
 - **K-1002** A new page is private: it sits in the tray (K-509), unless the owner drops it on the map (K-1101).
-- **K-1003** The Worker serves a page at `pages.<zone>/<id>`, with the sandbox of the T3 render route (no same-origin scripts). The id is random, 16 characters or more.
+- **K-1003** The Worker serves a page at `pages.<zone>/<id>`, with the sandbox of the T3 render route (no same-origin scripts). Only the kitshn admin host may frame a page or a file (`frame-ancestors`), for the previews of K-520. The id is random, 16 characters or more.
 - **K-1004** The Worker checks shares for each page request (K-404). A page in "Everyone" opens with no login. Other pages need a login through an Access application on `pages.<zone>/login`, which sends the visitor back. A second application on `pages.<zone>/login/passkey` adds the passkey check, for circles with "needs passkey" (K-103). Files use the same two paths on `files.<zone>`. Checked on 2026-10-27: a service token on `/login` gets the `CF_Authorization` cookie with `Path=/`, so the Worker reads it on the other paths of the same host. The login lets in any email, so a stranger can take a Zero Trust seat (K-111); seat expiration frees it after a month. Milestone 3 tests it.
 - **K-1005** The Library view lists all pages with a search by title, thread and machine, and a preview. It reads the index in the Durable Object, not R2.
 - **K-1006** Deleting a thread does not delete its library page. "Delete" in the library removes the page from R2 and the map.

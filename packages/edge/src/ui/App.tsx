@@ -264,8 +264,9 @@ export function App() {
     const goingPublic = diffs.filter((diff) => diff.to && !diff.from && isPublicCircle(diff.circle));
     // The drop stays where the owner let go while they answer; Cancel puts it back.
     const requestId = hold(edits);
-    for (const diff of goingPublic) {
-      if (!(await ask(`This makes ${diff.resource.name} public. Anyone with the address can open it.`))) {
+    if (goingPublic.length > 0) {
+      const names = [...new Set(goingPublic.map((diff) => diff.resource.name))].join(", ");
+      if (!(await ask(`This makes ${names} public. Anyone with the address can open it.`))) {
         release(requestId);
         return;
       }
@@ -320,6 +321,13 @@ export function App() {
     queueMicrotask(() => fitRef.current?.());
   }
   const tray = [...state.resources.values()].filter((resource) => !state.places.has(resource.id));
+  const shownTray = tray
+    .filter((resource) =>
+      `${resource.name} ${resource.kind} ${resource.addresses[0] ?? ""}`
+        .toLowerCase()
+        .includes(trayFilter.trim().toLowerCase()),
+    )
+    .reverse();
 
   const fit = () => {
     const points = [
@@ -536,7 +544,7 @@ export function App() {
                 setPreviews(!previews);
               }}
             >
-              Previews
+              Previews{previews && view.s < 0.8 ? " (zoom in)" : ""}
             </button>
           </>
         ) : null}
@@ -562,37 +570,33 @@ export function App() {
             <span class="help">Drag cards onto the map. Shift-click picks several.</span>
           </div>
           <div class="tray-list">
-            {tray
-              .filter((resource) =>
-                `${resource.name} ${resource.kind}`.toLowerCase().includes(trayFilter.trim().toLowerCase()),
-              )
-              .reverse()
-              .map((resource) => (
-                <div
-                  key={resource.id}
-                  class={`card${selection.cards.has(resource.id) ? " sel" : ""}`}
-                  draggable
-                  onDragStart={(event) => {
-                    // A selected card carries the whole selection of tray cards with it.
-                    const ids = selection.cards.has(resource.id)
-                      ? tray.filter((item) => selection.cards.has(item.id)).map((item) => item.id)
-                      : [resource.id];
-                    event.dataTransfer?.setData(TRAY_CARDS_TYPE, JSON.stringify(ids));
-                    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-                  }}
-                  onClick={(event) => {
-                    const cards = new Set(event.shiftKey ? selection.cards : []);
-                    if (event.shiftKey && cards.has(resource.id)) cards.delete(resource.id);
-                    else cards.add(resource.id);
-                    setSelection({ cards, circle: null });
-                  }}
-                >
-                  <div class="name">
-                    {KINDS[resource.kind].icon} {resource.name}
-                  </div>
-                  <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
+            {shownTray.length === 0 ? <p class="help">No card matches.</p> : null}
+            {shownTray.map((resource) => (
+              <div
+                key={resource.id}
+                class={`card${selection.cards.has(resource.id) ? " sel" : ""}`}
+                draggable
+                onDragStart={(event) => {
+                  // A selected card carries the whole selection of tray cards with it.
+                  const ids = selection.cards.has(resource.id)
+                    ? shownTray.filter((item) => selection.cards.has(item.id)).map((item) => item.id)
+                    : [resource.id];
+                  event.dataTransfer?.setData(TRAY_CARDS_TYPE, JSON.stringify(ids));
+                  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+                }}
+                onClick={(event) => {
+                  const cards = new Set(event.shiftKey ? selection.cards : []);
+                  if (event.shiftKey && cards.has(resource.id)) cards.delete(resource.id);
+                  else cards.add(resource.id);
+                  setSelection({ cards, circle: null });
+                }}
+              >
+                <div class="name">
+                  {KINDS[resource.kind].icon} {resource.name}
                 </div>
-              ))}
+                <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
+              </div>
+            ))}
           </div>
         </aside>
       ) : null}

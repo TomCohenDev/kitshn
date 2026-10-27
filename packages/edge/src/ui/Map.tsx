@@ -105,6 +105,8 @@ export function MapView(props: Props) {
   const [draft, setDraft] = useState<{ state: State; diffs: Array<ShareDiff>; pointer: Point } | null>(null);
   const longPress = useRef<number | null>(null);
   const viewport = useRef<HTMLDivElement>(null);
+  /** The cards that had a frame in the last render (live previews keep them, see below). */
+  const previewed = useRef<ReadonlySet<string>>(new Set());
 
   const shown = draft?.state ?? state;
   const toWorld = (clientX: number, clientY: number): Point => ({
@@ -123,8 +125,6 @@ export function MapView(props: Props) {
     [...moves].map(([id, after]) => ({ _tag: "place", id, before: state.places.get(id) ?? null, after }));
 
   const onPointerDown = (event: PointerEvent) => {
-    // A drag on the map never starts a text selection on the page.
-    event.preventDefault();
     const target = event.target as HTMLElement;
     const world = toWorld(event.clientX, event.clientY);
     if (event.button === 1 || event.button === 2) {
@@ -282,24 +282,29 @@ export function MapView(props: Props) {
 
   const previewCircles = new Set(draft?.diffs.map((diff) => diff.circle.id));
   // A few frames at most, for the site cards nearest the centre of the view, and only when they are readable.
-  const previewIds = new Set(
+  // Candidates: drawn site and page cards whose centre is in the open part of the map (not under the tray
+  // or the panel). A card keeps its frame while it stays a candidate, so a pan never reloads a frame.
+  const visible =
     props.previews && view.s >= PREVIEW_SCALE
       ? [...shown.places]
           .filter(([id]) => {
             const kind = shown.resources.get(id)?.kind;
-            return kind !== undefined && PREVIEW_KINDS.has(kind) && !props.hidden.has(kind);
+            const stack = stackOf(id);
+            const drawn = !stack || props.openStacks.has(stack[0]) || stack[1][0] === id;
+            return kind !== undefined && PREVIEW_KINDS.has(kind) && !props.hidden.has(kind) && drawn;
           })
           .map(([id, place]) => ({ id, x: place.x * view.s + view.x, y: place.y * view.s + view.y }))
-          .filter((card) => card.x > 0 && card.y > 0 && card.x < innerWidth && card.y < innerHeight)
+          .filter((card) => card.x > 240 && card.y > 120 && card.x < innerWidth - 400 && card.y < innerHeight)
           .sort(
             (a, b) =>
               Math.hypot(a.x - innerWidth / 2, a.y - innerHeight / 2) -
               Math.hypot(b.x - innerWidth / 2, b.y - innerHeight / 2),
           )
-          .slice(0, MAX_PREVIEWS)
           .map((card) => card.id)
-      : [],
-  );
+      : [];
+  const kept = [...previewed.current].filter((id) => visible.includes(id));
+  const previewIds = new Set([...kept, ...visible.filter((id) => !kept.includes(id))].slice(0, MAX_PREVIEWS));
+  previewed.current = previewIds;
   const zoomedOut = view.s < ZOOMED_OUT;
   const draggedIds = drag?.type === "cards" && drag.moved ? new Set(drag.origins.keys()) : new Set<string>();
 
@@ -567,7 +572,7 @@ function CardPreview(props: { address: string }) {
   const [interact, setInteract] = useState(false);
   const url = `https://${props.address}`;
   return (
-    <div class="preview-frame" onPointerDown={(event) => event.stopPropagation()}>
+    <div class="preview-frame">
       <iframe
         src={url}
         title={`Preview of ${props.address}`}
@@ -575,7 +580,7 @@ function CardPreview(props: { address: string }) {
         sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
         style={{ pointerEvents: interact ? "auto" : "none" }}
       />
-      <div class="row">
+      <div class="row" onPointerDown={(event) => event.stopPropagation()}>
         <button type="button" class="btn" onClick={() => setInteract(!interact)}>
           {interact ? "Done" : "Interact"}
         </button>
@@ -583,6 +588,7 @@ function CardPreview(props: { address: string }) {
           Open site
         </a>
       </div>
+      <div class="help">Blank? Open the site once to log in.</div>
     </div>
   );
 }

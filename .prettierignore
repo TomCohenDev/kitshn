@@ -1,0 +1,14 @@
+# KitSHn 1 files keep their own style.
+*.md
+*.yml
+*.yaml
+*.html
+src/
+tests/
+specs/
+assets/
+.homebrew/
+uv.lock
+pnpm-lock.yaml
+packages/edge/public/install
+dist/

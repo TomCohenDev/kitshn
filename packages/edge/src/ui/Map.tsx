@@ -1,0 +1,470 @@
+import { useRef, useState } from "preact/hooks";
+import { type Change, type Edit, type ShareDiff, applyChanges, shareDiff } from "../core/changes.ts";
+import {
+  type Circle,
+  type Point,
+  type Resource,
+  type ResourceKind,
+  type State,
+  circlesHolding,
+  insideCircle,
+  memberLabel,
+  shareKey,
+  shareLevel,
+} from "../core/model.ts";
+import type { AccessState } from "../core/protocol.ts";
+import { KINDS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
+
+export interface View {
+  readonly x: number;
+  readonly y: number;
+  readonly s: number;
+}
+
+export type Selection = { readonly cards: ReadonlySet<string>; readonly circle: string | null };
+
+type Drag =
+  | { readonly type: "pan"; readonly sx: number; readonly sy: number; readonly view: View }
+  | {
+      readonly type: "cards";
+      readonly start: Point;
+      readonly origins: ReadonlyMap<string, Point>;
+      readonly clicked: string;
+      moved: boolean;
+    }
+  | {
+      readonly type: "circle";
+      readonly start: Point;
+      readonly origin: Circle;
+      readonly carry: ReadonlyMap<string, Point>;
+      moved: boolean;
+    }
+  | { readonly type: "resize"; readonly origin: Circle }
+  | { readonly type: "box"; readonly start: Point; readonly end: Point; readonly base: ReadonlySet<string> };
+
+/** Cards with one group stack when they share the same circles (K-508). */
+export function stacksOf(state: State): Map<string, Array<string>> {
+  const stacks = new Map<string, Array<string>>();
+  for (const resource of state.resources.values()) {
+    if (!resource.group || !state.places.has(resource.id)) continue;
+    const circles = circlesHolding(state, resource.id)
+      .map((circle) => circle.id)
+      .sort()
+      .join(",");
+    const key = `${resource.group}|${circles}`;
+    stacks.set(key, [...(stacks.get(key) ?? []), resource.id]);
+  }
+  for (const [key, ids] of stacks) if (ids.length < 2) stacks.delete(key);
+  return stacks;
+}
+
+interface Props {
+  readonly state: State;
+  readonly access: Readonly<Record<string, AccessState>>;
+  readonly selection: Selection;
+  readonly onSelect: (selection: Selection) => void;
+  readonly hidden: ReadonlySet<ResourceKind>;
+  readonly view: View;
+  readonly onView: (view: View) => void;
+  readonly openStacks: ReadonlySet<string>;
+  readonly onToggleStack: (key: string) => void;
+  readonly onCommit: (edits: Array<Edit>, diffs: Array<ShareDiff>) => void;
+}
+
+const LONG_PRESS_MS = 350;
+/** Preact 11 does not add a unit to numeric style values. */
+const px = (value: number) => `${value}px`;
+const ZOOMED_OUT = 0.4;
+
+export function MapView(props: Props) {
+  const { state, view } = props;
+  const [drag, setDrag] = useState<Drag | null>(null);
+  const [draft, setDraft] = useState<{ state: State; diffs: Array<ShareDiff>; pointer: Point } | null>(null);
+  const longPress = useRef<number | null>(null);
+  const viewport = useRef<HTMLDivElement>(null);
+
+  const shown = draft?.state ?? state;
+  const toWorld = (clientX: number, clientY: number): Point => ({
+    x: (clientX - view.x) / view.s,
+    y: (clientY - view.y) / view.s,
+  });
+  const stacks = stacksOf(shown);
+  const stackOf = (id: string) => [...stacks.entries()].find(([, ids]) => ids.includes(id));
+
+  const preview = (changes: Array<Change>, pointer: Point) => {
+    const next = applyChanges(state, changes);
+    setDraft({ state: next, diffs: shareDiff(state, next), pointer });
+  };
+
+  const placeChanges = (moves: Iterable<[string, Point]>): Array<Change> =>
+    [...moves].map(([id, after]) => ({ _tag: "place", id, before: state.places.get(id) ?? null, after }));
+
+  const onPointerDown = (event: PointerEvent) => {
+    const target = event.target as HTMLElement;
+    const world = toWorld(event.clientX, event.clientY);
+    if (event.button === 1 || event.button === 2) {
+      setDrag({ type: "pan", sx: event.clientX, sy: event.clientY, view });
+      return;
+    }
+    const grip = target.closest<HTMLElement>("[data-grip]");
+    const head = target.closest<HTMLElement>("[data-head]");
+    const cardElement = target.closest<HTMLElement>("[data-card]");
+    try {
+      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    } catch {
+      // A pointer that is gone cannot be captured; the drag still works inside the viewport.
+    }
+    if (grip) {
+      const origin = state.circles.get(grip.dataset["grip"] ?? "");
+      if (origin) setDrag({ type: "resize", origin });
+      return;
+    }
+    if (head) {
+      const origin = state.circles.get(head.dataset["head"] ?? "");
+      if (!origin) return;
+      props.onSelect({ cards: new Set(), circle: origin.id });
+      // K-504: the head carries the cards inside the circle; Alt moves the circle alone.
+      const carry = new Map<string, Point>();
+      if (!event.altKey) {
+        for (const [id, place] of state.places) if (insideCircle(place, origin)) carry.set(id, place);
+      }
+      setDrag({ type: "circle", start: world, origin, carry, moved: false });
+      return;
+    }
+    if (cardElement) {
+      const id = cardElement.dataset["card"] ?? "";
+      if (event.shiftKey) {
+        const cards = new Set(props.selection.cards);
+        if (cards.has(id)) cards.delete(id);
+        else cards.add(id);
+        props.onSelect({ cards, circle: null });
+        return;
+      }
+      const ids = new Set(props.selection.cards.has(id) ? props.selection.cards : [id]);
+      const stack = stackOf(id);
+      if (stack && !props.openStacks.has(stack[0])) for (const member of stack[1]) ids.add(member);
+      if (!props.selection.cards.has(id)) props.onSelect({ cards: new Set([id]), circle: null });
+      const origins = new Map<string, Point>();
+      for (const card of ids) origins.set(card, state.places.get(card) ?? world);
+      const start = () => setDrag({ type: "cards", start: world, origins, clicked: id, moved: false });
+      // K-516: on touch, a long press starts the drag, so a swipe still pans.
+      if (event.pointerType === "touch") {
+        setDrag({ type: "pan", sx: event.clientX, sy: event.clientY, view });
+        longPress.current = window.setTimeout(start, LONG_PRESS_MS);
+      } else start();
+      return;
+    }
+    if (event.pointerType === "touch") {
+      setDrag({ type: "pan", sx: event.clientX, sy: event.clientY, view });
+      return;
+    }
+    const base = event.shiftKey ? props.selection.cards : new Set<string>();
+    props.onSelect({ cards: base, circle: null });
+    setDrag({ type: "box", start: world, end: world, base });
+  };
+
+  const onPointerMove = (event: PointerEvent) => {
+    if (!drag) return;
+    const world = toWorld(event.clientX, event.clientY);
+    const pointer = { x: event.clientX, y: event.clientY };
+    if (drag.type === "pan") {
+      if (longPress.current !== null && Math.hypot(event.clientX - drag.sx, event.clientY - drag.sy) > 8) {
+        window.clearTimeout(longPress.current);
+        longPress.current = null;
+      }
+      props.onView({ ...drag.view, x: drag.view.x + event.clientX - drag.sx, y: drag.view.y + event.clientY - drag.sy });
+      return;
+    }
+    if (drag.type === "box") {
+      const box = { ...drag, end: world };
+      setDrag(box);
+      const [x1, x2] = [Math.min(box.start.x, world.x), Math.max(box.start.x, world.x)];
+      const [y1, y2] = [Math.min(box.start.y, world.y), Math.max(box.start.y, world.y)];
+      const cards = new Set(drag.base);
+      for (const [id, place] of state.places) {
+        const kind = state.resources.get(id)?.kind;
+        if (kind && !props.hidden.has(kind) && place.x > x1 && place.x < x2 && place.y > y1 && place.y < y2) {
+          cards.add(id);
+        }
+      }
+      props.onSelect({ cards, circle: null });
+      return;
+    }
+    if (drag.type === "cards") {
+      const dx = world.x - drag.start.x;
+      const dy = world.y - drag.start.y;
+      if (Math.abs(dx) + Math.abs(dy) > 4 / view.s) drag.moved = true;
+      if (!drag.moved) return;
+      const moves = [...drag.origins].map(([id, origin]): [string, Point] => [
+        id,
+        { x: Math.round(origin.x + dx), y: Math.round(origin.y + dy) },
+      ]);
+      preview(placeChanges(moves), pointer);
+      return;
+    }
+    if (drag.type === "circle") {
+      const dx = world.x - drag.start.x;
+      const dy = world.y - drag.start.y;
+      if (Math.abs(dx) + Math.abs(dy) > 4 / view.s) drag.moved = true;
+      if (!drag.moved) return;
+      const after = { ...drag.origin, x: Math.round(drag.origin.x + dx), y: Math.round(drag.origin.y + dy) };
+      const moves = [...drag.carry].map(([id, origin]): [string, Point] => [
+        id,
+        { x: Math.round(origin.x + dx), y: Math.round(origin.y + dy) },
+      ]);
+      preview([{ _tag: "circle", id: after.id, before: drag.origin, after }, ...placeChanges(moves)], pointer);
+      return;
+    }
+    const r = Math.max(60, Math.round(Math.hypot(world.x - drag.origin.x, world.y - drag.origin.y) * 1.2));
+    preview([{ _tag: "circle", id: drag.origin.id, before: drag.origin, after: { ...drag.origin, r } }], pointer);
+  };
+
+  const onPointerUp = () => {
+    if (longPress.current !== null) {
+      window.clearTimeout(longPress.current);
+      longPress.current = null;
+    }
+    if (drag?.type === "cards" && !drag.moved) {
+      const stack = stackOf(drag.clicked);
+      if (stack) props.onToggleStack(stack[0]);
+    }
+    if (draft) {
+      const edits = editsOf(state, draft.state);
+      if (edits.length > 0) props.onCommit(edits, draft.diffs);
+    }
+    setDrag(null);
+    setDraft(null);
+  };
+
+  const onWheel = (event: WheelEvent) => {
+    event.preventDefault();
+    if (event.ctrlKey || event.metaKey) {
+      const world = toWorld(event.clientX, event.clientY);
+      const s = Math.min(2.5, Math.max(0.15, view.s * Math.exp(-event.deltaY / 300)));
+      props.onView({ x: event.clientX - world.x * s, y: event.clientY - world.y * s, s });
+    } else props.onView({ ...view, x: view.x - event.deltaX, y: view.y - event.deltaY });
+  };
+
+  const previewCircles = new Set(draft?.diffs.map((diff) => diff.circle.id));
+  const zoomedOut = view.s < ZOOMED_OUT;
+  const draggedIds = drag?.type === "cards" && drag.moved ? new Set(drag.origins.keys()) : new Set<string>();
+
+  return (
+    <div
+      class="viewport"
+      ref={viewport}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      onWheel={onWheel}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <div class="world" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})` }}>
+        {[...shown.circles.values()].map((circle) => (
+          <CircleView
+            key={circle.id}
+            circle={circle}
+            state={shown}
+            selected={props.selection.circle === circle.id}
+            preview={previewCircles.has(circle.id)}
+            zoomedOut={zoomedOut}
+            hidden={props.hidden}
+          />
+        ))}
+        {[...shown.resources.values()].map((resource) => {
+          const place = shown.places.get(resource.id);
+          if (!place || props.hidden.has(resource.kind)) return null;
+          const stack = stackOf(resource.id);
+          const open = stack ? props.openStacks.has(stack[0]) : false;
+          const index = stack ? stack[1].indexOf(resource.id) : 0;
+          if (stack && !open && index > 0) return null;
+          const head = stack ? shown.places.get(stack[1][0] ?? "") : undefined;
+          const at = stack && open && head ? { x: head.x + index * 175, y: head.y } : place;
+          const selected = props.selection.cards.has(resource.id);
+          if (zoomedOut) {
+            return (
+              <div
+                key={resource.id}
+                data-card={resource.id}
+                class={`mini${selected ? " sel" : ""}`}
+                style={{ left: px(at.x), top: px(at.y), background: KINDS[resource.kind].color }}
+                title={resource.name}
+              />
+            );
+          }
+          return (
+            <CardView
+              key={resource.id}
+              resource={resource}
+              state={shown}
+              at={at}
+              selected={selected}
+              dragging={draggedIds.has(resource.id)}
+              count={stack && index === 0 ? stack[1].length : null}
+              open={open}
+              access={props.access[resource.id] ?? null}
+            />
+          );
+        })}
+      </div>
+      {drag?.type === "box" ? (
+        <div
+          class="box"
+          style={{
+            left: px(Math.min(drag.start.x, drag.end.x) * view.s + view.x),
+            top: px(Math.min(drag.start.y, drag.end.y) * view.s + view.y),
+            width: px(Math.abs(drag.end.x - drag.start.x) * view.s),
+            height: px(Math.abs(drag.end.y - drag.start.y) * view.s),
+          }}
+        />
+      ) : null}
+      {draft && draft.diffs.length > 0 ? (
+        <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
+          {draft.diffs.slice(0, 6).map((diff) => (
+            <span key={`${diff.resource.id}/${diff.circle.id}`} class={diff.to ? "" : "minus"}>
+              {diff.to ? `+ ${diff.circle.name} · ${diff.to}` : `− ${diff.circle.name}`}
+              {draft.diffs.some((other) => other.resource.id !== diff.resource.id) ? ` (${diff.resource.name})` : ""}
+            </span>
+          ))}
+          {draft.diffs.length > 6 ? <span>and {draft.diffs.length - 6} more</span> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** The edits that turn `from` into `to`, for circles and places only. */
+function editsOf(from: State, to: State): Array<Edit> {
+  const edits: Array<Edit> = [];
+  for (const [id, circle] of to.circles) if (from.circles.get(id) !== circle) edits.push({ _tag: "circle", id, after: circle });
+  for (const [id, place] of to.places) if (from.places.get(id) !== place) edits.push({ _tag: "place", id, after: place });
+  return edits;
+}
+
+function CircleView(props: {
+  circle: Circle;
+  state: State;
+  selected: boolean;
+  preview: boolean;
+  zoomedOut: boolean;
+  hidden: ReadonlySet<ResourceKind>;
+}) {
+  const { circle } = props;
+  const shown = circle.members.slice(0, 4);
+  const extra = circle.members.length - shown.length;
+  const counts = new Map<ResourceKind, number>();
+  if (props.zoomedOut) {
+    for (const resource of props.state.resources.values()) {
+      const place = props.state.places.get(resource.id);
+      if (place && insideCircle(place, circle)) counts.set(resource.kind, (counts.get(resource.kind) ?? 0) + 1);
+    }
+  }
+  return (
+    <div
+      class={`circle${props.selected ? " sel" : ""}${props.preview ? " preview" : ""}`}
+      style={{
+        left: px(circle.x - circle.r),
+        top: px(circle.y - circle.r),
+        width: px(circle.r * 2),
+        height: px(circle.r * 2),
+        background: `${circle.color}22`,
+        borderColor: circle.color,
+      }}
+    >
+      <div class="head" data-head={circle.id}>
+        <span>{circle.name}</span>
+        <span class="sticker" style={{ "--tilt": LEVEL_TILTS[circle.level], background: circle.color }}>
+          {circle.level}
+        </span>
+        {circle.needsPasskey ? <span title="Needs a passkey">🔑</span> : null}
+        {circle.match === "all" ? <span title="Every member must match">∧</span> : null}
+      </div>
+      {props.zoomedOut ? (
+        <div class="counts">
+          {[...counts].map(([kind, count]) => (
+            <span key={kind}>
+              {KINDS[kind].icon} {count}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div class="members">
+          {shown.map((member, index) => (
+            <span class="chip" key={index}>
+              {MEMBER_ICONS[member._tag]} {memberLabel(member)}
+            </span>
+          ))}
+          {extra > 0 ? (
+            <span class="chip" data-head={circle.id} title={circle.members.slice(4).map(memberLabel).join(", ")}>
+              +{extra}
+            </span>
+          ) : null}
+        </div>
+      )}
+      <div class="grip" data-grip={circle.id} title="Resize" />
+    </div>
+  );
+}
+
+function CardView(props: {
+  resource: Resource;
+  state: State;
+  at: Point;
+  selected: boolean;
+  dragging: boolean;
+  count: number | null;
+  open: boolean;
+  access: AccessState | null;
+}) {
+  const { resource, state } = props;
+  const kind = KINDS[resource.kind];
+  const holding = circlesHolding(state, resource.id);
+  return (
+    <div
+      class={`card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}`}
+      data-card={resource.id}
+      style={{ left: px(props.at.x), top: px(props.at.y) }}
+    >
+      {props.count !== null ? (
+        <span class="sticker count">
+          {props.count}
+          {props.open ? " ▾" : ""}
+        </span>
+      ) : null}
+      {props.access?.state === "applying" ? <span class="sticker wait state">applying</span> : null}
+      {props.access?.state === "failed" ? (
+        <span class="sticker state" title={props.access.error}>
+          failed
+        </span>
+      ) : null}
+      <div class="name">
+        {kind.icon} {resource.name}
+      </div>
+      <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
+      <div class="foot">
+        <span class="sticker" style={{ "--tilt": kind.tilt, background: kind.color }}>
+          {resource.kind}
+        </span>
+        {holding.map((circle) => {
+          const level = shareLevel(state, resource, circle);
+          return (
+            <span
+              key={circle.id}
+              class="dot"
+              title={`${circle.name} · ${level ?? "none"}`}
+              style={{ background: circle.color }}
+            />
+          );
+        })}
+        {holding
+          .filter((circle) => state.shareSettings.get(shareKey(resource.id, circle.id))?.level)
+          .map((circle) => (
+            <span key={`o-${circle.id}`} class="chip" title="Level override">
+              {circle.name}: {shareLevel(state, resource, circle) ?? "none"}
+            </span>
+          ))}
+      </div>
+    </div>
+  );
+}

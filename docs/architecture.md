@@ -83,7 +83,7 @@ Reference setup (K-1301): 5 machines, about 15 apps with about 5 open previews, 
 | Service tokens | 50 | about 9: 5 machines, 4 devices | GitHub uses OIDC, no token. |
 | Tunnels | 1,000 | 5 | |
 | Worker scripts | 100 | about 15: kitshn, 8 app environments, 5 previews | Refuse new previews at 90 (K-903). |
-| DNS records per zone | 200 for Free zones made after 2024-09-01, 1,000 before ([DNS FAQ](https://developers.cloudflare.com/dns/faq/)) | about 35 | One record per address. Not checked: the creation date of the owner's zone. |
+| DNS records per zone | 200 for Free zones made after 2024-09-01, 1,000 before ([DNS FAQ](https://developers.cloudflare.com/dns/faq/)) | about 35 | One record per address. The owner's zone `yarden-zamir.com` was made on 2026-09-29, so its limit is 200. It had 70 records on 2026-10-27. |
 | Rate limiting rules | 1 on Free | 1, kept from the guest links rule | |
 
 The tightest limits for growth are service tokens (50) and Worker scripts (100), not requests.

@@ -1221,6 +1221,18 @@ async function checkSites() {
 async function runCommand() {
   const config = readConfig();
   log(`kitshn ${VERSION} starts as machine ${config.machineId}`);
+  // First, so a second daemon stops before it touches the tunnel or the connection of the running one.
+  const own = process.getuid!();
+  const local = await listenLocal(paths.socket, {
+    platform,
+    // Read at each connection, so `kitshn local-users` needs no restart.
+    decide: (peer) => peerDecision(peer, own, localUsersOf(readMachineFile())),
+    handle: answerLocal,
+    log,
+  });
+  process.on("exit", local.stop);
+  // The service manager stops the daemon with SIGTERM; an exit runs the clean-up of the socket and the jobs.
+  for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => process.exit(0));
   pruneSamples();
   await ensureTunnel(config);
   watchTunnel();
@@ -1236,17 +1248,6 @@ async function runCommand() {
     () => void checkSites().catch((error: unknown) => log(`site check failed: ${String(error)}`)),
     10_000,
   );
-  const own = process.getuid!();
-  const local = listenLocal(paths.socket, {
-    platform,
-    // Read at each connection, so `kitshn local-users` needs no restart.
-    decide: (peer) => peerDecision(peer, own, localUsersOf(readMachineFile())),
-    handle: answerLocal,
-    log,
-  });
-  process.on("exit", local.stop);
-  // The service manager stops the daemon with SIGTERM; an exit runs the clean-up of the socket and the jobs.
-  for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => process.exit(0));
 }
 
 /** `machine.json` as it is on disk now, or null when it cannot be read. */

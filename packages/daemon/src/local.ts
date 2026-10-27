@@ -27,16 +27,28 @@ export interface LocalOptions {
 
 /**
  * K-701: removes a socket file that an earlier daemon left, listens, and sets the folder to 0700 and the socket
- * to 0600. `stop` removes the socket file, unless another daemon made a new one meanwhile.
+ * to 0600. It throws when a daemon still listens there. `stop` removes the socket file, unless another daemon
+ * made a new one meanwhile.
  */
-export function listenLocal(path: string, options: LocalOptions): { readonly stop: () => void } {
+export async function listenLocal(path: string, options: LocalOptions): Promise<{ readonly stop: () => void }> {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   chmodSync(dirname(path), 0o700);
+  // Known limit: a daemon that starts between this check and the listen below loses its socket. Two daemons
+  // that start in the same moment are a mistake of the service setup.
+  const live = await Bun.connect({ unix: path, socket: { data() {} } }).then(
+    (socket) => (socket.end(), true),
+    () => false,
+  );
+  if (live) throw new Error(`another kitshn daemon listens on ${path}.`);
   rmSync(path, { force: true });
   const send = (socket: Bun.Socket<Connection | undefined>, answer: Answer) => {
     const text = line(answer);
     // Answers are small, so a short write means a broken connection, not back-pressure.
     if (socket.write(text) < Buffer.byteLength(text)) socket.end();
+  };
+  const tooLong = (socket: Bun.Socket<Connection | undefined>) => {
+    send(socket, { id: null, type: "error", error: `A line is longer than ${MAX_LINE_LENGTH} characters.` });
+    socket.end();
   };
   const answer = async (socket: Bun.Socket<Connection | undefined>, uid: number, text: string) => {
     const read = readRequest(text);
@@ -74,12 +86,10 @@ export function listenLocal(path: string, options: LocalOptions): { readonly sto
         for (let end = connection.buffer.indexOf("\n"); end >= 0; end = connection.buffer.indexOf("\n")) {
           const text = connection.buffer.slice(0, end);
           connection.buffer = connection.buffer.slice(end + 1);
+          if (text.length > MAX_LINE_LENGTH) return tooLong(socket);
           void answer(socket, connection.uid, text);
         }
-        if (connection.buffer.length > MAX_LINE_LENGTH) {
-          send(socket, { id: null, type: "error", error: `A line is longer than ${MAX_LINE_LENGTH} characters.` });
-          socket.end();
-        }
+        if (connection.buffer.length > MAX_LINE_LENGTH) tooLong(socket);
       },
     },
   });

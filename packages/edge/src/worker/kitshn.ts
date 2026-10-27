@@ -1775,13 +1775,15 @@ export class Kitshn extends DurableObject<Env> {
         resourceId,
         event.branch,
       );
-      if (result.kind !== "teardown" || !own) {
-        return Response.json(
-          {
-            error: `The token names no pull request, and ${event.branch} deployed no preview pr-${event.pr}.`,
+      // GitHub gives no token to pull requests from forks, so the head branch names a branch of this repo.
+      if (result.kind !== "teardown" || !own || event.branch === "") {
+        return Response.json({
+          deployId: null,
+          plan: {
+            kind: "skip",
+            reason: `The token names no pull request, and ${event.branch || "this run"} deployed no preview pr-${event.pr}; remove it on the map.`,
           },
-          { status: 403 },
-        );
+        });
       }
     }
     const compose = "compose" in recipe ? recipe.compose : null;
@@ -2124,7 +2126,9 @@ export class Kitshn extends DurableObject<Env> {
   private teardownCompose(row: DeployRow, deployer: Deployer) {
     const resource = this.state.resources.get(row.resource_id);
     const machineId = resource?.machine ?? row.machine_id;
-    const name = row.address.slice(0, -this.env.KITSHN_ZONE.length - 1);
+    // The name comes from the card, not from the recipe of this request, so a close stops only its own app.
+    const address = resource?.addresses[0] ?? row.address;
+    const name = address.slice(0, -this.env.KITSHN_ZONE.length - 1);
     const now = Date.now();
     this.ctx.storage.transactionSync(() => {
       if (machineId)

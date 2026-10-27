@@ -39,6 +39,12 @@ describe("held edits on the map", () => {
     expect(overlay(start(), held).places.get("kitshn-admin")).toEqual({ x: 90, y: 40 });
   });
 
+  it("keeps an edit whose answer was lost until the next snapshot", () => {
+    const lost: Array<Held> = [{ requestId: "a", edits: move(50), revision: 0 }];
+    expect(overlay(start(), lost).places.get("kitshn-admin")).toEqual({ x: 50, y: 40 });
+    expect(settle(lost, 3)).toEqual([]);
+  });
+
   it("ignores a snapshot that is older than the one shown", () => {
     expect(isNewer(5, 6)).toBe(false);
     expect(isNewer(6, 6)).toBe(true);

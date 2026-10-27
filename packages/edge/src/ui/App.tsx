@@ -21,7 +21,7 @@ import { CIRCLE_COLORS, KINDS, MEMBER_ICONS } from "./kinds.ts";
 import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
 import { MapView, type Selection, type View } from "./Map.tsx";
 import { overlay } from "./held.ts";
-import { applyEdits, callApi, explainRefusal, toState, undoRevision, useStore } from "./store.ts";
+import { applyEdits, callApi, explainRefusal, hold, release, toState, undoRevision, useStore } from "./store.ts";
 
 const VIEW_KEY = "kitshn.view";
 const UNDO_MS = 10_000;
@@ -123,11 +123,15 @@ export function App() {
   /** Sends edits. K-210: a card that enters a public circle asks first. K-503: a share change shows Undo. */
   const commit = async (edits: Array<Edit>, diffs: Array<ShareDiff>) => {
     const goingPublic = diffs.filter((diff) => diff.to && !diff.from && isPublicCircle(diff.circle));
+    // The drop stays where the owner let go while they answer; Cancel puts it back.
+    const requestId = hold(edits);
     for (const diff of goingPublic) {
-      if (!(await ask(`This makes ${diff.resource.name} public. Anyone with the address can open it.`)))
+      if (!(await ask(`This makes ${diff.resource.name} public. Anyone with the address can open it.`))) {
+        release(requestId);
         return;
+      }
     }
-    const result = await applyEdits(edits);
+    const result = await applyEdits(edits, requestId);
     if (!result.ok) showToast({ text: result.error, error: true, undo: null });
     else if (diffs.length > 0) {
       const text = diffs

@@ -3,7 +3,8 @@ import type { State } from "../core/model.ts";
 
 /**
  * Edits that the map shows before the server holds them: a dropped card stays where the owner let go
- * while the save runs. `revision` is the revision that saved them; null until the server answers.
+ * while the save runs. `revision` is the revision that saved them; null until the server answers, and 0
+ * when the answer was lost with the connection, so the next snapshot settles them.
  */
 export interface Held {
   readonly requestId: string;

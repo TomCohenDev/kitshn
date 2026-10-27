@@ -320,6 +320,12 @@ export class Kitshn extends DurableObject<Env> {
     }
   }
 
+  /** The newest revision id ever made. It never goes down, also after the cleanup of K-1503. */
+  private lastRevision(): number {
+    const [row] = this.sql<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'revisions'");
+    return row?.seq ?? 0;
+  }
+
   private insertRevision(
     actor: Actor,
     summary: string,
@@ -408,7 +414,7 @@ export class Kitshn extends DurableObject<Env> {
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
       version: this.env.KITSHN_VERSION,
-      revision: this.revisions[0]?.id ?? 0,
+      revision: this.lastRevision(),
       me,
     };
   }
@@ -554,7 +560,18 @@ export class Kitshn extends DurableObject<Env> {
       socket.close(4000, `kitshn cannot read the message: ${String(error).slice(0, 100)}`);
       return;
     }
-    send(socket, this.handle(caller, message));
+    try {
+      send(socket, this.handle(caller, message));
+    } catch (error) {
+      // Every request gets an answer, so a map never waits forever on an edit it shows (held.ts).
+      console.error(`kitshn could not handle a ${message.type} request: ${String(error)}`);
+      send(socket, {
+        type: "result",
+        requestId: message.requestId,
+        ok: false,
+        error: "kitshn could not save this change. Try again.",
+      });
+    }
   }
 
   override async webSocketClose(socket: WebSocket) {

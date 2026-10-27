@@ -15,7 +15,8 @@ interface StoreState {
 }
 
 type Result =
-  { readonly ok: true; readonly revision: number | null } | { readonly ok: false; readonly error: string };
+  | { readonly ok: true; readonly revision: number | null }
+  | { readonly ok: false; readonly error: string; readonly lost?: true };
 
 let current: StoreState = { snapshot: null, connection: "connecting", reason: null, held: [] };
 const listeners = new Set<() => void>();
@@ -68,7 +69,13 @@ export function connect() {
     }
   };
   ws.onclose = (event) => {
-    for (const resolve of waiting.values()) resolve({ ok: false, error: "The connection closed." });
+    for (const resolve of waiting.values()) {
+      resolve({
+        ok: false,
+        lost: true,
+        error: "The connection closed before kitshn answered. The map shows what kitshn saved when it reconnects.",
+      });
+    }
     waiting.clear();
     if (event.code === 4003 || event.code === 1008) {
       set({ connection: "refused", reason: event.reason || "kitshn refused the connection." });
@@ -121,17 +128,30 @@ export async function callApi<T>(
  * Sends edits and shows them at once: they stay on the map until a snapshot reaches the revision that
  * saved them, and go only when the server refuses them (the caller shows the reason).
  */
-export async function applyEdits(edits: ReadonlyArray<Edit>): Promise<Result> {
-  const requestId = crypto.randomUUID();
-  set({ held: [...current.held, { requestId, edits, revision: null }] });
+export async function applyEdits(edits: ReadonlyArray<Edit>, requestId = hold(edits)): Promise<Result> {
   const result = await request({ type: "apply", edits }, requestId);
   const others = current.held.filter((item) => item.requestId !== requestId);
-  if (!result.ok || result.revision === null) set({ held: others });
+  if (!result.ok && result.lost) {
+    // Saved or not is unknown: keep the edit until the next snapshot shows what kitshn has.
+    set({ held: [...others, { requestId, edits, revision: 0 }] });
+  } else if (!result.ok || result.revision === null) set({ held: others });
   else {
     const saved: Held = { requestId, edits, revision: result.revision };
     set({ held: settle([...others, saved], current.snapshot?.revision ?? 0) });
   }
   return result;
+}
+
+/** Shows edits on the map before they are sent, for example while a confirmation is open. */
+export function hold(edits: ReadonlyArray<Edit>): string {
+  const requestId = crypto.randomUUID();
+  set({ held: [...current.held, { requestId, edits, revision: null }] });
+  return requestId;
+}
+
+/** Takes back held edits that were never sent, because the owner cancelled. */
+export function release(requestId: string) {
+  set({ held: current.held.filter((item) => item.requestId !== requestId) });
 }
 export const undoRevision = (revision: number) => request({ type: "undo", revision });
 

@@ -335,7 +335,9 @@ export function App() {
         me={store.snapshot.me}
         onEdit={async (edits) => {
           const result = await applyEdits(edits);
-          if (!result.ok) showToast({ text: result.error, error: true, undo: null });
+          if (result.ok) return null;
+          showToast({ text: result.error, error: true, undo: null });
+          return result.error;
         }}
         onDeleteCircle={async (circle) => {
           if (
@@ -377,13 +379,15 @@ export function App() {
         onSignOut={async () => {
           if (!(await ask("End every session of every kitshn application? Everyone logs in again, you too.")))
             return;
-          const result = await callApi<{ ended: number }>("POST", "/api/sign-out", {});
+          const result = await callApi<{ ended: number; failed: Array<string> }>("POST", "/api/sign-out", {});
           showToast(
             "error" in result
               ? { text: result.error, error: true, undo: null }
               : {
-                  text: `Ended the sessions of ${plural(result.ended, "application")}.`,
-                  error: false,
+                  text:
+                    `Ended the sessions of ${plural(result.ended, "application")}.` +
+                    (result.failed.length > 0 ? ` Failed: ${result.failed.join("; ")}` : ""),
+                  error: result.failed.length > 0,
                   undo: null,
                 },
           );
@@ -505,7 +509,7 @@ function Panel(props: {
   selection: Selection;
   access: Readonly<Record<string, import("../core/protocol.ts").AccessState>>;
   me: Actor;
-  onEdit: (edits: Array<Edit>) => void;
+  onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onDeleteCircle: (circle: Circle) => void;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean) => void;
@@ -524,7 +528,13 @@ function Panel(props: {
   let body;
   if (circle)
     body = (
-      <CircleEditor circle={circle} state={state} onEdit={props.onEdit} onDelete={props.onDeleteCircle} />
+      <CircleEditor
+        key={circle.id}
+        circle={circle}
+        state={state}
+        onEdit={props.onEdit}
+        onDelete={props.onDeleteCircle}
+      />
     );
   else if (cards.length === 1 && cards[0]) {
     body = (
@@ -614,7 +624,7 @@ function CardPanel(props: {
   resource: Resource;
   state: State;
   access: import("../core/protocol.ts").AccessState | null;
-  onEdit: (edits: Array<Edit>) => void;
+  onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean) => void;
 }) {
@@ -754,7 +764,7 @@ function CardPanel(props: {
 type DeviceMember = Extract<Member, { _tag: "device" }>;
 
 /** K-106: pick an Access service token as a device member, or make a new one. */
-function DevicePicker(props: { onAdd: (member: DeviceMember) => void }) {
+function DevicePicker(props: { onAdd: (member: DeviceMember) => Promise<string | null> }) {
   const [devices, setDevices] = useState<Array<Omit<DeviceMember, "_tag">> | null>(null);
   const [picked, setPicked] = useState("");
   const [name, setName] = useState("");
@@ -793,7 +803,7 @@ function DevicePicker(props: { onAdd: (member: DeviceMember) => void }) {
           disabled={!picked}
           onClick={() => {
             const device = devices.find((item) => item.tokenId === picked);
-            if (device) props.onAdd({ _tag: "device", ...device });
+            if (device) void props.onAdd({ _tag: "device", ...device }).then(setError);
           }}
         >
           Add
@@ -810,12 +820,14 @@ function DevicePicker(props: { onAdd: (member: DeviceMember) => void }) {
           setError(null);
           setName("");
           setSecret({ clientId: result.clientId, clientSecret: result.clientSecret });
-          props.onAdd({
+          setDevices([...devices, { tokenId: result.tokenId, clientId: result.clientId, name: result.name }]);
+          const refused = await props.onAdd({
             _tag: "device",
             tokenId: result.tokenId,
             clientId: result.clientId,
             name: result.name,
           });
+          if (refused) setError(`The token exists, but the circle did not take it: ${refused}`);
         }}
       >
         <input
@@ -855,7 +867,7 @@ function memberFrom(kind: AddableKind, value: string): Member | string {
 function CircleEditor(props: {
   circle: Circle;
   state: State;
-  onEdit: (edits: Array<Edit>) => void;
+  onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onDelete: (circle: Circle) => void;
 }) {
   const { circle, state } = props;
@@ -981,7 +993,13 @@ function CircleEditor(props: {
         <button class="btn">Add</button>
       </form>
       {error ? <p class="muted">{error}</p> : null}
-      <DevicePicker onAdd={(member) => put({ members: [...circle.members, member] })} />
+      <DevicePicker
+        onAdd={(member) =>
+          props.onEdit([
+            { _tag: "circle", id: circle.id, after: { ...circle, members: [...circle.members, member] } },
+          ])
+        }
+      />
       <div class="label" style={{ marginTop: "10px" }}>
         What it opens ({inside.length})
       </div>

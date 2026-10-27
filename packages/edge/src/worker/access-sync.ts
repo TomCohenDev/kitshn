@@ -24,6 +24,7 @@ export type Api = <T>(method: "GET" | "POST" | "PUT" | "DELETE", path: string, b
 
 /** K-406: one alarm run makes at most this many Cloudflare API calls. */
 export const CALLS_PER_RUN = 40;
+const PAGE = 1000;
 
 const policyBody = (policy: PolicyBody) => JSON.stringify(policy);
 
@@ -139,8 +140,12 @@ export async function verifyAccess(
   accountId: string,
 ): Promise<Array<string>> {
   const base = `/accounts/${accountId}/access`;
-  const policies = await api<ReadonlyArray<LivePolicy>>("GET", `${base}/policies?per_page=1000`);
-  const apps = await api<ReadonlyArray<LiveApp>>("GET", `${base}/apps?per_page=1000`);
+  const policies = await api<ReadonlyArray<LivePolicy>>("GET", `${base}/policies?per_page=${PAGE}`);
+  const apps = await api<ReadonlyArray<LiveApp>>("GET", `${base}/apps?per_page=${PAGE}`);
+  // A full page can hide objects on a next page; then "missing" means nothing, so kitshn compares nothing.
+  if (policies.length >= PAGE || apps.length >= PAGE) {
+    return ["The account has too many Access objects for the daily compare (K-408), so kitshn skipped it."];
+  }
   for (const row of store.rows.values()) {
     if (!row.cfId || !row.body) continue;
     const ours = JSON.parse(row.body) as Record<string, unknown>;
@@ -204,14 +209,67 @@ export async function verifyAccess(
 }
 
 /** K-110: ends the sessions of every application that kitshn made. It never touches other applications. */
-export async function signOutEverywhere(store: AccessStore, api: Api, accountId: string): Promise<number> {
+export async function signOutEverywhere(
+  store: AccessStore,
+  api: Api,
+  accountId: string,
+): Promise<{ ended: number; failed: Array<string> }> {
   let ended = 0;
-  for (const row of store.rows.values()) {
-    if (!row.key.startsWith("app:") || !row.cfId) continue;
-    await api("POST", `/accounts/${accountId}/access/apps/${row.cfId}/revoke_tokens`);
-    ended++;
+  const failed: Array<string> = [];
+  const apps = [...store.rows.values()].filter((row) => row.key.startsWith("app:") && row.cfId);
+  for (const [index, row] of apps.entries()) {
+    if (index >= CALLS_PER_RUN) {
+      failed.push(`${apps.length - index} more applications (the call limit of one request)`);
+      break;
+    }
+    try {
+      await api("POST", `/accounts/${accountId}/access/apps/${row.cfId}/revoke_tokens`);
+      ended++;
+    } catch (error) {
+      failed.push(`${row.key}: ${message(error)}`);
+    }
   }
-  return ended;
+  return { ended, failed };
+}
+
+/**
+ * K-408 for the passkey check (K-103): the policy lists carry no MFA settings, so this reads each policy
+ * that needs a passkey once a day and marks it when someone changed its MFA settings.
+ */
+export async function verifyPasskeys(
+  store: AccessStore,
+  api: Api,
+  accountId: string,
+  budget: number,
+): Promise<number> {
+  let calls = 0;
+  for (const row of store.rows.values()) {
+    if (calls >= budget) break;
+    if (!row.key.startsWith("policy:") || !row.cfId || !row.body) continue;
+    const ours = (
+      JSON.parse(row.body) as {
+        mfa_config?: { allowed_authenticators: Array<string>; session_duration: string };
+      }
+    ).mfa_config;
+    if (!ours) continue;
+    calls++;
+    const live = await api<{
+      mfa_config?: {
+        allowed_authenticators?: Array<string>;
+        session_duration?: string;
+        mfa_disabled?: boolean;
+      } | null;
+    }>("GET", `/accounts/${accountId}/access/policies/${row.cfId}`);
+    const same =
+      live.mfa_config?.mfa_disabled !== true &&
+      deepEqual(
+        [...(live.mfa_config?.allowed_authenticators ?? [])].sort(),
+        [...ours.allowed_authenticators].sort(),
+      ) &&
+      live.mfa_config?.session_duration === ours.session_duration;
+    if (!same) store.put({ ...row, body: "", tried: "", error: null });
+  }
+  return calls;
 }
 
 /**
@@ -258,13 +316,27 @@ export async function syncAccess(
       const result = cfId
         ? await api<Named>("PUT", `${base}/${kind}/${cfId}`, request)
         : await api<Named>("POST", `${base}/${kind}`, request);
-      store.put({ key, cfId: result.id, body, tried: body, error: null });
-      // K-409: a removed share takes effect at once, so the sessions of the application end.
-      if (kind === "apps" && row?.body && removesPolicy(row.body, body) && spend()) {
-        await api("POST", `${base}/apps/${result.id}/revoke_tokens`).catch((error: unknown) => {
-          console.warn(`kitshn could not end the sessions of ${key}: ${message(error)}`);
-        });
+      // K-409: a removed share takes effect at once, so the sessions of the application end. Until the
+      // revoke succeeds, the row keeps its old body, so the next run writes and revokes again.
+      if (kind === "apps" && row?.body && removesPolicy(row.body, body)) {
+        if (!spend()) {
+          store.put({ key, cfId: result.id, body: row.body, tried: "", error: null });
+          return false;
+        }
+        try {
+          await api("POST", `${base}/apps/${result.id}/revoke_tokens`);
+        } catch (error) {
+          store.put({
+            key,
+            cfId: result.id,
+            body: row.body,
+            tried: body,
+            error: `sessions not ended: ${message(error)}`,
+          });
+          return true;
+        }
       }
+      store.put({ key, cfId: result.id, body, tried: body, error: null });
     } catch (error) {
       // Someone deleted the object: forget its id, so the next run creates it again.
       if (isNotFound(error) && cfId) store.put({ key, cfId: "", body: "", tried: "", error: null });

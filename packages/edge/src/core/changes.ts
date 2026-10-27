@@ -154,10 +154,9 @@ export function ruleViolation(state: State): string | null {
   if (!state.circles.has(OWNER_CIRCLE_ID)) return "The Owner circle cannot be deleted.";
   const admin = state.resources.get(ADMIN_RESOURCE_ID);
   if (!admin) return "The kitshn admin card is missing.";
-  const holding = circlesHolding(state, admin.id).filter(
-    (circle) => !state.paused || circle.id === OWNER_CIRCLE_ID,
-  );
-  const publicCircle = holding.find((circle) => isPublicCircle(circle) && shareLevel(state, admin, circle));
+  const all = circlesHolding(state, admin.id);
+  const publicCircle = all.find((circle) => isPublicCircle(circle) && shareLevel(state, admin, circle));
+  const holding = all.filter((circle) => !state.paused || circle.id === OWNER_CIRCLE_ID);
   if (publicCircle) return `The kitshn admin cannot be shared with "${publicCircle.name}", which is public.`;
   const guarded = holding.some(
     (circle) =>

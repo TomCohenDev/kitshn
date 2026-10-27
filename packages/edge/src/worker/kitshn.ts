@@ -33,10 +33,12 @@ import {
   type AccessRow,
   type AccessStore,
   accessStates,
+  CALLS_PER_RUN,
   hasAccessWork,
   signOutEverywhere,
   syncAccess,
   verifyAccess,
+  verifyPasskeys,
 } from "./access-sync.ts";
 import type { Caller } from "./auth.ts";
 import { cloudflare } from "./cloudflare.ts";
@@ -470,8 +472,7 @@ export class Kitshn extends DurableObject<Env> {
     const api = this.api();
     if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
     try {
-      const ended = await signOutEverywhere(this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID);
-      return Response.json({ ended });
+      return Response.json(await signOutEverywhere(this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID));
     } catch (error) {
       return Response.json({ error: String(error) }, { status: 502 });
     }
@@ -555,6 +556,8 @@ export class Kitshn extends DurableObject<Env> {
     const api = this.api();
     if (api) {
       const desired = desiredAccess(this.state, now);
+      // K-406: the daily compare spends part of the 40 calls of this run.
+      let spent = 0;
       if (daily) {
         try {
           this.accessWarnings = await verifyAccess(
@@ -563,12 +566,21 @@ export class Kitshn extends DurableObject<Env> {
             api,
             this.env.CLOUDFLARE_ACCOUNT_ID,
           );
+          spent += 2;
+          spent += await verifyPasskeys(this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID, 10);
           this.setMeta("access_warnings", JSON.stringify(this.accessWarnings));
         } catch (error) {
           console.warn(`kitshn could not compare Access with the shares: ${String(error)}`);
+          spent = 12;
         }
       }
-      await syncAccess(desired, this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID);
+      await syncAccess(
+        desired,
+        this.accessStore(),
+        api,
+        this.env.CLOUDFLARE_ACCOUNT_ID,
+        CALLS_PER_RUN - spent,
+      );
       this.broadcast();
     }
     await this.scheduleAlarm();

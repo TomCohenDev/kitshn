@@ -80,6 +80,8 @@ export function circleMatches(circle: Circle, visitor: Visitor): boolean {
 
 /** K-207: the highest level of the shares whose circle matches the visitor, or null. */
 export function visitorLevel(state: State, resource: Resource, visitor: Visitor, now: number): Level | null {
+  // K-1504: a pause stops agents too, so devices and machines get nothing while it lasts.
+  if (state.paused && visitor.clientId !== null) return null;
   let best: Level | null = null;
   for (const share of activeShares(state, resource, now)) {
     if (!circleMatches(share.circle, visitor)) continue;

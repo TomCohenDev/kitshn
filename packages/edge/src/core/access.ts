@@ -170,6 +170,8 @@ export function desiredAccess(state: State, now: number): DesiredAccess {
     const policyKeys: Array<string> = [];
     for (const share of activeShares(state, resource, now)) {
       for (const [key, body] of circlePolicies(share.circle)) {
+        // K-1504: during a pause only people pass; the devices and networks policy of Owner drops out.
+        if (state.paused && !key.endsWith(":people")) continue;
         policies.set(key, body);
         policyKeys.push(key);
       }

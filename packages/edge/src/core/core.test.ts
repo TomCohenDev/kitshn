@@ -330,6 +330,30 @@ describe("pause (K-1504)", () => {
     expect(visitorLevel(after, after.resources.get(ADMIN_RESOURCE_ID)!, owner, 0)).toBe("control");
   });
 
+  it("stops owner devices during a pause and keeps refusing a public admin", () => {
+    const state = start();
+    const owner = circle(state, OWNER_CIRCLE_ID);
+    const device = { _tag: "device" as const, tokenId: "t1", clientId: "c1.access", name: "agent" };
+    const withDevice = edit(state, [
+      { _tag: "circle", id: OWNER_CIRCLE_ID, after: { ...owner, members: [...owner.members, device] } },
+    ]);
+    const paused = edit(withDevice.after, [{ _tag: "pause", after: true }]).after;
+    const admin = paused.resources.get(ADMIN_RESOURCE_ID)!;
+    expect(visitorLevel(paused, admin, { email: null, clientId: "c1.access", ip: null }, 0)).toBeNull();
+    expect(desiredAccess(paused, 0).apps.get("app:kitshn-admin:kit.example.com")?.policyKeys).toEqual([
+      "policy:owner:people",
+    ]);
+    const everyone = circle(paused, EVERYONE_CIRCLE_ID);
+    const covering = edit(paused, [
+      {
+        _tag: "circle",
+        id: EVERYONE_CIRCLE_ID,
+        after: { ...everyone, level: "control", x: 0, y: 40, r: 100 },
+      },
+    ]);
+    expect(ruleViolation(covering.after)).toMatch(/public/);
+  });
+
   it("refuses a pause when only another circle guards the admin", () => {
     const state = start();
     const owner = circle(state, OWNER_CIRCLE_ID);

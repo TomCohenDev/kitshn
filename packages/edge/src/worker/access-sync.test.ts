@@ -217,7 +217,7 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
       `POST /apps/${cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId}/revoke_tokens`,
     );
     cf.calls.length = 0;
-    expect(await signOutEverywhere(cf.store, cf.api, "a")).toBe(1);
+    expect(await signOutEverywhere(cf.store, cf.api, "a")).toEqual({ ended: 1, failed: [] });
     expect(cf.calls).toEqual([
       `POST /apps/${cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId}/revoke_tokens`,
     ]);

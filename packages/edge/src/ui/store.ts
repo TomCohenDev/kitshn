@@ -90,11 +90,16 @@ export async function callApi<T>(
   path: string,
   body?: object,
 ): Promise<T | { error: string }> {
-  const response = await fetch(path, {
-    method,
-    headers: { "content-type": "application/json" },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method,
+      headers: { "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  } catch (error) {
+    return { error: `kitshn is not reachable: ${String(error)}` };
+  }
   const data = (await response.json().catch(() => null)) as (T & { error?: string }) | null;
   if (!response.ok || data === null) return { error: data?.error ?? `kitshn answered ${response.status}.` };
   return data;

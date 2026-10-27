@@ -286,4 +286,4 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-1501** Every change makes one revision with the time, the actor (owner device, agent with machine and thread, or kitshn for an expiry) and a summary.
 - **K-1502** "Undo" on a revision makes a new revision that reverses it. Undo runs the guard of K-105.
 - **K-1503** Revisions older than 90 days and beyond the newest 5,000 are deleted by the daily alarm.
-- **K-1504** "Emergency pause" moves no card, but sets every share to none except the admin share of the Owner circle, and sends "stop all agents" to every provider that has the command. "Resume" returns the shares. The pause keeps MM-708 to MM-719 where they apply.
+- **K-1504** "Emergency pause" moves no card, but sets every share to none except the admin share of the Owner circle for its people (devices and machines get nothing), and sends "stop all agents" to every provider that has the command (providers arrive in milestone 5). "Resume" returns the shares. The pause keeps MM-708 to MM-719 where they apply.

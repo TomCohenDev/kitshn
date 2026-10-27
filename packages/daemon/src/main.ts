@@ -9,6 +9,7 @@ import {
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import { kitshn1Deployment } from "./kitshn1.ts";
 import {
   chmodSync,
   copyFileSync,
@@ -292,6 +293,11 @@ async function deployFile(deployId: string, file: string): Promise<Buffer> {
   return Buffer.from(await response.arrayBuffer());
 }
 
+/** K-1404: the persistent root of KitSHn 1 on this machine. */
+const KITSHN1_PERSISTENT = process.env["KITSHN1_PERSISTENT"] ?? "/persistent";
+/** Short root jobs on app folders (copy, clean-up); busybox has `cp -a` and `find -delete` and is a few MB. */
+const HELPER_IMAGE = "busybox:1.38";
+
 /**
  * K-812, K-607: builds and starts a Compose app with the variables of KitSHn 1, so its `compose.yml` works
  * unchanged: the app listens on `$KITSHN_DEFAULT_SOCKET`. Then the socket becomes a live site under the
@@ -330,6 +336,28 @@ async function composeUp(
     rmSync(source, { recursive: true, force: true });
     mkdirSync(source, { recursive: true });
     await step("unpack the source", "tar", ["-xzf", join(dir, "source.tgz"), "-C", source]);
+    // K-1404: the first deploy of an app on this machine takes over the data of its KitSHn 1 deployment.
+    // KitSHn 1 stops first, so no write lands after the copy; root-owned files need a short container.
+    const data = join(dir, "data");
+    const old = kitshn1Deployment(command.repo, command.environment, KITSHN1_PERSISTENT);
+    if (command.kind === "compose" && !existsSync(data) && old && existsSync(old.dataDir)) {
+      await step("stop the KitSHn 1 app", "docker", ["compose", "-p", old.project, "stop"], { cwd: paths.data });
+      mkdirSync(data, { recursive: true });
+      await step("copy the KitSHn 1 data", "docker", [
+        "run",
+        "--rm",
+        "-v",
+        `${old.dataDir}:/from:ro`,
+        "-v",
+        `${data}:/to`,
+        HELPER_IMAGE,
+        "cp",
+        "-a",
+        "/from/.",
+        "/to/",
+      ]);
+      output += `KitSHn 1 data of ${old.project} copied from ${old.dataDir}; it stays there for a rollback.\n`;
+    }
     // The container user may not be the daemon user; the socket directory must take its socket.
     mkdirSync(sockets, { recursive: true });
     chmodSync(sockets, 0o777);

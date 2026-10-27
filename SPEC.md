@@ -241,7 +241,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-1101** "Upload" on the map, and `kitshn_publish` for agents, put a file into R2 and a card into the tray. A file is at most 100 MB.
 - **K-1102** The Worker serves files at `files.<zone>/<id>/<name>` with the checks of K-1004.
 - **K-1103** Public sites (for example tick3d and the resume) are static sites (K-805) in the Everyone circle.
-- **K-1104** A live site is a local server of a machine, shared through the tunnel of the machine. `kitshn expose <socket or port> --name <name>` or `kitshn_expose` adds it. Its address is `<name>.<zone>`. It is live only: when the machine is off, the site is off. kitshn keeps no copy.
+- **K-1104** A live site is a local server of a machine, shared through the tunnel of the machine. `kitshn expose <socket or port> --name <name>` or `kitshn_expose` adds it, and `kitshn unexpose <name>` removes it. kitshn makes its card, its DNS record and its ingress only when nothing else uses the address, and the ingress only after its Access application exists. Its address is `<name>.<zone>`. It is live only: when the machine is off, the site is off. kitshn keeps no copy.
 - **K-1105** A live site of a dev server gets the `Host` header `localhost` toward its origin, because Vite and similar servers refuse other hosts.
 - **K-1106** When the origin of a live site or of a Compose app is down, visitors who pass Access get the kitshn offline page:
   - It uses the kitshn look (K-517), a short playful message, the site name, the machine name, the time the site was last seen, and "It comes back when <machine> is on."
@@ -252,7 +252,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
   - The machine is off: its daemon socket closes, or misses pings for 30 seconds.
   - The machine is on, but the local server is off: the daemon tries the socket or port of each exposed site every 10 seconds, on the machine only, and reports a change.
 - **K-1108** While an origin is down, kitshn adds a Worker route for the site address to the kitshn Worker. When the origin is back, it removes the route. So visits to a healthy site never run the Worker and cost no Worker request. Custom error rules would do this with no Worker, but the free plan has none ([Custom Errors](https://developers.cloudflare.com/rules/custom-errors/)).
-- **K-1109** While the route exists, the Worker first passes the request to the origin. It shows the offline page only when the answer is status 502 or 530, or a Cloudflare 1033 error. So a site that comes back before kitshn removes the route works at once. VERIFY: a fetch from a Worker on a route to the same hostname reaches the origin and does not run the Worker again. Milestone 3 tests it.
+- **K-1109** While the route exists, the Worker first passes the request to the origin. It shows the offline page only when the answer is status 502 or 530, or a Cloudflare 1033 error. So a site that comes back before kitshn removes the route works at once. Checked on 2026-10-27: with the offline route still on the hostname, a fetch from the Worker reached the restarted origin and answered 200, without running the Worker again.
 - **K-1110** The Worker reads the site name and the last seen time from the Durable Object, and keeps them for 60 seconds in the Cache API.
 - **K-1111** Domains: kitshn publishes only on zones that the owner adds to it. Each address must be in one of them.
 

@@ -79,20 +79,22 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           version="${GITHUB_SHA:0:12}"
-          mkdir assets
+          # Not "assets/": the repo has a folder of that name.
+          out="$RUNNER_TEMP/release"
+          mkdir "$out"
           cp kitshn-edge.tar.gz packages/daemon/dist/kitshn-linux-arm64 packages/daemon/dist/kitshn-linux-x64 \
             packages/daemon/dist/kitshn-darwin-arm64 packages/daemon/dist/kitshn-darwin-x64 \
-            packages/kitshn/dist/kitshn.mjs packages/kitshn/dist/kitshn.tgz assets/
-          (cd assets && sha256sum * > SHA256SUMS)
+            packages/kitshn/dist/kitshn.mjs packages/kitshn/dist/kitshn.tgz "$out"/
+          (cd "$out" && sha256sum * > SHA256SUMS)
           # A rerun keeps the files that the first run published; a new build has other hashes.
           if ! gh release view "edge-$version" >/dev/null 2>&1; then
-            gh release create "edge-$version" assets/* --prerelease --latest=false --target "$GITHUB_SHA" \
+            gh release create "edge-$version" "$out"/* --prerelease --latest=false --target "$GITHUB_SHA" \
               --title "kitshn 2 $version" --notes "kitshn 2 Worker bundle, daemon and CLI from $GITHUB_SHA."
           fi
           if gh release view edge >/dev/null 2>&1; then
-            gh release upload edge assets/* --clobber
+            gh release upload edge "$out"/* --clobber
             gh release edit edge --target "$GITHUB_SHA" --notes "kitshn 2 Worker bundle, daemon and CLI from $GITHUB_SHA."
           else
-            gh release create edge assets/* --prerelease --latest=false --target "$GITHUB_SHA" \
+            gh release create edge "$out"/* --prerelease --latest=false --target "$GITHUB_SHA" \
               --title "kitshn 2 edge" --notes "kitshn 2 Worker bundle, daemon and CLI from $GITHUB_SHA."
           fi

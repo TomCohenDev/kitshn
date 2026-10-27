@@ -78,7 +78,11 @@ export function accessStates(
 }
 
 /** True when some object needs a write that is not waiting for the daily retry. */
-export function hasAccessWork(desired: DesiredAccess, rows: ReadonlyMap<string, AccessRow>): boolean {
+export function hasAccessWork(
+  desired: DesiredAccess,
+  rows: ReadonlyMap<string, AccessRow>,
+  reachable: ReadonlySet<string> = new Set(),
+): boolean {
   for (const [key, policy] of desired.policies) {
     const body = policyBody(policy);
     if (rows.get(key)?.body !== body && !failedWith(rows.get(key), body)) return true;
@@ -87,13 +91,46 @@ export function hasAccessWork(desired: DesiredAccess, rows: ReadonlyMap<string, 
     const body = appBody(key, app, rows);
     if (body !== null && rows.get(key)?.body !== body && !failedWith(rows.get(key), body)) return true;
   }
-  for (const row of rows.values()) if (isStale(desired, row)) return true;
+  const kept = keptPolicies(desired, rows, reachable);
+  for (const row of rows.values()) if (isStale(desired, row, reachable, kept)) return true;
   return false;
 }
 
-/** A row that kitshn no longer wants. A failed deletion waits for the daily retry (K-408). */
-const isStale = (desired: DesiredAccess, row: AccessRow) =>
-  !desired.policies.has(row.key) && !desired.apps.has(row.key) && row.error === null;
+const appDomain = (row: AccessRow) =>
+  row.body ? ((JSON.parse(row.body) as { domain?: string }).domain ?? null) : null;
+
+/**
+ * K-006: an application that kitshn no longer wants stays while a route (tunnel ingress, DNS record,
+ * Worker route or custom domain) can still reach its address. Its policies stay with it.
+ */
+function keptPolicies(
+  desired: DesiredAccess,
+  rows: ReadonlyMap<string, AccessRow>,
+  reachable: ReadonlySet<string>,
+) {
+  const kept = new Set<string>();
+  for (const row of rows.values()) {
+    if (!row.key.startsWith("app:") || desired.apps.has(row.key)) continue;
+    const domain = appDomain(row);
+    if (domain !== null && reachable.has(domain)) for (const id of policyIds(row.body)) kept.add(id);
+  }
+  return kept;
+}
+
+/** A row that kitshn no longer wants and may delete now. A failed deletion waits for the daily retry (K-408). */
+const isStale = (
+  desired: DesiredAccess,
+  row: AccessRow,
+  reachable: ReadonlySet<string>,
+  kept: ReadonlySet<string>,
+) => {
+  if (desired.policies.has(row.key) || desired.apps.has(row.key) || row.error !== null) return false;
+  if (row.key.startsWith("app:")) {
+    const domain = appDomain(row);
+    return domain === null || !reachable.has(domain);
+  }
+  return !kept.has(row.cfId);
+};
 
 const isNotFound = (error: unknown) =>
   typeof error === "object" && error !== null && "status" in error && error.status === 404;
@@ -285,6 +322,7 @@ export async function syncAccess(
   api: Api,
   accountId: string,
   budget = CALLS_PER_RUN,
+  reachable: ReadonlySet<string> = new Set(),
 ): Promise<boolean> {
   let calls = 0;
   const spend = () => calls++ < budget;
@@ -358,7 +396,8 @@ export async function syncAccess(
     const found = (list: ReadonlyArray<Named>) => list.find((item) => item.domain === app.domain);
     if (!(await write(key, "apps", body, found))) return false;
   }
-  const stale = [...store.rows.values()].filter((row) => isStale(desired, row));
+  const kept = keptPolicies(desired, store.rows, reachable);
+  const stale = [...store.rows.values()].filter((row) => isStale(desired, row, reachable, kept));
   // Applications first: Access refuses to delete a policy that an application still uses.
   stale.sort((a, b) => Number(a.key.startsWith("policy:")) - Number(b.key.startsWith("policy:")));
   for (const row of stale) {

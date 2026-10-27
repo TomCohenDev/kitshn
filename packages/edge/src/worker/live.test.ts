@@ -5,6 +5,7 @@ import {
   liveSiteId,
   offlineReason,
   parseSites,
+  reachableAddresses,
   seenText,
   sitesNeedingRoutes,
   tunnelConfig,
@@ -62,5 +63,18 @@ describe("live sites (K-1104 to K-1108)", () => {
     expect(liveSiteId(machine, "dashboard-api")).not.toBe(liveSiteId(machine, "dashboard-web"));
     expect(liveSiteId(machine, "dashboard-api").length).toBeLessThanOrEqual(63);
     expect(parseSites([{ name: "x", target: "http://localhost:0", up: true }]).sites).toEqual([]);
+  });
+
+  it("counts an address as reachable while accepted ingress, a DNS record or a route has it", () => {
+    const applied = JSON.stringify(tunnelConfig([site("old", "m", true)]));
+    const reachable = reachableAddresses({
+      ingress: [applied, ""],
+      records: [
+        { address: "dns.example.com", record_id: "r1" },
+        { address: "never.example.com", record_id: "" },
+      ],
+      routes: [{ address: "route.example.com", route_id: "x" }],
+    });
+    expect([...reachable].sort()).toEqual(["dns.example.com", "old.example.com", "route.example.com"]);
   });
 });

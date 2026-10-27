@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { Schema } from "effect";
-import { desiredAccess } from "../core/access.ts";
+import { ACCESS_NAME_PREFIX, desiredAccess } from "../core/access.ts";
 import {
   type Actor,
   type Change,
@@ -1603,12 +1603,26 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-110: ends every session of every application that kitshn made. */
   private async signOut() {
-    // K-110: the Worker checks pages and files itself, so it refuses every login from before this time.
-    this.setMeta("signed_out_at", String(Date.now()));
+    // K-110: the Worker checks pages and files itself, so it refuses every login from before this second.
+    this.setMeta("signed_out_at", String(Math.floor(Date.now() / 1000) * 1000));
     const api = this.api();
     if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
     try {
-      return Response.json(await signOutEverywhere(this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID));
+      const account = this.env.CLOUDFLARE_ACCOUNT_ID;
+      const logins = new Set(
+        ["pages", "files"].flatMap((host) => [
+          `${host}.${this.env.KITSHN_ZONE}/login`,
+          `${host}.${this.env.KITSHN_ZONE}/login/passkey`,
+        ]),
+      );
+      const all = await api<Array<{ id: string; name: string; domain: string }>>(
+        "GET",
+        `/accounts/${account}/access/apps?per_page=1000`,
+      );
+      const loginApps = all
+        .filter((app) => logins.has(app.domain) && app.name.startsWith(ACCESS_NAME_PREFIX))
+        .map((app) => ({ key: app.domain, cfId: app.id }));
+      return Response.json(await signOutEverywhere(this.accessStore(), api, account, loginApps));
     } catch (error) {
       return Response.json({ error: String(error) }, { status: 502 });
     }
@@ -1985,14 +1999,19 @@ export class Kitshn extends DurableObject<Env> {
   private contentDecision({ id, visitor: sent }: ContentRequest) {
     const signedOutAt = Number(this.meta("signed_out_at") ?? 0);
     const visitor: ContentVisitor =
-      sent.issuedAt !== null && sent.issuedAt * 1000 < signedOutAt
+      (sent.email !== null || sent.clientId !== null) && (sent.issuedAt ?? 0) * 1000 < signedOutAt
         ? { email: null, clientId: null, ip: sent.ip, passkey: false, issuedAt: null }
         : sent;
+    // The old cookie still opens the login path, so the Worker drops it, or the login sends the visitor
+    // straight back with it.
+    const stale = visitor !== sent;
     const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", id);
     const resource = this.state.resources.get(id);
-    if (!row || !resource) return Response.json({ decision: "missing" });
+    if (!row || !resource) return Response.json({ decision: "missing", stale });
     const decision = contentAccess(this.state, resource, visitor, Date.now());
-    return Response.json(decision === "allow" ? { decision, item: libraryItem(row) } : { decision });
+    return Response.json(
+      decision === "allow" ? { decision, item: libraryItem(row), stale } : { decision, stale },
+    );
   }
 
   /**
@@ -2031,7 +2050,7 @@ export class Kitshn extends DurableObject<Env> {
         source,
       );
       // An import adds a page once (K-1008), and never again after a delete in the Library.
-      if (known) return Response.json({ id: known.id, existing: true });
+      if (known) return Response.json(known.id ? { id: known.id, existing: true } : { deleted: true });
     }
     const createdAt = Number(header("x-kitshn-created-at") ?? Date.now());
     if (!Number.isFinite(createdAt) || createdAt <= 0)

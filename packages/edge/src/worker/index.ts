@@ -46,9 +46,19 @@ async function offline(request: Request, env: Env, ctx: ExecutionContext): Promi
 }
 
 /** What the Durable Object decides for one page or file request (K-1004). */
-type ContentAnswer =
+type ContentAnswer = { readonly stale: boolean } & (
   | { readonly decision: "allow"; readonly item: LibraryItem }
-  | { readonly decision: "login" | "passkey" | "deny" | "missing" };
+  | { readonly decision: "login" | "passkey" | "deny" | "missing" }
+);
+
+/** K-110: a redirect that also drops a login from before "Sign out everywhere". */
+function redirect(location: string, stale: boolean) {
+  const response = Response.redirect(location, 302);
+  if (!stale) return response;
+  const headers = new Headers(response.headers);
+  headers.append("set-cookie", "CF_Authorization=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax");
+  return new Response(null, { status: 302, headers });
+}
 
 /** The decoded path segment, or null for broken percent-encoding. */
 const decoded = (value: string) => {
@@ -88,8 +98,8 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
     })
   ).json()) as ContentAnswer;
   const back = `?next=${encodeURIComponent(url.pathname)}`;
-  if (answer.decision === "login") return Response.redirect(`${url.origin}/login${back}`, 302);
-  if (answer.decision === "passkey") return Response.redirect(`${url.origin}/login/passkey${back}`, 302);
+  if (answer.decision === "login") return redirect(`${url.origin}/login${back}`, answer.stale);
+  if (answer.decision === "passkey") return redirect(`${url.origin}/login/passkey${back}`, answer.stale);
   if (answer.decision === "deny")
     return text(
       `${visitor.email ?? visitor.clientId} has no access to this ${kind}. Ask its owner to share it.`,

@@ -90,10 +90,11 @@ export function contentAccess(
       shares.some((share) => isPublicCircle(share.circle) && share.circle.match === "any")
     )
       return "allow";
-    // K-1504: during a pause only people pass, as in Access.
+    // K-1504: during a pause Access keeps only the people policies, so only an email can match.
     if (state.paused && visitor.email === null) return "deny";
-    const matching = shares.filter((share) => circleMatches(share.circle, visitor, state.machines));
-    if (matching.some((share) => !passkeyNeeded(share.circle, visitor, state))) return "allow";
+    const who = state.paused ? { ...visitor, ip: null, clientId: null } : visitor;
+    const matching = shares.filter((share) => circleMatches(share.circle, who, state.machines));
+    if (matching.some((share) => !passkeyNeeded(share.circle, who, state))) return "allow";
     return matching.length > 0 ? "passkey" : "deny";
   });
   if (decisions.includes("allow")) return "allow";

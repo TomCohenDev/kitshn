@@ -38,7 +38,12 @@ async function accessIdentity(
     const audience = wanted.find((tag) => tokenAudiences.includes(tag));
     if (!audience) return "The Access token has none of the expected audience tags.";
     if (!email && !clientId) return "The Access token names no email and no service token.";
-    return { email: email || null, clientId: email ? null : clientId, audience, issuedAt: payload.iat ?? null };
+    return {
+      email: email || null,
+      clientId: email ? null : clientId,
+      audience,
+      issuedAt: payload.iat ?? null,
+    };
   } catch (error) {
     return `The Access token is not valid: ${error instanceof Error ? error.message : String(error)}`;
   }

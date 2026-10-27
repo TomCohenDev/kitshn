@@ -262,10 +262,15 @@ export async function signOutEverywhere(
   store: AccessStore,
   api: Api,
   accountId: string,
+  /** Applications that the bootstrap made, such as the page and file logins (K-1004). */
+  loginApps: ReadonlyArray<{ readonly key: string; readonly cfId: string }> = [],
 ): Promise<{ ended: number; failed: Array<string> }> {
   let ended = 0;
   const failed: Array<string> = [];
-  const apps = [...store.rows.values()].filter((row) => row.key.startsWith("app:") && row.cfId);
+  const apps = [
+    ...[...store.rows.values()].filter((row) => row.key.startsWith("app:") && row.cfId),
+    ...loginApps,
+  ];
   for (const [index, row] of apps.entries()) {
     if (index >= CALLS_PER_RUN) {
       failed.push(`${apps.length - index} more applications (the call limit of one request)`);

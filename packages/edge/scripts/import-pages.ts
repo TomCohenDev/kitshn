@@ -102,8 +102,13 @@ async function upload(host: string, machine: string, manifestPath: string, direc
     const result = (await response.json().catch(() => null)) as {
       id?: string;
       existing?: boolean;
+      deleted?: boolean;
       error?: string;
     } | null;
+    if (response.ok && result?.deleted) {
+      console.log(`skipped ${entry.title}: it was deleted in the Library`);
+      continue;
+    }
     if (!response.ok || !result?.id) {
       throw new Error(`${entry.file}: kitshn answered ${response.status}: ${result?.error ?? "no JSON"}`);
     }

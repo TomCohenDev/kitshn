@@ -76,7 +76,7 @@ describe("page and file access (K-1004)", () => {
     expect(decide(start(), person("friend@example.com", true))).toBe("deny");
   });
 
-  it("does not make an \"all must match\" circle with everyone public", () => {
+  it('does not make an "all must match" circle with everyone public', () => {
     const state = at(start(), 2000);
     const friends = state.circles.get("friends")!;
     const strict: Circle = { ...friends, match: "all", members: [{ _tag: "everyone" }, ...friends.members] };
@@ -88,10 +88,29 @@ describe("page and file access (K-1004)", () => {
   it("asks no passkey of a visitor who matches a network member, logged in or not (K-402)", () => {
     const state = at(start(), 2000);
     const friends = state.circles.get("friends")!;
-    const office: Circle = { ...friends, needsPasskey: true, members: [{ _tag: "ip", range: "203.0.113.0/24" }] };
+    const office: Circle = {
+      ...friends,
+      needsPasskey: true,
+      members: [{ _tag: "ip", range: "203.0.113.0/24" }],
+    };
     const circles = new Map(state.circles).set("friends", office);
     expect(decide({ ...state, circles }, anonymous)).toBe("allow");
-    expect(decide({ ...state, circles }, { ...person("friend@example.com"), ip: "203.0.113.9" })).toBe("allow");
+    expect(decide({ ...state, circles }, { ...person("friend@example.com"), ip: "203.0.113.9" })).toBe(
+      "allow",
+    );
+  });
+
+  it("asks the passkey during a pause also on a network of a passkey circle (K-1504)", () => {
+    const state = { ...start(), paused: true };
+    const owner = state.circles.get("owner")!;
+    const withOffice: Circle = {
+      ...owner,
+      members: [...owner.members, { _tag: "ip", range: "203.0.113.0/24" }],
+    };
+    const circles = new Map(state.circles).set("owner", withOffice);
+    expect(decide({ ...state, circles }, { ...person("stranger@example.com"), ip: "203.0.113.9" })).toBe(
+      "deny",
+    );
   });
 
   it("lets only people through during a pause (K-1504)", () => {

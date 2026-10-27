@@ -1,10 +1,9 @@
 import { useState } from "preact/hooks";
 import type { MachineView } from "../core/protocol.ts";
+import { RESERVED_SITE_NAMES } from "../core/library.ts";
 import { Toggle } from "./Circle.tsx";
 import { callApi } from "./store.ts";
 
-/** Names that kitshn itself uses on the zone (K-1003, K-1102); a live site cannot take them. */
-const RESERVED = new Set(["pages", "files", "kit", "www"]);
 
 const isName = (name: string) =>
   name.length > 0 &&
@@ -15,7 +14,8 @@ const isName = (name: string) =>
 
 /** A port, or an absolute socket path that a shell can take in single quotes. */
 function targetError(target: string): string | null {
-  if (target.startsWith("/")) return target.includes("'") ? "A socket path cannot have a quote." : null;
+  if (target.startsWith("/"))
+    return target.includes("'") || target.includes(" ") ? "A socket path cannot have a quote or a space." : null;
   const port = Number(target);
   return Number.isInteger(port) && port > 0 && port < 65536 && String(port) === target
     ? null
@@ -25,14 +25,15 @@ function targetError(target: string): string | null {
 const RECIPE = `import { defineApp } from "kitshn";
 
 export default defineApp({
-  static: { output: "dist" },
+  // The build runs in GitHub Actions; leave it out when the repo has the site files already.
+  static: { build: "npm ci && npm run build", output: "dist" },
   deploy: [
     { on: "push", branch: "main", name: "prod" },
     { on: "pull_request", name: "pr-{pr}", ephemeral: true },
   ],
 });`;
 
-const WORKFLOW = `name: kitshn
+const workflow = (server: string) => `name: kitshn
 on:
   push:
     branches: [main]
@@ -43,7 +44,9 @@ permissions:
   id-token: write
 jobs:
   kitshn:
-    uses: Yarden-zamir/kitshn/.github/workflows/kitshn2-deploy.yml@main`;
+    uses: Yarden-zamir/kitshn/.github/workflows/kitshn2-deploy.yml@main
+    with:
+      server: ${server}`;
 
 function Snippet(props: { file: string; text: string }) {
   return (
@@ -68,7 +71,9 @@ export function AddSite(props: {
 }) {
   const [kind, setKind] = useState<"live" | "static">("live");
   const online = props.machines.filter((view) => view.online);
-  const [machineId, setMachineId] = useState(online[0]?.machine.id ?? "");
+  const [picked, setPicked] = useState("");
+  // A machine that comes online while the dialog is open becomes the default.
+  const machineId = online.some((view) => view.machine.id === picked) ? picked : (online[0]?.machine.id ?? "");
   const [target, setTarget] = useState("");
   const [name, setName] = useState("");
   const [dev, setDev] = useState(false);
@@ -79,12 +84,13 @@ export function AddSite(props: {
       ? "Pick a machine that is online."
       : !isName(name)
         ? "A name has 1 to 40 lowercase letters, digits and dashes."
-        : RESERVED.has(name)
+        : RESERVED_SITE_NAMES.has(name)
           ? `${name}.${props.zone} belongs to kitshn itself. Pick another name.`
           : targetError(target.trim());
     if (problem) return setError(problem);
     setBusy(true);
-    const script = `"\${KITSHN:-kitshn}" expose '${target.trim()}' --name '${name}'${dev ? " --dev" : ""}`;
+    // An older daemon has no $KITSHN; the join script installs the binary in ~/.local/bin.
+    const script = `"\${KITSHN:-$HOME/.local/bin/kitshn}" expose '${target.trim()}' --name '${name}'${dev ? " --dev" : ""}`;
     const result = await callApi<{ id: number }>("POST", "/api/jobs", {
       machineId,
       command: { kind: "shell", script },
@@ -125,7 +131,7 @@ export function AddSite(props: {
               ) : (
                 <select
                   value={machineId}
-                  onChange={(event) => setMachineId((event.target as HTMLSelectElement).value)}
+                  onChange={(event) => setPicked((event.target as HTMLSelectElement).value)}
                 >
                   {online.map((view) => (
                     <option key={view.machine.id} value={view.machine.id}>
@@ -182,7 +188,7 @@ export function AddSite(props: {
               in the tray, private, until you place it in a circle.
             </p>
             <Snippet file="kitshn.config.ts" text={RECIPE} />
-            <Snippet file=".github/workflows/kitshn.yml" text={WORKFLOW} />
+            <Snippet file=".github/workflows/kitshn.yml" text={workflow(location.origin)} />
             <div class="row">
               <button type="button" class="btn" onClick={props.onClose}>
                 Done

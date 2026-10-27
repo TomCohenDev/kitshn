@@ -2064,7 +2064,7 @@ export class Kitshn extends DurableObject<Env> {
       return refuse("X-Kitshn-Created-At is not a time in ms.");
     // A file dropped on the map lands where it was dropped, and so in the circles there (K-204).
     const [x, y] = [header("x-kitshn-x"), header("x-kitshn-y")].map((value) =>
-      value === null ? null : Number(value),
+      value === null ? null : value === "" ? Number.NaN : Number(value),
     );
     const place =
       x === null || y === null || x === undefined || y === undefined
@@ -2108,7 +2108,7 @@ export class Kitshn extends DurableObject<Env> {
       group: null,
       machine: null,
     };
-    this.ctx.storage.transactionSync(() => {
+    const revision = this.ctx.storage.transactionSync(() => {
       this.sql(
         `INSERT INTO library (id, kind, title, file_name, thread, machine, size, content_type, created_at, source)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -2124,15 +2124,15 @@ export class Kitshn extends DurableObject<Env> {
         source,
       );
       this.putResource(resource);
-      if (place) {
-        const changes: Array<Change> = [{ _tag: "place", id: item.id, before: null, after: place }];
-        this.persist(changes);
-        this.insertRevision(caller.actor, `Added the ${kind} ${title} on the map`, changes, null);
-      } else this.insertRevision(caller.actor, `Added the ${kind} ${title} to the tray`, [], null);
+      if (!place) return this.insertRevision(caller.actor, `Added the ${kind} ${title} to the tray`, [], null);
+      // The UI asks before a drop makes a card public (K-210); an agent tool must ask the same way (K-715).
+      const changes: Array<Change> = [{ _tag: "place", id: item.id, before: null, after: place }];
+      this.persist(changes);
+      return this.insertRevision(caller.actor, `Added the ${kind} ${title} on the map`, changes, null);
     });
     this.load();
     this.broadcast();
-    return Response.json({ id: item.id, address: resource.addresses[0] }, { status: 201 });
+    return Response.json({ id: item.id, address: resource.addresses[0], revision }, { status: 201 });
   }
 
   /**

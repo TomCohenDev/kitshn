@@ -251,7 +251,8 @@ function runJob(command: Command): Promise<{ ok: boolean; exitCode: number | nul
     const child = spawn("/bin/sh", ["-c", command.script], {
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
-      env: { ...process.env, KITSHN: process.execPath },
+      // From source, execPath is bun itself, not kitshn.
+      env: VERSION === "dev" ? process.env : { ...process.env, KITSHN: process.execPath },
     });
     if (child.pid) runningGroups.add(child.pid);
     const add = (chunk: Buffer) => {

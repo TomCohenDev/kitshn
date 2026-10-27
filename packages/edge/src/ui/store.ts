@@ -129,9 +129,11 @@ export async function callApi<T>(
 }
 
 /** The JSON answer of an upload, or null when it is not JSON, for example an Access login page. */
-function parseAnswer(text: string): { id?: string; address?: string; error?: string } | null {
+type Answer = { id?: string; address?: string; revision?: number; error?: string };
+
+function parseAnswer(text: string): Answer | null {
   try {
-    return JSON.parse(text) as { id?: string; address?: string; error?: string };
+    return JSON.parse(text) as Answer;
   } catch {
     return null;
   }
@@ -146,7 +148,7 @@ export function upload(
   file: File,
   at: { readonly x: number; readonly y: number } | null = null,
   onProgress: (fraction: number) => void = () => undefined,
-): Promise<{ id: string; address: string } | { error: string }> {
+): Promise<{ id: string; address: string; revision: number } | { error: string }> {
   const lower = file.name.toLowerCase();
   const extension = [".html", ".htm"].find((ending) => lower.endsWith(ending));
   const name = extension ? file.name.slice(0, -extension.length) : file.name;
@@ -163,8 +165,8 @@ export function upload(
     xhr.onerror = () => resolve({ error: `kitshn is not reachable for ${file.name}.` });
     xhr.onload = () => {
       const data = parseAnswer(xhr.responseText);
-      if (xhr.status >= 200 && xhr.status < 300 && data?.id && data.address)
-        resolve({ id: data.id, address: data.address });
+      if (xhr.status >= 200 && xhr.status < 300 && data?.id && data.address && typeof data.revision === "number")
+        resolve({ id: data.id, address: data.address, revision: data.revision });
       else resolve({ error: data?.error ?? `kitshn answered ${xhr.status} for ${file.name}.` });
     };
     xhr.send(file);

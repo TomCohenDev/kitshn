@@ -50,6 +50,8 @@ interface Toast {
   readonly text: string;
   readonly error: boolean;
   readonly undo: number | null;
+  /** More revisions that the same Undo takes back after `undo`, newest first (a drop of several files). */
+  readonly alsoUndo?: ReadonlyArray<number>;
 }
 
 const loadView = (): View => {
@@ -122,11 +124,19 @@ export function App() {
         setSelection({ cards: new Set(), circle: null });
       }
     };
+    // A file dropped outside the map would make the browser open it and leave kitshn.
+    const keepFiles = (event: DragEvent) => {
+      if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
+    };
     addEventListener("hashchange", onHash);
     addEventListener("keydown", onKey);
+    addEventListener("dragover", keepFiles);
+    addEventListener("drop", keepFiles);
     return () => {
       removeEventListener("hashchange", onHash);
       removeEventListener("keydown", onKey);
+      removeEventListener("dragover", keepFiles);
+      removeEventListener("drop", keepFiles);
     };
   }, []);
 
@@ -149,48 +159,50 @@ export function App() {
   const uploadFiles = async (files: Array<File>, at: Point | null) => {
     const tooBig = files.filter((file) => file.size > MAX_UPLOAD_BYTES);
     const fitting = files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
-    if (tooBig.length > 0) {
-      showToast({
-        text: `${tooBig.map((file) => file.name).join(", ")}: kitshn takes at most 100 MB a file.`,
-        error: true,
-        undo: null,
-      });
+    const refused =
+      tooBig.length > 0 ? `${tooBig.map((file) => file.name).join(", ")}: kitshn takes at most 100 MB a file.` : "";
+    if (fitting.length === 0 || !state) {
+      if (refused) showToast({ text: refused, error: true, undo: null });
+      return;
     }
-    if (fitting.length === 0 || !state) return;
-    const publicHere = at
-      ? [...state.circles.values()].filter((circle) => isPublicCircle(circle) && insideCircle(at, circle))
-      : [];
+    // Every card lands in exactly the circles of the drop point, also when several fan out (K-204).
+    const circles = [...state.circles.values()];
+    const wanted = new Set(at ? circles.filter((circle) => insideCircle(at, circle)).map((circle) => circle.id) : []);
+    const publicHere = circles.filter((circle) => wanted.has(circle.id) && isPublicCircle(circle));
     if (publicHere.length > 0) {
       const what = fitting.length === 1 ? fitting[0]?.name : plural(fitting.length, "file");
       const where = publicHere.map((circle) => circle.name).join(", ");
       if (!(await ask(`This makes ${what} public in ${where}. Anyone with the address can open it.`))) return;
     }
-    const added: Array<string> = [];
+    const added: Array<{ id: string; revision: number }> = [];
     const errors: Array<string> = [];
     for (const [index, file] of fitting.entries()) {
-      // Several files go down from the drop point, one card height apart, so each card stays visible.
-      const point = at ? { x: at.x + (index % 2) * 30, y: at.y + index * 90 } : null;
+      const spot = at ? { x: at.x + (index % 2) * 30, y: at.y + index * 90 } : null;
+      const point = spot && at ? (placeInside(state, spot, wanted) ?? at) : null;
       const step = `${index + 1} of ${fitting.length}: ${file.name}`;
       setProgress(`Uploading ${step}`);
       const result = await upload(file, point, (fraction) =>
         setProgress(`Uploading ${step} · ${Math.round(fraction * 100)}%`),
       );
       if ("error" in result) errors.push(result.error);
-      else added.push(result.id);
+      else added.push(result);
     }
     setProgress(null);
-    if (added.length > 0) setSelection({ cards: new Set(added), circle: null });
-    showToast(
-      errors.length > 0
-        ? { text: errors.join(" "), error: true, undo: null }
-        : {
-            text: at
-              ? `Added ${plural(added.length, "card")} where you dropped them.`
-              : `Uploaded ${plural(added.length, "file")}. They wait in the tray, private.`,
-            error: false,
-            undo: null,
-          },
-    );
+    if (added.length > 0) setSelection({ cards: new Set(added.map((item) => item.id)), circle: null });
+    const done =
+      added.length === 0
+        ? ""
+        : at
+          ? `Added ${plural(added.length, "card")} where you dropped them.`
+          : `Uploaded ${plural(added.length, "file")}. They wait in the tray, private.`;
+    // K-503: a drop changes shares, so one Undo takes back the whole drop, newest first.
+    const [last, ...earlier] = at ? added.map((item) => item.revision).reverse() : [];
+    showToast({
+      text: [done, ...errors, refused].filter(Boolean).join(" "),
+      error: errors.length > 0 || refused !== "",
+      undo: last ?? null,
+      alsoUndo: earlier,
+    });
   };
 
   /** Opens the circle editor with its Add member input ready. */
@@ -624,7 +636,10 @@ export function App() {
             history: () => (location.hash = "history"),
             addMachine: () => setAddingMachine(true),
             addSite: () => setAddingSite(true),
-            upload: () => uploadInput.current?.click(),
+            upload: () => {
+              location.hash = "map";
+              setTimeout(() => uploadInput.current?.click());
+            },
             addMember: addMemberTo,
           }}
         />
@@ -651,9 +666,11 @@ export function App() {
             <button
               class="btn primary"
               onClick={() => {
-                const revision = toast.undo;
+                const revisions = [...(toast.undo === null ? [] : [toast.undo]), ...(toast.alsoUndo ?? [])];
                 setToast(null);
-                if (revision !== null) void undo(revision);
+                void (async () => {
+                  for (const revision of revisions) await undo(revision);
+                })();
               }}
             >
               Undo

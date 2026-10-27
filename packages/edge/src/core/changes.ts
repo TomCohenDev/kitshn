@@ -293,7 +293,11 @@ export const describeDiff = (diff: ShareDiff) =>
 
 export function summarize(before: State, after: State, changes: ReadonlyArray<Change>): string {
   const pause = changes.find((change) => change._tag === "pause");
-  if (pause) return pause.after ? "Paused all shares (K-1504)" : "Resumed all shares";
+  if (pause) {
+    if (pause.after === null) return "Resumed all shares";
+    if (pause.after === "keep-public") return "Paused all shares except public sites, apps, pages and files (K-1504)";
+    return pause.before ? "Closed public sites too: lockdown (K-1504)" : "Paused all shares: lockdown (K-1504)";
+  }
   const diffs = shareDiff(before, after);
   if (diffs.length > 0) {
     const shown = diffs.slice(0, 3).map(describeDiff).join("; ");

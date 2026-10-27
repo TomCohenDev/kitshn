@@ -4,7 +4,7 @@ import { Toggle } from "./Circle.tsx";
 /** K-1504: what one press of the emergency pause stops, in the order the owner reads it. */
 const STOPS = [
   "Every share that is not public closes, except the Owner circle's people on the kitshn admin: sites, Compose apps, live sites, pages and files.",
-  "Devices, agent keys and machines lose every share, so agent keys stop moving, deploying and running jobs.",
+  "Devices, agent keys and machines lose every share that is not public, so agent keys stop moving, deploying and running jobs.",
   "New deploys from GitHub wait until Resume.",
   "Agents in T3 Code get “stop all agents” once the T3 provider is on (milestone 5).",
 ] as const;

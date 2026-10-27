@@ -101,6 +101,15 @@ export interface State {
 
 export type PauseMode = "keep-public" | "lockdown";
 
+/** K-1504: the stored pause; any value other than empty or "keep-public" fails closed as a lockdown. */
+export function pauseModeOf(stored: string | null): PauseMode | null {
+  if (stored === null || stored === "" || stored === "false") return null;
+  return stored === "keep-public" ? "keep-public" : "lockdown";
+}
+
+/** K-1504: the kinds whose public shares a pause keeps open; machines, repos and the admin always close. */
+const KEPT_PUBLIC: ReadonlySet<ResourceKind> = new Set(["site.static", "site.worker", "site.compose", "site.live", "page", "file"]);
+
 export const levelRank = (level: Level) => LEVELS.indexOf(level);
 
 /** K-206: the highest level of the kind that is not above the wanted level, or null for none. */
@@ -150,7 +159,12 @@ export function activeShares(state: State, resource: Resource, now: number): Arr
     const shareEnds = state.shareSettings.get(shareKey(resource.id, share.circle.id))?.endsAt ?? null;
     if (shareEnds !== null && shareEnds <= now) return false;
     if (!state.paused || (resource.id === ADMIN_RESOURCE_ID && share.circle.id === OWNER_CIRCLE_ID)) return true;
-    return state.paused === "keep-public" && isPublicCircle(share.circle) && share.circle.match === "any";
+    return (
+      state.paused === "keep-public" &&
+      KEPT_PUBLIC.has(resource.kind) &&
+      isPublicCircle(share.circle) &&
+      share.circle.match === "any"
+    );
   });
 }
 

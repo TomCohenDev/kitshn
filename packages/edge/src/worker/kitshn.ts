@@ -27,7 +27,7 @@ import {
   type Point,
   type Resource,
   type ShareSetting,
-  type PauseMode,
+  pauseModeOf,
   type Stack,
   type State,
   circlesHolding,
@@ -386,7 +386,8 @@ export class Kitshn extends DurableObject<Env> {
         : `Undo #${undoes}: ${summarize(before, after, changes)}`;
     const id = this.ctx.storage.transactionSync(() => {
       this.persist(changes);
-      if (changes.some((change) => change._tag === "pause" && change.after)) {
+      // A switch to a lockdown keeps who paused first and when.
+      if (changes.some((change) => change._tag === "pause" && change.after && !change.before)) {
         this.setMeta("paused_by", JSON.stringify(actor));
         this.setMeta("paused_at", String(Date.now()));
         // K-1504: jobs that devices and agent keys queued do not run after Resume.
@@ -2994,11 +2995,6 @@ const libraryItem = (row: LibraryRow): LibraryItem => ({
 const deployObject = (deployId: string, file: string) => `deploys/${deployId}/${file}`;
 
 /** The requester of a job that kitshn makes itself, such as a deploy (K-614). */
-/** K-1504: the stored pause; any value other than empty or "keep-public" fails closed as a lockdown. */
-function pauseModeOf(stored: string | null): PauseMode | null {
-  if (stored === null || stored === "" || stored === "false") return null;
-  return stored === "keep-public" ? "keep-public" : "lockdown";
-}
 
 /** K-1504: who paused and when, from the meta rows that a pause writes. */
 function parsePausedBy(actor: string | null, at: string | null): { readonly actor: Actor; readonly at: number } | null {

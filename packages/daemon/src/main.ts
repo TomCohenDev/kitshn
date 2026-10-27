@@ -247,9 +247,9 @@ function runProgram(
       env: options.env ?? process.env,
     });
     if (child.pid) runningGroups.add(child.pid);
+    // The end of the output holds the error of a failed build, so a long output keeps its end.
     const add = (chunk: Buffer) => {
-      if (output.length < OUTPUT_LIMIT)
-        output += chunk.toString("utf8").slice(0, OUTPUT_LIMIT - output.length);
+      output = (output + chunk.toString("utf8")).slice(-OUTPUT_LIMIT);
     };
     child.stdout?.on("data", add);
     child.stderr?.on("data", add);
@@ -330,8 +330,12 @@ async function composeUp(command: Extract<Command, { kind: "compose" }>): Promis
     };
     for (const folder of [env.KITSHN_DATA_DIR, env.KITSHN_LOG_DIR]) mkdirSync(folder, { recursive: true });
     // KitSHn 1 apps join this network; it exists on a KitSHn 1 host and is made elsewhere.
-    if (!(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok)
-      await step("make the kitshn-edge network", "docker", ["network", "create", "kitshn-edge"]);
+    if (!(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok) {
+      // Another deploy may make it at the same moment; only a network that is still missing is an error.
+      const made = await runProgram("docker", ["network", "create", "kitshn-edge"]);
+      if (!made.ok && !(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok)
+        throw new Error(`docker network create kitshn-edge failed: ${made.output}`);
+    }
     await step(
       "docker compose up",
       "nice",
@@ -342,8 +346,7 @@ async function composeUp(command: Extract<Command, { kind: "compose" }>): Promis
         "compose",
         "-p",
         command.project,
-        "-f",
-        command.file,
+        ...(command.file ? ["-f", command.file] : []),
         "--env-file",
         join(dir, "params.env"),
         "up",
@@ -391,15 +394,24 @@ async function composeDown(command: Extract<Command, { kind: "compose-down" }>):
       "--remove-orphans",
       ...(command.removeData ? ["--volumes", "--rmi", "local"] : []),
     ],
-    { timeoutMs: COMPOSE_TIMEOUT_MS },
+    // Compose reads the app's own files, not a compose.yml in the daemon's folder.
+    { timeoutMs: COMPOSE_TIMEOUT_MS, cwd: existsSync(join(dir, "src")) ? join(dir, "src") : paths.data },
   );
   if (command.removeData) rmSync(dir, { recursive: true, force: true });
   return result;
 }
 
+/** One Compose job per app at a time: a teardown never runs during the build of the same app. */
+const appQueues = new Map<string, Promise<unknown>>();
+function oneAtATime(project: string, work: () => Promise<JobOutcome>): Promise<JobOutcome> {
+  const next = (appQueues.get(project) ?? Promise.resolve()).then(work, work);
+  appQueues.set(project, next);
+  return next;
+}
+
 function runJob(command: Command): Promise<JobOutcome> {
-  if (command.kind === "compose") return composeUp(command);
-  if (command.kind === "compose-down") return composeDown(command);
+  if (command.kind === "compose") return oneAtATime(command.project, () => composeUp(command));
+  if (command.kind === "compose-down") return oneAtATime(command.project, () => composeDown(command));
   if (command.kind === "diagnostics") {
     const text = [
       `kitshn ${VERSION}`,

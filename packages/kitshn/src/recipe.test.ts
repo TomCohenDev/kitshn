@@ -87,7 +87,9 @@ describe("plan (K-807, K-901, K-904)", () => {
       static: { output: "site" },
       deploy: [{ on: "pull_request", name: "prod", ephemeral: true }],
     });
-    expect(plan(sneaky, "me/x", { name: "pull_request", branch: "x", pr: 3, action: "closed" }, "example.com")).toMatchObject({
+    expect(
+      plan(sneaky, "me/x", { name: "pull_request", branch: "x", pr: 3, action: "closed" }, "example.com"),
+    ).toMatchObject({
       kind: "error",
     });
   });

@@ -45,11 +45,21 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+      # Only KITSHN_* names leave this step, in a file; the build commands of the next step see no secrets.
+      - name: kitshn params
+        env:
+          SECRETS: ${{ toJSON(secrets) }}
+          VARS: ${{ toJSON(vars) }}
+        run: |
+          umask 077
+          node -e '
+            const pick = (text) => Object.fromEntries(Object.entries(JSON.parse(text || "{}")).filter(([key]) => key.startsWith("KITSHN_")));
+            require("fs").writeFileSync(process.argv[1], JSON.stringify({ secrets: pick(process.env.SECRETS), vars: pick(process.env.VARS) }));
+          ' "$RUNNER_TEMP/kitshn-params.json"
       - name: kitshn deploy
         env:
           SERVER: ${{ inputs.server }}
-          KITSHN_SECRETS_JSON: ${{ toJSON(secrets) }}
-          KITSHN_VARS_JSON: ${{ toJSON(vars) }}
+          KITSHN_PARAMS_JSON: ${{ runner.temp }}/kitshn-params.json
         # K-617: the CLI of the release that the kitshn server names, checked against its SHA256SUMS.
         run: |
           version=$(curl -fsSL "$SERVER/deploy/version")

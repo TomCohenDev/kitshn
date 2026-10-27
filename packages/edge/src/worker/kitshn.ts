@@ -728,13 +728,20 @@ export class Kitshn extends DurableObject<Env> {
          AND (state = 'sent' OR (state = 'failed' AND output = '${OFFLINE_OUTPUT}'))`,
         result.ok === true ? "done" : "failed",
         typeof result.exitCode === "number" ? result.exitCode : null,
-        String(result.output ?? "").slice(0, OUTPUT_LIMIT),
+        // The end of the output holds the error of a failed build.
+        String(result.output ?? "").slice(-OUTPUT_LIMIT),
         message.id,
         attachment.machineId,
       );
       // K-812: the source and params of a Compose deploy live only as long as its job.
       const [job] = this.sql<{ command: string }>("SELECT command FROM jobs WHERE id = ?", message.id);
       const command = job ? (JSON.parse(job.command) as Command) : null;
+      if (command?.kind === "compose")
+        this.sql(
+          "UPDATE deploys SET state = ? WHERE job_id = ? AND state = 'running'",
+          result.ok === true ? "done" : "failed",
+          message.id,
+        );
       if (command?.kind === "compose" && this.env.BUCKET) {
         void this.env.BUCKET.delete([
           deployObject(command.deployId, "source.tgz"),
@@ -982,8 +989,11 @@ export class Kitshn extends DurableObject<Env> {
       Date.now(),
     );
     for (const job of queued) {
-      const visitor = JSON.parse(job.visitor) as Visitor;
-      const allowed = new Set([...online].filter((id) => this.canControl(visitor, id)));
+      const visitor = JSON.parse(job.visitor) as Visitor & { readonly kitshn?: true };
+      // A job that kitshn makes itself (a deploy) needs no member with control (K-614).
+      const allowed = new Set(
+        visitor.kitshn ? online : [...online].filter((id) => this.canControl(visitor, id)),
+      );
       const machine =
         job.machine_id !== null
           ? allowed.has(job.machine_id)
@@ -1761,14 +1771,15 @@ export class Kitshn extends DurableObject<Env> {
       else if (result.kind === "deploy") {
         const labels = compose.runsOn ?? [];
         const pick = [...this.state.machines.values()]
-          .filter((machine) => labels.every((label) => machine.labels.includes(label)))
+          // Only a machine that the owner labels "deploy" runs the apps of repos (K-610).
+          .filter((machine) => ["deploy", ...labels].every((label) => machine.labels.includes(label)))
           .filter((machine) => this.machineView(machine).status?.capabilities?.includes("compose"))
           .sort((a, b) => a.order - b.order)
           .find((machine) => this.presence.get(machine.id)?.online);
         if (!pick) {
           return Response.json(
             {
-              error: `No online machine with a Compose-ready daemon has the labels ${labels.join(", ") || "(none)"}. Update the daemon or start the machine.`,
+              error: `No online machine with a Compose-ready daemon has the labels ${["deploy", ...labels].join(", ")}. Label a machine "deploy", update its daemon, or start it.`,
             },
             { status: 409 },
           );
@@ -1860,8 +1871,8 @@ export class Kitshn extends DurableObject<Env> {
     }
     const deployId = crypto.randomUUID();
     this.sql(
-      `INSERT INTO deploys (id, repo, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?)`,
+      `INSERT INTO deploys (id, repo, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?)`,
       deployId,
       deployer.repo,
       result.environment,
@@ -1875,6 +1886,7 @@ export class Kitshn extends DurableObject<Env> {
       event.name === "push" ? event.branch : "",
       compose ? "compose" : "static",
       machineId,
+      compose?.file ?? null,
     );
     return Response.json({ deployId, plan: result });
   }
@@ -1951,7 +1963,7 @@ export class Kitshn extends DurableObject<Env> {
       return fail(410, "This deploy expired or started.");
     const bucket = this.env.BUCKET;
     if (!bucket || !request.body) return fail(503, "R2 is off, or the request has no body.");
-    const limit = path === "/deploy/archive" ? 200 * 1024 * 1024 : 64 * 1024;
+    const limit = path === "/deploy/archive" ? 95 * 1024 * 1024 : 256 * 1024;
     const size = Number(request.headers.get("content-length"));
     if (!Number.isInteger(size) || size < 0) return fail(411, "Send a Content-Length.");
     if (size > limit) return fail(413, `${path} takes at most ${limit} bytes.`);
@@ -2027,13 +2039,13 @@ export class Kitshn extends DurableObject<Env> {
       name: row.address.slice(0, -this.env.KITSHN_ZONE.length - 1),
       environment: row.environment,
       repo: row.repo,
-      file: "compose.yml",
+      file: row.compose_file,
     };
     const now = Date.now();
     const jobId = this.ctx.storage.transactionSync(() => {
       const [inserted] = this.sql<{ id: number }>(
         `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
-         VALUES (?, '[]', ?, 'queued', ?, ?, ?, '{}', NULL, '') RETURNING id`,
+         VALUES (?, '[]', ?, 'queued', ?, ?, ?, '${KITSHN_JOB}', NULL, '') RETURNING id`,
         machine.id,
         JSON.stringify(command),
         now,
@@ -2058,10 +2070,12 @@ export class Kitshn extends DurableObject<Env> {
       "SELECT state, output, exit_code FROM jobs WHERE id = ?",
       row.job_id,
     );
+    // A dropped connection fails the job only for now: kitshn still takes its real result (OFFLINE_OUTPUT).
+    const waiting = job?.state === "failed" && job.output === OFFLINE_OUTPUT;
     const state =
       job?.state === "done"
         ? "done"
-        : job?.state === "failed" || job?.state === "expired"
+        : (job?.state === "failed" && !waiting) || job?.state === "expired"
           ? job.state
           : "running";
     if (state !== "running" && row.state === "running")
@@ -2079,7 +2093,7 @@ export class Kitshn extends DurableObject<Env> {
       if (machineId)
         this.sql(
           `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
-           VALUES (?, '[]', ?, 'queued', ?, ?, ?, '{}', NULL, '')`,
+           VALUES (?, '[]', ?, 'queued', ?, ?, ?, '${KITSHN_JOB}', NULL, '')`,
           machineId,
           JSON.stringify({
             kind: "compose-down",
@@ -2586,6 +2600,7 @@ interface DeployRow extends Record<string, SqlStorageValue> {
   app: "static" | "compose";
   machine_id: string | null;
   job_id: number | null;
+  compose_file: string | null;
 }
 
 /** A failed tunnel, DNS or route write tries again after this time. */
@@ -2628,3 +2643,6 @@ const libraryItem = (row: LibraryRow): LibraryItem => ({
 
 /** The R2 key of a file of a Compose deploy (K-812). */
 const deployObject = (deployId: string, file: string) => `deploys/${deployId}/${file}`;
+
+/** The requester of a job that kitshn makes itself, such as a deploy (K-614). */
+const KITSHN_JOB = JSON.stringify({ email: null, clientId: null, ip: null, kitshn: true });

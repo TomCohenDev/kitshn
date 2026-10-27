@@ -54,6 +54,7 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "ALTER TABLE deploys ADD COLUMN app TEXT NOT NULL DEFAULT 'static'",
     "ALTER TABLE deploys ADD COLUMN machine_id TEXT",
     "ALTER TABLE deploys ADD COLUMN job_id INTEGER",
+    "ALTER TABLE deploys ADD COLUMN compose_file TEXT",
   ],
 ];
 

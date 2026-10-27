@@ -106,7 +106,10 @@ export function plan(recipe: Recipe, repo: string, event: DeployEvent, zone: str
   }
   // K-901: one level under the zone, so the free Universal SSL certificate covers it.
   if (!LABEL.test(label))
-    return { kind: "error", reason: `The address ${label}.${zone} must be one name of at most 63 letters, digits or dashes under ${zone} (K-901).` };
+    return {
+      kind: "error",
+      reason: `The address ${label}.${zone} must be one name of at most 63 letters, digits or dashes under ${zone} (K-901).`,
+    };
   const ephemeral = entry.ephemeral === true;
   const closing = event.name === "pull_request" && event.action === "closed";
   if (closing && !ephemeral)

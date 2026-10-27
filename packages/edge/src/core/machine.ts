@@ -50,7 +50,8 @@ export type Command =
       readonly name: string;
       readonly environment: string;
       readonly repo: string;
-      readonly file: string;
+      /** The Compose file of the recipe; null lets Compose find `compose.yml` and its override file. */
+      readonly file: string | null;
     }
   /** K-904: stop a Compose app and stop exposing it; a preview also loses its data. */
   | {

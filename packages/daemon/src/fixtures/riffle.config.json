@@ -1,0 +1,105 @@
+{
+  "name": "riffle-prod",
+  "networks": {
+    "default": {
+      "name": "riffle-prod_default",
+      "ipam": {}
+    }
+  },
+  "services": {
+    "app": {
+      "build": {
+        "context": "/apps/riffle-prod/src",
+        "dockerfile": "Dockerfile"
+      },
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "KITSHN_DATA_DIR": "placeholder",
+        "KITSHN_DEFAULT_SOCKET": "placeholder",
+        "KITSHN_DEPLOYMENT": "placeholder",
+        "KITSHN_ENVIRONMENT": "placeholder",
+        "KITSHN_LOG_DIR": "placeholder",
+        "KITSHN_RECIPE": "placeholder",
+        "KITSHN_SOCKET_DIR": "placeholder",
+        "RIFFLE_AUTH_ENABLED": "placeholder",
+        "RIFFLE_AUTO_REFRESH": "placeholder",
+        "RIFFLE_CORS_ORIGINS": "placeholder",
+        "RIFFLE_DATA_DIR": "placeholder",
+        "RIFFLE_DB": "placeholder",
+        "RIFFLE_OAUTH2_PROXY_URL": "placeholder",
+        "RIFFLE_PUBLIC_ORIGIN": "placeholder",
+        "RIFFLE_REFRESH_INTERVAL_SECONDS": "placeholder",
+        "RIFFLE_REFRESH_WINDOW": "placeholder",
+        "RIFFLE_SEED_DEFAULT_SOURCES": "placeholder"
+      },
+      "expose": [
+        "8000"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"
+        ],
+        "timeout": "10s",
+        "interval": "30s",
+        "retries": 5
+      },
+      "networks": {
+        "default": null
+      },
+      "scale": 1,
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/apps/riffle-prod/data/data",
+          "target": "/data",
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ]
+    },
+    "socket-proxy": {
+      "command": [
+        "UNIX-LISTEN:/apps/riffle-prod/sockets/default.sock,fork,unlink-early,mode=666",
+        "TCP:app:8000"
+      ],
+      "depends_on": {
+        "app": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "test",
+          "-S",
+          "/apps/riffle-prod/sockets/default.sock"
+        ],
+        "timeout": "5s",
+        "interval": "10s",
+        "retries": 5
+      },
+      "image": "alpine/socat:latest",
+      "networks": {
+        "default": null
+      },
+      "pull_policy": "always",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/apps/riffle-prod/sockets",
+          "target": "/apps/riffle-prod/sockets",
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ]
+    }
+  }
+}

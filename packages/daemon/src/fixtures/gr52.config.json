@@ -1,0 +1,98 @@
+{
+  "name": "gr52-prod",
+  "networks": {
+    "default": {
+      "name": "gr52-prod_default",
+      "ipam": {}
+    },
+    "kitshn-edge": {
+      "name": "kitshn-edge",
+      "ipam": {},
+      "external": true
+    }
+  },
+  "services": {
+    "site": {
+      "build": {
+        "context": "/apps/gr52-prod/src",
+        "dockerfile": "Dockerfile"
+      },
+      "command": null,
+      "depends_on": {
+        "uploader": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "KITSHN_DEFAULT_SOCKET": "placeholder",
+        "KITSHN_DEPLOYMENT": "placeholder",
+        "KITSHN_ENVIRONMENT": "placeholder",
+        "KITSHN_RECIPE": "placeholder",
+        "KITSHN_SOCKET_DIR": "placeholder"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "test",
+          "-S",
+          "/apps/gr52-prod/sockets/default.sock"
+        ],
+        "timeout": "5s",
+        "interval": "30s",
+        "retries": 5,
+        "start_period": "10s"
+      },
+      "networks": {
+        "default": null,
+        "kitshn-edge": null
+      },
+      "pull_policy": "build",
+      "restart": "unless-stopped",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/apps/gr52-prod/sockets",
+          "target": "/apps/gr52-prod/sockets",
+          "bind": {
+            "create_host_path": true
+          }
+        },
+        {
+          "type": "volume",
+          "source": "logdata",
+          "target": "/data",
+          "read_only": true,
+          "volume": {}
+        }
+      ]
+    },
+    "uploader": {
+      "build": {
+        "context": "/apps/gr52-prod/src/uploader",
+        "dockerfile": "Dockerfile"
+      },
+      "command": null,
+      "entrypoint": null,
+      "networks": {
+        "default": null
+      },
+      "pull_policy": "build",
+      "restart": "unless-stopped",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "logdata",
+          "target": "/data",
+          "volume": {}
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "logdata": {
+      "name": "gr52-prod_logdata"
+    }
+  }
+}

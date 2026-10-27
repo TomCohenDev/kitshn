@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -296,7 +297,9 @@ async function deployFile(deployId: string, file: string): Promise<Buffer> {
  * unchanged: the app listens on `$KITSHN_DEFAULT_SOCKET`. Then the socket becomes a live site under the
  * name of the address, and the tunnel sends the address there.
  */
-async function composeUp(command: Extract<Command, { kind: "compose" }>): Promise<JobOutcome> {
+async function composeUp(
+  command: Extract<Command, { kind: "compose" | "compose-redeploy" }>,
+): Promise<JobOutcome> {
   const dir = join(paths.data, "apps", command.project);
   const source = join(dir, "src");
   const sockets = join(dir, "sockets");
@@ -310,12 +313,20 @@ async function composeUp(command: Extract<Command, { kind: "compose" }>): Promis
   };
   try {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "source.tgz"), await deployFile(command.deployId, "source.tgz"));
-    writeFileSync(join(dir, "params.env"), await deployFile(command.deployId, "params.env"), { mode: 0o600 });
+    // K-718: the last build that came up stays as good.tgz with its params; a redeploy starts it again.
+    if (command.kind === "compose-redeploy") {
+      if (!existsSync(join(dir, "good.tgz")))
+        throw new Error("this machine keeps no build of the app that came up; deploy it from the repo");
+      copyFileSync(join(dir, "good.tgz"), join(dir, "source.tgz"));
+      copyFileSync(join(dir, "good.params.env"), join(dir, "params.env"));
+      chmodSync(join(dir, "params.env"), 0o600);
+    } else {
+      writeFileSync(join(dir, "source.tgz"), await deployFile(command.deployId, "source.tgz"));
+      writeFileSync(join(dir, "params.env"), await deployFile(command.deployId, "params.env"), { mode: 0o600 });
+    }
     rmSync(source, { recursive: true, force: true });
     mkdirSync(source, { recursive: true });
     await step("unpack the source", "tar", ["-xzf", join(dir, "source.tgz"), "-C", source]);
-    rmSync(join(dir, "source.tgz"), { force: true });
     // The container user may not be the daemon user; the socket directory must take its socket.
     mkdirSync(sockets, { recursive: true });
     chmodSync(sockets, 0o777);
@@ -369,6 +380,9 @@ async function composeUp(command: Extract<Command, { kind: "compose" }>): Promis
     if (typeof next === "string") throw new Error(next);
     writeSites(next);
     void checkSites();
+    renameSync(join(dir, "source.tgz"), join(dir, "good.tgz"));
+    copyFileSync(join(dir, "params.env"), join(dir, "good.params.env"));
+    chmodSync(join(dir, "good.params.env"), 0o600);
     output += `\nThe app answers on its socket; the tunnel sends ${command.name} there.\n`;
     return { ok: true, exitCode: 0, output };
   } catch (error) {
@@ -412,7 +426,8 @@ function oneAtATime(project: string, work: () => Promise<JobOutcome>): Promise<J
 }
 
 function runJob(command: Command): Promise<JobOutcome> {
-  if (command.kind === "compose") return oneAtATime(command.project, () => composeUp(command));
+  if (command.kind === "compose" || command.kind === "compose-redeploy")
+    return oneAtATime(command.project, () => composeUp(command));
   if (command.kind === "compose-down") return oneAtATime(command.project, () => composeDown(command));
   if (command.kind === "diagnostics") {
     const text = [
@@ -445,7 +460,7 @@ function report() {
   const message: DaemonMessage = {
     type: "status",
     status: {
-      capabilities: ["update", "update-gz", "compose"],
+      capabilities: ["update", "update-gz", "compose", "compose-redeploy"],
       version: VERSION,
       os: `${osPlatform()} ${release()}`,
       arch: arch(),

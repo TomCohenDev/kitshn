@@ -51,8 +51,10 @@ function githubEvent(): DeployEvent {
     const pr = payload.pull_request;
     return { name, branch: pr?.head.ref ?? "", pr: pr?.number ?? null, action: payload.action ?? null };
   }
-  if (name === "push") return { name, branch: process.env["GITHUB_REF_NAME"] ?? "", pr: null, action: null };
-  return fail(`kitshn deploys on push and pull_request, not on ${name}.`);
+  // K-718: a dispatch runs one branch's code, so it deploys as a push of that branch.
+  if (name === "push" || name === "workflow_dispatch")
+    return { name: "push", branch: process.env["GITHUB_REF_NAME"] ?? "", pr: null, action: null };
+  return fail(`kitshn deploys on push, pull_request and workflow_dispatch, not on ${name}.`);
 }
 
 async function call<T>(server: string, path: string, body: object): Promise<T> {

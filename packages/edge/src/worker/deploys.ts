@@ -38,10 +38,13 @@ export function eventOf(
   deployer: { eventName: string; branch: string; pr: number | null },
   value: unknown,
 ): (DeployEvent & { readonly claimed?: true }) | string {
-  if (deployer.eventName !== "push" && deployer.eventName !== "pull_request") {
-    return `kitshn deploys on push and pull_request, not on ${deployer.eventName}.`;
+  // K-718: a dispatch (from the map or an agent key, through the App) runs the repo's code of one branch,
+  // so it plans as a push of that branch.
+  if (deployer.eventName === "push" || deployer.eventName === "workflow_dispatch")
+    return { name: "push", branch: deployer.branch, pr: null, action: null };
+  if (deployer.eventName !== "pull_request") {
+    return `kitshn deploys on push, pull_request and workflow_dispatch, not on ${deployer.eventName}.`;
   }
-  if (deployer.eventName === "push") return { name: "push", branch: deployer.branch, pr: null, action: null };
   const action =
     typeof value === "object" && value !== null ? (value as Record<string, unknown>)["action"] : null;
   if (typeof action !== "string") return "A pull request deploy needs its action.";

@@ -43,7 +43,7 @@ import {
 import { placeInside } from "../core/place.ts";
 import type { MachineView, RevisionView, ServerMessage, Snapshot } from "../core/protocol.ts";
 import { ClientMessage } from "../core/schema.ts";
-import { agentMayRunOn, agentRefusal, cardsControlledBy, circlesOf } from "../core/agent.ts";
+import { agentDeployPlan, agentMayRunOn, agentRefusal, cardsControlledBy, circlesOf } from "../core/agent.ts";
 import { demo } from "../core/demo.ts";
 import {
   contentSecurityPolicy,
@@ -72,6 +72,7 @@ import {
 } from "./access-sync.ts";
 import type { Caller, Deployer } from "./auth.ts";
 import { CloudflareError, cloudflare } from "./cloudflare.ts";
+import { dispatchDeploy } from "./github.ts";
 import { migrate } from "./migrations.ts";
 import {
   DEPLOY_MS,
@@ -2446,7 +2447,87 @@ export class Kitshn extends DurableObject<Env> {
         return Response.json({ error: `This key sent no job ${id}.` }, { status: 404 });
       return Response.json(job);
     }
+    if (path === "/agent/deploy" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      const card = isRecord(body) && typeof body["card"] === "string" ? body["card"] : null;
+      const mode = isRecord(body) ? body["mode"] : null;
+      if (card === null || (mode !== "redeploy" && mode !== "build"))
+        return Response.json({ error: 'Send {"card": <id>, "mode": "redeploy" | "build"}.' }, { status: 400 });
+      if (!cardsControlledBy(this.state, caller.visitor, Date.now()).has(card))
+        return Response.json({ error: `This key has no control on the card "${card}".` }, { status: 403 });
+      const [row] = this.sql<DeployRow>(
+        "SELECT * FROM deploys WHERE resource_id = ? AND kind = 'deploy' AND state = 'done' ORDER BY expires_at DESC LIMIT 1",
+        card,
+      );
+      const machine = row?.machine_id ? this.state.machines.get(row.machine_id) : undefined;
+      const plan = agentDeployPlan(
+        row
+          ? {
+              app: row.app,
+              repo: row.repo,
+              branch: row.branch,
+              resourceId: row.resource_id,
+              environment: row.environment,
+              name: row.address.slice(0, -this.env.KITSHN_ZONE.length - 1),
+              composeFile: row.compose_file,
+            }
+          : null,
+        mode,
+        machine !== undefined &&
+          (this.machineView(machine).status?.capabilities?.includes("compose-redeploy") ?? false),
+      );
+      if (plan.kind === "refused") return Response.json({ error: plan.error }, { status: plan.status });
+      if (plan.kind === "build") return this.agentBuild(agent, plan.repo, plan.branch);
+      if (!machine) return Response.json({ error: "The machine of this app is gone." }, { status: 409 });
+      return this.agentRedeploy(agent, machine.id, plan.command);
+    }
     return Response.json({ error: `The agent path has no ${request.method} ${path}.` }, { status: 404 });
+  }
+
+  /** K-718: queues the start of the last build that came up; kitshn makes the job, the key reads it. */
+  private agentRedeploy(caller: Caller, machineId: string, command: Extract<Command, { kind: "compose-redeploy" }>) {
+    const now = Date.now();
+    const id = this.ctx.storage.transactionSync(() => {
+      const [inserted] = this.sql<{ id: number }>(
+        `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
+         VALUES (?, '[]', ?, 'queued', ?, ?, ?, ?, NULL, '') RETURNING id`,
+        machineId,
+        JSON.stringify(command),
+        now,
+        now + DEPLOY_MS,
+        JSON.stringify(caller.actor),
+        JSON.stringify({ ...caller.visitor, kitshn: true }),
+      );
+      this.insertRevision(caller.actor, `Redeployed the last good build of ${command.name}`, [], null);
+      return inserted?.id ?? null;
+    });
+    this.load();
+    this.deliverJobs();
+    this.broadcast();
+    void this.scheduleAlarm();
+    return Response.json({ job: id });
+  }
+
+  /** K-718, K-812: a new build runs the repo's own kitshn workflow on the environment's branch. */
+  private async agentBuild(caller: Caller, repo: string, branch: string) {
+    const appId = this.env.GITHUB_APP_ID;
+    const key = this.env.GITHUB_APP_KEY;
+    if (!appId || !key)
+      return Response.json(
+        { error: "This kitshn has no GitHub App. Run the bootstrap with KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY." },
+        { status: 503 },
+      );
+    try {
+      await dispatchDeploy({ id: appId, key }, repo, branch, AGENT_WORKFLOW);
+    } catch (error) {
+      return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
+    }
+    this.ctx.storage.transactionSync(() =>
+      this.insertRevision(caller.actor, `Started a deploy of ${repo} from ${branch}`, [], null),
+    );
+    this.load();
+    this.broadcast();
+    return Response.json({ dispatched: { repo, branch, workflow: AGENT_WORKFLOW } });
   }
 
   private libraryItems(): Array<LibraryItem> {
@@ -2799,6 +2880,8 @@ interface DeployRow extends Record<string, SqlStorageValue> {
   machine_id: string | null;
   job_id: number | null;
   compose_file: string | null;
+  /** The branch that the deploy came from (K-807). */
+  branch: string;
 }
 
 /** A failed tunnel, DNS or route write tries again after this time. */
@@ -2843,4 +2926,7 @@ const libraryItem = (row: LibraryRow): LibraryItem => ({
 const deployObject = (deployId: string, file: string) => `deploys/${deployId}/${file}`;
 
 /** The requester of a job that kitshn makes itself, such as a deploy (K-614). */
+/** K-718: the workflow file that an agent key starts in an app repo, the one that the map's recipe shows. */
+const AGENT_WORKFLOW = "kitshn.yml";
+
 const KITSHN_JOB = JSON.stringify({ email: null, clientId: null, ip: null, kitshn: true });

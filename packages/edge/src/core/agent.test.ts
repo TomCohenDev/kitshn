@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 const as = (clientId: string) => ({ email: null, clientId, ip: null });
-import { agentMayRunOn, agentRefusal, cardsControlledBy, isAgentKey } from "./agent.ts";
+import { agentDeployPlan, agentMayRunOn, agentRefusal, cardsControlledBy, isAgentKey } from "./agent.ts";
 import { type Edit, applyChanges, resolveEdits } from "./changes.ts";
 import type { Circle, Resource, State } from "./model.ts";
 import { seed } from "./seed.ts";
@@ -137,5 +137,25 @@ describe("agent keys (K-718)", () => {
       stacks: new Map([["s1", { id: "s1", name: "pair", members: ["site", "other"] }]]),
     };
     expect(check(state, [{ _tag: "place", id: "site", after: { x: 600, y: 1000 } }])).toMatch(/other/);
+  });
+  it("deploys only the repo's code: the last good build, or the repo's workflow on its branch", () => {
+    const last = {
+      app: "compose" as const,
+      repo: "o/app",
+      branch: "main",
+      resourceId: "app-o-1-prod",
+      environment: "prod",
+      name: "app",
+      composeFile: null,
+    };
+    expect(agentDeployPlan(last, "redeploy", true)).toMatchObject({
+      kind: "redeploy",
+      command: { kind: "compose-redeploy", project: "app-o-1-prod", name: "app" },
+    });
+    expect(agentDeployPlan(last, "build", true)).toEqual({ kind: "build", repo: "o/app", branch: "main" });
+    expect(agentDeployPlan(last, "redeploy", false)).toMatchObject({ kind: "refused", error: /Update the daemon/ });
+    expect(agentDeployPlan({ ...last, app: "static" }, "redeploy", true)).toMatchObject({ kind: "refused" });
+    expect(agentDeployPlan({ ...last, branch: "" }, "build", true)).toMatchObject({ kind: "refused" });
+    expect(agentDeployPlan(null, "build", true)).toMatchObject({ kind: "refused", error: /no finished deploy/ });
   });
 });

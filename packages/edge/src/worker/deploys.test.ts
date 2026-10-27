@@ -10,6 +10,14 @@ describe("deploys (K-811, K-903)", () => {
       pr: null,
       action: null,
     });
+    // K-718: a dispatch through the App deploys the dispatched branch's code, as a push of that branch.
+    expect(eventOf({ eventName: "workflow_dispatch", branch: "main", pr: null }, {})).toEqual({
+      name: "push",
+      branch: "main",
+      pr: null,
+      action: null,
+    });
+    expect(eventOf({ eventName: "schedule", branch: "main", pr: null }, {})).toMatch(/not on schedule/);
     const pull = { eventName: "pull_request", branch: "x", pr: 7 };
     expect(eventOf(pull, { action: "closed", pr: 1 })).toEqual({
       name: "pull_request",
@@ -32,9 +40,6 @@ describe("deploys (K-811, K-903)", () => {
     ).toMatchObject({
       pr: null,
     });
-    expect(eventOf({ eventName: "workflow_dispatch", branch: "main", pr: null }, {})).toMatch(
-      /push and pull_request/,
-    );
   });
 
   it("keeps repos with similar names apart", () => {

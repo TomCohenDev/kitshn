@@ -1,6 +1,10 @@
 import type { Actor } from "./changes.ts";
 import type { Command, Machine, MachineStatus, Sample } from "./machine.ts";
 import type { Circle, PauseMode, Point, Resource, ShareSetting, Stack } from "./model.ts";
+import type { RepoGate } from "./repos.ts";
+
+/** K-819: `resourceIds` are the cards that this repo deployed, which the card panel matches. */
+export type RepoView = RepoGate & { readonly resourceIds: ReadonlyArray<string> };
 
 export interface RevisionView {
   readonly id: number;
@@ -30,6 +34,8 @@ export interface Snapshot {
   /** K-408: Access applications that kitshn did not make but that cover a kitshn address. */
   readonly accessWarnings: ReadonlyArray<string>;
   readonly paused: PauseMode | null;
+  /** K-819: the repos that deployed or wait to deploy, newest first. */
+  readonly repos: ReadonlyArray<RepoView>;
   /** K-1504: who paused and when, while paused. */
   readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;

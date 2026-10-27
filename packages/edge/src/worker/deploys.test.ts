@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { environmentNames, eventOf, parseManifest } from "./deploys.ts";
+import { environmentNames, eventOf, legacyRepos, parseManifest, repoIdOf } from "./deploys.ts";
 
 describe("deploys (K-811, K-903)", () => {
   it("takes the event, branch and pull request from the token, not from the request", () => {
@@ -59,5 +59,42 @@ describe("deploys (K-811, K-903)", () => {
     });
     expect(parseManifest({ "index.html": { hash: "a".repeat(32), size: 10 } })).toMatch(/path/);
     expect(parseManifest({})).toMatch(/files/);
+  });
+
+  it("finds the repo id inside a card id, only with the repo name that made it (K-819)", () => {
+    const card = environmentNames("42", "me/my-site", "prod").resourceId;
+    expect(repoIdOf("me/my-site", "prod", card)).toBe("42");
+    // After a rename the old name of the deploy row still finds it; the new name does not.
+    expect(repoIdOf("me/renamed", "prod", card)).toBeNull();
+    // Another repo that reuses the name has its own id in its own card.
+    expect(repoIdOf("me/my-site", "prod", environmentNames("43", "me/my-site", "prod").resourceId)).toBe(
+      "43",
+    );
+    const long = "feature/a-very-long-branch-name-that-needs-a-hash";
+    const hashed = environmentNames("1061234567", "me/a-fairly-long-repository-name", long).resourceId;
+    expect(repoIdOf("me/a-fairly-long-repository-name", long, hashed)).toBe("1061234567");
+    // A card id from before the repo id was part of it.
+    expect(repoIdOf("me/my-site", "prod", "app-me-my-site-prod")).toBeNull();
+  });
+
+  it("allows only the repos that finished a deploy before the gate (K-819)", () => {
+    const row = (id: string, repoId: string, repo: string, kind: string, state: string) => ({
+      id,
+      repo,
+      environment: "pr-1",
+      resourceId: environmentNames(repoId, repo, "pr-1").resourceId,
+      kind,
+      state,
+    });
+    const { repoIds, allowed, unknown } = legacyRepos([
+      row("d1", "1", "me/old-name", "deploy", "done"),
+      row("d2", "1", "me/new-name", "deploy", "failed"),
+      row("d3", "2", "me/teardown-only", "teardown", "done"),
+      row("d4", "3", "me/never-done", "deploy", "running"),
+      { ...row("d5", "4", "me/x", "deploy", "done"), resourceId: "app-me-x-pr-1" },
+    ]);
+    expect(Object.fromEntries(repoIds)).toEqual({ d1: "1", d2: "1", d3: "2", d4: "3" });
+    expect(Object.fromEntries(allowed)).toEqual({ "1": "me/old-name" });
+    expect(unknown).toEqual(["d5"]);
   });
 });

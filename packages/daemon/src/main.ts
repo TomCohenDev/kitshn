@@ -883,11 +883,18 @@ async function rotateKey(ws: WebSocket) {
   const current = readKey(keyFile);
   if (!current) return log(`no key to rotate in ${keyFile}`);
   rotating = true;
-  const next = await newMachineKey();
-  writeKey(nextKeyFile, next);
-  const text = rotateText(new URL(joined.server).host, joined.machineId, challenge, next.x);
-  ws.send(JSON.stringify({ type: "rotate", publicKey: next.x, signature: await signText(current, text) } satisfies DaemonMessage));
-  log(`rotating the machine key to ${await fingerprintOf(next.x)}`);
+  try {
+    const next = await newMachineKey();
+    writeKey(nextKeyFile, next);
+    const text = rotateText(new URL(joined.server).host, joined.machineId, challenge, next.x);
+    ws.send(JSON.stringify({ type: "rotate", publicKey: next.x, signature: await signText(current, text) } satisfies DaemonMessage));
+    log(`rotating the machine key to ${await fingerprintOf(next.x)}`);
+  } catch (error) {
+    // The request file stays, so the next tick tries again.
+    rotating = false;
+    rmSync(nextKeyFile, { force: true });
+    log(`the key rotation failed: ${String(error)}`);
+  }
 }
 
 /** K-604: one WebSocket to kitshn, with backoff after a failure and a ping every 10 seconds. */

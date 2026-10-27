@@ -1416,16 +1416,17 @@ export class Kitshn extends DurableObject<Env> {
         { error: "This join code is not valid, or someone used it already." },
         { status: 404 },
       );
-    this.sql("DELETE FROM join_codes WHERE lookup = ?", lookup);
-    if (row.expires_at < Date.now()) {
+    const machine = this.state.machines.get(row.machine_id);
+    const used = () => this.sql("DELETE FROM join_codes WHERE lookup = ?", lookup);
+    if (row.expires_at < Date.now() || !machine) {
+      used();
       return Response.json(
-        { error: "This join code expired. Make a new one with Add machine." },
-        { status: 410 },
+        { error: machine ? "This join code expired. Make a new one with Add machine." : "The machine of this join code is gone." },
+        { status: machine ? 410 : 404 },
       );
     }
-    const machine = this.state.machines.get(row.machine_id);
-    if (!machine) return Response.json({ error: "The machine of this join code is gone." }, { status: 404 });
-    this.setKey(machine, key, deviceActor(machine), `${machine.name} joined with the key ${key.fingerprint}`);
+    // K-1703: the key and the use of the code are one step.
+    this.setKey(machine, key, deviceActor(machine), `${machine.name} joined with the key ${key.fingerprint}`, used);
     return Response.json({ iv: row.iv, sealed: row.sealed });
   }
 
@@ -1439,17 +1440,19 @@ export class Kitshn extends DurableObject<Env> {
     const key = await this.publicKey(publicKey);
     const lookup = await joinLookup(code);
     const [row] = this.sql<{ machine_id: string; expires_at: number }>(
-      "DELETE FROM rekey_codes WHERE lookup = ? RETURNING machine_id, expires_at",
+      "SELECT machine_id, expires_at FROM rekey_codes WHERE lookup = ?",
       lookup,
     );
     if (!row)
       return Response.json({ error: "This rekey code is not valid, or someone used it already." }, { status: 404 });
-    if (row.expires_at < Date.now())
-      return Response.json({ error: "This rekey code expired. Press Reset key again." }, { status: 410 });
     const machine = this.state.machines.get(row.machine_id);
-    if (machine?.key?.kind !== "waiting")
-      return Response.json({ error: "This machine does not wait for a key." }, { status: 409 });
-    this.setKey(machine, key, deviceActor(machine), `${machine.name} got the key ${key.fingerprint} with a rekey code`);
+    const used = () => this.sql("DELETE FROM rekey_codes WHERE lookup = ?", lookup);
+    if (row.expires_at < Date.now() || machine?.key?.kind !== "waiting") {
+      used();
+      return Response.json({ error: "This rekey code expired. Press Reset key again." }, { status: 410 });
+    }
+    // The key and the use of the code are one step, so a failed write keeps the code.
+    this.setKey(machine, key, deviceActor(machine), `${machine.name} got the key ${key.fingerprint} with a rekey code`, used);
     return Response.json({ machineId: machine.id, fingerprint: key.fingerprint });
   }
 

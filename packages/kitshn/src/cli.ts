@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // The kitshn CLI for app repos: `kitshn check` (K-802) and `kitshn deploy` (K-803, K-805, K-811).
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";

@@ -39,7 +39,7 @@ export const ComposeApp = Schema.Struct({
   file: Schema.optionalKey(Schema.String),
 });
 
-const deploy = Schema.Array(DeployEntry).check(Schema.isMinLength(1), Schema.isMaxLength(20));
+const deploy = Schema.NonEmptyArray(DeployEntry).check(Schema.isMaxLength(20));
 
 /** K-801, K-804: a recipe has exactly one kind. Worker apps follow later. */
 export const Recipe = Schema.Union([
@@ -48,20 +48,19 @@ export const Recipe = Schema.Union([
 ]);
 export type Recipe = typeof Recipe.Type;
 
-// The public types of index.ts and the schema accept the same recipes.
-type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+// The public types of index.ts and the schema accept the same recipes; a failing line names the type.
+// Strict equality: plain assignability both ways misses a key that is optional on one side only.
+type Same<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+type Keys<T> = T extends unknown ? keyof T : never;
 type Assert<T extends true> = T;
-export type PublicTypesMatch = Assert<
-  [
-  Same<typeof DeployEntry.Type, PublicDeployEntry>,
-  Same<typeof StaticApp.Type, PublicStaticApp>,
-  Same<typeof ComposeApp.Type, PublicComposeApp>,
-  Recipe extends PublicRecipe ? true : false,
-  PublicRecipe extends Recipe ? true : false,
-  ] extends Array<true>
-    ? true
-    : false
->;
+export type PublicTypesMatch = [
+  Assert<Same<typeof DeployEntry.Type, PublicDeployEntry>>,
+  Assert<Same<typeof StaticApp.Type, PublicStaticApp>>,
+  Assert<Same<typeof ComposeApp.Type, PublicComposeApp>>,
+  Assert<Same<Keys<Recipe>, Keys<PublicRecipe>>>,
+  Assert<Recipe extends PublicRecipe ? true : false>,
+  Assert<PublicRecipe extends Recipe ? true : false>,
+];
 
 export const decodeRecipe = Schema.decodeUnknownSync(Recipe, { onExcessProperty: "error" });
 

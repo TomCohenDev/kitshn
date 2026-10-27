@@ -33,9 +33,9 @@ export interface ComposeApp {
 }
 
 /** 1 to 20 entries. */
-type Deploy = ReadonlyArray<DeployEntry>;
+type Deploy = readonly [DeployEntry, ...Array<DeployEntry>];
 
-/** K-801, K-804: a recipe has exactly one kind. */
+/** K-801, K-804: a recipe has exactly one kind: `static` or `compose`. */
 export type Recipe =
   | { readonly static: StaticApp; readonly compose?: never; readonly deploy: Deploy }
   | { readonly compose: ComposeApp; readonly static?: never; readonly deploy: Deploy };

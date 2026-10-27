@@ -729,19 +729,71 @@ select {
   }
 }
 
-.banner {
+/* K-1504: the big red button. Red in both modes, so it never reads as an ordinary action. */
+.btn.big-red {
+  background: #e5232e;
+  color: #ffffff;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  border-color: var(--shadow-ink);
+  box-shadow: 3px 3px 0 0 var(--shadow-ink);
+}
+.btn.big-red:not(:disabled):hover {
+  background: #c8101b;
+}
+.btn.resume {
+  background: var(--green);
+  color: #000000;
+  font-weight: 800;
+}
+.hazard-frame {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+  border: 10px solid transparent;
+  border-image: repeating-linear-gradient(-45deg, #e5232e 0 14px, #000000 14px 28px) 10;
+}
+.paused-banner {
   position: fixed;
   top: 112px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 11;
-  padding: 4px 12px;
-  font-weight: 800;
-  color: var(--error-fg);
-  background: var(--error-surface);
-  border: var(--bw) solid var(--border);
+  z-index: 31;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 6px 8px 6px 14px;
+  color: #ffffff;
+  background: #e5232e;
+  border: var(--bw) solid var(--shadow-ink);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+}
+.paused-banner > * {
+  white-space: nowrap;
+}
+.paused-banner strong {
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pause-dialog {
+  max-width: 34rem;
+  border-color: #e5232e;
+  box-shadow: 6px 6px 0 0 #e5232e;
+}
+.pause-dialog h2 {
+  color: #e5232e;
+}
+.pause-dialog li {
+  margin-bottom: 6px;
+  cursor: default;
+}
+.pause-dialog .row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
 }
 .secret {
   display: flex;

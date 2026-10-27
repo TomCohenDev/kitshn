@@ -29,8 +29,9 @@ import type { JobView, MachineView, RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
 import { CircleEditor, type DeviceSecret, EndsPicker, LevelOverride, SecretDialog } from "./Circle.tsx";
 import { AddSite } from "./Add.tsx";
+import { PauseDialog, PausedBanner } from "./Pause.tsx";
 import { LibraryView } from "./Library.tsx";
-import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
+import { AddMachine, MachinePanel, MachinesView, ago } from "./Machines.tsx";
 import { MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
 import { overlay } from "./held.ts";
 import {
@@ -104,6 +105,7 @@ export function App() {
   const [previews, setPreviews] = useState(() => localStorage.getItem(PREVIEWS_KEY) === "on");
   const [addingSite, setAddingSite] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
+  const [pausing, setPausing] = useState(false);
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
   const [route, setRoute] = useState(routeFromHash);
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -136,6 +138,8 @@ export function App() {
     const keepFiles = (event: DragEvent) => {
       if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
     };
+    // K-1504: Access sends the owner back here after the fresh passkey check of "Resume".
+    if (location.hash === "#resume") void finishResume();
     addEventListener("hashchange", onHash);
     addEventListener("keydown", onKey);
     addEventListener("dragover", keepFiles);
@@ -331,6 +335,37 @@ export function App() {
       setTimeout(() => document.querySelector<HTMLInputElement>(".add-member input")?.focus()),
     );
   };
+
+  /** K-1504: one press after the confirm pauses everything at once. */
+  const pauseNow = async () => {
+    setPausing(false);
+    const result = await applyEdits([{ _tag: "pause", after: true }]);
+    showToast(
+      result.ok
+        ? { text: "Paused. Only the Owner circle's people open the admin.", error: false, undo: null }
+        : { text: result.error, error: true, undo: null },
+    );
+  };
+
+  /** Resume needs a fresh passkey: Access checks it on `/api/fresh` and sends the owner back to `#resume`. */
+  const startResume = () => location.assign("/api/fresh/start");
+
+  const finishResume = async () => {
+    history.replaceState(null, "", location.pathname + location.search);
+    const result = await callApi<{ revision: number | null }>("POST", "/api/fresh/resume", {});
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: "Resumed. Every share is back.", error: false, undo: null },
+    );
+  };
+
+  const pausedBy = useMemo(() => {
+    const pause = [...(store.snapshot?.revisions ?? [])]
+      .filter((revision) => revision.summary.startsWith("Paused all shares"))
+      .sort((a, b) => b.id - a.id)[0];
+    return pause ? { by: actorLabel(pause.actor), at: pause.at } : null;
+  }, [store.snapshot?.revisions]);
 
   const showToast = (next: Toast) => {
     setToast(next);
@@ -633,6 +668,20 @@ export function App() {
           </>
         ) : null}
         <span class="grow" />
+        {store.snapshot?.paused ? (
+          <button class="btn resume" onClick={startResume} title="Resume needs your passkey again">
+            Resume
+          </button>
+        ) : (
+          <button
+            class="btn big-red"
+            onClick={() => setPausing(true)}
+            title="Emergency pause: stop shares, agents and deploys at once"
+            aria-label="Emergency pause"
+          >
+            ■ Pause
+          </button>
+        )}
         <button class="btn" onClick={() => setPalette("")} title="Command palette (Cmd+K or Ctrl+K)">
           ⌘K
         </button>
@@ -742,22 +791,7 @@ export function App() {
           );
         }}
         warnings={store.snapshot.accessWarnings}
-        onPause={async (pause) => {
-          const text = pause
-            ? "Pause sets every share to none, except the Owner circle's share of the admin. Pause now?"
-            : "Resume gives every share back. Resume now?";
-          if (!(await ask(text))) return;
-          const result = await applyEdits([{ _tag: "pause", after: pause }]);
-          showToast(
-            result.ok
-              ? {
-                  text: pause ? "Paused. Only the Owner circle opens the admin." : "Resumed.",
-                  error: false,
-                  undo: result.revision,
-                }
-              : { text: result.error, error: true, undo: null },
-          );
-        }}
+        onPause={(pause) => (pause ? setPausing(true) : startResume())}
         onSignOut={async () => {
           if (!(await ask("End every session of every kitshn application? Everyone logs in again, you too.")))
             return;
@@ -776,10 +810,9 @@ export function App() {
         }}
       />
       {store.snapshot.paused ? (
-        <div class="banner" role="status">
-          Paused: only the Owner circle opens the admin. Everything else is closed.
-        </div>
+        <PausedBanner by={pausedBy?.by ?? null} since={pausedBy ? (Date.now() - pausedBy.at < 60_000 ? "just now" : `${ago(pausedBy.at)} ago`) : null} onResume={startResume} />
       ) : null}
+      {pausing ? <PauseDialog onCancel={() => setPausing(false)} onPause={() => void pauseNow()} /> : null}
       {palette !== null ? (
         <Palette
           state={state}
@@ -794,6 +827,7 @@ export function App() {
             newCircle: () => void newCircle(),
             fit,
             history: () => (location.hash = "history"),
+            pause: () => (store.snapshot?.paused ? startResume() : setPausing(true)),
             addMachine: () => setAddingMachine(true),
             addSite: () => setAddingSite(true),
             upload: () => {
@@ -1252,6 +1286,8 @@ interface PaletteActions {
   newCircle: () => void;
   fit: () => void;
   history: () => void;
+  /** K-1504: opens the big red button, or Resume while paused. */
+  pause: () => void;
   addMachine: () => void;
   addSite: () => void;
   upload: () => void;
@@ -1275,6 +1311,7 @@ function Palette(props: {
       { label: "Upload a page or a file", run: actions.upload },
       { label: "Fit the map", run: actions.fit },
       { label: "Open History", run: actions.history },
+      { label: "Emergency pause, or Resume", run: actions.pause },
     ];
     for (const resource of state.resources.values()) {
       all.push({

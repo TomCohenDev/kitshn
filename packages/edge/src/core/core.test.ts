@@ -5,6 +5,7 @@ import {
   conflictOf,
   type Edit,
   invert,
+  refuseResume,
   resolveEdits,
   ruleViolation,
   shareDiff,
@@ -467,5 +468,14 @@ describe("stacks (K-521, K-522)", () => {
     }
     expect(stacks.size).toBe(0);
     expect(ruleViolation({ ...after, resources, places, stacks })).toBeNull();
+  });
+});
+
+describe("emergency pause (K-1504)", () => {
+  it("lets an edit or an undo pause, but never resume", () => {
+    const paused = edit(start(), [{ _tag: "pause", after: true }]);
+    expect(refuseResume(paused.changes)).toEqual(paused.changes);
+    expect(() => refuseResume(resolveEdits(paused.after, [{ _tag: "pause", after: false }]))).toThrow(/passkey/);
+    expect(() => refuseResume(invert(paused.changes))).toThrow(/passkey/);
   });
 });

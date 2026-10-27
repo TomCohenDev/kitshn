@@ -195,6 +195,11 @@ app "$KITSHN_HOST/deploy" "kitshn deploy (public)" 24h "$public_policy" >/dev/nu
 CONNECT_AUD=$(app "$KITSHN_HOST/connect" "kitshn connect" 24h "$machines_policy")
 # K-718: agent keys reach /agent with their service token; the Worker decides what each key may do.
 AGENT_AUD=$(app "$KITSHN_HOST/agent" "kitshn agent keys" 24h "$machines_policy")
+# K-1504: "Resume" needs a fresh passkey: a 10-minute application and MFA session for the owner emails.
+fresh_rules=$(printf '%s' "$KITSHN_OWNER_EMAILS" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0) | {email: {email: .}})')
+fresh_policy=$(policy "kitshn fresh passkey" "$(jq -nc --argjson include "$fresh_rules" \
+  '{name:"kitshn fresh passkey",decision:"allow",include:$include,require:[],exclude:[],mfa_config:{allowed_authenticators:["biometrics","security_key"],session_duration:"10m"}}')")
+FRESH_AUD=$(app "$KITSHN_HOST/api/fresh" "kitshn fresh passkey" 10m "$fresh_policy")
 # K-1004: pages and files have no Access application on the whole host; the Worker checks the shares.
 # Only the login paths have one. It lets in anyone who logs in, and the passkey path adds the passkey
 # check (K-103). The Worker reads who logged in from the cookie that Access sets for the whole host.
@@ -295,7 +300,7 @@ if [ "$(printf '%s' "$scripts" | jq -r --arg s "$SCRIPT" 'map(select(.id == $s))
 fi
 # run_worker_first: the offline routes of live sites (K-1108) need the Worker before the map's assets.
 metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --argjson migrations "$migrations" \
-  --arg host "$KITSHN_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" --arg agent_aud "$AGENT_AUD" \
+  --arg host "$KITSHN_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" --arg agent_aud "$AGENT_AUD" --arg fresh_aud "$FRESH_AUD" \
   --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" \
   --arg zone "$ZONE" --arg zone_name "$ZONE_NAME" --arg deployers "$DEPLOY_OWNER_IDS" \
   --arg version "$(cat "$WORK/bundle/version")" --arg r2 "$R2" --arg pages_login "$PAGES_LOGIN_AUD" \
@@ -313,6 +318,7 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
       {type: "plain_text", name: "ACCESS_ADMIN_AUD", text: $admin_aud},
       {type: "plain_text", name: "ACCESS_CONNECT_AUD", text: $connect_aud},
       {type: "plain_text", name: "ACCESS_AGENT_AUD", text: $agent_aud},
+      {type: "plain_text", name: "ACCESS_FRESH_AUD", text: $fresh_aud},
       {type: "plain_text", name: "OWNER_EMAILS", text: $owners},
       {type: "plain_text", name: "OWNER_DEVICES", text: $devices},
       {type: "plain_text", name: "CLOUDFLARE_ACCOUNT_ID", text: $account},

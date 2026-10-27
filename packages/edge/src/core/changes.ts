@@ -332,3 +332,10 @@ export function stacksWithout(stacks: Iterable<Stack>, id: string): Array<{ id: 
       return { id: stack.id, after: members.length > 1 ? { ...stack, members } : null };
     });
 }
+
+/** K-1504: only "Resume" with a fresh passkey ends a pause; an edit or an undo never does. */
+export function refuseResume(changes: Array<Change>): Array<Change> {
+  if (changes.some((change) => change._tag === "pause" && !change.after))
+    throw new RuleError("Resume needs your passkey again: press Resume on the map.");
+  return changes;
+}

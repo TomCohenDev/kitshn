@@ -10,6 +10,7 @@ import {
   conflictOf,
   deepEqual,
   invert,
+  refuseResume,
   resolveEdits,
   ruleViolation,
   shareDiff,
@@ -402,7 +403,22 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private apply(actor: Actor, edits: ReadonlyArray<Edit>) {
-    return this.commit(actor, resolveEdits(this.state, edits), null);
+    return this.commit(actor, refuseResume(resolveEdits(this.state, edits)), null);
+  }
+
+  /** K-1504: "Resume", after the Worker checked a passkey login of at most ten minutes. */
+  private resume(caller: Caller) {
+    if (!this.authorized(caller))
+      return Response.json({ error: "You have no control level on the kitshn admin (K-104)." }, { status: 403 });
+    if (!this.state.paused) return Response.json({ revision: null });
+    try {
+      return Response.json({
+        revision: this.commit(caller.actor, resolveEdits(this.state, [{ _tag: "pause", after: false }]), null),
+      });
+    } catch (error) {
+      if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
+      throw error;
+    }
   }
 
   /** K-1502: Undo makes a new revision that reverses the old one, and runs the same rules. */
@@ -429,7 +445,7 @@ export class Kitshn extends DurableObject<Env> {
       throw new RuleError(
         `This undo would make ${goingPublic.resource.name} public through its stack. Move the stack by hand.`,
       );
-    return this.commit(actor, changes, revisionId);
+    return this.commit(actor, refuseResume(changes), revisionId);
   }
 
   private authorized(caller: Caller) {
@@ -531,6 +547,8 @@ export class Kitshn extends DurableObject<Env> {
     if (!header) return new Response("The Worker sent no caller.", { status: 500 });
     const caller = JSON.parse(header) as Caller;
     if (path === "/connect") return this.connectMachine(request, caller);
+    // Only the Worker's fresh passkey route sends this path (K-1504).
+    if (path === "/fresh/resume" && request.method === "POST") return this.resume(caller);
     if (path.startsWith("/agent/")) return this.agentRequest(path, request, caller);
     if (path.startsWith("/connect/deploys/")) return this.deploySource(path, caller);
     if (!this.authorized(caller)) {
@@ -1794,6 +1812,9 @@ export class Kitshn extends DurableObject<Env> {
     const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
     const fail = (status: number, error: string) => Response.json({ error }, { status });
     try {
+      // K-1504: no new deploy while paused; the workflow fails with the reason and runs again after Resume.
+      if (path === "/deploy/plan" && this.state.paused)
+        return fail(423, "kitshn is paused (Emergency pause). Deploys wait until the owner resumes.");
       if (path === "/deploy/plan") return await this.planDeploy(api, deployer, input);
       if (path === "/deploy/status") return this.composeStatus(deployer, String(input["deployId"] ?? ""));
       const [row] = this.sql<DeployRow>(

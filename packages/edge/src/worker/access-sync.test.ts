@@ -7,7 +7,9 @@ import {
   type AccessRow,
   type Api,
   accessStates,
+  fillAudiences,
   hasAccessWork,
+  rowsWithoutAud,
   signOutEverywhere,
   syncAccess,
   syncLauncher,
@@ -92,36 +94,42 @@ describe("Access sync (K-406, K-408)", () => {
     expect([...cf.rows.keys()]).toEqual(["policy:enrollment"]);
   });
 
-  it("keeps the audience tag of an application and fetches it when a row has none (K-603)", async () => {
+  it("keeps the audience tag of each application (K-603)", async () => {
     const cf = fakeCloudflare();
-    const desired = desiredAccess(start(), 0);
-    await syncAccess(desired, cf.store, cf.api, "a");
-    const key = "app:kitshn-admin:kit.example.com";
-    const app = cf.rows.get(key)!;
+    await syncAccess(desiredAccess(start(), 0), cf.store, cf.api, "a");
+    const app = cf.rows.get("app:kitshn-admin:kit.example.com")!;
     expect(app.aud).toBe(`aud-${app.cfId}`);
     expect(cf.rows.get("policy:owner:people")!.aud).toBe("");
-
-    // A row from before the audience tag column: the next sync writes the application again to read it.
-    cf.rows.set(key, { ...app, aud: "" });
-    expect(hasAccessWork(desired, cf.rows)).toBe(true);
-    cf.calls.length = 0;
-    await syncAccess(desired, cf.store, cf.api, "a");
-    expect(cf.calls).toEqual([`PUT /apps/${app.cfId}`]);
-    expect(cf.rows.get(key)!.aud).toBe(`aud-${app.cfId}`);
   });
 
-  it("marks an application failed when Cloudflare returns no audience tag", async () => {
-    const cf = fakeCloudflare();
-    const noAud: Api = async <T>(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown) => {
-      const result = await cf.api<{ id: string }>(method, path, body);
-      return (method === "POST" && path.endsWith("/apps") ? { id: result.id } : result) as T;
-    };
-    const desired = desiredAccess(start(), 0);
-    await syncAccess(desired, cf.store, noAud, "a");
-    const app = cf.rows.get("app:kitshn-admin:kit.example.com")!;
-    expect(app).toMatchObject({ aud: "", body: "", error: expect.stringContaining("audience tag") });
-    expect(app.cfId).not.toBe("");
-    expect(accessStates(desired, cf.rows)["kitshn-admin"]?.state).toBe("failed");
+  it("reads missing audience tags from one list of the applications, by id (K-603)", async () => {
+    const cf = fakeCloudflare({
+      apps: [
+        { id: "app-1", name: "kitshn a", aud: "aud-1" },
+        { id: "app-2", name: "kitshn b", aud: "aud-2" },
+      ],
+    });
+    const row = (key: string, cfId: string, aud: string): AccessRow => ({
+      key,
+      cfId,
+      aud,
+      body: "{}",
+      tried: "",
+      error: null,
+    });
+    // Rows from before the audience tag column, as a deploy finds them.
+    cf.store.put(row("app:x:x.example.com", "app-1", ""));
+    cf.store.put(row("app:y:y.example.com", "app-gone", ""));
+    cf.store.put(row("app:z:z.example.com", "app-2", "aud-2"));
+    expect(await fillAudiences(cf.store, cf.api, "a")).toBe(1);
+    expect(cf.calls).toEqual(["GET /apps?per_page=1000&page=1"]);
+    expect(cf.rows.get("app:x:x.example.com")!.aud).toBe("aud-1");
+    expect(rowsWithoutAud(cf.rows).map((item) => item.key)).toEqual(["app:y:y.example.com"]);
+
+    cf.store.put(row("app:y:y.example.com", "", ""));
+    cf.calls.length = 0;
+    expect(await fillAudiences(cf.store, cf.api, "a")).toBe(0);
+    expect(cf.calls).toEqual([]);
   });
 
   it("stops at the call budget and reports work left", async () => {

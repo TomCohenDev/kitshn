@@ -64,23 +64,24 @@ const validTarget = (target: string) => {
 /**
  * K-603: how cloudflared guards the ingress rule of a site. "check": it drops a request without a valid
  * Access JWT of the application. "bypass": the application lets everyone in and issues no JWT (K-403).
- * "unknown": kitshn has no audience tag for the application yet, so the site gets no rule.
  */
 export type IngressAccess =
   | { readonly kind: "check"; readonly teamName: string; readonly aud: string }
-  | { readonly kind: "bypass" }
-  | { readonly kind: "unknown" };
+  | { readonly kind: "bypass" };
 
-/** K-603, K-403: the Access check of a site's ingress rule, from its application `app:<site>:<address>`. */
+/**
+ * K-603, K-403: the Access check of a site's ingress rule, from its application `app:<site>:<address>`.
+ * Null while kitshn does not know the audience tag of the application.
+ */
 export function ingressAccess(
   site: LiveSite,
   desired: DesiredAccess,
   rows: ReadonlyMap<string, AccessRow>,
   teamDomain: string,
-): IngressAccess {
+): IngressAccess | null {
   const key = `app:${site.id}:${site.address}`;
   const row = rows.get(key);
-  if (!row?.cfId || !row.aud) return { kind: "unknown" };
+  if (!row?.cfId || !row.aud) return null;
   const policyKeys = desired.apps.get(key)?.policyKeys ?? [];
   if (policyKeys.some((policyKey) => desired.policies.get(policyKey)?.decision === "bypass"))
     return { kind: "bypass" };
@@ -89,16 +90,21 @@ export function ingressAccess(
   return { kind: "check", teamName, aud: row.aud };
 }
 
-/** K-603, K-607, K-1105: the ingress of a machine's tunnel from its live sites. */
-export function tunnelConfig(sites: ReadonlyArray<LiveSite>, accessOf: (site: LiveSite) => IngressAccess) {
+/**
+ * K-603, K-607, K-1105: the ingress of a machine's tunnel from its live sites. Null while a site has no
+ * known audience tag: the tunnel then keeps the ingress that Cloudflare has, so no rule goes away and no
+ * rule gets written without its check.
+ */
+export function tunnelConfig(sites: ReadonlyArray<LiveSite>, accessOf: (site: LiveSite) => IngressAccess | null) {
+  const guarded = [...sites]
+    .sort((a, b) => a.address.localeCompare(b.address))
+    .map((site) => ({ site, access: accessOf(site) }));
+  if (guarded.some((item) => item.access === null)) return null;
   return {
     config: {
       ingress: [
-        ...[...sites]
-          .sort((a, b) => a.address.localeCompare(b.address))
-          .flatMap((site) => {
-            const access = accessOf(site);
-            if (access.kind === "unknown") return [];
+        ...guarded.flatMap(({ site, access }) => {
+            if (access === null) return [];
             const originRequest = {
               ...(site.dev ? { httpHostHeader: "localhost" } : {}),
               ...(access.kind === "check"

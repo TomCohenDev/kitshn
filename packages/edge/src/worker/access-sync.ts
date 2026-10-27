@@ -97,8 +97,7 @@ export function hasAccessWork(
   }
   for (const [key, app] of desired.apps) {
     const body = appBody(key, app, rows);
-    const row = rows.get(key);
-    if (body !== null && (row?.body !== body || !row.aud) && !failedWith(row, body)) return true;
+    if (body !== null && rows.get(key)?.body !== body && !failedWith(rows.get(key), body)) return true;
   }
   const kept = keptPolicies(desired, rows, reachable);
   for (const row of rows.values()) if (isStale(desired, row, reachable, kept)) return true;
@@ -337,6 +336,36 @@ export async function verifyPasskeys(
   return calls;
 }
 
+/** The application rows that have a Cloudflare id but no audience tag yet (K-603). */
+export const rowsWithoutAud = (rows: ReadonlyMap<string, AccessRow>) =>
+  [...rows.values()].filter((row) => row.key.startsWith("app:") && row.cfId !== "" && row.aud === "");
+
+/**
+ * K-603: reads the audience tag of each application row that has an id but no tag, from the list of
+ * applications, matched by id. Returns the number of calls. An account has at most 500 applications
+ * (K-402), so this is one call; the loop reads further pages only if that limit grows.
+ */
+export async function fillAudiences(store: AccessStore, api: Api, accountId: string): Promise<number> {
+  const missing = rowsWithoutAud(store.rows);
+  if (missing.length === 0) return 0;
+  const auds = new Map<string, string>();
+  let calls = 0;
+  for (let page = 1; ; page++) {
+    const apps = await api<ReadonlyArray<Named>>(
+      "GET",
+      `/accounts/${accountId}/access/apps?per_page=${PAGE}&page=${page}`,
+    );
+    calls++;
+    for (const app of apps) if (app.aud) auds.set(app.id, app.aud);
+    if (apps.length < PAGE) break;
+  }
+  for (const row of missing) {
+    const aud = auds.get(row.cfId);
+    if (aud) store.put({ ...row, aud });
+  }
+  return calls;
+}
+
 /**
  * K-406: brings Access to the desired state in at most `budget` calls. Returns true when no work is left.
  * It adopts an object that it did not record only when its name starts with "kitshn " (K-408).
@@ -362,8 +391,7 @@ export async function syncAccess(
     find: (list: ReadonlyArray<Named>) => Named | undefined,
   ) => {
     const row = store.rows.get(key);
-    // An application without its audience tag is written again to get it (K-603).
-    if ((row?.body === body && (kind === "policies" || row.aud)) || failedWith(row, body)) return true;
+    if (row?.body === body || failedWith(row, body)) return true;
     let cfId = row?.cfId ?? "";
     try {
       if (!cfId) {
@@ -385,12 +413,8 @@ export async function syncAccess(
       const result = cfId
         ? await api<Named>("PUT", `${base}/${kind}/${cfId}`, request)
         : await api<Named>("POST", `${base}/${kind}`, request);
+      // A missing tag is read again from the list of applications (K-603).
       const aud = kind === "apps" ? (result.aud ?? "") : "";
-      if (kind === "apps" && !aud) {
-        const error = "Cloudflare returned the application without its audience tag.";
-        store.put({ key, cfId: result.id, aud, body: row?.body ?? "", tried: body, error });
-        return true;
-      }
       // K-409: a removed share takes effect at once, so the sessions of the application end. Until the
       // revoke succeeds, the row keeps its old body, so the next run writes and revokes again.
       if (kind === "apps" && row?.body && removesPolicy(row.body, body)) {

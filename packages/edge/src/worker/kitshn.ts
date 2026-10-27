@@ -65,7 +65,9 @@ import {
   type Api,
   accessStates,
   CALLS_PER_RUN,
+  fillAudiences,
   hasAccessWork,
+  rowsWithoutAud,
   signOutEverywhere,
   syncAccess,
   syncLauncher,
@@ -1216,11 +1218,28 @@ export class Kitshn extends DurableObject<Env> {
     const rows = new Map(this.tunnelRows().map((row) => [row.machine_id, row]));
     const accessOf = this.ingressAccessOf();
     for (const machine of this.state.machines.values()) {
-      const config = tunnelConfig(this.protectedSites(machine.id), accessOf);
-      const body = JSON.stringify(config);
       const row = rows.get(machine.id);
-      if (row?.applied === body && row.error === null) continue;
       if (row?.error && row.retry_at > now) continue;
+      let config: ReturnType<typeof tunnelConfig>;
+      try {
+        config = tunnelConfig(this.protectedSites(machine.id), accessOf);
+      } catch (error) {
+        // A missing Access team stops the tunnel writes only, not the rest of the alarm.
+        console.warn(`kitshn could not build the ingress of ${machine.id}: ${String(error)}`);
+        this.sql(
+          "INSERT OR REPLACE INTO tunnel_objects (machine_id, body, applied, error, retry_at) VALUES (?, ?, ?, ?, ?)",
+          machine.id,
+          row?.body ?? "",
+          row?.applied ?? "",
+          String(error),
+          now + RETRY_MS,
+        );
+        continue;
+      }
+      // An application without its audience tag yet: the tunnel keeps the ingress that it has (K-603).
+      if (config === null) continue;
+      const body = JSON.stringify(config);
+      if (row?.applied === body && row.error === null) continue;
       if (calls++ >= budget) return;
       try {
         await api(
@@ -1276,8 +1295,14 @@ export class Kitshn extends DurableObject<Env> {
     const accessOf = this.ingressAccessOf();
     const stale = [...this.state.machines.values()].some((machine) => {
       const row = tunnels.get(machine.id);
-      const due = !row?.error || row.retry_at <= now;
-      return due && row?.applied !== JSON.stringify(tunnelConfig(this.protectedSites(machine.id), accessOf));
+      if (row?.error && row.retry_at > now) return false;
+      try {
+        const config = tunnelConfig(this.protectedSites(machine.id), accessOf);
+        return config !== null && row?.applied !== JSON.stringify(config);
+      } catch {
+        // syncTunnels records the error and its retry time.
+        return true;
+      }
     });
     const checking = [...this.liveSites.values()].some(
       (site) => site.state === "checking" && (this.checkRetryAt.get(site.id) ?? 0) <= Date.now(),
@@ -1676,6 +1701,8 @@ export class Kitshn extends DurableObject<Env> {
       now,
     );
     if (retry?.at) next = Math.min(next, retry.at);
+    if (this.env.CLOUDFLARE_API_TOKEN && rowsWithoutAud(this.access).length > 0)
+      next = Math.min(next, Math.max(this.audRetryAt, now));
     const ends = [
       ...[...this.state.shareSettings.values()].map((setting) => setting.endsAt),
       ...[...this.state.circles.values()].map((circle) => circle.endsAt),
@@ -2820,6 +2847,21 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private accessLock: Promise<unknown> = Promise.resolve();
+  /** K-603: when the alarm reads missing audience tags again. In memory: a restart only reads sooner. */
+  private audRetryAt = 0;
+
+  /** K-603: reads missing audience tags before the tunnels use them. Returns the number of calls. */
+  private async fillAudiences(api: Api, now: number) {
+    if (rowsWithoutAud(this.access).length === 0 || this.audRetryAt > now) return 0;
+    try {
+      return await fillAudiences(this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID);
+    } catch (error) {
+      console.warn(`kitshn could not read the audience tags of Access: ${String(error)}`);
+      return 1;
+    } finally {
+      if (rowsWithoutAud(this.access).length > 0) this.audRetryAt = now + RETRY_MS;
+    }
+  }
 
   /** Runs one Access sync at a time, so a deploy and the alarm never both create the same object. */
   private withAccessLock<T>(work: () => Promise<T>): Promise<T> {
@@ -2888,6 +2930,7 @@ export class Kitshn extends DurableObject<Env> {
           spent = 12;
         }
       }
+      spent += await this.fillAudiences(api, now);
       // Removals first: ingress and DNS go before an Access application does. Additions wait for the next
       // run, because ingress and DNS need the application that the Access sync makes (K-410).
       await this.syncTunnels(api, 6);

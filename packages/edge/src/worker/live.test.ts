@@ -31,7 +31,7 @@ const bypass: IngressAccess = { kind: "bypass" };
 
 describe("live sites (K-1104 to K-1108)", () => {
   it("routes each site through the tunnel, with Host localhost for a dev server", () => {
-    expect(tunnelConfig([site("b", "m", true, true), site("a", "m", true)], () => bypass).config.ingress).toEqual([
+    expect(tunnelConfig([site("b", "m", true, true), site("a", "m", true)], () => bypass)?.config.ingress).toEqual([
       { hostname: "a.example.com", service: "http://localhost:5173" },
       {
         hostname: "b.example.com",
@@ -42,14 +42,13 @@ describe("live sites (K-1104 to K-1108)", () => {
     ]);
   });
 
-  it("makes cloudflared check the Access JWT, and writes no rule without an audience tag (K-603)", () => {
+  it("makes cloudflared check the Access JWT of the application (K-603)", () => {
     const access = new Map<string, IngressAccess>([
       ["a", { kind: "check", teamName: "team", aud: "aud-a" }],
       ["b", { kind: "check", teamName: "team", aud: "aud-b" }],
-      ["c", { kind: "unknown" }],
     ]);
-    const sites = [site("a", "m", true), site("b", "m", true, true), site("c", "m", true)];
-    expect(tunnelConfig(sites, (item) => access.get(item.name)!).config.ingress).toEqual([
+    const sites = [site("a", "m", true), site("b", "m", true, true)];
+    expect(tunnelConfig(sites, (item) => access.get(item.name)!)?.config.ingress).toEqual([
       {
         hostname: "a.example.com",
         service: "http://localhost:5173",
@@ -106,8 +105,21 @@ describe("live sites (K-1104 to K-1108)", () => {
       ingressAccess(site(name, "m", true), desired, rows, domain);
     expect(of("pub")).toEqual({ kind: "bypass" });
     expect(of("priv")).toEqual({ kind: "check", teamName: "team", aud: "aud-priv" });
-    expect(of("new")).toEqual({ kind: "unknown" });
+    expect(of("new")).toBeNull();
     expect(() => of("priv", "")).toThrow(/ACCESS_TEAM_DOMAIN/);
+  });
+
+  it("writes no ingress for a machine while one of its applications has no audience tag (K-603)", () => {
+    // At deploy, rows from before the audience tag column have an id but no tag. The tunnel keeps
+    // the ingress that Cloudflare has instead of dropping the sites.
+    const desired: DesiredAccess = { policies: new Map(), apps: new Map() };
+    const rows = new Map<string, AccessRow>([
+      ["app:live-m-a:a.example.com", { key: "app:live-m-a:a.example.com", cfId: "cf-a", aud: "aud-a", body: "{}", tried: "", error: null }],
+      ["app:live-m-b:b.example.com", { key: "app:live-m-b:b.example.com", cfId: "cf-b", aud: "", body: "{}", tried: "", error: null }],
+    ]);
+    const accessOf = (item: LiveSite) => ingressAccess(item, desired, rows, "team.cloudflareaccess.com");
+    expect(tunnelConfig([site("a", "m", true), site("b", "m", true)], accessOf)).toBeNull();
+    expect(tunnelConfig([site("a", "m", true)], accessOf)?.config.ingress).toHaveLength(2);
   });
 
   it("needs an offline route when the site is down or its machine is offline", () => {

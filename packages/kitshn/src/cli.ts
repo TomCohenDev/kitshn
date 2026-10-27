@@ -192,7 +192,8 @@ const INFRASTRUCTURE = new Set(["SSH_KEY", "VPS_HOST", "SSH_KNOWN_HOSTS"]);
 function params(): string {
   const file = process.env["KITSHN_PARAMS_JSON"];
   delete process.env["KITSHN_PARAMS_JSON"];
-  if (!file || !existsSync(file)) return "";
+  if (!file) return "";
+  if (!existsSync(file)) fail(`the params file ${file} is missing; the workflow and the CLI do not match.`);
   const text = readFileSync(file, "utf8");
   // Gone before any build command runs, so a build cannot read the secrets.
   rmSync(file, { force: true });
@@ -204,7 +205,11 @@ function params(): string {
   for (const source of [read.vars ?? {}, read.secrets ?? {}]) {
     for (const [key, value] of Object.entries(source)) {
       const name = key.slice("KITSHN_".length);
-      if (!key.startsWith("KITSHN_") || typeof value !== "string" || INFRASTRUCTURE.has(name)) continue;
+      const named =
+        name.length > 0 &&
+        [...name].every((c) => c === "_" || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9"));
+      if (!key.startsWith("KITSHN_") || !named || typeof value !== "string" || INFRASTRUCTURE.has(name))
+        continue;
       values.set(name, value);
     }
   }
@@ -241,7 +246,10 @@ async function deployCompose(server: string, dir: string, deployId: string, addr
   const started = await call<{ machine: string }>(server, "/deploy/start", { deployId });
   console.log(`kitshn: building and starting on ${started.machine}`);
   let shown = 0;
+  // The workflow stops at 40 minutes; a deploy that has not ended by then failed somewhere.
+  const until = Date.now() + 38 * 60_000;
   for (;;) {
+    if (Date.now() > until) fail("the deploy did not end within 38 minutes.");
     await new Promise((done) => setTimeout(done, 3000));
     const status = await call<{ state: string; output: string; exitCode: number | null }>(
       server,

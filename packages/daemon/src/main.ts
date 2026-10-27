@@ -534,11 +534,18 @@ function connect(config: JoinSecrets) {
       const message = JSON.parse(text) as ServerToDaemon;
       if (message.type === "job") {
         log(`job ${message.id}: ${message.command.kind}`);
-        void runJob(message.command).then((result) => {
-          // The connection can change while a job runs; the result goes out on the current one.
-          pendingResults.push({ type: "jobResult", id: message.id, result });
-          flushResults();
-        });
+        // A job that throws (for example a file it cannot delete) still sends a result, and never ends the daemon.
+        void runJob(message.command)
+          .catch((error: unknown): JobOutcome => ({
+            ok: false,
+            exitCode: null,
+            output: `[kitshn: ${String(error)}]`,
+          }))
+          .then((result) => {
+            // The connection can change while a job runs; the result goes out on the current one.
+            pendingResults.push({ type: "jobResult", id: message.id, result });
+            flushResults();
+          });
       }
     };
     ws.onclose = (event) => {

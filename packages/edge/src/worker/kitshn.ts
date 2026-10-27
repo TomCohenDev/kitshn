@@ -733,8 +733,12 @@ export class Kitshn extends DurableObject<Env> {
         message.id,
         attachment.machineId,
       );
+      // Only a result that this machine's job took counts; a stray or late one changes no deploy.
+      const [{ taken } = { taken: 0 }] = this.sql<{ taken: number }>("SELECT changes() AS taken");
       // K-812: the source and params of a Compose deploy live only as long as its job.
-      const [job] = this.sql<{ command: string }>("SELECT command FROM jobs WHERE id = ?", message.id);
+      const [job] = taken
+        ? this.sql<{ command: string }>("SELECT command FROM jobs WHERE id = ?", message.id)
+        : [];
       const command = job ? (JSON.parse(job.command) as Command) : null;
       if (command?.kind === "compose")
         this.sql(
@@ -1767,8 +1771,18 @@ export class Kitshn extends DurableObject<Env> {
     // K-610, K-611: a new Compose app goes to the first online machine with all labels; a running one stays.
     let machineId: string | null = null;
     if (compose) {
-      if (existing?.machine) machineId = existing.machine;
-      else if (result.kind === "deploy") {
+      if (existing?.machine) {
+        // K-611: a running app stays on its machine, but only while the owner still offers it (K-610).
+        if (!this.state.machines.get(existing.machine)?.labels.includes("deploy")) {
+          return Response.json(
+            {
+              error: `${existing.name} runs on a machine without the label "deploy". Label it again, or remove the card to deploy elsewhere.`,
+            },
+            { status: 409 },
+          );
+        }
+        machineId = existing.machine;
+      } else if (result.kind === "deploy") {
         const labels = compose.runsOn ?? [];
         const pick = [...this.state.machines.values()]
           // Only a machine that the owner labels "deploy" runs the apps of repos (K-610).
@@ -2066,12 +2080,13 @@ export class Kitshn extends DurableObject<Env> {
     const [row] = this.sql<DeployRow>("SELECT * FROM deploys WHERE id = ?", deployId);
     if (!row || row.repo !== deployer.repo || row.job_id === null)
       return Response.json({ error: "kitshn knows no such running deploy of this repo." }, { status: 404 });
-    const [job] = this.sql<{ state: string; output: string; exit_code: number | null }>(
-      "SELECT state, output, exit_code FROM jobs WHERE id = ?",
+    const [job] = this.sql<{ state: string; output: string; exit_code: number | null; expires_at: number }>(
+      "SELECT state, output, exit_code, expires_at FROM jobs WHERE id = ?",
       row.job_id,
     );
-    // A dropped connection fails the job only for now: kitshn still takes its real result (OFFLINE_OUTPUT).
-    const waiting = job?.state === "failed" && job.output === OFFLINE_OUTPUT;
+    // A dropped connection fails the job only for now: kitshn still takes its real result (OFFLINE_OUTPUT),
+    // until the job would have expired; a daemon that restarted never sends it.
+    const waiting = job?.state === "failed" && job.output === OFFLINE_OUTPUT && job.expires_at > Date.now();
     const state =
       job?.state === "done"
         ? "done"
@@ -2080,7 +2095,11 @@ export class Kitshn extends DurableObject<Env> {
           : "running";
     if (state !== "running" && row.state === "running")
       this.sql("UPDATE deploys SET state = ? WHERE id = ?", state === "done" ? "done" : "failed", row.id);
-    return Response.json({ state, output: job?.output ?? "", exitCode: job?.exit_code ?? null });
+    return Response.json({
+      state,
+      output: waiting ? "" : (job?.output ?? ""),
+      exitCode: job?.exit_code ?? null,
+    });
   }
 
   /** K-904: a closed pull request stops its Compose preview; its card goes once the machine stops exposing it. */

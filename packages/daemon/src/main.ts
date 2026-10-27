@@ -295,8 +295,6 @@ async function deployFile(deployId: string, file: string): Promise<Buffer> {
 
 /** K-1404: the persistent root of KitSHn 1 on this machine. */
 const KITSHN1_PERSISTENT = process.env["KITSHN1_PERSISTENT"] ?? "/persistent";
-/** Short root jobs on app folders (copy, clean-up); busybox has `cp -a` and `find -delete` and is a few MB. */
-const HELPER_IMAGE = "busybox:1.38";
 
 /**
  * K-812, K-607: builds and starts a Compose app with the variables of KitSHn 1, so its `compose.yml` works

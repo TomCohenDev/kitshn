@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex" />
     <title>{{site}} is off · kitshn</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' role='img' aria-label='kitshn'%3E%3Ctitle%3Ekitshn%3C/title%3E%3Cstyle%3E%40media (prefers-color-scheme:dark)%7B.shadow%7Bfill:%23B9A8FF%7D%7D%3C/style%3E%3Crect class='shadow' x='6' y='6' width='58' height='58' rx='8'/%3E%3Cg stroke='%23000' stroke-width='4' stroke-linejoin='round'%3E%3Crect x='2' y='2' width='56' height='56' rx='8' fill='%23FFE14D'/%3E%3Cpath fill='%23FF8A3D' d='M14 54c0-6 4-10 6-15 3 3 4 6 5 8 1-5 3-9 5-13 2 4 4 8 5 13 1-2 2-5 5-8 2 5 6 9 6 15z'/%3E%3Crect x='5' y='20' width='10' height='7' rx='3.5' fill='%236C5CE7'/%3E%3Crect x='45' y='20' width='10' height='7' rx='3.5' fill='%236C5CE7'/%3E%3Crect x='12' y='16' width='36' height='20' rx='4' fill='%236C5CE7'/%3E%3Crect x='8' y='10' width='44' height='7' rx='3.5' fill='%236C5CE7'/%3E%3Crect x='26' y='5' width='8' height='5' rx='2' fill='%236C5CE7'/%3E%3C/g%3E%3C/svg%3E" />
     <style>
       /* K-1106: the kitshn offline page in the tick3d look, light and dark. No continuous animation. */
       @import url("https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,800&family=JetBrains+Mono:wght@400;600&display=swap");
@@ -67,8 +68,8 @@
         box-shadow: 6px 6px 0 0 var(--shadow-ink);
       }
       .pot {
-        font-size: 3rem;
-        line-height: 1;
+        width: 64px;
+        height: 64px;
       }
       h1 {
         margin: 10px 0 6px;
@@ -142,7 +143,7 @@
   <body>
     <main>
       <span class="sticker">back soon</span>
-      <div class="pot" aria-hidden="true">🍳</div>
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" class="pot" aria-hidden="true"><rect fill="var(--shadow-ink)" x="6" y="6" width="58" height="58" rx="8"/><g stroke="#000" stroke-width="4" stroke-linejoin="round"><rect x="2" y="2" width="56" height="56" rx="8" fill="#FFE14D"/><path fill="#FF8A3D" d="M14 54c0-6 4-10 6-15 3 3 4 6 5 8 1-5 3-9 5-13 2 4 4 8 5 13 1-2 2-5 5-8 2 5 6 9 6 15z"/><rect x="5" y="20" width="10" height="7" rx="3.5" fill="#6C5CE7"/><rect x="45" y="20" width="10" height="7" rx="3.5" fill="#6C5CE7"/><rect x="12" y="16" width="36" height="20" rx="4" fill="#6C5CE7"/><rect x="8" y="10" width="44" height="7" rx="3.5" fill="#6C5CE7"/><rect x="26" y="5" width="8" height="5" rx="2" fill="#6C5CE7"/></g></svg>
       <h1>The kitchen is closed.</h1>
       <span class="site">{{site}}</span>
       <p>{{reason}}</p>

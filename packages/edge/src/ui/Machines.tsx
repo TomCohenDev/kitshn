@@ -97,11 +97,18 @@ export function AddMachine(props: { onClose: () => void }) {
   );
 }
 
-const describe = (command: Command) => (command.kind === "shell" ? command.script : command.kind);
+const describe = (command: Command) =>
+  command.kind === "shell"
+    ? command.script
+    : command.kind === "update"
+      ? `update to ${command.version}`
+      : command.kind;
 
 /** The machine part of the card panel: status, sample, commands (K-612) and removal (K-615). */
 export function MachinePanel(props: {
   view: MachineView;
+  /** K-617: the release of this kitshn. */
+  version: string;
   jobs: ReadonlyArray<JobView>;
   onRemove: () => void;
   onToast: (text: string, error: boolean) => void;
@@ -188,6 +195,16 @@ export function MachinePanel(props: {
         <button class="btn" onClick={() => void run({ kind: "restart" })}>
           Restart daemon
         </button>
+        {/* A local build names no release, so there is nothing to update to (K-617). */}
+        {/^[0-9a-f]{12}$/.test(props.version) ? (
+          <button
+            class={`btn${view.status && view.status.version !== props.version ? " primary" : ""}`}
+            title={`Install the daemon of release ${props.version}`}
+            onClick={() => void run({ kind: "update", version: props.version })}
+          >
+            {view.status && view.status.version !== props.version ? `Update daemon to ${props.version}` : "Update daemon"}
+          </button>
+        ) : null}
       </div>
       <ul>
         {jobs.slice(0, 5).map((job) => (

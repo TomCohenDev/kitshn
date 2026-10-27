@@ -7,6 +7,7 @@ import {
   type ServerToDaemon,
 } from "@kitshn/edge/machine";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -30,7 +31,16 @@ import {
   uptime,
 } from "node:os";
 import { dirname, join } from "node:path";
-import { type Platform, cloudflaredUrl, pathsFor, serviceCommands, serviceFile } from "./service.ts";
+import {
+  type Platform,
+  RELEASES,
+  cloudflaredUrl,
+  expectedHash,
+  pathsFor,
+  releaseAsset,
+  serviceCommands,
+  serviceFile,
+} from "./service.ts";
 import { type SiteEntry, addSite, parseSiteFile, probe, targetOf } from "./sites.ts";
 
 declare const KITSHN_VERSION: string;
@@ -163,6 +173,39 @@ function pruneSamples() {
   writeFileSync(file, lines.length ? `${lines.join("\n")}\n` : "");
 }
 
+/**
+ * K-612, K-617: downloads the daemon of the release that kitshn names, checks it against the release's
+ * SHA256SUMS, puts it in place of this binary, and exits; the service manager starts the new one.
+ */
+async function updateDaemon(version: string): Promise<{ ok: boolean; exitCode: number | null; output: string }> {
+  const failed = (output: string) => ({ ok: false, exitCode: null, output });
+  if (!/^[0-9a-f]{12}$/.test(version)) return failed(`kitshn named no valid release (${version}).`);
+  // A daemon run from source has the runtime as its execPath; replacing that would break the runtime.
+  if (VERSION === "dev") return failed("This daemon runs from source; update it from the repo.");
+  if (version === VERSION) return { ok: true, exitCode: 0, output: `Already at ${version}.` };
+  const name = releaseAsset(platform, arch());
+  const base = `${RELEASES}/edge-${version}`;
+  try {
+    const sums = await fetch(`${base}/SHA256SUMS`);
+    const binary = await fetch(`${base}/${name}`);
+    if (!sums.ok || !binary.ok) return failed(`The release edge-${version} has no ${name}.`);
+    const expected = expectedHash(await sums.text(), name);
+    const bytes = new Uint8Array(await binary.arrayBuffer());
+    const actual = createHash("sha256").update(bytes).digest("hex");
+    if (!expected || expected !== actual) return failed(`${name} of edge-${version} does not match its SHA256SUMS.`);
+    const next = `${process.execPath}.new`;
+    // A leftover file keeps its old mode, so start fresh and set the mode explicitly.
+    rmSync(next, { force: true });
+    writeFileSync(next, bytes);
+    chmodSync(next, 0o755);
+    renameSync(next, process.execPath);
+  } catch (error) {
+    return failed(`The update failed: ${String(error)}`);
+  }
+  setTimeout(() => process.exit(0), 500);
+  return { ok: true, exitCode: 0, output: `Updated ${VERSION} to ${version}; restarting.` };
+}
+
 /** Process groups of running shell jobs. They end with the daemon, also under launchd. */
 const runningGroups = new Set<number>();
 process.on("exit", () => {
@@ -187,6 +230,7 @@ function runJob(command: Command): Promise<{ ok: boolean; exitCode: number | nul
     ].join("\n");
     return Promise.resolve({ ok: true, exitCode: 0, output: text });
   }
+  if (command.kind === "update") return updateDaemon(command.version);
   if (command.kind === "restart") {
     // The service manager starts the daemon again after this exit.
     setTimeout(() => process.exit(0), 500);
@@ -240,6 +284,7 @@ function report() {
   const message: DaemonMessage = {
     type: "status",
     status: {
+      capabilities: ["update"],
       version: VERSION,
       os: `${osPlatform()} ${release()}`,
       arch: arch(),

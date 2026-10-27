@@ -83,6 +83,7 @@ import {
   machineIdFor,
   parseCommand,
   parseLabels,
+  legacyUpdateScript,
   pickMachine,
 } from "./machines.ts";
 import type { Env } from "./env.ts";
@@ -406,6 +407,7 @@ export class Kitshn extends DurableObject<Env> {
       paused: this.state.paused,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
+      version: this.env.KITSHN_VERSION,
       me,
     };
   }
@@ -648,12 +650,17 @@ export class Kitshn extends DurableObject<Env> {
         os: String(message.status.os).slice(0, 80),
         arch: String(message.status.arch).slice(0, 20),
         hostname: String(message.status.hostname).slice(0, 80),
+        capabilities: Array.isArray(message.status.capabilities)
+          ? message.status.capabilities.filter((item): item is string => typeof item === "string").slice(0, 20)
+          : [],
         tunnel: ["starting", "running", "stopped"].includes(String(message.status.tunnel))
           ? message.status.tunnel
           : "stopped",
       };
       socket.serializeAttachment({ ...attachment, status } satisfies Attachment);
       this.sendMachine(machine);
+      // An update job waits for the status; it can go now.
+      this.deliverJobs();
     } else if (message.type === "sample" && isRecord(message.sample)) {
       const share = (value: unknown) => (typeof value === "number" && value >= 0 && value <= 1 ? value : 0);
       const sample: Sample = {
@@ -844,8 +851,18 @@ export class Kitshn extends DurableObject<Env> {
   /** K-610 to K-614: a job runs on one machine, or on the first online machine with its labels. */
   private addJob(caller: Caller, body: unknown) {
     const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
-    const command = parseCommand(input["command"]);
-    if (typeof command === "string") return Response.json({ error: command }, { status: 400 });
+    const parsed = parseCommand(input["command"]);
+    if (typeof parsed === "string") return Response.json({ error: parsed }, { status: 400 });
+    if (parsed.kind === "update" && !/^[0-9a-f]{12}$/.test(this.env.KITSHN_VERSION)) {
+      return Response.json(
+        {
+          error: `This kitshn runs the build "${this.env.KITSHN_VERSION}", which has no release to update to.`,
+        },
+        { status: 409 },
+      );
+    }
+    const command: Command =
+      parsed.kind === "update" ? { kind: "update", version: this.env.KITSHN_VERSION } : parsed;
     const labels = parseLabels(input["labels"] ?? []);
     if (typeof labels === "string") return Response.json({ error: labels }, { status: 400 });
     const machineId = typeof input["machineId"] === "string" ? input["machineId"] : null;
@@ -920,7 +937,28 @@ export class Kitshn extends DurableObject<Env> {
       if (!machine) continue;
       const socket = this.openSocket(machine.id);
       if (!socket) continue;
-      send(socket, { type: "job", id: job.id, command: JSON.parse(job.command) as Command });
+      let command = JSON.parse(job.command) as Command;
+      if (command.kind === "update") {
+        // K-617: the version at delivery, so a job that waited never installs an older release.
+        command = { kind: "update", version: this.env.KITSHN_VERSION };
+        const status = this.machineView(machine).status;
+        // The daemon sends its status just after it connects; the job waits for it.
+        if (!status) continue;
+        const fail = (output: string) => this.sql("UPDATE jobs SET state = 'failed', output = ? WHERE id = ?", output, job.id);
+        if (!/^[0-9a-f]{12}$/.test(command.version)) {
+          fail(`This kitshn runs the build "${command.version}", which has no release to update to.`);
+          continue;
+        }
+        if (!status.capabilities?.includes("update")) {
+          const script = status.version === "dev" ? null : legacyUpdateScript(command.version, status.os, status.arch);
+          if (!script) {
+            fail("This daemon runs from source, or kitshn does not know its platform. Update it by hand or join the machine again.");
+            continue;
+          }
+          command = { kind: "shell", script };
+        }
+      }
+      send(socket, { type: "job", id: job.id, command });
       this.sql("UPDATE jobs SET state = 'sent', machine_id = ? WHERE id = ?", machine.id, job.id);
     }
   }

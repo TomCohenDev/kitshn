@@ -3,7 +3,7 @@ import { circlePolicies } from "../core/access.ts";
 import { type Machine, newJoinCode, openJoin, sealJoin } from "../core/machine.ts";
 import type { Circle } from "../core/model.ts";
 import { circleMatches } from "../core/visitor.ts";
-import { machineIdFor, parseCommand, parseLabels, pickMachine } from "./machines.ts";
+import { legacyUpdateScript, machineIdFor, parseCommand, parseLabels, pickMachine } from "./machines.ts";
 
 const machine = (id: string, order: number, labels: Array<string>): Machine => ({
   id,
@@ -48,6 +48,8 @@ describe("jobs (K-610)", () => {
     expect(parseCommand({ kind: "shell", script: "uptime" })).toEqual({ kind: "shell", script: "uptime" });
     expect(parseCommand({ kind: "shell", script: " " })).toMatch(/script/);
     expect(parseCommand({ kind: "format-disk" })).toMatch(/no command/);
+    // The sender cannot pick the version of an update; kitshn fills in its own release (K-617).
+    expect(parseCommand({ kind: "update", version: "deadbeefdead" })).toEqual({ kind: "update", version: "" });
     expect(parseLabels(["Docker", "docker", "arm"])).toEqual(["docker", "arm"]);
     expect(parseLabels(["no spaces"])).toMatch(/label/);
     expect(machineIdFor("Oracle VPS!")).toMatch(/^oracle-vps-[0-9a-f]{6}$/);
@@ -82,5 +84,14 @@ describe("machine members (K-107)", () => {
   it("matches nobody and compiles to nothing for an unknown machine", () => {
     expect(circleMatches(circle, { email: null, clientId: "m1.access", ip: null }, new Map())).toBe(false);
     expect(circlePolicies({ ...circle, match: "all" }, new Map()).size).toBe(0);
+  });
+
+  it("updates an old daemon with a checked shell script, only for a known platform (K-617)", () => {
+    const script = legacyUpdateScript("f5d93ff436db", "linux 6.17.0-1020-oracle", "arm64");
+    expect(script).toContain("edge-f5d93ff436db");
+    expect(script).toContain("kitshn-linux-arm64");
+    expect(script).toContain("SHA256SUMS");
+    expect(legacyUpdateScript("f5d93ff436db", "win32 10", "x64")).toBeNull();
+    expect(legacyUpdateScript("local", "linux", "x64")).toBeNull();
   });
 });

@@ -258,7 +258,8 @@ fi
 metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --argjson migrations "$migrations" \
   --arg host "$KITSHN_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" \
   --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" \
-  --arg zone "$ZONE" --arg zone_name "$ZONE_NAME" --arg deployers "$DEPLOY_OWNER_IDS" '
+  --arg zone "$ZONE" --arg zone_name "$ZONE_NAME" --arg deployers "$DEPLOY_OWNER_IDS" \
+  --arg version "$(cat "$WORK/bundle/version")" '
   {
     main_module: "worker.js",
     compatibility_date: $date,
@@ -276,7 +277,8 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
       {type: "plain_text", name: "CLOUDFLARE_ACCOUNT_ID", text: $account},
       {type: "plain_text", name: "CLOUDFLARE_ZONE_ID", text: $zone},
       {type: "plain_text", name: "KITSHN_ZONE", text: $zone_name},
-      {type: "plain_text", name: "DEPLOY_OWNER_IDS", text: $deployers}
+      {type: "plain_text", name: "DEPLOY_OWNER_IDS", text: $deployers},
+      {type: "plain_text", name: "KITSHN_VERSION", text: $version}
     ],
     keep_bindings: ["secret_text"]
   } + (if $migrations == null then {} else {migrations: $migrations} end)')

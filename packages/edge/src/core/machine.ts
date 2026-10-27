@@ -20,6 +20,8 @@ export interface MachineStatus {
   readonly arch: string;
   readonly hostname: string;
   readonly tunnel: "starting" | "running" | "stopped";
+  /** Job kinds that this daemon knows beyond shell, diagnostics and restart. Old daemons send none. */
+  readonly capabilities?: ReadonlyArray<string>;
 }
 
 /** K-605, K-606: the latest resource sample. The Durable Object keeps it in memory only. */
@@ -34,7 +36,9 @@ export interface Sample {
 export type Command =
   | { readonly kind: "shell"; readonly script: string }
   | { readonly kind: "diagnostics" }
-  | { readonly kind: "restart" };
+  | { readonly kind: "restart" }
+  /** K-612, K-617: replace the daemon with the release that the Worker names, then restart. */
+  | { readonly kind: "update"; readonly version: string };
 
 export interface JobResult {
   readonly ok: boolean;

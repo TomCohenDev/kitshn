@@ -70,16 +70,29 @@ jobs:
         with:
           name: kitshn-edge
       # A release made with GITHUB_TOKEN triggers no other workflow, so homebrew.yml stays quiet.
-      - name: Publish the rolling edge release
+      # K-617: one release per commit, edge-<version>, that nothing changes later, with SHA256SUMS. The
+      # Worker names its version; join, update and deploy download from that release only. The rolling
+      # "edge" release stays for the bootstrap of a new account.
+      - name: Publish edge-<version> and the rolling edge release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          files="kitshn-edge.tar.gz packages/daemon/dist/kitshn-linux-arm64 packages/daemon/dist/kitshn-linux-x64 packages/daemon/dist/kitshn-darwin-arm64 packages/daemon/dist/kitshn-darwin-x64 packages/kitshn/dist/kitshn.mjs packages/kitshn/dist/kitshn.tgz"
+          version="${GITHUB_SHA:0:12}"
+          mkdir assets
+          cp kitshn-edge.tar.gz packages/daemon/dist/kitshn-linux-arm64 packages/daemon/dist/kitshn-linux-x64 \
+            packages/daemon/dist/kitshn-darwin-arm64 packages/daemon/dist/kitshn-darwin-x64 \
+            packages/kitshn/dist/kitshn.mjs packages/kitshn/dist/kitshn.tgz assets/
+          (cd assets && sha256sum * > SHA256SUMS)
+          # A rerun keeps the files that the first run published; a new build has other hashes.
+          if ! gh release view "edge-$version" >/dev/null 2>&1; then
+            gh release create "edge-$version" assets/* --prerelease --latest=false --target "$GITHUB_SHA" \
+              --title "kitshn 2 $version" --notes "kitshn 2 Worker bundle, daemon and CLI from $GITHUB_SHA."
+          fi
           if gh release view edge >/dev/null 2>&1; then
-            gh release upload edge $files --clobber
+            gh release upload edge assets/* --clobber
             gh release edit edge --target "$GITHUB_SHA" --notes "kitshn 2 Worker bundle, daemon and CLI from $GITHUB_SHA."
           else
-            gh release create edge $files --prerelease --latest=false --target "$GITHUB_SHA" \
+            gh release create edge assets/* --prerelease --latest=false --target "$GITHUB_SHA" \
               --title "kitshn 2 edge" --notes "kitshn 2 Worker bundle, daemon and CLI from $GITHUB_SHA."
           fi

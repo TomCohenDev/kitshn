@@ -308,7 +308,8 @@ export async function signOutEverywhere(
 /**
  * K-408 for the passkey check (K-103): the policy lists carry no MFA settings, so this reads each policy
  * that needs a passkey once a day and marks it when someone changed its MFA settings. It reads at most
- * `budget` policies a day, which covers 10 passkey circles; revisit when an owner has more.
+ * `budget` policies a day, which covers 10 passkey circles, or 5 that also hold pages or files (their passkey
+ * login copy needs a read too); revisit when an owner has more.
  */
 export async function verifyPasskeys(
   store: AccessStore,
@@ -534,6 +535,20 @@ export function loginHeld(attached: string): Set<string> {
   if (!attached) return new Set();
   const ids = JSON.parse(attached) as { login: Array<string>; passkey: Array<string> };
   return new Set([...ids.login, ...ids.passkey]);
+}
+
+/**
+ * K-1004: the `loginWant` of what the login applications may hold after a login step: its own ids when it
+ * worked, and the earlier and its own ids together when some write failed, since some apps may hold each.
+ */
+export function loginHeldAfter(previous: string, want: string, ok: boolean): string {
+  if (ok || !previous) return want;
+  const before = JSON.parse(previous) as { login: Array<string>; passkey: Array<string> };
+  const after = JSON.parse(want) as { login: Array<string>; passkey: Array<string> };
+  return JSON.stringify({
+    login: [...new Set([...before.login, ...after.login])],
+    passkey: [...new Set([...before.passkey, ...after.passkey])],
+  });
 }
 
 /** K-1004: a login policy that Cloudflare refused, so the map shows why some people cannot log in. */

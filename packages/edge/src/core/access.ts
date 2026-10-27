@@ -222,20 +222,17 @@ export function desiredAccess(state: State, now: number): DesiredAccess {
     for (const { circle } of activeShares(state, resource, now)) {
       if (seen.has(circle.id)) continue;
       seen.add(circle.id);
-      const key = `policy:${circle.id}:people`;
-      const people = circlePolicies(circle, state.machines).get(key);
+      const people = circlePolicies(circle, state.machines).get(`policy:${circle.id}:people`);
       // "Everyone" compiles to a Bypass: its items open without a login, and a Bypass would let in anyone.
       if (people?.decision !== "allow") continue;
-      policies.set(key, people);
-      if (!circle.needsPasskey) {
-        login.push(key);
-        continue;
-      }
-      // The plain login comes before the passkey step, so it needs the same people without the passkey.
+      // The login applications get their own copies, so a stuck login step never holds back a policy of a
+      // site (K-409). The plain login comes before the passkey step, so its copy has no passkey check.
       const { mfa_config: _, ...plain } = people;
       policies.set(`policy:${circle.id}:login`, { ...plain, name: `${people.name} (login)` });
       login.push(`policy:${circle.id}:login`);
-      passkey.push(key);
+      if (!circle.needsPasskey) continue;
+      policies.set(`policy:${circle.id}:login-passkey`, { ...people, name: `${people.name} (passkey login)` });
+      passkey.push(`policy:${circle.id}:login-passkey`);
     }
   }
   // K-113: the people of every passkey circle may open the App Launcher, where Access enrolls a passkey.

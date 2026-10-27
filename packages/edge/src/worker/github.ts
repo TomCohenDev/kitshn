@@ -25,7 +25,17 @@ export function pkcs8Pem(pem: string): string {
 
 const API = "https://api.github.com";
 
-async function call(token: string, method: string, path: string, body?: object) {
+/** A GitHub answer that is not 2xx, with its status, so a caller can tell a refusal from a fault. */
+class GitHubError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+async function call(token: string, method: string, path: string, body?: object): Promise<unknown> {
   const response = await fetch(`${API}${path}`, {
     method,
     headers: {
@@ -38,22 +48,27 @@ async function call(token: string, method: string, path: string, body?: object) 
   });
   if (!response.ok) {
     const text = await response.text();
-    if (path.endsWith("/installation") && response.status === 404)
-      throw new Error("The kitshn GitHub App is not installed on this repo.");
-    if (path.endsWith("/access_tokens") && response.status === 422)
-      throw new Error("Give the kitshn GitHub App the permission Actions: write, and accept it on the installation.");
     if (path.endsWith("/dispatches") && response.status === 422 && text.includes("workflow_dispatch"))
-      throw new Error("Add workflow_dispatch to the repo's kitshn.yml.");
-    throw new Error(`GitHub answered ${response.status} for ${method} ${path}: ${text}`);
+      throw new GitHubError(422, "Add workflow_dispatch to the repo's kitshn.yml.");
+    throw new GitHubError(response.status, `GitHub answered ${response.status} for ${method} ${path}: ${text}`);
   }
-  return response.status === 204 ? null : ((await response.json()) as Record<string, unknown>);
+  return response.status === 204 ? null : await response.json();
 }
 
+const record = (value: unknown): Record<string, unknown> => {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new Error("GitHub sent an answer that kitshn does not know.");
+  return value as Record<string, unknown>;
+};
+
 /**
- * K-718: runs the repo's kitshn workflow on one branch through the App (`workflow_dispatch`). The token
- * covers only that repo and only Actions, so it can start the repo's own code and nothing else.
+ * K-718, K-819: runs the repo's kitshn workflow on one branch through the App (`workflow_dispatch`). kitshn
+ * names the repo by its id, never by a name that a rename or a new repo can take over: the token covers only
+ * that repo id and only Actions, and the current name comes from that token. Returns the current full name.
  */
-export async function dispatchDeploy(app: GitHubApp, repo: string, branch: string, workflow: string) {
+export async function dispatchDeploy(app: GitHubApp, repoId: string, branch: string, workflow: string) {
+  const id = Number(repoId);
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error(`${repoId} is not a GitHub repository id.`);
   const now = Math.floor(Date.now() / 1000);
   const jwt = await new SignJWT({})
     .setProtectedHeader({ alg: "RS256" })
@@ -61,18 +76,42 @@ export async function dispatchDeploy(app: GitHubApp, repo: string, branch: strin
     .setIssuedAt(now - 60)
     .setExpirationTime(now + 540)
     .sign(await importPKCS8(pkcs8Pem(app.key), "RS256"));
-  const installation = await call(jwt, "GET", `/repos/${repo}/installation`);
-  const id = installation?.["id"];
-  if (typeof id !== "number") throw new Error("GitHub sent no installation id for this repo.");
-  const name = repo.split("/")[1] ?? repo;
-  const access = await call(jwt, "POST", `/app/installations/${id}/access_tokens`, {
-    repositories: [name],
-    permissions: { actions: "write" },
-  });
-  const token = access?.["token"];
-  if (typeof token !== "string") throw new Error("GitHub sent no installation token.");
+  // GitHub looks up an installation only by a repo name, so kitshn asks each installation for a token of
+  // this id. Only the first 100 installations count; the App has one per owner account (K-811).
+  const installations = await call(jwt, "GET", "/app/installations?per_page=100");
+  if (!Array.isArray(installations)) throw new Error("GitHub sent no list of installations.");
+  let token: string | null = null;
+  for (const installation of installations) {
+    const installationId = record(installation)["id"];
+    if (typeof installationId !== "number") throw new Error("GitHub sent an installation without an id.");
+    if (record(installation)["suspended_at"]) continue;
+    try {
+      const access = record(
+        await call(jwt, "POST", `/app/installations/${installationId}/access_tokens`, {
+          repository_ids: [id],
+          permissions: { actions: "write" },
+        }),
+      );
+      if (typeof access["token"] !== "string") throw new Error("GitHub sent no installation token.");
+      token = access["token"];
+      break;
+    } catch (error) {
+      // This installation does not hold the repo, lacks Actions: write (422), or GitHub refuses it (403, 404).
+      if (error instanceof GitHubError && [403, 404, 422].includes(error.status)) continue;
+      throw error;
+    }
+  }
+  if (token === null)
+    throw new Error(
+      "The kitshn GitHub App has no installation with this repo and the permission Actions: write. Install it on the repo and accept the permission.",
+    );
+  const repositories = record(await call(token, "GET", "/installation/repositories"))["repositories"];
+  const repo = (Array.isArray(repositories) ? repositories : []).map(record).find((item) => item["id"] === id);
+  const name = repo?.["full_name"];
+  if (typeof name !== "string") throw new Error(`The installation token does not reach the repo ${repoId}.`);
   // A full branch ref, so a tag with the same name never runs.
-  await call(token, "POST", `/repos/${repo}/actions/workflows/${workflow}/dispatches`, {
+  await call(token, "POST", `/repos/${name}/actions/workflows/${workflow}/dispatches`, {
     ref: `refs/heads/${branch}`,
   });
+  return name;
 }

@@ -12,6 +12,7 @@ import {
   syncAccess,
   syncLauncher,
   loginHeld,
+  loginHeldAfter,
   loginWant,
   loginWarnings,
   syncLogins,
@@ -56,10 +57,11 @@ describe("Access sync (K-406, K-408)", () => {
     const cf = fakeCloudflare();
     const desired = desiredAccess(start(), 0);
     expect(await syncAccess(desired, cf.store, cf.api, "a")).toBe(true);
-    // The Owner policy, its plain login copy (K-1004) and the passkey enrollment policy (K-113), then the
+    // The Owner policy, its two login copies (K-1004) and the passkey enrollment policy (K-113), then the
     // admin application.
     expect(cf.calls).toEqual([
       "GET /policies?per_page=1000",
+      "POST /policies",
       "POST /policies",
       "POST /policies",
       "POST /policies",
@@ -94,11 +96,13 @@ describe("Access sync (K-406, K-408)", () => {
     const appId = cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId;
     const ownerId = cf.rows.get("policy:owner:people")!.cfId;
     const loginId = cf.rows.get("policy:owner:login")!.cfId;
+    const passkeyId = cf.rows.get("policy:owner:login-passkey")!.cfId;
     await syncAccess(desiredAccess(withoutAdmin, 0), cf.store, cf.api, "a");
     expect(cf.calls).toEqual([
       `DELETE /apps/${appId}`,
       `DELETE /policies/${ownerId}`,
       `DELETE /policies/${loginId}`,
+      `DELETE /policies/${passkeyId}`,
     ]);
     // The Owner circle still needs a passkey, so its people keep the enrollment policy (K-113).
     expect([...cf.rows.keys()]).toEqual(["policy:enrollment"]);
@@ -182,6 +186,7 @@ describe("Access sync (K-406, K-408)", () => {
     expect(cf.calls).toEqual([
       `PUT /policies/${cf.rows.get("policy:owner:people")!.cfId}`,
       `PUT /policies/${cf.rows.get("policy:owner:login")!.cfId}`,
+      `PUT /policies/${cf.rows.get("policy:owner:login-passkey")!.cfId}`,
       `PUT /policies/${cf.rows.get("policy:enrollment")!.cfId}`,
     ]);
   });
@@ -195,6 +200,7 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
     const adminId = cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId;
     const enrollment = cf.rows.get("policy:enrollment")!;
     const login = cf.rows.get("policy:owner:login")!;
+    const loginPasskey = cf.rows.get("policy:owner:login-passkey")!;
     const live: Api = async <T>(method: string, path: string) => {
       if (path.includes("/policies?"))
         return [
@@ -208,6 +214,7 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
           },
           { id: enrollment.cfId, ...JSON.parse(enrollment.body) },
           { id: login.cfId, ...JSON.parse(login.body) },
+          { id: loginPasskey.cfId, ...JSON.parse(loginPasskey.body) },
         ] as T;
       if (path.includes("/apps?"))
         return [
@@ -294,9 +301,13 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
     const reachable = new Set(["kit.example.com"]);
     cf.calls.length = 0;
     const loginId = cf.rows.get("policy:owner:login")!.cfId;
+    const passkeyId = cf.rows.get("policy:owner:login-passkey")!.cfId;
     await syncAccess(desired, cf.store, cf.api, "a", 40, reachable);
-    // Only the login policy goes: no application holds it (K-1004).
-    expect(cf.calls.filter((call) => call.startsWith("DELETE"))).toEqual([`DELETE /policies/${loginId}`]);
+    // Only the login copies go: no Access application of a card holds them (K-1004).
+    expect(cf.calls.filter((call) => call.startsWith("DELETE"))).toEqual([
+      `DELETE /policies/${loginId}`,
+      `DELETE /policies/${passkeyId}`,
+    ]);
     cf.calls.length = 0;
     expect(hasAccessWork(desired, cf.rows, reachable)).toBe(false);
     // Once the route is confirmed gone, the app goes, and then its policy.
@@ -491,7 +502,7 @@ describe("page and file logins (K-1004)", () => {
     const desired = desiredAccess(start(), 0);
     await syncAccess(desired, cf.store, cf.api, "a");
     const plain = cf.rows.get("policy:owner:login")!.cfId;
-    const passkey = cf.rows.get("policy:owner:people")!.cfId;
+    const passkey = cf.rows.get("policy:owner:login-passkey")!.cfId;
     cf.calls.length = 0;
     const result = await syncLogins(desired, cf.store, cf.api, "a", "example.com", "", false);
     expect(cf.puts).toEqual([
@@ -573,36 +584,6 @@ describe("page and file logins (K-1004)", () => {
     );
   });
 
-  it("keeps a passkey circle off the passkey login until Cloudflare holds its passkey check", async () => {
-    const cf = fakeCloudflare();
-    const state = start();
-    const owner = state.circles.get("owner")!;
-    const relaxed = { ...state, circles: new Map(state.circles).set("owner", { ...owner, needsPasskey: false }) };
-    await syncAccess(desiredAccess(relaxed, 0), cf.store, cf.api, "a");
-    // "Needs passkey" turns on; the row still has the old body without the passkey check.
-    const desired = desiredAccess(state, 0);
-    expect(JSON.parse(loginWant(desired, cf.rows))).toEqual({ login: [], passkey: [] });
-    await syncAccess(desired, cf.store, cf.api, "a");
-    expect(JSON.parse(loginWant(desired, cf.rows))).toEqual({
-      login: [cf.rows.get("policy:owner:login")!.cfId],
-      passkey: [cf.rows.get("policy:owner:people")!.cfId],
-    });
-  });
-
-  it("warns on the map about a login policy that Cloudflare refused", async () => {
-    const cf = fakeCloudflare();
-    const desired = desiredAccess(start(), 0);
-    const failing: Api = async (method, path, body) => {
-      if (method === "POST" && path.endsWith("/policies")) throw new Error("refused");
-      return cf.api(method, path, body);
-    };
-    await syncAccess(desired, cf.store, failing, "a");
-    expect(loginWarnings(desired, cf.rows)).toEqual([
-      expect.stringContaining('"kitshn circle Owner (login)" of pages and files failed: refused'),
-      expect.stringContaining('"kitshn circle Owner" of pages and files failed: refused'),
-    ]);
-  });
-
   it("runs the login step before the sync, inside one budget (K-406)", async () => {
     const order: Array<string> = [];
     const logins = async () => {
@@ -635,28 +616,6 @@ describe("page and file logins (K-1004)", () => {
     ]);
   });
 
-  it("never drops the passkey check of a policy that a login application holds while the login step waits", async () => {
-    const cf = fakeCloudflare();
-    const state = start();
-    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
-    const attached = loginWant(desiredAccess(state, 0), cf.rows);
-    const people = cf.rows.get("policy:owner:people")!;
-    // "Needs passkey" turns off, and the login step was skipped or failed: the apps still hold the policy.
-    const owner = state.circles.get("owner")!;
-    const relaxed = desiredAccess(
-      { ...state, circles: new Map(state.circles).set("owner", { ...owner, needsPasskey: false }) },
-      0,
-    );
-    const held = loginHeld(attached);
-    cf.calls.length = 0;
-    await syncAccess(relaxed, cf.store, cf.api, "a", 40, new Set(), held);
-    expect(cf.calls).not.toContain(`PUT /policies/${people.cfId}`);
-    expect(cf.rows.get("policy:owner:people")!.body).toBe(people.body);
-    // Once the login step lets go of it, the sync writes it.
-    await syncAccess(relaxed, cf.store, cf.api, "a", 40, new Set(), loginHeld(loginWant(relaxed, cf.rows)));
-    expect(cf.calls).toContain(`PUT /policies/${people.cfId}`);
-  });
-
   it("never deletes a policy that a login application holds", async () => {
     const cf = fakeCloudflare();
     const state = start();
@@ -668,5 +627,63 @@ describe("page and file logins (K-1004)", () => {
     const deleted = cf.calls.filter((call) => call.startsWith("DELETE /policies"));
     for (const id of held) expect(deleted).not.toContain(`DELETE /policies/${id}`);
     expect(hasAccessWork(gone, cf.rows, new Set(), held)).toBe(false);
+  });
+
+  it("keeps a policy off the passkey login while Cloudflare holds a body without its passkey check", async () => {
+    const cf = fakeCloudflare();
+    const desired = desiredAccess(start(), 0);
+    await syncAccess(desired, cf.store, cf.api, "a");
+    const row = cf.rows.get("policy:owner:login-passkey")!;
+    const { mfa_config: _, ...old } = JSON.parse(row.body) as Record<string, unknown>;
+    cf.rows.set(row.key, { ...row, body: JSON.stringify(old) });
+    expect(JSON.parse(loginWant(desired, cf.rows))).toEqual({
+      login: [cf.rows.get("policy:owner:login")!.cfId],
+      passkey: [],
+    });
+  });
+
+  it("warns on the map about a login policy that Cloudflare refused", async () => {
+    const cf = fakeCloudflare();
+    const desired = desiredAccess(start(), 0);
+    const failing: Api = async (method, path, body) => {
+      if (method === "POST" && path.endsWith("/policies")) throw new Error("refused");
+      return cf.api(method, path, body);
+    };
+    await syncAccess(desired, cf.store, failing, "a");
+    expect(loginWarnings(desired, cf.rows)).toEqual([
+      expect.stringContaining('"kitshn circle Owner (login)" of pages and files failed: refused'),
+      expect.stringContaining('"kitshn circle Owner (passkey login)" of pages and files failed: refused'),
+    ]);
+  });
+
+  it("holds only the login copies, so a site policy still changes while the login step waits (K-409)", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    const held = loginHeld(loginWant(desiredAccess(state, 0), cf.rows));
+    const people = cf.rows.get("policy:owner:people")!;
+    const passkeyCopy = cf.rows.get("policy:owner:login-passkey")!;
+    // "Needs passkey" turns off, and the login step was skipped or failed.
+    const owner = state.circles.get("owner")!;
+    const relaxed = desiredAccess(
+      { ...state, circles: new Map(state.circles).set("owner", { ...owner, needsPasskey: false }) },
+      0,
+    );
+    cf.calls.length = 0;
+    await syncAccess(relaxed, cf.store, cf.api, "a", 40, new Set(), held);
+    expect(cf.calls).toContain(`PUT /policies/${people.cfId}`);
+    expect(cf.calls).not.toContain(`DELETE /policies/${passkeyCopy.cfId}`);
+    expect(cf.rows.get(passkeyCopy.key)!.body).toBe(passkeyCopy.body);
+    // Once the login step lets go of it, the copy goes.
+    await syncAccess(relaxed, cf.store, cf.api, "a", 40, new Set(), loginHeld(loginWant(relaxed, cf.rows)));
+    expect(cf.calls).toContain(`DELETE /policies/${passkeyCopy.cfId}`);
+  });
+
+  it("holds the earlier and the new ids after a login step that failed part way", () => {
+    const before = JSON.stringify({ login: ["a"], passkey: ["p"] });
+    const want = JSON.stringify({ login: ["a", "b"], passkey: [] });
+    expect(JSON.parse(loginHeldAfter(before, want, false))).toEqual({ login: ["a", "b"], passkey: ["p"] });
+    expect(loginHeldAfter(before, want, true)).toBe(want);
+    expect(loginHeldAfter("", want, false)).toBe(want);
   });
 });

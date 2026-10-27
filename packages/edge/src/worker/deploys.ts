@@ -16,11 +16,57 @@ const id = (text: string) =>
  * similar names apart (my.site and my-site).
  */
 export function environmentNames(repoId: string, repo: string, environment: string) {
-  const slug = id(repo.split("/")[1] ?? repo).slice(0, 20);
+  const slug = slugOf(repo);
   const full = id(`app-${slug}-${repoId}-${environment}`);
   // A long name keeps a hash of the environment instead of cutting it, so two environments never meet.
   const resourceId = full.length <= 56 ? full : `app-${slug}-${repoId}-${fnv(environment)}`;
   return { resourceId, script: `kitshn-${resourceId}` };
+}
+
+const slugOf = (repo: string) => id(repo.split("/")[1] ?? repo).slice(0, 20);
+
+/**
+ * K-819: the repo id inside a card id that `environmentNames` made from this repo name and environment,
+ * or null when the card id has another form (card ids from before the repo id, or another repo).
+ */
+export function repoIdOf(repo: string, environment: string, resourceId: string): string | null {
+  const prefix = `app-${slugOf(repo)}-`;
+  if (!resourceId.startsWith(prefix)) return null;
+  const rest = resourceId.slice(prefix.length);
+  const end = rest.indexOf("-");
+  const candidate = end === -1 ? rest : rest.slice(0, end);
+  if (candidate === "") return null;
+  return environmentNames(candidate, repo, environment).resourceId === resourceId ? candidate : null;
+}
+
+/**
+ * K-819: the repo ids of the deploy rows from before the gate, and the repos that count as allowed: each
+ * repo with a finished deploy (a teardown alone does not count). `unknown` lists the rows without an id.
+ * Later rows win the repo name.
+ */
+export function legacyRepos(
+  deploys: ReadonlyArray<{
+    readonly id: string;
+    readonly repo: string;
+    readonly environment: string;
+    readonly resourceId: string;
+    readonly kind: string;
+    readonly state: string;
+  }>,
+) {
+  const repoIds = new Map<string, string>();
+  const allowed = new Map<string, string>();
+  const unknown: Array<string> = [];
+  for (const deploy of deploys) {
+    const repoId = repoIdOf(deploy.repo, deploy.environment, deploy.resourceId);
+    if (repoId === null) {
+      unknown.push(deploy.id);
+      continue;
+    }
+    repoIds.set(deploy.id, repoId);
+    if (deploy.kind === "deploy" && deploy.state === "done") allowed.set(repoId, deploy.repo);
+  }
+  return { repoIds, allowed, unknown };
 }
 
 /** FNV-1a, 32 bits, as 8 hex characters. */

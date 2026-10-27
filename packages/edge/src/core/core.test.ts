@@ -355,7 +355,7 @@ describe("page and file logins (K-1004)", () => {
     const state = withPage(start(), 760);
     expect(desiredAccess(state, 0).logins).toEqual({
       login: ["policy:owner:login"],
-      passkey: ["policy:owner:people"],
+      passkey: ["policy:owner:login-passkey"],
     });
     for (const policy of loginRules(state)) {
       expect(policy.decision).toBe("allow");
@@ -363,18 +363,20 @@ describe("page and file logins (K-1004)", () => {
     }
   });
 
-  it("adds the people of a circle that holds a page", () => {
+  it("adds the people of a circle that holds a page, in a copy of its own", () => {
     const access = desiredAccess(withPage(start(), 450), 0);
-    expect(access.logins.login).toEqual(["policy:owner:login", "policy:her:people"]);
-    expect(access.policies.get("policy:her:people")?.include).toEqual([
+    // Her holds no site, so her site policy is not wanted at all: a stuck login step never holds it.
+    expect(access.policies.has("policy:her:people")).toBe(false);
+    expect(access.logins.login).toEqual(["policy:owner:login", "policy:her:login"]);
+    expect(access.policies.get("policy:her:login")?.include).toEqual([
       { email: { email: "her@example.com" } },
     ]);
   });
 
   it("asks for the passkey only on the passkey login", () => {
     const access = desiredAccess(withPage(start(), 450), 0);
-    expect(access.logins.passkey).toEqual(["policy:owner:people"]);
-    expect(access.policies.get("policy:owner:people")?.mfa_config).toBeDefined();
+    expect(access.logins.passkey).toEqual(["policy:owner:login-passkey"]);
+    expect(access.policies.get("policy:owner:login-passkey")?.mfa_config).toBeDefined();
     expect(access.policies.get("policy:owner:login")?.mfa_config).toBeUndefined();
     expect(access.policies.get("policy:owner:login")?.include).toEqual([{ email: { email: OWNER } }]);
   });
@@ -402,8 +404,8 @@ describe("page and file logins (K-1004)", () => {
         members: [...her.members, { _tag: "ip" as const, range: "10.0.0.0/8" }],
       }),
     };
-    expect(desiredAccess(strict, 0).logins.login).toEqual(["policy:owner:login", "policy:her:people"]);
-    expect(desiredAccess(strict, 0).policies.get("policy:her:people")?.require).toEqual([
+    expect(desiredAccess(strict, 0).logins.login).toEqual(["policy:owner:login", "policy:her:login"]);
+    expect(desiredAccess(strict, 0).policies.get("policy:her:login")?.require).toEqual([
       { ip: { ip: "10.0.0.0/8" } },
     ]);
     const ended = { ...state, circles: new Map(state.circles).set("her", { ...her, endsAt: 1 }) };
@@ -417,7 +419,7 @@ describe("page and file logins (K-1004)", () => {
       const { after } = edit(state, [{ _tag: "pause", after: mode }]);
       expect(desiredAccess(after, 0).logins).toEqual({
         login: ["policy:owner:login"],
-        passkey: ["policy:owner:people"],
+        passkey: ["policy:owner:login-passkey"],
       });
     }
   });

@@ -163,7 +163,9 @@ const describe = (command: Command) =>
     ? command.script
     : command.kind === "update"
       ? `update to ${command.version}`
-      : command.kind;
+      : command.kind === "compose-volume-remove"
+        ? `delete volume ${command.volume}`
+        : command.kind;
 
 /** The machine part of the card panel: status, sample, commands (K-612) and removal (K-615). */
 export function MachinePanel(props: {
@@ -312,6 +314,31 @@ export function MachinePanel(props: {
           </button>
         ) : null}
       </div>
+      {view.orphanVolumes.length > 0 ? (
+        <>
+          <div class="label" style={{ marginTop: "10px" }}>
+            Orphaned volumes
+          </div>
+          <p class="help">
+            Volumes of removed apps. Undo of a removal does not bring back a deleted volume (K-909).
+          </p>
+          <ul>
+            {view.orphanVolumes.map((volume) => (
+              <li key={volume.name}>
+                <div class="row">
+                  <code>{volume.name}</code>
+                  <button
+                    class="btn danger"
+                    onClick={() => void run({ kind: "compose-volume-remove", project: volume.project, volume: volume.name })}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
       <ul>
         {jobs.slice(0, 5).map((job) => (
           <li key={job.id}>

@@ -1,8 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 import { Schema } from "effect";
 import { ACCESS_NAME_PREFIX, ENROLLMENT_KEY, desiredAccess } from "../core/access.ts";
+import { appRestart, appTeardown, composeUndo, orphanVolumes } from "../core/apps.ts";
 import {
   type Actor,
+  type AppCard,
   type Change,
   type Edit,
   RuleError,
@@ -12,7 +14,9 @@ import {
   invert,
   refuseRaiseWhilePaused,
   refuseResume,
+  removeAppChanges,
   resolveEdits,
+  restoredResource,
   ruleViolation,
   shareDiff,
   stacksWithout,
@@ -39,6 +43,7 @@ import {
   type Machine,
   type MachineKey,
   type MachineStatus,
+  type ProjectVolume,
   type Sample,
   type ServerToDaemon,
   allowedFor,
@@ -65,6 +70,7 @@ import {
 } from "../core/repos.ts";
 import { ClientMessage } from "../core/schema.ts";
 import {
+  type LastDeploy,
   agentDeployPlan,
   agentHas,
   agentHomeCircle,
@@ -114,6 +120,7 @@ import {
 import type { Caller, Deployer } from "./auth.ts";
 import { CloudflareError, cloudflare } from "./cloudflare.ts";
 import { dispatchDeploy } from "./github.ts";
+import { REPLACED, dropLiveSite, failQueuedDowns, removalDown, requeueDowns } from "./downs.ts";
 import { REPO_GATE_MIGRATION, migrate } from "./migrations.ts";
 import {
   DEPLOY_MS,
@@ -166,6 +173,8 @@ type Attachment =
       /** K-605, K-606: kept on the socket, so they survive hibernation and cost no row writes. */
       readonly status: MachineStatus | null;
       readonly sample: Sample | null;
+      /** K-909: the idle volumes of kitshn apps; a socket from before this field has none. */
+      readonly volumes?: ReadonlyArray<ProjectVolume>;
     };
 
 /**
@@ -252,6 +261,9 @@ export class Kitshn extends DurableObject<Env> {
   private sql<T extends Record<string, SqlStorageValue>>(query: string, ...bindings: Array<SqlStorageValue>) {
     return this.ctx.storage.sql.exec<T>(query, ...bindings).toArray();
   }
+
+  /** The SQL of the job helpers in downs.ts, which tests run on node:sqlite. */
+  private query = (query: string, ...bindings: Array<string | number | null>) => this.sql(query, ...bindings);
 
   private load() {
     const json = <T>(rows: Array<{ id: string; body: string }>) =>
@@ -378,6 +390,12 @@ export class Kitshn extends DurableObject<Env> {
             state,
             Date.now(),
           );
+      // The demo's riffle card counts as deployed, so the card panel shows "Remove app" (K-909).
+      if (extra.resources.some((resource) => resource.id === "riffle"))
+        this.sql(
+          `INSERT OR IGNORE INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file)
+           VALUES ('demo-riffle', 'Yarden-zamir/riffle', '1001', 'prod', 'riffle', 'riffle.example.com', '', NULL, 'deploy', 'demo', 'done', 0, 'main', 'compose', NULL, NULL)`,
+        );
       this.insertRevision({ _tag: "kitshn", reason: "setup" }, "Set up kitshn", changes, null);
     });
     this.load();
@@ -404,6 +422,11 @@ export class Kitshn extends DurableObject<Env> {
     for (const change of changes) {
       if (change._tag === "pause") {
         this.setMeta("paused", change.after ?? "");
+        continue;
+      }
+      if (change._tag === "app") {
+        if (change.after) this.putResource(restoredResource(change.after));
+        else this.sql("DELETE FROM resources WHERE id = ?", change.id);
         continue;
       }
       const table =
@@ -455,14 +478,28 @@ export class Kitshn extends DurableObject<Env> {
     return row.id;
   }
 
+  /** K-401, K-909: the Access objects, with the addresses that removed apps still serve. */
+  private desired(now: number) {
+    const removed = [...this.liveSites.values()].filter(
+      (site) => site.state === "ok" && !this.state.resources.has(site.id),
+    );
+    return desiredAccess(this.state, now, removed);
+  }
+
+  /** The rules that every write keeps (K-105, K-1504). Returns the state after the changes. */
+  private checked(changes: ReadonlyArray<Change>): State {
+    const after = applyChanges(this.state, changes);
+    const violation = ruleViolation(after);
+    if (violation) throw new RuleError(violation);
+    refuseRaiseWhilePaused(this.state, after);
+    return after;
+  }
+
   /** One write: checks the rules (K-105), stores the changes and one revision (K-1501), then tells everyone. */
   private commit(actor: Actor, changes: ReadonlyArray<Change>, undoes: number | null): number | null {
     if (changes.length === 0) return null;
     const before = this.state;
-    const after = applyChanges(before, changes);
-    const violation = ruleViolation(after);
-    if (violation) throw new RuleError(violation);
-    refuseRaiseWhilePaused(before, after);
+    const after = this.checked(changes);
     const summary =
       undoes === null
         ? summarize(before, after, changes)
@@ -529,7 +566,10 @@ export class Kitshn extends DurableObject<Env> {
       );
     // This also refuses a second undo of the same revision: its changes are no longer current.
     const conflict = conflictOf(this.state, inverted);
-    if (conflict) throw new RuleError(`A later revision changed ${conflict}. Undo that revision first.`);
+    if (conflict?._tag === "app")
+      throw new RuleError(`A later deploy or removal changed the app "${conflict.id}", so this undo no longer fits (K-909).`);
+    if (conflict)
+      throw new RuleError(`A later revision changed ${conflict._tag} "${conflict.id}". Undo that revision first.`);
     // A card that joined a stack since then takes its stack along (K-521), but never into a public circle
     // without the question of K-210, which an undo does not ask.
     const changes = withStackMates(this.state, inverted);
@@ -541,7 +581,171 @@ export class Kitshn extends DurableObject<Env> {
       throw new RuleError(
         `This undo would make ${goingPublic.resource.name} public through its stack. Move the stack by hand.`,
       );
-    return this.commit(actor, refuseResume(changes), revisionId);
+    return this.commitApps(actor, refuseResume(changes), revisionId);
+  }
+
+  /** K-909: removes a deployed app; the card panel, the palette and `DELETE /api/apps/<card>` all come here. */
+  private async removeApp(caller: Caller, id: string) {
+    try {
+      if (!this.deployedCards(id).includes(id))
+        return Response.json(
+          { error: `A deploy did not make the card "${id}", so it is not an app (K-909).` },
+          { status: 409 },
+        );
+      return Response.json(await this.commitApps(caller.actor, removeAppChanges(this.state, id), null));
+    } catch (error) {
+      if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
+      return Response.json({ error: `kitshn could not remove the app: ${String(error)}` }, { status: 502 });
+    }
+  }
+
+  /**
+   * K-909: commits changes that can remove or restore apps, with the work in Cloudflare and on machines that
+   * goes with them. Returns the revision and a note for each app: what started or stopped, or why not.
+   */
+  private async commitApps(
+    actor: Actor,
+    changes: ReadonlyArray<Change>,
+    undoes: number | null,
+  ): Promise<{ revision: number | null; notes: Array<string> }> {
+    const apps = changes.flatMap((change) => (change._tag === "app" ? [change] : []));
+    // Check first, so that a refused change tears nothing down.
+    this.checked(changes);
+    // K-410: a Worker address goes before its card, because the card keeps its Access application.
+    for (const { before, after } of apps) {
+      const teardown = before && !after ? appTeardown(before, this.env.KITSHN_ZONE) : null;
+      if (teardown?.kind !== "worker") continue;
+      const api = this.api();
+      if (!api) throw new RuleError("kitshn has no Cloudflare API token here.");
+      await this.removeWorker(api, teardown.address, teardown.script);
+    }
+    // The state can change while Cloudflare answers.
+    const conflict = conflictOf(this.state, changes);
+    if (conflict) throw new RuleError(`${conflict._tag} "${conflict.id}" changed meanwhile. Try again.`);
+    // K-909: the stop of a removed Compose app that the machine runs now ends first. A closed preview has its
+    // own teardown (K-904), which the undo leaves alone.
+    const restored = apps.flatMap(({ after }) =>
+      after?.kind === "site.compose" && !this.closedPreview(after.id) ? [after] : [],
+    );
+    for (const card of restored)
+      if (composeUndo(removalDown(this.query, card.id)) === "refuse")
+        throw new RuleError(`The machine is stopping ${card.name} now; undo after it finishes (K-909).`);
+    const revision = this.commit(actor, changes, undoes);
+    // A stop that still waits goes, and the app starts again (a short restart where it never stopped).
+    for (const card of restored) {
+      failQueuedDowns(this.query, card.id, "The undo of the removal replaced this job (K-909).");
+      dropLiveSite(this.query, card.id);
+    }
+    if (restored.length > 0) this.load();
+    const notes: Array<string> = [];
+    for (const { before, after } of apps) {
+      if (after) notes.push(await this.restartApp(actor, after));
+      else if (before?.kind === "site.compose") notes.push(this.stopCompose(actor, before));
+    }
+    if (apps.length > 0) {
+      this.deliverJobs();
+      this.broadcast();
+    }
+    return { revision, notes };
+  }
+
+  /**
+   * K-909: the cards that a deploy made, which "Remove app" accepts: a deploy with a repo id, or a finished one
+   * from before the repo id (K-819). With an id, only that card. The card panel reads the same list.
+   */
+  private deployedCards(id: string | null = null): Array<string> {
+    return this.sql<{ resource_id: string }>(
+      `SELECT DISTINCT resource_id FROM deploys WHERE kind = 'deploy' AND (repo_id IS NOT NULL OR state = 'done')
+       AND (? IS NULL OR resource_id = ?)`,
+      id,
+      id,
+    )
+      .map((row) => row.resource_id)
+      .filter((card) => this.state.resources.has(card));
+  }
+
+  /** K-718, K-909: the newest finished deploy of a card, or null. */
+  private lastDone(id: string): DeployRow | null {
+    const [row] = this.sql<DeployRow>(
+      "SELECT * FROM deploys WHERE resource_id = ? AND kind = 'deploy' AND state = 'done' ORDER BY expires_at DESC LIMIT 1",
+      id,
+    );
+    return row ?? null;
+  }
+
+  /** K-909: the newest plan of this environment was a teardown, so its pull request closed (K-904). */
+  private closedPreview(id: string) {
+    const [row] = this.sql<{ kind: string }>(
+      "SELECT kind FROM deploys WHERE resource_id = ? ORDER BY expires_at DESC LIMIT 1",
+      id,
+    );
+    return row?.kind === "teardown";
+  }
+
+  /** K-718, K-909: the last finished deploy as the start of an app reads it. */
+  private lastDeployOf(row: DeployRow): LastDeploy {
+    return {
+      app: row.app,
+      repo: row.repo,
+      branch: row.branch,
+      resourceId: row.resource_id,
+      environment: row.environment,
+      name: row.address.slice(0, -this.env.KITSHN_ZONE.length - 1),
+      composeFile: row.compose_file,
+    };
+  }
+
+  /** K-718, K-909: whether a machine can start the last good build of a card. */
+  private redeployFacts(machine: Machine, card: string, repo: string) {
+    return {
+      canRedeploy: ["compose-redeploy", "compose-guard"].every(
+        (capability) => this.machineView(machine).status?.capabilities?.includes(capability) ?? false,
+      ),
+      takesDeploys: machine.labels.includes("deploy"),
+      runsCard: this.state.resources.get(card)?.machine === machine.id,
+      allowed: allowedFor(machine, repo),
+    };
+  }
+
+  /** K-909: stops a removed Compose app and keeps its volumes. The job waits for the machine, however long. */
+  private stopCompose(actor: Actor, card: AppCard) {
+    const teardown = appTeardown(card, this.env.KITSHN_ZONE);
+    if (teardown.kind !== "compose") throw new Error(`${card.name} is no Compose app.`);
+    const machine = teardown.machineId ? this.state.machines.get(teardown.machineId) : undefined;
+    if (!machine) return `kitshn knows no machine of ${card.name}, so nothing stops there.`;
+    this.queueKitshnJob(machine.id, teardown.command, actor, NEVER);
+    const when = this.onlineMachines().has(machine.id) ? "now" : `when ${machine.name} comes online`;
+    return `${card.name} stops on ${machine.name} ${when}; its volumes stay on the machine.`;
+  }
+
+  /** K-909: the undo of a removal starts the app again where it can, and says why where it cannot. */
+  private async restartApp(actor: Actor, card: AppCard) {
+    const done = this.lastDone(card.id);
+    const machine = done?.machine_id ? this.state.machines.get(done.machine_id) : undefined;
+    const refusal = this.state.paused
+      ? "kitshn is paused, so it starts nothing until Resume."
+      : done
+        ? this.repoRefusal(done.repo_id)
+        : null;
+    const plan = appRestart(
+      done ? this.lastDeployOf(done) : null,
+      refusal,
+      this.closedPreview(card.id),
+      machine ? this.redeployFacts(machine, card.id, done?.repo ?? "") : null,
+    );
+    const back = `${card.name} is back on the map`;
+    if (plan.kind === "none") return `${back}, but kitshn did not start it: ${plan.reason}`;
+    if (plan.kind === "redeploy") {
+      if (!machine) throw new Error("A redeploy plan without its machine.");
+      this.queueKitshnJob(machine.id, plan.command, actor, Date.now() + DEPLOY_MS);
+      return `${back} and starts its last good build on ${machine.name}.`;
+    }
+    try {
+      const repo = await this.dispatchBuild(done?.repo_id ?? "", plan.branch);
+      return `${back}; kitshn started a build of ${repo} from ${plan.branch}.`;
+    } catch (error) {
+      return `${back}, but the build did not start: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
 
   private authorized(caller: Caller) {
@@ -554,7 +758,7 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private snapshot(me: Actor, repos: ReadonlyArray<RepoView> = this.repoViews()): Snapshot {
-    const desired = desiredAccess(this.state, Date.now());
+    const desired = this.desired(Date.now());
     const loginError = this.meta("login_error");
     return {
       circles: [...this.state.circles.values()],
@@ -571,6 +775,7 @@ export class Kitshn extends DurableObject<Env> {
       ],
       paused: this.state.paused,
       repos,
+      deployedCards: this.deployedCards(),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
@@ -593,6 +798,7 @@ export class Kitshn extends DurableObject<Env> {
       status: live?.status ?? null,
       sample: live?.sample ?? null,
       keyFailure: this.keyFailures.get(machine.id) ?? null,
+      orphanVolumes: orphanVolumes(live?.volumes ?? [], this.state),
     };
   }
 
@@ -630,13 +836,13 @@ export class Kitshn extends DurableObject<Env> {
     }
   }
 
-  private handle(caller: Caller, message: ClientMessage): Extract<ServerMessage, { type: "result" }> {
+  private async handle(caller: Caller, message: ClientMessage): Promise<Extract<ServerMessage, { type: "result" }>> {
     try {
-      const revision =
+      const { revision, notes } =
         message.type === "apply"
-          ? this.apply(caller.actor, message.edits)
-          : this.undo(caller.actor, message.revision);
-      return { type: "result", requestId: message.requestId, ok: true, revision };
+          ? { revision: this.apply(caller.actor, message.edits), notes: [] }
+          : await this.undo(caller.actor, message.revision);
+      return { type: "result", requestId: message.requestId, ok: true, revision, notes };
     } catch (error) {
       if (!(error instanceof RuleError)) throw error;
       return { type: "result", requestId: message.requestId, ok: false, error: error.message };
@@ -697,6 +903,8 @@ export class Kitshn extends DurableObject<Env> {
       );
     if (path.startsWith("/api/machines/") && request.method === "DELETE")
       return this.removeMachine(caller, decodeURIComponent(path.slice("/api/machines/".length)));
+    if (path.startsWith("/api/apps/") && request.method === "DELETE")
+      return this.removeApp(caller, decodeURIComponent(path.slice("/api/apps/".length)));
     if (path.startsWith("/api/repos/") && request.method === "POST")
       return await this.setRepoState(
         caller,
@@ -731,7 +939,7 @@ export class Kitshn extends DurableObject<Env> {
       } catch (error) {
         return Response.json({ error: String(error) }, { status: 400 });
       }
-      const result = this.handle(caller, message);
+      const result = await this.handle(caller, message);
       return Response.json(result, { status: result.ok ? 200 : 409 });
     }
     return new Response("Not found.", { status: 404 });
@@ -762,7 +970,7 @@ export class Kitshn extends DurableObject<Env> {
       return;
     }
     try {
-      send(socket, this.handle(caller, message));
+      send(socket, await this.handle(caller, message));
     } catch (error) {
       // Every request gets an answer, so a map never waits forever on an edit it shows (held.ts).
       console.error(`kitshn could not handle a ${message.type} request: ${String(error)}`);
@@ -791,6 +999,7 @@ export class Kitshn extends DurableObject<Env> {
     const others = this.checkedSockets(attachment.machineId).filter((other) => other !== socket);
     if (others.length > 0) return;
     // A job that the machine had when its connection ended has no result coming.
+    requeueDowns(this.query, attachment.machineId);
     this.sql(
       `UPDATE jobs SET state = 'failed', output = '${OFFLINE_OUTPUT}' WHERE machine_id = ? AND state = 'sent'`,
       attachment.machineId,
@@ -823,6 +1032,8 @@ export class Kitshn extends DurableObject<Env> {
   private reconcilePresence() {
     for (const [id, value] of this.presence)
       if (value.online && this.openSocket(id) === null) this.setPresence(id, false);
+    // K-909: a restart closed every socket without a close event, so no stop stays sent forever.
+    for (const id of this.state.machines.keys()) if (this.openSocket(id) === null) requeueDowns(this.query, id);
   }
 
   /**
@@ -877,6 +1088,9 @@ export class Kitshn extends DurableObject<Env> {
     }
     if (this.presence.get(machine.id)?.online) this.sendMachine(machine);
     else this.setPresence(machine.id, true);
+    // K-909: after a fast reconnect the old socket's close finds this one and requeues nothing, and a removal
+    // down never expires, so its result that may never come must not keep it sent.
+    requeueDowns(this.query, machine.id);
     this.deliverJobs();
     void this.scheduleAlarm();
   }
@@ -907,6 +1121,7 @@ export class Kitshn extends DurableObject<Env> {
     const first = machine.key ? null : parsePublicKey(message["publicKey"]);
     const publicKey = machine.key?.publicKey ?? first;
     if (publicKey === null) return this.refuseSocket(socket, machine, "The answer has no valid public key.");
+    const firstKey = first === null ? null : await this.publicKey(first);
     const valid = await verifyText(
       publicKey,
       connectText(this.env.KITSHN_HOST, machine.id, attachment.challenge),
@@ -920,11 +1135,14 @@ export class Kitshn extends DurableObject<Env> {
       const expected = machine.key ? `the key ${machine.key.fingerprint}` : "the key that it sent";
       return this.refuseSocket(socket, machine, `The answer does not carry a signature of ${expected}.`);
     }
-    if (first !== null) {
-      const key = await this.publicKey(first);
-      this.setKey(machine, key, deviceActor(machine), `${machine.name} sent its first key ${key.fingerprint}`);
-    }
-    this.acceptMachine(socket, { ...attachment, answered: true, check: "signed" });
+    const signed = { ...attachment, answered: true, check: "signed" } satisfies Attachment;
+    if (firstKey === null) return this.acceptMachine(socket, signed);
+    // K-1708: the socket counts already on its token; it only gets the key and the word "accepted".
+    const fingerprint = firstKey.fingerprint;
+    this.setKey(machine, firstKey, deviceActor(machine), `${machine.name} sent its first key ${fingerprint}`);
+    socket.serializeAttachment(signed);
+    this.keyFailures.delete(machine.id);
+    send(socket, { type: "accepted", fingerprint } satisfies ServerToDaemon);
   }
 
   /**
@@ -941,6 +1159,7 @@ export class Kitshn extends DurableObject<Env> {
       return this.refuseSocket(socket, machine, "A machine without a key gets one on its next connection.");
     const publicKey = parsePublicKey(message["publicKey"]);
     if (publicKey === null) return this.refuseSocket(socket, machine, "The rotation has no valid public key.");
+    const key = await this.publicKey(publicKey);
     const valid = await verifyText(
       machine.key.publicKey,
       rotateText(this.env.KITSHN_HOST, machine.id, attachment.challenge, publicKey),
@@ -951,7 +1170,6 @@ export class Kitshn extends DurableObject<Env> {
       return this.refuseSocket(socket, machine, "The key of this machine changed during the rotation.");
     if (!valid)
       return this.refuseSocket(socket, machine, `The rotation does not carry a signature of ${machine.key.fingerprint}.`);
-    const key = await this.publicKey(publicKey);
     this.setKey(
       machine,
       key,
@@ -1030,6 +1248,13 @@ export class Kitshn extends DurableObject<Env> {
       this.sendMachine(machine);
     } else if (message.type === "sites") {
       this.updateLiveSites(machine, message.sites);
+    } else if (message.type === "volumes" && Array.isArray(message.volumes)) {
+      const volumes = message.volumes
+        .filter((item) => isRecord(item) && typeof item["name"] === "string" && typeof item["project"] === "string")
+        .slice(0, 200)
+        .map((item): ProjectVolume => ({ name: item.name.slice(0, 255), project: item.project.slice(0, 63) }));
+      socket.serializeAttachment({ ...attachment, volumes } satisfies Attachment);
+      this.sendMachine(machine);
     } else if (message.type === "jobResult" && typeof message.id === "number" && isRecord(message.result)) {
       const result = message.result;
       this.sql(
@@ -1047,9 +1272,19 @@ export class Kitshn extends DurableObject<Env> {
       const [{ taken } = { taken: 0 }] = this.sql<{ taken: number }>("SELECT changes() AS taken");
       // K-812: the source and params of a Compose deploy live only as long as its job.
       const [job] = taken
-        ? this.sql<{ command: string }>("SELECT command FROM jobs WHERE id = ?", message.id)
+        ? this.sql<{ command: string; actor: string }>("SELECT command, actor FROM jobs WHERE id = ?", message.id)
         : [];
       const command = job ? (JSON.parse(job.command) as Command) : null;
+      // K-909: undo never brings a deleted volume back, so History records the delete as an action once it ran.
+      if (job && command?.kind === "compose-volume-remove" && result.ok === true) {
+        this.insertRevision(
+          JSON.parse(job.actor) as Actor,
+          `Deleted the volume ${command.volume} on ${machine.name} (K-909)`,
+          [],
+          null,
+        );
+        this.load();
+      }
       if (command?.kind === "compose")
         this.sql(
           "UPDATE deploys SET state = ? WHERE job_id = ? AND state = 'running'",
@@ -1330,8 +1565,6 @@ export class Kitshn extends DurableObject<Env> {
         { status: 409 },
       );
     }
-    const command: Command =
-      parsed.kind === "update" ? { kind: "update", version: this.env.KITSHN_VERSION } : parsed;
     const labels = parseLabels(input["labels"] ?? []);
     if (typeof labels === "string") return Response.json({ error: labels }, { status: 400 });
     const machineId = typeof input["machineId"] === "string" ? input["machineId"] : null;
@@ -1339,6 +1572,22 @@ export class Kitshn extends DurableObject<Env> {
     if (machineId !== null && !target) {
       return Response.json({ error: `No machine "${machineId}" exists.` }, { status: 404 });
     }
+    // K-909: only a volume that the machine reports as orphaned, with the project from that report.
+    const orphan =
+      parsed.kind === "compose-volume-remove"
+        ? (target ? this.machineView(target).orphanVolumes : []).find((volume) => volume.name === parsed.volume)
+        : undefined;
+    if (parsed.kind === "compose-volume-remove" && !orphan)
+      return Response.json(
+        { error: `${parsed.volume} is not an orphaned volume of this machine (K-909).` },
+        { status: 409 },
+      );
+    const command: Command =
+      parsed.kind === "update"
+        ? { kind: "update", version: this.env.KITSHN_VERSION }
+        : parsed.kind === "compose-volume-remove" && orphan
+          ? { ...parsed, project: orphan.project }
+          : parsed;
     if (machineId !== null && !this.canControl(caller.visitor, machineId)) {
       return Response.json(
         {
@@ -1425,6 +1674,14 @@ export class Kitshn extends DurableObject<Env> {
       const socket = this.openSocket(machine.id);
       if (!socket) continue;
       let command = JSON.parse(job.command) as Command;
+      if (command.kind === "compose-volume-remove" && this.state.resources.has(command.project)) {
+        this.sql(
+          "UPDATE jobs SET state = 'failed', output = ? WHERE id = ?",
+          "The app of this volume has a card again, so the volume is no longer orphaned (K-909).",
+          job.id,
+        );
+        continue;
+      }
       if (command.kind === "update") {
         // K-617: the version at delivery, so a job that waited never installs an older release.
         command = { kind: "update", version: this.env.KITSHN_VERSION };
@@ -1678,7 +1935,12 @@ export class Kitshn extends DurableObject<Env> {
             resource.machine === machine.id &&
             resource.addresses.includes(address),
         );
-        const id = app?.id ?? liveSiteId(machine.id, report.name);
+        // K-909: a removed Compose app keeps its row until its compose-down ends, so it never turns into a
+        // live site card meanwhile.
+        const id =
+          app?.id ??
+          this.sitesOf(machine.id).find((site) => site.address === address)?.id ??
+          liveSiteId(machine.id, report.name);
         const other = [...this.state.resources.values()].find(
           (resource) => resource.id !== id && resource.addresses.includes(address),
         );
@@ -1715,8 +1977,10 @@ export class Kitshn extends DurableObject<Env> {
         if (keep.has(site.id)) continue;
         changed = true;
         this.sql("DELETE FROM live_sites WHERE id = ?", site.id);
+        // A removed app has its History entry already (K-909).
+        const hadCard = this.state.resources.has(site.id);
         this.forgetCard(site.id);
-        if (site.state === "ok") {
+        if (site.state === "ok" && hadCard) {
           this.insertRevision(
             { _tag: "kitshn", reason: `live site on ${machine.name}` },
             `${machine.name} stopped exposing ${site.address}`,
@@ -2008,7 +2272,7 @@ export class Kitshn extends DurableObject<Env> {
       "SELECT MIN(expires_at) AS expires_at FROM jobs WHERE state IN ('queued', 'sent')",
     );
     if (job?.expires_at) next = Math.min(next, Math.max(job.expires_at, now));
-    const desired = desiredAccess(this.state, now);
+    const desired = this.desired(now);
     if (
       this.env.CLOUDFLARE_API_TOKEN &&
       (hasAccessWork(desired, this.access, this.reachableAddresses(), loginHeld(this.meta("login_held") ?? "")) || this.launcherWork() || this.loginWork())
@@ -2253,7 +2517,7 @@ export class Kitshn extends DurableObject<Env> {
   private repoViews(): Array<RepoView> {
     const cards = new Map<string, Array<string>>();
     for (const { repo_id, resource_id } of this.sql<{ repo_id: string; resource_id: string }>(
-      "SELECT repo_id, resource_id FROM deploys WHERE repo_id IS NOT NULL GROUP BY repo_id, resource_id",
+      "SELECT repo_id, resource_id FROM deploys WHERE repo_id IS NOT NULL AND kind = 'deploy' GROUP BY repo_id, resource_id",
     ))
       if (this.state.resources.has(resource_id))
         cards.set(repo_id, [...(cards.get(repo_id) ?? []), resource_id]);
@@ -2273,7 +2537,7 @@ export class Kitshn extends DurableObject<Env> {
   /** K-819: the repo id of a card that a deploy made, or null when kitshn does not know it. */
   private repoIdOfCard(resourceId: string): string | null {
     const [row] = this.sql<{ repo_id: string }>(
-      "SELECT repo_id FROM deploys WHERE resource_id = ? AND repo_id IS NOT NULL LIMIT 1",
+      "SELECT repo_id FROM deploys WHERE resource_id = ? AND repo_id IS NOT NULL AND kind = 'deploy' LIMIT 1",
       resourceId,
     );
     return row?.repo_id ?? null;
@@ -2658,6 +2922,8 @@ export class Kitshn extends DurableObject<Env> {
     if (this.state.resources.has(row.resource_id))
       return "The card keeps its place; the map decides who opens it (K-807).";
     const slug = repoSlug(row.repo);
+    // K-909: the row of a removed app with this id would take the new card with it (dropLiveSite).
+    if (kind === "site.compose") dropLiveSite(this.query, row.resource_id);
     this.putResource({
       id: row.resource_id,
       kind,
@@ -2804,21 +3070,15 @@ export class Kitshn extends DurableObject<Env> {
       repo: row.repo,
       file: row.compose_file,
     };
-    const now = Date.now();
-    const jobId = this.ctx.storage.transactionSync(() => {
-      const [inserted] = this.sql<{ id: number }>(
-        `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
-         VALUES (?, '[]', ?, 'queued', ?, ?, ?, '${KITSHN_JOB}', NULL, '') RETURNING id`,
+    this.ctx.storage.transactionSync(() => {
+      const jobId = this.queueKitshnJob(
         machine.id,
-        JSON.stringify(command),
-        now,
-        now + DEPLOY_MS,
-        JSON.stringify({ _tag: "kitshn", reason: `deploy of ${row.repo}` }),
+        command,
+        { _tag: "kitshn", reason: `deploy of ${row.repo}` },
+        Date.now() + DEPLOY_MS,
       );
-      this.sql("UPDATE deploys SET state = 'running', job_id = ? WHERE id = ?", inserted?.id ?? null, row.id);
-      return inserted?.id ?? null;
+      this.sql("UPDATE deploys SET state = 'running', job_id = ? WHERE id = ?", jobId, row.id);
     });
-    if (jobId === null) throw new Error("The job insert returned no id.");
     this.deliverJobs();
     this.broadcast();
     return Response.json({ machine: machine.name, card });
@@ -2858,25 +3118,13 @@ export class Kitshn extends DurableObject<Env> {
     // The name comes from the card, not from the recipe of this request, so a close stops only its own app.
     const address = resource?.addresses[0] ?? row.address;
     const name = address.slice(0, -this.env.KITSHN_ZONE.length - 1);
-    const now = Date.now();
     this.ctx.storage.transactionSync(() => {
       if (machineId)
-        this.sql(
-          `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
-           VALUES (?, '[]', ?, 'queued', ?, ?, ?, '${KITSHN_JOB}', NULL, '')`,
+        this.queueKitshnJob(
           machineId,
-          JSON.stringify({
-            kind: "compose-down",
-            project: row.resource_id,
-            name,
-            removeData: true,
-          } satisfies Command),
-          now,
-          now + JOB_EXPIRY_MS,
-          JSON.stringify({
-            _tag: "kitshn",
-            reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}`,
-          }),
+          { kind: "compose-down", project: row.resource_id, name, removeData: true },
+          { _tag: "kitshn", reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}` },
+          Date.now() + JOB_EXPIRY_MS,
         );
       this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
       // A preview that never came up has no live site to take its card away.
@@ -2974,25 +3222,7 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-904: a closed pull request removes its preview: the address, the Worker, the card and its Access app. */
   private async teardown(api: Api, row: DeployRow, deployer: Deployer) {
-    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
-    const domains = await api<Array<{ id: string; service: string }>>(
-      "GET",
-      `${account}/workers/domains?hostname=${encodeURIComponent(row.address)}`,
-    );
-    for (const domain of domains.filter((item) => item.service === row.script)) {
-      await api("DELETE", `${account}/workers/domains/${domain.id}`);
-    }
-    // K-006: the card, and with it the Access application, goes only after the address is confirmed gone.
-    const left = await api<Array<{ service: string }>>(
-      "GET",
-      `${account}/workers/domains?hostname=${encodeURIComponent(row.address)}`,
-    );
-    if (left.some((item) => item.service === row.script)) {
-      throw new Error(`${row.address} still serves ${row.script}; run the teardown again.`);
-    }
-    await api("DELETE", `${account}/workers/scripts/${row.script}?force=true`).catch((error: unknown) =>
-      error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error),
-    );
+    await this.removeWorker(api, row.address, row.script);
     const resource = this.state.resources.get(row.resource_id);
     this.ctx.storage.transactionSync(() => {
       this.forgetCard(row.resource_id);
@@ -3009,6 +3239,47 @@ export class Kitshn extends DurableObject<Env> {
     this.broadcast();
     void this.scheduleAlarm();
     return Response.json({ removed: row.address });
+  }
+
+  /** K-904, K-909: takes a Worker site's address off, confirms it, then deletes the Worker script. */
+  private async removeWorker(api: Api, address: string, script: string) {
+    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+    const domains = await api<Array<{ id: string; service: string }>>(
+      "GET",
+      `${account}/workers/domains?hostname=${encodeURIComponent(address)}`,
+    );
+    for (const domain of domains.filter((item) => item.service === script)) {
+      await api("DELETE", `${account}/workers/domains/${domain.id}`);
+    }
+    // K-006: the card, and with it the Access application, goes only after the address is confirmed gone.
+    const left = await api<Array<{ service: string }>>(
+      "GET",
+      `${account}/workers/domains?hostname=${encodeURIComponent(address)}`,
+    );
+    if (left.some((item) => item.service === script)) {
+      throw new Error(`${address} still serves ${script}; run the teardown again.`);
+    }
+    await api("DELETE", `${account}/workers/scripts/${script}?force=true`).catch((error: unknown) =>
+      error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error),
+    );
+  }
+
+  /** A job that kitshn makes itself, so it needs no member with control (K-614). Returns the job id. */
+  private queueKitshnJob(machineId: string, command: Command, actor: Actor, expiresAt: number) {
+    const now = Date.now();
+    if (command.kind === "compose" || command.kind === "compose-redeploy")
+      failQueuedDowns(this.query, command.project, REPLACED);
+    const [row] = this.sql<{ id: number }>(
+      `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
+       VALUES (?, '[]', ?, 'queued', ?, ?, ?, '${KITSHN_JOB}', NULL, '') RETURNING id`,
+      machineId,
+      JSON.stringify(command),
+      now,
+      expiresAt,
+      JSON.stringify(actor),
+    );
+    if (!row) throw new Error("The job insert returned no id.");
+    return row.id;
   }
 
   /**
@@ -3041,7 +3312,7 @@ export class Kitshn extends DurableObject<Env> {
     // K-718: the cards of repos that this key allowed (K-819); only these may become public.
     const added = new Set(
       this.sql<{ resource_id: string }>(
-        `SELECT DISTINCT deploys.resource_id FROM deploys JOIN repos ON repos.repo_id = deploys.repo_id
+        `SELECT DISTINCT deploys.resource_id FROM deploys JOIN repos ON repos.repo_id = deploys.repo_id AND deploys.kind = 'deploy'
          WHERE repos.allowed_by_client = ?`,
         caller.visitor.clientId,
       ).map((row) => row.resource_id),
@@ -3125,6 +3396,10 @@ export class Kitshn extends DurableObject<Env> {
       const body: unknown = await request.json().catch(() => null);
       const machineId =
         typeof body === "object" && body !== null && "machineId" in body ? body.machineId : undefined;
+      // K-718, K-909: an agent key removes nothing, also no orphaned volume.
+      const command = isRecord(body) && isRecord(body["command"]) ? body["command"] : null;
+      if (command?.["kind"] === "compose-volume-remove")
+        return Response.json({ error: "An agent key does not delete volumes (K-718, K-909)." }, { status: 403 });
       // Only the machines whose cards it manages; a label job could land on any machine.
       if (typeof machineId !== "string" || !agentMayRunOn(this.state, caller.visitor, machineId, Date.now()))
         return Response.json(
@@ -3173,34 +3448,12 @@ export class Kitshn extends DurableObject<Env> {
         return Response.json({ error: 'Send {"card": <id>, "mode": "redeploy" | "build"}.' }, { status: 400 });
       if (!cardsControlledBy(this.state, caller.visitor, Date.now()).has(card))
         return Response.json({ error: `This key has no control on the card "${card}".` }, { status: 403 });
-      const [row] = this.sql<DeployRow>(
-        "SELECT * FROM deploys WHERE resource_id = ? AND kind = 'deploy' AND state = 'done' ORDER BY expires_at DESC LIMIT 1",
-        card,
-      );
+      const row = this.lastDone(card);
       const machine = row?.machine_id ? this.state.machines.get(row.machine_id) : undefined;
       const plan = agentDeployPlan(
-        row
-          ? {
-              app: row.app,
-              repo: row.repo,
-              branch: row.branch,
-              resourceId: row.resource_id,
-              environment: row.environment,
-              name: row.address.slice(0, -this.env.KITSHN_ZONE.length - 1),
-              composeFile: row.compose_file,
-            }
-          : null,
+        row ? this.lastDeployOf(row) : null,
         mode,
-        machine
-          ? {
-              canRedeploy: ["compose-redeploy", "compose-guard"].every(
-                (capability) => this.machineView(machine).status?.capabilities?.includes(capability) ?? false,
-              ),
-              takesDeploys: machine.labels.includes("deploy"),
-              runsCard: this.state.resources.get(card)?.machine === machine.id,
-              allowed: allowedFor(machine, row?.repo ?? ""),
-            }
-          : null,
+        machine ? this.redeployFacts(machine, card, row?.repo ?? "") : null,
       );
       if (plan.kind === "refused") return Response.json({ error: plan.error }, { status: plan.status });
       const repoId = row?.repo_id ?? null;
@@ -3225,6 +3478,7 @@ export class Kitshn extends DurableObject<Env> {
   private agentRedeploy(caller: Caller, machineId: string, command: Extract<Command, { kind: "compose-redeploy" }>) {
     const now = Date.now();
     const id = this.ctx.storage.transactionSync(() => {
+      failQueuedDowns(this.query, command.project, REPLACED);
       const [inserted] = this.sql<{ id: number }>(
         `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
          VALUES (?, '[]', ?, 'queued', ?, ?, ?, ?, NULL, '') RETURNING id`,
@@ -3247,26 +3501,30 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-718, K-812, K-819: a new build runs the kitshn workflow of the repo with this id on one branch. */
   private async agentBuild(caller: Caller, repoId: string, branch: string) {
-    const appId = this.env.GITHUB_APP_ID;
-    const key = this.env.GITHUB_APP_KEY;
-    if (!appId || !key)
-      return Response.json(
-        { error: "This kitshn has no GitHub App. Run the bootstrap with KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY." },
-        { status: 503 },
-      );
+    if (!this.env.GITHUB_APP_ID || !this.env.GITHUB_APP_KEY)
+      return Response.json({ error: NO_GITHUB_APP }, { status: 503 });
     let repo: string;
     try {
-      repo = await dispatchDeploy({ id: appId, key }, repoId, branch, AGENT_WORKFLOW);
+      repo = await this.dispatchBuild(repoId, branch);
     } catch (error) {
       return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
     }
-    this.ctx.storage.transactionSync(() => {
-      this.sql("UPDATE repos SET name = ? WHERE repo_id = ?", repo, repoId);
-      this.insertRevision(caller.actor, `Started a deploy of ${repo} from ${branch}`, [], null);
-    });
+    this.ctx.storage.transactionSync(() =>
+      this.insertRevision(caller.actor, `Started a deploy of ${repo} from ${branch}`, [], null),
+    );
     this.load();
     this.broadcast();
     return Response.json({ dispatched: { repo, branch, workflow: AGENT_WORKFLOW } });
+  }
+
+  /** K-718, K-908, K-909: runs the kitshn workflow of a repo on one branch. Returns the repo's current name. */
+  private async dispatchBuild(repoId: string, branch: string) {
+    const appId = this.env.GITHUB_APP_ID;
+    const key = this.env.GITHUB_APP_KEY;
+    if (!appId || !key) throw new Error(NO_GITHUB_APP);
+    const repo = await dispatchDeploy({ id: appId, key }, repoId, branch, AGENT_WORKFLOW);
+    this.sql("UPDATE repos SET name = ? WHERE repo_id = ?", repo, repoId);
+    return repo;
   }
 
   private libraryItems(): Array<LibraryItem> {
@@ -3451,7 +3709,7 @@ export class Kitshn extends DurableObject<Env> {
     if (!force && this.meta("launcher_failed") === `failed:${this.launcherWant()}`) return 0;
     try {
       const result = await syncLauncher(
-        desiredAccess(this.state, Date.now()),
+        this.desired(Date.now()),
         this.accessStore(),
         api,
         this.env.CLOUDFLARE_ACCOUNT_ID,
@@ -3471,7 +3729,7 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-113: the enrollment policy id that the App Launcher should have, or "" for none. */
   private launcherWant() {
-    return desiredAccess(this.state, Date.now()).policies.has(ENROLLMENT_KEY)
+    return this.desired(Date.now()).policies.has(ENROLLMENT_KEY)
       ? this.access.get(ENROLLMENT_KEY)?.cfId || ""
       : "";
   }
@@ -3484,7 +3742,7 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-1004: returns the Cloudflare calls it made. The daily run (K-408) asks it to write everything again. */
   private async syncLogins(api: Api) {
-    const desired = desiredAccess(this.state, Date.now());
+    const desired = this.desired(Date.now());
     const want = loginWant(desired, this.access);
     const force = this.meta("login_check") === "due";
     this.setMeta("login_check", "done");
@@ -3529,7 +3787,7 @@ export class Kitshn extends DurableObject<Env> {
         () => this.syncLogins(api),
         (left) =>
           syncAccess(
-            desiredAccess(this.state, Date.now()),
+            this.desired(Date.now()),
             this.accessStore(),
             api,
             this.env.CLOUDFLARE_ACCOUNT_ID,
@@ -3545,7 +3803,7 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1004: the daily check is due, or the login applications lack the wanted policies and that did not fail. */
   private loginWork() {
     if (this.meta("login_check") === "due") return true;
-    const want = loginWant(desiredAccess(this.state, Date.now()), this.access);
+    const want = loginWant(this.desired(Date.now()), this.access);
     return want !== (this.meta("login_policies") ?? "") && this.meta("login_failed") !== `failed:${want}`;
   }
 
@@ -3609,13 +3867,13 @@ export class Kitshn extends DurableObject<Env> {
     this.checkLiveness(now);
     // The alarm runs every 30 s while a daemon is connected, so it tells the maps only about real changes.
     let changed = this.expireJobs(now) > 0;
-    const before = JSON.stringify(accessStates(desiredAccess(this.state, now), this.access));
+    const before = JSON.stringify(accessStates(this.desired(now), this.access));
     this.endShares(now);
     const daily = this.dailyAt() <= now;
     if (daily) this.daily(now);
     const api = this.api();
     if (api) {
-      const desired = desiredAccess(this.state, now);
+      const desired = this.desired(now);
       // K-406: the daily compare spends part of the 40 calls of this run.
       let spent = 0;
       if (daily) {
@@ -3652,7 +3910,7 @@ export class Kitshn extends DurableObject<Env> {
       await this.syncLauncher(api, false);
 
       changed ||=
-        daily || JSON.stringify(accessStates(desiredAccess(this.state, now), this.access)) !== before;
+        daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
     }
     if (changed) this.broadcast();
     await this.scheduleAlarm();
@@ -3778,3 +4036,7 @@ const KITSHN_JOB = JSON.stringify({ email: null, clientId: null, ip: null, kitsh
 
 /** K-718: the workflow file that an agent key starts in an app repo, the one that the map's recipe shows. */
 const AGENT_WORKFLOW = "kitshn.yml";
+/** K-909: the expiry of a job that waits for its machine however long. */
+const NEVER = Number.MAX_SAFE_INTEGER;
+const NO_GITHUB_APP =
+  "This kitshn has no GitHub App. Run the bootstrap with KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY.";

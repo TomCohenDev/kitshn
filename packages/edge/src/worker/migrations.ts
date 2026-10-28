@@ -146,6 +146,13 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "CREATE TABLE library_addresses (kind TEXT NOT NULL, name TEXT NOT NULL, item_id TEXT NOT NULL, PRIMARY KEY (kind, name))",
     "CREATE INDEX library_addresses_item ON library_addresses (item_id)",
   ],
+  // 23: folder sites (K-1123), a static site that an agent key publishes from a folder, with no repo. `circle` and
+  // `public` are where the first publish lands; `agent_tray` works as for pages (K-1117).
+  [
+    `CREATE TABLE agent_sites (card_id TEXT PRIMARY KEY, client_id TEXT NOT NULL, folder TEXT NOT NULL,
+     address TEXT NOT NULL, circle TEXT, public INTEGER NOT NULL DEFAULT 0, agent_tray INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+     UNIQUE (client_id, folder))`,
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

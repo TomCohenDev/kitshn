@@ -2229,7 +2229,7 @@ function CardPanel(props: {
       {address && (resource.kind === "page" || resource.kind === "file") ? (
         <AddressName address={address} onSave={(name) => props.onSetAddress(resource, name)} />
       ) : null}
-      {address && props.deployed ? (
+      {address && props.repo ? (
         <p class="help">Its repo sets this address: change it in kitshn.config.ts.</p>
       ) : null}
       {props.repo ? (

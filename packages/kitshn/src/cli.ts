@@ -210,7 +210,9 @@ async function deployApp(
     console.log(
       "kitshn: warning: the recipe builds too, over the artifact; a site with its own build job names no build.",
     );
-  const assets = await uploadAssets(server, dir, plan.deployId, recipe.static.output);
+  const assets = await uploadAssets(insideRepo(dir, recipe.static.output, "the output folder"), (manifest) =>
+    call<AssetSession>(server, "/deploy/assets", { deployId: plan.deployId, manifest }),
+  );
   const done = await call<{ address: string; status: number; card: string }>(server, "/deploy/finish", {
     deployId: plan.deployId,
     jwt: assets.jwt,
@@ -257,8 +259,16 @@ function insideRepo(dir: string, path: string, what: string): string {
  * K-805: uploads a folder of files through the Workers direct upload flow, and picks the card icon (K-1112).
  * `_headers` and `_redirects` are config that Cloudflare reads, not files to serve.
  */
-async function uploadAssets(server: string, dir: string, deployId: string, folder: string) {
-  const output = insideRepo(dir, folder, "the output folder");
+type AssetSession = { jwt: string; buckets: Array<Array<string>>; uploadUrl: string };
+
+/**
+ * K-805, K-1123: uploads the files of `output` as Workers static assets. `open` asks kitshn for the upload session of
+ * the manifest: a repo deploy with its GitHub token, a folder site with the agent key.
+ */
+async function uploadAssets(
+  output: string,
+  open: (manifest: Record<string, { hash: string; size: number }>) => Promise<AssetSession>,
+) {
   const manifest: Record<string, { hash: string; size: number }> = {};
   const byHash = new Map<string, { path: string; type: string }>();
   const byPath = new Map<string, string>();
@@ -286,12 +296,8 @@ async function uploadAssets(server: string, dir: string, deployId: string, folde
     byPath.set(sitePath, path);
     byHash.set(hash, { path, type: contentType(path) });
   }
-  if (Object.keys(manifest).length === 0) fail(`the output folder ${folder} is empty.`);
-  const session = await call<{ jwt: string; buckets: Array<Array<string>>; uploadUrl: string }>(
-    server,
-    "/deploy/assets",
-    { deployId, manifest },
-  );
+  if (Object.keys(manifest).length === 0) fail(`the folder ${output} is empty.`);
+  const session = await open(manifest);
   let completion = session.jwt;
   for (const bucket of session.buckets) {
     const form = new FormData();
@@ -396,7 +402,11 @@ async function deployWorker(
         fail(`${app.main} exports no class ${name} for the Durable Object binding ${binding}.`);
     const storage = await call<{ created: ReadonlyArray<string> }>(server, "/deploy/storage", { deployId });
     for (const name of storage.created) console.log(`kitshn: made the KV namespace of ${name}.`);
-    const assets = app.assets ? await uploadAssets(server, dir, deployId, app.assets.folder) : null;
+    const assets = app.assets
+      ? await uploadAssets(insideRepo(dir, app.assets.folder, "the output folder"), (manifest) =>
+          call<AssetSession>(server, "/deploy/assets", { deployId, manifest }),
+        )
+      : null;
     const done = await call<{ address: string; status: number; card: string; notes: ReadonlyArray<string> }>(
       server,
       "/deploy/finish",
@@ -535,19 +545,32 @@ function agentHeaders(server: string): Record<string, string> {
   return { "cf-access-client-id": id ?? "", "cf-access-client-secret": secret ?? "" };
 }
 
-async function publish(
-  server: string,
-  file: string,
-  name: string,
-  circle: string,
-  address: string,
-  open: boolean,
-) {
+/** K-1116, K-1120, K-1123: one JSON call to an `/agent` route with the agent key. */
+async function agentCall<T>(server: string, path: string, body: object): Promise<T> {
+  const response = await fetch(new URL(path, server), {
+    method: "POST",
+    headers: { ...agentHeaders(server), "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = (await response.json().catch(() => null)) as (T & { error?: string }) | null;
+  if (!response.ok || !data) fail(data?.error ?? `${path} answered ${response.status}.`);
+  return data as T;
+}
+
+interface PublishOptions {
+  readonly name: string;
+  readonly circle: string;
+  readonly address: string;
+  readonly zone: string;
+  readonly open: boolean;
+}
+
+async function publish(server: string, file: string, options: PublishOptions) {
   const credentials = agentHeaders(server);
   if (!existsSync(file)) fail(`${file} does not exist.`);
-  // Known limit: a folder becomes a static site without a repo in a later change (K-1116); until then, one file.
-  if (statSync(file).isDirectory())
-    fail(`${file} is a folder; publish one file, or put the folder in a repo.`);
+  if (statSync(file).isDirectory()) return publishFolder(server, file, options);
+  if (options.zone) fail("--zone is for a folder site; a page or a file lives on the kitshn zone.");
+  const { name, circle, address, open } = options;
   const body = readFileSync(file);
   const fileName = name || file.slice(file.lastIndexOf(sep) + 1);
   const headers: Record<string, string> = {
@@ -570,16 +593,48 @@ async function publish(
   );
 }
 
+/**
+ * K-1123: a folder becomes a static site at `<name>.<zone>`, in the steps of a repo deploy: plan, the upload of the
+ * files straight to Cloudflare, finish. The same folder name again deploys the same site.
+ */
+async function publishFolder(server: string, folder: string, options: PublishOptions) {
+  const name = options.name || resolve(folder).slice(resolve(folder).lastIndexOf(sep) + 1);
+  const plan = await agentCall<{ deployId: string; address: string; updated: boolean }>(
+    server,
+    "/agent/sites/plan",
+    {
+      folder: name,
+      circle: options.circle,
+      address: options.address,
+      zone: options.zone,
+      public: options.open,
+    },
+  );
+  const assets = await uploadAssets(folder, (manifest) =>
+    agentCall<AssetSession>(server, "/agent/sites/assets", { deployId: plan.deployId, manifest }),
+  );
+  const done = await agentCall<{ address: string; status: number }>(server, "/agent/sites/finish", {
+    deployId: plan.deployId,
+    jwt: assets.jwt,
+    icon: assets.icon,
+    headers: assets.headers,
+    redirects: assets.redirects,
+  });
+  console.log(
+    `kitshn: ${plan.updated ? "updated" : "published"} ${name} (${assets.count} files) at https://${done.address} (answered ${done.status})`,
+  );
+}
+
 /** K-1120: gives a page or a file card, by its id or its address name, a new address name. */
 async function setAddress(server: string, card: string, name: string) {
-  const response = await fetch(new URL(`/agent/cards/${encodeURIComponent(card)}/address`, server), {
-    method: "POST",
-    headers: { ...agentHeaders(server), "content-type": "application/json" },
-    body: JSON.stringify({ address: name }),
-  });
-  const data = (await response.json().catch(() => null)) as { error?: string; address?: string } | null;
-  if (!response.ok) fail(data?.error ?? `/agent/cards answered ${response.status}.`);
-  console.log(`kitshn: ${card} is now at https://${data?.address ?? ""}`);
+  const data = await agentCall<{ address: string }>(
+    server,
+    `/agent/cards/${encodeURIComponent(card)}/address`,
+    {
+      address: name,
+    },
+  );
+  console.log(`kitshn: ${card} is now at https://${data.address}`);
 }
 
 const [command, ...args] = process.argv.slice(2);
@@ -592,20 +647,19 @@ try {
   if (command === "check") console.log(JSON.stringify(loadApps(flag("--dir", ".")), null, 2));
   else if (command === "deploy") await deploy(flag("--server", ""), flag("--dir", "."));
   else if (command === "publish") {
-    const valued = new Set(["--name", "--circle", "--address", "--server"]);
+    const valued = new Set(["--name", "--circle", "--address", "--zone", "--server"]);
     const file = args.find((arg, index) => !arg.startsWith("--") && !valued.has(args[index - 1] ?? ""));
     if (!file)
       fail(
-        "name the file to publish: kitshn publish <file> [--name <name>] [--address <name>] [--circle <circle>] [--public].",
+        "name the file or folder to publish: kitshn publish <file|folder> [--name <name>] [--address <name>] [--zone <zone>] [--circle <circle>] [--public].",
       );
-    await publish(
-      flag("--server", process.env["KITSHN_SERVER"] ?? ""),
-      file ?? "",
-      flag("--name", ""),
-      flag("--circle", ""),
-      flag("--address", ""),
-      args.includes("--public"),
-    );
+    await publish(flag("--server", process.env["KITSHN_SERVER"] ?? ""), file ?? "", {
+      name: flag("--name", ""),
+      circle: flag("--circle", ""),
+      address: flag("--address", ""),
+      zone: flag("--zone", ""),
+      open: args.includes("--public"),
+    });
   } else if (command === "address") {
     const [card, name] = args.filter((arg, index) => !arg.startsWith("--") && args[index - 1] !== "--server");
     if (!card || !name) fail("name the card and its new address name: kitshn address <card> <name>.");
@@ -619,7 +673,7 @@ try {
 if (command !== "check" && command !== "deploy" && command !== "publish" && command !== "address") {
   console.log(`kitshn check [--dir <app>]                  check kitshn.config.ts and print it as JSON (K-802)
 kitshn deploy --server <address> [--dir <app>]   deploy from GitHub Actions (K-803)
-kitshn publish <file> [--name <name>] [--address <name>] [--circle <circle>] [--public]
-                                             publish a page or a file with an agent key (K-1116)
+kitshn publish <file|folder> [--name <name>] [--address <name>] [--zone <zone>] [--circle <circle>] [--public]
+                                             publish a page, a file (K-1116) or a folder site (K-1123) with an agent key
 kitshn address <card> <name>                 give a page or a file a new address name (K-1120)`);
 }

@@ -47,6 +47,7 @@ import {
   ActionMenu,
   Menu,
   MenuItem,
+  MenuSep,
   MoreButton,
   OverlayPanel,
   ResizeEdge,
@@ -236,6 +237,10 @@ export function App() {
   const escapeRef = useRef<() => void>(() => undefined);
   /** The anchor of the open "Show" menu of kinds, or null. */
   const [showMenu, setShowMenu] = useState<Rect | null>(null);
+  /** K-528: the phone's "☰" menu, which holds the tabs and the map tools that the toolbar has on a wide screen. */
+  const [moreMenu, setMoreMenu] = useState<Rect | null>(null);
+  /** K-528: on a phone the shelf is a sheet that the owner opens; closed, it shows only its count. */
+  const [trayOpen, setTrayOpen] = useState(false);
   const [refusal, setRefusal] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
@@ -749,6 +754,12 @@ export function App() {
     )
     .reverse();
 
+  /** The right edge of the shelf where it covers the map, or 0: a closed shelf on a phone covers none of it. */
+  const shelfRight = () => {
+    if (!trayShown || (!wide && !trayOpen)) return 0;
+    return document.querySelector(".tray")?.getBoundingClientRect().right ?? 10 + (wide ? widths.tray : Math.min(16 * REM, screenWidth - 20));
+  };
+
   /** The part of the screen where the map shows clear of the toolbar, the tray and a floating panel. */
   const mapArea = (withPanel: boolean, panelWidth?: number): Box =>
     openArea({
@@ -757,9 +768,8 @@ export function App() {
       height: wideScreen() ? (document.querySelector(".hint")?.getBoundingClientRect().top ?? innerHeight) : innerHeight,
       top: document.querySelector("header.bar")?.getBoundingClientRect().bottom ?? 70,
       // The tray is not drawn yet when a full view switches to the map, so its width then comes from the tray cards.
-      left:
-        document.querySelector(".tray")?.getBoundingClientRect().right ??
-        (tray.length > 0 ? (wideScreen() ? widths.tray + 10 : 160) : 0),
+      // On a phone a closed shelf is a chip above the map, so the map takes the full width (K-528).
+      left: shelfRight(),
       panelLeft: withPanel ? panelLeft(panelWidth) : null,
       narrow: !wideScreen(),
     });
@@ -830,7 +840,10 @@ export function App() {
     setPanel(null);
     setDetailsLarge(false);
     if (fullPage) location.hash = "map";
-    (opener.current?.isConnected ? opener.current : document.querySelector<HTMLElement>(".bar .seg button"))?.focus();
+    (opener.current?.isConnected
+      ? opener.current
+      : document.querySelector<HTMLElement>(".bar .seg button, .bar button[aria-label='Menu']")
+    )?.focus();
   };
 
   historyShow.current = showOnMap;
@@ -1035,7 +1048,7 @@ export function App() {
             changeView(next);
           }}
           panelLeft={floating && wideScreen() ? panelLeft() : null}
-          trayRight={trayShown ? 10 + (wide ? widths.tray : 150) : 0}
+          trayRight={shelfRight()}
           flash={flash}
           openStacks={openStacks}
           onToggleStack={(key) => {
@@ -1174,6 +1187,7 @@ export function App() {
       />
       <header class={`bar${floating ? " beside-panel" : ""}`} ref={barRef}>
         <h1>kitshn</h1>
+        {wide ? (
         <div class="seg">
           {(["map", "machines", "library", "history"] as const).map((tab) => (
             <button
@@ -1189,10 +1203,75 @@ export function App() {
             </button>
           ))}
         </div>
+        ) : (
+          <button
+            type="button"
+            class="btn"
+            aria-haspopup="menu"
+            aria-expanded={moreMenu !== null}
+            aria-label="Menu"
+            data-tip="The tabs, the kinds to show, Fit and Previews."
+            onClick={(event) => setMoreMenu(event.currentTarget.getBoundingClientRect())}
+          >
+            ☰
+          </button>
+        )}
+        {moreMenu ? (
+          <Menu label="Menu" anchor={moreMenu} onClose={() => setMoreMenu(null)}>
+            {(["map", "machines", "library", "history"] as const).map((tab) => (
+              <MenuItem
+                key={tab}
+                checked={fullPage ? route.tab === tab : tab === "map" ? panel === "details" : panel === tab}
+                tip={TABS[tab]}
+                onSelect={() => openTab(tab)}
+              >
+                {tab[0]?.toUpperCase()}
+                {tab.slice(1)}
+              </MenuItem>
+            ))}
+            {waitingRepos > 0 ? (
+              <MenuItem
+                tip="Repos that wait for you to allow their first deploy. It shows them in the panel."
+                onSelect={() => {
+                  setSelection({ cards: new Set(), circle: null });
+                  openTab("map");
+                }}
+              >
+                {plural(waitingRepos, "repo")} waiting
+              </MenuItem>
+            ) : null}
+            {route.tab === "map" ? (
+              <>
+                <MenuSep />
+                <MenuItem
+                  tip="Show or hide kinds of cards on the map."
+                  onSelect={() => setShowMenu(moreMenu)}
+                >
+                  Show{hidden.size > 0 ? ` (${hidden.size} hidden)` : ""} ▸
+                </MenuItem>
+                <MenuItem tip="Fit every circle and card in the view." onSelect={fit}>
+                  Fit
+                </MenuItem>
+                <MenuItem
+                  checkbox
+                  checked={previews}
+                  tip={`${previews ? "Hide" : "Show"} live previews of up to four site and page cards near the centre, from zoom 80%.`}
+                  onSelect={() => {
+                    localStorage.setItem(PREVIEWS_KEY, previews ? "off" : "on");
+                    setPreviews(!previews);
+                  }}
+                >
+                  Previews{previews && view.s < 0.8 ? " (zoom in)" : ""}
+                </MenuItem>
+              </>
+            ) : null}
+          </Menu>
+        ) : null}
         {route.tab === "map" ? (
           <>
-            <span class="sep" />
+            {wide ? <span class="sep" /> : null}
             {/* K-501: one menu for the kinds, so the toolbar stays short and "Machines" names only the tab. */}
+            {wide ? (
             <button
               type="button"
               class="btn"
@@ -1202,6 +1281,7 @@ export function App() {
             >
               Show{hidden.size > 0 ? ` (${hidden.size} hidden)` : ""} ▾
             </button>
+            ) : null}
             {showMenu ? (
               <Menu label="Show kinds on the map" anchor={showMenu} onClose={() => setShowMenu(null)}>
                 {(Object.keys(RESOURCE_KINDS) as Array<ResourceKind>)
@@ -1225,7 +1305,7 @@ export function App() {
                   ))}
               </Menu>
             ) : null}
-            <span class="sep" />
+            {wide ? <span class="sep" /> : null}
             <button
               class="btn primary add"
               aria-haspopup="menu"
@@ -1237,6 +1317,8 @@ export function App() {
             >
               +
             </button>
+            {wide ? (
+            <>
             <button class="btn" data-tip="Fit every circle and card in the view." onClick={fit}>
               Fit
             </button>
@@ -1251,10 +1333,12 @@ export function App() {
             >
               Previews{previews && view.s < 0.8 ? " (zoom in)" : ""}
             </button>
+            </>
+            ) : null}
           </>
         ) : null}
         <span class="grow" />
-        {waitingRepos > 0 ? (
+        {waitingRepos > 0 && wide ? (
           <button
             class="btn"
             data-tip="Repos that wait for you to allow their first deploy. A click shows them in the panel."
@@ -1263,10 +1347,13 @@ export function App() {
               openTab("map");
             }}
           >
-            <span class="sticker wait">{plural(waitingRepos, "repo")} waiting</span>
+            <span class="sticker wait">{wide ? `${plural(waitingRepos, "repo")} waiting` : `${waitingRepos} waiting`}</span>
           </button>
         ) : null}
-        <PanicOpener pause={pauseView} open={shownPanel === "safety"} onOpen={openSafety} />
+        {/* On a phone Resume takes the opener's place while paused; the banner shows the paused state. */}
+        {wide || !pauseView ? (
+          <PanicOpener pause={pauseView} open={shownPanel === "safety"} onOpen={openSafety} />
+        ) : null}
         {pauseView ? (
           <button class="btn resume" onClick={startResume} data-tip={RESUME_TIP}>
             Resume
@@ -1278,18 +1365,21 @@ export function App() {
           aria-label="Command palette"
           data-tip="Command palette (Cmd+K or Ctrl+K): find every card, circle and action."
         >
-          ⌘K
+          {wide ? "⌘K" : "Find"}
         </button>
-        <span
-          class={`sticker ${store.connection === "live" ? "ok" : "wait"}`}
-          style={{ "--tilt": "3deg" }}
-          data-tip={CONNECTION_TIPS[store.connection]}
-        >
-          {store.connection}
-        </span>
+        {/* A phone shows the connection only when it is not live, so the toolbar fits one row. */}
+        {wide || store.connection !== "live" ? (
+          <span
+            class={`sticker ${store.connection === "live" ? "ok" : "wait"}`}
+            style={{ "--tilt": "3deg" }}
+            data-tip={CONNECTION_TIPS[store.connection]}
+          >
+            {store.connection}
+          </span>
+        ) : null}
       </header>
       {tray.length > 0 && route.tab === "map" ? (
-        <aside class="tray">
+        <aside class={`tray${!wide && !trayOpen ? " closed" : ""}`}>
           {wide ? (
             <ResizeEdge
               label="Shelf width"
@@ -1302,12 +1392,24 @@ export function App() {
             />
           ) : null}
           <div class="tray-head">
-            <span
-              class="label"
-              data-tip="New cards arrive here, outside every circle, so they start private."
-            >
-              New · private ({tray.length})
-            </span>
+            {wide ? (
+              <span
+                class="label"
+                data-tip="New cards arrive here, outside every circle, so they start private."
+              >
+                New · private ({tray.length})
+              </span>
+            ) : (
+              <button
+                type="button"
+                class="label tray-toggle"
+                aria-expanded={trayOpen}
+                data-tip="New cards arrive here, outside every circle, so they start private. Tap to open or close."
+                onClick={() => setTrayOpen(!trayOpen)}
+              >
+                New · private ({tray.length}) {trayOpen ? "▴" : "▾"}
+              </button>
+            )}
             <input
               type="search"
               placeholder="Filter"

@@ -103,6 +103,8 @@ function fakeCloudflare(others: Record<string, number> = {}) {
         item.crons = ((await request.json()) as Array<{ cron: string }>).map((entry) => entry.cron);
       return ok({ schedules: item.crons.map((cron) => ({ cron })) });
     }
+    if (/^\/accounts\/acct\/workers\/scripts\/[^/]+\/deployments$/.test(path))
+      return ok({ deployments: [{ versions: [{ version_id: `version-${uploads.length}` }] }] });
     if (path.startsWith("/accounts/acct/workers/scripts/")) return ok({});
     if (path === "/accounts/acct/workers/domains") {
       if (method === "GET")

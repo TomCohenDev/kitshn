@@ -202,3 +202,34 @@ describe("Worker apps (K-806)", () => {
     expect(parseWorkerSecrets({ BIG: "x".repeat(6000) })).toHaveProperty("error");
   });
 });
+
+describe("card ids of several apps (K-804)", () => {
+  it("keeps the ids of the app `app`, and puts every other key after the repo id", () => {
+    expect(environmentNames("568822911", "Yarden-zamir/me", "prod")).toEqual(
+      environmentNames("568822911", "Yarden-zamir/me", "prod", "app"),
+    );
+    expect(environmentNames("568822911", "Yarden-zamir/me", "prod").resourceId).toBe("app-me-568822911-prod");
+    expect(environmentNames("568822911", "Yarden-zamir/me", "pr-31", "cv")).toEqual({
+      resourceId: "app-me-568822911-cv-pr-31",
+      script: "kitshn-app-me-568822911-cv-pr-31",
+    });
+  });
+
+  it("hashes a long id within 56 characters, apart from the same environment of another app", () => {
+    const long = environmentNames(
+      "1234567890",
+      "Yarden-zamir/trek-site-template-gr52x",
+      "pr-1234",
+      "statsdashboard",
+    );
+    expect(long.resourceId).toMatch(/^app-trek-site-template-g-1234567890-[0-9a-f]{8}$/);
+    expect(long.script.length).toBeLessThanOrEqual(63);
+    const other = environmentNames(
+      "1234567890",
+      "Yarden-zamir/trek-site-template-gr52x",
+      "pr-1234",
+      "statsdashboarx",
+    );
+    expect(other.resourceId).not.toBe(long.resourceId);
+  });
+});

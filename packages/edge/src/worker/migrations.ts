@@ -101,6 +101,16 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `CREATE TABLE worker_storage (card_id TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('kv', 'script')),
       name TEXT NOT NULL, cf_id TEXT NOT NULL, PRIMARY KEY (card_id, kind, name))`,
   ],
+  // 17: several apps per repo (K-804) and their order (K-820). `app_key` is the app of the deploy; older rows are
+  // the app `app`. `state` also takes 'failed' and 'skipped', with `reason`. `version_id` (the Cloudflare version of a
+  // static or Worker deploy) and the run keep what a later rollback needs.
+  [
+    "ALTER TABLE deploys ADD COLUMN app_key TEXT NOT NULL DEFAULT 'app'",
+    "ALTER TABLE deploys ADD COLUMN reason TEXT",
+    "ALTER TABLE deploys ADD COLUMN version_id TEXT",
+    "ALTER TABLE deploys ADD COLUMN run_id TEXT",
+    "ALTER TABLE deploys ADD COLUMN run_attempt TEXT",
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

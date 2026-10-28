@@ -209,6 +209,9 @@ export interface Deployer {
   readonly eventName: string;
   readonly branch: string;
   readonly pr: number | null;
+  /** The workflow run and its attempt; the deploys of one run are one group for a later rollback (K-820). */
+  readonly runId: string;
+  readonly runAttempt: string;
 }
 
 const github = createRemoteJWKSet(new URL("https://token.actions.githubusercontent.com/.well-known/jwks"));
@@ -246,7 +249,17 @@ export async function deployerOf(request: Request, env: Env): Promise<Deployer |
     if (!owners.includes(ownerId)) return `kitshn does not trust the GitHub owner of ${repo} (K-811).`;
     const pull = /^refs\/pull\/(\d+)\//.exec(ref);
     const branch = eventName === "pull_request" ? text("head_ref") : ref.replace(/^refs\/heads\//, "");
-    return { repo, repoId, ownerId, sha, eventName, branch, pr: pull ? Number(pull[1]) : null };
+    return {
+      repo,
+      repoId,
+      ownerId,
+      sha,
+      eventName,
+      branch,
+      pr: pull ? Number(pull[1]) : null,
+      runId: text("run_id"),
+      runAttempt: text("run_attempt"),
+    };
   } catch (error) {
     return `The GitHub token is not valid: ${error instanceof Error ? error.message : String(error)}`;
   }

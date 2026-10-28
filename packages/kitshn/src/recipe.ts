@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { RESERVED_SITE_NAMES } from "./names.ts";
+import { DEFAULT_APP, RESERVED_SITE_NAMES } from "./names.ts";
 import type {
   ComposeApp as PublicComposeApp,
   DeployEntry as PublicDeployEntry,
@@ -126,13 +126,58 @@ export const workerBindingNames = (app: {
 
 const deploy = Schema.Array(DeployEntry).check(Schema.isMinLength(1), Schema.isMaxLength(20));
 
+/** K-804: the key of an app; it has no `-`, so a card id reads left to right. */
+export const AppKey = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9]{0,19}$/));
+
+/** K-820: the keys of the apps of this repo that this app needs: they deploy first. */
+const needs = Schema.optionalKey(Schema.Array(AppKey).check(Schema.isMaxLength(9)));
+
 /** K-801, K-804: a recipe has exactly one kind. */
 export const Recipe = Schema.Union([
-  Schema.Struct({ static: StaticApp, deploy }),
-  Schema.Struct({ compose: ComposeApp, deploy }),
-  Schema.Struct({ worker: WorkerApp, deploy }),
+  Schema.Struct({ static: StaticApp, deploy, needs }),
+  Schema.Struct({ compose: ComposeApp, deploy, needs }),
+  Schema.Struct({ worker: WorkerApp, deploy, needs }),
 ]);
 export type Recipe = typeof Recipe.Type;
+
+/**
+ * K-820: the keys in deploy order: each app after the apps that it names in `needs`, ties by key. A key that no app
+ * has, an app that names itself and a cycle are errors.
+ */
+export function deployOrder(apps: {
+  readonly [key: string]: { readonly needs?: ReadonlyArray<string> };
+}): { readonly order: ReadonlyArray<string> } | { readonly error: string } {
+  const keys = Object.keys(apps).sort();
+  for (const key of keys)
+    for (const before of apps[key]?.needs ?? []) {
+      if (before === key) return { error: `The app ${key} needs itself (K-820).` };
+      if (!keys.includes(before))
+        return { error: `The app ${key} needs ${before}, but no app has that key (K-820).` };
+    }
+  const order: Array<string> = [];
+  while (order.length < keys.length) {
+    const next = keys.find(
+      (key) => !order.includes(key) && (apps[key]?.needs ?? []).every((before) => order.includes(before)),
+    );
+    if (next === undefined) {
+      const left = keys.filter((key) => !order.includes(key));
+      return { error: `The apps ${left.join(", ")} need each other, a cycle (K-820).` };
+    }
+    order.push(next);
+  }
+  return { order };
+}
+
+/** K-804, K-820: the apps of a repo by key, 1 to 10, in an order that `needs` allows. */
+export const Apps = Schema.Record(AppKey, Recipe).check(
+  Schema.isMinProperties(1),
+  Schema.isMaxProperties(10),
+  Schema.makeFilter((apps) => {
+    const result = deployOrder(apps);
+    return "error" in result ? result.error : undefined;
+  }),
+);
+export type Apps = typeof Apps.Type;
 
 // The public types of index.ts and the schema accept the same recipes; a failing line names the type.
 // Strict equality: plain assignability both ways misses a key that is optional on one side only.
@@ -175,6 +220,7 @@ export type PublicTypesMatch = [
 ];
 
 export const decodeRecipe = Schema.decodeUnknownSync(Recipe, { onExcessProperty: "error" });
+export const decodeApps = Schema.decodeUnknownSync(Apps, { onExcessProperty: "error" });
 
 /** The GitHub event that a deploy runs for. */
 export interface DeployEvent {
@@ -233,6 +279,7 @@ export function plan(
   event: DeployEvent,
   zone: string,
   otherZones: ReadonlyArray<string> = [],
+  key: string = DEFAULT_APP,
 ): Plan {
   const entry = recipe.deploy.find(
     (item) =>
@@ -249,7 +296,8 @@ export function plan(
   const environment = entry.name.replaceAll("{pr}", String(event.pr ?? ""));
   if (!LABEL.test(environment))
     return { kind: "error", reason: `The environment name "${environment}" is not a valid name.` };
-  const slug = repoSlug(repo);
+  // K-804: the default address of an app other than `app` holds its key.
+  const slug = key === DEFAULT_APP ? repoSlug(repo) : `${repoSlug(repo)}-${key}`;
   const listed =
     entry.address === undefined
       ? []

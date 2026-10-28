@@ -69,24 +69,48 @@ export interface WorkerApp {
 /** 1 to 20 entries. */
 type Deploy = readonly [DeployEntry, ...Array<DeployEntry>];
 
+/**
+ * K-820: the keys of the apps of this repo that this app needs: they deploy first, and when one of them did not
+ * deploy, this app does not deploy either.
+ */
+type Needs = ReadonlyArray<string>;
+
 /** K-801, K-804: a recipe has exactly one kind: `static`, `compose` or `worker`. */
 export type Recipe =
-  | { readonly static: StaticApp; readonly compose?: never; readonly worker?: never; readonly deploy: Deploy }
+  | {
+      readonly static: StaticApp;
+      readonly compose?: never;
+      readonly worker?: never;
+      readonly deploy: Deploy;
+      readonly needs?: Needs;
+    }
   | {
       readonly compose: ComposeApp;
       readonly static?: never;
       readonly worker?: never;
       readonly deploy: Deploy;
+      readonly needs?: Needs;
     }
   | {
       readonly worker: WorkerApp;
       readonly static?: never;
       readonly compose?: never;
       readonly deploy: Deploy;
+      readonly needs?: Needs;
     };
 
 /**
- * K-801: the one export of `kitshn.config.ts`. The value is one object literal; `kitshn check` refuses
- * anything that computes (K-802), because kitshn reads the recipe without running it (K-803).
+ * K-804: the apps of one repo by key: a lowercase letter, then up to 19 lowercase letters or digits. The app with
+ * the key `app` keeps the card ids and addresses of a repo with one app; every other key is part of them. 1 to 10.
+ */
+export type Apps = { readonly [key: string]: Recipe };
+
+/**
+ * K-801: the one export of `kitshn.config.ts`, for a repo with one app (the key `app`). The value is one object
+ * literal; `kitshn check` refuses anything that computes (K-802), because kitshn reads the recipe without running
+ * it (K-803).
  */
 export const defineApp = (recipe: Recipe): Recipe => recipe;
+
+/** K-804: the one export of `kitshn.config.ts`, for a repo with several apps. */
+export const defineApps = (apps: Apps): Apps => apps;

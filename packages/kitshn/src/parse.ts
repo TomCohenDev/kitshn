@@ -1,4 +1,5 @@
 import { parse } from "@babel/parser";
+import { DEFAULT_APP } from "./names.ts";
 
 /** Where a recipe breaks the rule of K-802, with its line and column. */
 export class RecipeError extends Error {
@@ -58,17 +59,18 @@ function literal(node: Node): unknown {
 }
 
 /**
- * K-802, K-803: reads `kitshn.config.ts` without running it. The file may import only `defineApp` from
- * "kitshn" and export one `defineApp({...})` call with a literal object.
+ * K-802, K-803, K-804: reads `kitshn.config.ts` without running it, as the apps by key. The file may import only
+ * `defineApp` and `defineApps` from "kitshn" and export one `defineApp({...})` call, which is the app `app`, or
+ * one `defineApps({...})` call, with a literal object.
  */
-export function readRecipe(source: string): unknown {
+export function readApps(source: string): unknown {
   let program: Node;
   try {
     program = parse(source, { sourceType: "module", plugins: ["typescript"] }).program as unknown as Node;
   } catch (error) {
     throw new RecipeError(`kitshn.config.ts is not valid TypeScript: ${String(error)}`);
   }
-  let recipe: unknown;
+  let apps: unknown;
   let found = false;
   for (const statement of program["body"] as Array<Node>) {
     if (statement.type === "ImportDeclaration") {
@@ -76,8 +78,10 @@ export function readRecipe(source: string): unknown {
       const names = (statement["specifiers"] as Array<Node>).map(
         (item) => (item["imported"] as Node | undefined)?.["name"],
       );
-      if (from !== "kitshn" || names.some((name) => name !== "defineApp")) {
-        throw new RecipeError(`A recipe imports only defineApp from "kitshn" (${at(statement)}).`);
+      if (from !== "kitshn" || names.some((name) => name !== "defineApp" && name !== "defineApps")) {
+        throw new RecipeError(
+          `A recipe imports only defineApp and defineApps from "kitshn" (${at(statement)}).`,
+        );
       }
       continue;
     }
@@ -88,15 +92,17 @@ export function readRecipe(source: string): unknown {
       if (
         call.type !== "CallExpression" ||
         callee?.type !== "Identifier" ||
-        callee["name"] !== "defineApp" ||
+        (callee["name"] !== "defineApp" && callee["name"] !== "defineApps") ||
         args.length !== 1
       ) {
-        throw new RecipeError(`The default export must be defineApp({...}) (${at(statement)}).`);
+        throw new RecipeError(
+          `The default export must be defineApp({...}) or defineApps({...}) (${at(statement)}).`,
+        );
       }
       const [argument] = args;
       if (argument?.type !== "ObjectExpression")
-        throw new RecipeError(`defineApp takes one object literal (${at(call)}).`);
-      recipe = literal(argument);
+        throw new RecipeError(`${String(callee["name"])} takes one object literal (${at(call)}).`);
+      apps = callee["name"] === "defineApp" ? { [DEFAULT_APP]: literal(argument) } : literal(argument);
       found = true;
       continue;
     }
@@ -104,6 +110,9 @@ export function readRecipe(source: string): unknown {
       `A recipe has only the import and the default export; ${statement.type} is not allowed (${at(statement)}).`,
     );
   }
-  if (!found) throw new RecipeError("kitshn.config.ts has no `export default defineApp({...})`.");
-  return recipe;
+  if (!found)
+    throw new RecipeError(
+      "kitshn.config.ts has no `export default defineApp({...})` or `defineApps({...})`.",
+    );
+  return apps;
 }

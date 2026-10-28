@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { readRecipe } from "./parse.ts";
-import { decodeRecipe, plan } from "./recipe.ts";
+import { readApps } from "./parse.ts";
+import { decodeApps, decodeRecipe, deployOrder, plan } from "./recipe.ts";
+
+/** The recipe of a `defineApp` file: the app `app` (K-804). */
+const readRecipe = (source: string) => (readApps(source) as { readonly app: unknown }).app;
 
 const source = `import { defineApp } from "kitshn";
 
@@ -232,5 +235,55 @@ describe("Worker recipes (K-806)", () => {
 
   it("refuses a recipe with a Worker and another kind", () => {
     expect(() => decodeRecipe({ ...worker({}), static: { output: "site" } })).toThrow();
+  });
+});
+
+describe("several apps per repo (K-804, K-820)", () => {
+  const app = (needs?: ReadonlyArray<string>) => ({
+    static: { output: "site" },
+    deploy: [{ on: "push", name: "prod" }],
+    ...(needs ? { needs } : {}),
+  });
+
+  it("reads defineApps by key, and defineApp as the app `app`", () => {
+    const source = `import { defineApps } from "kitshn";
+export default defineApps({ app: { static: { output: "public" }, deploy: [{ on: "push", name: "prod" }] }, cv: { static: { output: "cv" }, deploy: [{ on: "push", name: "prod" }], needs: ["app"] } });
+`;
+    expect(Object.keys(decodeApps(readApps(source)))).toEqual(["app", "cv"]);
+    expect(
+      Object.keys(
+        readApps(
+          `import { defineApp } from "kitshn";\nexport default defineApp(${JSON.stringify(app())});`,
+        ) as object,
+      ),
+    ).toEqual(["app"]);
+  });
+
+  it("deploys each app after the apps it needs, ties by key", () => {
+    expect(deployOrder({ web: app(["api"]), api: app(["db"]), db: app(), docs: app() })).toEqual({
+      order: ["db", "api", "docs", "web"],
+    });
+  });
+
+  it("refuses an unknown key, an app that names itself and a cycle when the recipe loads", () => {
+    expect(() => decodeApps({ web: app(["api"]) })).toThrow(/no app has that key/);
+    expect(() => decodeApps({ web: app(["web"]) })).toThrow(/needs itself/);
+    expect(() => decodeApps({ a: app(["b"]), b: app(["a"]) })).toThrow(/cycle/);
+    expect(() => decodeApps({ "my-app": app() })).toThrow();
+    expect(() => decodeApps({})).toThrow();
+  });
+
+  it("puts the key in the default address of every app but `app`", () => {
+    const event = { name: "pull_request", branch: "x", pr: 31, action: "opened" } as const;
+    const preview = {
+      static: { output: "cv" },
+      deploy: [{ on: "pull_request", name: "pr-{pr}", ephemeral: true }],
+    } as const;
+    expect(plan(preview, "Yarden-zamir/me", event, "yarden-zamir.com", [], "cv")).toMatchObject({
+      address: "me-cv-pr-31.yarden-zamir.com",
+    });
+    expect(plan(preview, "Yarden-zamir/me", event, "yarden-zamir.com")).toMatchObject({
+      address: "me-pr-31.yarden-zamir.com",
+    });
   });
 });

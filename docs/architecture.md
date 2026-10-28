@@ -14,7 +14,7 @@ This page says what the parts are, where each piece of state lives, how requests
 | App Workers | Cloudflare | One Worker script per environment of a static site or Worker app. |
 | `kitshn` daemon | Each machine | Runs `cloudflared`, runs jobs (Compose deploys, commands), checks local sites, keeps sample history, serves the local socket for providers. |
 | Providers | Each machine | Programs such as T3 Code that add resource kinds through the local socket. |
-| `kitshn` npm package | App repos and Actions | `defineApp`, the recipe types, and the GitHub Action that evaluates the recipe and sends JSON. |
+| `kitshn` npm package | App repos and Actions | `defineApp`, `defineApps`, the recipe types, and the GitHub Action that evaluates the recipe and sends JSON. |
 | GitHub App | GitHub | Webhooks for pull request close, deployment statuses, repo discovery, "New app". |
 
 ```text

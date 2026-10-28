@@ -33,8 +33,15 @@ export async function cloudflareCount(token: string, path: string): Promise<numb
   return total;
 }
 
-/** One GraphQL Analytics query. Its answer has `data` and `errors`, not the envelope of the REST API. */
-export async function cloudflareGraphql<T>(token: string, query: string, variables: object): Promise<T> {
+/**
+ * One GraphQL Analytics query. Its answer has `data` and `errors`, not the envelope of the REST API. A refused field
+ * is null in `data` and has an error with its alias in `path`, so the caller keeps the other fields.
+ */
+export async function cloudflareGraphql<T>(
+  token: string,
+  query: string,
+  variables: object,
+): Promise<{ readonly data: T; readonly errors: Readonly<Record<string, string>> }> {
   const response = await fetch("https://api.cloudflare.com/client/v4/graphql", {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
@@ -42,14 +49,19 @@ export async function cloudflareGraphql<T>(token: string, query: string, variabl
   });
   const answer = (await response.json().catch(() => null)) as {
     data?: T | null;
-    errors?: ReadonlyArray<{ message: string }> | null;
+    errors?: ReadonlyArray<{ message: string; path?: ReadonlyArray<string | number> }> | null;
   } | null;
-  if (!response.ok || !answer?.data || (answer.errors?.length ?? 0) > 0)
+  if (!response.ok || !answer?.data)
     throw new CloudflareError(
       response.status,
       `GraphQL failed (${response.status}): ${answer?.errors?.map((error) => error.message).join("; ") ?? "no data"}`,
     );
-  return answer.data;
+  const errors: Record<string, string> = {};
+  for (const error of answer.errors ?? []) {
+    const alias = error.path?.at(-1);
+    if (typeof alias === "string") errors[alias] = error.message;
+  }
+  return { data: answer.data, errors };
 }
 
 async function envelope<T>(

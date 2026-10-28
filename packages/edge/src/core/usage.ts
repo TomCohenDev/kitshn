@@ -5,64 +5,92 @@ export type UsagePeriod = "day" | "month" | "now";
 
 export interface UsageRow {
   readonly label: string;
-  readonly used: number;
+  /** Null when kitshn could not read the value; `error` says why. Never 0 for "unknown". */
+  readonly used: number | null;
   readonly limit: number;
   readonly period: UsagePeriod;
   readonly unit: "count" | "bytes";
   /** The Cloudflare page that names the limit. */
   readonly docs: string;
+  /** How kitshn counts the value, when that is not plain. */
+  readonly note?: string;
+  readonly error?: string;
 }
 
 export interface Usage {
-  /** When kitshn read the numbers; the Durable Object keeps them for 5 minutes (K-1305). */
+  /** When kitshn read the numbers; it keeps them for 5 minutes (K-1305). */
   readonly at: number;
   readonly rows: ReadonlyArray<UsageRow>;
-  /** A part that kitshn could not read, with the reason; the other rows still show. */
-  readonly errors: ReadonlyArray<string>;
+  /** K-1304: the Worker answered, because the Durable Object of kitshn failed, with its reason. */
+  readonly kitshnDown?: string;
 }
 
 /** K-1303: a row warns at 80% of its limit. */
 export const USAGE_WARNING = 0.8;
 
-export const usageLevel = (row: UsageRow): "ok" | "warn" | "full" =>
-  row.used >= row.limit ? "full" : row.used >= row.limit * USAGE_WARNING ? "warn" : "ok";
+export const usageLevel = (row: UsageRow): "unknown" | "ok" | "warn" | "full" =>
+  row.used === null
+    ? "unknown"
+    : row.used >= row.limit
+      ? "full"
+      : row.used >= row.limit * USAGE_WARNING
+        ? "warn"
+        : "ok";
 
 const GB = 1_000_000_000;
 const DO_DOCS = "https://developers.cloudflare.com/durable-objects/platform/pricing/";
+const D1_DOCS = "https://developers.cloudflare.com/d1/platform/pricing/";
 const KV_DOCS = "https://developers.cloudflare.com/kv/platform/pricing/";
 const R2_DOCS = "https://developers.cloudflare.com/r2/pricing/";
 const ACCESS_DOCS = "https://developers.cloudflare.com/cloudflare-one/account-limits/";
+const DNS_DOCS = "https://developers.cloudflare.com/dns/faq/";
 
-/** The answer of the one GraphQL Analytics query of K-1303 (`USAGE_QUERY`). */
+/** K-1305: the permission that each part of the view needs on the API token. */
+export const PERMISSION = {
+  analytics: "Account Analytics: Read",
+  seats: "Access: Audit Logs Read",
+  applications: "Access: Apps and Policies Read",
+  serviceTokens: "Access: Service Tokens Read",
+  scripts: "Workers Scripts Read",
+  dns: "DNS Read",
+  zone: "Zone Read",
+} as const;
+
+type Sum<T extends string> = { readonly sum: Readonly<Record<T, number>> };
+type Max<T extends string> = { readonly max: Readonly<Record<T, number>> };
+type Action = { readonly dimensions: { readonly actionType: string } };
+type Invocation = Sum<"requests"> & { readonly dimensions: { readonly type: string } };
+
+/** One dataset of `USAGE_QUERY`; null when Cloudflare refused it (the answer then has an error for its alias). */
+type Dataset<T> = ReadonlyArray<T> | null | undefined;
+
+/** The answer of the one GraphQL Analytics query of K-1303 (`USAGE_QUERY`), by alias. */
 export interface Analytics {
-  readonly workers: ReadonlyArray<{ readonly sum: { readonly requests: number } }>;
-  readonly objects: ReadonlyArray<{ readonly sum: { readonly requests: number } }>;
-  readonly rows: ReadonlyArray<{ readonly sum: { readonly rowsRead: number; readonly rowsWritten: number } }>;
-  readonly objectStorage: ReadonlyArray<{ readonly max: { readonly storedBytes: number } }>;
-  readonly kv: ReadonlyArray<{
-    readonly sum: { readonly requests: number };
-    readonly dimensions: { readonly actionType: string };
-  }>;
-  readonly kvStorage: ReadonlyArray<{ readonly max: { readonly byteCount: number } }>;
-  readonly r2: ReadonlyArray<{
-    readonly sum: { readonly requests: number };
-    readonly dimensions: { readonly actionType: string };
-  }>;
-  readonly r2Storage: ReadonlyArray<{
-    readonly max: { readonly payloadSize: number; readonly metadataSize: number };
-  }>;
+  readonly workers?: Dataset<Sum<"requests">>;
+  readonly objects?: Dataset<Invocation>;
+  readonly rows?: Dataset<Sum<"rowsRead" | "rowsWritten">>;
+  readonly objectStorage?: Dataset<Max<"storedBytes">>;
+  readonly d1?: Dataset<Sum<"rowsRead" | "rowsWritten">>;
+  readonly d1Storage?: Dataset<Max<"databaseSizeBytes">>;
+  readonly kv?: Dataset<Sum<"requests"> & Action>;
+  readonly kvStorage?: Dataset<Max<"byteCount">>;
+  readonly r2?: Dataset<Sum<"requests"> & Action>;
+  readonly r2Storage?: Dataset<Max<"payloadSize" | "metadataSize">>;
 }
 
 /**
- * Daily datasets filter on `$day`, monthly R2 operations on `$month`. R2 storage is the newest value of each bucket.
+ * Daily datasets filter on `$day`, monthly R2 operations on `$monthSince`. A storage dataset has one group per
+ * Durable Object namespace, database, KV namespace or bucket; kitshn adds them up.
  * Known limit: the R2 free operations count per calendar month, while Cloudflare counts per billing month.
  */
 export const USAGE_QUERY = `query ($account: String!, $day: Date!, $since: Time!, $monthSince: Time!, $until: Time!) {
   viewer { accounts(filter: { accountTag: $account }) {
     workers: workersInvocationsAdaptive(limit: 1, filter: { datetime_geq: $since, datetime_leq: $until }) { sum { requests } }
-    objects: durableObjectsInvocationsAdaptiveGroups(limit: 1, filter: { date: $day }) { sum { requests } }
+    objects: durableObjectsInvocationsAdaptiveGroups(limit: 20, filter: { date: $day }) { sum { requests } dimensions { type } }
     rows: durableObjectsPeriodicGroups(limit: 1, filter: { date: $day }) { sum { rowsRead rowsWritten } }
-    objectStorage: durableObjectsStorageGroups(limit: 1, filter: { date: $day }) { max { storedBytes } }
+    objectStorage: durableObjectsSqlStorageGroups(limit: 1000, filter: { date: $day }) { max { storedBytes } dimensions { namespaceId } }
+    d1: d1AnalyticsAdaptiveGroups(limit: 1, filter: { date: $day }) { sum { rowsRead rowsWritten } }
+    d1Storage: d1StorageAdaptiveGroups(limit: 1000, filter: { date: $day }) { max { databaseSizeBytes } dimensions { databaseId } }
     kv: kvOperationsAdaptiveGroups(limit: 10, filter: { date: $day }) { sum { requests } dimensions { actionType } }
     kvStorage: kvStorageAdaptiveGroups(limit: 1000, filter: { date: $day }) { max { byteCount } dimensions { namespaceId } }
     r2: r2OperationsAdaptiveGroups(limit: 100, filter: { datetime_geq: $monthSince, datetime_leq: $until }) { sum { requests } dimensions { actionType } }
@@ -112,166 +140,221 @@ const R2_CLASS_B = new Set([
 ]);
 const R2_FREE = new Set(["DeleteObject", "DeleteObjects", "DeleteBucket", "AbortMultipartUpload"]);
 
+/** The [pricing page](https://developers.cloudflare.com/durable-objects/platform/pricing/) bills incoming WebSocket messages 20:1. */
+const WEBSOCKET_RATIO = 20;
+
 const sum = (values: ReadonlyArray<number>) => values.reduce((total, value) => total + value, 0);
 
-/** The rows from the analytics; rows read come first, because they ran out first (2026-10-28). */
-export function analyticsRows(data: Analytics): { rows: Array<UsageRow>; errors: Array<string> } {
-  const errors: Array<string> = [];
-  const kv = (action: string) =>
-    sum(data.kv.filter((group) => group.dimensions.actionType === action).map((group) => group.sum.requests));
-  let classA = 0;
-  let classB = 0;
-  for (const group of data.r2) {
-    const action = group.dimensions.actionType;
-    if (R2_CLASS_B.has(action)) classB += group.sum.requests;
-    else if (R2_CLASS_A.has(action)) classA += group.sum.requests;
-    else if (!R2_FREE.has(action)) {
-      // A class that the pricing page does not name yet counts as class A, the smaller limit, and says so.
-      classA += group.sum.requests;
-      errors.push(`R2 action ${action} is not on the pricing page; kitshn counts it as class A.`);
-    }
-  }
-  const rows = data.rows[0]?.sum ?? { rowsRead: 0, rowsWritten: 0 };
+/** A value, or the reason that it is missing. */
+export type Read = { readonly used: number } | { readonly error: string };
+
+function row(
+  label: string,
+  read: Read,
+  limit: number,
+  period: UsagePeriod,
+  unit: UsageRow["unit"],
+  docs: string,
+  note?: string,
+): UsageRow {
   return {
-    errors,
-    rows: [
-      {
-        label: "Durable Object rows read",
-        used: rows.rowsRead,
-        limit: 5_000_000,
-        period: "day",
-        unit: "count",
-        docs: DO_DOCS,
-      },
-      {
-        label: "Durable Object rows written",
-        used: rows.rowsWritten,
-        limit: 100_000,
-        period: "day",
-        unit: "count",
-        docs: DO_DOCS,
-      },
-      {
-        label: "Worker requests",
-        used: data.workers[0]?.sum.requests ?? 0,
-        limit: 100_000,
-        period: "day",
-        unit: "count",
-        docs: "https://developers.cloudflare.com/workers/platform/limits/",
-      },
-      {
-        label: "Durable Object requests",
-        used: data.objects[0]?.sum.requests ?? 0,
-        limit: 100_000,
-        period: "day",
-        unit: "count",
-        docs: DO_DOCS,
-      },
-      {
-        label: "Durable Object storage",
-        used: data.objectStorage[0]?.max.storedBytes ?? 0,
-        limit: 5 * GB,
-        period: "now",
-        unit: "bytes",
-        docs: DO_DOCS,
-      },
-      { label: "KV reads", used: kv("read"), limit: 100_000, period: "day", unit: "count", docs: KV_DOCS },
-      { label: "KV writes", used: kv("write"), limit: 1_000, period: "day", unit: "count", docs: KV_DOCS },
-      { label: "KV deletes", used: kv("delete"), limit: 1_000, period: "day", unit: "count", docs: KV_DOCS },
-      { label: "KV lists", used: kv("list"), limit: 1_000, period: "day", unit: "count", docs: KV_DOCS },
-      {
-        label: "KV storage",
-        used: sum(data.kvStorage.map((group) => group.max.byteCount)),
-        limit: 1 * GB,
-        period: "now",
-        unit: "bytes",
-        docs: KV_DOCS,
-      },
-      {
-        label: "R2 class A operations",
-        used: classA,
-        limit: 1_000_000,
-        period: "month",
-        unit: "count",
-        docs: R2_DOCS,
-      },
-      {
-        label: "R2 class B operations",
-        used: classB,
-        limit: 10_000_000,
-        period: "month",
-        unit: "count",
-        docs: R2_DOCS,
-      },
-      {
-        label: "R2 storage",
-        used: sum(data.r2Storage.map((group) => group.max.payloadSize + group.max.metadataSize)),
-        limit: 10 * GB,
-        period: "now",
-        unit: "bytes",
-        docs: R2_DOCS,
-      },
-    ],
+    label,
+    limit,
+    period,
+    unit,
+    docs,
+    ...("used" in read ? { used: read.used } : { used: null, error: read.error }),
+    ...(note ? { note } : {}),
   };
 }
 
-/** The counts that the REST API gives, one call each. */
-export interface Counts {
-  readonly seats: number;
-  readonly applications: number;
-  readonly serviceTokens: number;
-  readonly scripts: number;
-  /** Each zone with its records and its limit (K-1111: 200 for a Free zone made after 2024-09-01, else 1,000). */
-  readonly zones: ReadonlyArray<{
-    readonly name: string;
-    readonly records: number;
-    readonly createdOn: string;
-  }>;
+/**
+ * The rows from the analytics. `errors` holds the GraphQL error of each refused alias. Operations: no group means
+ * no operation today, so 0. Storage: no group means that Cloudflare has no value yet, so unknown, never 0.
+ */
+export function analyticsRows(data: Analytics, errors: Readonly<Record<string, string>>): Array<UsageRow> {
+  const refused = (alias: keyof Analytics): Read => ({
+    error: `Cloudflare sent no value (needs ${PERMISSION.analytics}): ${errors[alias] ?? "no reason given"}`,
+  });
+  const operations = <T>(
+    groups: Dataset<T>,
+    alias: keyof Analytics,
+    read: (groups: ReadonlyArray<T>) => number,
+  ) => (groups ? { used: read(groups) } : refused(alias));
+  const storage = <T>(groups: Dataset<T>, alias: keyof Analytics, read: (group: T) => number): Read => {
+    if (!groups) return refused(alias);
+    if (groups.length === 0) return { error: "Cloudflare has no value for today yet." };
+    return { used: sum(groups.map(read)) };
+  };
+  const kv = (action: string) =>
+    operations(data.kv, "kv", (groups) =>
+      sum(
+        groups.filter((group) => group.dimensions.actionType === action).map((group) => group.sum.requests),
+      ),
+    );
+  // An action that the pricing page does not name counts as class A, the smaller limit, and the bar says so.
+  const unknownR2 = [...new Set((data.r2 ?? []).map((group) => group.dimensions.actionType))].filter(
+    (action) => !R2_CLASS_A.has(action) && !R2_CLASS_B.has(action) && !R2_FREE.has(action),
+  );
+  const r2 = (counts: (action: string) => boolean) =>
+    operations(data.r2, "r2", (groups) =>
+      sum(groups.filter((group) => counts(group.dimensions.actionType)).map((group) => group.sum.requests)),
+    );
+  return [
+    row(
+      "Durable Object rows read",
+      operations(data.rows, "rows", (groups) => sum(groups.map((group) => group.sum.rowsRead))),
+      5_000_000,
+      "day",
+      "count",
+      DO_DOCS,
+    ),
+    row(
+      "Durable Object rows written",
+      operations(data.rows, "rows", (groups) => sum(groups.map((group) => group.sum.rowsWritten))),
+      100_000,
+      "day",
+      "count",
+      DO_DOCS,
+    ),
+    row(
+      "Worker requests",
+      operations(data.workers, "workers", (groups) => sum(groups.map((group) => group.sum.requests))),
+      100_000,
+      "day",
+      "count",
+      "https://developers.cloudflare.com/workers/platform/limits/",
+    ),
+    row(
+      "Durable Object requests",
+      operations(data.objects, "objects", (groups) =>
+        Math.ceil(
+          sum(
+            groups.map((group) =>
+              // "hibernation" counts the WebSocket messages of a hibernating object, one each (checked 2026-10-28).
+              group.dimensions.type === "hibernation"
+                ? group.sum.requests / WEBSOCKET_RATIO
+                : group.sum.requests,
+            ),
+          ),
+        ),
+      ),
+      100_000,
+      "day",
+      "count",
+      DO_DOCS,
+      "Incoming WebSocket messages count 20:1, as on the bill.",
+    ),
+    row(
+      "Durable Object storage",
+      storage(data.objectStorage, "objectStorage", (group) => group.max.storedBytes),
+      5 * GB,
+      "now",
+      "bytes",
+      DO_DOCS,
+    ),
+    row(
+      "D1 rows read",
+      operations(data.d1, "d1", (groups) => sum(groups.map((group) => group.sum.rowsRead))),
+      5_000_000,
+      "day",
+      "count",
+      D1_DOCS,
+    ),
+    row(
+      "D1 rows written",
+      operations(data.d1, "d1", (groups) => sum(groups.map((group) => group.sum.rowsWritten))),
+      100_000,
+      "day",
+      "count",
+      D1_DOCS,
+    ),
+    row(
+      "D1 storage",
+      storage(data.d1Storage, "d1Storage", (group) => group.max.databaseSizeBytes),
+      5 * GB,
+      "now",
+      "bytes",
+      D1_DOCS,
+    ),
+    row("KV reads", kv("read"), 100_000, "day", "count", KV_DOCS),
+    row("KV writes", kv("write"), 1_000, "day", "count", KV_DOCS),
+    row("KV deletes", kv("delete"), 1_000, "day", "count", KV_DOCS),
+    row("KV lists", kv("list"), 1_000, "day", "count", KV_DOCS),
+    row(
+      "KV storage",
+      storage(data.kvStorage, "kvStorage", (group) => group.max.byteCount),
+      1 * GB,
+      "now",
+      "bytes",
+      KV_DOCS,
+    ),
+    row(
+      "R2 class A operations",
+      r2((action) => R2_CLASS_A.has(action) || unknownR2.includes(action)),
+      1_000_000,
+      "month",
+      "count",
+      R2_DOCS,
+      unknownR2.length > 0
+        ? `Counts ${unknownR2.join(", ")} as class A, because the pricing page does not name them.`
+        : undefined,
+    ),
+    row(
+      "R2 class B operations",
+      r2((action) => R2_CLASS_B.has(action)),
+      10_000_000,
+      "month",
+      "count",
+      R2_DOCS,
+    ),
+    row(
+      "R2 storage",
+      storage(data.r2Storage, "r2Storage", (group) => group.max.payloadSize + group.max.metadataSize),
+      10 * GB,
+      "now",
+      "bytes",
+      R2_DOCS,
+    ),
+  ];
 }
 
+/** The counts that the REST API gives; each one fails on its own. */
+export interface Counts {
+  readonly seats: Read;
+  readonly applications: Read;
+  readonly serviceTokens: Read;
+  readonly scripts: Read;
+  /** Each zone with its records and its creation date, which sets its limit (K-1111). */
+  readonly zones: ReadonlyArray<{ readonly name: string; readonly records: Read; readonly createdOn: Read }>;
+}
+
+/** K-1111: 200 records for a Free zone made after 2024-09-01, else 1,000. `createdOn` is an ISO time. */
 export const dnsLimit = (createdOn: string) => (createdOn >= "2024-09-01" ? 200 : 1_000);
 
 export function countRows(counts: Counts): Array<UsageRow> {
+  const now = (label: string, read: Read, limit: number, docs: string) =>
+    row(label, read, limit, "now", "count", docs);
   return [
-    {
-      label: "Access seats",
-      used: counts.seats,
-      limit: 50,
-      period: "now",
-      unit: "count",
-      docs: "https://developers.cloudflare.com/cloudflare-one/team-and-resources/users/seat-management/",
-    },
-    {
-      label: "Access applications",
-      used: counts.applications,
-      limit: 500,
-      period: "now",
-      unit: "count",
-      docs: ACCESS_DOCS,
-    },
-    {
-      label: "Access service tokens",
-      used: counts.serviceTokens,
-      limit: 50,
-      period: "now",
-      unit: "count",
-      docs: ACCESS_DOCS,
-    },
-    {
-      label: "Worker scripts",
-      used: counts.scripts,
-      limit: 100,
-      period: "now",
-      unit: "count",
-      docs: "https://developers.cloudflare.com/workers/platform/limits/",
-    },
-    ...counts.zones.map((zone) => ({
-      label: `DNS records of ${zone.name}`,
-      used: zone.records,
-      limit: dnsLimit(zone.createdOn),
-      period: "now" as const,
-      unit: "count" as const,
-      docs: "https://developers.cloudflare.com/dns/faq/",
-    })),
+    now(
+      "Access seats",
+      counts.seats,
+      50,
+      "https://developers.cloudflare.com/cloudflare-one/team-and-resources/users/seat-management/",
+    ),
+    now("Access applications", counts.applications, 500, ACCESS_DOCS),
+    now("Access service tokens", counts.serviceTokens, 50, ACCESS_DOCS),
+    now("Worker scripts", counts.scripts, 100, "https://developers.cloudflare.com/workers/platform/limits/"),
+    ...counts.zones.map((zone) =>
+      "used" in zone.createdOn
+        ? now(
+            `DNS records of ${zone.name}`,
+            zone.records,
+            dnsLimit(new Date(zone.createdOn.used).toISOString()),
+            DNS_DOCS,
+          )
+        : // Without the date the limit is unknown; 200 is the smaller one, so the bar does not hide a full zone.
+          now(`DNS records of ${zone.name}`, { error: zone.createdOn.error }, 200, DNS_DOCS),
+    ),
   ];
 }

@@ -198,7 +198,7 @@ import {
 } from "./deploys.ts";
 import { DEFAULT_APP } from "kitshn/names";
 import { AppKey, type Recipe, WorkerApp, decodeRecipe, deployOrder, plan, repoSlug } from "kitshn/recipe";
-import { type Zone, removeStaleDomains, zoneFor, zoneOfAddressIn, zonesOf } from "./zones.ts";
+import { removeStaleDomains, zoneFor, zoneOfAddressIn, zonesOrMain } from "./zones.ts";
 import {
   type LiveSite,
   ingressAccess,
@@ -396,10 +396,10 @@ export class Kitshn extends DurableObject<Env> {
    */
   private deployFacts: DeployFacts | null = null;
 
-  /** K-1708: the last failed challenge of each machine, for the panel. Memory only (K-1302). */
   /** K-1305: the last Usage answer, kept in memory for 5 minutes, so the view costs no writes. */
   private usage: Usage | null = null;
 
+  /** K-1708: the last failed challenge of each machine, for the panel. Memory only (K-1302). */
   private keyFailures = new Map<string, { readonly at: number; readonly reason: string }>();
 
   private meta(key: string): string | null {
@@ -2267,7 +2267,7 @@ export class Kitshn extends DurableObject<Env> {
       return this.addJob(caller, await request.json().catch(() => null));
     if (path === "/api/jobs" && request.method === "GET") return Response.json(this.recentJobs(100));
     if (path === "/api/devices" && request.method === "GET") return this.listDevices();
-    if (path === "/api/usage" && request.method === "GET") return Response.json(await this.readUsage());
+    if (path === "/api/usage" && request.method === "GET") return await this.readUsage();
     if (path === "/api/library" && request.method === "GET") return Response.json(this.libraryItems());
     if ((path === "/api/pages" || path === "/api/files") && request.method === "POST")
       return this.upload(caller, request, path === "/api/pages" ? "page" : "file").catch((error: unknown) => {
@@ -4117,30 +4117,20 @@ export class Kitshn extends DurableObject<Env> {
     this.broadcast();
   }
 
-  /** K-106: the Access service tokens of the account, to pick a device member. */
-  /** A broken KITSHN_ZONES leaves only the kitshn zone, so a deploy there still works (K-1111). */
-  private zones(): Array<Zone> {
-    try {
-      return zonesOf(this.env);
-    } catch (error) {
-      console.error(`kitshn cannot read KITSHN_ZONES (K-1111): ${String(error)}`);
-      return [{ name: this.env.KITSHN_ZONE, id: this.env.CLOUDFLARE_ZONE_ID }];
-    }
-  }
-
   /** K-1303, K-1305: the free plan use of the account; one read per 5 minutes at most. */
-  private async readUsage(): Promise<Usage> {
+  private async readUsage(): Promise<Response> {
     const now = Date.now();
-    if (this.usage && now - this.usage.at < USAGE_CACHE_MS) return this.usage;
+    if (this.usage && now - this.usage.at < USAGE_CACHE_MS) return Response.json(this.usage);
     const token = this.env.CLOUDFLARE_API_TOKEN;
     if (!token) {
-      if (this.env.DEV_DEMO && this.env.KITSHN_HOST === "localhost") return demoUsage(now);
-      return { at: now, rows: [], errors: ["kitshn has no Cloudflare API token here."] };
+      if (this.env.DEV_DEMO && this.env.KITSHN_HOST === "localhost") return Response.json(demoUsage(now));
+      return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
     }
-    this.usage = await readUsage(token, this.env.CLOUDFLARE_ACCOUNT_ID, this.zones(), now);
-    return this.usage;
+    this.usage = await readUsage(token, this.env.CLOUDFLARE_ACCOUNT_ID, zonesOrMain(this.env), now);
+    return Response.json(this.usage);
   }
 
+  /** K-106: the Access service tokens of the account, to pick a device member. */
   private async listDevices() {
     const api = this.api();
     if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
@@ -4678,7 +4668,7 @@ export class Kitshn extends DurableObject<Env> {
         { error: "A skip reason is text of at most 500 characters (K-820)." },
         { status: 400 },
       );
-    const zones = this.zones();
+    const zones = zonesOrMain(this.env);
     const result = plan(
       recipe,
       deployer.repo,

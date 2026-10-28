@@ -20,11 +20,11 @@ const PERIOD: Record<UsageRow["period"], string> = {
   now: "now",
 };
 
-/** One limit as an ink-bordered bar; yellow from 80%, red at the limit. */
+/** One limit as an ink-bordered bar; yellow from 80%, red at the limit, empty and "unknown" without a value. */
 function Gauge(props: {
   label: string;
   share: number;
-  level: "ok" | "warn" | "full";
+  level: "unknown" | "ok" | "warn" | "full";
   detail: string;
   docs?: string;
 }) {
@@ -34,7 +34,11 @@ function Gauge(props: {
       <div class="gauge-head">
         <strong>{props.label}</strong>
         {props.level === "ok" ? null : (
-          <span class="sticker">{props.level === "full" ? "full" : `${percent}%`}</span>
+          <span
+            class={`sticker${props.level === "warn" ? " wait" : props.level === "unknown" ? " info" : ""}`}
+          >
+            {props.level === "full" ? "full" : props.level === "unknown" ? "unknown" : `${percent}%`}
+          </span>
         )}
       </div>
       <div
@@ -86,19 +90,27 @@ export function UsageView(props: { machines: ReadonlyArray<MachineView> }) {
       {usage && "error" in usage ? <p class="error">{usage.error}</p> : null}
       {usage && "rows" in usage ? (
         <>
-          {usage.errors.map((error) => (
-            <p key={error} class="error">
-              {error}
+          {usage.kitshnDown ? (
+            <p class="error">
+              kitshn itself is over a limit or down, so the Worker read these numbers without it:{" "}
+              {usage.kitshnDown}
             </p>
-          ))}
+          ) : null}
           <div class="gauges">
             {usage.rows.map((row) => (
               <Gauge
                 key={row.label}
                 label={row.label}
-                share={row.used / row.limit}
+                share={(row.used ?? 0) / row.limit}
                 level={usageLevel(row)}
-                detail={`${amount(row, row.used)} of ${amount(row, row.limit)} ${PERIOD[row.period]}`}
+                detail={[
+                  row.used === null
+                    ? `Unknown: ${row.error ?? "no value"}`
+                    : `${amount(row, row.used)} of ${amount(row, row.limit)} ${PERIOD[row.period]}`,
+                  row.note,
+                ]
+                  .filter(Boolean)
+                  .join(". ")}
                 docs={row.docs}
               />
             ))}

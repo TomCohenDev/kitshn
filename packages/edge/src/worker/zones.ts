@@ -25,6 +25,18 @@ export function zonesOf(env: Pick<Env, "KITSHN_ZONE" | "CLOUDFLARE_ZONE_ID" | "K
   return [main, ...others.filter((zone) => zone.name !== main.name)];
 }
 
+/** A broken KITSHN_ZONES leaves only the kitshn zone, so a deploy there still works (K-1111). */
+export function zonesOrMain(
+  env: Pick<Env, "KITSHN_ZONE" | "CLOUDFLARE_ZONE_ID" | "KITSHN_ZONES">,
+): Array<Zone> {
+  try {
+    return zonesOf(env);
+  } catch (error) {
+    console.error(`kitshn cannot read KITSHN_ZONES (K-1111): ${String(error)}`);
+    return [{ name: env.KITSHN_ZONE, id: env.CLOUDFLARE_ZONE_ID }];
+  }
+}
+
 /** K-817: the zone of an address, or null when kitshn does not publish there. */
 export function zoneFor(address: string, zones: ReadonlyArray<Zone>): Zone | null {
   const name = zoneOfAddress(

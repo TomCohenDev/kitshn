@@ -8,6 +8,7 @@ import {
   objectKey,
 } from "../core/library.ts";
 import {
+  type Caller,
   type ContentLogins,
   callerOf,
   contentVisitorOf,
@@ -18,9 +19,11 @@ import {
   stepToken,
 } from "./auth.ts";
 import { type BadgeState, badgeSvg } from "../core/badge.ts";
+import type { Usage } from "../core/usage.ts";
 import { escapeHtml, originDown, seenText } from "./live.ts";
 import type { Env } from "./env.ts";
-import { zoneFor, zonesOf } from "./zones.ts";
+import { readUsage } from "./usage.ts";
+import { zoneFor, zonesOf, zonesOrMain } from "./zones.ts";
 
 export { Kitshn } from "./kitshn.ts";
 
@@ -311,6 +314,41 @@ function badge(request: Request, env: Env, ctx: ExecutionContext) {
   });
 }
 
+/**
+ * K-1304: the Usage view while the Durable Object fails, for example after the daily rows read run out. The Worker
+ * reads the values itself for an owner of OWNER_EMAILS and keeps them 5 minutes in the Cache API. Known limit: an
+ * owner that the map added later, and not the bootstrap, gets no fallback.
+ */
+async function usageAnswer(
+  request: Request,
+  env: Env,
+  caller: Caller,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const headers = new Headers(request.headers);
+  headers.set("x-kitshn-caller", JSON.stringify(caller));
+  const answer = await env.KITSHN.getByName("kitshn")
+    .fetch(new Request(request, { headers }))
+    .catch((error: unknown) => error);
+  if (answer instanceof Response && answer.status < 500) return answer;
+  const reason =
+    answer instanceof Response ? `${answer.status}: ${(await answer.text()).slice(0, 300)}` : String(answer);
+  const email = caller.visitor.email?.toLowerCase();
+  const owner = env.OWNER_EMAILS.split(",").some((each) => each.trim().toLowerCase() === email);
+  if (!owner || !env.CLOUDFLARE_API_TOKEN)
+    return Response.json({ error: `kitshn did not answer: ${reason}` }, { status: 503 });
+  const key = new Request("https://kitshn.internal/usage");
+  const cached = await caches.default.match(key);
+  const usage = cached
+    ? ((await cached.json()) as Usage)
+    : await readUsage(env.CLOUDFLARE_API_TOKEN, env.CLOUDFLARE_ACCOUNT_ID, zonesOrMain(env), Date.now());
+  if (!cached)
+    ctx.waitUntil(
+      caches.default.put(key, Response.json(usage, { headers: { "cache-control": "max-age=300" } })),
+    );
+  return Response.json({ ...usage, kitshnDown: reason } satisfies Usage);
+}
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
@@ -369,6 +407,8 @@ export default {
         return Response.json({ error: "Not found." }, { status: 404 });
       const caller = await callerOf(request, env, env.ACCESS_ADMIN_AUD);
       if (typeof caller === "string") return Response.json({ error: caller }, { status: 401 });
+      if (url.pathname === "/api/usage" && request.method === "GET")
+        return usageAnswer(request, env, caller, ctx);
       const headers = new Headers(request.headers);
       headers.set("x-kitshn-caller", JSON.stringify(caller));
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));

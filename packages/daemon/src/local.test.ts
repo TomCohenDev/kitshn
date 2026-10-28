@@ -1,16 +1,18 @@
 import type { Request } from "@kitshn/local";
-import { mkdtempSync, statSync, existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, statSync, symlinkSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { type Caller, type LocalOptions, askLocal, listenLocal } from "./local.ts";
+import { type Caller, type LocalOptions, askLocal, listenLocal, sharedFolderProblem } from "./local.ts";
+import type { Platform } from "./service.ts";
 
-const platform = process.platform === "darwin" ? "darwin" : "linux";
+const platform: Platform = process.platform === "darwin" ? "darwin" : "linux";
 const own = process.getuid!();
+const daemonPeer = { platform, daemonUid: own } as const;
 
 /** A daemon on a socket in a new temporary folder, never the path of a live daemon. */
-async function daemon(decide: LocalOptions["decide"]) {
+async function daemon(decide: LocalOptions["decide"], access: LocalOptions["access"] = "private") {
   const path = join(mkdtempSync(join(tmpdir(), "kitshn-local-")), "kitshn", "kitshn.sock");
   const peers: Array<number | null> = [];
   const callers: Array<Caller> = [];
@@ -30,6 +32,7 @@ async function daemon(decide: LocalOptions["decide"]) {
       });
     },
     log: () => {},
+    access,
   });
   return { path, peers, callers, [Symbol.dispose]: server.stop };
 }
@@ -58,7 +61,7 @@ describe("local socket (K-701, K-702)", () => {
     using local = await daemon(() => ({ accept: true }));
     expect(statSync(local.path).mode & 0o777).toBe(0o600);
     expect(statSync(join(local.path, "..")).mode & 0o777).toBe(0o700);
-    const outcome = await askLocal(local.path, status, 5000);
+    const outcome = await askLocal(local.path, status, 5000, daemonPeer);
     expect(outcome).toMatchObject({ kind: "answer", answer: { id: "1", type: "status" } });
     expect(local.peers).toEqual([own]);
     expect(local.callers).toEqual([{ uid: own }]);
@@ -66,7 +69,7 @@ describe("local socket (K-701, K-702)", () => {
 
   it("closes a refused connection before it reads a request", async () => {
     using local = await daemon(() => ({ accept: false, reason: "test" }));
-    await expect(askLocal(local.path, status, 5000)).rejects.toThrow("without an answer");
+    await expect(askLocal(local.path, status, 5000, daemonPeer)).rejects.toThrow("without an answer");
     expect(local.callers).toEqual([]);
   });
 
@@ -84,9 +87,33 @@ describe("local socket (K-701, K-702)", () => {
 
   it("refuses to start next to a daemon that listens, and ends a connection with a line that is too long", async () => {
     using local = await daemon(() => ({ accept: true }));
-    await expect(listenLocal(local.path, { platform, decide: () => ({ accept: true }), handle: () => Promise.reject(new Error("unused")), log: () => {} })).rejects.toThrow("another kitshn daemon");
+    await expect(listenLocal(local.path, { platform, decide: () => ({ accept: true }), handle: () => Promise.reject(new Error("unused")), log: () => {}, access: "private" })).rejects.toThrow("another kitshn daemon");
     const [answer] = await raw(local.path, `${JSON.stringify({ id: "9", type: "status", pad: "x".repeat(70_000) })}\n`, 1);
     expect(answer).toMatchObject({ id: null, type: "error" });
+    expect(local.callers).toEqual([]);
+  });
+
+  it("opens a shared socket for local users: folder 0711, socket 0666 (K-701)", async () => {
+    using local = await daemon(() => ({ accept: true }), "shared");
+    expect(statSync(local.path).mode & 0o777).toBe(0o666);
+    expect(statSync(join(local.path, "..")).mode & 0o777).toBe(0o711);
+    expect(await askLocal(local.path, status, 5000, daemonPeer)).toMatchObject({ kind: "answer" });
+  });
+
+  it("refuses a shared folder that is a link, or that another user owns", async () => {
+    const base = mkdtempSync(join(tmpdir(), "kitshn-local-"));
+    mkdirSync(join(base, "real"));
+    symlinkSync(join(base, "real"), join(base, "kitshn"));
+    const options = { platform, decide: () => ({ accept: true }) as const, handle: () => Promise.reject(new Error("unused")), log: () => {} };
+    await expect(listenLocal(join(base, "kitshn", "kitshn.sock"), { ...options, access: "shared" })).rejects.toThrow("is a link");
+    const folder = { isDirectory: () => true, isSymbolicLink: () => false, uid: own + 1 };
+    expect(sharedFolderProblem(folder, own)).toMatch(`user id ${own + 1}`);
+    expect(sharedFolderProblem({ ...folder, uid: own }, own)).toBeNull();
+  });
+
+  it("sends nothing to a socket whose peer is not the daemon user (K-701)", async () => {
+    using local = await daemon(() => ({ accept: true }), "shared");
+    await expect(askLocal(local.path, status, 5000, { platform, daemonUid: own + 1 })).rejects.toThrow("sent nothing");
     expect(local.callers).toEqual([]);
   });
 
@@ -94,6 +121,6 @@ describe("local socket (K-701, K-702)", () => {
     const local = await daemon(() => ({ accept: true }));
     local[Symbol.dispose]();
     expect(existsSync(local.path)).toBe(false);
-    expect(await askLocal(local.path, status, 5000)).toEqual({ kind: "not-running" });
+    expect(await askLocal(local.path, status, 5000, daemonPeer)).toEqual({ kind: "not-running" });
   });
 });

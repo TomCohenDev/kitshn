@@ -14,6 +14,8 @@ export interface Paths {
   readonly tunnelService: string;
   /** K-701: the local socket of the daemon. */
   readonly socket: string;
+  /** K-701: the socket for the users in `localUsers`, in a folder of the daemon user that others can pass. */
+  readonly sharedSocket: string;
 }
 
 export function pathsFor(
@@ -26,6 +28,7 @@ export function pathsFor(
     const support = join(home, "Library", "Application Support", "kitshn");
     return {
       socket: join(support, "kitshn.sock"),
+      sharedSocket: sharedSocketOf(uid),
       config: join(support, "machine.json"),
       data: support,
       service: join(home, "Library", "LaunchAgents", "com.kitshn.daemon.plist"),
@@ -38,11 +41,30 @@ export function pathsFor(
   const runtime = env["XDG_RUNTIME_DIR"] || `/run/user/${uid}`;
   return {
     socket: join(runtime, "kitshn", "kitshn.sock"),
+    sharedSocket: sharedSocketOf(uid),
     config: join(config, "kitshn", "machine.json"),
     data: join(data, "kitshn"),
     service: join(config, "systemd", "user", "kitshn.service"),
     tunnelService: join(config, "systemd", "user", "kitshn-tunnel.service"),
   };
+}
+
+/** K-701: the private socket folder sits in a folder that only its user can pass, so the shared one is in /tmp. */
+const sharedSocketOf = (uid: number) => `/tmp/kitshn-${uid}/kitshn.sock`;
+
+/**
+ * K-701: the user id of the daemon that a client expects at the socket: `KITSHN_DAEMON_UID`, else the id in the
+ * name of a shared socket folder, else its own. A string is the reason when `KITSHN_DAEMON_UID` is not a user id.
+ */
+export function expectedDaemonUid(env: Record<string, string | undefined>, socket: string, own: number): number | string {
+  const given = env["KITSHN_DAEMON_UID"];
+  if (given !== undefined && given !== "") {
+    const uid = Number(given);
+    return Number.isInteger(uid) && uid >= 0 ? uid : `KITSHN_DAEMON_UID=${given} is not a user id.`;
+  }
+  const folder = socket.endsWith("/kitshn.sock") ? socket.slice(0, -"/kitshn.sock".length) : "";
+  const id = folder.startsWith("/tmp/kitshn-") ? folder.slice("/tmp/kitshn-".length) : "";
+  return id !== "" && [...id].every((char) => char >= "0" && char <= "9") ? Number(id) : own;
 }
 
 const xml = (text: string) =>

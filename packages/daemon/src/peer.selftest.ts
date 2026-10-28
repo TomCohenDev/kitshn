@@ -17,8 +17,11 @@ const server = await listenLocal(path, {
   },
   handle: (request) => Promise.resolve({ id: request.id, type: "reconnect" }),
   log: console.log,
+  access: "private",
 });
-const outcome = await askLocal(path, { id: "selftest", type: "reconnect" }, 5000).catch((error: unknown) => {
+// The client side reads the peer user id too, before it sends (K-701).
+const platform = process.platform === "darwin" ? "darwin" : "linux";
+const outcome = await askLocal(path, { id: "selftest", type: "reconnect" }, 5000, { platform, daemonUid: own }).catch((error: unknown) => {
   console.error(`kitshn self-test: ${String(error)}`);
   return null;
 });

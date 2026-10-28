@@ -896,9 +896,6 @@ input[type="search"]::-webkit-search-cancel-button {
   .bar .btn {
     padding: 2px 8px;
   }
-  .bar .panic.opener .panic-label {
-    display: none;
-  }
   .bar .panic.opener {
     --well: 1.9rem;
     --cap: 1.6rem;
@@ -1852,20 +1849,26 @@ a > code {
   box-shadow: var(--shadow);
 }
 
-/* A live preview: a desktop-size page drawn at a quarter size inside the card. */
+/* A live preview as a thumbnail: the page lays out at 5 times the card width and shows at 1/5, so its top fits. */
 .preview-frame {
   margin-top: 6px;
 }
-.preview-frame iframe {
-  display: block;
-  width: 720px;
-  height: 440px;
-  margin-bottom: -330px;
-  margin-right: -540px;
-  transform: scale(0.25);
-  transform-origin: 0 0;
+.preview-frame .thumb {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
   background: #fff;
   border: var(--bw) solid var(--border);
+}
+.preview-frame .thumb iframe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 500%;
+  height: 500%;
+  border: 0;
+  transform: scale(0.2);
+  transform-origin: 0 0;
 }
 .preview-frame .row {
   display: flex;

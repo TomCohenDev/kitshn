@@ -69,6 +69,7 @@ export function PanicOpener(props: { pause: PauseView | null; open: boolean; onO
       type="button"
       class={`panic opener${pause ? " is-paused" : ""}`}
       aria-expanded={props.open}
+      aria-label={pause ? `Big red button: ${pausedLabel(pause)}` : "Big red button"}
       data-tip={
         pause
           ? `${pausedLabel(pause)}. Open the big red button to see what is closed. ${RESUME_TIP}`
@@ -79,10 +80,6 @@ export function PanicOpener(props: { pause: PauseView | null; open: boolean; onO
       <span class="panic-inner">
         <span class="panic-well" aria-hidden="true">
           <span class="mushroom">{pause ? "off" : "stop"}</span>
-        </span>
-        <span class="panic-label">
-          <b>Big red button</b>
-          <span>{pause ? pausedLabel(pause) : "Lift the lid, press"}</span>
         </span>
       </span>
     </button>

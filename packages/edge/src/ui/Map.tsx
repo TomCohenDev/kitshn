@@ -980,7 +980,7 @@ function StackCard(props: {
       >
         {props.members.length} ▸
       </span>
-      <div class="name">🗃 {props.name}</div>
+      <div class="name">{props.name}</div>
       <ul>
         {props.members.slice(0, 6).map((member) => (
           <li key={member.id}>

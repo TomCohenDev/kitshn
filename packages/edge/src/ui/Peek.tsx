@@ -1,5 +1,5 @@
 import { createPortal } from "preact";
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { type Resource, type State, activeShares, isPublicCircle } from "../core/model.ts";
 import { frameSandbox } from "./frames.ts";
 
@@ -28,13 +28,15 @@ export function CardPreview(props: {
   const url = `https://${address}`;
   return (
     <div class="preview-frame" onPointerDown={(event) => event.stopPropagation()}>
-      <iframe
-        src={url}
-        aria-label={`Preview of ${address}`}
-        loading="lazy"
-        sandbox={sandbox}
-        style={{ pointerEvents: interact ? "auto" : "none" }}
-      />
+      <div class="thumb">
+        <iframe
+          src={url}
+          aria-label={`Preview of ${address}`}
+          loading="lazy"
+          sandbox={sandbox}
+          style={{ pointerEvents: interact ? "auto" : "none" }}
+        />
+      </div>
       <div class="row">
         <button
           type="button"
@@ -74,10 +76,12 @@ export function CardPreview(props: {
 export function PeekArrow(props: { resource: Resource; state: State; zone: string }) {
   const [open, setOpen] = useState(false);
   const [large, setLarge] = useState(false);
+  const toggle = useRef<HTMLButtonElement>(null);
   return (
     <div class="peek">
       <button
         type="button"
+        ref={toggle}
         class="btn peek-toggle"
         aria-expanded={open}
         data-tip={open ? "Close the preview." : "Open a small preview of the address."}
@@ -90,7 +94,15 @@ export function PeekArrow(props: { resource: Resource; state: State; zone: strin
         {open ? "▴ Preview" : "▾ Preview"}
       </button>
       {open && !large ? <CardPreview {...props} onEnlarge={() => setLarge(true)} /> : null}
-      {open && large ? <LargePreview {...props} onClose={() => setLarge(false)} /> : null}
+      {open && large ? (
+        <LargePreview
+          {...props}
+          onClose={() => {
+            setLarge(false);
+            toggle.current?.focus();
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -98,13 +110,9 @@ export function PeekArrow(props: { resource: Resource; state: State; zone: strin
 function LargePreview(props: { resource: Resource; state: State; zone: string; onClose: () => void }) {
   const address = props.resource.addresses[0] ?? "";
   const sandbox = frameSandbox(address, location.hostname, props.zone);
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") props.onClose();
-    };
-    addEventListener("keydown", close);
-    return () => removeEventListener("keydown", close);
-  }, []);
+  const close = useRef<HTMLButtonElement>(null);
+  // Focus inside the dialog makes Escape its own, so the map keeps its selection (App's `ownsEscape`).
+  useEffect(() => close.current?.focus(), []);
   if (sandbox === null) return null;
   const url = `https://${address}`;
   return createPortal(
@@ -112,7 +120,13 @@ function LargePreview(props: { resource: Resource; state: State; zone: string; o
       class="scrim peek-scrim"
       onClick={(event) => event.target === event.currentTarget && props.onClose()}
     >
-      <section class="dialog peek-large" role="dialog" aria-label={`Preview of ${props.resource.name}`}>
+      <section
+        class="dialog peek-large"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Preview of ${props.resource.name}`}
+        onKeyDown={(event) => event.key === "Escape" && props.onClose()}
+      >
         <header class="overlay-head">
           <h2>{props.resource.name}</h2>
           <a
@@ -125,6 +139,7 @@ function LargePreview(props: { resource: Resource; state: State; zone: string; o
             Open in new tab
           </a>
           <button
+            ref={close}
             type="button"
             class="btn"
             aria-label="Close"

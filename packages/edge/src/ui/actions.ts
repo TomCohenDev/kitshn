@@ -896,7 +896,9 @@ export function paletteEntries(ctx: ActionContext, h: ActionHandlers): Array<Pal
         `${KINDS[resource.kind].icon} ${resource.name}`,
       ),
     ),
-    ...[...state.stacks.values()].flatMap((stack) => flatten(stackActions(ctx, h, stack), `🗃 ${stack.name}`)),
+    ...[...state.stacks.values()].flatMap((stack) =>
+      flatten(stackActions(ctx, h, stack), `Stack ${stack.name}`),
+    ),
     ...[...state.circles.values()].flatMap((circle) =>
       flatten(circleActions(ctx, h, circle), `⭕ ${circle.name}`),
     ),

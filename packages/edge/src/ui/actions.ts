@@ -22,7 +22,7 @@ import {
   circlesHolding,
   shareKey,
 } from "../core/model.ts";
-import { placeInside } from "../core/place.ts";
+import { circleForCards, placeInside } from "../core/place.ts";
 import type { MachineView } from "../core/protocol.ts";
 import { KINDS } from "./kinds.ts";
 import type { Selection } from "./Map.tsx";
@@ -66,6 +66,8 @@ export interface ActionContext {
   readonly version: string;
   /** K-1507: the per-item undo that the open menu or palette asked the server about, or null. */
   readonly undoCheck: UndoCheck | null;
+  /** The cards selected on the map now, for actions on all of them (K-529). */
+  readonly selected: ReadonlySet<string>;
 }
 
 export interface ActionHandlers {
@@ -92,6 +94,8 @@ export interface ActionHandlers {
   readonly upload: (at: Point | null) => void;
   readonly addSite: () => void;
   readonly addMachine: () => void;
+  /** K-529: one new circle around the selected cards. */
+  readonly newCircleFor: () => void;
   readonly fit: () => void;
   readonly undoItem: (item: Item) => void;
 }
@@ -367,6 +371,40 @@ function levelActions(state: State, h: ActionHandlers, resource: Resource): Arra
   });
 }
 
+/** A new circle matches nobody until the owner adds members, so making one changes no access. */
+export const NEW_CIRCLE = {
+  name: "New circle",
+  level: "view",
+  members: [],
+  match: "any",
+  needsPasskey: false,
+  endsAt: null,
+} as const satisfies Omit<Circle, "id" | "color" | "x" | "y" | "r">;
+
+const circlePlans = new WeakMap<State, Map<string, ReturnType<typeof circleForCards>>>();
+/**
+ * K-529: the actions on every selected card at once, in the menu of a selected card and in the palette. The plan
+ * is cached per state and selection, so an open menu does not place the circle again on each render.
+ */
+export function selectionActions(ctx: ActionContext, h: ActionHandlers): Array<Action> {
+  if (ctx.selected.size < 2) return [];
+  const cache = circlePlans.get(ctx.state) ?? new Map<string, ReturnType<typeof circleForCards>>();
+  circlePlans.set(ctx.state, cache);
+  const key = [...ctx.selected].sort().join(",");
+  const plan = cache.get(key) ?? circleForCards(ctx.state, ctx.selected, { ...NEW_CIRCLE, id: "preview", color: "#6C5CE7" });
+  cache.set(key, plan);
+  const refused = "refused" in plan ? plan.refused : refusal(ctx.state, plan.edits);
+  return [
+    {
+      id: "new-circle-for",
+      label: `New circle for these (${ctx.selected.size})`,
+      tip: "Make one new circle with no members around the selected cards. Every card keeps its circles; cards in the way move out.",
+      ...(refused ? { refused } : {}),
+      run: h.newCircleFor,
+    },
+  ];
+}
+
 export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Resource): ActionGroups {
   const { state } = ctx;
   const address = resource.addresses[0];
@@ -375,7 +413,9 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
   const stacks = [...state.stacks.values()].filter((other) => other !== stack);
   const machine = ctx.machines.get(resource.id);
   const kind = KINDS[resource.kind].label.toLowerCase();
+  const forSelection = ctx.selected.has(resource.id) ? selectionActions(ctx, h) : [];
   return [
+    ...(forSelection.length > 0 ? [forSelection] : []),
     [
       {
         id: "details",
@@ -640,7 +680,12 @@ export function addActions(ctx: ActionContext, h: ActionHandlers, at: Point | nu
 
 /** An empty spot of the map, or `at: null` for the palette, which adds in the middle of the view. */
 export function mapActions(ctx: ActionContext, h: ActionHandlers, at: Point | null): ActionGroups {
-  return [addActions(ctx, h, at), [{ id: "fit", label: "Fit the map", tip: "Fit every circle and card in the view.", run: h.fit }]];
+  const forSelection = selectionActions(ctx, h);
+  return [
+    ...(forSelection.length > 0 ? [forSelection] : []),
+    addActions(ctx, h, at),
+    [{ id: "fit", label: "Fit the map", tip: "Fit every circle and card in the view.", run: h.fit }],
+  ];
 }
 
 /** The groups for a menu target, or null when its item is gone. */
@@ -738,7 +783,11 @@ export function paletteEntries(ctx: ActionContext, h: ActionHandlers): Array<Pal
   return [
     ...flatten(mapActions(ctx, h, null), ""),
     ...[...state.resources.values()].flatMap((resource) =>
-      flatten(cardActions(ctx, h, resource), `${KINDS[resource.kind].icon} ${resource.name}`),
+      // The selection's actions come once, with the map's, not once per selected card.
+      flatten(
+        cardActions(ctx, h, resource).map((group) => group.filter((action) => action.id !== "new-circle-for")),
+        `${KINDS[resource.kind].icon} ${resource.name}`,
+      ),
     ),
     ...[...state.stacks.values()].flatMap((stack) => flatten(stackActions(ctx, h, stack), `🗃 ${stack.name}`)),
     ...[...state.circles.values()].flatMap((circle) => flatten(circleActions(ctx, h, circle), `⭕ ${circle.name}`)),

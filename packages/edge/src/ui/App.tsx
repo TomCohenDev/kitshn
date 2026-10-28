@@ -29,7 +29,7 @@ import {
   shareLevel,
 } from "../core/model.ts";
 import { MAX_UPLOAD_BYTES } from "../core/library.ts";
-import { placeInside } from "../core/place.ts";
+import { circleForCards, placeInside } from "../core/place.ts";
 import { awaitsAllow } from "../core/repos.ts";
 import type { Command } from "../core/machine.ts";
 import type { JobView, MachineView, RepoView, RevisionView } from "../core/protocol.ts";
@@ -57,6 +57,7 @@ import {
 } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import {
+  type Action,
   type ActionContext,
   type ActionHandlers,
   type MenuTarget,
@@ -69,7 +70,9 @@ import {
   REMOVE_APP_TIP,
   levelEdit,
   paletteEntries,
+  NEW_CIRCLE,
   reshareEdits,
+  selectionActions,
   type StackPart,
   stackChoice,
   stackOntoEdits,
@@ -861,14 +864,9 @@ export function App() {
     const id = `c-${crypto.randomUUID().slice(0, 8)}`;
     const center = at ?? { x: (innerWidth / 2 - view.x) / view.s, y: (innerHeight / 2 - view.y) / view.s };
     const circle: Circle = {
+      ...NEW_CIRCLE,
       id,
-      name: "New circle",
       color: CIRCLE_COLORS[state.circles.size % CIRCLE_COLORS.length] ?? "#6C5CE7",
-      level: "view",
-      members: [],
-      match: "any",
-      needsPasskey: false,
-      endsAt: null,
       x: Math.round(center.x),
       y: Math.round(center.y),
       r: 220,
@@ -876,6 +874,32 @@ export function App() {
     const result = await applyEdits([{ _tag: "circle", id, after: circle }]);
     if (result.ok) select({ cards: new Set(), circle: id });
     else showToast({ text: result.error, error: true, undo: null });
+  };
+
+  /**
+   * K-529: one new circle around the selected cards, as one edit, so one undo takes it back. Its editor opens
+   * next, because it has no members until the owner adds some.
+   */
+  const newCircleFor = async () => {
+    const id = `c-${crypto.randomUUID().slice(0, 8)}`;
+    const color = CIRCLE_COLORS[state.circles.size % CIRCLE_COLORS.length] ?? "#6C5CE7";
+    const plan = circleForCards(state, selection.cards, { ...NEW_CIRCLE, id, color });
+    if ("refused" in plan) {
+      showToast({ text: plan.refused, error: true, undo: null });
+      return;
+    }
+    const result = await applyEdits(plan.edits);
+    if (!result.ok) {
+      showToast({ text: result.error, error: true, undo: null });
+      return;
+    }
+    const { moved, cards } = plan;
+    selectAndFocus({ cards: new Set(), circle: id }, ".add-member input");
+    showToast({
+      text: `Made a circle for ${cards} cards${moved > 0 ? `; ${plural(moved, "card")} moved to keep their circles` : ""}. Add members next.`,
+      error: false,
+      undo: result.revision,
+    });
   };
 
   /** K-511: share or unshare without a drag, by placing the card where exactly the wanted circles hold it. */
@@ -1017,6 +1041,7 @@ export function App() {
     upload: uploadTo,
     addSite: () => setAddingSite(true),
     addMachine: () => setAddingMachine(true),
+    newCircleFor: () => void newCircleFor(),
     fit,
     undoItem: (item) => void undoItem(item),
   };
@@ -1026,6 +1051,7 @@ export function App() {
     machines,
     version: store.snapshot.version,
     undoCheck,
+    selected: selection.cards,
   };
 
   const waitingRepos = store.snapshot?.repos.filter(awaitsAllow).length ?? 0;
@@ -1083,7 +1109,7 @@ export function App() {
           heading={
             shownPanel !== "details"
               ? PANEL_HEADINGS[shownPanel]
-              : selection.circle !== null
+              : selection.circle !== null && state.circles.has(selection.circle)
                 ? "Circle"
                 : selection.cards.size === 1
                   ? "Card"
@@ -1145,6 +1171,7 @@ export function App() {
               onRunJob={runJob}
               warnings={store.snapshot.accessWarnings}
               onOpenSafety={openSafety}
+              newCircleFor={selectionActions(actionContext, handlers).find((action) => action.id === "new-circle-for") ?? null}
               onSignOut={(retry) => void signOut(retry)}
               signOutWarning={store.snapshot.signOutWarning}
               signingOut={signingOut}
@@ -1605,6 +1632,8 @@ function Panel(props: {
   version: string;
   onToast: (text: string, error: boolean) => void;
   onOpenSafety: () => void;
+  /** K-529: the shared action, so the panel shows the same refusal as the menu and the palette. */
+  newCircleFor: Action | null;
   onSignOut: (retry: boolean) => void;
   signOutWarning: string | null;
   signingOut: boolean;
@@ -1688,6 +1717,16 @@ function Panel(props: {
         >
           Stack these
         </button>
+        {props.newCircleFor && "run" in props.newCircleFor ? (
+          <button
+            class="btn"
+            disabled={props.newCircleFor.refused !== undefined}
+            data-tip={props.newCircleFor.refused ?? `${props.newCircleFor.tip} Undo takes it all back.`}
+            onClick={props.newCircleFor.run}
+          >
+            New circle for these
+          </button>
+        ) : null}
       </section>
     );
     if (stackOfAll) body = (

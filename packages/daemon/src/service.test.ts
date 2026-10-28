@@ -74,9 +74,11 @@ describe("daemon service (K-601)", () => {
   it("names the shared socket and the daemon user that a client expects there (K-701)", () => {
     expect(pathsFor("linux", {}, "/home/u", 7).sharedSocket).toBe("/tmp/kitshn-7/kitshn.sock");
     expect(expectedDaemonUid({}, "/tmp/kitshn-1000/kitshn.sock", 1001)).toBe(1000);
-    expect(expectedDaemonUid({}, "/run/user/7/kitshn/kitshn.sock", 7)).toBe(7);
+    // Root reaches the private socket of the daemon user 7 and expects 7 there.
+    expect(expectedDaemonUid({}, "/run/user/7/kitshn/kitshn.sock", 0)).toBe(7);
     expect(expectedDaemonUid({ KITSHN_DAEMON_UID: "1000" }, "/srv/k.sock", 1001)).toBe(1000);
     expect(expectedDaemonUid({ KITSHN_DAEMON_UID: "kitshn" }, "/srv/k.sock", 1001)).toMatch(/not a user id/);
+    expect(expectedDaemonUid({ KITSHN_DAEMON_UID: "1e3" }, "/srv/k.sock", 1001)).toMatch(/not a user id/);
     expect(expectedDaemonUid({}, "/tmp/kitshn-x/kitshn.sock", 5)).toBe(5);
   });
 });

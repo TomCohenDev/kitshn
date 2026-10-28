@@ -21,7 +21,7 @@ import { gunzipSync } from "node:zlib";
 import type { Answer, Request } from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { keyPlan } from "./keys.ts";
-import { type LocalOutcome, askLocal, listenLocal } from "./local.ts";
+import { type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from "./local.ts";
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
 import { localUsersOf, peerDecision } from "./peer.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
@@ -29,12 +29,14 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   statfsSync,
+  statSync,
   writeFileSync,
   appendFileSync,
 } from "node:fs";
@@ -56,6 +58,7 @@ import {
   cloudflaredUrl,
   expectedDaemonUid,
   expectedHash,
+  isDigits,
   pathsFor,
   releaseAsset,
   serviceCommands,
@@ -193,14 +196,14 @@ async function rekeyCommand(code: string | undefined) {
 /** K-1705: asks the running daemon to rotate its key over its connection. */
 async function rotateKeyCommand() {
   const answer = await ask({ id: "1", type: "rotate-key" });
-  if (answer === null) fail(notRunning);
+  if (answer === null) fail(notRunning());
   if (answer.type !== "rotate-key") fail(`the daemon answered ${answer.type} to rotate-key.`);
   console.log(`Rotated. The new key is ${answer.fingerprint}.`);
 }
 
 async function statusCommand() {
   const answer = await ask({ id: "1", type: "status" });
-  if (answer === null) fail(notRunning);
+  if (answer === null) fail(notRunning());
   if (answer.type !== "status") fail(`the daemon answered ${answer.type} to status.`);
   const { status } = answer;
   console.log(
@@ -217,7 +220,16 @@ async function statusCommand() {
 /** K-701: where the commands find the daemon. `KITSHN_LOCAL_SOCKET` names the socket for a user other than its own. */
 const socketPath = process.env["KITSHN_LOCAL_SOCKET"] || paths.socket;
 const daemonUid = expectedDaemonUid(process.env, socketPath, process.getuid!());
-const notRunning = `the daemon is not running (no daemon listens on ${socketPath}). Start it with: kitshn service install`;
+/** K-701: why no daemon answers. A shared folder that another user made first keeps the daemon out of it. */
+function notRunning(): string {
+  const folder = dirname(socketPath);
+  if (socketPath.startsWith("/tmp/kitshn-") && typeof daemonUid === "number" && existsSync(folder)) {
+    const problem = sharedFolderProblem(lstatSync(folder), statSync(dirname(folder)), daemonUid);
+    if (problem)
+      return `${folder} belongs to another user or is not safe (${problem}), so the daemon cannot listen there. Ask root to remove it, then restart the daemon.`;
+  }
+  return `the daemon is not running (no daemon listens on ${socketPath}). Start it with: kitshn service install`;
+}
 
 /** K-702: one request to the running daemon; null when it does not run. An error answer ends the command. */
 async function ask(request: Request): Promise<Exclude<Answer, { type: "error" }> | null> {
@@ -261,7 +273,7 @@ function localUsersCommand(action: string | undefined, who: string | undefined) 
 
 /** A user id, from a number or a user name. */
 function uidOf(who: string): number {
-  if ([...who].every((char) => char >= "0" && char <= "9")) return Number(who);
+  if (isDigits(who)) return Number(who);
   const result = spawnSync("id", ["-u", who], { encoding: "utf8" });
   if (result.status !== 0) fail(`there is no user ${who}.`);
   return Number(result.stdout.trim());

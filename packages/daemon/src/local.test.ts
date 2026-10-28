@@ -1,5 +1,6 @@
 import type { Request } from "@kitshn/local";
-import { existsSync, mkdirSync, mkdtempSync, statSync, symlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,9 +12,13 @@ const platform: Platform = process.platform === "darwin" ? "darwin" : "linux";
 const own = process.getuid!();
 const daemonPeer = { platform, daemonUid: own } as const;
 
+/** A folder name directly in /tmp, as the shared socket needs (root's, with the sticky bit); never a live one. */
+const sharedTestFolder = () => join("/tmp", `kitshn-test-${randomUUID()}`);
+
 /** A daemon on a socket in a new temporary folder, never the path of a live daemon. */
 async function daemon(decide: LocalOptions["decide"], access: LocalOptions["access"] = "private") {
-  const path = join(mkdtempSync(join(tmpdir(), "kitshn-local-")), "kitshn", "kitshn.sock");
+  const folder = access === "shared" ? sharedTestFolder() : join(mkdtempSync(join(tmpdir(), "kitshn-local-")), "kitshn");
+  const path = join(folder, "kitshn.sock");
   const peers: Array<number | null> = [];
   const callers: Array<Caller> = [];
   const server = await listenLocal(path, {
@@ -34,7 +39,11 @@ async function daemon(decide: LocalOptions["decide"], access: LocalOptions["acce
     log: () => {},
     access,
   });
-  return { path, peers, callers, [Symbol.dispose]: server.stop };
+  const stop = () => {
+    server.stop();
+    if (access === "shared") rmSync(folder, { recursive: true, force: true });
+  };
+  return { path, peers, callers, [Symbol.dispose]: stop };
 }
 
 /** Sends raw lines, as a provider with a bug would, and collects the answer lines. node:net buffers a long write. */
@@ -101,14 +110,22 @@ describe("local socket (K-701, K-702)", () => {
   });
 
   it("refuses a shared folder that is a link, or that another user owns", async () => {
-    const base = mkdtempSync(join(tmpdir(), "kitshn-local-"));
-    mkdirSync(join(base, "real"));
-    symlinkSync(join(base, "real"), join(base, "kitshn"));
+    const real = mkdtempSync(join(tmpdir(), "kitshn-local-"));
+    const link = sharedTestFolder();
+    symlinkSync(real, link);
     const options = { platform, decide: () => ({ accept: true }) as const, handle: () => Promise.reject(new Error("unused")), log: () => {} };
-    await expect(listenLocal(join(base, "kitshn", "kitshn.sock"), { ...options, access: "shared" })).rejects.toThrow("is a link");
+    try {
+      await expect(listenLocal(join(link, "kitshn.sock"), { ...options, access: "shared" })).rejects.toThrow("is a link");
+    } finally {
+      rmSync(link, { force: true });
+    }
     const folder = { isDirectory: () => true, isSymbolicLink: () => false, uid: own + 1 };
-    expect(sharedFolderProblem(folder, own)).toMatch(`user id ${own + 1}`);
-    expect(sharedFolderProblem({ ...folder, uid: own }, own)).toBeNull();
+    const tmp = { uid: 0, mode: 0o41777 };
+    expect(sharedFolderProblem(folder, tmp, own)).toMatch(`user id ${own + 1}`);
+    expect(sharedFolderProblem({ ...folder, uid: own }, tmp, own)).toBeNull();
+    // Without the sticky bit, or not root's, another user could rename the folder away.
+    expect(sharedFolderProblem({ ...folder, uid: own }, { uid: 0, mode: 0o40777 }, own)).toMatch("sticky");
+    expect(sharedFolderProblem({ ...folder, uid: own }, { uid: own, mode: 0o41777 }, own)).toMatch("sticky");
   });
 
   it("sends nothing to a socket whose peer is not the daemon user (K-701)", async () => {

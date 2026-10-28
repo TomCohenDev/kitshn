@@ -1,6 +1,7 @@
 // K-701: the user id of the process at the other end of a local socket connection.
 import { FFIType, dlopen, ptr } from "bun:ffi";
 import { Schema } from "effect";
+import type { Request } from "@kitshn/local";
 import type { Platform } from "./service.ts";
 
 /** Linux `<sys/socket.h>` on x86-64 and arm64. */
@@ -47,6 +48,19 @@ function readPeer(calls: Calls, fd: number): number | null {
   const result = calls.darwin.getpeereid(fd, ptr(ids, 0), ptr(ids, 4));
   return result === 0 ? (ids[0] ?? null) : null;
 }
+
+/**
+ * K-701: who may send each request. A user in `localUsers` only reads the status; the machine-admin requests stay
+ * with the daemon user and root. A new request kind must take a side here.
+ */
+const REQUEST_SENDERS: Record<Request["type"], "local-users" | "daemon-user-or-root"> = {
+  status: "local-users",
+  "rotate-key": "daemon-user-or-root",
+  reconnect: "daemon-user-or-root",
+};
+
+export const requestAllowed = (type: Request["type"], uid: number, own: number) =>
+  REQUEST_SENDERS[type] === "local-users" || uid === own || uid === 0;
 
 export type PeerDecision = { readonly accept: true } | { readonly accept: false; readonly reason: string };
 

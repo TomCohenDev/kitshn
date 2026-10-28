@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { localUsersOf, peerDecision } from "./peer.ts";
+import { localUsersOf, peerDecision, requestAllowed } from "./peer.ts";
 
 describe("peer user check (K-701)", () => {
   it("lets in the daemon user and the listed local users only", () => {
@@ -20,5 +20,17 @@ describe("local users in machine.json (K-701)", () => {
     expect(localUsersOf({ machineId: "m1" })).toEqual([]);
     expect(localUsersOf({ localUsers: ["root"] })).toBeNull();
     expect(localUsersOf({ localUsers: [-1] })).toBeNull();
+  });
+
+  it("lets a local user read the status only; the admin requests stay with the daemon user and root", () => {
+    const own = 1000;
+    for (const uid of [own, 0]) {
+      expect(requestAllowed("status", uid, own)).toBe(true);
+      expect(requestAllowed("rotate-key", uid, own)).toBe(true);
+      expect(requestAllowed("reconnect", uid, own)).toBe(true);
+    }
+    expect(requestAllowed("status", 1001, own)).toBe(true);
+    expect(requestAllowed("rotate-key", 1001, own)).toBe(false);
+    expect(requestAllowed("reconnect", 1001, own)).toBe(false);
   });
 });

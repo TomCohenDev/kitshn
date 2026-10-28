@@ -2,7 +2,7 @@
 import { type Answer, type Request, MAX_LINE_LENGTH, line, readAnswer, readRequest } from "@kitshn/local";
 import { type Stats, chmodSync, existsSync, lstatSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { dirname } from "node:path";
-import { type PeerDecision, peerUid } from "./peer.ts";
+import { type PeerDecision, peerUid, requestAllowed } from "./peer.ts";
 import type { Platform } from "./service.ts";
 
 /** The local user that sent a request. Each request records it (K-701). */
@@ -34,7 +34,13 @@ export interface LocalOptions {
  * K-701: why a shared socket folder is not safe to use, or null. Another user may make the folder in /tmp first, so
  * it must be a real folder of the daemon user, not a link.
  */
-export function sharedFolderProblem(folder: Pick<Stats, "isDirectory" | "isSymbolicLink" | "uid">, own: number): string | null {
+export function sharedFolderProblem(
+  folder: Pick<Stats, "isDirectory" | "isSymbolicLink" | "uid">,
+  parent: Pick<Stats, "uid" | "mode">,
+  own: number,
+): string | null {
+  // Only the sticky bit stops another user from renaming or removing the daemon's folder in /tmp.
+  if (parent.uid !== 0 || (parent.mode & 0o1000) === 0) return "its parent folder is not root's with the sticky bit";
   if (folder.isSymbolicLink()) return "it is a link";
   if (!folder.isDirectory()) return "it is not a folder";
   if (folder.uid !== own) return `it belongs to the user id ${folder.uid}, not to the daemon user ${own}`;
@@ -57,7 +63,7 @@ export async function listenLocal(path: string, options: LocalOptions): Promise<
     } catch (error) {
       if ((error as { code?: unknown }).code !== "EEXIST") throw error;
     }
-    const problem = sharedFolderProblem(lstatSync(folder), process.getuid!());
+    const problem = sharedFolderProblem(lstatSync(folder), statSync(dirname(folder)), process.getuid!());
     if (problem) throw new Error(`the shared socket folder ${folder} is not safe: ${problem}.`);
     chmodSync(folder, 0o711);
   }
@@ -83,10 +89,19 @@ export async function listenLocal(path: string, options: LocalOptions): Promise<
     send(socket, { id: null, type: "error", error: `A line is longer than ${MAX_LINE_LENGTH} characters.` });
     socket.end();
   };
+  const lastRefusal = new Map<number | null, number>();
   const answer = async (socket: Bun.Socket<Connection | undefined>, uid: number, text: string) => {
     const read = readRequest(text);
     if (!read.ok) return send(socket, read.answer);
     const { request } = read;
+    if (!requestAllowed(request.type, uid, process.getuid!())) {
+      options.log(`local socket: refused ${request.type} from user id ${uid}`);
+      return send(socket, {
+        id: request.id,
+        type: "error",
+        error: `${request.type} is not allowed for the user id ${uid}; only the daemon user and root may send it (K-701).`,
+      });
+    }
     options.log(`local socket: ${request.type} from user id ${uid}`);
     send(
       socket,
@@ -108,7 +123,12 @@ export async function listenLocal(path: string, options: LocalOptions): Promise<
         // Bun has no documented call for the descriptor; a Bun without `fd` makes every peer fail here.
         const peer = peerUid(options.platform, (socket as { fd?: unknown }).fd);
         const refuse = (reason: string) => {
-          options.log(`local socket: refused a connection: ${reason}`);
+          // One line per user id and minute, so a client in a loop cannot fill the log.
+          const now = Date.now();
+          if (now - (lastRefusal.get(peer) ?? 0) >= 60_000) {
+            lastRefusal.set(peer, now);
+            options.log(`local socket: refused a connection: ${reason}`);
+          }
           socket.end();
         };
         if (peer === null) return refuse("the peer user id cannot be read (K-006)");

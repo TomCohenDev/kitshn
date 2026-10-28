@@ -58,14 +58,17 @@ const sharedSocketOf = (uid: number) => `/tmp/kitshn-${uid}/kitshn.sock`;
  */
 export function expectedDaemonUid(env: Record<string, string | undefined>, socket: string, own: number): number | string {
   const given = env["KITSHN_DAEMON_UID"];
-  if (given !== undefined && given !== "") {
-    const uid = Number(given);
-    return Number.isInteger(uid) && uid >= 0 ? uid : `KITSHN_DAEMON_UID=${given} is not a user id.`;
-  }
-  const folder = socket.endsWith("/kitshn.sock") ? socket.slice(0, -"/kitshn.sock".length) : "";
-  const id = folder.startsWith("/tmp/kitshn-") ? folder.slice("/tmp/kitshn-".length) : "";
-  return id !== "" && [...id].every((char) => char >= "0" && char <= "9") ? Number(id) : own;
+  if (given !== undefined && given !== "") return isDigits(given) ? Number(given) : `KITSHN_DAEMON_UID=${given} is not a user id.`;
+  const shared = socket.startsWith("/tmp/kitshn-") ? socket.slice("/tmp/kitshn-".length, -"/kitshn.sock".length) : "";
+  // The private socket of a Linux daemon: /run/user/<uid>/kitshn/kitshn.sock, which root also uses.
+  const runtime = socket.startsWith("/run/user/") ? socket.slice("/run/user/".length).split("/")[0] ?? "" : "";
+  if (socket.endsWith("/kitshn.sock") && isDigits(shared)) return Number(shared);
+  if (isDigits(runtime)) return Number(runtime);
+  return own;
 }
+
+/** A user id in decimal digits only, as `kitshn local-users` takes it. */
+export const isDigits = (text: string) => text !== "" && [...text].every((char) => char >= "0" && char <= "9");
 
 const xml = (text: string) =>
   text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");

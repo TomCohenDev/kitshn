@@ -153,6 +153,8 @@ import {
   DEPLOY_MS,
   SCRIPT_LIMIT,
   STATIC_WORKER,
+  jobError,
+  keptImages,
   parseWorkerModule,
   parseWorkerSecrets,
   workerMetadata,
@@ -164,7 +166,7 @@ import {
   parseSiteIcon,
 } from "./deploys.ts";
 import { DEFAULT_APP } from "kitshn/names";
-import { AppKey, type Recipe, WorkerApp, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
+import { AppKey, type Recipe, WorkerApp, decodeRecipe, deployOrder, plan, repoSlug } from "kitshn/recipe";
 import { type Zone, removeStaleDomains, zoneFor, zoneOfAddressIn, zonesOf } from "./zones.ts";
 import {
   type LiveSite,
@@ -329,6 +331,8 @@ export class Kitshn extends DurableObject<Env> {
       if (this.state.circles.size === 0) this.seed();
       this.syncAdminAddress();
       this.reconcilePresence();
+      // K-821: a restart cut off any run rollback that did not wait for a job.
+      this.settleRollbacks();
       await this.scheduleAlarm();
     });
   }
@@ -886,6 +890,376 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ deleted });
   }
 
+  /**
+   * K-821: the finished deploys of a card, newest first, and whether a rollback can go back to each. The newest one
+   * serves now. Static and Worker deploys need their Cloudflare version; a Compose deploy needs the kept build before
+   * the last one on its machine, so only the deploy before the current one counts; a preview has no rollback.
+   */
+  private rollbackChoices(card: string): Array<RollbackChoice> {
+    const rows = this.sql<DeployRow>(
+      "SELECT * FROM deploys WHERE resource_id = ? AND kind = 'deploy' AND state = 'done' ORDER BY expires_at DESC LIMIT 6",
+      card,
+    );
+    const current = rows[0];
+    return rows.map((row, index) => {
+      const why =
+        index === 0
+          ? "This deploy serves now."
+          : isPreview(row.environment)
+            ? "A preview has no rollback."
+            : row.app === "compose"
+              ? index !== 1
+                ? "The machine keeps only the build before the last one."
+                : row.images === null
+                  ? "The machine kept no images of this deploy."
+                  : null
+              : row.version_id === null
+                ? "kitshn has no Cloudflare version of this deploy."
+                : row.version_id === current?.version_id
+                  ? "This version serves now."
+                  : null;
+      return {
+        deployId: row.id,
+        sha: row.sha,
+        at: row.expires_at - DEPLOY_MS,
+        run: row.run_id === null ? null : `${row.run_id}.${row.run_attempt ?? "1"}`,
+        note: row.reason,
+        why,
+      };
+    });
+  }
+
+  private rollbackChoicesResponse(card: string) {
+    if (!this.deployedCards(card).includes(card))
+      return Response.json({ error: `A deploy did not make the card "${card}" (K-821).` }, { status: 409 });
+    return Response.json({ choices: this.rollbackChoices(card) });
+  }
+
+  private async rollbackResponse(caller: Caller, card: string, deployId: string) {
+    const result = await this.rollbackCard(caller.actor, card, deployId, null);
+    if ("error" in result) return Response.json({ error: result.error }, { status: 409 });
+    this.broadcast();
+    return Response.json(result);
+  }
+
+  /**
+   * K-821: rolls one card back to an earlier finished deploy. A static or Worker card deploys that Cloudflare version
+   * again at once; a Compose card starts its kept build on its machine as a job. The new deploy row repeats the old
+   * one, so the card, Undo and the next rollback see it as the current deploy. Data never rolls back; the vars and
+   * secrets (or the Compose params) of that deploy come back with it.
+   */
+  private async rollbackCard(
+    actor: Actor,
+    card: string,
+    deployId: string,
+    group: string | null,
+  ): Promise<{ readonly note: string; readonly jobId: number | null } | { readonly error: string }> {
+    const resource = this.state.resources.get(card);
+    if (!resource || !this.deployedCards(card).includes(card))
+      return { error: `A deploy did not make the card "${card}" (K-821).` };
+    if (this.state.paused)
+      return { error: "kitshn is paused, so it rolls nothing back until Resume (K-1504)." };
+    const choice = this.rollbackChoices(card).find((item) => item.deployId === deployId);
+    if (!choice) return { error: `${deployId} is not one of the last finished deploys of ${resource.name}.` };
+    if (choice.why !== null) return { error: choice.why };
+    // The newest row counts as the current deploy, so a deploy that ends after the rollback would hide it.
+    if (this.deployRuns(card)) return { error: "A deploy of this card runs now. Roll back after it ends." };
+    const [target] = this.sql<DeployRow>("SELECT * FROM deploys WHERE id = ?", deployId);
+    if (!target) return { error: `kitshn knows no deploy ${deployId}.` };
+    // The daemon keeps a Compose build by the deploy that built it; a rollback row repeats that build.
+    const origin = target.origin ?? target.id;
+    const refusal = this.repoRefusal(target.repo_id);
+    if (refusal) return { error: refusal };
+    const sha = target.sha.slice(0, 7);
+    const id = crypto.randomUUID();
+    const insert = (state: "done" | "running", jobId: number | null) =>
+      this.sql(
+        `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state,
+           expires_at, branch, app, machine_id, job_id, compose_file, addresses, worker, app_key, reason, version_id,
+           run_id, run_attempt, images, needs, origin)
+         SELECT ?, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, ?, ?, branch, app,
+           machine_id, ?, compose_file, addresses, worker, app_key, ?, version_id, NULL, NULL, images, needs, ?
+         FROM deploys WHERE id = ?`,
+        id,
+        state,
+        Date.now() + DEPLOY_MS,
+        jobId,
+        `rollback to ${sha}`,
+        origin,
+        deployId,
+      );
+    if (target.app !== "compose") {
+      const api = this.api();
+      if (!api) return { error: "kitshn has no Cloudflare API token here." };
+      try {
+        await api(
+          "POST",
+          `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${target.script}/deployments`,
+          {
+            strategy: "percentage",
+            versions: [{ version_id: target.version_id, percentage: 100 }],
+          },
+        );
+      } catch (error) {
+        return {
+          error: `Cloudflare refused the rollback: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      this.ctx.storage.transactionSync(() => {
+        insert("done", null);
+        this.insertRevision(actor, `Rolled back ${resource.name} to ${sha} (K-821)`, [], null);
+      });
+      return {
+        note: `${resource.name} serves ${sha} again, with the vars and secrets of that deploy; its data did not roll back.`,
+        jobId: null,
+      };
+    }
+    const machine = resource.machine ? this.state.machines.get(resource.machine) : undefined;
+    if (!machine) return { error: `${resource.name} runs on no known machine.` };
+    const offMachine = this.redeployRefusal(machine.id, card);
+    if (offMachine) return { error: offMachine };
+    if (!this.machineView(machine).status?.capabilities?.includes("compose-rollback"))
+      return { error: `Update the daemon on ${machine.name} first: it cannot roll back yet (K-821).` };
+    const jobId = this.ctx.storage.transactionSync(() => {
+      const queued = this.queueKitshnJob(
+        machine.id,
+        {
+          kind: "compose-rollback",
+          deployId: origin,
+          allowed: allowedFor(machine, target.repo),
+          project: card,
+          name: target.address.slice(0, -this.env.KITSHN_ZONE.length - 1),
+          environment: target.environment,
+          repo: target.repo,
+          file: target.compose_file,
+          group,
+        },
+        actor,
+        Date.now() + DEPLOY_MS,
+      );
+      insert("running", queued);
+      this.insertRevision(actor, `Rolled back ${resource.name} to ${sha} (K-821)`, [], null);
+      return queued;
+    });
+    this.deliverJobs();
+    return {
+      note: `${machine.name} starts the kept build ${sha} of ${resource.name}, with the params of that deploy; its data does not roll back.`,
+      jobId,
+    };
+  }
+
+  /**
+   * K-821: the rollback of the run that made the current deploy of a card: each card of that run whose current deploy
+   * is still from it, back to its newest finished deploy before the run, an app before the apps that it needs.
+   */
+  private runRollbackPlan(card: string): Array<RunRollbackStep> | { readonly error: string } {
+    const [current] = this.sql<DeployRow>(
+      "SELECT * FROM deploys WHERE resource_id = ? AND kind = 'deploy' AND state = 'done' ORDER BY expires_at DESC LIMIT 1",
+      card,
+    );
+    if (!current?.run_id)
+      return { error: "The current deploy of this card came from no workflow run (K-821)." };
+    const ofRun = this.sql<DeployRow>(
+      "SELECT * FROM deploys WHERE repo_id = ? AND run_id = ? AND run_attempt = ? AND kind = 'deploy' AND state = 'done'",
+      current.repo_id,
+      current.run_id,
+      current.run_attempt,
+    );
+    const steps: Array<RunRollbackStep & { readonly key: string; readonly needs: ReadonlyArray<string> }> =
+      [];
+    for (const row of ofRun) {
+      const resource = this.state.resources.get(row.resource_id);
+      const [newest] = this.sql<{ id: string }>(
+        "SELECT id FROM deploys WHERE resource_id = ? AND kind = 'deploy' AND state = 'done' ORDER BY expires_at DESC LIMIT 1",
+        row.resource_id,
+      );
+      if (!resource || newest?.id !== row.id) continue;
+      const [before] = this.sql<DeployRow>(
+        `SELECT * FROM deploys WHERE resource_id = ? AND kind = 'deploy' AND state = 'done' AND expires_at < ?
+         AND (run_id IS NULL OR run_id != ? OR run_attempt != ?) ORDER BY expires_at DESC LIMIT 1`,
+        row.resource_id,
+        row.expires_at,
+        current.run_id,
+        current.run_attempt,
+      );
+      const choice = before
+        ? this.rollbackChoices(row.resource_id).find((item) => item.deployId === before.id)
+        : undefined;
+      const why = !before
+        ? "The card has no deploy before the run."
+        : choice === undefined
+          ? "The deploy before the run is older than the last 5."
+          : choice.why;
+      steps.push({
+        card: row.resource_id,
+        name: resource.name,
+        deployId: before?.id ?? null,
+        sha: before?.sha ?? null,
+        why,
+        key: row.app_key,
+        needs: JSON.parse(row.needs ?? "[]") as Array<string>,
+      });
+    }
+    const keys = new Set(steps.map((step) => step.key));
+    const order = deployOrder(
+      Object.fromEntries(
+        steps.map((step) => [step.key, { needs: { apps: step.needs.filter((key) => keys.has(key)) } }]),
+      ),
+    );
+    if ("error" in order) return { error: order.error };
+    // An app goes back before the apps that it needs, the reverse of the deploy order.
+    return [...order.order]
+      .reverse()
+      .flatMap((key) => steps.filter((step) => step.key === key))
+      .map(({ key: _key, needs: _needs, ...step }) => step);
+  }
+
+  private runRollbackPlanResponse(card: string) {
+    const plan = this.runRollbackPlan(card);
+    if ("error" in plan) return Response.json({ error: plan.error }, { status: 409 });
+    return Response.json({ steps: plan });
+  }
+
+  /** K-821: starts a run rollback; a Compose step waits for its job, and the job result goes on (continueRollback). */
+  private async runRollback(caller: Caller, card: string) {
+    const plan = this.runRollbackPlan(card);
+    if ("error" in plan) return Response.json({ error: plan.error }, { status: 409 });
+    const blocked = plan.find((step) => step.why !== null);
+    if (blocked) return Response.json({ error: `${blocked.name}: ${blocked.why}` }, { status: 409 });
+    const busy = new Set(
+      this.sql<{ steps: string }>("SELECT steps FROM rollbacks WHERE state = 'running'").flatMap((row) =>
+        (JSON.parse(row.steps) as Array<RunRollbackStep>).map((step) => step.card),
+      ),
+    );
+    const overlap = plan.find((step) => busy.has(step.card));
+    if (overlap)
+      return Response.json(
+        { error: `A run rollback of ${overlap.name} runs now. Wait until it ends.` },
+        { status: 409 },
+      );
+    const id = crypto.randomUUID();
+    this.sql(
+      "INSERT INTO rollbacks (id, steps, next, state, actor, notes) VALUES (?, ?, 0, 'running', ?, '[]')",
+      id,
+      JSON.stringify(plan),
+      JSON.stringify(caller.actor),
+    );
+    await this.advanceRollback(id);
+    this.broadcast();
+    const [row] = this.sql<{ state: string; notes: string }>(
+      "SELECT state, notes FROM rollbacks WHERE id = ?",
+      id,
+    );
+    return Response.json({
+      id,
+      state: row?.state ?? "failed",
+      notes: JSON.parse(row?.notes ?? "[]") as Array<string>,
+    });
+  }
+
+  /** K-821: the run rollbacks that a call of advanceRollback works on now; a restart empties it. */
+  private readonly advancing = new Set<string>();
+
+  /** K-821: runs the next steps of a run rollback until one waits for a machine, fails, or the last one is done. */
+  private async advanceRollback(id: string) {
+    this.advancing.add(id);
+    try {
+      for (;;) {
+        const [row] = this.sql<{ steps: string; next: number; state: string; actor: string; notes: string }>(
+          "SELECT steps, next, state, actor, notes FROM rollbacks WHERE id = ?",
+          id,
+        );
+        if (!row || row.state !== "running") return;
+        const steps = JSON.parse(row.steps) as Array<RunRollbackStep>;
+        const notes = JSON.parse(row.notes) as Array<string>;
+        const step = steps[row.next];
+        if (!step) {
+          this.finishRollback(id, "done", notes);
+          return;
+        }
+        const result = await this.rollbackCard(
+          JSON.parse(row.actor) as Actor,
+          step.card,
+          step.deployId ?? "",
+          id,
+        );
+        if ("error" in result) {
+          this.finishRollback(id, "failed", [
+            ...notes,
+            `${step.name}: ${result.error} The rollback stopped here.`,
+          ]);
+          return;
+        }
+        notes.push(result.note);
+        this.sql(
+          "UPDATE rollbacks SET next = next + ?, notes = ?, job_id = ? WHERE id = ?",
+          result.jobId === null ? 1 : 0,
+          JSON.stringify(notes),
+          result.jobId,
+          id,
+        );
+        if (result.jobId !== null) return;
+      }
+    } finally {
+      this.advancing.delete(id);
+    }
+  }
+
+  /** K-821: the job of a Compose step of a run rollback ended; the run goes on, or stops at a failed job. */
+  private continueRollback(id: string, error: string | null) {
+    const [row] = this.sql<{ notes: string }>(
+      "SELECT notes FROM rollbacks WHERE id = ? AND state = 'running'",
+      id,
+    );
+    if (!row) return;
+    const notes = JSON.parse(row.notes) as Array<string>;
+    if (error !== null) {
+      this.finishRollback(id, "failed", [...notes, `${error} The rollback stopped here.`]);
+      return;
+    }
+    this.sql("UPDATE rollbacks SET next = next + 1, job_id = NULL WHERE id = ?", id);
+    // Set now, so the alarm does not settle the rollback before the next step starts.
+    this.advancing.add(id);
+    void this.advanceRollback(id).then(() => this.broadcast());
+  }
+
+  /**
+   * K-821: stops each run rollback that waits for nothing: its job ended without a result (it expired, the repo was
+   * blocked, the delivery failed), or a restart cut off a step. A job that failed only because its machine went
+   * offline still waits until it expires, because kitshn takes its late result. Returns how many stopped.
+   */
+  private settleRollbacks() {
+    const stuck = this.sql<{ id: string; notes: string; job_id: number | null }>(
+      `SELECT rollbacks.id, rollbacks.notes, rollbacks.job_id FROM rollbacks LEFT JOIN jobs ON jobs.id = rollbacks.job_id
+       WHERE rollbacks.state = 'running' AND (jobs.id IS NULL OR (jobs.state NOT IN ('queued', 'sent')
+         AND NOT (jobs.state = 'failed' AND jobs.output = '${OFFLINE_OUTPUT}' AND jobs.expires_at > ?)))`,
+      Date.now(),
+    ).filter((row) => !this.advancing.has(row.id));
+    for (const row of stuck)
+      this.finishRollback(row.id, "failed", [
+        ...(JSON.parse(row.notes) as Array<string>),
+        row.job_id === null
+          ? "kitshn restarted during this step, so it may or may not have rolled back. Check the card. The rollback stopped here."
+          : "The machine sent no result for the last step. The rollback stopped here.",
+      ]);
+    return stuck.length;
+  }
+
+  /** K-821: the end of a run rollback; History shows it, because the toast shows only the steps before a job. */
+  private finishRollback(id: string, state: "done" | "failed", notes: ReadonlyArray<string>) {
+    const [row] = this.sql<{ actor: string }>(
+      "UPDATE rollbacks SET state = ?, notes = ?, job_id = NULL WHERE id = ? AND state = 'running' RETURNING actor",
+      state,
+      JSON.stringify(notes),
+      id,
+    );
+    if (!row) return;
+    this.recordRevision(
+      JSON.parse(row.actor) as Actor,
+      state === "done" ? "The run rollback ended (K-821)" : `The run rollback stopped: ${notes.at(-1) ?? ""}`,
+    );
+  }
+
   /** K-909: removes a deployed app; the card panel, the palette and `DELETE /api/apps/<card>` all come here. */
   private async removeApp(caller: Caller, id: string) {
     try {
@@ -1023,6 +1397,18 @@ export class Kitshn extends DurableObject<Env> {
     return this.deployFacts;
   }
 
+  /** K-909, K-821: the deployed cards and, of them, the preview cards, from one read of the deploy rows. */
+  private deployedAndPreviewCards() {
+    const rows = this.sql<{ resource_id: string; preview: number }>(
+      `SELECT resource_id, MAX(environment GLOB 'pr-[0-9]*') AS preview FROM deploys
+       WHERE kind = 'deploy' AND (repo_id IS NOT NULL OR state = 'done') GROUP BY resource_id`,
+    ).filter((row) => this.state.resources.has(row.resource_id));
+    return {
+      deployedCards: rows.map((row) => row.resource_id),
+      previewCards: rows.filter((row) => row.preview === 1).map((row) => row.resource_id),
+    };
+  }
+
   /** K-820: the cards on the map whose newest deploy failed or was skipped. */
   private deployNotes(): Record<string, DeployNote> {
     const notes: Record<string, DeployNote> = {};
@@ -1148,7 +1534,7 @@ export class Kitshn extends DurableObject<Env> {
       signOutWarning: signOutWarning(this.signOutLeft()),
       paused: this.state.paused,
       repos,
-      deployedCards: this.deployedCards(),
+      ...this.deployedAndPreviewCards(),
       orphanWorkers: this.orphanWorkers(),
       deployNotes: this.deployNotes(),
       icons: Object.fromEntries([...this.iconHashes].filter(([id]) => this.state.resources.has(id))),
@@ -1300,6 +1686,23 @@ export class Kitshn extends DurableObject<Env> {
         caller,
         decodeURIComponent(path.slice("/api/worker-storage/".length)),
       );
+    if (path.startsWith("/api/apps/") && path.endsWith("/rollbacks") && request.method === "GET")
+      return this.rollbackChoicesResponse(
+        decodeURIComponent(path.slice("/api/apps/".length, -"/rollbacks".length)),
+      );
+    if (path.startsWith("/api/apps/") && path.endsWith("/rollback") && request.method === "POST") {
+      const body = (await request.json().catch(() => null)) as { deployId?: unknown } | null;
+      return await this.rollbackResponse(
+        caller,
+        decodeURIComponent(path.slice("/api/apps/".length, -"/rollback".length)),
+        String(body?.deployId ?? ""),
+      );
+    }
+    if (path.startsWith("/api/apps/") && path.endsWith("/run-rollback")) {
+      const card = decodeURIComponent(path.slice("/api/apps/".length, -"/run-rollback".length));
+      if (request.method === "GET") return this.runRollbackPlanResponse(card);
+      if (request.method === "POST") return await this.runRollback(caller, card);
+    }
     if (path.startsWith("/api/apps/") && request.method === "DELETE")
       return this.removeApp(caller, decodeURIComponent(path.slice("/api/apps/".length)));
     if (path === "/api/repos/check" && request.method === "POST") return await this.checkReposOnGitHub();
@@ -1680,6 +2083,11 @@ export class Kitshn extends DurableObject<Env> {
         tunnel: ["starting", "running", "stopped"].includes(String(message.status.tunnel))
           ? message.status.tunnel
           : "stopped",
+        ...(typeof message.status.keptBytes === "number" &&
+        Number.isSafeInteger(message.status.keptBytes) &&
+        message.status.keptBytes >= 0
+          ? { keptBytes: message.status.keptBytes }
+          : {}),
       };
       socket.serializeAttachment({ ...attachment, status } satisfies Attachment);
       this.setMachineOs(machine.id, machineOs(status.os));
@@ -1745,12 +2153,19 @@ export class Kitshn extends DurableObject<Env> {
         );
         this.load();
       }
-      if (command?.kind === "compose")
+      if (command?.kind === "compose" || command?.kind === "compose-rollback") {
+        // K-820: a build that came up clears the give-up note of the CLI; a failed one keeps the machine's error.
+        const error = jobError(String(result.output ?? ""));
         this.sql(
-          "UPDATE deploys SET state = ? WHERE job_id = ? AND state = 'running'",
+          "UPDATE deploys SET state = ?, reason = ?, images = ? WHERE job_id = ? AND state = 'running'",
           result.ok === true ? "done" : "failed",
+          result.ok === true ? null : error,
+          result.ok === true ? keptImages(result["images"]) : null,
           message.id,
         );
+        if (command.kind === "compose-rollback" && command.group)
+          this.continueRollback(command.group, result.ok === true ? null : error);
+      }
       if (command?.kind === "compose" && this.env.BUCKET) {
         void this.env.BUCKET.delete([
           deployObject(command.deployId, "source.tgz"),
@@ -3599,8 +4014,8 @@ export class Kitshn extends DurableObject<Env> {
     // K-820: an app whose needed app did not deploy records why, so its card shows it, and changes nothing.
     if (typeof skip === "string" && result.kind === "deploy") {
       this.sql(
-        `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, addresses, app_key, reason, run_id, run_attempt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'deploy', ?, 'skipped', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, addresses, app_key, reason, run_id, run_attempt, needs)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'deploy', ?, 'skipped', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         crypto.randomUUID(),
         deployer.repo,
         deployer.repoId,
@@ -3618,6 +4033,7 @@ export class Kitshn extends DurableObject<Env> {
         skip,
         deployer.runId,
         deployer.runAttempt,
+        JSON.stringify(recipe.needs?.apps ?? []),
       );
       this.broadcast();
       return Response.json({ deployId: null, plan: { kind: "skip", reason: skip } });
@@ -3790,8 +4206,8 @@ export class Kitshn extends DurableObject<Env> {
     }
     const deployId = crypto.randomUUID();
     this.sql(
-      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file, addresses, worker, app_key, run_id, run_attempt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file, addresses, worker, app_key, run_id, run_attempt, needs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       deployId,
       deployer.repo,
       deployer.repoId,
@@ -3813,6 +4229,7 @@ export class Kitshn extends DurableObject<Env> {
       key,
       deployer.runId,
       deployer.runAttempt,
+      JSON.stringify(recipe.needs?.apps ?? []),
     );
     return Response.json({ deployId, plan: result });
   }
@@ -4600,7 +5017,11 @@ export class Kitshn extends DurableObject<Env> {
   /** A job that kitshn makes itself, so it needs no member with control (K-614). Returns the job id. */
   private queueKitshnJob(machineId: string, command: Command, actor: Actor, expiresAt: number) {
     const now = Date.now();
-    if (command.kind === "compose" || command.kind === "compose-redeploy")
+    if (
+      command.kind === "compose" ||
+      command.kind === "compose-redeploy" ||
+      command.kind === "compose-rollback"
+    )
       failQueuedDowns(this.query, command.project, REPLACED);
     const [row] = this.sql<{ id: number }>(
       `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
@@ -5260,6 +5681,7 @@ export class Kitshn extends DurableObject<Env> {
     this.checkLiveness(now);
     // The alarm runs every 30 s while a daemon is connected, so it tells the maps only about real changes.
     let changed = this.expireJobs(now) > 0;
+    if (this.settleRollbacks() > 0) changed = true;
     const before = JSON.stringify(accessStates(this.desired(now), this.access));
     this.endShares(now);
     const daily = this.dailyAt() <= now;
@@ -5388,6 +5810,30 @@ interface DeployRow extends Record<string, SqlStorageValue> {
   version_id: string | null;
   run_id: string | null;
   run_attempt: string | null;
+  /** K-821: the image ids of a Compose deploy that came up, and the `needs.apps` keys, as JSON. */
+  images: string | null;
+  needs: string | null;
+  /** K-821: the deploy whose build this rollback row repeats; null on a row that a workflow run made. */
+  origin: string | null;
+}
+
+/** K-821: one finished deploy of a card in the rollback list; `why` says why a rollback cannot go there. */
+interface RollbackChoice {
+  readonly deployId: string;
+  readonly sha: string;
+  readonly at: number;
+  readonly run: string | null;
+  readonly note: string | null;
+  readonly why: string | null;
+}
+
+/** K-821: one card of a run rollback and the deploy that it goes back to. */
+interface RunRollbackStep {
+  readonly card: string;
+  readonly name: string;
+  readonly deployId: string | null;
+  readonly sha: string | null;
+  readonly why: string | null;
 }
 
 /** K-806: the crons of the Free plan per account. */

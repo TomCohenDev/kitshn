@@ -25,7 +25,7 @@ export const REPLACED = "A newer deploy replaced this removal (K-909).";
  */
 export function requeueDowns(sql: Sql, machineId: string) {
   const newer = `EXISTS (SELECT 1 FROM jobs AS newer WHERE newer.id > jobs.id
-    AND json_extract(newer.command, '$.kind') IN ('compose', 'compose-redeploy')
+    AND json_extract(newer.command, '$.kind') IN ('compose', 'compose-redeploy', 'compose-rollback')
     AND json_extract(newer.command, '$.project') = json_extract(jobs.command, '$.project'))`;
   const sent = `machine_id = ? AND state = 'sent' AND json_extract(command, '$.kind') = 'compose-down'`;
   sql(`UPDATE jobs SET state = 'failed', output = ? WHERE ${sent} AND ${newer}`, REPLACED, machineId);

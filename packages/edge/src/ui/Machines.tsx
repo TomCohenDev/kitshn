@@ -258,6 +258,12 @@ export function MachinePanel(props: {
           <span class="muted">
             {view.status.hostname} · {view.status.os} · {view.status.arch} · kitshn {view.status.version} ·
             tunnel {view.status.tunnel}
+            {view.status.keptBytes === undefined ? null : (
+              <span data-tip="Kept builds (K-821): the images that this machine keeps for rollbacks, at most; shared layers count once per image.">
+                {" "}
+                · kept builds up to {Math.round(view.status.keptBytes / 1024 / 1024)} MB
+              </span>
+            )}
           </span>
         ) : null}
       </div>

@@ -33,6 +33,7 @@ import { MAX_UPLOAD_BYTES } from "../core/library.ts";
 import { circleForCards, placeInside } from "../core/place.ts";
 import { awaitsAllow } from "../core/repos.ts";
 import type { Command } from "../core/machine.ts";
+import { ROLLBACK_DATA, RollbackDialog } from "./Rollback.tsx";
 import type {
   DeployNote,
   JobView,
@@ -236,6 +237,7 @@ export function App() {
   const [palette, setPalette] = useState<string | null>(null);
   const [addingMachine, setAddingMachine] = useState(false);
   const [secret, setSecret] = useState<DeviceSecret | null>(null);
+  const [rollback, setRollback] = useState<{ card: Resource; mode: "card" | "run" } | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [trayFilter, setTrayFilter] = useState("");
   const [previews, setPreviews] = useState(() => localStorage.getItem(PREVIEWS_KEY) === "on");
@@ -296,6 +298,7 @@ export function App() {
     [store.snapshot],
   );
   const deployed = useMemo(() => new Set(store.snapshot?.deployedCards ?? []), [store.snapshot]);
+  const previewCards = useMemo(() => new Set(store.snapshot?.previewCards ?? []), [store.snapshot]);
 
   /**
    * K-523, K-1507: the item whose per-item undo the open menu shows, or for the palette the selected card or
@@ -1098,6 +1101,7 @@ export function App() {
         'input[aria-label="Stack name"]',
       ),
     removeApp: (resource) => void removeApp(resource),
+    rollback: (resource, mode) => setRollback({ card: resource, mode }),
     runJob: (machine, command) => void runJob(machine, command),
     removeMachine: (machine) => void removeMachine(machine),
     editCircle: (circleId) => {
@@ -1119,6 +1123,7 @@ export function App() {
   const actionContext: ActionContext = {
     state,
     deployed,
+    previews: previewCards,
     machines,
     version: store.snapshot.version,
     undoCheck,
@@ -1236,9 +1241,11 @@ export function App() {
               onPlace={placeInView}
               onReshare={(resource, circle, share, part) => void reshare(resource, circle, share, part)}
               onRemoveApp={(resource) => void removeApp(resource)}
+              onRollback={(resource, mode) => setRollback({ card: resource, mode })}
               orphanWorkers={store.snapshot.orphanWorkers}
               onDeleteOrphanWorker={(orphan) => void deleteOrphanWorker(orphan)}
               deployed={deployed}
+              previewCards={previewCards}
               deployNotes={store.snapshot.deployNotes}
               pause={pauseView}
               machines={machines}
@@ -1267,6 +1274,14 @@ export function App() {
         />
       ) : null}
       {secret ? <SecretDialog secret={secret} onClose={() => setSecret(null)} /> : null}
+      {rollback ? (
+        <RollbackDialog
+          card={rollback.card}
+          mode={rollback.mode}
+          onClose={() => setRollback(null)}
+          onDone={(text, error) => showToast({ text, error, undo: null })}
+        />
+      ) : null}
       {progress ? (
         <div class="progress" role="status">
           <span class="sticker wait" data-tip="Upload: kitshn sends the files one after the other.">
@@ -1719,10 +1734,12 @@ function Panel(props: {
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   onRemoveApp: (resource: Resource) => void;
+  onRollback: (resource: Resource, mode: "card" | "run") => void;
   orphanWorkers: ReadonlyArray<OrphanWorker>;
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
   /** K-909 */
   deployed: ReadonlySet<string>;
+  previewCards: ReadonlySet<string>;
   deployNotes: Readonly<Record<string, DeployNote>>;
   pause: PauseView | null;
   warnings: ReadonlyArray<string>;
@@ -1779,9 +1796,11 @@ function Panel(props: {
         onPlace={props.onPlace}
         onReshare={props.onReshare}
         onRemoveApp={props.onRemoveApp}
+        onRollback={props.onRollback}
         orphanWorkers={cards[0].id === ADMIN_RESOURCE_ID ? props.orphanWorkers : []}
         onDeleteOrphanWorker={props.onDeleteOrphanWorker}
         deployed={props.deployed.has(cards[0].id)}
+        preview={props.previewCards.has(cards[0].id)}
         deployNote={props.deployNotes[cards[0].id] ?? null}
         machine={props.machines.get(cards[0].id) ?? null}
         version={props.version}
@@ -2033,11 +2052,14 @@ function CardPanel(props: {
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   onRemoveApp: (resource: Resource) => void;
+  onRollback: (resource: Resource, mode: "card" | "run") => void;
   /** K-909: on the admin card, what removed Worker apps left in Cloudflare. */
   orphanWorkers: ReadonlyArray<OrphanWorker>;
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
   /** K-909: a deploy made this card, so "Remove app" applies. */
   deployed: boolean;
+  /** K-821: a pull request preview, which has no rollback. */
+  preview: boolean;
   /** K-820: the newest deploy of this card failed or did not run. */
   deployNote: DeployNote | null;
   machine: MachineView | null;
@@ -2187,6 +2209,24 @@ function CardPanel(props: {
         >
           Place on the map
         </button>
+      ) : null}
+      {isAppCard(resource) && props.deployed && !props.preview ? (
+        <div class="row">
+          <button
+            class="btn"
+            data-tip={`Roll back: serve an earlier deploy of this card again. ${ROLLBACK_DATA}`}
+            onClick={() => props.onRollback(resource, "card")}
+          >
+            Roll back…
+          </button>
+          <button
+            class="btn"
+            data-tip={`Roll back every card of the workflow run that made this deploy. ${ROLLBACK_DATA}`}
+            onClick={() => props.onRollback(resource, "run")}
+          >
+            Roll back this run…
+          </button>
+        </div>
       ) : null}
       {isAppCard(resource) && props.deployed ? (
         <button

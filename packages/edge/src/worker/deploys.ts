@@ -289,3 +289,20 @@ export function workerMetadata(
   };
   return { metadata };
 }
+
+/** K-821: the image ids that a daemon reports for a Compose build, as JSON for the deploy row, or null. */
+export function keptImages(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(
+      (entry): entry is [string, string] =>
+        typeof entry[1] === "string" && /^sha256:[0-9a-f]{64}$/.test(entry[1]),
+    )
+    .slice(0, 50);
+  return entries.length === 0 ? null : JSON.stringify(Object.fromEntries(entries));
+}
+
+/** K-820: the error that a failed Compose job of the daemon names at the end of its output, for the card. */
+export function jobError(output: string): string {
+  return /\[kitshn: ([^\]]{1,400})\]\s*$/.exec(output)?.[1] ?? "The machine job failed.";
+}

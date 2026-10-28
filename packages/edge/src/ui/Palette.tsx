@@ -1,10 +1,6 @@
 import { useId, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { type PaletteCursor, type PaletteEntry, paletteActive, paletteArrow, paletteEnter } from "./actions.ts";
 
-/**
- * K-511: the command palette. It filters every entry by the words of the query; Enter runs the highlighted
- * entry, but a dangerous one only when it is the only match or the arrows picked it (K-523).
- */
 /** The entries whose label or keywords hold every word of the query, at most 50. */
 const matching = (entries: ReadonlyArray<PaletteEntry>, query: string) => {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -16,23 +12,42 @@ const matching = (entries: ReadonlyArray<PaletteEntry>, query: string) => {
     .slice(0, 50);
 };
 
+const fresh: PaletteCursor = { label: null, picked: false };
+
+/**
+ * K-511: the command palette. It filters every entry by the words of the query; Enter runs the highlighted
+ * entry, but a dangerous one only when it is the only match or the arrows picked it (K-523).
+ */
 export function Palette(props: {
   initialQuery: string;
   onClose: () => void;
   entries: ReadonlyArray<PaletteEntry>;
 }) {
   const [query, setQuery] = useState(props.initialQuery);
-  const [cursor, setCursor] = useState<PaletteCursor>({ label: null, picked: false });
+  const [cursor, setCursor] = useState<PaletteCursor>(fresh);
+  // Events sent in one task (a script or an agent: input, ArrowDown, Enter) arrive before any render, so the
+  // keys read the query and the cursor as the last key left them, not as the last render showed them.
+  const live = useRef({ query: props.initialQuery, cursor: fresh });
+  const moveCursor = (query: string, next: PaletteCursor) => {
+    live.current = { query, cursor: next };
+    setCursor(next);
+  };
   const matches = matching(props.entries, query);
   const labels = matches.map((entry) => entry.label);
-  const { index: active, picked } = paletteActive(labels, cursor);
+  const { index: active } = paletteActive(labels, cursor);
   const listId = useId();
   const input = useRef<HTMLInputElement>(null);
   // `autoFocus` only sets the HTML attribute, which a browser applies at page load, not to a dialog opened
-  // later; without this, ⌘K left the focus on the panel and the typing went nowhere.
-  useLayoutEffect(() => input.current?.focus(), []);
-  const run = (index: number) => {
-    const entry = matches[index];
+  // later; without this, ⌘K left the focus on the panel and the typing went nowhere. On close the focus goes
+  // back to where it was.
+  useLayoutEffect(() => {
+    const before = document.activeElement;
+    input.current?.focus();
+    return () => {
+      if (before instanceof HTMLElement && before.isConnected) before.focus();
+    };
+  }, []);
+  const run = (entry: PaletteEntry | undefined) => {
     if (!entry) return;
     props.onClose();
     entry.run();
@@ -50,24 +65,24 @@ export function Palette(props: {
           placeholder="Find a card, a circle or an action. Try “share”."
           value={query}
           onInput={(event) => {
-            setQuery((event.target as HTMLInputElement).value);
-            setCursor({ label: null, picked: false });
+            const value = event.currentTarget.value;
+            setQuery(value);
+            moveCursor(value, fresh);
           }}
           onKeyDown={(event) => {
+            // A key that finishes an IME composition is the composition's, not the palette's.
+            if (event.isComposing) return;
             if (event.key === "Escape") props.onClose();
-            else if (event.key === "ArrowDown" || event.key === "ArrowUp")
-              setCursor(paletteArrow(event.key, labels, cursor));
-            else if (event.key === "Enter") {
-              // Typing and Enter can arrive before a render; Enter then acts on the query that the input holds
-              // now, with its first match and nothing picked, so a dangerous entry never runs by accident.
+            else if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter") {
               const now = event.currentTarget.value;
-              const fresh = now === query ? null : matching(props.entries, now);
-              const index = fresh ? paletteEnter(fresh, 0, false) : paletteEnter(matches, active, picked);
-              const entry = index === null ? undefined : (fresh ?? matches)[index];
-              if (entry) {
-                props.onClose();
-                entry.run();
-              }
+              const list = matching(props.entries, now);
+              const names = list.map((entry) => entry.label);
+              const from = now === live.current.query ? live.current.cursor : fresh;
+              if (event.key === "Enter") {
+                const at = paletteActive(names, from);
+                const index = paletteEnter(list, at.index, at.picked);
+                run(index === null ? undefined : list[index]);
+              } else moveCursor(now, paletteArrow(event.key, names, from));
             } else return;
             event.preventDefault();
           }}
@@ -81,8 +96,8 @@ export function Palette(props: {
               data-tip={entry.danger && matches.length > 1 ? `${entry.tip} Pick it with the arrows or a click; Enter alone does not run it.` : entry.tip}
               data-danger={entry.danger || undefined}
               aria-selected={index === active}
-              onClick={() => run(index)}
-              onMouseEnter={() => setCursor({ label: entry.label, picked: false })}
+              onClick={() => run(entry)}
+              onMouseEnter={() => moveCursor(query, { label: entry.label, picked: false })}
             >
               {entry.label}
             </li>

@@ -91,8 +91,6 @@ export interface ActionHandlers {
   readonly upload: (at: Point | null) => void;
   readonly addSite: () => void;
   readonly addMachine: () => void;
-  /** Adds a member to a circle that the owner picks next. */
-  readonly addMemberSomewhere: () => void;
   readonly fit: () => void;
   readonly undoItem: (item: Item) => void;
 }
@@ -560,7 +558,7 @@ export function circleActions(ctx: ActionContext, h: ActionHandlers, circle: Cir
  * K-526: everything that the owner can add. The toolbar "+" and the menu of an empty spot both show this one
  * list, so they never differ. `at` is the spot, or null for the middle of the view.
  */
-export function addActions(h: ActionHandlers, at: Point | null): ReadonlyArray<Action> {
+export function addActions(ctx: ActionContext, h: ActionHandlers, at: Point | null): ReadonlyArray<Action> {
   const here = at ? " here" : "";
   return [
     {
@@ -574,8 +572,8 @@ export function addActions(h: ActionHandlers, at: Point | null): ReadonlyArray<A
       label: `Upload a page or a file${here}`,
       keywords: "upload html",
       tip: at
-        ? "Upload files to this spot: they land in exactly the circles here, so they get those shares."
-        : "Upload files: they wait in the tray, private.",
+        ? "Upload files to this spot: they land in exactly the circles here, so they get those shares. An HTML file becomes a page, any other file stays a file, at most 100 MB."
+        : "Upload files: they wait in the tray, private. An HTML file becomes a page, any other file stays a file, at most 100 MB. You can also drop files on the map.",
       run: () => h.upload(at),
     },
     {
@@ -596,15 +594,20 @@ export function addActions(h: ActionHandlers, at: Point | null): ReadonlyArray<A
       id: "add-member",
       label: "Add a member",
       keywords: "person domain device network",
-      tip: "Add a person, a domain, a device or a network to a circle that you pick next.",
-      run: h.addMemberSomewhere,
+      tip: "Add a person, a domain, a device or a network to a circle.",
+      items: [...ctx.state.circles.values()].map((circle) => ({
+        id: `add-member:${circle.id}`,
+        label: circle.name,
+        tip: `Add a person, a domain, a device or a network to ${circle.name}.`,
+        run: () => h.addMember(circle.id),
+      })),
     },
   ];
 }
 
 /** An empty spot of the map, or `at: null` for the palette, which adds in the middle of the view. */
-export function mapActions(_ctx: ActionContext, h: ActionHandlers, at: Point | null): ActionGroups {
-  return [addActions(h, at), [{ id: "fit", label: "Fit the map", tip: "Fit every circle and card in the view.", run: h.fit }]];
+export function mapActions(ctx: ActionContext, h: ActionHandlers, at: Point | null): ActionGroups {
+  return [addActions(ctx, h, at), [{ id: "fit", label: "Fit the map", tip: "Fit every circle and card in the view.", run: h.fit }]];
 }
 
 /** The groups for a menu target, or null when its item is gone. */
@@ -625,7 +628,7 @@ export function actionsFor(ctx: ActionContext, h: ActionHandlers, target: MenuTa
     case "map":
       return mapActions(ctx, h, target.at);
     case "add":
-      return [addActions(h, null)];
+      return [addActions(ctx, h, null)];
   }
 }
 

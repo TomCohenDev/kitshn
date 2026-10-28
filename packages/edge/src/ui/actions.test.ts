@@ -231,6 +231,11 @@ describe("stack, circle and map actions", () => {
     expect(ids(add)).toEqual(["new-circle", "upload", "add-site", "add-machine", "add-member"]);
     run(find(add, "new-circle"));
     expect(calls[0]).toEqual(["newCircle", null]);
+    expect(items(find(add, "add-member")).map((item) => item.id)).toContain(`add-member:${OWNER_CIRCLE_ID}`);
+    const owner = items(find(add, "add-member")).find((item) => item.id === `add-member:${OWNER_CIRCLE_ID}`);
+    if (!owner) throw new Error("no Owner item");
+    run(owner);
+    expect(calls[1]).toEqual(["addMember", OWNER_CIRCLE_ID]);
   });
 
   it("has no menu for an item that is gone", () => {

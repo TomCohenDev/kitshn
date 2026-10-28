@@ -1912,6 +1912,7 @@ a > code {
   font-size: 1.35rem;
   line-height: 1;
   padding: 2px 14px 4px;
+}
 /* K-525: the drag edges of the side panel and the shelf. A thin strip that shows a bar on hover and focus. */
 .resize-edge {
   position: fixed;

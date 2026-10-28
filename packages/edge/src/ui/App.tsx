@@ -1005,7 +1005,6 @@ export function App() {
     upload: uploadTo,
     addSite: () => setAddingSite(true),
     addMachine: () => setAddingMachine(true),
-    addMemberSomewhere: () => setPalette("add a member to "),
     fit,
     undoItem: (item) => void undoItem(item),
   };

@@ -77,6 +77,7 @@ After [#115](https://github.com/Yarden-zamir/kitshn/pull/115) merges. An agent k
 - `kitshn publish <file> [--name <name>] [--circle <circle>] [--public]` puts a page or a file on the map (K-1116). The same file name again updates its card (K-1117).
 - After [#118](https://github.com/Yarden-zamir/kitshn/pull/118): `--address <name>` and `kitshn address <card> <name>` set a readable address, `pages.<zone>/<name>` (K-1120).
 - After [#121](https://github.com/Yarden-zamir/kitshn/pull/121): `kitshn publish <folder>` publishes a static site with no repo (K-1123).
+- `kitshn logs <card> [text] [--since 1h | --from <time> [--to <time>]] [--deploys] [--json]` searches the logs of a Compose or Worker card that the key controls, or its deploy runs with `--deploys` (K-1809, K-1810). It shows at most the newest 500 lines that match. It has no live follow.
 
 A key never raises access on its own: `--public` needs "may publish" (K-718).
 

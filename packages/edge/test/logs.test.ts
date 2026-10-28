@@ -3,7 +3,8 @@ import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LogLine } from "../src/core/logs.ts";
 import type { Machine, MachineStatus } from "../src/core/machine.ts";
-import type { Resource } from "../src/core/model.ts";
+import type { Edit } from "../src/core/changes.ts";
+import type { Circle, Resource } from "../src/core/model.ts";
 import { accessToken, send, stubAccessCerts } from "./access.ts";
 
 /** K-1804, K-1805: log searches and tails go between a map, the Durable Object and the daemon of the card. */
@@ -184,5 +185,69 @@ describe("Compose logs (K-1804, K-1805)", () => {
       reason: expect.stringMatching(/closed/),
     });
     await close(map.server);
+  });
+});
+
+describe("logs for agent keys (K-1810)", () => {
+  const circle = (id: string, clientId: string, x: number, level: "view" | "control"): Circle => ({
+    id,
+    name: id,
+    color: "#7c3aed",
+    level,
+    members: [{ _tag: "device", tokenId: `t-${id}`, clientId, name: id }],
+    match: "any",
+    needsPasskey: false,
+    endsAt: null,
+    x,
+    y: 2000,
+    r: 300,
+  });
+  const owner = () => accessToken("admin-aud", { email: "owner@example.com" });
+  const asKey = async (clientId: string, card: string) => {
+    const response = await send("/agent/logs", {
+      method: "POST",
+      headers: {
+        "cf-access-jwt-assertion": await accessToken("agent-aud", { common_name: clientId }),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ card, tab: "deploys", text: "", from: 0, to: Date.now() }),
+    });
+    return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+  };
+
+  it("answers a key that controls the card, and refuses a key at view and a key without the card", async () => {
+    stubAccessCerts();
+    await composeCard("m-keys", "app-keys");
+    const edits: ReadonlyArray<Edit> = [
+      {
+        _tag: "circle",
+        id: "keys-control",
+        after: circle("keys-control", "agent-c.access", 2000, "control"),
+      },
+      { _tag: "circle", id: "keys-view", after: circle("keys-view", "agent-v.access", 2200, "view") },
+      { _tag: "place", id: "app-keys", after: { x: 2100, y: 2000 } },
+    ];
+    const applied = await send("/api/apply", {
+      method: "POST",
+      headers: { "cf-access-jwt-assertion": await owner(), "content-type": "application/json" },
+      body: JSON.stringify({ edits }),
+    });
+    expect(applied.status).toBe(200);
+    expect(await asKey("agent-c.access", "app-keys")).toEqual({ status: 200, body: { runs: [] } });
+    expect((await asKey("agent-v.access", "app-keys")).status).toBe(403);
+    expect((await asKey("agent-c.access", "app-other")).status).toBe(403);
+    // K-1810: at most 30 searches a minute per key; the first one above counts.
+    for (let index = 1; index < 30; index++)
+      expect((await asKey("agent-c.access", "app-keys")).status).toBe(200);
+    const limited = await send("/agent/logs", {
+      method: "POST",
+      headers: {
+        "cf-access-jwt-assertion": await accessToken("agent-aud", { common_name: "agent-c.access" }),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ card: "app-keys", tab: "deploys", text: "", from: 0, to: Date.now() }),
+    });
+    expect([limited.status, Number(limited.headers.get("retry-after"))]).toEqual([429, expect.any(Number)]);
+    await limited.arrayBuffer();
   });
 });

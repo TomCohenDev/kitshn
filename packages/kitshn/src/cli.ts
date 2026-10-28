@@ -20,6 +20,7 @@ import { headersWarnings, redirectsWarnings } from "./headers.ts";
 import { pickSiteIcon } from "./icon.ts";
 import { contentType } from "./media.ts";
 import { cardOutput, errorOutput } from "./output.ts";
+import { type DeployRun, type LogAnswer, logArgs, logLineText, logRange } from "./logs.ts";
 import { type Artifact, artifactsByApp } from "./artifacts.ts";
 import { RecipeError, readApps } from "./parse.ts";
 import {
@@ -665,7 +666,60 @@ async function setAddress(server: string, card: string, name: string) {
   console.log(`kitshn: ${card} is now at https://${data.address}`);
 }
 
+/** K-1809: an agent key searches the logs of a card that it controls (K-1810); no Live, which needs the map. */
+async function logs(
+  server: string,
+  card: string,
+  text: string,
+  range: { from: number; to: number },
+  options: { deploys: boolean; json: boolean },
+) {
+  const answer = await agentCall<{ answer?: LogAnswer; runs?: ReadonlyArray<DeployRun> }>(
+    server,
+    "/agent/logs",
+    {
+      card,
+      tab: options.deploys ? "deploys" : "app",
+      text,
+      from: range.from,
+      to: range.to,
+    },
+  );
+  // An error answer fails (exit 1), also with --json, where the catch prints it as {"error"} (K-1809).
+  const found = answer.answer;
+  if (found?.state === "error") fail(found.error);
+  if (found?.state === "needs-permission")
+    fail('search in Worker logs needs the token permission "Workers Observability: Edit" (K-1806).');
+  // With --json, stdout holds only the answer; console.log goes to stderr in that mode.
+  if (options.json) return void process.stdout.write(`${JSON.stringify(found ?? answer.runs)}\n`);
+  if (options.deploys) {
+    for (const run of answer.runs ?? []) {
+      console.log(
+        `${new Date(run.at).toISOString()} ${run.sha.slice(0, 7)} ${run.state}${run.reason ? ` ${run.reason}` : ""}${run.runUrl ? ` ${run.runUrl}` : ""}`,
+      );
+      for (const line of run.lines ?? []) console.log(`  ${line}`);
+    }
+    return;
+  }
+  if (!found) fail("kitshn sent no answer.");
+  if (found?.state !== "lines") return;
+  for (const line of found.lines) console.log(logLineText(line));
+  if (found.cut)
+    console.error(
+      "kitshn: the search stopped at 15 s, so the newest lines may be missing; narrow the range.",
+    );
+  else if (found.matched > found.lines.length)
+    console.error(`kitshn: the newest ${found.lines.length} of ${found.matched} lines that match.`);
+}
+
 const [command, ...args] = process.argv.slice(2);
+
+/** K-1809: bad arguments exit with 2, and with --json the reason is the one object on stdout. */
+function usage(reason: string): never {
+  if (args.includes("--json")) process.stdout.write(errorOutput(reason));
+  console.error(`kitshn: ${reason}`);
+  process.exit(2);
+}
 /** K-1116: with `--json`, stdout holds only the result object; progress and notes go to stderr. */
 const json = args.includes("--json");
 if (json) console.log = console.error.bind(console);
@@ -691,6 +745,27 @@ try {
       zone: flag("--zone", ""),
       open: args.includes("--public"),
     });
+  } else if (command === "logs") {
+    const { card, text } = logArgs(args);
+    if (!card)
+      usage(
+        "name the card: kitshn logs <card> [text] [--since 1h | --from <time> [--to <time>]] [--deploys] [--json] [-- <text>].",
+      );
+    const range = logRange(
+      { since: flag("--since", ""), from: flag("--from", ""), to: flag("--to", "") },
+      Date.now(),
+    );
+    if (typeof range === "string") usage(range);
+    await logs(
+      flag("--server", process.env["KITSHN_SERVER"] ?? ""),
+      card ?? "",
+      text,
+      range as { from: number; to: number },
+      {
+        deploys: args.includes("--deploys"),
+        json: args.includes("--json"),
+      },
+    );
   } else if (command === "address") {
     const [card, name] = args.filter((arg, index) => !arg.startsWith("--") && args[index - 1] !== "--server");
     if (!card || !name) fail("name the card and its new address name: kitshn address <card> <name>.");
@@ -705,11 +780,19 @@ try {
   console.error(`kitshn: ${error.message}`);
   process.exit(1);
 }
-if (command !== "check" && command !== "deploy" && command !== "publish" && command !== "address") {
+if (
+  command !== "check" &&
+  command !== "deploy" &&
+  command !== "publish" &&
+  command !== "address" &&
+  command !== "logs"
+) {
   console.log(`kitshn check [--dir <app>]                  check kitshn.config.ts and print it as JSON (K-802)
 kitshn deploy --server <address> [--dir <app>]   deploy from GitHub Actions (K-803)
 kitshn publish <file|folder> [--name <name>] [--address <name>] [--zone <zone>] [--circle <circle>] [--public] [--json]
                                              publish a page, a file (K-1116) or a folder site (K-1123) with an agent key
 kitshn address <card> <name> [--json]        give a page, a file (K-1120) or a folder site (K-1124) a new address name
-                                             --json prints one JSON object on stdout: the card, or {"error"}`);
+                                             --json prints one JSON object on stdout: the card, or {"error"}
+kitshn logs <card> [text] [--since 1h | --from <time> [--to <time>]] [--deploys] [--json] [-- <text>]
+                                             search the logs of a card that your agent key controls (K-1809)`);
 }

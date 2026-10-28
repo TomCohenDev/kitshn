@@ -1364,6 +1364,24 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ choices: this.rollbackChoices(card) });
   }
 
+  /**
+   * K-1810: the times of each key's searches in the last minute. In memory only: a wake starts it empty, which lets
+   * a key search a little more after a wake; revisit if keys loop across wakes.
+   */
+  private readonly logSearchTimes = new Map<string, Array<number>>();
+
+  /** K-1810: 0 when the key may search now, else the seconds until it may. */
+  private logRateWait(key: string, now: number): number {
+    const recent = (this.logSearchTimes.get(key) ?? []).filter((at) => at > now - 60_000);
+    if (recent.length >= 30) {
+      this.logSearchTimes.set(key, recent);
+      return Math.max(1, Math.ceil((recent[0]! + 60_000 - now) / 1000));
+    }
+    recent.push(now);
+    this.logSearchTimes.set(key, recent);
+    return 0;
+  }
+
   /** K-1804: searches that wait on a daemon, by id. In memory: the request keeps the object awake. */
   private readonly logSearches = new Map<string, (answer: LogAnswer) => void>();
 
@@ -6511,6 +6529,27 @@ export class Kitshn extends DurableObject<Env> {
         { state: "allowed" },
         { clientId: device.clientId, name: device.name },
       );
+    }
+    // K-1810: a key reads the logs of a card only while it controls the card; the same search as the map.
+    if (path === "/agent/logs" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      const card = isRecord(body) && typeof body["card"] === "string" ? body["card"] : null;
+      if (card === null)
+        return Response.json({ error: 'Send {"card": <id>, "tab", "text", "from", "to"}.' }, { status: 400 });
+      if (!managed.has(card))
+        return Response.json(
+          { error: `This key has no control on the card "${card}" (K-1810).` },
+          { status: 403 },
+        );
+      // K-1810: each key searches at most 30 times a minute, so a loop cannot keep a daemon busy.
+      const wait = this.logRateWait(caller.visitor.clientId ?? "", now);
+      if (wait > 0)
+        return Response.json(
+          { error: `This key searched logs 30 times in the last minute; try again in ${wait} s (K-1810).` },
+          { status: 429, headers: { "retry-after": String(wait) } },
+        );
+      // The query schema of the map ignores the extra `card` key.
+      return await this.logsResponse(card, body);
     }
     if (path === "/agent/deploy" && request.method === "POST") {
       const body: unknown = await request.json().catch(() => null);

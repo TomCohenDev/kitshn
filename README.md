@@ -1,4 +1,4 @@
-<img src="packages/edge/public/favicon.svg" width="72" alt="kitshn 2 icon: a pot on a flame">
+<img src="packages/edge/public/favicon.svg" width="72" alt="kitshn icon: an ink pot on a yellow tile">
 
 # KitSHn
 

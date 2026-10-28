@@ -5,9 +5,13 @@ import {
   conflictOf,
   type Edit,
   invert,
+  itemKey,
+  itemOfKey,
   itemUndo,
   MOVE_MERGE_MS,
   mergeMoves,
+  movedSummary,
+  partsLeft,
   refuseRaiseWhilePaused,
   refuseResume,
   removeAppChanges,
@@ -774,6 +778,9 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     const again = mergeMoves({ actor: A, at: 60_000, changes: merged!, undoes: null }, A, 170_000, second.changes);
     expect(again).toEqual([{ _tag: "place", id: "notes", before: null, after: { x: 900, y: 900 } }]);
     expect(undone(second.after, again!).after.places.has("notes")).toBe(false);
+    const summary = movedSummary("Added the file notes on the map", again!);
+    expect(summary).toBe("Added the file notes on the map and moved it");
+    expect(movedSummary(summary, again!)).toBe(summary);
   });
 
   it("keeps moves apart for another actor, after the window, for another card and after a share change", () => {
@@ -802,24 +809,74 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     expect(plan.kept).toEqual(["riffle stays where it is: a later change moved it."]);
   });
 
-  it("reverts a share setting while nobody changed it since, field by field", () => {
-    const set = (state: State, level: "view" | "use" | null, endsAt: number | null) =>
+  it("keeps the access of a share setting or a circle as one unit, so an undo never mixes old and new access", () => {
+    const set = (state: State, level: "view" | "control", endsAt: number | null) =>
       edit(state, [{ _tag: "shareSetting", resourceId: "riffle", circleId: "owner", after: { level, endsAt } }]);
-    const created = set(start(), null, 5);
-    const level = set(created.after, "view", 5);
-    const ends = set(level.after, "view", 9);
-    expect(undone(ends.after, level.changes).after.shareSettings.get(shareKey("riffle", "owner"))).toEqual({
-      level: null,
-      endsAt: 9,
-    });
-    const relevel = set(ends.after, "use", 9);
-    expect(undone(relevel.after, level.changes)).toMatchObject({
+    const control = set(start(), "control", null);
+    const narrowed = set(control.after, "view", 5);
+    const unended = set(narrowed.after, "view", null);
+    expect(undone(unended.after, narrowed.changes)).toMatchObject({
       changes: [],
-      kept: ["The share of riffle with Owner keeps its level: a later change set it."],
+      kept: ["The share of riffle with Owner stays as it is: a later change changed it."],
     });
-    expect(undone(relevel.after, created.changes).kept).toEqual([
-      "The share of riffle with Owner stays as it is: a later change changed it.",
+
+    const her = circle(start(), "her");
+    const open = edit(start(), [{ _tag: "circle", id: "her", after: { ...her, members: [{ _tag: "everyone" }], level: "view" } }]);
+    const closed = edit(open.after, [
+      { _tag: "circle", id: "her", after: { ...her, members: [{ _tag: "email", email: "her@example.com" }], level: "control" } },
     ]);
+    const used = edit(closed.after, [{ _tag: "circle", id: "her", after: { ...circle(closed.after, "her"), level: "use" } }]);
+    expect(undone(used.after, closed.changes)).toMatchObject({
+      changes: [],
+      kept: ["The circle Her keeps its access (members, level, rules, end date): a later change set it."],
+    });
+  });
+
+  it("refuses an undo that lets in more than the revision took away", () => {
+    const base = start();
+    const machine: State = {
+      ...base,
+      resources: new Map([...base.resources, ["riffle", { ...base.resources.get("riffle")!, kind: "machine" }]]),
+    };
+    const inHer = edit(move(machine, "riffle", 400, 0).after, [
+      { _tag: "shareSetting", resourceId: "riffle", circleId: "her", after: { level: "view", endsAt: null } },
+    ]).after;
+    const out = edit(inHer, [
+      { _tag: "place", id: "riffle", after: { x: 0, y: -200 } },
+      { _tag: "shareSetting", resourceId: "riffle", circleId: "her", after: null },
+    ]);
+    expect(undone(out.after, out.changes).after.places.get("riffle")).toEqual({ x: 400, y: 0 });
+    const later = edit(out.after, [
+      { _tag: "shareSetting", resourceId: "riffle", circleId: "her", after: { level: "use", endsAt: null } },
+    ]);
+    expect(() => undoPlan(later.after, out.changes)).toThrow(/let in more than anyone chose: riffle would gain Her · use/);
+  });
+
+  it("leaves the cards of a stack that changed since where they are", () => {
+    const stack = { id: "s1", name: "Sites", members: ["kitshn-admin", "riffle"] };
+    const made = edit(start(), [
+      { _tag: "place", id: "riffle", after: { x: 0, y: 40 } },
+      { _tag: "stack", id: "s1", after: stack },
+    ]);
+    const renamed = edit(made.after, [{ _tag: "stack", id: "s1", after: { ...stack, name: "Mine" } }]);
+    expect(undone(renamed.after, made.changes)).toMatchObject({
+      changes: [],
+      kept: ["The stack Sites stays as it is: a later change changed it.", "The cards of the stack Mine stay with it."],
+    });
+  });
+
+  it("refuses to re-create a public circle that would hold cards, and names cards that moved into a re-created circle", () => {
+    const her = circle(start(), "her");
+    const inHer = move(start(), "riffle", 400, 0).after;
+    const pub = edit(inHer, [{ _tag: "circle", id: "her", after: { ...her, members: [{ _tag: "everyone" }] } }]).after;
+    const deleted = edit(pub, [{ _tag: "circle", id: "her", after: null }]);
+    expect(() => undoPlan(deleted.after, deleted.changes)).toThrow(
+      "Re-creating Her would make its cards public; drag them in by hand.",
+    );
+    const gone = edit(start(), [{ _tag: "circle", id: "her", after: null }]);
+    const movedIn = move(gone.after, "riffle", 400, 0);
+    const back = undoPlan(movedIn.after, gone.changes, () => new Set(["riffle"]));
+    expect(back.kept).toEqual(["The circle Her is back and now also holds riffle, which moved into its area since."]);
   });
 
   it("reverts a circle edit field by field, and deletes a new circle while only its place changed", () => {
@@ -866,6 +923,22 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     expect(second?.revision).toBe(1);
     expect(applyChanges(once, second!.plan.changes).places.has("notes")).toBe(false);
     expect(itemUndo(both.after, history, { kind: "circle", id: "her" })).toBeNull();
+  });
+
+  it("takes back the cards that a circle drag moved with it, and a whole undo leaves out what a per-item undo took back", () => {
+    const inHer = move(start(), "riffle", 400, 0);
+    const drag = edit(inHer.after, [
+      { _tag: "circle", id: "her", after: { ...circle(inHer.after, "her"), x: 600 } },
+      { _tag: "place", id: "riffle", after: { x: 600, y: 0 } },
+    ]);
+    const found = itemUndo(drag.after, [{ id: 1, changes: drag.changes }], { kind: "circle", id: "her" });
+    const after = applyChanges(drag.after, found!.plan.changes);
+    expect(after.circles.get("her")?.x).toBe(400);
+    expect(after.places.get("riffle")).toEqual({ x: 400, y: 0 });
+
+    const removal = removeAppChanges(inHer.after, "riffle");
+    expect(partsLeft(removal, [{ kind: "card", id: "riffle" }])).toEqual([]);
+    expect(itemOfKey(itemKey({ kind: "circle", id: "a:b" }))).toEqual({ kind: "circle", id: "a:b" });
   });
 
   it("finds the undo in effect along a chain of undos of undos", () => {

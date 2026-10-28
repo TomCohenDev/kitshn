@@ -8,10 +8,16 @@ const MAX_LINE = 2000;
  */
 export function headersWarnings(text: string): Array<string> {
   const lines = text.split("\n");
-  const rules = lines.filter((line) => line.trim() !== "" && !line.startsWith(" ") && !line.startsWith("\t") && !line.startsWith("#"));
+  const rules = lines.filter(
+    (line) => line.trim() !== "" && !line.startsWith(" ") && !line.startsWith("\t") && !line.startsWith("#"),
+  );
   const long = lines.flatMap((line, index) => (line.length > MAX_LINE ? [index + 1] : []));
   return [
-    ...(rules.length > MAX_RULES ? [`_headers has ${rules.length} rules; Cloudflare reads only the first ${MAX_RULES}.`] : []),
-    ...long.map((line) => `_headers line ${line} is longer than ${MAX_LINE} characters; Cloudflare ignores it.`),
+    ...(rules.length > MAX_RULES
+      ? [`_headers has ${rules.length} rules; Cloudflare reads only the first ${MAX_RULES}.`]
+      : []),
+    ...long.map(
+      (line) => `_headers line ${line} is longer than ${MAX_LINE} characters; Cloudflare ignores it.`,
+    ),
   ];
 }

@@ -80,7 +80,15 @@ import {
 import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
 import { Palette } from "./Palette.tsx";
-import { LOCKDOWN_TIP, PAUSE_TIP, PanicOpener, PausedBanner, type PauseView, RESUME_TIP, SafetyView } from "./Pause.tsx";
+import {
+  LOCKDOWN_TIP,
+  PAUSE_TIP,
+  PanicOpener,
+  PausedBanner,
+  type PauseView,
+  RESUME_TIP,
+  SafetyView,
+} from "./Pause.tsx";
 import { playResumeSound, pressSound, showPanic, unlockAudio } from "./panic.ts";
 import { GONE_STICKER, REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
 import { LibraryView } from "./Library.tsx";
@@ -194,7 +202,10 @@ const FLASH_MS = 1200;
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
-const routeFromHash = (): { readonly tab: "map" | Exclude<PanelKind, "details" | "safety">; readonly id: string } => {
+const routeFromHash = (): {
+  readonly tab: "map" | Exclude<PanelKind, "details" | "safety">;
+  readonly id: string;
+} => {
   const [tab = "map", id = ""] = location.hash.slice(1).split("/");
   return { tab: tab === "history" || tab === "machines" || tab === "library" ? tab : "map", id };
 };
@@ -255,7 +266,11 @@ export function App() {
   );
   const pausedBy = store.snapshot?.pausedBy ?? null;
   const pauseView: PauseView | null = store.snapshot?.paused
-    ? { mode: store.snapshot.paused, by: pausedBy ? actorLabel(pausedBy.actor) : null, at: pausedBy?.at ?? null }
+    ? {
+        mode: store.snapshot.paused,
+        by: pausedBy ? actorLabel(pausedBy.actor) : null,
+        at: pausedBy?.at ?? null,
+      }
     : null;
   // K-1504: the counts of the paused banner, only while paused; the Safety panel counts while it shows.
   const pausedReach = useMemo(
@@ -305,7 +320,11 @@ export function App() {
       clearTimeout(slow);
       if (!live) return;
       setUndoCheck((check) =>
-        settleUndoCheck(check, undoKey, "error" in answer ? { allowed: false, reason: answer.error } : answer),
+        settleUndoCheck(
+          check,
+          undoKey,
+          "error" in answer ? { allowed: false, reason: answer.error } : answer,
+        ),
       );
     });
     return () => {
@@ -447,7 +466,11 @@ export function App() {
         showToast({ text: plan.refused, error: true, undo: null });
         return;
       }
-      await commit(plan.edits, shareDiff(state, applyChanges(state, resolveEdits(state, plan.edits))), plan.done);
+      await commit(
+        plan.edits,
+        shareDiff(state, applyChanges(state, resolveEdits(state, plan.edits))),
+        plan.done,
+      );
     },
     pullOut: async (stackId, id) => {
       const stack = state?.stacks.get(stackId);
@@ -581,7 +604,6 @@ export function App() {
     );
   };
 
-
   const showToast = (next: Toast) => {
     setToast(next);
     if (toastTimer.current !== null) clearTimeout(toastTimer.current);
@@ -637,9 +659,13 @@ export function App() {
 
   /** K-1507: undoes the caller's own newest change to one card or circle. */
   const undoItem = async (item: Item) => {
-    const result = await callApi<{ revision: number | null; notes: ReadonlyArray<string> }>("POST", "/api/undo-item", {
-      item,
-    });
+    const result = await callApi<{ revision: number | null; notes: ReadonlyArray<string> }>(
+      "POST",
+      "/api/undo-item",
+      {
+        item,
+      },
+    );
     showToast(
       "error" in result
         ? { text: result.error, error: true, undo: null }
@@ -658,7 +684,11 @@ export function App() {
       return;
     }
     setSelection({ cards: new Set(), circle: null });
-    showToast({ text: [`Removed ${resource.name}.`, ...result.notes].join(" "), error: false, undo: result.revision });
+    showToast({
+      text: [`Removed ${resource.name}.`, ...result.notes].join(" "),
+      error: false,
+      undo: result.revision,
+    });
   };
 
   const fullPage = route.tab !== "map";
@@ -712,7 +742,10 @@ export function App() {
         return () => observer.unobserve(element);
       };
     };
-    return [measured("--bar-bottom", (rect) => rect.bottom), measured("--hint-height", (rect) => rect.height)];
+    return [
+      measured("--bar-bottom", (rect) => rect.bottom),
+      measured("--hint-height", (rect) => rect.height),
+    ];
   }, []);
 
   if (!state || !store.snapshot) {
@@ -748,7 +781,8 @@ export function App() {
     document.documentElement.style.removeProperty("--tray-width");
   }
   /** The left edge of the overlay panel on a wide screen, for a panel `width` wide. */
-  const panelLeft = (width = widths.panel || wantedPanel) => innerWidth - 12 - Math.min(width, innerWidth - 24);
+  const panelLeft = (width = widths.panel || wantedPanel) =>
+    innerWidth - 12 - Math.min(width, innerWidth - 24);
   const shownTray = tray
     .filter((resource) =>
       `${resource.name} ${resource.kind} ${resource.addresses[0] ?? ""}`
@@ -760,7 +794,10 @@ export function App() {
   /** The right edge of the shelf where it covers the map, or 0: a closed shelf on a phone covers none of it. */
   const shelfRight = () => {
     if (!trayShown || (!wide && !trayOpen)) return 0;
-    return document.querySelector(".tray")?.getBoundingClientRect().right ?? 10 + (wide ? widths.tray : Math.min(16 * REM, screenWidth - 20));
+    return (
+      document.querySelector(".tray")?.getBoundingClientRect().right ??
+      10 + (wide ? widths.tray : Math.min(16 * REM, screenWidth - 20))
+    );
   };
 
   /** The part of the screen where the map shows clear of the toolbar, the tray and a floating panel. */
@@ -768,7 +805,9 @@ export function App() {
     openArea({
       width: innerWidth,
       // The hint line at the bottom shows only on a wide screen; the map stays above it.
-      height: wideScreen() ? (document.querySelector(".hint")?.getBoundingClientRect().top ?? innerHeight) : innerHeight,
+      height: wideScreen()
+        ? (document.querySelector(".hint")?.getBoundingClientRect().top ?? innerHeight)
+        : innerHeight,
       top: document.querySelector("header.bar")?.getBoundingClientRect().bottom ?? 70,
       // The tray is not drawn yet when a full view switches to the map, so its width then comes from the tray cards.
       // On a phone a closed shelf is a chip above the map, so the map takes the full width (K-528).
@@ -926,11 +965,18 @@ export function App() {
 
   /** K-615: no confirm, and no undo; History records it. */
   const removeMachine = async (machine: MachineView) => {
-    const result = await callApi<{ removed: string }>("DELETE", `/api/machines/${encodeURIComponent(machine.machine.id)}`);
+    const result = await callApi<{ removed: string }>(
+      "DELETE",
+      `/api/machines/${encodeURIComponent(machine.machine.id)}`,
+    );
     showToast(
       "error" in result
         ? { text: result.error, error: true, undo: null }
-        : { text: `Removed ${machine.machine.name}: its token and tunnel are gone. History records it.`, error: false, undo: null },
+        : {
+            text: `Removed ${machine.machine.name}: its token and tunnel are gone. History records it.`,
+            error: false,
+            undo: null,
+          },
     );
   };
 
@@ -1217,21 +1263,21 @@ export function App() {
       <header class={`bar${floating ? " beside-panel" : ""}`} ref={barRef}>
         <h1>kitshn</h1>
         {wide ? (
-        <div class="seg">
-          {(["map", "machines", "library", "history"] as const).map((tab) => (
-            <button
-              key={tab}
-              aria-pressed={
-                fullPage ? route.tab === tab : tab === "map" ? panel === "details" : panel === tab
-              }
-              data-tip={TABS[tab]}
-              onClick={() => openTab(tab)}
-            >
-              {tab[0]?.toUpperCase()}
-              {tab.slice(1)}
-            </button>
-          ))}
-        </div>
+          <div class="seg">
+            {(["map", "machines", "library", "history"] as const).map((tab) => (
+              <button
+                key={tab}
+                aria-pressed={
+                  fullPage ? route.tab === tab : tab === "map" ? panel === "details" : panel === tab
+                }
+                data-tip={TABS[tab]}
+                onClick={() => openTab(tab)}
+              >
+                {tab[0]?.toUpperCase()}
+                {tab.slice(1)}
+              </button>
+            ))}
+          </div>
         ) : (
           <button
             type="button"
@@ -1301,15 +1347,15 @@ export function App() {
             {wide ? <span class="sep" /> : null}
             {/* K-501: one menu for the kinds, so the toolbar stays short and "Machines" names only the tab. */}
             {wide ? (
-            <button
-              type="button"
-              class="btn"
-              aria-haspopup="menu"
-              data-tip="Show or hide kinds of cards on the map. Hidden kinds still count for their circles."
-              onClick={(event) => setShowMenu(event.currentTarget.getBoundingClientRect())}
-            >
-              Show{hidden.size > 0 ? ` (${hidden.size} hidden)` : ""} ▾
-            </button>
+              <button
+                type="button"
+                class="btn"
+                aria-haspopup="menu"
+                data-tip="Show or hide kinds of cards on the map. Hidden kinds still count for their circles."
+                onClick={(event) => setShowMenu(event.currentTarget.getBoundingClientRect())}
+              >
+                Show{hidden.size > 0 ? ` (${hidden.size} hidden)` : ""} ▾
+              </button>
             ) : null}
             {showMenu ? (
               <Menu label="Show kinds on the map" anchor={showMenu} onClose={() => setShowMenu(null)}>
@@ -1347,22 +1393,22 @@ export function App() {
               +
             </button>
             {wide ? (
-            <>
-            <button class="btn" data-tip="Fit every circle and card in the view." onClick={fit}>
-              Fit
-            </button>
-            <button
-              class="btn toggle"
-              aria-pressed={previews}
-              data-tip={`${previews ? "Hide" : "Show"} live previews of up to four site and page cards near the centre, from zoom 80%.`}
-              onClick={() => {
-                localStorage.setItem(PREVIEWS_KEY, previews ? "off" : "on");
-                setPreviews(!previews);
-              }}
-            >
-              Previews{previews && view.s < 0.8 ? " (zoom in)" : ""}
-            </button>
-            </>
+              <>
+                <button class="btn" data-tip="Fit every circle and card in the view." onClick={fit}>
+                  Fit
+                </button>
+                <button
+                  class="btn toggle"
+                  aria-pressed={previews}
+                  data-tip={`${previews ? "Hide" : "Show"} live previews of up to four site and page cards near the centre, from zoom 80%.`}
+                  onClick={() => {
+                    localStorage.setItem(PREVIEWS_KEY, previews ? "off" : "on");
+                    setPreviews(!previews);
+                  }}
+                >
+                  Previews{previews && view.s < 0.8 ? " (zoom in)" : ""}
+                </button>
+              </>
             ) : null}
           </>
         ) : null}
@@ -1376,7 +1422,9 @@ export function App() {
               openTab("map");
             }}
           >
-            <span class="sticker wait">{wide ? `${plural(waitingRepos, "repo")} waiting` : `${waitingRepos} waiting`}</span>
+            <span class="sticker wait">
+              {wide ? `${plural(waitingRepos, "repo")} waiting` : `${waitingRepos} waiting`}
+            </span>
           </button>
         ) : null}
         {/* On a phone Resume takes the opener's place while paused; the banner shows the paused state. */}
@@ -1525,7 +1573,14 @@ export function App() {
                       ]
                     : []),
                 ]
-              : [{ label: "Emergency pause: open the big red button", danger: true as const, tip: PAUSE_TIP, run: openSafety }]),
+              : [
+                  {
+                    label: "Emergency pause: open the big red button",
+                    danger: true as const,
+                    tip: PAUSE_TIP,
+                    run: openSafety,
+                  },
+                ]),
             ...(store.snapshot.signOutWarning
               ? [
                   {
@@ -1540,7 +1595,9 @@ export function App() {
           ]}
         />
       ) : null}
-      {menu && route.tab === "map" ? <ContextMenu menu={menu} context={actionContext} handlers={handlers} onClose={() => setMenu(null)} /> : null}
+      {menu && route.tab === "map" ? (
+        <ContextMenu menu={menu} context={actionContext} handlers={handlers} onClose={() => setMenu(null)} />
+      ) : null}
       {confirm ? (
         <div class="scrim">
           <div class="dialog" role="alertdialog">
@@ -1595,7 +1652,12 @@ export function App() {
               {toast.action.label}
             </button>
           ) : null}
-          <button class="btn" onClick={() => setToast(null)} aria-label="Close" data-tip="Close this message.">
+          <button
+            class="btn"
+            onClick={() => setToast(null)}
+            aria-label="Close"
+            data-tip="Close this message."
+          >
             ×
           </button>
         </div>
@@ -1603,8 +1665,9 @@ export function App() {
       {route.tab === "map" ? (
         // Beside a floating panel the hint stops at the panel and wraps, so it stays readable.
         <div class={`hint${floating ? " beside-panel" : ""}`} ref={hintRef}>
-          Drag a card into a circle to share it · Right-click, a long press or ⋯: actions · Shift-click or drag
-          empty space: select many · {ALONE_KEY.label}-drag a circle head: move it alone · Ctrl or ⌘ + wheel: zoom
+          Drag a card into a circle to share it · Right-click, a long press or ⋯: actions · Shift-click or
+          drag empty space: select many · {ALONE_KEY.label}-drag a circle head: move it alone · Ctrl or ⌘ +
+          wheel: zoom
         </div>
       ) : null}
     </>
@@ -1724,9 +1787,15 @@ function Panel(props: {
         </div>
       </section>
     );
-    if (stackOfAll) body = (
-      <StackPanel stack={stackOfAll} state={state} actions={props.stacks} onSelectCard={props.onSelectCard} />
-    );
+    if (stackOfAll)
+      body = (
+        <StackPanel
+          stack={stackOfAll}
+          state={state}
+          actions={props.stacks}
+          onSelectCard={props.onSelectCard}
+        />
+      );
   } else {
     body = (
       <section>
@@ -1769,7 +1838,10 @@ function Panel(props: {
         <p class="muted">You are {actorLabel(props.me)}.</p>
         {props.warnings.length > 0 || props.signOutWarning ? (
           <>
-            <div class="label" data-tip="Access warnings: Access applications that kitshn did not make and that cover a kitshn address.">
+            <div
+              class="label"
+              data-tip="Access warnings: Access applications that kitshn did not make and that cover a kitshn address."
+            >
               Access warnings
             </div>
             <ul>
@@ -1807,7 +1879,9 @@ function Panel(props: {
             }
             onClick={props.onOpenSafety}
           >
-            {props.pause ? `Big red button: ${props.pause.mode === "lockdown" ? "locked down" : "paused"}` : "Big red button…"}
+            {props.pause
+              ? `Big red button: ${props.pause.mode === "lockdown" ? "locked down" : "paused"}`
+              : "Big red button…"}
           </button>
         </div>
         <div class="row">
@@ -1935,7 +2009,11 @@ function CardPanel(props: {
   return (
     <section>
       {removing && stack ? (
-        <Menu label={`Remove from ${removing.circle.name}`} anchor={removing.anchor} onClose={() => setRemoving(null)}>
+        <Menu
+          label={`Remove from ${removing.circle.name}`}
+          anchor={removing.anchor}
+          onClose={() => setRemoving(null)}
+        >
           {stackChoice(stack).map(({ part, label, tip }) => (
             <MenuItem
               key={part}
@@ -2027,7 +2105,9 @@ function CardPanel(props: {
             <span
               class={`sticker ${props.access.state === "applying" ? "wait" : ""}`}
               data-tip={
-                props.access.state === "applying" ? ACCESS_TIPS.applying : "Failed: Cloudflare refused the change."
+                props.access.state === "applying"
+                  ? ACCESS_TIPS.applying
+                  : "Failed: Cloudflare refused the change."
               }
             >
               {props.access.state}
@@ -2046,11 +2126,7 @@ function CardPanel(props: {
         </button>
       ) : null}
       {isAppCard(resource) && props.deployed ? (
-        <button
-          class="btn danger"
-          data-tip={REMOVE_APP_TIP}
-          onClick={() => props.onRemoveApp(resource)}
-        >
+        <button class="btn danger" data-tip={REMOVE_APP_TIP} onClick={() => props.onRemoveApp(resource)}>
           Remove app
         </button>
       ) : null}
@@ -2095,7 +2171,11 @@ function CardPanel(props: {
                   <span class="swatch" style={{ background: circle.color }} /> <b>{circle.name}</b>
                   <span
                     class="sticker"
-                    data-tip={level ? LEVEL_TIPS[level] : "None: this kind has no level at or below the circle's level."}
+                    data-tip={
+                      level
+                        ? LEVEL_TIPS[level]
+                        : "None: this kind has no level at or below the circle's level."
+                    }
                     style={{ background: level ? LEVEL_COLORS[level] : undefined }}
                   >
                     {level ?? "none"}
@@ -2126,7 +2206,10 @@ function CardPanel(props: {
                   ))}
                 </div>
                 <div class="field-row">
-                  <span class="label" data-tip="Level: the level of this card in this circle. Default follows the circle.">
+                  <span
+                    class="label"
+                    data-tip="Level: the level of this card in this circle. Default follows the circle."
+                  >
                     Level
                   </span>
                   <LevelOverride resource={resource} circle={circle} state={state} onEdit={props.onEdit} />
@@ -2194,4 +2277,3 @@ function ContextMenu(props: {
   const label = target._tag === "add" ? "Add" : `Actions for ${name ?? "the map"}`;
   return <ActionMenu label={label} anchor={props.menu.anchor} groups={groups} onClose={props.onClose} />;
 }
-

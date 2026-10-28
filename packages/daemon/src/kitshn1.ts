@@ -43,7 +43,9 @@ export function takeoverPlan(input: {
   if (!input.exists(old.dataDir))
     return {
       kind: "skip",
-      note: input.exists(dirname(old.dataDir)) ? `No KitSHn 1 data at ${old.dataDir}; the app starts empty.` : null,
+      note: input.exists(dirname(old.dataDir))
+        ? `No KitSHn 1 data at ${old.dataDir}; the app starts empty.`
+        : null,
     };
   return { kind: "take", ...old };
 }

@@ -445,7 +445,11 @@ describe("passkey enrollment on the App Launcher (K-113)", () => {
       name: "Guests",
       members: [{ _tag: "email" as const, email: "g@x.com" }],
     };
-    const paused = { ...state, paused: "lockdown" as const, circles: new Map(state.circles).set("guests", guests) };
+    const paused = {
+      ...state,
+      paused: "lockdown" as const,
+      circles: new Map(state.circles).set("guests", guests),
+    };
     expect(desiredAccess(paused, 0).policies.get("policy:enrollment")?.include).toEqual([
       { email: { email: "owner@example.com" } },
     ]);
@@ -524,7 +528,9 @@ describe("page and file logins (K-1004)", () => {
         same_site_cookie_attribute: "lax",
         allowed_idps: ["otp"],
         scim_config: { enabled: false },
-        policies: attachMachines ? [{ ...anyLogin, precedence: 1 }, machines] : [{ ...anyLogin, precedence: 1 }],
+        policies: attachMachines
+          ? [{ ...anyLogin, precedence: 1 }, machines]
+          : [{ ...anyLogin, precedence: 1 }],
       },
       {
         id: `${host}-passkey`,
@@ -571,7 +577,9 @@ describe("page and file logins (K-1004)", () => {
           ],
         },
       },
-      expect.objectContaining({ body: expect.objectContaining({ policies: [{ id: passkey, precedence: 1 }] }) }),
+      expect.objectContaining({
+        body: expect.objectContaining({ policies: [{ id: passkey, precedence: 1 }] }),
+      }),
       expect.objectContaining({ path: "/accounts/a/access/apps/files-login" }),
       expect.objectContaining({ path: "/accounts/a/access/apps/files-passkey" }),
     ]);
@@ -611,7 +619,9 @@ describe("page and file logins (K-1004)", () => {
     cf.rows.set(row.key, { ...row, body: "" });
     await syncLogins(desired, cf.store, cf.api, "a", "example.com", "", false);
     expect(cf.puts[0]).toEqual(
-      expect.objectContaining({ body: expect.objectContaining({ policies: [{ id: "machines", precedence: 1 }] }) }),
+      expect.objectContaining({
+        body: expect.objectContaining({ policies: [{ id: "machines", precedence: 1 }] }),
+      }),
     );
   });
 
@@ -737,11 +747,14 @@ describe("page and file logins (K-1004)", () => {
 });
 
 describe("sign out everywhere (K-110)", () => {
-  const apps = (count: number) => Array.from({ length: count }, (_, index) => ({ key: `app${index}`, cfId: `id${index}` }));
-  const failing = (bad: string): Api => async <T>(_method: string, path: string) => {
-    if (path.includes(`/${bad}/`)) throw new Error("Cloudflare said no");
-    return {} as T;
-  };
+  const apps = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({ key: `app${index}`, cfId: `id${index}` }));
+  const failing =
+    (bad: string): Api =>
+    async <T>(_method: string, path: string) => {
+      if (path.includes(`/${bad}/`)) throw new Error("Cloudflare said no");
+      return {} as T;
+    };
 
   it("keeps each failed application and each one past the call limit for a retry", async () => {
     const outcome = await revokeSessions(failing("id1"), "a", apps(CALLS_PER_RUN + 2));
@@ -750,7 +763,11 @@ describe("sign out everywhere (K-110)", () => {
       left: [
         { key: "app1", cfId: "id1", reason: "Cloudflare said no" },
         { key: `app${CALLS_PER_RUN}`, cfId: `id${CALLS_PER_RUN}`, reason: "the call limit of one request" },
-        { key: `app${CALLS_PER_RUN + 1}`, cfId: `id${CALLS_PER_RUN + 1}`, reason: "the call limit of one request" },
+        {
+          key: `app${CALLS_PER_RUN + 1}`,
+          cfId: `id${CALLS_PER_RUN + 1}`,
+          reason: "the call limit of one request",
+        },
       ],
     });
     expect(signOutSummary(outcome, false)).toContain(`failed for: app1, app${CALLS_PER_RUN}`);
@@ -763,7 +780,9 @@ describe("sign out everywhere (K-110)", () => {
     const retry = await revokeSessions(failing("none"), "a", "left" in first ? first.left : []);
     expect(retry).toEqual({ ended: 1, left: [] });
     expect(signOutWarning(retry)).toBeNull();
-    expect(signOutSummary(retry, true)).toBe("Retry of sign-out everywhere ended the sessions of 1 application");
+    expect(signOutSummary(retry, true)).toBe(
+      "Retry of sign-out everywhere ended the sessions of 1 application",
+    );
   });
 
   it("counts an application that Cloudflare no longer has as ended", async () => {
@@ -778,13 +797,21 @@ describe("sign out everywhere (K-110)", () => {
       { key: "app0", cfId: "old0", reason: "x" },
       { key: "removed", cfId: "old1", reason: "x" },
     ];
-    expect(retryApps(left, [{ key: "app0", cfId: "new0" }, { key: "other", cfId: "o" }])).toEqual([{ key: "app0", cfId: "new0" }]);
+    expect(
+      retryApps(left, [
+        { key: "app0", cfId: "new0" },
+        { key: "other", cfId: "o" },
+      ]),
+    ).toEqual([{ key: "app0", cfId: "new0" }]);
   });
 
   it("reads a broken stored outcome as nothing left", () => {
     expect(readSignOutLeft('{"ended":"x"}')).toBeNull();
     expect(readSignOutLeft("")).toBeNull();
-    expect(readSignOutLeft('{"ended":0,"listFailed":"HTTP 500"}')).toEqual({ ended: 0, listFailed: "HTTP 500" });
+    expect(readSignOutLeft('{"ended":0,"listFailed":"HTTP 500"}')).toEqual({
+      ended: 0,
+      listFailed: "HTTP 500",
+    });
   });
 
   it("warns with Retry when the list of applications failed, as no session ended", () => {

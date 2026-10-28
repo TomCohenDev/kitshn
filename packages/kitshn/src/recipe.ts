@@ -75,8 +75,12 @@ export type PublicTypesMatch = [
   Assert<Same<Keys<Recipe>, Keys<PublicRecipe>>>,
   Assert<Same<Extract<Recipe, { static: unknown }>, Kind<PublicRecipe, "static", "compose">>>,
   Assert<Same<Extract<Recipe, { compose: unknown }>, Kind<PublicRecipe, "compose", "static">>>,
-  Assert<Same<Pick<Extract<PublicRecipe, { static: PublicStaticApp }>, "compose">, { readonly compose?: never }>>,
-  Assert<Same<Pick<Extract<PublicRecipe, { compose: PublicComposeApp }>, "static">, { readonly static?: never }>>,
+  Assert<
+    Same<Pick<Extract<PublicRecipe, { static: PublicStaticApp }>, "compose">, { readonly compose?: never }>
+  >,
+  Assert<
+    Same<Pick<Extract<PublicRecipe, { compose: PublicComposeApp }>, "static">, { readonly static?: never }>
+  >,
 ];
 
 export const decodeRecipe = Schema.decodeUnknownSync(Recipe, { onExcessProperty: "error" });

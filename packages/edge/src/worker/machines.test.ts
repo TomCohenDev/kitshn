@@ -150,7 +150,10 @@ describe("key codes (K-1706, K-1708)", () => {
 
   it("uses up an expired code and a code of a machine that has a key again", () => {
     expect(rekeyDecision(code, "m1", keyless, 200)).toMatchObject({ kind: "refuse", keepCode: false });
-    const keyed = { ...keyless, key: { kind: "public", publicKey: "p", fingerprint: "f", since: 1 } } as const;
+    const keyed = {
+      ...keyless,
+      key: { kind: "public", publicKey: "p", fingerprint: "f", since: 1 },
+    } as const;
     expect(rekeyDecision(code, "m1", keyed, 50)).toMatchObject({ kind: "refuse", keepCode: false });
     expect(rekeyDecision(code, "m1", undefined, 50)).toMatchObject({ kind: "refuse", keepCode: false });
   });

@@ -238,12 +238,20 @@ describe("changes and undo (K-1501, K-1502)", () => {
     const state = start();
     const owner = state.circles.get("owner")!;
     const bot = { _tag: "device" as const, tokenId: "t", clientId: "c", name: "Bot" };
-    const withBot = edit(state, [{ _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, bot] } }]).after;
+    const withBot = edit(state, [
+      { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, bot] } },
+    ]).after;
     const gave = edit(withBot, [
-      { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, { ...bot, publishes: true }] } },
+      {
+        _tag: "circle",
+        id: "owner",
+        after: { ...owner, members: [...owner.members, { ...bot, publishes: true }] },
+      },
     ]);
     expect(summarize(withBot, gave.after, gave.changes)).toBe("Gave Bot may publish in Owner");
-    const took = edit(gave.after, [{ _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, bot] } }]);
+    const took = edit(gave.after, [
+      { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, bot] } },
+    ]);
     expect(summarize(gave.after, took.after, took.changes)).toBe("Took may publish from Bot in Owner");
   });
 
@@ -264,7 +272,9 @@ describe("changes and undo (K-1501, K-1502)", () => {
 
 describe("app removal and its undo (K-909, K-1502)", () => {
   const shared = () =>
-    edit(start(), [{ _tag: "shareSetting", resourceId: "riffle", circleId: "owner", after: { level: null, endsAt: 5 } }]).after;
+    edit(start(), [
+      { _tag: "shareSetting", resourceId: "riffle", circleId: "owner", after: { level: null, endsAt: 5 } },
+    ]).after;
 
   it("removes the card with its place and shares, and undo puts it back in the same place and circles", () => {
     const state = shared();
@@ -616,13 +626,19 @@ describe("stacks (K-521, K-522)", () => {
       { _tag: "place", id: "riffle", after: point },
       { _tag: "stack", id: "s1", after: stack },
     ]);
-    const moved = applyChanges(after, resolveEdits(after, [{ _tag: "place", id: "riffle", after: { x: 5, y: 5 } }]));
+    const moved = applyChanges(
+      after,
+      resolveEdits(after, [{ _tag: "place", id: "riffle", after: { x: 5, y: 5 } }]),
+    );
     expect(moved.places.get("kitshn-admin")).toEqual({ x: 5, y: 5 });
     expect(ruleViolation(moved) ?? "").not.toMatch(/share one place/);
     const left = applyChanges(
       after,
       resolveEdits(after, [
-        ...stacksWithout(after.stacks.values(), "riffle").map((change): Edit => ({ _tag: "stack", ...change })),
+        ...stacksWithout(after.stacks.values(), "riffle").map((change): Edit => ({
+          _tag: "stack",
+          ...change,
+        })),
         { _tag: "place", id: "riffle", after: { x: 5, y: 5 } },
       ]),
     );
@@ -693,19 +709,27 @@ describe("emergency pause (K-1504)", () => {
     const before = pauseReach(state, 0);
     const reach = pauseReach(open, 0);
     // The public site stays open unless it is a lockdown; the public machine closes in every pause.
-    expect(reach).toEqual({ closes: before.closes + 1, cards: before.cards + 1, keptPublic: before.keptPublic + 1 });
+    expect(reach).toEqual({
+      closes: before.closes + 1,
+      cards: before.cards + 1,
+      keptPublic: before.keptPublic + 1,
+    });
     expect(pauseReach(edit(open, [{ _tag: "pause", after: "lockdown" }]).after, 0)).toEqual(reach);
   });
   it("lets an edit or an undo pause, but never resume", () => {
     const paused = edit(start(), [{ _tag: "pause", after: "lockdown" }]);
     expect(refuseResume(paused.changes)).toEqual(paused.changes);
-    expect(() => refuseResume(resolveEdits(paused.after, [{ _tag: "pause", after: null }]))).toThrow(/passkey/);
+    expect(() => refuseResume(resolveEdits(paused.after, [{ _tag: "pause", after: null }]))).toThrow(
+      /passkey/,
+    );
     expect(() => refuseResume(invert(paused.changes))).toThrow(/passkey/);
   });
   it("keeps public sites open unless the pause is a lockdown", () => {
     const state = start();
     const everyone = circle(state, EVERYONE_CIRCLE_ID);
-    const open = edit(state, [{ _tag: "place", id: "riffle", after: { x: everyone.x, y: everyone.y } }]).after;
+    const open = edit(state, [
+      { _tag: "place", id: "riffle", after: { x: everyone.x, y: everyone.y } },
+    ]).after;
     const stranger = { email: null, clientId: null, ip: null };
     const riffle = open.resources.get("riffle")!;
     for (const [mode, level] of [
@@ -742,7 +766,9 @@ describe("emergency pause (K-1504)", () => {
     const state = start();
     const everyone = circle(state, EVERYONE_CIRCLE_ID);
     const base = state.resources.get("riffle")!;
-    const kinds = Object.keys(RESOURCE_KINDS).filter((kind) => kind !== "kitshn.admin") as Array<ResourceKind>;
+    const kinds = Object.keys(RESOURCE_KINDS).filter(
+      (kind) => kind !== "kitshn.admin",
+    ) as Array<ResourceKind>;
     for (const kind of kinds) {
       const card = { ...base, id: "card", kind, addresses: [] };
       const open = {
@@ -780,22 +806,40 @@ describe("emergency pause (K-1504)", () => {
       { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, { _tag: "everyone" }] } },
     ]).after;
     expect(() => refuseRaiseWhilePaused(paused, wider)).toThrow(/only goes down/);
-    const narrower = edit(paused, [{ _tag: "circle", id: "owner", after: { ...owner, needsPasskey: true } }]).after;
+    const narrower = edit(paused, [
+      { _tag: "circle", id: "owner", after: { ...owner, needsPasskey: true } },
+    ]).after;
     expect(() => refuseRaiseWhilePaused(paused, narrower)).not.toThrow();
-    const allMatch = { ...owner, match: "all" as const, members: [...owner.members, { _tag: "ip" as const, range: "10.0.0.0/8" }] };
+    const allMatch = {
+      ...owner,
+      match: "all" as const,
+      members: [...owner.members, { _tag: "ip" as const, range: "10.0.0.0/8" }],
+    };
     const strict = { ...paused, circles: new Map(paused.circles).set("owner", allMatch) };
-    const looser = { ...strict, circles: new Map(strict.circles).set("owner", { ...allMatch, members: owner.members }) };
+    const looser = {
+      ...strict,
+      circles: new Map(strict.circles).set("owner", { ...allMatch, members: owner.members }),
+    };
     expect(() => refuseRaiseWhilePaused(strict, looser)).toThrow(/only goes down/);
-    const ending = { ...paused, shareSettings: new Map([["kitshn-admin/owner", { level: null, endsAt: 5 }]]) };
-    expect(() => refuseRaiseWhilePaused(ending, { ...ending, shareSettings: new Map() })).toThrow(/end later/);
+    const ending = {
+      ...paused,
+      shareSettings: new Map([["kitshn-admin/owner", { level: null, endsAt: 5 }]]),
+    };
+    expect(() => refuseRaiseWhilePaused(ending, { ...ending, shareSettings: new Map() })).toThrow(
+      /end later/,
+    );
     // K-718: an agent right that turns on raises access; one that turns off lowers it.
     const device = { _tag: "device" as const, tokenId: "t", clientId: "c", name: "Bot" };
     const withDevice = (member: typeof device & { publishes?: true }) => ({
       ...paused,
       circles: new Map(paused.circles).set("owner", { ...owner, members: [...owner.members, member] }),
     });
-    expect(() => refuseRaiseWhilePaused(withDevice(device), withDevice({ ...device, publishes: true }))).toThrow(/only goes down/);
-    expect(() => refuseRaiseWhilePaused(withDevice({ ...device, publishes: true }), withDevice(device))).not.toThrow();
+    expect(() =>
+      refuseRaiseWhilePaused(withDevice(device), withDevice({ ...device, publishes: true })),
+    ).toThrow(/only goes down/);
+    expect(() =>
+      refuseRaiseWhilePaused(withDevice({ ...device, publishes: true }), withDevice(device)),
+    ).not.toThrow();
   });
 });
 
@@ -809,29 +853,50 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     const box: Resource = { ...state.resources.get("riffle")!, id: "box", name: "box", kind: "machine" };
     return { ...state, resources: new Map([...state.resources, ["box", box]]) };
   };
-  const move = (state: State, id: string, x: number, y: number) => edit(state, [{ _tag: "place", id, after: { x, y } }]);
+  const move = (state: State, id: string, x: number, y: number) =>
+    edit(state, [{ _tag: "place", id, after: { x, y } }]);
 
   /** A small History: each step is an actor and edits; returns the state and the stored revisions. */
   const history = (state: State, steps: ReadonlyArray<readonly [Actor, Array<Edit>]>) => {
     const revisions: Array<StoredRevision & { readonly changes: ReadonlyArray<Change> }> = [];
     for (const [actor, edits] of steps) {
       const step = edit(state, edits);
-      revisions.push({ id: revisions.length + 1, actor, summary: `step ${revisions.length + 1}`, changes: step.changes, undoes: null });
+      revisions.push({
+        id: revisions.length + 1,
+        actor,
+        summary: `step ${revisions.length + 1}`,
+        changes: step.changes,
+        undoes: null,
+      });
       state = step.after;
     }
     return { state, revisions };
   };
   const her = circle(start(), "her");
   const place = (id: string, x: number, y: number): Edit => ({ _tag: "place", id, after: { x, y } });
-  const herAs = (changes: Partial<Circle>): Edit => ({ _tag: "circle", id: "her", after: { ...her, ...changes } });
+  const herAs = (changes: Partial<Circle>): Edit => ({
+    _tag: "circle",
+    id: "her",
+    after: { ...her, ...changes },
+  });
 
   it("merges moves of the same card by the same actor into the drop, and undo sends the card to the tray", () => {
     const drop = move(withTray(), "box", 400, 0);
     const first = move(drop.after, "box", 420, 10);
-    const merged = mergeMoves({ actor: A, at: 0, changes: drop.changes, undoes: null }, A, 60_000, first.changes)!;
+    const merged = mergeMoves(
+      { actor: A, at: 0, changes: drop.changes, undoes: null },
+      A,
+      60_000,
+      first.changes,
+    )!;
     expect(merged).toEqual([{ _tag: "place", id: "box", before: null, after: { x: 420, y: 10 } }]);
     const second = move(first.after, "box", 430, 10);
-    const again = mergeMoves({ actor: A, at: 60_000, changes: merged, undoes: null }, A, 170_000, second.changes)!;
+    const again = mergeMoves(
+      { actor: A, at: 60_000, changes: merged, undoes: null },
+      A,
+      170_000,
+      second.changes,
+    )!;
     expect(again).toEqual([{ _tag: "place", id: "box", before: null, after: { x: 430, y: 10 } }]);
     const revisions = [{ id: 1, actor: A, summary: "Added box", changes: again, undoes: null }];
     const target = undoTarget(second.after, revisions, A, { revision: 1 });
@@ -856,7 +921,13 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     const drop = move(withTray(), "box", 0, -200);
     const nudge = move(drop.after, "box", 10, -200);
     const merged = mergeMoves({ actor: A, at: 0, changes: drop.changes, undoes: null }, A, 1, nudge.changes)!;
-    const summary = mergedSummary("Added the file box on the map", withTray(), drop.after, nudge.after, merged);
+    const summary = mergedSummary(
+      "Added the file box on the map",
+      withTray(),
+      drop.after,
+      nudge.after,
+      merged,
+    );
     expect(summary).toBe("Added the file box on the map and moved it");
     expect(mergedSummary(summary, withTray(), drop.after, nudge.after, merged)).toBe(summary);
     expect(mergedSummary("Moved a card", withTray(), drop.after, nudge.after, merged)).toBe("Moved a card");
@@ -881,9 +952,14 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
       [A, [place("box", 1600, 1500)]],
       [B, [place("riffle", 2000, 2000)]],
     ]);
-    expect(() => undoTarget(state, revisions, A, { revision: 1 })).toThrow('Only your newest change can be undone: #2 "step 2".');
+    expect(() => undoTarget(state, revisions, A, { revision: 1 })).toThrow(
+      'Only your newest change can be undone: #2 "step 2".',
+    );
     expect(() => undoTarget(state, revisions, A, { revision: 3 })).toThrow(/Only your newest change/);
-    const withUndo = [...revisions, { id: 4, actor: A, summary: "Undo #2", changes: invert(revisions[1]!.changes), undoes: 2 }];
+    const withUndo = [
+      ...revisions,
+      { id: 4, actor: A, summary: "Undo #2", changes: invert(revisions[1]!.changes), undoes: 2 },
+    ];
     expect(() => undoTarget(state, withUndo, A, { revision: 4 })).toThrow(/is an undo/);
     expect(() => undoTarget(state, withUndo, A, { revision: 2 })).toThrow(/undone already/);
     // An undo and the revision that it undid cancel out, so the change before them is the newest again.
@@ -897,8 +973,17 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     ["remove a member, then a card enters, then undo", [herAs({ members: [] })], [place("box", 400, 0)]],
     ["shrink, then a card enters the freed area, then undo", [herAs({ r: 50 })], [place("box", 520, 0)]],
     ["move the circle away, then a card enters, then undo", [herAs({ x: 1400 })], [place("box", 400, 0)]],
-    ["remove everyone, then a machine card enters, then undo", [herAs({ members: [] })], [place("box", 400, 0)], true],
-    ["delete the circle, then a card enters its area, then undo", [{ _tag: "circle", id: "her", after: null }], [place("box", 400, 0)]],
+    [
+      "remove everyone, then a machine card enters, then undo",
+      [herAs({ members: [] })],
+      [place("box", 400, 0)],
+      true,
+    ],
+    [
+      "delete the circle, then a card enters its area, then undo",
+      [{ _tag: "circle", id: "her", after: null }],
+      [place("box", 400, 0)],
+    ],
     [
       "unstack, then a card of the stack moves, then undo",
       [{ _tag: "stack", id: "s1", after: null }],
@@ -914,7 +999,9 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
       [A, mine],
       [B, theirs],
     ]);
-    expect(() => undoTarget(state, revisions, A, { revision: 1 })).toThrow(/#2 "step 2" changed the same cards or circles later/);
+    expect(() => undoTarget(state, revisions, A, { revision: 1 })).toThrow(
+      /#2 "step 2" changed the same cards or circles later/,
+    );
   });
 
   it("undoes only the caller's newest change to one card, also when that revision moved several cards", () => {
@@ -927,7 +1014,9 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     const back = applyChanges(state, invert(target.changes));
     expect(back.places.get("box")).toEqual({ x: 1500, y: 1500 });
     expect(back.places.get("riffle")).toEqual({ x: 2000, y: 2000 });
-    expect(() => undoTarget(state, revisions, B, { item: { kind: "card", id: "box" } })).toThrow(/no change to this item/);
+    expect(() => undoTarget(state, revisions, B, { item: { kind: "card", id: "box" } })).toThrow(
+      /no change to this item/,
+    );
   });
 
   it("takes back only the cards that sat inside a circle before its head drag", () => {
@@ -950,8 +1039,13 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
 
   it("refuses a per-item undo whose part the rest of its revision depends on, both ways", () => {
     const inHer = move(withTray(), "box", 400, 0).after;
-    const { state, revisions } = history(inHer, [[A, [herAs({ members: [{ _tag: "everyone" }] }), place("box", 1500, 1500)]]]);
-    for (const item of [{ kind: "card", id: "box" }, { kind: "circle", id: "her" }] as const)
+    const { state, revisions } = history(inHer, [
+      [A, [herAs({ members: [{ _tag: "everyone" }] }), place("box", 1500, 1500)]],
+    ]);
+    for (const item of [
+      { kind: "card", id: "box" },
+      { kind: "circle", id: "her" },
+    ] as const)
       expect(() => undoTarget(state, revisions, A, { item })).toThrow(/undo the whole change instead/);
     expect(undoTarget(state, revisions, A, { revision: 1 }).revision).toBe(1);
   });
@@ -966,10 +1060,18 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     });
     const placed = history(withTray(), [[A, [place("box", 400, 0)]]]);
     // forgetCard deleted the card; the live site then came back with the same id, in the tray.
-    const again = applyChanges(placed.state, [{ _tag: "place", id: "box", before: { x: 400, y: 0 }, after: null }]);
-    expect(() => undoTarget(again, [...placed.revisions, forget(2)], A, { revision: 1 })).toThrow(/#2 "stopped exposing box"/);
-    const trayed = history(move(withTray(), "box", 400, 0).after, [[A, [{ _tag: "place", id: "box", after: null }]]]);
-    expect(() => undoTarget(trayed.state, [...trayed.revisions, forget(2)], A, { revision: 1 })).toThrow(/#2/);
+    const again = applyChanges(placed.state, [
+      { _tag: "place", id: "box", before: { x: 400, y: 0 }, after: null },
+    ]);
+    expect(() => undoTarget(again, [...placed.revisions, forget(2)], A, { revision: 1 })).toThrow(
+      /#2 "stopped exposing box"/,
+    );
+    const trayed = history(move(withTray(), "box", 400, 0).after, [
+      [A, [{ _tag: "place", id: "box", after: null }]],
+    ]);
+    expect(() => undoTarget(trayed.state, [...trayed.revisions, forget(2)], A, { revision: 1 })).toThrow(
+      /#2/,
+    );
     expect(() => undoTarget(trayed.state, [forget(1)], KITSHN, { revision: 1 })).toThrow(/records an action/);
   });
 
@@ -982,7 +1084,8 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     expect(undoAnswer(state, revisions, A, { item: { kind: "card", id: "box" } })).toEqual({ allowed: true });
     expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: "her" } })).toEqual({
       allowed: false,
-      reason: '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
+      reason:
+        '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
     });
     expect(undoAnswer(state, revisions, B, { item: { kind: "card", id: "box" } })).toEqual({
       allowed: false,
@@ -990,7 +1093,8 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     });
     expect(undoAnswer(state, revisions, A, { revision: 2 })).toEqual({
       allowed: false,
-      reason: '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
+      reason:
+        '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
     });
   });
 
@@ -999,7 +1103,8 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     const { state, revisions } = history(move(withTray(), "riffle", 560, 0).after, [
       [A, [{ _tag: "circle", id: EVERYONE_CIRCLE_ID, after: { ...everyone, r: 100 } }]],
     ]);
-    const reason = "This undo would make riffle public in Everyone. An undo never does that without asking; share it by hand.";
+    const reason =
+      "This undo would make riffle public in Everyone. An undo never does that without asking; share it by hand.";
     expect(() => prepareUndo(state, revisions[0]!.changes)).toThrow(reason);
     expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: EVERYONE_CIRCLE_ID } })).toEqual({
       allowed: false,
@@ -1026,7 +1131,18 @@ describe("History targets (K-1508)", () => {
   });
 
   it("names the cards of a stack before and after the change", () => {
-    expect(revisionTargets([{ _tag: "stack", id: "s-1", members: [["a", "b"], ["b", "c"]] }]).items).toEqual([
+    expect(
+      revisionTargets([
+        {
+          _tag: "stack",
+          id: "s-1",
+          members: [
+            ["a", "b"],
+            ["b", "c"],
+          ],
+        },
+      ]).items,
+    ).toEqual([
       { kind: "card", id: "a" },
       { kind: "card", id: "b" },
       { kind: "card", id: "c" },
@@ -1037,7 +1153,14 @@ describe("History targets (K-1508)", () => {
     expect(
       revisionTargets([
         { _tag: "shareSetting", id: "a/her" },
-        { _tag: "stack", id: "s-1", members: [["a", "b", "c"], ["b", "c"]] },
+        {
+          _tag: "stack",
+          id: "s-1",
+          members: [
+            ["a", "b", "c"],
+            ["b", "c"],
+          ],
+        },
       ]).kind,
     ).toBe("share");
   });
@@ -1056,7 +1179,11 @@ describe("share summaries (K-1501, K-1508)", () => {
     const riffle = state.resources.get("riffle");
     const her = circle(state, "her");
     if (!riffle) throw new Error("The fixture has riffle.");
-    expect(describeDiff({ resource: riffle, circle: her, from: null, to: "view" })).toBe("riffle: + Her · view");
-    expect(describeDiff({ resource: riffle, circle: her, from: "view", to: "use" })).toBe("riffle: Her · view → use");
+    expect(describeDiff({ resource: riffle, circle: her, from: null, to: "view" })).toBe(
+      "riffle: + Her · view",
+    );
+    expect(describeDiff({ resource: riffle, circle: her, from: "view", to: "use" })).toBe(
+      "riffle: Her · view → use",
+    );
   });
 });

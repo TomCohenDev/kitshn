@@ -15,7 +15,10 @@ export function pkcs8Pem(pem: string): string {
   const body = pem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
   const rsa = Uint8Array.from(atob(body), (char) => char.charCodeAt(0));
   // version 0, then AlgorithmIdentifier rsaEncryption with NULL parameters.
-  const head = [0x02, 0x01, 0x00, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00];
+  const head = [
+    0x02, 0x01, 0x00, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05,
+    0x00,
+  ];
   const octet = [0x04, ...derLength(rsa.length)];
   const inner = head.length + octet.length + rsa.length;
   const der = new Uint8Array([0x30, ...derLength(inner), ...head, ...octet, ...rsa]);
@@ -50,7 +53,10 @@ async function call(token: string, method: string, path: string, body?: object):
     const text = await response.text();
     if (path.endsWith("/dispatches") && response.status === 422 && text.includes("workflow_dispatch"))
       throw new GitHubError(422, "Add workflow_dispatch to the repo's kitshn.yml.");
-    throw new GitHubError(response.status, `GitHub answered ${response.status} for ${method} ${path}: ${text}`);
+    throw new GitHubError(
+      response.status,
+      `GitHub answered ${response.status} for ${method} ${path}: ${text}`,
+    );
   }
   return response.status === 204 ? null : await response.json();
 }
@@ -115,7 +121,9 @@ export async function dispatchDeploy(app: GitHubApp, repoId: string, branch: str
       "The kitshn GitHub App has no installation with this repo and the permission Actions: write. Install it on the repo and accept the permission.",
     );
   const repositories = record(await call(token, "GET", "/installation/repositories"))["repositories"];
-  const repo = (Array.isArray(repositories) ? repositories : []).map(record).find((item) => item["id"] === id);
+  const repo = (Array.isArray(repositories) ? repositories : [])
+    .map(record)
+    .find((item) => item["id"] === id);
   const name = repo?.["full_name"];
   if (typeof name !== "string") throw new Error(`The installation token does not reach the repo ${repoId}.`);
   // A full branch ref, so a tag with the same name never runs.

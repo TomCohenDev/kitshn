@@ -40,7 +40,8 @@ export function sharedFolderProblem(
   own: number,
 ): string | null {
   // Only the sticky bit stops another user from renaming or removing the daemon's folder in /tmp.
-  if (parent.uid !== 0 || (parent.mode & 0o1000) === 0) return "its parent folder is not root's with the sticky bit";
+  if (parent.uid !== 0 || (parent.mode & 0o1000) === 0)
+    return "its parent folder is not root's with the sticky bit";
   if (folder.isSymbolicLink()) return "it is a link";
   if (!folder.isDirectory()) return "it is not a folder";
   if (folder.uid !== own) return `it belongs to the user id ${folder.uid}, not to the daemon user ${own}`;
@@ -52,7 +53,10 @@ export function sharedFolderProblem(
  * throws when a daemon still listens there, or when a shared folder is not the daemon user's own. `stop` removes the
  * socket file, unless another daemon made a new one meanwhile.
  */
-export async function listenLocal(path: string, options: LocalOptions): Promise<{ readonly stop: () => void }> {
+export async function listenLocal(
+  path: string,
+  options: LocalOptions,
+): Promise<{ readonly stop: () => void }> {
   const folder = dirname(path);
   if (options.access === "private") {
     mkdirSync(folder, { recursive: true, mode: 0o700 });
@@ -107,13 +111,11 @@ export async function listenLocal(path: string, options: LocalOptions): Promise<
       socket,
       await Promise.resolve()
         .then(() => options.handle(request, { uid }))
-        .catch(
-        (error: unknown): Answer => ({
+        .catch((error: unknown): Answer => ({
           id: request.id,
           type: "error",
           error: error instanceof Error ? error.message : String(error),
-        }),
-      ),
+        })),
     );
   };
   const server = Bun.listen<Connection | undefined>({
@@ -197,7 +199,11 @@ export function askLocal(
           if (uid !== peer.daemonUid) {
             const who = uid === null ? "a user whose id kitshn cannot read" : `the user id ${uid}`;
             finish(() =>
-              reject(new Error(`${path} belongs to ${who}, not to the daemon user ${peer.daemonUid}; kitshn sent nothing (K-701).`)),
+              reject(
+                new Error(
+                  `${path} belongs to ${who}, not to the daemon user ${peer.daemonUid}; kitshn sent nothing (K-701).`,
+                ),
+              ),
             );
             socket.end();
             return;

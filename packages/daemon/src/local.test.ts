@@ -17,7 +17,8 @@ const sharedTestFolder = () => join("/tmp", `kitshn-test-${randomUUID()}`);
 
 /** A daemon on a socket in a new temporary folder, never the path of a live daemon. */
 async function daemon(decide: LocalOptions["decide"], access: LocalOptions["access"] = "private") {
-  const folder = access === "shared" ? sharedTestFolder() : join(mkdtempSync(join(tmpdir(), "kitshn-local-")), "kitshn");
+  const folder =
+    access === "shared" ? sharedTestFolder() : join(mkdtempSync(join(tmpdir(), "kitshn-local-")), "kitshn");
   const path = join(folder, "kitshn.sock");
   const peers: Array<number | null> = [];
   const callers: Array<Caller> = [];
@@ -33,7 +34,13 @@ async function daemon(decide: LocalOptions["decide"], access: LocalOptions["acce
       return Promise.resolve({
         id: request.id,
         type: "status",
-        status: { version: "dev", machineId: "m1", fingerprint: null, connection: "disconnected", tunnel: "stopped" },
+        status: {
+          version: "dev",
+          machineId: "m1",
+          fingerprint: null,
+          connection: "disconnected",
+          tunnel: "stopped",
+        },
       });
     },
     log: () => {},
@@ -84,7 +91,11 @@ describe("local socket (K-701, K-702)", () => {
 
   it("answers a clear error for a bad line, with its id when it has one", async () => {
     using local = await daemon(() => ({ accept: true }));
-    const answers = await raw(local.path, 'not json\n{"id":"7","type":"nope"}\n{"id":"8","type":"rotate-key"}\n', 3);
+    const answers = await raw(
+      local.path,
+      'not json\n{"id":"7","type":"nope"}\n{"id":"8","type":"rotate-key"}\n',
+      3,
+    );
     expect(answers).toEqual(
       expect.arrayContaining([
         { id: null, type: "error", error: "The line is not JSON." },
@@ -96,8 +107,20 @@ describe("local socket (K-701, K-702)", () => {
 
   it("refuses to start next to a daemon that listens, and ends a connection with a line that is too long", async () => {
     using local = await daemon(() => ({ accept: true }));
-    await expect(listenLocal(local.path, { platform, decide: () => ({ accept: true }), handle: () => Promise.reject(new Error("unused")), log: () => {}, access: "private" })).rejects.toThrow("another kitshn daemon");
-    const [answer] = await raw(local.path, `${JSON.stringify({ id: "9", type: "status", pad: "x".repeat(70_000) })}\n`, 1);
+    await expect(
+      listenLocal(local.path, {
+        platform,
+        decide: () => ({ accept: true }),
+        handle: () => Promise.reject(new Error("unused")),
+        log: () => {},
+        access: "private",
+      }),
+    ).rejects.toThrow("another kitshn daemon");
+    const [answer] = await raw(
+      local.path,
+      `${JSON.stringify({ id: "9", type: "status", pad: "x".repeat(70_000) })}\n`,
+      1,
+    );
     expect(answer).toMatchObject({ id: null, type: "error" });
     expect(local.callers).toEqual([]);
   });
@@ -113,9 +136,16 @@ describe("local socket (K-701, K-702)", () => {
     const real = mkdtempSync(join(tmpdir(), "kitshn-local-"));
     const link = sharedTestFolder();
     symlinkSync(real, link);
-    const options = { platform, decide: () => ({ accept: true }) as const, handle: () => Promise.reject(new Error("unused")), log: () => {} };
+    const options = {
+      platform,
+      decide: () => ({ accept: true }) as const,
+      handle: () => Promise.reject(new Error("unused")),
+      log: () => {},
+    };
     try {
-      await expect(listenLocal(join(link, "kitshn.sock"), { ...options, access: "shared" })).rejects.toThrow("is a link");
+      await expect(listenLocal(join(link, "kitshn.sock"), { ...options, access: "shared" })).rejects.toThrow(
+        "is a link",
+      );
     } finally {
       rmSync(link, { force: true });
     }
@@ -130,7 +160,9 @@ describe("local socket (K-701, K-702)", () => {
 
   it("sends nothing to a socket whose peer is not the daemon user (K-701)", async () => {
     using local = await daemon(() => ({ accept: true }), "shared");
-    await expect(askLocal(local.path, status, 5000, { platform, daemonUid: own + 1 })).rejects.toThrow("sent nothing");
+    await expect(askLocal(local.path, status, 5000, { platform, daemonUid: own + 1 })).rejects.toThrow(
+      "sent nothing",
+    );
     expect(local.callers).toEqual([]);
   });
 

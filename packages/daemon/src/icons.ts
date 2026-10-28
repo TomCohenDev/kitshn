@@ -51,7 +51,10 @@ export async function readTarget(target: string, path: string): Promise<Uint8Arr
 /** K-1114: the icon of the app at the target, in the order of K-1112 with `/` as the entry page. */
 export async function targetIcon(target: string): Promise<SiteIcon | null> {
   let reads = 0;
-  const { icon } = await pickSiteIcon((path) => (++reads > READS_PER_SITE ? null : readTarget(target, path)), "/");
+  const { icon } = await pickSiteIcon(
+    (path) => (++reads > READS_PER_SITE ? null : readTarget(target, path)),
+    "/",
+  );
   return icon;
 }
 

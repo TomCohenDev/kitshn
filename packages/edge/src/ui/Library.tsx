@@ -111,7 +111,11 @@ export function LibraryView(props: {
                 <td>
                   <button
                     class="btn"
-                    data-tip={preview === item.id ? "Hide the preview." : `Show a preview of ${item.title} above the table.`}
+                    data-tip={
+                      preview === item.id
+                        ? "Hide the preview."
+                        : `Show a preview of ${item.title} above the table.`
+                    }
                     onClick={() => setPreview(preview === item.id ? null : item.id)}
                   >
                     {preview === item.id ? "Hide" : "Preview"}

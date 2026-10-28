@@ -245,9 +245,12 @@ export default {
         if (typeof fresh === "string") return Response.json({ error: fresh }, { status: 401 });
         const headers = new Headers(request.headers);
         headers.set("x-kitshn-caller", JSON.stringify(fresh));
-        return env.KITSHN.getByName("kitshn").fetch(new Request(`${url.origin}/fresh/resume`, { method: "POST", headers }));
+        return env.KITSHN.getByName("kitshn").fetch(
+          new Request(`${url.origin}/fresh/resume`, { method: "POST", headers }),
+        );
       }
-      if (url.pathname.startsWith("/api/fresh/")) return Response.json({ error: "Not found." }, { status: 404 });
+      if (url.pathname.startsWith("/api/fresh/"))
+        return Response.json({ error: "Not found." }, { status: 404 });
       const caller = await callerOf(request, env, env.ACCESS_ADMIN_AUD);
       if (typeof caller === "string") return Response.json({ error: caller }, { status: 401 });
       const headers = new Headers(request.headers);

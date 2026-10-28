@@ -43,7 +43,11 @@ export function placeFloating(
     return {
       side: "right",
       left: clamp(left, MARGIN, viewport.width - size.width - MARGIN),
-      top: clamp(anchor.top + anchor.height / 2 - size.height / 2, MARGIN, viewport.height - size.height - MARGIN),
+      top: clamp(
+        anchor.top + anchor.height / 2 - size.height / 2,
+        MARGIN,
+        viewport.height - size.height - MARGIN,
+      ),
     };
   }
   const above = anchor.top - GAP - size.height;
@@ -51,7 +55,13 @@ export function placeFloating(
   const fitsAbove = above >= MARGIN;
   const fitsBelow = below + size.height <= viewport.height - MARGIN;
   const side =
-    prefer.side === "top" ? (fitsAbove || !fitsBelow ? "top" : "bottom") : fitsBelow || !fitsAbove ? "bottom" : "top";
+    prefer.side === "top"
+      ? fitsAbove || !fitsBelow
+        ? "top"
+        : "bottom"
+      : fitsBelow || !fitsAbove
+        ? "bottom"
+        : "top";
   const left = prefer.align === "center" ? anchor.left + anchor.width / 2 - size.width / 2 : anchor.left;
   return {
     side,

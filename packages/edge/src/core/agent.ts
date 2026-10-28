@@ -32,7 +32,9 @@ export const circlesOf = (state: State, visitor: Visitor, now: number) =>
           .filter(
             (circle) =>
               circle.members.every((member) => member._tag === "device") &&
-              circle.members.some((member) => member._tag === "device" && member.clientId === visitor.clientId) &&
+              circle.members.some(
+                (member) => member._tag === "device" && member.clientId === visitor.clientId,
+              ) &&
               (circle.endsAt === null || circle.endsAt > now) &&
               circleMatches(circle, visitor, state.machines),
           )
@@ -44,7 +46,9 @@ export function agentHas(state: State, visitor: Visitor, right: AgentRight, now:
   return [...circlesOf(state, visitor, now)].some((id) =>
     state.circles
       .get(id)
-      ?.members.some((member) => member._tag === "device" && member.clientId === visitor.clientId && member[right]),
+      ?.members.some(
+        (member) => member._tag === "device" && member.clientId === visitor.clientId && member[right],
+      ),
   );
 }
 
@@ -156,7 +160,9 @@ export function agentRefusal(
       );
       if (foreign)
         return `An agent key moves cards only between its own agent circles with control${publishes ? ", and the sites that it added into Everyone" : ""}, and "${foreign.name}" is not one of them.`;
-      const keeps = holding.some((circle) => own.has(circle.id) && levelIn(side, edit.id, circle) === "control");
+      const keeps = holding.some(
+        (circle) => own.has(circle.id) && levelIn(side, edit.id, circle) === "control",
+      );
       if (side === after && holding.some(isEveryoneCircle) && !keeps)
         return publishRefusal(state, visitor, now);
     }
@@ -168,7 +174,9 @@ export function agentRefusal(
 function publishRefusal(state: State, visitor: Visitor, now: number) {
   const everyone = [...state.circles.values()].find(isEveryoneCircle);
   const overlaps = controlCircles(state, visitor, now).some(
-    (circle) => everyone !== undefined && Math.hypot(circle.x - everyone.x, circle.y - everyone.y) < circle.r + everyone.r,
+    (circle) =>
+      everyone !== undefined &&
+      Math.hypot(circle.x - everyone.x, circle.y - everyone.y) < circle.r + everyone.r,
   );
   return overlaps
     ? "Publish into the overlap of an agent circle and Everyone, so the key keeps managing the card."
@@ -195,7 +203,10 @@ export function publishPlace(
     const holding = circlesHolding(state, cardId);
     if (!from || !everyone || !holding.some((circle) => circle.id === everyone.id)) return null;
     const rest = new Set(holding.filter((circle) => circle.id !== everyone.id).map((circle) => circle.id));
-    return placeInside(state, from, rest) ?? "kitshn finds no place in the same circles without Everyone. Ask the owner.";
+    return (
+      placeInside(state, from, rest) ??
+      "kitshn finds no place in the same circles without Everyone. Ask the owner."
+    );
   }
   if (!agentHas(state, visitor, "publishes", now))
     return 'This key may not publish. The owner turns on "may publish" for it (K-718).';
@@ -277,9 +288,12 @@ export function agentDeployPlan(
   }
   if (last.app !== "compose")
     return refused("A static site keeps serving its last build; a new build comes from the repo (build).");
-  if (!machine || !machine.runsCard) return refused("This app no longer runs on the machine of its last deploy.");
-  if (!machine.takesDeploys) return refused("The machine of this app no longer has the label deploy (K-610).");
-  if (!machine.canRedeploy) return refused("The daemon of this app cannot redeploy yet. Update the daemon first.");
+  if (!machine || !machine.runsCard)
+    return refused("This app no longer runs on the machine of its last deploy.");
+  if (!machine.takesDeploys)
+    return refused("The machine of this app no longer has the label deploy (K-610).");
+  if (!machine.canRedeploy)
+    return refused("The daemon of this app cannot redeploy yet. Update the daemon first.");
   return {
     kind: "redeploy",
     command: {

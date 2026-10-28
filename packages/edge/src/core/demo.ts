@@ -4,8 +4,30 @@ import type { Circle, Point, Resource } from "./model.ts";
 
 /** K-524: the demo machines, offline, with the system of their last status, so their cards show it. */
 export const DEMO_MACHINES: ReadonlyArray<{ readonly machine: Machine; readonly os: MachineOs }> = [
-  { machine: { id: "mac", name: "Mac", labels: ["laptop"], order: 0, serviceTokenId: "demo-mac", clientId: "demo-mac.access", tunnelId: "demo-mac" }, os: "macos" },
-  { machine: { id: "vps", name: "VPS", labels: ["server", "deploy"], order: 1, serviceTokenId: "demo-vps", clientId: "demo-vps.access", tunnelId: "demo-vps" }, os: "linux" },
+  {
+    machine: {
+      id: "mac",
+      name: "Mac",
+      labels: ["laptop"],
+      order: 0,
+      serviceTokenId: "demo-mac",
+      clientId: "demo-mac.access",
+      tunnelId: "demo-mac",
+    },
+    os: "macos",
+  },
+  {
+    machine: {
+      id: "vps",
+      name: "VPS",
+      labels: ["server", "deploy"],
+      order: 1,
+      serviceTokenId: "demo-vps",
+      clientId: "demo-vps.access",
+      tunnelId: "demo-vps",
+    },
+    os: "linux",
+  },
 ];
 
 /** K-1113: the stored icon of the demo static site. */

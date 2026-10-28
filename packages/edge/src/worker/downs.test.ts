@@ -7,7 +7,8 @@ function jobs() {
   const db = new DatabaseSync(":memory:");
   db.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
   migrate((query) => db.exec(query), 0);
-  const sql = (query: string, ...bindings: Array<string | number | null>) => db.prepare(query).all(...bindings);
+  const sql = (query: string, ...bindings: Array<string | number | null>) =>
+    db.prepare(query).all(...bindings);
   const add = (command: object, state: string) =>
     Number(
       db

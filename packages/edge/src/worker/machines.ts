@@ -153,8 +153,18 @@ export function rekeyDecision(
   now: number,
 ): RekeyDecision {
   if (code.machineId !== senderMachineId)
-    return { kind: "refuse", status: 403, reason: "This key code belongs to another machine.", keepCode: true };
+    return {
+      kind: "refuse",
+      status: 403,
+      reason: "This key code belongs to another machine.",
+      keepCode: true,
+    };
   if (code.expiresAt < now || !machine || machine.key?.kind === "public")
-    return { kind: "refuse", status: 410, reason: "This key code expired. Make a new one in the panel.", keepCode: false };
+    return {
+      kind: "refuse",
+      status: 410,
+      reason: "This key code expired. Make a new one in the panel.",
+      keepCode: false,
+    };
   return { kind: "store" };
 }

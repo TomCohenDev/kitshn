@@ -142,7 +142,9 @@ export function SafetyView(props: {
               class="mushroom"
               aria-label={pause ? "Emergency pause: paused" : "Emergency pause"}
               aria-disabled={pause || !lifted ? true : undefined}
-              data-tip={pause ? `${pausedLabel(pause)}. ${RESUME_TIP}` : lifted ? PAUSE_TIP : "Lift the lid first."}
+              data-tip={
+                pause ? `${pausedLabel(pause)}. ${RESUME_TIP}` : lifted ? PAUSE_TIP : "Lift the lid first."
+              }
               onClick={() => {
                 if (pause || !lifted) return;
                 setLifted(false);

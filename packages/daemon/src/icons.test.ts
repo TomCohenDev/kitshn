@@ -3,7 +3,14 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ICON_SITES_PER_PASS, type IconMemory, iconToSend, iconsDue, readTarget, targetIcon } from "./icons.ts";
+import {
+  ICON_SITES_PER_PASS,
+  type IconMemory,
+  iconToSend,
+  iconsDue,
+  readTarget,
+  targetIcon,
+} from "./icons.ts";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1]);
 
@@ -21,7 +28,8 @@ async function app(files: Record<string, Uint8Array | string>, on: "socket" | "p
   });
   if (on === "socket") await new Promise<void>((done) => server.listen(path, done));
   else await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
-  const target = on === "socket" ? `unix:${path}` : `http://localhost:${(server.address() as { port: number }).port}`;
+  const target =
+    on === "socket" ? `unix:${path}` : `http://localhost:${(server.address() as { port: number }).port}`;
   return { target, [Symbol.asyncDispose]: () => new Promise<void>((done) => server.close(() => done())) };
 }
 

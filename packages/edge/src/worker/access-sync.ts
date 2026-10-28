@@ -331,7 +331,9 @@ export function sessionApps(
   loginApps: ReadonlyArray<{ readonly key: string; readonly cfId: string }>,
 ): Array<{ readonly key: string; readonly cfId: string }> {
   return [
-    ...[...store.rows.values()].filter((row) => row.key.startsWith("app:") && row.cfId).map(({ key, cfId }) => ({ key, cfId })),
+    ...[...store.rows.values()]
+      .filter((row) => row.key.startsWith("app:") && row.cfId)
+      .map(({ key, cfId }) => ({ key, cfId })),
     ...loginApps,
   ];
 }
@@ -378,9 +380,12 @@ export function retryApps(
 /** K-110: the History entry of one sign-out or retry. */
 export function signOutSummary(outcome: SignOutOutcome, retry: boolean): string {
   const what = retry ? "Retry of sign-out everywhere" : "Sign-out everywhere";
-  if ("listFailed" in outcome) return `${what} failed: kitshn could not list the Access applications (${outcome.listFailed})`;
+  if ("listFailed" in outcome)
+    return `${what} failed: kitshn could not list the Access applications (${outcome.listFailed})`;
   const ended = `${what} ended the sessions of ${applications(outcome.ended)}`;
-  return outcome.left.length === 0 ? ended : `${ended} and failed for: ${outcome.left.map((app) => app.key).join(", ")}`;
+  return outcome.left.length === 0
+    ? ended
+    : `${ended} and failed for: ${outcome.left.map((app) => app.key).join(", ")}`;
 }
 
 /** K-110: the Access warning while sessions are left, or null when every session ended. */
@@ -772,7 +777,13 @@ export async function syncLogins(
         continue;
       }
       const live = [...(app.policies ?? [])].sort((a, b) => (a.precedence ?? 0) - (b.precedence ?? 0));
-      if (deepEqual(wanted, live.map((policy) => policy.id))) continue;
+      if (
+        deepEqual(
+          wanted,
+          live.map((policy) => policy.id),
+        )
+      )
+        continue;
       calls++;
       try {
         // The list holds whole applications, so like the App Launcher every other field goes back unchanged.
@@ -802,6 +813,7 @@ export async function syncLogins(
       if (!isNotFound(error)) errors.push(`deleting the policy "${policy.name}": ${message(error)}`);
     }
   }
-  if (errors.length > 0) throw new Error(`kitshn could not update the page and file logins: ${errors.join("; ")}`);
+  if (errors.length > 0)
+    throw new Error(`kitshn could not update the page and file logins: ${errors.join("; ")}`);
   return { attached: want, calls };
 }

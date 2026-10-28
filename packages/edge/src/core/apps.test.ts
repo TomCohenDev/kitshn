@@ -42,8 +42,14 @@ describe("app removal (K-909)", () => {
       kind: "redeploy",
       command: { kind: "compose-redeploy", project: compose.id, name: "riffle" },
     });
-    expect(appRestart({ ...last, environment: "pr-3" }, null, false, ready)).toMatchObject({ kind: "redeploy" });
-    expect(appRestart({ ...last, app: "static" }, null, false, null)).toEqual({ kind: "build", repo: "o/riffle", branch: "main" });
+    expect(appRestart({ ...last, environment: "pr-3" }, null, false, ready)).toMatchObject({
+      kind: "redeploy",
+    });
+    expect(appRestart({ ...last, app: "static" }, null, false, null)).toEqual({
+      kind: "build",
+      repo: "o/riffle",
+      branch: "main",
+    });
   });
 
   it("says why it starts nothing", () => {
@@ -51,8 +57,14 @@ describe("app removal (K-909)", () => {
       kind: "none",
       reason: "The preview pr-3 comes back on the next push to its pull request.",
     });
-    expect(appRestart(last, "kitshn is paused.", false, ready)).toEqual({ kind: "none", reason: "kitshn is paused." });
-    expect(appRestart(last, null, false, { ...ready, takesDeploys: false })).toMatchObject({ kind: "none", reason: /label deploy/ });
+    expect(appRestart(last, "kitshn is paused.", false, ready)).toEqual({
+      kind: "none",
+      reason: "kitshn is paused.",
+    });
+    expect(appRestart(last, null, false, { ...ready, takesDeploys: false })).toMatchObject({
+      kind: "none",
+      reason: /label deploy/,
+    });
     expect(appRestart(null, null, false, null)).toMatchObject({ kind: "none", reason: /next deploy/ });
     expect(appRestart({ ...last, environment: "pr-3" }, null, true, ready)).toMatchObject({
       kind: "none",
@@ -62,7 +74,8 @@ describe("app removal (K-909)", () => {
 
   it("refuses an undo only while the machine runs the compose-down", () => {
     expect(composeUndo({ state: "sent" })).toBe("refuse");
-    for (const state of ["queued", "done", "failed", "expired"] as const) expect(composeUndo({ state })).toBe("start");
+    for (const state of ["queued", "done", "failed", "expired"] as const)
+      expect(composeUndo({ state })).toBe("start");
     expect(composeUndo(null)).toBe("start");
   });
 

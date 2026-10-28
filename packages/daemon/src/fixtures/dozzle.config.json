@@ -22,11 +22,7 @@
         "KITSHN_SOCKET_DIR": "placeholder"
       },
       "healthcheck": {
-        "test": [
-          "CMD",
-          "/dozzle",
-          "healthcheck"
-        ],
+        "test": ["CMD", "/dozzle", "healthcheck"],
         "timeout": "10s",
         "interval": "30s",
         "retries": 5,
@@ -115,12 +111,7 @@
       },
       "entrypoint": null,
       "healthcheck": {
-        "test": [
-          "CMD",
-          "test",
-          "-S",
-          "/apps/dozzle-prod/sockets/default.sock"
-        ],
+        "test": ["CMD", "test", "-S", "/apps/dozzle-prod/sockets/default.sock"],
         "timeout": "5s",
         "interval": "30s",
         "retries": 3

@@ -261,7 +261,10 @@ export function desiredAccess(
       policies.set(`policy:${circle.id}:login`, { ...plain, name: `${people.name} (login)` });
       login.push(`policy:${circle.id}:login`);
       if (!circle.needsPasskey) continue;
-      policies.set(`policy:${circle.id}:login-passkey`, { ...people, name: `${people.name} (passkey login)` });
+      policies.set(`policy:${circle.id}:login-passkey`, {
+        ...people,
+        name: `${people.name} (passkey login)`,
+      });
       passkey.push(`policy:${circle.id}:login-passkey`);
     }
   }

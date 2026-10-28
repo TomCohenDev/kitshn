@@ -76,12 +76,18 @@ export const NEW_CIRCLE_CAP = 3;
 export function enclosingCircle(points: ReadonlyArray<Point>): { x: number; y: number; r: number } {
   const first = points[0];
   if (!first) throw new Error("enclosingCircle needs at least one point.");
-  const inside = (c: { x: number; y: number; r: number }, p: Point) => Math.hypot(p.x - c.x, p.y - c.y) <= c.r + 1e-7;
-  const two = (a: Point, b: Point) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, r: Math.hypot(a.x - b.x, a.y - b.y) / 2 });
+  const inside = (c: { x: number; y: number; r: number }, p: Point) =>
+    Math.hypot(p.x - c.x, p.y - c.y) <= c.r + 1e-7;
+  const two = (a: Point, b: Point) => ({
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+    r: Math.hypot(a.x - b.x, a.y - b.y) / 2,
+  });
   const three = (a: Point, b: Point, c: Point) => {
     const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
     // Points on one line: the widest pair holds the third.
-    if (Math.abs(d) < 1e-9) return [two(a, b), two(a, c), two(b, c)].reduce((wide, next) => (next.r > wide.r ? next : wide));
+    if (Math.abs(d) < 1e-9)
+      return [two(a, b), two(a, c), two(b, c)].reduce((wide, next) => (next.r > wide.r ? next : wide));
     const sq = (p: Point) => p.x * p.x + p.y * p.y;
     const x = (sq(a) * (b.y - c.y) + sq(b) * (c.y - a.y) + sq(c) * (a.y - b.y)) / d;
     const y = (sq(a) * (c.x - b.x) + sq(b) * (a.x - c.x) + sq(c) * (b.x - a.x)) / d;
@@ -114,14 +120,22 @@ export function circleForCards(
   state: State,
   selected: Iterable<string>,
   template: Omit<Circle, "x" | "y" | "r">,
-): { readonly edits: Array<Edit>; readonly moved: number; readonly cards: number } | { readonly refused: string } {
+):
+  | { readonly edits: Array<Edit>; readonly moved: number; readonly cards: number }
+  | { readonly refused: string } {
   const ids = new Set(selected);
-  for (const stack of state.stacks.values()) if (stack.members.some((id) => ids.has(id))) for (const id of stack.members) ids.add(id);
+  for (const stack of state.stacks.values())
+    if (stack.members.some((id) => ids.has(id))) for (const id of stack.members) ids.add(id);
   const missing = [...ids].find((id) => !state.places.has(id));
   if (missing) return { refused: `Place ${state.resources.get(missing)?.name ?? missing} on the map first.` };
   const circles = [...state.circles.values()];
   const cap = NEW_CIRCLE_CAP * Math.max(0, ...circles.map((circle) => circle.r));
-  const holding = (id: string) => new Set(circles.filter((circle) => insideCircle(state.places.get(id) as Point, circle)).map((circle) => circle.id));
+  const holding = (id: string) =>
+    new Set(
+      circles
+        .filter((circle) => insideCircle(state.places.get(id) as Point, circle))
+        .map((circle) => circle.id),
+    );
   const nameOf = (id: string) => state.resources.get(id)?.name ?? id;
   /** A stack sits on one spot, so it moves as one unit (K-521). */
   const unitsOf = (cards: Iterable<string>) => {
@@ -143,15 +157,27 @@ export function circleForCards(
     const around = enclosingCircle([...ids].map((id) => spots.get(id) as Point));
     const r = Math.ceil(around.r + CARD_REACH);
     if (circles.length > 0 && r > cap)
-      return { refused: `The new circle would be wider than ${NEW_CIRCLE_CAP} times the widest circle. Select cards that sit closer together.` };
+      return {
+        refused: `The new circle would be wider than ${NEW_CIRCLE_CAP} times the widest circle. Select cards that sit closer together.`,
+      };
     const circle: Circle = { ...template, x: Math.round(around.x), y: Math.round(around.y), r };
     const withCircle: State = { ...state, circles: new Map(state.circles).set(circle.id, circle) };
     const all = new Map(moves);
-    const inside = [...state.places].filter(([id, place]) => !ids.has(id) && insideCircle(place, circle)).map(([id]) => id);
+    const inside = [...state.places]
+      .filter(([id, place]) => !ids.has(id) && insideCircle(place, circle))
+      .map(([id]) => id);
     for (const unit of unitsOf(inside)) {
       const first = unit[0] as string;
-      const to = placeInside(withCircle, state.places.get(first) as Point, holding(first), others(spots, unit));
-      if (!to) return { refused: `${nameOf(first)} cannot leave the new circle without changing its circles. Move it, then try again.` };
+      const to = placeInside(
+        withCircle,
+        state.places.get(first) as Point,
+        holding(first),
+        others(spots, unit),
+      );
+      if (!to)
+        return {
+          refused: `${nameOf(first)} cannot leave the new circle without changing its circles. Move it, then try again.`,
+        };
       for (const id of unit) {
         spots.set(id, to);
         all.set(id, to);
@@ -165,7 +191,9 @@ export function circleForCards(
   const distance = (point: Point) => Math.hypot(point.x - middle.x, point.y - middle.y);
   // The units nearest to the middle choose first; each keeps clear of every other card where it sits now.
   const ordered = unitsOf(ids).sort(
-    (a, b) => distance(state.places.get(a[0] as string) as Point) - distance(state.places.get(b[0] as string) as Point),
+    (a, b) =>
+      distance(state.places.get(a[0] as string) as Point) -
+      distance(state.places.get(b[0] as string) as Point),
   );
   const spots = new Map(state.places);
   const pulled = new Map<string, Point>();

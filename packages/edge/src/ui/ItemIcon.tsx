@@ -63,11 +63,23 @@ export function ItemIcon(props: { resource: Resource }) {
   const icon = cardIcon(resource, snapshot?.icons ?? {}, os);
   switch (icon._tag) {
     case "site":
-      return <IconTile image={icon.src} glyph={kind.icon} tip={`The icon of ${resource.name}, from ${ICON_SOURCES[resource.kind] ?? "the running app"}.`} />;
+      return (
+        <IconTile
+          image={icon.src}
+          glyph={kind.icon}
+          tip={`The icon of ${resource.name}, from ${ICON_SOURCES[resource.kind] ?? "the running app"}.`}
+        />
+      );
     case "avatar":
       return <IconTile image={icon.src} glyph={kind.icon} tip={avatarTip(icon.owner)} />;
     case "os":
-      return <IconTile image={null} glyph={OS_ICONS[icon.os].glyph} tip={`${OS_ICONS[icon.os].name}: the system of this machine.`} />;
+      return (
+        <IconTile
+          image={null}
+          glyph={OS_ICONS[icon.os].glyph}
+          tip={`${OS_ICONS[icon.os].name}: the system of this machine.`}
+        />
+      );
     case "kind":
       return <IconTile image={null} glyph={kind.icon} tip={kind.help} />;
   }

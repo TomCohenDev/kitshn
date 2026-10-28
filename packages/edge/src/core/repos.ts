@@ -83,11 +83,22 @@ export function agentAllowRefusal(
 ): { readonly status: 400 | 403 | 404 | 409; readonly error: string } | null {
   if (state !== "allowed") return { status: 400, error: 'Send {"state": "allowed"}.' };
   if (!addsApps)
-    return { status: 403, error: "This key may not add apps. The owner turns on \"may add apps\" for it (K-718)." };
-  if (!gate) return { status: 404, error: "kitshn knows no such repo. Its first deploy step records it (K-819)." };
+    return {
+      status: 403,
+      error: 'This key may not add apps. The owner turns on "may add apps" for it (K-718).',
+    };
+  if (!gate)
+    return { status: 404, error: "kitshn knows no such repo. Its first deploy step records it (K-819)." };
   if (gate.state !== "waiting")
-    return { status: 409, error: `${gate.name} is ${gate.state}; an agent key allows only a waiting repo (K-819).` };
-  if (goneOnGitHub) return { status: 409, error: `GitHub deleted ${gate.name}; an agent key allows only a waiting repo (K-819).` };
+    return {
+      status: 409,
+      error: `${gate.name} is ${gate.state}; an agent key allows only a waiting repo (K-819).`,
+    };
+  if (goneOnGitHub)
+    return {
+      status: 409,
+      error: `GitHub deleted ${gate.name}; an agent key allows only a waiting repo (K-819).`,
+    };
   return null;
 }
 

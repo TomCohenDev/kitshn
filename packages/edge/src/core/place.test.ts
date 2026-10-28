@@ -18,9 +18,21 @@ const circle = (id: string, x: number, y: number, r: number): Circle => ({
   y,
   r,
 });
-const card = (id: string): Resource => ({ id, kind: "file", name: id, addresses: [], status: "running", group: null, machine: null });
+const card = (id: string): Resource => ({
+  id,
+  kind: "file",
+  name: id,
+  addresses: [],
+  status: "running",
+  group: null,
+  machine: null,
+});
 
-function world(circles: ReadonlyArray<Circle>, places: Record<string, Point>, stacks: Record<string, Array<string>> = {}): State {
+function world(
+  circles: ReadonlyArray<Circle>,
+  places: Record<string, Point>,
+  stacks: Record<string, Array<string>> = {},
+): State {
   return {
     circles: new Map(circles.map((each) => [each.id, each])),
     resources: new Map(Object.keys(places).map((id) => [id, card(id)])),
@@ -32,7 +44,16 @@ function world(circles: ReadonlyArray<Circle>, places: Record<string, Point>, st
   };
 }
 
-const template = { id: "new", name: "New circle", color: "#14B8A6", level: "view", members: [], match: "any", needsPasskey: false, endsAt: null } as const;
+const template = {
+  id: "new",
+  name: "New circle",
+  color: "#14B8A6",
+  level: "view",
+  members: [],
+  match: "any",
+  needsPasskey: false,
+  endsAt: null,
+} as const;
 
 const overlap = (a: Point, b: Point) =>
   Math.abs(a.x - b.x) < 2 * CARD_BOX.half && Math.abs(a.y - b.y) < CARD_BOX.above + CARD_BOX.below;
@@ -47,26 +68,43 @@ function apply(state: State, selected: ReadonlyArray<string>) {
   if (!made) throw new Error("no new circle");
   // A selected card takes its stack along (K-521).
   const chosen = new Set(selected);
-  for (const stack of state.stacks.values()) if (stack.members.some((id) => chosen.has(id))) for (const id of stack.members) chosen.add(id);
+  for (const stack of state.stacks.values())
+    if (stack.members.some((id) => chosen.has(id))) for (const id of stack.members) chosen.add(id);
   for (const id of state.places.keys()) {
-    const before = circlesHolding(state, id).map((each) => each.id).sort();
-    const now = circlesHolding(after, id).map((each) => each.id).filter((each) => each !== "new").sort();
+    const before = circlesHolding(state, id)
+      .map((each) => each.id)
+      .sort();
+    const now = circlesHolding(after, id)
+      .map((each) => each.id)
+      .filter((each) => each !== "new")
+      .sort();
     expect(now, `${id} keeps its circles`).toEqual(before);
-    expect(insideCircle(after.places.get(id) as Point, made), `${id} is inside the new circle only when selected`).toBe(chosen.has(id));
+    expect(
+      insideCircle(after.places.get(id) as Point, made),
+      `${id} is inside the new circle only when selected`,
+    ).toBe(chosen.has(id));
   }
   return { plan, changes, after, made };
 }
 
 describe("New circle for these (K-529)", () => {
   it("draws the smallest circle around the cards and moves nothing when no other card is inside", () => {
-    const state = world([circle("her", 0, 0, 600)], { a: { x: -100, y: 0 }, b: { x: 100, y: 0 }, far: { x: 0, y: 500 } });
+    const state = world([circle("her", 0, 0, 600)], {
+      a: { x: -100, y: 0 },
+      b: { x: 100, y: 0 },
+      far: { x: 0, y: 500 },
+    });
     const { plan, made } = apply(state, ["a", "b"]);
     expect(plan.moved).toBe(0);
     expect(made).toMatchObject({ x: 0, y: 0, members: [] });
   });
 
   it("moves an unselected card out to its nearest spot in its own circles", () => {
-    const state = world([circle("her", 0, 0, 800)], { a: { x: -200, y: 0 }, b: { x: 200, y: 0 }, middle: { x: 0, y: 0 } });
+    const state = world([circle("her", 0, 0, 800)], {
+      a: { x: -200, y: 0 },
+      b: { x: 200, y: 0 },
+      middle: { x: 0, y: 0 },
+    });
     const { plan, after } = apply(state, ["a", "b"]);
     expect(plan.moved).toBe(1);
     expect(after.places.get("a")).toEqual({ x: -200, y: 0 });
@@ -75,7 +113,11 @@ describe("New circle for these (K-529)", () => {
   it("pulls spread cards together when that moves fewer cards than pushing others out", () => {
     // The circle around a and b as they are would hold all four others; pulled to the free middle, it holds none.
     const others = Object.fromEntries([-500, -350, 350, 500].map((x) => [`o${x}`, { x, y: 0 }]));
-    const state = world([circle("her", 0, 0, 1000)], { a: { x: -700, y: 0 }, b: { x: 700, y: 0 }, ...others });
+    const state = world([circle("her", 0, 0, 1000)], {
+      a: { x: -700, y: 0 },
+      b: { x: 700, y: 0 },
+      ...others,
+    });
     const { plan, after } = apply(state, ["a", "b"]);
     expect(plan.moved).toBe(2);
     for (const id of Object.keys(others)) expect(after.places.get(id)).toEqual(state.places.get(id));
@@ -103,7 +145,8 @@ describe("New circle for these (K-529)", () => {
       for (const other of cards) {
         // Only pulled cards must keep clear; u1 to u4 already overlap each other in this layout.
         const pulled = (id: string) => !id.startsWith("u");
-        if (one >= other || !(pulled(one) || pulled(other)) || (one.startsWith("s") && other.startsWith("s"))) continue;
+        if (one >= other || !(pulled(one) || pulled(other)) || (one.startsWith("s") && other.startsWith("s")))
+          continue;
         const p = after.places.get(one) as Point;
         const q = after.places.get(other) as Point;
         const apart = Math.abs(p.x - q.x) >= 190 || Math.abs(p.y - q.y) >= 86;
@@ -126,19 +169,32 @@ describe("New circle for these (K-529)", () => {
   });
 
   it("leaves a selected card that sits in the middle where it is", () => {
-    const state = world([circle("her", 0, 0, 900)], { a: { x: 0, y: 0 }, b: { x: 600, y: 0 }, u: { x: 300, y: 0 } });
+    const state = world([circle("her", 0, 0, 900)], {
+      a: { x: 0, y: 0 },
+      b: { x: 600, y: 0 },
+      u: { x: 300, y: 0 },
+    });
     const { after } = apply(state, ["a", "b"]);
     expect(after.places.get("a")).toEqual({ x: 0, y: 0 });
   });
 
   it("keeps a card in no circle in no other circle, and an unselected one out of the new circle", () => {
-    const state = world([circle("her", 0, 0, 300)], { a: { x: 600, y: 0 }, b: { x: 800, y: 0 }, loose: { x: 700, y: 0 }, inside: { x: 0, y: 0 } });
+    const state = world([circle("her", 0, 0, 300)], {
+      a: { x: 600, y: 0 },
+      b: { x: 800, y: 0 },
+      loose: { x: 700, y: 0 },
+      inside: { x: 0, y: 0 },
+    });
     apply(state, ["a", "b"]);
     apply(state, ["a", "inside"]);
   });
 
   it("takes the whole stack when one of its cards is selected", () => {
-    const state = world([circle("her", 0, 0, 600)], { a: { x: -100, y: 0 }, s1: { x: 100, y: 0 }, s2: { x: 100, y: 0 } }, { st: ["s1", "s2"] });
+    const state = world(
+      [circle("her", 0, 0, 600)],
+      { a: { x: -100, y: 0 }, s1: { x: 100, y: 0 }, s2: { x: 100, y: 0 } },
+      { st: ["s1", "s2"] },
+    );
     const plan = circleForCards(state, ["a", "s1"], template);
     if ("refused" in plan) throw new Error(plan.refused);
     const after = applyChanges(state, resolveEdits(state, plan.edits));
@@ -146,19 +202,32 @@ describe("New circle for these (K-529)", () => {
   });
 
   it("refuses, and changes nothing, when an unselected card cannot leave without changing its circles", () => {
-    const state = world([circle("small", 0, 0, 150)], { a: { x: -60, y: 0 }, b: { x: 60, y: 0 }, trapped: { x: 0, y: 60 } });
+    const state = world([circle("small", 0, 0, 150)], {
+      a: { x: -60, y: 0 },
+      b: { x: 60, y: 0 },
+      trapped: { x: 0, y: 60 },
+    });
     const plan = circleForCards(state, ["a", "b"], template);
     expect(plan).toEqual({ refused: expect.stringContaining("trapped cannot leave the new circle") });
   });
 
   it("refuses a circle wider than 3 times the widest circle", () => {
     // Each card sits in its own small circle, far apart, so no plan can bring them close.
-    const state = world([circle("left", -2000, 0, 100), circle("right", 2000, 0, 100)], { a: { x: -2000, y: 0 }, b: { x: 2000, y: 0 } });
-    expect(circleForCards(state, ["a", "b"], template)).toEqual({ refused: expect.stringContaining("wider than 3 times") });
+    const state = world([circle("left", -2000, 0, 100), circle("right", 2000, 0, 100)], {
+      a: { x: -2000, y: 0 },
+      b: { x: 2000, y: 0 },
+    });
+    expect(circleForCards(state, ["a", "b"], template)).toEqual({
+      refused: expect.stringContaining("wider than 3 times"),
+    });
   });
 
   it("is undone as one change: every moved card goes back and the circle goes", () => {
-    const state = world([circle("her", 0, 0, 800)], { a: { x: -200, y: 0 }, b: { x: 200, y: 0 }, middle: { x: 0, y: 0 } });
+    const state = world([circle("her", 0, 0, 800)], {
+      a: { x: -200, y: 0 },
+      b: { x: 200, y: 0 },
+      middle: { x: 0, y: 0 },
+    });
     const { changes, after } = apply(state, ["a", "b"]);
     const undone = applyChanges(after, invert(changes));
     expect(undone.circles.has("new")).toBe(false);
@@ -167,8 +236,18 @@ describe("New circle for these (K-529)", () => {
 
   it("finds the smallest enclosing circle", () => {
     expect(enclosingCircle([{ x: 0, y: 0 }])).toEqual({ x: 0, y: 0, r: 0 });
-    expect(enclosingCircle([{ x: -1, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 0.5 }])).toMatchObject({ x: 0, y: 0, r: 1 });
-    const triangle = enclosingCircle([{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 0, y: 3 }]);
+    expect(
+      enclosingCircle([
+        { x: -1, y: 0 },
+        { x: 1, y: 0 },
+        { x: 0, y: 0.5 },
+      ]),
+    ).toMatchObject({ x: 0, y: 0, r: 1 });
+    const triangle = enclosingCircle([
+      { x: 0, y: 0 },
+      { x: 4, y: 0 },
+      { x: 0, y: 3 },
+    ]);
     expect(triangle.r).toBeCloseTo(2.5);
   });
 });
@@ -214,7 +293,10 @@ describe("New circle for these on random maps (K-529)", () => {
         for (const other of names) {
           if (one >= other || stackOf(one) === stackOf(other)) continue;
           if (overlap(places[one] as Point, places[other] as Point)) continue;
-          expect(overlap(after.places.get(one) as Point, after.places.get(other) as Point), `layout ${layout}: ${one} and ${other}`).toBe(false);
+          expect(
+            overlap(after.places.get(one) as Point, after.places.get(other) as Point),
+            `layout ${layout}: ${one} and ${other}`,
+          ).toBe(false);
         }
     }
     // Most layouts make a circle, so the checks above ran on real plans.

@@ -10,7 +10,10 @@ const SO_PEERCRED = 17;
 
 const linux = () =>
   dlopen("libc.so.6", {
-    getsockopt: { args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+    getsockopt: {
+      args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.ptr],
+      returns: FFIType.i32,
+    },
   }).symbols;
 const darwin = () =>
   dlopen("/usr/lib/libSystem.B.dylib", {
@@ -68,7 +71,11 @@ export type PeerDecision = { readonly accept: true } | { readonly accept: false;
  * K-701: the daemon user always passes, and each user id in `localUsers` of `machine.json`. With a `machine.json`
  * that it cannot read, no peer passes (K-006).
  */
-export function peerDecision(peer: number, own: number, localUsers: ReadonlyArray<number> | null): PeerDecision {
+export function peerDecision(
+  peer: number,
+  own: number,
+  localUsers: ReadonlyArray<number> | null,
+): PeerDecision {
   if (localUsers === null) return { accept: false, reason: "localUsers in machine.json cannot be read" };
   if (peer === own || localUsers.includes(peer)) return { accept: true };
   return { accept: false, reason: `the user id ${peer} is not a local user of kitshn` };

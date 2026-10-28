@@ -4,11 +4,19 @@ import type { RevisionView } from "../core/protocol.ts";
 /** K-1508: History as plain sentences, grouped by day and by actor, with filters. Pure, for tests. */
 
 export const actorLabel = (actor: Actor) =>
-  actor._tag === "person" ? actor.email : actor._tag === "device" ? `📱 ${actor.name}` : `kitshn (${actor.reason})`;
+  actor._tag === "person"
+    ? actor.email
+    : actor._tag === "device"
+      ? `📱 ${actor.name}`
+      : `kitshn (${actor.reason})`;
 
 /** One filter value per actor; every kitshn reason (an expiry, a deploy) is the same actor "kitshn". */
 export const actorKey = (actor: Actor) =>
-  actor._tag === "person" ? `person:${actor.email}` : actor._tag === "device" ? `device:${actor.clientId}` : "kitshn";
+  actor._tag === "person"
+    ? `person:${actor.email}`
+    : actor._tag === "device"
+      ? `device:${actor.clientId}`
+      : "kitshn";
 
 /** The first words of summaries that are a verb, so a row under its actor reads "<verb> …". */
 const VERBS = new Set([
@@ -111,7 +119,8 @@ export function groupHistory(revisions: ReadonlyArray<RevisionView>, now: number
   for (const revision of revisions) {
     const day = dayOf(revision.at, now);
     const last = groups.at(-1);
-    if (last && last.day === day && actorKey(last.actor) === actorKey(revision.actor)) last.revisions.push(revision);
+    if (last && last.day === day && actorKey(last.actor) === actorKey(revision.actor))
+      last.revisions.push(revision);
     else groups.push({ day, actor: revision.actor, revisions: [revision] });
   }
   return groups;
@@ -147,5 +156,8 @@ export function filterHistory(
 export const undoableRow = (revisions: ReadonlyArray<RevisionView>, me: Actor): number | null =>
   revisions.find(
     (revision) =>
-      revision.undoable && revision.undoes === null && revision.undoneBy === null && deepEqual(revision.actor, me),
+      revision.undoable &&
+      revision.undoes === null &&
+      revision.undoneBy === null &&
+      deepEqual(revision.actor, me),
   )?.id ?? null;

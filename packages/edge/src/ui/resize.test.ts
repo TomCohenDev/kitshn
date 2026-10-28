@@ -12,7 +12,15 @@ function mount(width: number, commits: Array<number>) {
   const root = document.createElement("div");
   document.body.append(root);
   const edge = (w: number) =>
-    h(ResizeEdge, { label: "Shelf width", width: w, limits, grows: "right", cssVar: "--test-width", fit: (x: number) => x, onCommit: (x: number) => commits.push(x) });
+    h(ResizeEdge, {
+      label: "Shelf width",
+      width: w,
+      limits,
+      grows: "right",
+      cssVar: "--test-width",
+      fit: (x: number) => x,
+      onCommit: (x: number) => commits.push(x),
+    });
   act(() => render(edge(width), root));
   const element = root.querySelector<HTMLElement>(".resize-edge");
   if (!element) throw new Error("no edge");
@@ -21,7 +29,9 @@ function mount(width: number, commits: Array<number>) {
 
 const pointer = (element: HTMLElement, type: string, clientX: number, buttons = 1) =>
   act(() => {
-    element.dispatchEvent(new PointerEvent(type, { bubbles: true, clientX, button: 0, buttons, pointerId: 1 }));
+    element.dispatchEvent(
+      new PointerEvent(type, { bubbles: true, clientX, button: 0, buttons, pointerId: 1 }),
+    );
   });
 
 /** Presses Escape on the page and says whether a later listener of the page still got it. */

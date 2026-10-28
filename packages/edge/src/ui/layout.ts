@@ -53,7 +53,8 @@ export const headBox = (circle: Circle, angle: number): Box => {
   return { left: x - half, top: y - HEAD.above, right: x + half, bottom: y + HEAD.below };
 };
 
-const overlaps = (a: Box, b: Box) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+const overlaps = (a: Box, b: Box) =>
+  a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 
 /** The spots that a head tries along its circle edge, in this order: the top, then further to each side. */
 const HEAD_ANGLES = [0, -30, 30, -55, 55].map((degrees) => (degrees * Math.PI) / 180);
@@ -69,7 +70,12 @@ export function headAngle(circle: Circle, cards: ReadonlyArray<Box>): number {
 /** A circle with its head at every spot that the head can slide to (`headAngle`). */
 export const circleBox = (circle: Circle): Box =>
   union([
-    { left: circle.x - circle.r, top: circle.y - circle.r, right: circle.x + circle.r, bottom: circle.y + circle.r },
+    {
+      left: circle.x - circle.r,
+      top: circle.y - circle.r,
+      right: circle.x + circle.r,
+      bottom: circle.y + circle.r,
+    },
     ...HEAD_ANGLES.map((angle) => headBox(circle, angle)),
   ]);
 
@@ -144,7 +150,12 @@ export function panInto(box: Box, area: Box, view: View): View {
     right: box.right * view.s + view.x,
     bottom: box.bottom * view.s + view.y,
   };
-  if (screen.left >= area.left && screen.right <= area.right && screen.top >= area.top && screen.bottom <= area.bottom)
+  if (
+    screen.left >= area.left &&
+    screen.right <= area.right &&
+    screen.top >= area.top &&
+    screen.bottom <= area.bottom
+  )
     return view;
   return {
     s: view.s,
@@ -189,7 +200,9 @@ export function shownWidths(
       : clamp(wanted.panel, Math.min(limits.panel.min, panelRoom), Math.min(limits.panel.max, panelRoom));
   const trayRoom = Math.max(FLOOR, room - panel);
   const tray =
-    wanted.tray === null ? 0 : clamp(wanted.tray, Math.min(limits.tray.min, trayRoom), Math.min(limits.tray.max, trayRoom));
+    wanted.tray === null
+      ? 0
+      : clamp(wanted.tray, Math.min(limits.tray.min, trayRoom), Math.min(limits.tray.max, trayRoom));
   return { panel, tray };
 }
 
@@ -200,7 +213,12 @@ export function storedWidth(raw: string | null, limits: WidthLimits): number {
 }
 
 /** The width after a key on a resize edge, or null for a key that does not resize. */
-export function keyWidth(key: string, width: number, limits: WidthLimits, grows: "left" | "right"): number | null {
+export function keyWidth(
+  key: string,
+  width: number,
+  limits: WidthLimits,
+  grows: "left" | "right",
+): number | null {
   const step = 24;
   const wider = grows === "left" ? "ArrowLeft" : "ArrowRight";
   const narrower = grows === "left" ? "ArrowRight" : "ArrowLeft";
@@ -226,7 +244,10 @@ export interface Fingers {
  */
 export function pinchView(start: View, from: Fingers, to: Fingers): View {
   const spread = (fingers: Fingers) => Math.hypot(fingers.a.x - fingers.b.x, fingers.a.y - fingers.b.y);
-  const middle = (fingers: Fingers) => ({ x: (fingers.a.x + fingers.b.x) / 2, y: (fingers.a.y + fingers.b.y) / 2 });
+  const middle = (fingers: Fingers) => ({
+    x: (fingers.a.x + fingers.b.x) / 2,
+    y: (fingers.a.y + fingers.b.y) / 2,
+  });
   const before = spread(from);
   const s = Math.min(ZOOM.max, Math.max(ZOOM.min, start.s * (before > 0 ? spread(to) / before : 1)));
   const was = middle(from);

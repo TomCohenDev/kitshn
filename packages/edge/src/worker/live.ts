@@ -101,19 +101,19 @@ export function tunnelConfig(sites: ReadonlyArray<LiveSite>, accessOf: (site: Li
         ...[...sites]
           .sort((a, b) => a.address.localeCompare(b.address))
           .map((site) => {
-          const access = accessOf(site);
-          const originRequest = {
-            ...(site.dev ? { httpHostHeader: "localhost" } : {}),
-            ...(access.kind === "check"
-              ? { access: { required: true, teamName: access.teamName, audTag: [access.aud] } }
-              : {}),
-          };
-          return {
-            hostname: site.address,
-            service: site.target,
-            ...(Object.keys(originRequest).length > 0 ? { originRequest } : {}),
-          };
-        }),
+            const access = accessOf(site);
+            const originRequest = {
+              ...(site.dev ? { httpHostHeader: "localhost" } : {}),
+              ...(access.kind === "check"
+                ? { access: { required: true, teamName: access.teamName, audTag: [access.aud] } }
+                : {}),
+            };
+            return {
+              hostname: site.address,
+              service: site.target,
+              ...(Object.keys(originRequest).length > 0 ? { originRequest } : {}),
+            };
+          }),
         { service: "http_status:404" },
       ],
     },

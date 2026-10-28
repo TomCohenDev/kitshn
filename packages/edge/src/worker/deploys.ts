@@ -133,14 +133,16 @@ export function parseSiteIcon(
   if (value === undefined || value === null) return value;
   if (typeof value !== "string") return "The site icon must be base64 text or null.";
   // Base64 grows by 4/3, so a longer text cannot fit the limit; this check comes before the decode.
-  if (value.length > Math.ceil(ICON_LIMIT / 3) * 4) return `The site icon is larger than ${ICON_LIMIT / 1024} KB.`;
+  if (value.length > Math.ceil(ICON_LIMIT / 3) * 4)
+    return `The site icon is larger than ${ICON_LIMIT / 1024} KB.`;
   let bytes: Uint8Array;
   try {
     bytes = Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
   } catch {
     return "The site icon is not valid base64.";
   }
-  if (bytes.length === 0 || bytes.length > ICON_LIMIT) return `The site icon is empty or larger than ${ICON_LIMIT / 1024} KB.`;
+  if (bytes.length === 0 || bytes.length > ICON_LIMIT)
+    return `The site icon is empty or larger than ${ICON_LIMIT / 1024} KB.`;
   const type = iconType(bytes);
   if (type === null) return "The site icon is not a PNG, ICO, GIF, JPEG, WebP or SVG image.";
   return { bytes, type };
@@ -156,7 +158,8 @@ export const HEADERS_LIMIT = 100_000;
 export function parseHeadersFile(value: unknown): string | null | { readonly error: string } {
   if (value === undefined || value === null || value === "") return null;
   if (typeof value !== "string") return { error: "The _headers file must be text or null." };
-  if (new TextEncoder().encode(value).length > HEADERS_LIMIT) return { error: `The _headers file is larger than ${HEADERS_LIMIT / 1000} KB.` };
+  if (new TextEncoder().encode(value).length > HEADERS_LIMIT)
+    return { error: `The _headers file is larger than ${HEADERS_LIMIT / 1000} KB.` };
   return value;
 }
 

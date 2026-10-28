@@ -6,7 +6,11 @@ describe("_headers limits (K-805)", () => {
     const rule = (index: number) => `/p${index}\n  Cache-Control: no-cache\n`;
     expect(headersWarnings(`# comment\n${rule(1)}`)).toEqual([]);
     expect(headersWarnings(Array.from({ length: 100 }, (_, index) => rule(index)).join(""))).toEqual([]);
-    expect(headersWarnings(Array.from({ length: 101 }, (_, index) => rule(index)).join(""))).toEqual([expect.stringContaining("101 rules")]);
-    expect(headersWarnings(`/a\n  X-Long: ${"x".repeat(2000)}\n`)).toEqual([expect.stringContaining("line 2")]);
+    expect(headersWarnings(Array.from({ length: 101 }, (_, index) => rule(index)).join(""))).toEqual([
+      expect.stringContaining("101 rules"),
+    ]);
+    expect(headersWarnings(`/a\n  X-Long: ${"x".repeat(2000)}\n`)).toEqual([
+      expect.stringContaining("line 2"),
+    ]);
   });
 });

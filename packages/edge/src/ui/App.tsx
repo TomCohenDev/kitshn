@@ -28,6 +28,7 @@ import {
   pauseReach,
   shareKey,
   shareLevel,
+  stackTitle,
 } from "../core/model.ts";
 import { MAX_UPLOAD_BYTES, isLibraryId } from "../core/library.ts";
 import { circleForCards, placeInside } from "../core/place.ts";
@@ -506,7 +507,7 @@ export function App() {
       await commit(
         edits,
         shareDiff(state, applyChanges(state, resolveEdits(state, edits))),
-        `Pulled ${state.resources.get(id)?.name ?? "the card"} out of ${stack.name}.`,
+        `Pulled ${state.resources.get(id)?.name ?? "the card"} out of ${stackTitle(state, stack)}.`,
       );
     },
     unstack: async (stackId) => {
@@ -526,16 +527,17 @@ export function App() {
       await commit(
         edits,
         shareDiff(state, applyChanges(state, resolveEdits(state, edits))),
-        `Unstacked ${stack.name}.`,
+        `Unstacked ${stackTitle(state, stack)}.`,
       );
     },
     rename: async (stackId, name) => {
       const stack = state?.stacks.get(stackId);
-      if (!stack || !name.trim() || name.trim() === stack.name) return;
+      const next = name.trim().slice(0, 80);
+      if (!stack || next === stack.name) return;
       await commit(
-        [{ _tag: "stack", id: stackId, after: { ...stack, name: name.trim().slice(0, 80) } }],
+        [{ _tag: "stack", id: stackId, after: { ...stack, name: next } }],
         [],
-        `Renamed the stack to ${name.trim().slice(0, 80)}.`,
+        next ? `Renamed the stack to ${next}.` : "The stack has no name now.",
       );
     },
   };
@@ -2035,7 +2037,8 @@ function StackPanel(props: {
       <input
         class="title"
         aria-label="Stack name"
-        data-tip="The name of the stack. Enter saves it."
+        placeholder="No name"
+        data-tip="The name of the stack. Enter saves it; an empty name shows only its cards."
         key={stack.name}
         defaultValue={stack.name}
         onKeyDown={(event) => event.key === "Enter" && (event.target as HTMLInputElement).blur()}
@@ -2188,7 +2191,7 @@ function CardPanel(props: {
           anchor={removing.anchor}
           onClose={() => setRemoving(null)}
         >
-          {stackChoice(stack).map(({ part, label, tip }) => (
+          {stackChoice(state, stack).map(({ part, label, tip }) => (
             <MenuItem
               key={part}
               tip={`${tip} out of ${removing.circle.name}.`}
@@ -2456,7 +2459,7 @@ function CardPanel(props: {
                     aria-expanded={stack ? removing?.circle.id === circle.id : undefined}
                     data-tip={
                       stack
-                        ? `Remove ${resource.name} or all of ${stack.name} from ${circle.name}, without a drag.`
+                        ? `Remove ${resource.name} or all of ${stackTitle(state, stack)} from ${circle.name}, without a drag.`
                         : `Remove ${resource.name} from ${circle.name}, without a drag.`
                     }
                     onClick={(event) => {
@@ -2536,11 +2539,12 @@ function ContextMenu(props: {
   const groups = actionsFor(props.context, props.handlers, target);
   if (!groups) return null;
   const { state } = props.context;
+  const stackOfTarget = target._tag === "stack" ? state.stacks.get(target.id) : undefined;
   const name =
     target._tag === "card"
       ? state.resources.get(target.id)?.name
       : target._tag === "stack"
-        ? state.stacks.get(target.id)?.name
+        ? stackOfTarget && stackTitle(state, stackOfTarget)
         : target._tag === "circle"
           ? state.circles.get(target.id)?.name
           : "the map";

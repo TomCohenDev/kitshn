@@ -97,9 +97,14 @@ export const shareKey = (resourceId: string, circleId: string) => `${resourceId}
  */
 export interface Stack {
   readonly id: string;
+  /** Empty for a stack without a name, which shows only its cards. */
   readonly name: string;
   readonly members: ReadonlyArray<string>;
 }
+
+/** The name of a stack, or the names of its cards when it has none. */
+export const stackTitle = (state: State, stack: Stack) =>
+  stack.name || stack.members.map((id) => state.resources.get(id)?.name ?? id).join(", ");
 
 export interface State {
   readonly circles: ReadonlyMap<string, Circle>;

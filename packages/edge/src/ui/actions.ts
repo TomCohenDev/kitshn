@@ -22,6 +22,7 @@ import {
   type State,
   circlesHolding,
   shareKey,
+  stackTitle,
 } from "../core/model.ts";
 import { circleForCards, placeInside } from "../core/place.ts";
 import type { MachineView } from "../core/protocol.ts";
@@ -266,7 +267,7 @@ export function stackOntoEdits(
     id,
     after: {
       id,
-      name: into?.name ?? targetName ?? "Stack",
+      name: into?.name ?? "",
       members: [...(into?.members ?? [target]), ...moving],
     },
   });
@@ -274,7 +275,10 @@ export function stackOntoEdits(
   const refused = refusal(state, edits);
   return refused
     ? { refused }
-    : { edits, done: `Stacked ${names} with ${into?.name ?? targetName ?? "the card"}.` };
+    : {
+        edits,
+        done: `Stacked ${names} with ${into ? stackTitle(state, into) : (targetName ?? "the card")}.`,
+      };
 }
 
 /**
@@ -302,13 +306,13 @@ const ownStack = (state: State, id: string): Stack | undefined =>
   [...state.stacks.values()].find((stack) => stack.members.includes(id));
 
 /** K-527: the two answers when a stacked card leaves a circle, worded for the menu and the panel's Remove. */
-export const stackChoice = (stack: Stack) =>
+export const stackChoice = (state: State, stack: Stack) =>
   [
     { part: "card", label: "This card", tip: "Take only this card out of its stack and" },
     {
       part: "stack",
-      label: `${stack.name} (${stack.members.length})`,
-      tip: `Move all ${stack.members.length} cards of ${stack.name}`,
+      label: `${stackTitle(state, stack)} (${stack.members.length})`,
+      tip: `Move all ${stack.members.length} cards of ${stackTitle(state, stack)}`,
     },
   ] as const satisfies ReadonlyArray<{ part: StackPart; label: string; tip: string }>;
 
@@ -385,7 +389,7 @@ function shareActions(state: State, h: ActionHandlers, resource: Resource): Arra
                 id: `unshare:${circle.id}`,
                 label: circle.name,
                 tip: `Move ${resource.name} or its whole stack out of ${circle.name}.`,
-                items: stackChoice(stack).map(({ part, label, tip }) =>
+                items: stackChoice(state, stack).map(({ part, label, tip }) =>
                   option(part, label, `${tip} out of ${circle.name}.`),
                 ),
               };
@@ -567,7 +571,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
         ? [
             {
               id: "leave-stack",
-              label: `Leave stack ${stack.name}`,
+              label: `Leave stack ${stackTitle(state, stack)}`,
               tip: "The card lands next to the stack, in the same circles, so no share changes.",
               run: () => h.pullOut(stack.id, resource.id),
             },
@@ -697,13 +701,13 @@ export function stackActions(ctx: ActionContext, h: ActionHandlers, stack: Stack
       {
         id: "details",
         label: "Show details",
-        tip: `Select ${stack.name} and show its panel.`,
+        tip: `Select ${stackTitle(state, stack)} and show its panel.`,
         run: () => h.select({ cards: new Set(stack.members), circle: null }),
       },
       {
         id: "rename",
         label: "Rename",
-        tip: `Rename ${stack.name} in its panel.`,
+        tip: `Rename ${stackTitle(state, stack)} in its panel.`,
         run: () => h.renameStack(stack.id),
       },
     ],
@@ -716,7 +720,7 @@ export function stackActions(ctx: ActionContext, h: ActionHandlers, stack: Stack
         items: members.map((member) => ({
           id: `pull-out:${member.id}`,
           label: `${KINDS[member.kind].icon} ${member.name}`,
-          tip: `Take ${member.name} out of ${stack.name}.`,
+          tip: `Take ${member.name} out of ${stackTitle(state, stack)}.`,
           run: () => h.pullOut(stack.id, member.id),
         })),
       },
@@ -941,7 +945,7 @@ export function paletteEntries(ctx: ActionContext, h: ActionHandlers): Array<Pal
       ),
     ),
     ...[...state.stacks.values()].flatMap((stack) =>
-      flatten(stackActions(ctx, h, stack), `Stack ${stack.name}`),
+      flatten(stackActions(ctx, h, stack), `Stack ${stackTitle(state, stack)}`),
     ),
     ...[...state.circles.values()].flatMap((circle) =>
       flatten(circleActions(ctx, h, circle), `⭕ ${circle.name}`),

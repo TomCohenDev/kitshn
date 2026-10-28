@@ -510,6 +510,10 @@ input[type="search"]::-webkit-search-cancel-button {
   --tilt: 4deg;
   background: var(--yellow);
 }
+button.count {
+  font-family: inherit;
+  cursor: pointer;
+}
 /* K-523: the "⋯" button opens the context menu of a card, a stack or a circle head. */
 .more {
   display: inline-grid;

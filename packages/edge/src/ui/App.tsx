@@ -67,7 +67,7 @@ import {
 } from "./actions.ts";
 import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
-import { LOCKDOWN_TIP, PAUSE_TIP, PanicButton, PausedBanner, type PauseView, RESUME_TIP } from "./Pause.tsx";
+import { LOCKDOWN_TIP, PAUSE_TIP, PanicOpener, PausedBanner, type PauseView, RESUME_TIP, SafetyView } from "./Pause.tsx";
 import { playResumeSound, pressSound, showPanic, unlockAudio } from "./panic.ts";
 import { REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
 import { LibraryView } from "./Library.tsx";
@@ -158,13 +158,15 @@ const TABS = {
 } as const;
 
 /** K-516, K-519: what the overlay panel shows. History, Library and Machines also have a full view (a tab). */
-type PanelKind = "details" | "history" | "library" | "machines";
+/** "safety" is the big red button (K-1504); like "details", it has no full view. */
+type PanelKind = "details" | "safety" | "history" | "library" | "machines";
 
 /** `html` font size in styles.css; the panel width is 26rem (`--panel-width`). */
 const REM = 18;
 /** The left edge of the overlay panel on a wide screen. */
 const panelLeft = () => innerWidth - 12 - Math.min(26 * REM, innerWidth - 24);
 const PANEL_HEADINGS: Record<Exclude<PanelKind, "details">, string> = {
+  safety: "Big red button",
   history: "History",
   library: "Library",
   machines: "Machines",
@@ -175,7 +177,7 @@ const FLASH_MS = 1200;
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
-const routeFromHash = (): { readonly tab: "map" | Exclude<PanelKind, "details">; readonly id: string } => {
+const routeFromHash = (): { readonly tab: "map" | Exclude<PanelKind, "details" | "safety">; readonly id: string } => {
   const [tab = "map", id = ""] = location.hash.slice(1).split("/");
   return { tab: tab === "history" || tab === "machines" || tab === "library" ? tab : "map", id };
 };
@@ -231,7 +233,7 @@ export function App() {
   const pauseView: PauseView | null = store.snapshot?.paused
     ? { mode: store.snapshot.paused, by: pausedBy ? actorLabel(pausedBy.actor) : null, at: pausedBy?.at ?? null }
     : null;
-  // K-1504: the counts of the paused banner, only while paused; the "i" card counts while it shows.
+  // K-1504: the counts of the paused banner, only while paused; the Safety panel counts while it shows.
   const pausedReach = useMemo(
     () => (state && store.snapshot?.paused ? pauseReach(state, Date.now()) : null),
     [state, store.snapshot?.paused],
@@ -637,7 +639,7 @@ export function App() {
 
   const fullPage = route.tab !== "map";
   const shownPanel: PanelKind | null = fullPage ? route.tab : panel;
-  const large = fullPage || (panel === "details" && detailsLarge);
+  const large = fullPage || ((panel === "details" || panel === "safety") && detailsLarge);
   /** The panel floats over the map, so the map keeps its width and fit and pan leave its part free. */
   const floating = shownPanel !== null && !large;
 
@@ -773,14 +775,21 @@ export function App() {
   };
 
   /** A toolbar tab opens its panel over the map; Enlarge in the panel opens the full view. */
-  const openTab = (tab: "map" | Exclude<PanelKind, "details">) => {
+  const openTab = (tab: "map" | Exclude<PanelKind, "details" | "safety">) => {
     rememberOpener();
     setPanel(tab === "map" ? "details" : tab);
     location.hash = "map";
   };
 
+  /** K-1504: the toolbar opener, the palette and the map panel open the big red button here. */
+  const openSafety = () => {
+    rememberOpener();
+    setPanel("safety");
+    location.hash = "map";
+  };
+
   const resizePanel = (kind: PanelKind) => {
-    if (kind === "details") setDetailsLarge(!large);
+    if (kind === "details" || kind === "safety") setDetailsLarge(!large);
     else if (large) openTab(kind);
     else location.hash = kind;
   };
@@ -1015,7 +1024,14 @@ export function App() {
           onResize={() => resizePanel(shownPanel)}
           onClose={closePanel}
         >
-          {shownPanel === "history" ? (
+          {shownPanel === "safety" ? (
+            <SafetyView
+              reach={reachNow}
+              pause={pauseView}
+              onPress={() => void pauseNow("keep-public")}
+              onLockdown={() => void pauseNow("lockdown")}
+            />
+          ) : shownPanel === "history" ? (
             historyView
           ) : shownPanel === "library" ? (
             <LibraryView
@@ -1050,7 +1066,6 @@ export function App() {
               onRemoveApp={(resource) => void removeApp(resource)}
               deployed={deployed}
               pause={pauseView}
-              reach={reachNow}
               machines={machines}
               version={store.snapshot.version}
               jobs={store.snapshot.jobs}
@@ -1058,7 +1073,7 @@ export function App() {
               onRemoveMachine={handlers.removeMachine}
               onRunJob={runJob}
               warnings={store.snapshot.accessWarnings}
-              onPause={() => void pauseNow("keep-public")}
+              onOpenSafety={openSafety}
               onSignOut={(retry) => void signOut(retry)}
               signOutWarning={store.snapshot.signOutWarning}
               signingOut={signingOut}
@@ -1217,7 +1232,7 @@ export function App() {
             <span class="sticker wait">{plural(waitingRepos, "repo")} waiting</span>
           </button>
         ) : null}
-        <PanicButton size="toolbar" reach={reachNow} pause={pauseView} onPress={() => void pauseNow("keep-public")} />
+        <PanicOpener pause={pauseView} open={shownPanel === "safety"} onOpen={openSafety} />
         {pauseView ? (
           <button class="btn resume" onClick={startResume} data-tip={RESUME_TIP}>
             Resume
@@ -1334,7 +1349,7 @@ export function App() {
                       ]
                     : []),
                 ]
-              : [{ label: "Emergency pause", danger: true as const, tip: PAUSE_TIP, run: () => void pauseNow("keep-public") }]),
+              : [{ label: "Emergency pause: open the big red button", danger: true as const, tip: PAUSE_TIP, run: openSafety }]),
             ...(store.snapshot.signOutWarning
               ? [
                   {
@@ -1375,7 +1390,7 @@ export function App() {
         </div>
       ) : null}
       {toast ? (
-        <div class={`toast${toast.error ? " error" : ""}`} role="status">
+        <div class={`toast${toast.error ? " error" : ""}${floating ? " beside-panel" : ""}`} role="status">
           <span>{toast.text}</span>
           {toast.undo !== null ? (
             <button
@@ -1435,7 +1450,6 @@ function Panel(props: {
   /** K-909 */
   deployed: ReadonlySet<string>;
   pause: PauseView | null;
-  reach: () => PauseReach;
   warnings: ReadonlyArray<string>;
   machines: ReadonlyMap<string, MachineView>;
   jobs: ReadonlyArray<JobView>;
@@ -1443,7 +1457,7 @@ function Panel(props: {
   onRunJob: (view: MachineView, command: Command) => Promise<void>;
   version: string;
   onToast: (text: string, error: boolean) => void;
-  onPause: () => void;
+  onOpenSafety: () => void;
   onSignOut: (retry: boolean) => void;
   signOutWarning: string | null;
   signingOut: boolean;
@@ -1599,7 +1613,16 @@ function Panel(props: {
         <div class="label" data-tip="Safety: stop everything at once, or end every session.">
           Safety
         </div>
-        <PanicButton size="panel" reach={props.reach} pause={props.pause} onPress={props.onPause} />
+        <div class="row">
+          <button
+            type="button"
+            class="btn danger"
+            data-tip={props.pause ? RESUME_TIP : "Open the big red button: lift its lid, then press to pause everything."}
+            onClick={props.onOpenSafety}
+          >
+            {props.pause ? `Big red button: ${props.pause.mode === "lockdown" ? "locked down" : "paused"}` : "Big red button…"}
+          </button>
+        </div>
         <div class="row">
           <button
             class="btn danger"

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import type { PauseMode, PauseReach } from "../core/model.ts";
-import { Popover } from "./controls.tsx";
+import { lidSound } from "./panic.ts";
 
 /** K-1504: the stored pause, as the button and the banner show it. */
 export interface PauseView {
@@ -61,113 +61,122 @@ function effects(reach: PauseReach, pause: PauseView | null) {
   ] as const;
 }
 
-/**
- * K-1504: the "i" of the big red button. It explains what one press does, and while paused who pressed it.
- * `reach` runs only while the card shows, so the counts cost nothing on other snapshots.
- */
-function PauseInfo(props: {
-  reach: () => PauseReach;
-  pause: PauseView | null;
-  anchor: HTMLElement;
-  onClose: () => void;
-}) {
+/** K-1504: the toolbar opener of the big red button. It never pauses; it opens the Safety panel. */
+export function PanicOpener(props: { pause: PauseView | null; open: boolean; onOpen: () => void }) {
+  const pause = props.pause;
   return (
-    <Popover
-      label="What the big red button does"
-      anchor={props.anchor}
-      onClose={props.onClose}
-      class="pause-info"
+    <button
+      type="button"
+      class={`panic opener${pause ? " is-paused" : ""}`}
+      aria-expanded={props.open}
+      data-tip={
+        pause
+          ? `${pausedLabel(pause)}. Open the big red button to see what is closed. ${RESUME_TIP}`
+          : "Open the big red button: lift its lid, then press to pause everything at once."
+      }
+      onClick={props.onOpen}
     >
-      <div class="hazard-strip" aria-hidden="true" />
-      <div class="pause-info-body">
-        <div class="pause-info-head">
-          <h3>{props.pause ? pausedLabel(props.pause) : "What one press does"}</h3>
-          <button
-            type="button"
-            class="btn"
-            aria-label="Close"
-            data-tip="Close this explanation."
-            onClick={props.onClose}
-          >
-            ×
-          </button>
-        </div>
-        {props.pause?.by ? (
-          <p class="pause-info-now">
-            {props.pause.by} pressed it{props.pause.at === null ? "" : ` on ${when(props.pause.at)}`}.
-          </p>
-        ) : props.pause ? null : (
-          <p class="pause-info-now">No confirm: it stops all of this at once.</p>
-        )}
-        <ul class="pause-info-effects">
-          {effects(props.reach(), props.pause).map((effect) => (
-            <li key={effect.label}>
-              <span class={`sticker ${effect.tone}`}>{effect.label}</span>
-              <span>{effect.text}</span>
-            </li>
-          ))}
-        </ul>
-        <p class="pause-info-resume">
-          <b>Resume</b> needs your passkey again and returns every share. An edit or an undo never resumes.
-        </p>
-      </div>
-    </Popover>
+      <span class="panic-inner">
+        <span class="panic-well" aria-hidden="true">
+          <span class="mushroom">{pause ? "off" : "stop"}</span>
+        </span>
+        <span class="panic-label">
+          <b>Big red button</b>
+          <span>{pause ? pausedLabel(pause) : "Lift the lid, press"}</span>
+        </span>
+      </span>
+    </button>
   );
 }
 
 /**
- * K-1504: the big red button, after the panic button of the machine map (MM-708): a red mushroom in a
- * hazard frame. One press pauses; while paused it stays down, and the "i" says why. The toolbar has the
- * compact one; the Safety section of the map panel has the big one, which only shows the paused state.
+ * K-1504: the big red button in the Safety panel, after the panic button of the machine map (MM-708): a red
+ * mushroom under a flip-up lid in a hazard frame. Lifting the lid is part of the button, not a confirm; one
+ * press then pauses. While paused it stays down. Below it, what one press does, with the counts of the map.
  */
-export function PanicButton(props: {
-  size: "toolbar" | "panel";
+export function SafetyView(props: {
   reach: () => PauseReach;
   pause: PauseView | null;
   onPress: () => void;
+  onLockdown: () => void;
 }) {
-  const [info, setInfo] = useState<HTMLElement | null>(null);
+  const [lifted, setLifted] = useState(false);
   const pause = props.pause;
   const hint = pause
-    ? props.size === "panel" && pause.by
-      ? `${pausedLabel(pause)} by ${pause.by}. Resume is in the toolbar and the banner.`
-      : pausedLabel(pause)
-    : "One press pauses all";
+    ? `${pausedLabel(pause)}. Resume is in the toolbar and the banner.`
+    : lifted
+      ? "Press to stop everything"
+      : "Lift the lid first";
   return (
-    <div class={`panic ${props.size}${pause ? " is-paused" : ""}`}>
-      <div class="panic-inner">
-        <div class="panic-well">
-          <button
-            type="button"
-            class="mushroom"
-            aria-label={pause ? "Emergency pause: paused" : "Emergency pause"}
-            aria-disabled={pause ? true : undefined}
-            data-tip={pause ? `${pausedLabel(pause)}. ${RESUME_TIP}` : PAUSE_TIP}
-            onClick={() => {
-              if (!pause) props.onPress();
-            }}
-          >
-            {pause ? "off" : "stop"}
+    <div class="safety">
+      <div class={`panic panel${pause ? " is-paused" : ""}`}>
+        <span class="sticker panic-note" aria-hidden="true">
+          hands off
+        </span>
+        <div class="panic-inner">
+          <div class="panic-well">
+            {pause ? null : (
+              <button
+                type="button"
+                class={`lid${lifted ? " open" : ""}`}
+                aria-expanded={lifted}
+                aria-label={lifted ? "Close the lid" : "Lift the lid"}
+                data-tip={lifted ? "Close the lid." : "Lift the lid to reach the big red button."}
+                onClick={() => {
+                  lidSound(!lifted);
+                  setLifted(!lifted);
+                }}
+              >
+                <span>{lifted ? "close" : "lift"}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              class="mushroom"
+              aria-label={pause ? "Emergency pause: paused" : "Emergency pause"}
+              aria-disabled={pause || !lifted ? true : undefined}
+              data-tip={pause ? `${pausedLabel(pause)}. ${RESUME_TIP}` : lifted ? PAUSE_TIP : "Lift the lid first."}
+              onClick={() => {
+                if (pause || !lifted) return;
+                setLifted(false);
+                props.onPress();
+              }}
+            >
+              {pause ? "off" : "stop"}
+            </button>
+          </div>
+          <div class="panic-label">
+            <b>Big red button</b>
+            <span>{hint}</span>
+          </div>
+        </div>
+      </div>
+      <h3 class="safety-head">{pause ? pausedLabel(pause) : "What one press does"}</h3>
+      {pause?.by ? (
+        <p class="pause-info-now">
+          {pause.by} pressed it{pause.at === null ? "" : ` on ${when(pause.at)}`}.
+        </p>
+      ) : pause ? null : (
+        <p class="pause-info-now">No confirm after the lid: one press stops all of this at once.</p>
+      )}
+      <ul class="pause-info-effects">
+        {effects(props.reach(), pause).map((effect) => (
+          <li key={effect.label}>
+            <span class={`sticker ${effect.tone}`}>{effect.label}</span>
+            <span>{effect.text}</span>
+          </li>
+        ))}
+      </ul>
+      {pause?.mode === "keep-public" ? (
+        <div class="row">
+          <button type="button" class="btn danger" data-tip={LOCKDOWN_TIP} onClick={props.onLockdown}>
+            Close public sites too
           </button>
         </div>
-        <div class="panic-label">
-          <b>Big red button</b>
-          <span>{hint}</span>
-        </div>
-        <button
-          type="button"
-          class="panic-info"
-          aria-label="What the big red button does"
-          aria-expanded={info !== null}
-          data-tip="What one press closes, stops and keeps, and how Resume works."
-          onClick={(event) => setInfo(info ? null : event.currentTarget)}
-        >
-          i
-        </button>
-      </div>
-      {info ? (
-        <PauseInfo reach={props.reach} pause={pause} anchor={info} onClose={() => setInfo(null)} />
       ) : null}
+      <p class="pause-info-resume">
+        <b>Resume</b> needs your passkey again and returns every share. An edit or an undo never resumes.
+      </p>
     </div>
   );
 }

@@ -642,6 +642,17 @@ input[type="search"]::-webkit-search-cancel-button {
   font-weight: 700;
   font-size: 0.85rem;
 }
+/* Beside a floating panel, the toast centres over the map, so it never runs under the panel. */
+.toast.beside-panel {
+  left: calc((100vw - var(--panel-width) - 24px) / 2);
+  max-width: min(640px, calc(100vw - var(--panel-width) - 44px));
+}
+@media (max-width: 720px) {
+  .toast.beside-panel {
+    left: 50%;
+    max-width: calc(100vw - 20px);
+  }
+}
 .toast .btn {
   flex: none;
   white-space: nowrap;
@@ -997,35 +1008,6 @@ input[type="search"]::-webkit-search-cancel-button {
 .panic.panel .panic-label span {
   font-size: 0.85rem;
 }
-.panic.panel .panic-info {
-  align-self: flex-start;
-}
-.panic-info {
-  width: 1.4rem;
-  height: 1.4rem;
-  padding: 0;
-  font: inherit;
-  font-size: 0.8rem;
-  font-weight: 800;
-  line-height: 1;
-  color: #000000;
-  background: var(--info);
-  border: var(--bw) solid #000000;
-  border-radius: 50%;
-  box-shadow: 2px 2px 0 0 #000000;
-  cursor: pointer;
-  transition:
-    transform 80ms,
-    box-shadow 80ms;
-}
-.panic-info:hover {
-  transform: translate(-1px, -1px);
-  box-shadow: 3px 3px 0 0 #000000;
-}
-.panic-info:active {
-  transform: translate(2px, 2px);
-  box-shadow: none;
-}
 .hazard-strip {
   height: 12px;
   background: var(--hazard-stripes);
@@ -1036,35 +1018,101 @@ input[type="search"]::-webkit-search-cancel-button {
   background: var(--panic);
 }
 
-/* The "i" of the big red button: what one press does (controls.tsx `Popover` places it). */
-.popover {
-  position: fixed;
-  left: 0;
-  top: 0;
-  z-index: 40;
+/* The toolbar opener: the same frame and mushroom, as one button that opens the Safety panel. */
+.panic.opener {
+  font: inherit;
   color: var(--ink);
-  background: var(--surface);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 80ms,
+    box-shadow 80ms;
 }
-.pause-info {
-  width: min(27rem, calc(100vw - 16px));
-  max-height: calc(100dvh - 16px);
-  overflow: auto;
+.panic.opener:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 0 var(--shadow-ink);
 }
-.pause-info-body {
-  padding: 10px 14px 12px;
+.panic.opener:active {
+  transform: translate(3px, 3px);
+  box-shadow: none;
 }
-.pause-info-head {
+.panic.opener .panic-inner {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
 }
-.pause-info h3 {
+.panic.opener .mushroom {
+  display: grid;
+  place-items: center;
+}
+.panic.opener[aria-expanded="true"] .panic-inner {
+  background: var(--select);
+  color: var(--select-fg);
+}
+/* The flip-up lid of the big button (MM-708): clear hatched plastic on a left hinge. */
+.panic-well {
+  position: relative;
+}
+.lid {
+  position: absolute;
+  inset: -2px;
+  z-index: 2;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0 0 6px;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #000000;
+  background: repeating-linear-gradient(135deg, #ffffffb3 0 7px, #ffffff59 7px 14px);
+  border: var(--bw) solid #000000;
+  border-radius: 16px;
+  /* A top hinge: the lid flips up and stays inside the frame, so a panel edge never cuts it. */
+  transform-origin: center top;
+  transition: transform 120ms;
+  cursor: pointer;
+}
+.lid span {
+  padding: 1px 8px;
+  background: var(--yellow);
+  border: var(--bw) solid #000000;
+  border-radius: 4px;
+}
+.lid.open span {
+  visibility: hidden;
+}
+@media (hover: hover) {
+  .lid:not(.open):hover {
+    transform: perspective(360px) rotateX(18deg);
+  }
+}
+.lid.open {
+  transform: perspective(360px) rotateX(112deg);
+}
+.mushroom[aria-disabled="true"] {
+  cursor: default;
+}
+.panic-note {
+  position: absolute;
+  top: -12px;
+  right: 14px;
+  z-index: 3;
+  --tilt: 3deg;
+  background: var(--yellow);
+}
+.safety .panic.panel {
+  margin-top: 16px;
+}
+.safety-head {
+  margin: 4px 0 0;
   font-size: 1.3rem;
   text-transform: uppercase;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lid {
+    transition: none;
+  }
 }
 .pause-info-now {
   margin: 6px 0 0;

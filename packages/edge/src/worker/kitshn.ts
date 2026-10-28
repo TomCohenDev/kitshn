@@ -104,7 +104,11 @@ import {
   fillAudiences,
   hasAccessWork,
   rowsWithoutAud,
+  type SignOutOutcome,
+  revokeSessions,
   signOutEverywhere,
+  signOutSummary,
+  signOutWarning,
   syncAccess,
   syncLauncher,
   LOGIN_CALLS,
@@ -769,6 +773,7 @@ export class Kitshn extends DurableObject<Env> {
         ...(loginError ? [loginError] : []),
         ...loginWarnings(desired, this.access),
       ],
+      signOutWarning: signOutWarning(this.signOutLeft()),
       paused: this.state.paused,
       repos,
       deployedCards: this.deployedCards(),
@@ -885,6 +890,7 @@ export class Kitshn extends DurableObject<Env> {
     }
     if (path === "/api/state" && request.method === "GET") return Response.json(this.snapshot(caller.actor));
     if (path === "/api/sign-out" && request.method === "POST") return this.signOut(caller);
+    if (path === "/api/sign-out/retry" && request.method === "POST") return this.retrySignOut(caller);
     if (path === "/api/machines" && request.method === "POST")
       return this.addMachine(caller, await request.json().catch(() => null), new URL(request.url).origin);
     if (path.startsWith("/api/machines/") && path.endsWith("/rotate-key") && request.method === "POST")
@@ -2404,26 +2410,32 @@ export class Kitshn extends DurableObject<Env> {
   private async signOut(caller: Caller) {
     // K-110: the Worker checks pages and files itself, so it refuses every login from before this second.
     this.setMeta("signed_out_at", String(Math.floor(Date.now() / 1000) * 1000));
-    // K-110: no confirm in the map, so History records each sign-out before any Cloudflare call; the toast
-    // says how many Access applications ended their sessions.
-    const at = Date.now();
-    const summary = "Started sign-out everywhere: page and file logins end now; kitshn asks Cloudflare to end Access sessions";
-    const id = this.insertRevision(caller.actor, summary, [], null);
-    this.revisions = [
-      { id, at, actor: caller.actor, summary, undoes: null, undoneBy: null, undoable: false },
-      ...this.revisions,
-    ].slice(0, RECENT_REVISIONS);
-    this.broadcast();
-    const api = this.api();
-    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    // K-110: no confirm in the map, so History records the start before any Cloudflare call, and the outcome.
+    this.recordRevision(
+      caller.actor,
+      "Started sign-out everywhere: page and file logins end now; kitshn asks Cloudflare to end Access sessions",
+    );
+    return this.finishSignOut(caller, (api) => this.revokeEverything(api));
+  }
+
+  /** K-110: revokes the sessions that the last sign-out left, or starts over when it could not list them. */
+  private retrySignOut(caller: Caller) {
+    const left = this.signOutLeft();
+    if (!left) return Response.json({ error: "Every session of the last sign-out ended already." }, { status: 409 });
+    return this.finishSignOut(caller, (api) =>
+      "listFailed" in left ? this.revokeEverything(api) : revokeSessions(api, this.env.CLOUDFLARE_ACCOUNT_ID, left.left),
+    );
+  }
+
+  private async revokeEverything(api: Api): Promise<SignOutOutcome> {
+    const account = this.env.CLOUDFLARE_ACCOUNT_ID;
+    const logins = new Set(
+      ["pages", "files"].flatMap((host) => [
+        `${host}.${this.env.KITSHN_ZONE}/login`,
+        `${host}.${this.env.KITSHN_ZONE}/login/passkey`,
+      ]),
+    );
     try {
-      const account = this.env.CLOUDFLARE_ACCOUNT_ID;
-      const logins = new Set(
-        ["pages", "files"].flatMap((host) => [
-          `${host}.${this.env.KITSHN_ZONE}/login`,
-          `${host}.${this.env.KITSHN_ZONE}/login/passkey`,
-        ]),
-      );
       const all = await api<Array<{ id: string; name: string; domain: string }>>(
         "GET",
         `/accounts/${account}/access/apps?per_page=1000`,
@@ -2431,11 +2443,44 @@ export class Kitshn extends DurableObject<Env> {
       const loginApps = all
         .filter((app) => logins.has(app.domain) && app.name.startsWith(ACCESS_NAME_PREFIX))
         .map((app) => ({ key: app.domain, cfId: app.id }));
-      return Response.json(await signOutEverywhere(this.accessStore(), api, account, loginApps));
+      return await signOutEverywhere(this.accessStore(), api, account, loginApps);
     } catch (error) {
-      return Response.json({ error: String(error) }, { status: 502 });
+      return { ended: 0, listFailed: String(error) };
     }
   }
+
+  /** K-110: stores what is left (the warning with Retry) and records the outcome in History. */
+  private async finishSignOut(caller: Caller, run: (api: Api) => Promise<SignOutOutcome>) {
+    const api = this.api();
+    const outcome: SignOutOutcome = api
+      ? await run(api)
+      : { ended: 0, listFailed: "kitshn has no Cloudflare API token here" };
+    this.setMeta("sign_out_left", signOutWarning(outcome) ? JSON.stringify(outcome) : "");
+    this.recordRevision(caller.actor, signOutSummary(outcome));
+    return "listFailed" in outcome
+      ? Response.json({ error: signOutWarning(outcome) }, { status: 502 })
+      : Response.json({ ended: outcome.ended, failed: outcome.left.map((app) => `${app.key}: ${app.reason}`) });
+  }
+
+  /** K-110: what the last sign-out left to do, or null when every session ended. */
+  private signOutLeft(): SignOutOutcome | null {
+    const saved = this.meta("sign_out_left");
+    return saved ? (JSON.parse(saved) as SignOutOutcome) : null;
+  }
+
+  /**
+   * A revision without changes, also into the in-memory History list. It never calls `load()`, which would
+   * swap the Access map under a sync that awaits Cloudflare.
+   */
+  private recordRevision(actor: Actor, summary: string) {
+    const id = this.insertRevision(actor, summary, [], null);
+    this.revisions = [
+      { id, at: Date.now(), actor, summary, undoes: null, undoneBy: null, undoable: false },
+      ...this.revisions,
+    ].slice(0, RECENT_REVISIONS);
+    this.broadcast();
+  }
+
 
   /** K-106: the Access service tokens of the account, to pick a device member. */
   private async listDevices() {

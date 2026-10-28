@@ -613,9 +613,16 @@ export function App() {
     );
   };
 
-  /** K-110: no confirm; History records it. */
-  const signOut = async () => {
-    const result = await callApi<{ ended: number; failed: Array<string> }>("POST", "/api/sign-out", {});
+  /**
+   * K-110: no confirm; History records the start and the outcome. Sessions left show as a warning with
+   * Retry, which calls the same endpoint family.
+   */
+  const signOut = async (retry: boolean) => {
+    const result = await callApi<{ ended: number; failed: Array<string> }>(
+      "POST",
+      retry ? "/api/sign-out/retry" : "/api/sign-out",
+      {},
+    );
     showToast(
       "error" in result
         ? { text: result.error, error: true, undo: null }
@@ -985,7 +992,8 @@ export function App() {
         onRunJob={runJob}
         warnings={store.snapshot.accessWarnings}
         onPause={(pause) => (pause ? setPausing(true) : startResume())}
-        onSignOut={() => void signOut()}
+        onSignOut={(retry) => void signOut(retry)}
+        signOutWarning={store.snapshot.signOutWarning}
       />
       {store.snapshot.paused ? (
         <PausedBanner
@@ -1008,6 +1016,15 @@ export function App() {
               tip: PAUSE_TIP,
               run: () => (store.snapshot?.paused ? startResume() : setPausing(true)),
             },
+            ...(store.snapshot.signOutWarning
+              ? [
+                  {
+                    label: "Retry sign-out everywhere",
+                    tip: store.snapshot.signOutWarning,
+                    run: () => void signOut(true),
+                  },
+                ]
+              : []),
             ...paletteEntries(actionContext, handlers),
           ]}
         />
@@ -1138,7 +1155,8 @@ function Panel(props: {
   version: string;
   onToast: (text: string, error: boolean) => void;
   onPause: (pause: boolean) => void;
-  onSignOut: () => void;
+  onSignOut: (retry: boolean) => void;
+  signOutWarning: string | null;
   accessTeam: string;
   onSelectCard: (id: string) => void;
   onSelectCircle: (id: string) => void;
@@ -1264,7 +1282,7 @@ function Panel(props: {
         </ul>
         <RepoList repos={props.repos} onToast={props.onToast} />
         <p class="muted">You are {actorLabel(props.me)}.</p>
-        {props.warnings.length > 0 ? (
+        {props.warnings.length > 0 || props.signOutWarning ? (
           <>
             <div class="label" data-tip="Access warnings: Access applications that kitshn did not make and that cover a kitshn address.">
               Access warnings
@@ -1273,6 +1291,19 @@ function Panel(props: {
               {props.warnings.map((warning) => (
                 <li key={warning}>{warning}</li>
               ))}
+              {props.signOutWarning ? (
+                <li>
+                  {props.signOutWarning}{" "}
+                  <button
+                    type="button"
+                    class="btn"
+                    data-tip="Retry sign-out: revoke the sessions of the applications above again. The warning goes once every session ended."
+                    onClick={() => props.onSignOut(true)}
+                  >
+                    Retry sign-out
+                  </button>
+                </li>
+              ) : null}
             </ul>
           </>
         ) : null}
@@ -1294,7 +1325,7 @@ function Panel(props: {
           <button
             class="btn danger"
             data-tip="Sign out everywhere: ends every Access session of kitshn's apps at once. Everyone logs in again, you too. History records it."
-            onClick={props.onSignOut}
+            onClick={() => props.onSignOut(false)}
           >
             Sign out everywhere: ends every session
           </button>

@@ -279,6 +279,21 @@ export async function verifyAccess(
   return warnings;
 }
 
+/** K-110: an application whose sessions a sign-out did not end yet, and why. */
+export interface LeftApp {
+  readonly key: string;
+  readonly cfId: string;
+  readonly reason: string;
+}
+
+/**
+ * K-110: what a sign-out did. `listFailed` means the list of applications failed, so no session ended and a
+ * retry starts over; otherwise `left` names each application that a retry revokes again.
+ */
+export type SignOutOutcome =
+  | { readonly ended: number; readonly left: ReadonlyArray<LeftApp> }
+  | { readonly ended: 0; readonly listFailed: string };
+
 /** K-110: ends the sessions of every application that kitshn made. It never touches other applications. */
 export async function signOutEverywhere(
   store: AccessStore,
@@ -286,26 +301,52 @@ export async function signOutEverywhere(
   accountId: string,
   /** Applications that the bootstrap made, such as the page and file logins (K-1004). */
   loginApps: ReadonlyArray<{ readonly key: string; readonly cfId: string }> = [],
-): Promise<{ ended: number; failed: Array<string> }> {
-  let ended = 0;
-  const failed: Array<string> = [];
+): Promise<SignOutOutcome> {
   const apps = [
     ...[...store.rows.values()].filter((row) => row.key.startsWith("app:") && row.cfId),
     ...loginApps,
   ];
-  for (const [index, row] of apps.entries()) {
+  return revokeSessions(api, accountId, apps);
+}
+
+/** K-110: `revoke_tokens` for each application, at most one run of calls; the rest stay in `left`. */
+export async function revokeSessions(
+  api: Api,
+  accountId: string,
+  apps: ReadonlyArray<{ readonly key: string; readonly cfId: string }>,
+): Promise<SignOutOutcome> {
+  let ended = 0;
+  const left: Array<LeftApp> = [];
+  for (const [index, app] of apps.entries()) {
     if (index >= CALLS_PER_RUN) {
-      failed.push(`${apps.length - index} more applications (the call limit of one request)`);
-      break;
+      left.push({ key: app.key, cfId: app.cfId, reason: "the call limit of one request" });
+      continue;
     }
     try {
-      await api("POST", `/accounts/${accountId}/access/apps/${row.cfId}/revoke_tokens`);
+      await api("POST", `/accounts/${accountId}/access/apps/${app.cfId}/revoke_tokens`);
       ended++;
     } catch (error) {
-      failed.push(`${row.key}: ${message(error)}`);
+      left.push({ key: app.key, cfId: app.cfId, reason: message(error) });
     }
   }
-  return { ended, failed };
+  return { ended, left };
+}
+
+/** K-110: the History entry of one sign-out or retry. */
+export function signOutSummary(outcome: SignOutOutcome): string {
+  if ("listFailed" in outcome) return `Sign-out everywhere failed: kitshn could not list the Access applications (${outcome.listFailed})`;
+  const ended = `Sign-out everywhere ended the sessions of ${outcome.ended} applications`;
+  return outcome.left.length === 0 ? ended : `${ended} and failed for: ${outcome.left.map((app) => app.key).join(", ")}`;
+}
+
+/** K-110: the Access warning while sessions are left, or null when every session ended. */
+export function signOutWarning(outcome: SignOutOutcome | null): string | null {
+  if (!outcome) return null;
+  if ("listFailed" in outcome)
+    return `Sign out everywhere ended no Access session: kitshn could not list the applications (${outcome.listFailed}). Retry starts it again.`;
+  if (outcome.left.length === 0) return null;
+  const apps = outcome.left.map((app) => `${app.key} (${app.reason})`).join("; ");
+  return `Sign out everywhere did not end the sessions of ${outcome.left.length} applications: ${apps}. Retry revokes them again.`;
 }
 
 /**

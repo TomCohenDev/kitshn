@@ -78,7 +78,7 @@ import {
 } from "./service.ts";
 import { type SiteEntry, addSite, parseSiteFile, probe, targetOf } from "./sites.ts";
 import { RUNNING_FORMAT, VOLUME_FORMAT, idleVolumes, volumeRemoveRefusal } from "./volumes.ts";
-import { keptTag, serviceImages, staleTags } from "./keep.ts";
+import { keepBuild, keptId, keptTag, rollbackOverride, serviceImages, staleTags } from "./keep.ts";
 
 declare const KITSHN_VERSION: string;
 const VERSION = typeof KITSHN_VERSION === "string" ? KITSHN_VERSION : "dev";
@@ -597,8 +597,6 @@ async function composeUp(
     const previous = join(dir, "good.prev");
     // A stop in the middle of the swap below leaves only good.old; it is still the last good build.
     if (!existsSync(good) && existsSync(`${good}.old`)) renameSync(`${good}.old`, good);
-    const keptId = (set: string) =>
-      existsSync(join(set, "deploy-id")) ? readFileSync(join(set, "deploy-id"), "utf8").trim() : null;
     if (command.kind === "compose-rollback") {
       if (keptId(previous) !== command.deployId)
         throw new Error(
@@ -815,14 +813,22 @@ async function composeUp(
       "--env-file",
       env.KITSHN_PARAMS_FILE,
     ];
-    // K-821: a rollback runs the kept images of that deploy under the names that Compose runs, with no build.
-    const images = serviceImages(config, command.project);
+    // K-821: a rollback runs the kept images of that deploy through an override, with no build and no pull.
+    let images = serviceImages(config, command.project);
     if (command.kind === "compose-rollback") {
-      for (const [service, image] of images)
-        await step(`take the kept image of ${service}`, "docker", [
-          "tag",
-          keptTag(command.project, service, command.deployId),
-          image,
+      const override = rollbackOverride(config, command.project, command.deployId);
+      const overrideFile = join(scratch, "compose.rollback.json");
+      writeFileSync(overrideFile, JSON.stringify(override), { mode: 0o600 });
+      run.push("-f", overrideFile);
+      images = new Map(Object.entries(override.services).map(([service, pinned]) => [service, pinned.image]));
+      // Before the app stops: a missing kept image fails here, and the app runs on.
+      for (const [service, tag] of images)
+        await step(`find the kept image of ${service}`, "docker", [
+          "image",
+          "inspect",
+          "--format",
+          "{{.Id}}",
+          tag,
         ]);
     } else
       await step("docker compose build", "nice", ["-n", "19", "docker", ...run, "build"], {
@@ -874,8 +880,10 @@ async function composeUp(
       for (const [service, image] of images) {
         const id = await runProgram("docker", ["image", "inspect", "--format", "{{.Id}}", image]);
         if (!id.ok) continue;
+        const tag = keptTag(command.project, service, deployId);
+        // A rollback runs the kept tag itself; only a service whose tag exists counts as kept.
+        if (image !== tag && !(await runProgram("docker", ["tag", image, tag])).ok) continue;
         kept[service] = id.output.trim();
-        await runProgram("docker", ["tag", image, keptTag(command.project, service, deployId)]);
       }
     // The build and its params change together: a stop in between leaves the old pair, the new pair or none.
     const staged = join(dir, "good.next");
@@ -886,17 +894,7 @@ async function composeUp(
     chmodSync(join(staged, "params.env"), 0o600);
     if (deployId !== null) writeFileSync(join(staged, "deploy-id"), `${deployId}\n`);
     rmSync(checked, { force: true });
-    rmSync(`${good}.old`, { recursive: true, force: true });
-    // K-821: a new build or a rollback moves the build that ran so far to good.prev/; a preview keeps only one build.
-    const preview = /^pr-\d+$/.test(command.environment);
-    if (command.kind === "compose-redeploy") {
-      if (existsSync(good)) renameSync(good, `${good}.old`);
-    } else {
-      rmSync(previous, { recursive: true, force: true });
-      if (existsSync(good)) renameSync(good, preview ? `${good}.old` : previous);
-    }
-    renameSync(staged, good);
-    rmSync(`${good}.old`, { recursive: true, force: true });
+    keepBuild(dir, staged, command.kind === "compose-redeploy", /^pr-\d+$/.test(command.environment));
     output += await pruneKept(
       command.project,
       [keptId(good), keptId(previous)].flatMap((id) => (id ? [id] : [])),
@@ -1137,7 +1135,11 @@ async function removeVolume(
     return { ok: false, exitCode: null, output: "Docker does not answer, so the volume stays." };
   const refusal = volumeRemoveRefusal(idle, command);
   if (refusal !== null) return { ok: false, exitCode: null, output: refusal };
-  return runProgram("docker", ["volume", "rm", command.volume]);
+  const removed = await runProgram("docker", ["volume", "rm", command.volume]);
+  if (!removed.ok) return removed;
+  // K-821: an orphaned volume belongs to a removed app, so its kept builds for a rollback go with it.
+  rmSync(join(paths.data, "apps", command.project, "good.prev"), { recursive: true, force: true });
+  return { ...removed, output: removed.output + (await pruneKept(command.project, [])) };
 }
 
 /** One Compose job per app at a time: a teardown never runs during the build of the same app. */

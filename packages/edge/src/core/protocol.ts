@@ -63,6 +63,8 @@ export interface Snapshot {
   readonly repos: ReadonlyArray<RepoView>;
   /** K-909: the cards that a deploy made; only these show "Remove app". */
   readonly deployedCards: ReadonlyArray<string>;
+  /** K-821: the deployed cards of pull request previews, which have no rollback. */
+  readonly previewCards: ReadonlyArray<string>;
   /** K-909: what removed Worker apps left in Cloudflare: a kept script and KV namespaces, by the removed card. */
   readonly orphanWorkers: ReadonlyArray<OrphanWorker>;
   /** K-820: the cards whose newest deploy failed or did not run, with why. */

@@ -114,12 +114,14 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "CREATE INDEX deploys_resource ON deploys (resource_id)",
   ],
   // 18: rollback (K-821). `images` holds the image id of each service of a Compose deploy that came up; `needs` the
-  // keys of `needs.apps`, so a run rolls back in its own order. `rollbacks` holds the steps of a run rollback.
+  // keys of `needs.apps`, so a run rolls back in its own order. `origin` is the deploy whose build a rollback row
+  // repeats, the id that the daemon keeps it by. `rollbacks` holds the steps of a run rollback and the job it waits for.
   [
     "ALTER TABLE deploys ADD COLUMN images TEXT",
     "ALTER TABLE deploys ADD COLUMN needs TEXT",
+    "ALTER TABLE deploys ADD COLUMN origin TEXT",
     `CREATE TABLE rollbacks (id TEXT PRIMARY KEY, steps TEXT NOT NULL, next INTEGER NOT NULL, state TEXT NOT NULL,
-      actor TEXT NOT NULL, notes TEXT NOT NULL)`,
+      actor TEXT NOT NULL, notes TEXT NOT NULL, job_id INTEGER)`,
   ],
 ];
 

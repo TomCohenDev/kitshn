@@ -319,6 +319,8 @@ export class Kitshn extends DurableObject<Env> {
       if (this.state.circles.size === 0) this.seed();
       this.syncAdminAddress();
       this.reconcilePresence();
+      // K-821: a restart cut off any run rollback that did not wait for a job.
+      this.settleRollbacks();
       await this.scheduleAlarm();
     });
   }
@@ -932,14 +934,15 @@ export class Kitshn extends DurableObject<Env> {
   /**
    * K-821: rolls one card back to an earlier finished deploy. A static or Worker card deploys that Cloudflare version
    * again at once; a Compose card starts its kept build on its machine as a job. The new deploy row repeats the old
-   * one, so the card, Undo and the next rollback see it as the current deploy. Data never rolls back.
+   * one, so the card, Undo and the next rollback see it as the current deploy. Data never rolls back; the vars and
+   * secrets (or the Compose params) of that deploy come back with it.
    */
   private async rollbackCard(
     actor: Actor,
     card: string,
     deployId: string,
     group: string | null,
-  ): Promise<{ readonly note: string; readonly waits: boolean } | { readonly error: string }> {
+  ): Promise<{ readonly note: string; readonly jobId: number | null } | { readonly error: string }> {
     const resource = this.state.resources.get(card);
     if (!resource || !this.deployedCards(card).includes(card))
       return { error: `A deploy did not make the card "${card}" (K-821).` };
@@ -948,8 +951,12 @@ export class Kitshn extends DurableObject<Env> {
     const choice = this.rollbackChoices(card).find((item) => item.deployId === deployId);
     if (!choice) return { error: `${deployId} is not one of the last finished deploys of ${resource.name}.` };
     if (choice.why !== null) return { error: choice.why };
+    // The newest row counts as the current deploy, so a deploy that ends after the rollback would hide it.
+    if (this.deployRuns(card)) return { error: "A deploy of this card runs now. Roll back after it ends." };
     const [target] = this.sql<DeployRow>("SELECT * FROM deploys WHERE id = ?", deployId);
     if (!target) return { error: `kitshn knows no deploy ${deployId}.` };
+    // The daemon keeps a Compose build by the deploy that built it; a rollback row repeats that build.
+    const origin = target.origin ?? target.id;
     const refusal = this.repoRefusal(target.repo_id);
     if (refusal) return { error: refusal };
     const sha = target.sha.slice(0, 7);
@@ -958,15 +965,16 @@ export class Kitshn extends DurableObject<Env> {
       this.sql(
         `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state,
            expires_at, branch, app, machine_id, job_id, compose_file, addresses, worker, app_key, reason, version_id,
-           run_id, run_attempt, images, needs)
+           run_id, run_attempt, images, needs, origin)
          SELECT ?, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, ?, ?, branch, app,
-           machine_id, ?, compose_file, addresses, worker, app_key, ?, version_id, NULL, NULL, images, needs
+           machine_id, ?, compose_file, addresses, worker, app_key, ?, version_id, NULL, NULL, images, needs, ?
          FROM deploys WHERE id = ?`,
         id,
         state,
         Date.now() + DEPLOY_MS,
         jobId,
         `rollback to ${sha}`,
+        origin,
         deployId,
       );
     if (target.app !== "compose") {
@@ -990,7 +998,10 @@ export class Kitshn extends DurableObject<Env> {
         insert("done", null);
         this.insertRevision(actor, `Rolled back ${resource.name} to ${sha} (K-821)`, [], null);
       });
-      return { note: `${resource.name} serves ${sha} again; its data did not roll back.`, waits: false };
+      return {
+        note: `${resource.name} serves ${sha} again, with the vars and secrets of that deploy; its data did not roll back.`,
+        jobId: null,
+      };
     }
     const machine = resource.machine ? this.state.machines.get(resource.machine) : undefined;
     if (!machine) return { error: `${resource.name} runs on no known machine.` };
@@ -998,12 +1009,12 @@ export class Kitshn extends DurableObject<Env> {
     if (offMachine) return { error: offMachine };
     if (!this.machineView(machine).status?.capabilities?.includes("compose-rollback"))
       return { error: `Update the daemon on ${machine.name} first: it cannot roll back yet (K-821).` };
-    this.ctx.storage.transactionSync(() => {
-      const jobId = this.queueKitshnJob(
+    const jobId = this.ctx.storage.transactionSync(() => {
+      const queued = this.queueKitshnJob(
         machine.id,
         {
           kind: "compose-rollback",
-          deployId,
+          deployId: origin,
           allowed: allowedFor(machine, target.repo),
           project: card,
           name: target.address.slice(0, -this.env.KITSHN_ZONE.length - 1),
@@ -1015,13 +1026,14 @@ export class Kitshn extends DurableObject<Env> {
         actor,
         Date.now() + DEPLOY_MS,
       );
-      insert("running", jobId);
+      insert("running", queued);
       this.insertRevision(actor, `Rolled back ${resource.name} to ${sha} (K-821)`, [], null);
+      return queued;
     });
     this.deliverJobs();
     return {
-      note: `${machine.name} starts the kept build ${sha} of ${resource.name}; its data does not roll back.`,
-      waits: true,
+      note: `${machine.name} starts the kept build ${sha} of ${resource.name}, with the params of that deploy; its data does not roll back.`,
+      jobId,
     };
   }
 
@@ -1103,6 +1115,17 @@ export class Kitshn extends DurableObject<Env> {
     if ("error" in plan) return Response.json({ error: plan.error }, { status: 409 });
     const blocked = plan.find((step) => step.why !== null);
     if (blocked) return Response.json({ error: `${blocked.name}: ${blocked.why}` }, { status: 409 });
+    const busy = new Set(
+      this.sql<{ steps: string }>("SELECT steps FROM rollbacks WHERE state = 'running'").flatMap((row) =>
+        (JSON.parse(row.steps) as Array<RunRollbackStep>).map((step) => step.card),
+      ),
+    );
+    const overlap = plan.find((step) => busy.has(step.card));
+    if (overlap)
+      return Response.json(
+        { error: `A run rollback of ${overlap.name} runs now. Wait until it ends.` },
+        { status: 409 },
+      );
     const id = crypto.randomUUID();
     this.sql(
       "INSERT INTO rollbacks (id, steps, next, state, actor, notes) VALUES (?, ?, 0, 'running', ?, '[]')",
@@ -1123,40 +1146,51 @@ export class Kitshn extends DurableObject<Env> {
     });
   }
 
+  /** K-821: the run rollbacks that a call of advanceRollback works on now; a restart empties it. */
+  private readonly advancing = new Set<string>();
+
   /** K-821: runs the next steps of a run rollback until one waits for a machine, fails, or the last one is done. */
   private async advanceRollback(id: string) {
-    for (;;) {
-      const [row] = this.sql<{ steps: string; next: number; state: string; actor: string; notes: string }>(
-        "SELECT steps, next, state, actor, notes FROM rollbacks WHERE id = ?",
-        id,
-      );
-      if (!row || row.state !== "running") return;
-      const steps = JSON.parse(row.steps) as Array<RunRollbackStep>;
-      const notes = JSON.parse(row.notes) as Array<string>;
-      const step = steps[row.next];
-      if (!step) {
-        this.sql("UPDATE rollbacks SET state = 'done' WHERE id = ?", id);
-        return;
+    this.advancing.add(id);
+    try {
+      for (;;) {
+        const [row] = this.sql<{ steps: string; next: number; state: string; actor: string; notes: string }>(
+          "SELECT steps, next, state, actor, notes FROM rollbacks WHERE id = ?",
+          id,
+        );
+        if (!row || row.state !== "running") return;
+        const steps = JSON.parse(row.steps) as Array<RunRollbackStep>;
+        const notes = JSON.parse(row.notes) as Array<string>;
+        const step = steps[row.next];
+        if (!step) {
+          this.finishRollback(id, "done", notes);
+          return;
+        }
+        const result = await this.rollbackCard(
+          JSON.parse(row.actor) as Actor,
+          step.card,
+          step.deployId ?? "",
+          id,
+        );
+        if ("error" in result) {
+          this.finishRollback(id, "failed", [
+            ...notes,
+            `${step.name}: ${result.error} The rollback stopped here.`,
+          ]);
+          return;
+        }
+        notes.push(result.note);
+        this.sql(
+          "UPDATE rollbacks SET next = next + ?, notes = ?, job_id = ? WHERE id = ?",
+          result.jobId === null ? 1 : 0,
+          JSON.stringify(notes),
+          result.jobId,
+          id,
+        );
+        if (result.jobId !== null) return;
       }
-      const result = await this.rollbackCard(
-        JSON.parse(row.actor) as Actor,
-        step.card,
-        step.deployId ?? "",
-        id,
-      );
-      if ("error" in result) {
-        notes.push(`${step.name}: ${result.error} The rollback stopped here.`);
-        this.sql("UPDATE rollbacks SET state = 'failed', notes = ? WHERE id = ?", JSON.stringify(notes), id);
-        return;
-      }
-      notes.push(result.note);
-      this.sql(
-        "UPDATE rollbacks SET next = next + ?, notes = ? WHERE id = ?",
-        result.waits ? 0 : 1,
-        JSON.stringify(notes),
-        id,
-      );
-      if (result.waits) return;
+    } finally {
+      this.advancing.delete(id);
     }
   }
 
@@ -1167,13 +1201,47 @@ export class Kitshn extends DurableObject<Env> {
       id,
     );
     if (!row) return;
+    const notes = JSON.parse(row.notes) as Array<string>;
     if (error !== null) {
-      const notes = [...(JSON.parse(row.notes) as Array<string>), `${error} The rollback stopped here.`];
-      this.sql("UPDATE rollbacks SET state = 'failed', notes = ? WHERE id = ?", JSON.stringify(notes), id);
+      this.finishRollback(id, "failed", [...notes, `${error} The rollback stopped here.`]);
       return;
     }
-    this.sql("UPDATE rollbacks SET next = next + 1 WHERE id = ?", id);
+    this.sql("UPDATE rollbacks SET next = next + 1, job_id = NULL WHERE id = ?", id);
+    // Set now, so the alarm does not settle the rollback before the next step starts.
+    this.advancing.add(id);
     void this.advanceRollback(id).then(() => this.broadcast());
+  }
+
+  /**
+   * K-821: stops each run rollback that waits for nothing: its job ended without a result (it expired, its machine
+   * went offline, the repo was blocked, the delivery failed), or a restart cut off a step. Returns how many stopped.
+   */
+  private settleRollbacks() {
+    const stuck = this.sql<{ id: string; notes: string }>(
+      `SELECT rollbacks.id, rollbacks.notes FROM rollbacks LEFT JOIN jobs ON jobs.id = rollbacks.job_id
+       WHERE rollbacks.state = 'running' AND (jobs.id IS NULL OR jobs.state NOT IN ('queued', 'sent'))`,
+    ).filter((row) => !this.advancing.has(row.id));
+    for (const row of stuck)
+      this.finishRollback(row.id, "failed", [
+        ...(JSON.parse(row.notes) as Array<string>),
+        "The machine sent no result for the last step. The rollback stopped here.",
+      ]);
+    return stuck.length;
+  }
+
+  /** K-821: the end of a run rollback; History shows it, because the toast shows only the steps before a job. */
+  private finishRollback(id: string, state: "done" | "failed", notes: ReadonlyArray<string>) {
+    const [row] = this.sql<{ actor: string }>(
+      "UPDATE rollbacks SET state = ?, notes = ?, job_id = NULL WHERE id = ? AND state = 'running' RETURNING actor",
+      state,
+      JSON.stringify(notes),
+      id,
+    );
+    if (!row) return;
+    this.recordRevision(
+      JSON.parse(row.actor) as Actor,
+      state === "done" ? "The run rollback ended (K-821)" : `The run rollback stopped: ${notes.at(-1) ?? ""}`,
+    );
   }
 
   /** K-909: removes a deployed app; the card panel, the palette and `DELETE /api/apps/<card>` all come here. */
@@ -1412,6 +1480,11 @@ export class Kitshn extends DurableObject<Env> {
       paused: this.state.paused,
       repos,
       deployedCards: this.deployedCards(),
+      previewCards: this.sql<{ resource_id: string }>(
+        "SELECT DISTINCT resource_id FROM deploys WHERE kind = 'deploy' AND environment GLOB 'pr-[0-9]*'",
+      )
+        .map((row) => row.resource_id)
+        .filter((card) => this.state.resources.has(card)),
       orphanWorkers: this.orphanWorkers(),
       deployNotes: this.deployNotes(),
       icons: Object.fromEntries([...this.iconHashes].filter(([id]) => this.state.resources.has(id))),
@@ -5560,6 +5633,7 @@ export class Kitshn extends DurableObject<Env> {
     this.checkLiveness(now);
     // The alarm runs every 30 s while a daemon is connected, so it tells the maps only about real changes.
     let changed = this.expireJobs(now) > 0;
+    if (this.settleRollbacks() > 0) changed = true;
     const before = JSON.stringify(accessStates(this.desired(now), this.access));
     this.endShares(now);
     const daily = this.dailyAt() <= now;
@@ -5691,6 +5765,8 @@ interface DeployRow extends Record<string, SqlStorageValue> {
   /** K-821: the image ids of a Compose deploy that came up, and the `needs.apps` keys, as JSON. */
   images: string | null;
   needs: string | null;
+  /** K-821: the deploy whose build this rollback row repeats; null on a row that a workflow run made. */
+  origin: string | null;
 }
 
 /** K-821: one finished deploy of a card in the rollback list; `why` says why a rollback cannot go there. */

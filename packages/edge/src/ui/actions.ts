@@ -25,6 +25,7 @@ import {
 import { circleForCards, placeInside } from "../core/place.ts";
 import type { MachineView } from "../core/protocol.ts";
 import { KINDS } from "./kinds.ts";
+import { ROLLBACK_DATA } from "./Rollback.tsx";
 import type { Selection } from "./Map.tsx";
 
 /**
@@ -63,6 +64,8 @@ export interface ActionContext {
   readonly state: State;
   /** K-909: the cards that a deploy made. */
   readonly deployed: ReadonlySet<string>;
+  /** K-821: preview cards, which have no rollback. */
+  readonly previews: ReadonlySet<string>;
   readonly machines: ReadonlyMap<string, MachineView>;
   /** K-617: the release of this kitshn, or a local build. */
   readonly version: string;
@@ -598,20 +601,24 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
       : [],
     undoItemAction(ctx, h, { kind: "card", id: resource.id }),
     [
-      ...(isAppCard(resource) && ctx.deployed.has(resource.id)
+      ...(isAppCard(resource) && ctx.deployed.has(resource.id) && !ctx.previews.has(resource.id)
         ? [
             {
               id: "rollback",
               label: "Roll back…",
-              tip: "Roll back: serve an earlier deploy of this card again. Data does not roll back.",
+              tip: `Roll back: serve an earlier deploy of this card again. ${ROLLBACK_DATA}`,
               run: () => h.rollback(resource, "card"),
             },
             {
               id: "rollback-run",
               label: "Roll back this run…",
-              tip: "Roll back every card of the workflow run that made this deploy. Data does not roll back.",
+              tip: `Roll back every card of the workflow run that made this deploy. ${ROLLBACK_DATA}`,
               run: () => h.rollback(resource, "run"),
             },
+          ]
+        : []),
+      ...(isAppCard(resource) && ctx.deployed.has(resource.id)
+        ? [
             {
               id: "remove-app",
               label: "Remove app",

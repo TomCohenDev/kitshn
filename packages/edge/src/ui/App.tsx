@@ -33,7 +33,7 @@ import { MAX_UPLOAD_BYTES } from "../core/library.ts";
 import { circleForCards, placeInside } from "../core/place.ts";
 import { awaitsAllow } from "../core/repos.ts";
 import type { Command } from "../core/machine.ts";
-import { RollbackDialog } from "./Rollback.tsx";
+import { ROLLBACK_DATA, RollbackDialog } from "./Rollback.tsx";
 import type {
   DeployNote,
   JobView,
@@ -298,6 +298,7 @@ export function App() {
     [store.snapshot],
   );
   const deployed = useMemo(() => new Set(store.snapshot?.deployedCards ?? []), [store.snapshot]);
+  const previewCards = useMemo(() => new Set(store.snapshot?.previewCards ?? []), [store.snapshot]);
 
   /**
    * K-523, K-1507: the item whose per-item undo the open menu shows, or for the palette the selected card or
@@ -1122,6 +1123,7 @@ export function App() {
   const actionContext: ActionContext = {
     state,
     deployed,
+    previews: previewCards,
     machines,
     version: store.snapshot.version,
     undoCheck,
@@ -1243,6 +1245,7 @@ export function App() {
               orphanWorkers={store.snapshot.orphanWorkers}
               onDeleteOrphanWorker={(orphan) => void deleteOrphanWorker(orphan)}
               deployed={deployed}
+              previewCards={previewCards}
               deployNotes={store.snapshot.deployNotes}
               pause={pauseView}
               machines={machines}
@@ -1736,6 +1739,7 @@ function Panel(props: {
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
   /** K-909 */
   deployed: ReadonlySet<string>;
+  previewCards: ReadonlySet<string>;
   deployNotes: Readonly<Record<string, DeployNote>>;
   pause: PauseView | null;
   warnings: ReadonlyArray<string>;
@@ -1796,6 +1800,7 @@ function Panel(props: {
         orphanWorkers={cards[0].id === ADMIN_RESOURCE_ID ? props.orphanWorkers : []}
         onDeleteOrphanWorker={props.onDeleteOrphanWorker}
         deployed={props.deployed.has(cards[0].id)}
+        preview={props.previewCards.has(cards[0].id)}
         deployNote={props.deployNotes[cards[0].id] ?? null}
         machine={props.machines.get(cards[0].id) ?? null}
         version={props.version}
@@ -2053,6 +2058,8 @@ function CardPanel(props: {
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
   /** K-909: a deploy made this card, so "Remove app" applies. */
   deployed: boolean;
+  /** K-821: a pull request preview, which has no rollback. */
+  preview: boolean;
   /** K-820: the newest deploy of this card failed or did not run. */
   deployNote: DeployNote | null;
   machine: MachineView | null;
@@ -2203,18 +2210,18 @@ function CardPanel(props: {
           Place on the map
         </button>
       ) : null}
-      {isAppCard(resource) && props.deployed ? (
+      {isAppCard(resource) && props.deployed && !props.preview ? (
         <div class="row">
           <button
             class="btn"
-            data-tip="Roll back: serve an earlier deploy of this card again. Data does not roll back."
+            data-tip={`Roll back: serve an earlier deploy of this card again. ${ROLLBACK_DATA}`}
             onClick={() => props.onRollback(resource, "card")}
           >
             Roll back…
           </button>
           <button
             class="btn"
-            data-tip="Roll back every card of the workflow run that made this deploy. Data does not roll back."
+            data-tip={`Roll back every card of the workflow run that made this deploy. ${ROLLBACK_DATA}`}
             onClick={() => props.onRollback(resource, "run")}
           >
             Roll back this run…

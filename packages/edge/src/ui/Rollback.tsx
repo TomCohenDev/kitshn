@@ -2,9 +2,9 @@ import { useEffect, useState } from "preact/hooks";
 import type { Resource } from "../core/model.ts";
 import { callApi } from "./store.ts";
 
-/** K-821: the text that every rollback dialog shows, so nobody expects their data back. */
+/** K-821: the text that every rollback dialog and tip shows, so nobody expects their data back or a secret to stay. */
 export const ROLLBACK_DATA =
-  "Data does not roll back. KV, Durable Objects, volumes and what the app wrote stay as they are. An older version can break on newer data.";
+  "Data does not roll back. KV, Durable Objects, volumes and what the app wrote stay as they are. An older version can break on newer data. Secrets and vars go back to the values of that deploy. Rotate the secret again after a rollback if you rotated it after that deploy.";
 
 interface Choice {
   readonly deployId: string;

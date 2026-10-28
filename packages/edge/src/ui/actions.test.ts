@@ -110,6 +110,7 @@ function context(version = "0123456789ab"): ActionContext {
   return {
     state,
     deployed: new Set(["riffle"]),
+    previews: new Set(),
     machines: new Map([["vps", machine]]),
     version,
     undoCheck: null,
@@ -159,6 +160,13 @@ describe("card actions", () => {
       "remove-app",
     ]);
     expect(find(groups, "remove-app").danger).toBe(true);
+    // K-821: a preview has no rollback, but it can still go.
+    const preview = actionsFor({ ...context(), previews: new Set(["riffle"]) }, handlers, {
+      _tag: "card",
+      id: "riffle",
+    });
+    expect(ids(preview)).not.toContain("rollback");
+    expect(ids(preview)).toContain("remove-app");
     run(find(groups, "rollback-run"));
     expect(calls.at(-1)).toMatchObject(["rollback", { id: "riffle" }, "run"]);
     calls.length = 0;

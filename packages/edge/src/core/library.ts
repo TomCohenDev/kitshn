@@ -55,6 +55,163 @@ export const uploadKind = (fileName: string): "page" | "file" => {
   return lower.endsWith(".html") ? "page" : "file";
 };
 
+/** K-1120: a name a person gives the address of a page or a file. */
+export function addressNameError(name: string): string | null {
+  if (name.length < 3 || name.length > 63) return "An address name has 3 to 63 characters.";
+  const allowed = [...name].every(
+    (char) => (char >= "a" && char <= "z") || (char >= "0" && char <= "9") || char === "-",
+  );
+  if (!allowed || name.startsWith("-") || name.endsWith("-"))
+    return "An address name has only a to z, 0 to 9 and inner hyphens.";
+  // An id-shaped name would hide the item with that id; `login` is the login path of K-1004.
+  if (name === "login" || isLibraryId(name)) return `kitshn keeps the name "${name}" for itself.`;
+  return null;
+}
+
+const ADJECTIVES = [
+  "amber",
+  "brave",
+  "bright",
+  "brisk",
+  "calm",
+  "clever",
+  "cosy",
+  "crisp",
+  "curly",
+  "daring",
+  "dusky",
+  "eager",
+  "fair",
+  "fancy",
+  "fond",
+  "frosty",
+  "gentle",
+  "glad",
+  "golden",
+  "grand",
+  "happy",
+  "hazy",
+  "jolly",
+  "keen",
+  "kind",
+  "lively",
+  "lucky",
+  "merry",
+  "mellow",
+  "misty",
+  "neat",
+  "nimble",
+  "noble",
+  "olive",
+  "plucky",
+  "polite",
+  "proud",
+  "quick",
+  "quiet",
+  "rapid",
+  "rosy",
+  "rusty",
+  "shiny",
+  "silky",
+  "silver",
+  "sleek",
+  "snowy",
+  "spry",
+  "steady",
+  "sunny",
+  "swift",
+  "tidy",
+  "tiny",
+  "vivid",
+  "warm",
+  "wavy",
+  "wild",
+  "wise",
+  "witty",
+  "zesty",
+];
+const NOUNS = [
+  "acorn",
+  "badger",
+  "beacon",
+  "birch",
+  "bison",
+  "breeze",
+  "brook",
+  "canyon",
+  "cedar",
+  "comet",
+  "coral",
+  "crane",
+  "dune",
+  "falcon",
+  "fern",
+  "finch",
+  "fjord",
+  "fox",
+  "gecko",
+  "glade",
+  "harbor",
+  "hare",
+  "heron",
+  "island",
+  "koala",
+  "lagoon",
+  "lark",
+  "lemur",
+  "lynx",
+  "maple",
+  "meadow",
+  "moose",
+  "moth",
+  "newt",
+  "otter",
+  "owl",
+  "panda",
+  "pebble",
+  "pine",
+  "plover",
+  "quail",
+  "raven",
+  "reef",
+  "ridge",
+  "robin",
+  "salmon",
+  "seal",
+  "sparrow",
+  "spruce",
+  "stork",
+  "summit",
+  "thrush",
+  "tiger",
+  "trout",
+  "tulip",
+  "valley",
+  "walrus",
+  "willow",
+  "wren",
+  "yak",
+];
+
+/** K-1120: a random readable name such as `calm-otter-42`. It comes from nothing about the item, so it tells nothing. */
+export function randomAddressName(): string {
+  const [a = 0, b = 0, c = 0] = crypto.getRandomValues(new Uint32Array(3));
+  return `${ADJECTIVES[a % ADJECTIVES.length]}-${NOUNS[b % NOUNS.length]}-${10 + (c % 90)}`;
+}
+
+/** K-1003, K-1102, K-1120: the main address of a page or a file. `segment` is its name, or its id without one. */
+export const libraryAddress = (
+  zone: string,
+  item: Pick<LibraryItem, "kind" | "fileName">,
+  segment: string,
+) =>
+  item.kind === "page"
+    ? `pages.${zone}/${segment}`
+    : `files.${zone}/${segment}/${encodeURIComponent(item.fileName ?? "")}`;
+
+/** K-1120: the name or id in a main address of `libraryAddress`. */
+export const addressSegment = (address: string) => address.split("/")[1] ?? "";
+
 /** A file name that is safe as one path segment of `files.<zone>/<id>/<name>`. */
 export function fileNameError(name: string): string | null {
   if (name.length === 0 || name.length > 200) return "A file name has 1 to 200 characters.";

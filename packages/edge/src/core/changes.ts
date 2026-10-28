@@ -85,6 +85,13 @@ export type Change =
       readonly id: string;
       readonly before: AppCard | null;
       readonly after: AppCard | null;
+    }
+  /** K-1120: the main address of a page or a file card, `pages.<zone>/<name>` or `files.<zone>/<name>/<file>`. */
+  | {
+      readonly _tag: "address";
+      readonly id: string;
+      readonly before: string;
+      readonly after: string;
     };
 
 /**
@@ -146,6 +153,8 @@ const current = (state: State, change: Pick<Change, "_tag" | "id">) => {
       const resource = state.resources.get(change.id);
       return resource ? withoutStatus(resource) : null;
     }
+    case "address":
+      return state.resources.get(change.id)?.addresses[0] ?? null;
   }
 };
 
@@ -354,14 +363,19 @@ export function revisionTargets(changes: ReadonlyArray<RevisionTarget>): {
           ? "share"
           : tags.has("stack")
             ? "stack"
-            : tags.has("place")
+            : tags.has("place") || tags.has("address")
               ? "card"
               : "action";
   const items = new Map<string, Item>();
   const add = (item: Item) => items.set(`${item.kind}:${item.id}`, item);
   for (const change of changes) {
     if (change._tag === "circle") add({ kind: "circle", id: change.id });
-    else if (change._tag === "place" || change._tag === "app" || change._tag === "forget")
+    else if (
+      change._tag === "place" ||
+      change._tag === "app" ||
+      change._tag === "address" ||
+      change._tag === "forget"
+    )
       add({ kind: "card", id: change.id });
     else if (change._tag === "stack")
       for (const id of (change.members ?? []).flatMap((members) => members ?? [])) add({ kind: "card", id });
@@ -385,6 +399,7 @@ export function touches(change: Change, item: Item): boolean {
   switch (change._tag) {
     case "place":
     case "app":
+    case "address":
       return change.id === item.id;
     case "shareSetting":
       return change.id.startsWith(`${item.id}/`);
@@ -436,7 +451,13 @@ function footprint(changes: ReadonlyArray<Change | Forget>, state: State, pool: 
   const changed = new Set<string>();
   const points: Array<Point> = [];
   for (const change of changes) {
-    if (change._tag === "place" || change._tag === "app" || change._tag === "forget") cards.add(change.id);
+    if (
+      change._tag === "place" ||
+      change._tag === "app" ||
+      change._tag === "address" ||
+      change._tag === "forget"
+    )
+      cards.add(change.id);
     if (change._tag === "place")
       points.push(...[change.before, change.after].filter((point) => point !== null));
     if (change._tag === "circle") changed.add(change.id);
@@ -569,7 +590,7 @@ export function undoTarget(
   );
   const missing = changes
     .flatMap((change) =>
-      change._tag === "place" && change.before
+      (change._tag === "place" && change.before) || change._tag === "address"
         ? [change.id]
         : change._tag === "shareSetting" && change.before
           ? [change.id.split("/")[0] ?? ""]
@@ -603,7 +624,11 @@ export function applyChanges(state: State, changes: ReadonlyArray<Change>): Stat
     else if (change._tag === "shareSetting") put(shareSettings, change.id, change.after);
     else if (change._tag === "stack") put(stacks, change.id, change.after);
     else if (change._tag === "app") put(resources, change.id, change.after && restoredResource(change.after));
-    else paused = change.after;
+    else if (change._tag === "address") {
+      const resource = resources.get(change.id);
+      if (!resource) throw new RuleError(`No card "${change.id}" exists.`);
+      resources.set(change.id, { ...resource, addresses: [change.after, ...resource.addresses.slice(1)] });
+    } else paused = change.after;
   }
   return { ...state, circles, resources, places, shareSettings, stacks, paused };
 }
@@ -703,6 +728,9 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
   const app = changes.find((change) => change._tag === "app");
   if (app?.after) return `Restored the app ${app.after.name} (K-909)`;
   if (app?.before) return `Removed the app ${app.before.name} (K-909)`;
+  const address = changes.find((change) => change._tag === "address");
+  if (address)
+    return `Moved ${after.resources.get(address.id)?.name ?? address.id} to ${address.after} (K-1120)`;
   const pause = changes.find((change) => change._tag === "pause");
   if (pause) {
     if (pause.after === null) return "Resumed all shares";

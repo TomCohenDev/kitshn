@@ -95,6 +95,8 @@ export interface ActionHandlers {
   readonly rollback: (resource: Resource, mode: "card" | "run") => void;
   /** K-1117: swaps a page or a file with its previous version. */
   readonly restorePrevious: (resource: Resource) => void;
+  /** K-1120: shows the address name field of a page or a file card. */
+  readonly editAddress: (resource: Resource) => void;
   readonly runJob: (view: MachineView, command: Command) => void;
   readonly removeMachine: (view: MachineView) => void;
   readonly editCircle: (circleId: string) => void;
@@ -509,6 +511,16 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
               label: "Copy address",
               tip: `Copy https://${address} to the clipboard.`,
               run: () => h.copyAddress(address),
+            },
+          ]
+        : []),
+      ...(resource.kind === "page" || resource.kind === "file"
+        ? [
+            {
+              id: "set-address",
+              label: "Set address…",
+              tip: `Give ${resource.name} a new address name. The old address keeps working and sends visitors on.`,
+              run: () => h.editAddress(resource),
             },
           ]
         : []),

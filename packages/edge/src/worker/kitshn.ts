@@ -109,8 +109,13 @@ import {
   type LibraryItem,
   MAX_UPLOAD_BYTES,
   contentAccess,
+  addressNameError,
+  addressSegment,
   fileNameError,
+  isLibraryId,
+  libraryAddress,
   newLibraryId,
+  randomAddressName,
   objectKey,
   slotKey,
   uploadKind,
@@ -606,6 +611,14 @@ export class Kitshn extends DurableObject<Env> {
       if (change._tag === "app") {
         if (change.after) this.putResource(restoredResource(change.after));
         else this.sql("DELETE FROM resources WHERE id = ?", change.id);
+        continue;
+      }
+      if (change._tag === "address") {
+        const resource = this.state.resources.get(change.id);
+        if (!resource) throw new RuleError(`No card "${change.id}" exists.`);
+        this.putResource({ ...resource, addresses: [change.after, ...resource.addresses.slice(1)] });
+        const name = addressSegment(change.after);
+        if (!isLibraryId(name)) this.claimName(resource.kind === "file" ? "file" : "page", name, change.id);
         continue;
       }
       const table =
@@ -1784,6 +1797,13 @@ export class Kitshn extends DurableObject<Env> {
       return this.preview(path.slice("/api/library/".length, -"/content".length));
     if (path.startsWith("/api/library/") && request.method === "DELETE")
       return this.deleteItem(caller, path.slice("/api/library/".length));
+    if (path.startsWith("/api/cards/") && path.endsWith("/address") && request.method === "POST")
+      return this.setAddress(
+        caller,
+        path.slice("/api/cards/".length, -"/address".length),
+        await addressBody(request),
+        false,
+      );
     if (path.startsWith("/api/library/") && path.endsWith("/previous") && request.method === "POST")
       return this.restorePrevious(caller, path.slice("/api/library/".length, -"/previous".length), "owner");
     if (path === "/api/devices" && request.method === "POST")
@@ -5231,6 +5251,13 @@ export class Kitshn extends DurableObject<Env> {
     }
     // K-1116: an agent key publishes a page or a file, the same upload as a drop on the map.
     if (path === "/agent/library" && request.method === "POST") return this.agentPublish(agent, request, now);
+    if (path.startsWith("/agent/cards/") && path.endsWith("/address") && request.method === "POST")
+      return this.setAddress(
+        agent,
+        path.slice("/agent/cards/".length, -"/address".length),
+        await addressBody(request),
+        true,
+      );
     if (path.startsWith("/agent/library/") && path.endsWith("/previous") && request.method === "POST")
       return this.restorePrevious(agent, path.slice("/agent/library/".length, -"/previous".length), "agent");
     if (path === "/agent/jobs" && request.method === "POST") {
@@ -5398,7 +5425,7 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-1004: the Worker asks here before it serves a page or a file. */
-  private contentDecision({ id, visitor: sent }: ContentRequest) {
+  private contentDecision({ segment, kind, visitor: sent }: ContentRequest) {
     const signedOutAt = Number(this.meta("signed_out_at") ?? 0);
     const visitor: ContentVisitor =
       (sent.email !== null || sent.clientId !== null) && (sent.issuedAt ?? 0) * 1000 < signedOutAt
@@ -5407,12 +5434,22 @@ export class Kitshn extends DurableObject<Env> {
     // The old cookie still opens the login path, so the Worker drops it, or the login sends the visitor
     // straight back with it.
     const stale = visitor !== sent;
+    // K-1120: a name, current or old, or the id of K-1003.
+    const id = isLibraryId(segment)
+      ? segment
+      : (this.sql<{ item_id: string }>(
+          "SELECT item_id FROM library_addresses WHERE kind = ? AND name = ?",
+          kind,
+          segment,
+        )[0]?.item_id ?? "");
     const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", id);
     const resource = this.state.resources.get(id);
     if (!row || !resource) return Response.json({ decision: "missing", stale });
     const decision = contentAccess(this.state, resource, visitor, Date.now());
     return Response.json(
-      decision === "allow" ? { decision, item: libraryItem(row), stale } : { decision, stale },
+      decision === "allow"
+        ? { decision, item: libraryItem(row), address: resource.addresses[0] ?? "", stale }
+        : { decision, stale },
     );
   }
 
@@ -5483,6 +5520,8 @@ export class Kitshn extends DurableObject<Env> {
     if (place === undefined) return refuse("X-Kitshn-X and X-Kitshn-Y are not a point on the map.");
     const decided = agent ? agent.place() : place;
     if (typeof decided === "string") return refuse(decided, 403);
+    const addressName = this.newAddressName(kind, header("x-kitshn-address") || null);
+    if (typeof addressName !== "string") return refuse(addressName.error, addressName.status);
     const item: LibraryItem = {
       id: newLibraryId(),
       kind,
@@ -5518,11 +5557,7 @@ export class Kitshn extends DurableObject<Env> {
       id: item.id,
       kind,
       name: title,
-      addresses: [
-        kind === "page"
-          ? `pages.${this.env.KITSHN_ZONE}/${item.id}`
-          : `files.${this.env.KITSHN_ZONE}/${item.id}/${encodeURIComponent(name)}`,
-      ],
+      addresses: [libraryAddress(this.env.KITSHN_ZONE, item, addressName)],
       status: "running",
       group: null,
       machine: null,
@@ -5548,6 +5583,8 @@ export class Kitshn extends DurableObject<Env> {
           agent?.clientId ?? null,
         );
         this.putResource(resource);
+        // Another upload or a rename can take the name while R2 takes these bytes.
+        this.claimName(kind, addressName, item.id);
         if (!spot) {
           // K-1117: the key keeps a card that waits in the tray from its publish on; the first change ends that.
           if (agent) this.sql("UPDATE library SET agent_tray = 1 WHERE id = ?", item.id);
@@ -5569,6 +5606,7 @@ export class Kitshn extends DurableObject<Env> {
     } catch (error) {
       // No card names the object, so it goes too (K-1115).
       await bucket.delete(objectKey(item)).catch(() => undefined);
+      if (error instanceof AddressTaken) return refuse(error.message, 409);
       if (error instanceof RuleError) return refuse(error.message, 403);
       throw error;
     }
@@ -5607,10 +5645,10 @@ export class Kitshn extends DurableObject<Env> {
     const publish = header("x-kitshn-public") === "true";
     if (known) {
       // K-1117: an update changes only the bytes; a move goes through `kitshn apply`, with its checks (K-718).
-      if (circle !== null || publish)
+      if (circle !== null || publish || header("x-kitshn-address"))
         return Response.json(
           {
-            error: `${known.title} exists already, and --circle and --public apply only to a first publish. Publish without them, and move the card with /agent/apply.`,
+            error: `${known.title} exists already, and --circle, --public and --address apply only to a first publish. Publish without them; move the card with /agent/apply, and set its address with kitshn address.`,
           },
           { status: 409 },
         );
@@ -5623,6 +5661,126 @@ export class Kitshn extends DurableObject<Env> {
     const title = header("x-kitshn-title") || (kind === "page" && dot > 0 ? name.slice(0, dot) : name);
     const place = () => agentUploadPlace(this.state, agent.visitor, circle, publish, Date.now());
     return this.upload(agent, request, kind, { clientId, source, title, place });
+  }
+
+  /**
+   * K-1120, K-1122: gives an item a name in its transaction, or throws when another item holds it. The item keeps
+   * its newest old names, up to `OLD_NAMES`; an older one goes free.
+   */
+  private claimName(kind: "page" | "file", name: string, itemId: string) {
+    // A name that the item takes back (a rename to an old name, or Undo) gets a new rowid, so it counts as the newest.
+    this.sql("DELETE FROM library_addresses WHERE kind = ? AND name = ? AND item_id = ?", kind, name, itemId);
+    this.sql(
+      "INSERT INTO library_addresses (kind, name, item_id) VALUES (?, ?, ?) ON CONFLICT (kind, name) DO NOTHING",
+      kind,
+      name,
+      itemId,
+    );
+    const [owner] = this.sql<{ item_id: string }>(
+      "SELECT item_id FROM library_addresses WHERE kind = ? AND name = ?",
+      kind,
+      name,
+    );
+    if (owner?.item_id !== itemId) throw new AddressTaken(`The address name "${name}" is taken (K-1120).`);
+    // The rowid orders the names by when the item took them; the current name is never an old one.
+    this.sql(
+      `DELETE FROM library_addresses WHERE item_id = ? AND name != ? AND rowid NOT IN
+       (SELECT rowid FROM library_addresses WHERE item_id = ? AND name != ? ORDER BY rowid DESC LIMIT ?)`,
+      itemId,
+      name,
+      itemId,
+      name,
+      OLD_NAMES,
+    );
+  }
+
+  /**
+   * K-1120: the name of a new page or file: the one that the caller gives, when it is free, or a random readable one.
+   * The random name comes from nothing about the item, so the address tells nothing about it.
+   */
+  private newAddressName(
+    kind: "page" | "file",
+    wanted: string | null,
+  ): string | { readonly error: string; readonly status: number } {
+    const taken = (name: string) =>
+      this.sql("SELECT 1 FROM library_addresses WHERE kind = ? AND name = ?", kind, name).length > 0;
+    if (wanted !== null) {
+      const error = addressNameError(wanted);
+      if (error) return { error, status: 400 };
+      if (taken(wanted)) return { error: `The address name "${wanted}" is taken (K-1120).`, status: 409 };
+      return wanted;
+    }
+    // About 324,000 names; a few tries find a free one long before the map fills them.
+    for (let tries = 0; tries < 20; tries++) {
+      const name = randomAddressName();
+      if (!taken(name)) return name;
+    }
+    return { error: "kitshn found no free random name; give one with an address.", status: 409 };
+  }
+
+  /**
+   * K-1120: gives a page or a file card a new address name. The old name stays with the item and sends its
+   * visitors on, so no one else takes it; Undo moves the card back.
+   */
+  private setAddress(caller: Caller, named: string, name: string, agent: boolean) {
+    // The card by its id, or by a name of its address, so `kitshn address` takes what the address shows.
+    const candidates = this.state.resources.has(named)
+      ? [named]
+      : this.sql<{ item_id: string }>(
+          "SELECT DISTINCT item_id FROM library_addresses WHERE kind IN ('page', 'file') AND name = ?",
+          named,
+        ).map((row) => row.item_id);
+    let card: string;
+    if (agent) {
+      // A key learns nothing about cards that it may not change: one answer for unknown and for not its own.
+      const now = Date.now();
+      const mine = candidates.find((id) => this.agentMayChange(caller, id, now) === null);
+      if (!mine)
+        return Response.json(
+          { error: `This key cannot change the address of "${named}" (K-1117, K-1120).` },
+          { status: 403 },
+        );
+      card = mine;
+    } else {
+      if (candidates.length > 1)
+        return Response.json(
+          { error: `A page and a file both have the name "${named}"; name the card by its id.` },
+          { status: 409 },
+        );
+      card = candidates[0] ?? named;
+    }
+    const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", card);
+    const resource = this.state.resources.get(card);
+    if (!row || !resource)
+      return Response.json(
+        {
+          error:
+            resource && this.deployedCards(card).includes(card)
+              ? `The address of ${resource.name} comes from its repo; set it in kitshn.config.ts (K-1120).`
+              : `Only a page or a file has an address that kitshn sets (K-1120).`,
+        },
+        { status: 409 },
+      );
+    const error = addressNameError(name);
+    if (error) return Response.json({ error }, { status: 400 });
+    const item = libraryItem(row);
+    const [owner] = this.sql<{ item_id: string }>(
+      "SELECT item_id FROM library_addresses WHERE kind = ? AND name = ?",
+      item.kind,
+      name,
+    );
+    if (owner && owner.item_id !== card)
+      return Response.json({ error: `The address name "${name}" is taken (K-1120).` }, { status: 409 });
+    const before = resource.addresses[0] ?? "";
+    const after = libraryAddress(this.env.KITSHN_ZONE, item, name);
+    if (after === before) return Response.json({ address: after, revision: null });
+    try {
+      const revision = this.commit(caller.actor, [{ _tag: "address", id: card, before, after }], null);
+      return Response.json({ address: after, revision });
+    } catch (error) {
+      if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
+      throw error;
+    }
   }
 
   /**
@@ -5816,6 +5974,7 @@ export class Kitshn extends DurableObject<Env> {
         id,
       );
       this.sql("DELETE FROM library WHERE id = ?", id);
+      this.sql("DELETE FROM library_addresses WHERE item_id = ?", id);
       this.insertRevision(
         caller.actor,
         `Deleted the ${item.kind} ${item.title}`,
@@ -6196,7 +6355,9 @@ const send = (socket: WebSocket, message: ServerMessage | ServerToDaemon) =>
   socket.send(JSON.stringify(message));
 
 interface ContentRequest {
-  readonly id: string;
+  /** The first path segment: a name of K-1120 or an id. */
+  readonly segment: string;
+  readonly kind: "page" | "file";
   readonly visitor: ContentVisitor;
 }
 
@@ -6272,6 +6433,18 @@ function headIcon(kind: "page" | "file", head: Uint8Array | null) {
   const bytes = head === null ? null : kind === "page" ? pageDataIcon(new TextDecoder().decode(head)) : head;
   const type = bytes !== null && bytes.length <= ICON_LIMIT ? iconType(bytes) : null;
   return bytes !== null && type !== null ? { bytes, type } : null;
+}
+
+/** K-1122: the old names that an item keeps; each sends visitors on, and no other item takes it. */
+const OLD_NAMES = 5;
+
+/** K-1120: a name that another item holds; the routes answer 409. */
+class AddressTaken extends RuleError {}
+
+/** K-1120: the `address` of a JSON body, or "" for anything else, which the name check refuses. */
+async function addressBody(request: Request): Promise<string> {
+  const body: unknown = await request.json().catch(() => null);
+  return isRecord(body) && typeof body["address"] === "string" ? body["address"].trim() : "";
 }
 
 /** K-1116: what the agent route decides for an upload before `upload` writes anything. */

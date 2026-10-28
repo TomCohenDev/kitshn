@@ -380,6 +380,15 @@ describe("Restore previous version (K-1117)", () => {
   });
 });
 
+describe("Set address (K-1120)", () => {
+  it("is offered for a page or a file, not for an app, and runs editAddress", () => {
+    const { handlers, calls } = recorder();
+    run(find(actionsFor(context(), handlers, { _tag: "card", id: "notes" }), "set-address"));
+    expect(calls[0]).toMatchObject(["editAddress", { id: "notes" }]);
+    expect(ids(actionsFor(context(), handlers, { _tag: "card", id: "riffle" }))).not.toContain("set-address");
+  });
+});
+
 describe("the palette", () => {
   it("has every action of every menu, so no action exists only in a menu", () => {
     const { handlers } = recorder();

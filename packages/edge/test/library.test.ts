@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Edit } from "../src/core/changes.ts";
 import type { Circle } from "../src/core/model.ts";
+import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import worker from "../src/worker/index.ts";
 import { accessToken, send, stubAccessCerts } from "./access.ts";
 
 /** K-1116, K-1117: an agent key publishes a page, updates it by name, and the owner restores its previous version. */
@@ -50,6 +53,22 @@ async function publish(
 }
 
 const idOf = async (response: Response) => ((await response.json()) as { id: string }).id;
+
+/** A visit to `pages.<zone>` or `files.<zone>` with no login. */
+async function visit(path: string, host = "pages.example.com") {
+  const ctx = createExecutionContext();
+  const response = await worker.fetch(new Request(`https://${host}${path}`), env, ctx);
+  await waitOnExecutionContext(ctx);
+  return response;
+}
+
+async function ownerPost(path: string, body: unknown) {
+  return send(path, {
+    method: "POST",
+    headers: { "cf-access-jwt-assertion": await owner(), "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
 
 const content = async (id: string) =>
   (
@@ -202,6 +221,122 @@ describe("agent publish (K-1116, K-1117)", () => {
     // Back in the tray by the owner, the card stays out of the key's reach.
     await apply([{ _tag: "place", id, after: null }]);
     expect((await publish("agent-1.access", "race.html", "<p>four</p>")).status).toBe(403);
+  });
+
+  it("serves a page at its name, sends old names and the id on, and undoes a new name (K-1120)", async () => {
+    stubAccessCerts();
+    await apply([{ _tag: "circle", id: "agents", after: agentCircle("agents", "agent-1.access", 2000) }]);
+    const named = await publish("agent-1.access", "named.html", "<p>named</p>", {
+      "x-kitshn-address": "my-design",
+    });
+    const { id, address } = (await named.json()) as { id: string; address: string };
+    expect(address).toBe("pages.example.com/my-design");
+    const random = (await (await publish("agent-1.access", "plain.html", "<p>x</p>")).json()) as {
+      address: string;
+    };
+    expect(random.address.split("/")[1]?.split("-")).toHaveLength(3);
+    expect(random.address).not.toContain("plain");
+    const taken = await publish("agent-1.access", "other.html", "<p>y</p>", {
+      "x-kitshn-address": "my-design",
+    });
+    expect(taken.status).toBe(409);
+
+    // In Everyone, the page opens with no login.
+    const { circles } = (await (
+      await send("/api/state", { headers: { "cf-access-jwt-assertion": await owner() } })
+    ).json()) as { circles: ReadonlyArray<Circle> };
+    const everyone = circles.find((circle) => circle.id === "everyone");
+    if (!everyone) throw new Error("The seed has no Everyone circle.");
+    await apply([{ _tag: "place", id, after: { x: everyone.x, y: everyone.y } }]);
+    expect(await (await visit("/my-design")).text()).toBe("<p>named</p>");
+
+    const renamed = await ownerPost(`/api/cards/${id}/address`, { address: "renamed" });
+    const { revision } = (await renamed.json()) as { revision: number };
+    for (const old of ["/my-design", `/${id}`]) {
+      const sent = await visit(old);
+      expect([sent.status, sent.headers.get("location")]).toEqual([302, "https://pages.example.com/renamed"]);
+    }
+    expect(await (await visit("/renamed")).text()).toBe("<p>named</p>");
+    // The old name stays with its page.
+    expect(
+      (await publish("agent-1.access", "late.html", "<p>z</p>", { "x-kitshn-address": "my-design" })).status,
+    ).toBe(409);
+    // Out of its agent circle, the key cannot rename the card.
+    const foreign = await send(`/agent/cards/${id}/address`, {
+      method: "POST",
+      headers: {
+        "cf-access-jwt-assertion": await agent("agent-1.access"),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ address: "mine" }),
+    });
+    expect(foreign.status).toBe(403);
+    // A key gets the same answer for a card that does not exist, so it learns no names.
+    const unknown = await send("/agent/cards/no-such-card/address", {
+      method: "POST",
+      headers: {
+        "cf-access-jwt-assertion": await agent("agent-1.access"),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ address: "mine" }),
+    });
+    expect(unknown.status).toBe(403);
+    // The text up to the card that the key named, which differs between the two calls.
+    const said = async (response: Response) => {
+      const { error } = (await response.json()) as { error: string };
+      return error.slice(0, error.indexOf('"'));
+    };
+    expect(await said(unknown)).toBe(await said(foreign));
+
+    expect((await ownerPost("/api/undo", { revision })).status).toBe(200);
+    expect(await (await visit("/my-design")).text()).toBe("<p>named</p>");
+    expect((await visit("/renamed")).headers.get("location")).toBe("https://pages.example.com/my-design");
+
+    // The current name changes nothing; the name of another item is taken.
+    expect(await (await ownerPost(`/api/cards/${id}/address`, { address: "my-design" })).json()).toEqual({
+      address: "pages.example.com/my-design",
+      revision: null,
+    });
+    const otherName = random.address.split("/")[1] ?? "";
+    expect((await ownerPost(`/api/cards/${id}/address`, { address: otherName })).status).toBe(409);
+
+    // K-1122: past 5 old names, the oldest go free. Old now: renamed; the six renames push out my-design and renamed.
+    for (const next of ["n-one", "n-two", "n-three", "n-four", "n-five", "n-six"])
+      expect((await ownerPost(`/api/cards/${id}/address`, { address: next })).status).toBe(200);
+    expect((await visit("/renamed")).status).toBe(404);
+    expect((await visit("/n-one")).headers.get("location")).toBe("https://pages.example.com/n-six");
+    expect(
+      (await publish("agent-1.access", "freed.html", "<p>f</p>", { "x-kitshn-address": "my-design" })).status,
+    ).toBe(201);
+
+    // A name that the item takes back counts as its newest: after n-one comes back, the next rename frees n-two.
+    for (const next of ["n-one", "n-seven"])
+      expect((await ownerPost(`/api/cards/${id}/address`, { address: next })).status).toBe(200);
+    expect((await visit("/n-one")).headers.get("location")).toBe("https://pages.example.com/n-seven");
+    expect((await visit("/n-two")).status).toBe(404);
+
+    // A delete frees every name of the item.
+    const deleted = await send(`/api/library/${id}`, {
+      method: "DELETE",
+      headers: { "cf-access-jwt-assertion": await owner() },
+    });
+    expect(deleted.status).toBe(200);
+    expect(
+      (await publish("agent-1.access", "after.html", "<p>a</p>", { "x-kitshn-address": "n-seven" })).status,
+    ).toBe(201);
+
+    // A file keeps its file name when an old name sends a visitor on.
+    const file = await idOf(
+      await publish("agent-1.access", "pic.png", "png bytes", {
+        "x-kitshn-address": "pic",
+        "content-type": "image/png",
+      }),
+    );
+    await apply([{ _tag: "place", id: file, after: { x: everyone.x, y: everyone.y + 40 } }]);
+    expect((await ownerPost(`/api/cards/${file}/address`, { address: "pic-two" })).status).toBe(200);
+    expect((await visit("/pic/pic.png", "files.example.com")).headers.get("location")).toBe(
+      "https://files.example.com/pic-two/pic.png",
+    );
   });
 
   // Last: the Durable Object keeps its state across the tests of this file, and only a passkey resumes.

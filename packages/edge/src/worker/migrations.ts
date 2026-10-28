@@ -140,6 +140,12 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "ALTER TABLE library ADD COLUMN previous_size INTEGER",
     "ALTER TABLE library ADD COLUMN previous_type TEXT",
   ],
+  // 22: address names of pages and files (K-1120). A row stays when its item gets a new name, so the old name sends
+  // visitors on and no other item takes it; the delete of the item removes its rows.
+  [
+    "CREATE TABLE library_addresses (kind TEXT NOT NULL, name TEXT NOT NULL, item_id TEXT NOT NULL, PRIMARY KEY (kind, name))",
+    "CREATE INDEX library_addresses_item ON library_addresses (item_id)",
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

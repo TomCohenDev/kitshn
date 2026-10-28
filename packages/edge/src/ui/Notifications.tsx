@@ -3,6 +3,7 @@ import type { State } from "../core/model.ts";
 import { type Mute, type Notification, onBell } from "../core/notifications.ts";
 import { Menu, MenuItem } from "./controls.tsx";
 import type { Rect } from "./popover.ts";
+import { PushSection } from "./Push.tsx";
 import { callApi } from "./store.ts";
 
 const HOUR = 60 * 60_000;
@@ -81,6 +82,8 @@ export function NotificationsView(props: {
           ))}
         </Menu>
       ) : null}
+      <PushSection onToast={props.onToast} />
+      <h3>Notifications</h3>
       {list === null ? <p class="muted">Reading the notifications…</p> : null}
       {list && list.notifications.length === 0 ? (
         <p class="muted">No notification in the last 30 days.</p>

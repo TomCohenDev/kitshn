@@ -169,6 +169,8 @@ import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
 import { seed } from "../core/seed.ts";
 import { type Visitor, circleMatches, visitorLevel } from "../core/visitor.ts";
+import { DEFAULT_LEVELS, PUSH_TEST_MS, type PushDevice, deviceWants, pushMessage } from "../core/push.ts";
+import { type VapidKey, generateVapidJwk, pushTopic, sendPush, vapidKey } from "./push.ts";
 import {
   type Mute,
   NOTIFICATIONS_KEEP_MS,
@@ -339,6 +341,77 @@ const LOG_ANSWER_MS = 20_000;
 interface UndoOf {
   readonly revision: number;
   readonly item: string | null;
+}
+
+/** K-1907: the `meta` key of the VAPID private key; no read path, export or backup includes it. */
+const VAPID_META = "push_vapid_jwk";
+
+interface PushRow extends Record<string, SqlStorageValue> {
+  id: number;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  email: string;
+  label: string;
+  levels: string;
+  quiet_start: number | null;
+  quiet_end: number | null;
+  time_zone: string | null;
+  created_at: number;
+  last_ok_at: number | null;
+}
+
+const pushDeviceOf = (row: PushRow): PushDevice => ({
+  id: row.id,
+  label: row.label,
+  email: row.email,
+  levels: (JSON.parse(row.levels) as Array<string>).map((level) =>
+    oneOf(level, ["info", "warn", "error"] as const),
+  ),
+  quiet:
+    row.quiet_start === null || row.quiet_end === null || row.time_zone === null
+      ? null
+      : { start: row.quiet_start, end: row.quiet_end, timeZone: row.time_zone },
+  createdAt: row.created_at,
+  lastOkAt: row.last_ok_at,
+});
+
+/** K-1907: a subscription from the browser, checked. A push endpoint is an https address of a push service. */
+function pushInput(body: unknown) {
+  if (!isRecord(body)) return "Send the subscription as JSON.";
+  const { endpoint, p256dh, auth, label, levels, quiet } = body;
+  if (typeof endpoint !== "string" || !URL.canParse(endpoint) || new URL(endpoint).protocol !== "https:")
+    return "The endpoint is not an https address.";
+  if (typeof p256dh !== "string" || typeof auth !== "string" || p256dh === "" || auth === "")
+    return "The subscription has no keys.";
+  if (typeof label !== "string" || label.trim() === "" || label.length > 80)
+    return "Name the device in at most 80 characters.";
+  const chosen = Array.isArray(levels) ? levels : DEFAULT_LEVELS;
+  if (!chosen.every((level) => level === "info" || level === "warn" || level === "error"))
+    return "The levels are info, warn and error.";
+  let hours: { start: number; end: number; timeZone: string } | null = null;
+  if (quiet !== null && quiet !== undefined) {
+    if (!isRecord(quiet)) return "Quiet hours have a start, an end and a time zone.";
+    const { start, end, timeZone } = quiet;
+    const minute = (value: unknown) =>
+      Number.isInteger(value) && Number(value) >= 0 && Number(value) < 24 * 60;
+    if (!minute(start) || !minute(end) || typeof timeZone !== "string")
+      return "Quiet hours have a start and an end in minutes after midnight, and a time zone.";
+    try {
+      new Intl.DateTimeFormat("en", { timeZone });
+    } catch {
+      return `kitshn does not know the time zone ${timeZone}.`;
+    }
+    hours = { start: Number(start), end: Number(end), timeZone };
+  }
+  return {
+    endpoint,
+    p256dh,
+    auth,
+    label: label.trim(),
+    levels: chosen as Array<"info" | "warn" | "error">,
+    quiet: hours,
+  };
 }
 
 interface NotificationRow extends Record<string, SqlStorageValue> {
@@ -2889,6 +2962,7 @@ export class Kitshn extends DurableObject<Env> {
     if (path.startsWith("/api/uptime/") && request.method === "GET")
       return Response.json(this.uptimeChanges(decodeURIComponent(path.slice("/api/uptime/".length))));
     if (path.startsWith("/api/notifications")) return this.notificationRequest(path, request, caller);
+    if (path === "/api/push" || path.startsWith("/api/push/")) return this.pushRequest(path, request, caller);
     if ((path === "/api/pages" || path === "/api/files") && request.method === "POST")
       return this.upload(caller, request, path === "/api/pages" ? "page" : "file").catch((error: unknown) => {
         if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 400 });
@@ -4649,6 +4723,8 @@ export class Kitshn extends DurableObject<Env> {
     if (busy) return busy;
     // K-110: the Worker checks pages and files itself, so it refuses every login from before this second.
     this.setMeta("signed_out_at", String(Math.floor(Date.now() / 1000) * 1000));
+    // K-1606, K-1907: no browser keeps getting pushes after Sign out everywhere.
+    this.sql("DELETE FROM push_subscriptions");
     // K-110: no confirm in the map, so History records the start before any Cloudflare call, and the outcome.
     this.recordRevision(caller.actor, "Sign out everywhere: kitshn refuses older page and file logins");
     return this.finishSignOut(caller, false, async (api) => {
@@ -8246,14 +8322,16 @@ export class Kitshn extends DurableObject<Env> {
       value.episode,
     );
     if (!row) throw new Error("kitshn wrote a notification and got no id back.");
-    this.openNotifications.set(id, {
+    const opened: Notification = {
       ...value,
       id: row.id,
       state: "open",
       openedAt: now,
       closedAt: null,
       snoozedUntil: null,
-    });
+    };
+    this.openNotifications.set(id, opened);
+    this.queuePush(opened);
   }
 
   /** K-1903: sets the state of an open notification; any state but "open" closes it for every recipient. */
@@ -8265,6 +8343,9 @@ export class Kitshn extends DurableObject<Env> {
     this.sql("UPDATE notifications SET state = ?, closed_at = ? WHERE id = ?", state, now, before.id);
     this.openNotifications.delete(id);
     if (state === "dismissed") this.dismissed.set(id, before.episode);
+    // K-1907: a high priority notification also tells its recipients about its answer; dismiss is the owner's own.
+    if (before.priority === "high" && state !== "dismissed")
+      this.queuePush({ ...before, state, closedAt: now });
   }
 
   /** K-1904: the sources that kitshn derives from its own state. */
@@ -8448,6 +8529,163 @@ export class Kitshn extends DurableObject<Env> {
       ...this.mutes.map((mute) => mute.until),
       ...[...this.openNotifications.values()].map((notification) => notification.snoozedUntil),
     ].some((end) => end !== null && end > since && end <= now);
+  }
+
+  /** K-1907: the VAPID key, made on first use. The private half never leaves `meta` (no snapshot, no export). */
+  private vapid: Promise<VapidKey> | null = null;
+  private vapidKey(): Promise<VapidKey> {
+    this.vapid ??= (async () => {
+      let jwk = this.meta(VAPID_META);
+      if (jwk === null) {
+        jwk = await generateVapidJwk();
+        this.setMeta(VAPID_META, jwk);
+      }
+      const key = await vapidKey(jwk);
+      if (!key) throw new Error("kitshn has a push key in meta that it cannot read.");
+      return key;
+    })();
+    return this.vapid;
+  }
+
+  /** K-1907: pushes wait until the change commits, then go out in one task. */
+  private pushQueue: Array<Notification> = [];
+  private queuePush(notification: Notification) {
+    this.pushQueue.push(notification);
+    if (this.pushQueue.length === 1) this.ctx.waitUntil(Promise.resolve().then(() => this.flushPushes()));
+  }
+
+  private async flushPushes() {
+    const notifications = this.pushQueue;
+    this.pushQueue = [];
+    const devices = this.sql<PushRow>("SELECT * FROM push_subscriptions");
+    if (devices.length === 0) return;
+    const key = await this.vapidKey();
+    const now = Date.now();
+    const sends = notifications.flatMap((notification) =>
+      notification.state === "open" && !onBell(notification, this.mutes, now)
+        ? []
+        : devices
+            .filter(
+              (row) =>
+                this.receives({ email: row.email, clientId: null, ip: null }, notification) &&
+                deviceWants(pushDeviceOf(row), notification, now),
+            )
+            .map((row) => ({ row, notification })),
+    );
+    const results = await Promise.all(
+      sends.map(async ({ row, notification }) => {
+        const card =
+          notification.card === null ? null : (this.state.resources.get(notification.card)?.name ?? null);
+        try {
+          const result = await sendPush(
+            { endpoint: row.endpoint, p256dh: row.p256dh, auth: row.auth },
+            pushMessage(notification, card),
+            key,
+            `https://${this.env.KITSHN_HOST}`,
+            {
+              urgency: notification.level === "error" || notification.priority === "high" ? "high" : "normal",
+              topic: await pushTopic(`${notification.source}:${notification.key}`),
+            },
+          );
+          return { id: row.id, result };
+        } catch (error) {
+          console.warn(`kitshn could not push to device ${row.id}: ${String(error).slice(0, 200)}`);
+          return { id: row.id, result: "failed" as const };
+        }
+      }),
+    );
+    for (const { id, result } of results) {
+      if (result === "gone") this.sql("DELETE FROM push_subscriptions WHERE id = ?", id);
+      else if (result === "delivered")
+        this.sql("UPDATE push_subscriptions SET last_ok_at = ? WHERE id = ?", now, id);
+    }
+  }
+
+  /** K-1907: the devices of push, for the Owner circle only in this version (K-1902). */
+  private async pushRequest(path: string, request: Request, caller: Caller): Promise<Response> {
+    if (!this.isOwner(caller.visitor))
+      return Response.json(
+        { error: "Push is for the Owner circle in this version (K-1902)." },
+        { status: 403 },
+      );
+    const email = caller.visitor.email;
+    if (email === null)
+      return Response.json({ error: "Push needs a person, not a service token." }, { status: 403 });
+    const now = Date.now();
+    const body = request.method === "POST" ? ((await request.json().catch(() => null)) as unknown) : null;
+    if (path === "/api/push" && request.method === "GET") {
+      const mine = new URL(request.url).searchParams.get("mine");
+      const rows = this.sql<PushRow>("SELECT * FROM push_subscriptions ORDER BY created_at");
+      return Response.json({
+        publicKey: (await this.vapidKey()).publicKey,
+        devices: rows.map((row) => ({ ...pushDeviceOf(row), mine: row.endpoint === mine })),
+        testAt: Number(this.meta("push_test_at") ?? 0),
+      });
+    }
+    if (path === "/api/push/subscribe" && request.method === "POST") {
+      const input = pushInput(body);
+      if (typeof input === "string") return Response.json({ error: input }, { status: 400 });
+      this.sql(
+        `INSERT INTO push_subscriptions (endpoint, p256dh, auth, email, label, levels, quiet_start, quiet_end, time_zone,
+         created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (endpoint) DO UPDATE SET p256dh = excluded.p256dh,
+         auth = excluded.auth, email = excluded.email, label = excluded.label, levels = excluded.levels,
+         quiet_start = excluded.quiet_start, quiet_end = excluded.quiet_end, time_zone = excluded.time_zone`,
+        input.endpoint,
+        input.p256dh,
+        input.auth,
+        email,
+        input.label,
+        JSON.stringify(input.levels),
+        input.quiet?.start ?? null,
+        input.quiet?.end ?? null,
+        input.quiet?.timeZone ?? null,
+        now,
+      );
+      return Response.json({ ok: true });
+    }
+    if (path === "/api/push/unsubscribe" && request.method === "POST") {
+      const endpoint = isRecord(body) ? body["endpoint"] : undefined;
+      const id = isRecord(body) ? body["id"] : undefined;
+      if (typeof endpoint === "string")
+        this.sql("DELETE FROM push_subscriptions WHERE endpoint = ?", endpoint);
+      else if (typeof id === "number") this.sql("DELETE FROM push_subscriptions WHERE id = ?", id);
+      else return Response.json({ error: "Name the device by its endpoint or its id." }, { status: 400 });
+      return Response.json({ ok: true });
+    }
+    if (path === "/api/push/test" && request.method === "POST") {
+      const last = Number(this.meta("push_test_at") ?? 0);
+      if (now - last < PUSH_TEST_MS)
+        return Response.json({ error: "One test a minute; try again shortly." }, { status: 429 });
+      this.setMeta("push_test_at", String(now));
+      this.queuePush({
+        id: 0,
+        source: "test",
+        key: String(now),
+        episode: String(now),
+        card: null,
+        recipients: { _tag: "owner" },
+        level: "error",
+        priority: "normal",
+        title: "kitshn test push",
+        text: "",
+        actions: [],
+        state: "open",
+        openedAt: now,
+        closedAt: null,
+        snoozedUntil: null,
+      });
+      return Response.json({ ok: true });
+    }
+    if (path === "/api/push/rotate" && request.method === "POST") {
+      this.ctx.storage.transactionSync(() => {
+        this.sql("DELETE FROM meta WHERE key = ?", VAPID_META);
+        this.sql("DELETE FROM push_subscriptions");
+      });
+      this.vapid = null;
+      this.recordRevision(caller.actor, "Rotate push key: every browser subscribes again");
+      return Response.json({ publicKey: (await this.vapidKey()).publicKey });
+    }
+    return Response.json({ error: "Not found." }, { status: 404 });
   }
 
   override async alarm() {

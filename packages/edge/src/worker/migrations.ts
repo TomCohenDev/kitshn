@@ -193,6 +193,13 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `CREATE TABLE repo_cards (repo_id TEXT NOT NULL, app_key TEXT NOT NULL, environment TEXT NOT NULL,
      card_id TEXT NOT NULL UNIQUE, PRIMARY KEY (repo_id, app_key, environment))`,
   ],
+  // 29: Web Push subscriptions (K-1907), one row per browser of a person. `levels` is a JSON list; the quiet hours
+  // are minutes after midnight in `time_zone`, or all null.
+  [
+    `CREATE TABLE push_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL UNIQUE,
+     p256dh TEXT NOT NULL, auth TEXT NOT NULL, email TEXT NOT NULL, label TEXT NOT NULL, levels TEXT NOT NULL,
+     quiet_start INTEGER, quiet_end INTEGER, time_zone TEXT, created_at INTEGER NOT NULL, last_ok_at INTEGER)`,
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

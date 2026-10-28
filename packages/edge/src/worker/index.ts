@@ -335,7 +335,9 @@ async function usageAnswer(
     answer instanceof Response ? `${answer.status}: ${(await answer.text()).slice(0, 300)}` : String(answer);
   const email = caller.visitor.email?.toLowerCase();
   const owner = env.OWNER_EMAILS.split(",").some((each) => each.trim().toLowerCase() === email);
-  if (!owner || !env.CLOUDFLARE_API_TOKEN)
+  // The error text of the Durable Object is for owners only.
+  if (!owner) return Response.json({ error: "kitshn did not answer." }, { status: 503 });
+  if (!env.CLOUDFLARE_API_TOKEN)
     return Response.json({ error: `kitshn did not answer: ${reason}` }, { status: 503 });
   const key = new Request("https://kitshn.internal/usage");
   const cached = await caches.default.match(key);

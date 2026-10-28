@@ -198,7 +198,7 @@ import {
 } from "./deploys.ts";
 import { DEFAULT_APP } from "kitshn/names";
 import { AppKey, type Recipe, WorkerApp, decodeRecipe, deployOrder, plan, repoSlug } from "kitshn/recipe";
-import { removeStaleDomains, zoneFor, zoneOfAddressIn, zonesOrMain } from "./zones.ts";
+import { removeStaleDomains, zoneFor, zoneOfAddressIn, zonesOf, zonesOrMain } from "./zones.ts";
 import {
   type LiveSite,
   ingressAccess,

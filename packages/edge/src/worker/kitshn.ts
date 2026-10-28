@@ -91,7 +91,7 @@ import {
   mayDeployOn,
   publishPlace,
 } from "../core/agent.ts";
-import { DEMO_MACHINES, DEMO_SITE_ICON, demo } from "../core/demo.ts";
+import { DEMO_MACHINES, DEMO_ICONS, demo } from "../core/demo.ts";
 import { type MachineOs, machineOs } from "../core/icons.ts";
 import {
   contentSecurityPolicy,
@@ -449,14 +449,15 @@ export class Kitshn extends DurableObject<Env> {
             key === null ? null : "Yarden's agents",
             goneAt,
           );
-      // K-524, K-1113: the demo cards show a site icon and the system of each machine.
+      // K-524, K-1113, K-1114: the demo cards show site icons and the system of each machine.
       if (extra.resources.length > 0) {
-        this.sql(
-          "INSERT OR IGNORE INTO icons (id, type, hash, bytes) VALUES (?, ?, 'demo', ?)",
-          DEMO_SITE_ICON.id,
-          DEMO_SITE_ICON.type,
-          new TextEncoder().encode(DEMO_SITE_ICON.svg).slice().buffer,
-        );
+        for (const icon of DEMO_ICONS)
+          this.sql(
+            "INSERT OR IGNORE INTO icons (id, type, hash, bytes) VALUES (?, ?, 'demo', ?)",
+            icon.id,
+            icon.type,
+            new TextEncoder().encode(icon.svg).slice().buffer,
+          );
         for (const { machine, os } of DEMO_MACHINES) {
           this.sql("INSERT OR IGNORE INTO machines (id, body) VALUES (?, ?)", machine.id, JSON.stringify(machine));
           this.sql("INSERT OR IGNORE INTO presence (id, online, last_seen, os) VALUES (?, 0, ?, ?)", machine.id, Date.now() - 3_600_000, os);

@@ -1,0 +1,227 @@
+import { describe, expect, it } from "vitest";
+import {
+  ADMIN_RESOURCE_ID,
+  type Circle,
+  EVERYONE_CIRCLE_ID,
+  OWNER_CIRCLE_ID,
+  type Resource,
+  type State,
+  shareKey,
+} from "../core/model.ts";
+import type { MachineView } from "../core/protocol.ts";
+import { seed } from "../core/seed.ts";
+import {
+  type Action,
+  type ActionContext,
+  type ActionGroups,
+  type ActionHandlers,
+  actionsFor,
+  flatten,
+  levelEdit,
+  paletteEntries,
+} from "./actions.ts";
+
+/** K-523: the action list per item kind. The menu and the palette both read these lists. */
+
+const card = (id: string, kind: Resource["kind"], addresses: Array<string> = []): Resource => ({
+  id,
+  kind,
+  name: id,
+  addresses,
+  status: "running",
+  group: null,
+  machine: null,
+});
+
+const her: Circle = {
+  id: "her",
+  name: "Her",
+  color: "#FF5277",
+  level: "use",
+  members: [{ _tag: "email", email: "her@example.com" }],
+  match: "any",
+  needsPasskey: false,
+  endsAt: null,
+  x: 2000,
+  y: 0,
+  r: 200,
+};
+
+function context(version = "0123456789ab"): ActionContext {
+  const s = seed(["owner@example.com"], "kit.example.com");
+  const resources = [
+    ...s.resources,
+    card("riffle", "site.compose", ["riffle.example.com"]),
+    card("vps", "machine"),
+    card("notes", "page", ["pages.example.com/notes"]),
+    card("a", "file"),
+    card("b", "file"),
+    card("loose", "file"),
+  ];
+  const state: State = {
+    circles: new Map([...s.circles, her].map((circle) => [circle.id, circle])),
+    resources: new Map(resources.map((resource) => [resource.id, resource])),
+    places: new Map([
+      ...s.places,
+      ["riffle", { x: 0, y: -200 }],
+      ["vps", { x: 10, y: 10 }],
+      ["a", { x: 2000, y: 0 }],
+      ["b", { x: 2000, y: 0 }],
+    ]),
+    shareSettings: new Map(),
+    stacks: new Map([["s1", { id: "s1", name: "Docs", members: ["a", "b"] }]]),
+    paused: null,
+    machines: new Map(),
+  };
+  const machine: MachineView = {
+    machine: { id: "vps", name: "vps", labels: [], order: 0, serviceTokenId: "t", clientId: "c", tunnelId: "u" },
+    online: true,
+    lastSeen: null,
+    status: null,
+    sample: null,
+    keyFailure: null,
+    orphanVolumes: [],
+  };
+  return { state, deployed: new Set(["riffle"]), machines: new Map([["vps", machine]]), version };
+}
+
+/** Handlers that record each call by name. */
+function recorder() {
+  const calls: Array<[string, ...Array<unknown>]> = [];
+  const handlers = new Proxy({} as ActionHandlers, {
+    get: (_target, name) => (...args: Array<unknown>) => calls.push([String(name), ...args]),
+  });
+  return { calls, handlers };
+}
+
+const ids = (groups: ActionGroups | null) => (groups ?? []).flat().map((action) => action.id);
+const find = (groups: ActionGroups | null, id: string): Action => {
+  const action = (groups ?? []).flat().find((candidate) => candidate.id === id);
+  if (!action) throw new Error(`No action ${id} in ${ids(groups).join(", ")}`);
+  return action;
+};
+const run = (action: Action) => {
+  if (!("run" in action)) throw new Error(`${action.id} opens a list`);
+  action.run();
+};
+const items = (action: Action) => ("items" in action ? action.items : []);
+
+describe("card actions", () => {
+  it("offers a deployed app its address, shares, tray and Remove app, and nothing of a machine", () => {
+    const { handlers, calls } = recorder();
+    const groups = actionsFor(context(), handlers, { _tag: "card", id: "riffle" });
+    expect(ids(groups)).toEqual(["details", "open", "copy", "share", "unshare", "select-kind", "add-to-stack", "tray", "remove-app"]);
+    expect(find(groups, "remove-app").danger).toBe(true);
+    // The card sits in the Owner circle only, so it can join Everyone and Her.
+    expect(items(find(groups, "share")).map((item) => item.id)).toEqual([`share:${EVERYONE_CIRCLE_ID}`, "share:her"]);
+    run(find(groups, "remove-app"));
+    run(items(find(groups, "share"))[1] as Action);
+    expect(calls.map(([name]) => name)).toEqual(["removeApp", "reshare"]);
+    expect(calls[1]).toMatchObject(["reshare", { id: "riffle" }, { id: "her" }, true]);
+  });
+
+  it("gives a machine its level per circle and its daemon commands, and Update only with a release", () => {
+    const { handlers, calls } = recorder();
+    const groups = actionsFor(context(), handlers, { _tag: "card", id: "vps" });
+    expect(ids(groups)).toEqual(
+      expect.arrayContaining([`level:${OWNER_CIRCLE_ID}`, "restart", "update", "remove-machine"]),
+    );
+    expect(ids(groups)).not.toContain("remove-app");
+    expect(items(find(groups, `level:${OWNER_CIRCLE_ID}`)).map((item) => item.id)).toEqual([
+      `level:${OWNER_CIRCLE_ID}:default`,
+      `level:${OWNER_CIRCLE_ID}:view`,
+      `level:${OWNER_CIRCLE_ID}:use`,
+      `level:${OWNER_CIRCLE_ID}:control`,
+    ]);
+    run(find(groups, "update"));
+    expect(calls[0]).toMatchObject(["runJob", { machine: { id: "vps" } }, { kind: "update", version: "0123456789ab" }]);
+    expect(ids(actionsFor(context("local"), handlers, { _tag: "card", id: "vps" }))).not.toContain("update");
+  });
+
+  it("has no level list for a kind with one level, no tray for the admin, and Place for a tray card", () => {
+    const { handlers } = recorder();
+    const ctx = context();
+    expect(ids(actionsFor(ctx, handlers, { _tag: "card", id: "riffle" })).some((id) => id.startsWith("level:"))).toBe(false);
+    expect(ids(actionsFor(ctx, handlers, { _tag: "card", id: ADMIN_RESOURCE_ID }))).not.toContain("tray");
+    const loose = ids(actionsFor(ctx, handlers, { _tag: "card", id: "loose" }));
+    expect(loose).toContain("place");
+    expect(loose).not.toContain("tray");
+    expect(loose).not.toContain("share");
+  });
+
+  it("lets a stacked card leave its stack, and not join it again", () => {
+    const { handlers, calls } = recorder();
+    const groups = actionsFor(context(), handlers, { _tag: "card", id: "a" });
+    expect(ids(groups)).toContain("leave-stack");
+    expect(ids(groups)).not.toContain("add-to-stack");
+    run(find(groups, "leave-stack"));
+    expect(calls[0]).toEqual(["pullOut", "s1", "a"]);
+  });
+
+  it("selects every placed card of the same kind", () => {
+    const { handlers, calls } = recorder();
+    run(find(actionsFor(context(), handlers, { _tag: "card", id: "a" }), "select-kind"));
+    expect(calls[0]).toEqual(["select", { cards: new Set(["a", "b"]), circle: null }]);
+  });
+});
+
+describe("stack, circle and map actions", () => {
+  it("lists each card of a stack under Pull out", () => {
+    const { handlers } = recorder();
+    const groups = actionsFor(context(), handlers, { _tag: "stack", id: "s1" });
+    expect(ids(groups)).toEqual(expect.arrayContaining(["details", "rename", "pull-out", "unstack"]));
+    expect(items(find(groups, "pull-out")).map((item) => item.id)).toEqual(["pull-out:a", "pull-out:b"]);
+  });
+
+  it("never offers to delete the Owner circle (K-211), and deletes another at once", () => {
+    const { handlers, calls } = recorder();
+    expect(ids(actionsFor(context(), handlers, { _tag: "circle", id: OWNER_CIRCLE_ID }))).not.toContain("delete");
+    const groups = actionsFor(context(), handlers, { _tag: "circle", id: "her" });
+    expect(find(groups, "delete").danger).toBe(true);
+    run(find(groups, "delete"));
+    expect(calls[0]).toMatchObject(["deleteCircle", { id: "her" }]);
+  });
+
+  it("adds a circle and an upload at the clicked point", () => {
+    const { handlers, calls } = recorder();
+    const groups = actionsFor(context(), handlers, { _tag: "map", at: { x: 5, y: 6 } });
+    run(find(groups, "new-circle"));
+    run(find(groups, "upload"));
+    expect(calls).toEqual([
+      ["newCircle", { x: 5, y: 6 }],
+      ["upload", { x: 5, y: 6 }],
+    ]);
+  });
+
+  it("has no menu for an item that is gone", () => {
+    expect(actionsFor(context(), recorder().handlers, { _tag: "card", id: "gone" })).toBeNull();
+  });
+});
+
+describe("the palette", () => {
+  it("has every action of every menu, so no action exists only in a menu", () => {
+    const { handlers } = recorder();
+    const ctx = context();
+    const palette = new Set(paletteEntries(ctx, handlers).map((entry) => entry.label));
+    for (const id of ctx.state.resources.keys()) {
+      const groups = actionsFor(ctx, handlers, { _tag: "card", id });
+      for (const entry of flatten(groups ?? [], "")) expect([...palette].some((label) => label.endsWith(entry.label))).toBe(true);
+    }
+    // K-511: the words of "Share <card> with <circle>" find the entry.
+    expect([...palette].filter((label) => ["share", "riffle", "her"].every((word) => label.toLowerCase().includes(word)))).toEqual([
+      "📦 riffle · Share with: Her",
+    ]);
+  });
+});
+
+describe("levelEdit (K-205)", () => {
+  it("clears the setting for the default, and keeps an end date", () => {
+    const ctx = context();
+    const vps = ctx.state.resources.get("vps") as Resource;
+    const owner = ctx.state.circles.get(OWNER_CIRCLE_ID) as Circle;
+    expect(levelEdit(ctx.state, vps, owner, null).after).toBeNull();
+    const ending: State = { ...ctx.state, shareSettings: new Map([[shareKey("vps", OWNER_CIRCLE_ID), { level: "use", endsAt: 9 }]]) };
+    expect(levelEdit(ending, vps, owner, null).after).toEqual({ level: null, endsAt: 9 });
+    expect(levelEdit(ending, vps, owner, "view").after).toEqual({ level: "view", endsAt: 9 });
+  });
+});

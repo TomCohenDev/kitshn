@@ -1,5 +1,6 @@
-import { type ComponentChildren, createPortal } from "preact";
+import { type ComponentChildren, Fragment, createPortal } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import type { Action, ActionGroups } from "./actions.ts";
 import { type Rect, type Side, menuMove, placeFloating, tipTimer } from "./popover.ts";
 
 /**
@@ -180,7 +181,8 @@ const ITEMS = '[role="menuitem"]:not(:disabled)';
 /**
  * A menu in a portal next to `anchor` (a button's rect, or a zero-size rect at the pointer for a context
  * menu). It takes the focus, and gives it back on close. Arrows, Home, End and a first letter move; Enter
- * runs the item; Escape, Tab or a press outside closes it. A chosen item closes it too.
+ * runs the item; Escape, Tab or a press outside closes it. A chosen item closes it too, except an item that
+ * opens a sub-list.
  */
 export function Menu(props: {
   readonly label: string;
@@ -245,7 +247,8 @@ export function Menu(props: {
         list[next]?.focus();
       }}
       onClick={(event) => {
-        if ((event.target as Element).closest(ITEMS)) onClose.current();
+        const item = (event.target as Element).closest(ITEMS);
+        if (item && !item.hasAttribute("aria-haspopup")) onClose.current();
       }}
     >
       {props.children}
@@ -261,6 +264,8 @@ export function MenuItem(props: {
   readonly keys?: string;
   readonly danger?: boolean;
   readonly disabled?: boolean;
+  /** The item opens a sub-list in the same menu, so a choice keeps the menu open. */
+  readonly opens?: boolean;
   readonly children: ComponentChildren;
 }) {
   return (
@@ -269,6 +274,7 @@ export function MenuItem(props: {
       role="menuitem"
       tabIndex={-1}
       class="menu-item"
+      aria-haspopup={props.opens ? "menu" : undefined}
       data-danger={props.danger || undefined}
       data-tip={props.tip}
       disabled={props.disabled}
@@ -282,6 +288,69 @@ export function MenuItem(props: {
 
 export function MenuSep() {
   return <div class="menu-sep" role="separator" />;
+}
+
+/**
+ * K-523: a menu of action groups. An action with a sub-list shows that list in the same menu, with "Back"
+ * first, so the menu needs no second layer.
+ */
+export function ActionMenu(props: {
+  readonly label: string;
+  readonly anchor: Rect;
+  readonly groups: ActionGroups;
+  readonly onClose: () => void;
+}) {
+  const [open, setOpen] = useState<Extract<Action, { items: unknown }> | null>(null);
+  const item = (action: Action) =>
+    "items" in action ? (
+      <MenuItem key={action.id} tip={action.tip} danger={action.danger ?? false} opens onSelect={() => setOpen(action)}>
+        {action.label}
+        <span class="menu-key">▸</span>
+      </MenuItem>
+    ) : (
+      <MenuItem key={action.id} tip={action.tip} danger={action.danger ?? false} onSelect={action.run}>
+        {action.label}
+      </MenuItem>
+    );
+  return (
+    // A new key mounts a new menu, so the focus moves to the first item of the sub-list.
+    <Menu key={open?.id ?? ""} label={open ? `${props.label}: ${open.label}` : props.label} anchor={props.anchor} onClose={props.onClose}>
+      {open ? (
+        <>
+          <MenuItem tip="Back to the first list." opens onSelect={() => setOpen(null)}>
+            ◂ {open.label}
+          </MenuItem>
+          <MenuSep />
+          {open.items.map(item)}
+        </>
+      ) : (
+        props.groups.map((group, index) => (
+          <Fragment key={index}>
+            {index > 0 ? <MenuSep /> : null}
+            {group.map(item)}
+          </Fragment>
+        ))
+      )}
+    </Menu>
+  );
+}
+
+/** The "⋯" button of a card, a stack or a circle head: a keyboard path to its context menu (K-523). */
+export function MoreButton(props: { readonly name: string; readonly onOpen: (anchor: Rect) => void }) {
+  return (
+    <button
+      type="button"
+      class="more"
+      aria-haspopup="menu"
+      aria-label={`Actions for ${props.name}`}
+      data-tip={`Actions for ${props.name}. Right-click or a long press opens them too.`}
+      // The map starts a drag on a press; this button only opens the menu.
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => props.onOpen(event.currentTarget.getBoundingClientRect())}
+    >
+      ⋯
+    </button>
+  );
 }
 
 /** A panel that floats over the map, with its heading, "Enlarge" to the full view, and Close. */

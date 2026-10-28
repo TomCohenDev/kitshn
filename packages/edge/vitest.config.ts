@@ -1,3 +1,7 @@
 import { defineConfig } from "vitest/config";
 
-export default defineConfig({ test: { include: ["src/**/*.test.ts"] } });
+export default defineConfig({
+  // The UI tests render Preact components (menu.test.ts).
+  oxc: { jsx: { runtime: "automatic", importSource: "preact" } },
+  test: { include: ["src/**/*.test.ts"] },
+});

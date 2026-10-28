@@ -459,6 +459,33 @@ input[type="search"]::-webkit-search-cancel-button {
   --tilt: 4deg;
   background: var(--yellow);
 }
+/* K-523: the "⋯" button opens the context menu of a card, a stack or a circle head. */
+.more {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.6rem;
+  height: 1.4rem;
+  padding: 0 4px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  line-height: 1;
+  color: inherit;
+  background: none;
+  border: var(--bw) solid transparent;
+  border-radius: 4px;
+}
+.more:hover,
+.more:focus-visible {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--border);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.card .foot .more {
+  margin-left: auto;
+}
 /* A status sticker sits on the top edge, above the title line, so it never covers the name. */
 .card .state {
   position: absolute;

@@ -884,7 +884,7 @@ export class Kitshn extends DurableObject<Env> {
       return new Response(null, { status: 101, webSocket: client });
     }
     if (path === "/api/state" && request.method === "GET") return Response.json(this.snapshot(caller.actor));
-    if (path === "/api/sign-out" && request.method === "POST") return this.signOut();
+    if (path === "/api/sign-out" && request.method === "POST") return this.signOut(caller);
     if (path === "/api/machines" && request.method === "POST")
       return this.addMachine(caller, await request.json().catch(() => null), new URL(request.url).origin);
     if (path.startsWith("/api/machines/") && path.endsWith("/rotate-key") && request.method === "POST")
@@ -2401,7 +2401,7 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-110: ends every session of every application that kitshn made. */
-  private async signOut() {
+  private async signOut(caller: Caller) {
     // K-110: the Worker checks pages and files itself, so it refuses every login from before this second.
     this.setMeta("signed_out_at", String(Math.floor(Date.now() / 1000) * 1000));
     const api = this.api();
@@ -2421,7 +2421,12 @@ export class Kitshn extends DurableObject<Env> {
       const loginApps = all
         .filter((app) => logins.has(app.domain) && app.name.startsWith(ACCESS_NAME_PREFIX))
         .map((app) => ({ key: app.domain, cfId: app.id }));
-      return Response.json(await signOutEverywhere(this.accessStore(), api, account, loginApps));
+      const result = await signOutEverywhere(this.accessStore(), api, account, loginApps);
+      // K-110: no confirm in the map, so History records each sign-out.
+      const failed = result.failed.length > 0 ? `; ${result.failed.length} failed` : "";
+      this.insertRevision(caller.actor, `Signed out everywhere: ended the sessions of ${result.ended} applications${failed}`, [], null);
+      this.broadcast();
+      return Response.json(result);
     } catch (error) {
       return Response.json({ error: String(error) }, { status: 502 });
     }

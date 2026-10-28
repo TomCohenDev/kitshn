@@ -27,6 +27,7 @@ import {
 } from "../core/model.ts";
 import { MAX_UPLOAD_BYTES } from "../core/library.ts";
 import { placeInside } from "../core/place.ts";
+import type { Command } from "../core/machine.ts";
 import type { JobView, MachineView, RepoView, RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
 import {
@@ -38,12 +39,23 @@ import {
   MEMBER_HELP,
   SecretDialog,
 } from "./Circle.tsx";
-import { TooltipLayer } from "./controls.tsx";
+import { ActionMenu, TooltipLayer } from "./controls.tsx";
+import {
+  type ActionContext,
+  type ActionHandlers,
+  type MenuTarget,
+  type PaletteEntry,
+  actionsFor,
+  REMOVE_APP_TIP,
+  levelEdit,
+  paletteEntries,
+} from "./actions.ts";
+import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
 import { PauseDialog, PausedBanner } from "./Pause.tsx";
 import { REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
 import { LibraryView } from "./Library.tsx";
-import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
+import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
 import { overlay } from "./held.ts";
 import {
@@ -136,6 +148,9 @@ export function App() {
   const [previews, setPreviews] = useState(() => localStorage.getItem(PREVIEWS_KEY) === "on");
   const [addingSite, setAddingSite] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
+  /** Where the next upload of the file chooser lands: a map point, or null for the tray. */
+  const uploadAt = useRef<Point | null>(null);
+  const [menu, setMenu] = useState<{ readonly target: MenuTarget; readonly anchor: Rect } | null>(null);
   const [pausing, setPausing] = useState(false);
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
   const [route, setRoute] = useState(routeFromHash);
@@ -156,7 +171,10 @@ export function App() {
   const deployed = useMemo(() => new Set(store.snapshot?.deployedCards ?? []), [store.snapshot]);
 
   useEffect(() => {
-    const onHash = () => setRoute(routeFromHash());
+    const onHash = () => {
+      setRoute(routeFromHash());
+      setMenu(null);
+    };
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -359,14 +377,16 @@ export function App() {
     setSelection({ cards: new Set(edits.map((edit) => edit.id)), circle: null });
   };
 
-  /** Opens the circle editor with its Add member input ready. */
-  const addMemberTo = (circleId: string) => {
-    setSelection({ cards: new Set(), circle: circleId });
+  /** Selects an item and puts the focus into an input of its panel, after the panel renders. */
+  const selectAndFocus = (next: Selection, selector: string) => {
+    setSelection(next);
     location.hash = "map";
-    queueMicrotask(() =>
-      setTimeout(() => document.querySelector<HTMLInputElement>(".add-member input")?.focus()),
-    );
+    queueMicrotask(() => setTimeout(() => document.querySelector<HTMLInputElement>(selector)?.focus()));
   };
+
+  /** Opens the circle editor with its Add member input ready. */
+  const addMemberTo = (circleId: string) =>
+    selectAndFocus({ cards: new Set(), circle: circleId }, ".add-member input");
 
   /** K-1504: one press after the confirm pauses everything at once. */
   const pauseNow = async (mode: PauseMode) => {
@@ -532,9 +552,10 @@ export function App() {
 
   fitRef.current = fit;
 
-  const newCircle = async () => {
+  /** A new circle at `at`, or in the middle of the view. */
+  const newCircle = async (at: Point | null) => {
     const id = `c-${crypto.randomUUID().slice(0, 8)}`;
-    const center = { x: (innerWidth / 2 - view.x) / view.s, y: (innerHeight / 2 - view.y) / view.s };
+    const center = at ?? { x: (innerWidth / 2 - view.x) / view.s, y: (innerHeight / 2 - view.y) / view.s };
     const circle: Circle = {
       id,
       name: "New circle",
@@ -573,6 +594,105 @@ export function App() {
     await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
   };
 
+  /** No confirm: Undo in the toast and in History brings the circle back. */
+  const deleteCircle = async (circle: Circle) => {
+    const result = await applyEdits([{ _tag: "circle", id: circle.id, after: null }]);
+    if (result.ok) {
+      setSelection({ cards: new Set(), circle: null });
+      showToast({ text: `Deleted circle ${circle.name}.`, error: false, undo: result.revision });
+    } else showToast({ text: result.error, error: true, undo: null });
+  };
+
+  /** K-615: no confirm, and no undo; History records it. */
+  const removeMachine = async (machine: MachineView) => {
+    const result = await callApi<{ removed: string }>("DELETE", `/api/machines/${encodeURIComponent(machine.machine.id)}`);
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: `Removed ${machine.machine.name}: its token and tunnel are gone. History records it.`, error: false, undo: null },
+    );
+  };
+
+  /** K-110: no confirm; History records it. */
+  const signOut = async () => {
+    const result = await callApi<{ ended: number; failed: Array<string> }>("POST", "/api/sign-out", {});
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : {
+            text:
+              `Ended the sessions of ${plural(result.ended, "application")}. Everyone logs in again.` +
+              (result.failed.length > 0 ? ` Failed: ${result.failed.join("; ")}` : ""),
+            error: result.failed.length > 0,
+            undo: null,
+          },
+    );
+  };
+
+  const runJob = (machine: MachineView, command: Command) =>
+    queueJob(machine.machine.id, command).then(({ text, error }) => showToast({ text, error, undo: null }));
+
+  const placeInView = (resource: Resource) => {
+    const center = { x: (innerWidth / 2 - view.x) / view.s, y: (innerHeight / 2 - view.y) / view.s };
+    const to = placeInside(state, center, new Set());
+    if (to) void commit([{ _tag: "place", id: resource.id, after: to }], []);
+  };
+
+  const uploadTo = (at: Point | null) => {
+    uploadAt.current = at;
+    location.hash = "map";
+    setTimeout(() => uploadInput.current?.click());
+  };
+
+  /** K-523: the menu and the palette run these, the same as the toolbar and the panel. */
+  const handlers: ActionHandlers = {
+    select: (selected) => {
+      setSelection(selected);
+      location.hash = "map";
+    },
+    openAddress: (address) => void open(`https://${address}`, "_blank", "noreferrer"),
+    copyAddress: (address) => void navigator.clipboard.writeText(`https://${address}`),
+    reshare: (resource, circle, share) => void reshare(resource, circle, share),
+    setLevel: (resource, circle, level) =>
+      void applyEdits([levelEdit(state, resource, circle, level)]).then(
+        (result) => result.ok || showToast({ text: result.error, error: true, undo: null }),
+      ),
+    place: placeInView,
+    toTray: (resource) => {
+      const edits: Array<Edit> = [{ _tag: "place", id: resource.id, after: null }];
+      void commit(
+        edits,
+        shareDiff(state, applyChanges(state, resolveEdits(state, edits))),
+        `Moved ${resource.name} to the tray.`,
+      );
+    },
+    stackOnto: (ids, target) => void stacks.stackOnto(ids, target),
+    pullOut: (stackId, id) => void stacks.pullOut(stackId, id),
+    unstack: (stackId) => void stacks.unstack(stackId),
+    renameStack: (stackId) =>
+      selectAndFocus(
+        { cards: new Set(state.stacks.get(stackId)?.members ?? []), circle: null },
+        'input[aria-label="Stack name"]',
+      ),
+    removeApp: (resource) => void removeApp(resource),
+    runJob: (machine, command) => void runJob(machine, command),
+    removeMachine: (machine) => void removeMachine(machine),
+    editCircle: (circleId) => {
+      setSelection({ cards: new Set(), circle: circleId });
+      location.hash = "map";
+    },
+    renameCircle: (circleId) =>
+      selectAndFocus({ cards: new Set(), circle: circleId }, 'input[aria-label="Circle name"]'),
+    addMember: addMemberTo,
+    deleteCircle: (circle) => void deleteCircle(circle),
+    newCircle: (at) => void newCircle(at),
+    upload: uploadTo,
+    addSite: () => setAddingSite(true),
+    addMachine: () => setAddingMachine(true),
+    fit,
+  };
+  const actionContext: ActionContext = { state, deployed, machines, version: store.snapshot.version };
+
   const waitingRepos = store.snapshot?.repos.filter((repo) => repo.state === "waiting").length ?? 0;
   return (
     <>
@@ -598,13 +718,13 @@ export function App() {
           }}
           onCommit={(edits, diffs) => void commit(edits, diffs)}
           machines={machines}
+          onMenu={setMenu}
         />
       ) : route.tab === "library" ? (
         <LibraryView
           state={state}
           revision={store.snapshot.revision}
           onToast={(text, error) => showToast({ text, error, undo: null })}
-          ask={ask}
           onShowCard={(id) => {
             setSelection({ cards: new Set([id]), circle: null });
             location.hash = "map";
@@ -674,7 +794,7 @@ export function App() {
             <button
               class="btn primary"
               data-tip="Make a new circle in the middle of the view. It matches nobody until you add members."
-              onClick={() => void newCircle()}
+              onClick={() => void newCircle(null)}
             >
               + Circle
             </button>
@@ -702,7 +822,7 @@ export function App() {
             <button
               class="btn"
               data-tip="Upload files: an HTML file becomes a page, any other file stays a file (at most 100 MB). They wait in the tray, private. You can also drop files on the map."
-              onClick={() => uploadInput.current?.click()}
+              onClick={() => uploadTo(null)}
             >
               Upload
             </button>
@@ -714,7 +834,9 @@ export function App() {
               onChange={(event) => {
                 const files = [...(event.currentTarget.files ?? [])];
                 event.currentTarget.value = "";
-                void uploadFiles(files, null);
+                const at = uploadAt.current;
+                uploadAt.current = null;
+                void uploadFiles(files, at);
               }}
             />
             <button class="btn" data-tip="Fit every circle and card in the view." onClick={fit}>
@@ -848,24 +970,8 @@ export function App() {
           showToast({ text: result.error, error: true, undo: null });
           return result.error;
         }}
-        onDeleteCircle={async (circle) => {
-          if (
-            !(await ask(
-              `Delete the circle "${circle.name}"? Its cards stay where they are and lose its share.`,
-            ))
-          )
-            return;
-          const result = await applyEdits([{ _tag: "circle", id: circle.id, after: null }]);
-          if (result.ok) {
-            setSelection({ cards: new Set(), circle: null });
-            showToast({ text: `Deleted circle ${circle.name}.`, error: false, undo: result.revision });
-          } else showToast({ text: result.error, error: true, undo: null });
-        }}
-        onPlace={(resource) => {
-          const center = { x: (innerWidth / 2 - view.x) / view.s, y: (innerHeight / 2 - view.y) / view.s };
-          const to = placeInside(state, center, new Set());
-          if (to) void commit([{ _tag: "place", id: resource.id, after: to }], []);
-        }}
+        onDeleteCircle={handlers.deleteCircle}
+        onPlace={placeInView}
         onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
         onRemoveApp={(resource) => void removeApp(resource)}
         deployed={deployed}
@@ -874,41 +980,11 @@ export function App() {
         version={store.snapshot.version}
         jobs={store.snapshot.jobs}
         onToast={(text, error) => showToast({ text, error, undo: null })}
-        onRemoveMachine={async (view) => {
-          if (
-            !(await ask(
-              `Remove ${view.machine.name}? kitshn deletes its service token, its tunnel and its queue.`,
-            ))
-          )
-            return;
-          const result = await callApi<{ removed: string }>(
-            "DELETE",
-            `/api/machines/${encodeURIComponent(view.machine.id)}`,
-          );
-          showToast(
-            "error" in result
-              ? { text: result.error, error: true, undo: null }
-              : { text: `Removed ${view.machine.name}.`, error: false, undo: null },
-          );
-        }}
+        onRemoveMachine={handlers.removeMachine}
+        onRunJob={runJob}
         warnings={store.snapshot.accessWarnings}
         onPause={(pause) => (pause ? setPausing(true) : startResume())}
-        onSignOut={async () => {
-          if (!(await ask("End every session of every kitshn application? Everyone logs in again, you too.")))
-            return;
-          const result = await callApi<{ ended: number; failed: Array<string> }>("POST", "/api/sign-out", {});
-          showToast(
-            "error" in result
-              ? { text: result.error, error: true, undo: null }
-              : {
-                  text:
-                    `Ended the sessions of ${plural(result.ended, "application")}.` +
-                    (result.failed.length > 0 ? ` Failed: ${result.failed.join("; ")}` : ""),
-                  error: result.failed.length > 0,
-                  undo: null,
-                },
-          );
-        }}
+        onSignOut={() => void signOut()}
       />
       {store.snapshot.paused ? (
         <PausedBanner
@@ -922,31 +998,20 @@ export function App() {
       {pausing ? <PauseDialog onCancel={() => setPausing(false)} onPause={(mode) => void pauseNow(mode)} /> : null}
       {palette !== null ? (
         <Palette
-          state={state}
-          deployed={deployed}
           initialQuery={palette}
           onClose={() => setPalette(null)}
-          actions={{
-            select: (selected) => {
-              setSelection(selected);
-              location.hash = "map";
+          entries={[
+            { label: "Open History", tip: TABS.history, run: () => (location.hash = "history") },
+            {
+              label: "Emergency pause, or Resume",
+              tip: PAUSE_TIP,
+              run: () => (store.snapshot?.paused ? startResume() : setPausing(true)),
             },
-            reshare: (resource, circle, share) => void reshare(resource, circle, share),
-            removeApp: (resource) => void removeApp(resource),
-            newCircle: () => void newCircle(),
-            fit,
-            history: () => (location.hash = "history"),
-            pause: () => (store.snapshot?.paused ? startResume() : setPausing(true)),
-            addMachine: () => setAddingMachine(true),
-            addSite: () => setAddingSite(true),
-            upload: () => {
-              location.hash = "map";
-              setTimeout(() => uploadInput.current?.click());
-            },
-            addMember: addMemberTo,
-          }}
+            ...paletteEntries(actionContext, handlers),
+          ]}
         />
       ) : null}
+      {menu && route.tab === "map" ? <ContextMenu menu={menu} context={actionContext} handlers={handlers} onClose={() => setMenu(null)} /> : null}
       {confirm ? (
         <div class="scrim">
           <div class="dialog" role="alertdialog">
@@ -996,7 +1061,7 @@ export function App() {
       ) : null}
       {route.tab === "map" ? (
         <div class="hint">
-          Drag a card into a circle to share it · Shift-click or drag empty space to select many · {ALONE_KEY.label}-drag a
+          Drag a card into a circle to share it · Right-click, a long press or ⋯ shows its actions · Shift-click or drag empty space to select many · {ALONE_KEY.label}-drag a
           circle head to move it alone · Ctrl or ⌘ + wheel zooms
         </div>
       ) : null}
@@ -1068,6 +1133,7 @@ function Panel(props: {
   machines: ReadonlyMap<string, MachineView>;
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
+  onRunJob: (view: MachineView, command: Command) => Promise<void>;
   version: string;
   onToast: (text: string, error: boolean) => void;
   onPause: (pause: boolean) => void;
@@ -1115,6 +1181,7 @@ function Panel(props: {
         version={props.version}
         jobs={props.jobs}
         onRemoveMachine={props.onRemoveMachine}
+        onRunJob={props.onRunJob}
         onToast={props.onToast}
       />
     );
@@ -1224,11 +1291,11 @@ function Panel(props: {
             {props.paused ? "Resume" : "Emergency pause"}
           </button>
           <button
-            class="btn"
-            data-tip="End every session of every application that kitshn made. Everyone logs in again, you too."
+            class="btn danger"
+            data-tip="Sign out everywhere: ends every Access session of kitshn's apps at once. Everyone logs in again, you too. History records it."
             onClick={props.onSignOut}
           >
-            Sign out everywhere
+            Sign out everywhere: ends every session
           </button>
         </div>
       </section>
@@ -1336,6 +1403,7 @@ function CardPanel(props: {
   machine: MachineView | null;
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
+  onRunJob: (view: MachineView, command: Command) => Promise<void>;
   version: string;
   onToast: (text: string, error: boolean) => void;
 }) {
@@ -1435,7 +1503,7 @@ function CardPanel(props: {
       {isAppCard(resource) && props.deployed ? (
         <button
           class="btn danger"
-          data-tip="Remove app: take down what the deploy made and keep the volumes. Undo starts it again."
+          data-tip={REMOVE_APP_TIP}
           onClick={() => props.onRemoveApp(resource)}
         >
           Remove app
@@ -1447,6 +1515,7 @@ function CardPanel(props: {
           version={props.version}
           jobs={props.jobs}
           onRemove={() => props.machine && props.onRemoveMachine(props.machine)}
+          onRun={(command) => (props.machine ? props.onRunJob(props.machine, command) : Promise.resolve())}
           onToast={props.onToast}
         />
       ) : null}
@@ -1548,93 +1617,37 @@ function CardPanel(props: {
   );
 }
 
-interface PaletteActions {
-  select: (selection: Selection) => void;
-  reshare: (resource: Resource, circle: Circle, share: boolean) => void;
-  /** K-909 */
-  removeApp: (resource: Resource) => void;
-  newCircle: () => void;
-  fit: () => void;
-  history: () => void;
-  /** K-1504: opens the big red button, or Resume while paused. */
-  pause: () => void;
-  addMachine: () => void;
-  addSite: () => void;
-  upload: () => void;
-  addMember: (circleId: string) => void;
+/** K-523: a menu of the actions of one card, stack, circle or spot; the palette has the same ones. */
+function ContextMenu(props: {
+  menu: { readonly target: MenuTarget; readonly anchor: Rect };
+  context: ActionContext;
+  handlers: ActionHandlers;
+  onClose: () => void;
+}) {
+  const { target } = props.menu;
+  const groups = actionsFor(props.context, props.handlers, target);
+  if (!groups) return null;
+  const { state } = props.context;
+  const name =
+    target._tag === "card"
+      ? state.resources.get(target.id)?.name
+      : target._tag === "stack"
+        ? state.stacks.get(target.id)?.name
+        : target._tag === "circle"
+          ? state.circles.get(target.id)?.name
+          : "the map";
+  return <ActionMenu label={`Actions for ${name ?? "the map"}`} anchor={props.menu.anchor} groups={groups} onClose={props.onClose} />;
 }
 
 function Palette(props: {
-  state: State;
-  /** K-909: the cards that a deploy made, which a repo lists (K-819). */
-  deployed: ReadonlySet<string>;
   initialQuery: string;
   onClose: () => void;
-  actions: PaletteActions;
+  entries: ReadonlyArray<PaletteEntry>;
 }) {
   const [query, setQuery] = useState(props.initialQuery);
   const [active, setActive] = useState(0);
-  const { state, actions } = props;
-  const entries = useMemo(() => {
-    // A tip only where the label does not say what happens.
-    const all: Array<{ label: string; tip?: string; run: () => void }> = [
-      { label: "New circle", run: actions.newCircle },
-      {
-        label: "Add a machine (join code)",
-        tip: "Make a join command for a new machine. Its card starts in the tray, private.",
-        run: actions.addMachine,
-      },
-      { label: "Add a site, live from a machine or static from a repo", run: actions.addSite },
-      { label: "Upload a page or a file", run: actions.upload },
-      { label: "Fit the map", run: actions.fit },
-      { label: "Open History", run: actions.history },
-      { label: "Emergency pause, or Resume", tip: PAUSE_TIP, run: actions.pause },
-    ];
-    for (const resource of state.resources.values()) {
-      all.push({
-        label: `${KINDS[resource.kind].icon} ${resource.name}`,
-        tip: `${KINDS[resource.kind].help} Select it and show its panel.`,
-        run: () => actions.select({ cards: new Set([resource.id]), circle: null }),
-      });
-      if (isAppCard(resource) && props.deployed.has(resource.id))
-        all.push({
-          label: `Remove the app ${resource.name}`,
-          tip: "Take down what the deploy made and keep the volumes. Undo starts it again.",
-          run: () => actions.removeApp(resource),
-        });
-      if (!state.places.has(resource.id)) continue;
-      const holding = new Set(circlesHolding(state, resource.id).map((circle) => circle.id));
-      for (const circle of state.circles.values()) {
-        all.push(
-          holding.has(circle.id)
-            ? {
-                label: `Unshare ${resource.name} from ${circle.name}`,
-                tip: `Move the card out of ${circle.name}, without a drag. Its other circles stay.`,
-                run: () => actions.reshare(resource, circle, false),
-              }
-            : {
-                label: `Share ${resource.name} with ${circle.name}`,
-                tip: `Put the card where ${circle.name} also holds it, at ${circle.level}, without a drag.`,
-                run: () => actions.reshare(resource, circle, true),
-              },
-        );
-      }
-    }
-    for (const circle of state.circles.values()) {
-      all.push({
-        label: `Add a member to ${circle.name}: a person, a domain, a device or a network`,
-        run: () => actions.addMember(circle.id),
-      });
-      all.push({
-        label: `⭕ ${circle.name}`,
-        tip: `Edit the circle ${circle.name}: its members, level, match and end.`,
-        run: () => actions.select({ cards: new Set(), circle: circle.id }),
-      });
-    }
-    return all;
-  }, [state, actions, props.deployed]);
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const matches = entries
+  const matches = props.entries
     .filter((entry) => words.every((word) => entry.label.toLowerCase().includes(word)))
     .slice(0, 50);
   const listId = useId();

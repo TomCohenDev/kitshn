@@ -825,6 +825,28 @@ describe("folder sites (K-1123)", () => {
     // Removed again, the site counts for nothing: a new publish of the folder is a first publish, with the right.
     const again = await admin(`/api/apps/${card.id}`, "DELETE");
     expect(again.status, JSON.stringify(again.body)).toBe(200);
+    // Another site takes the free address; the Undo of the removal then no longer fits, and that site stays.
+    const other = await agentStep("folder-key.access", "/agent/sites/plan", {
+      folder: "other",
+      address: "demo-site",
+    });
+    expect(other.status, JSON.stringify(other.body)).toBe(200);
+    const otherId = other.body["deployId"];
+    expect(
+      (await agentStep("folder-key.access", "/agent/sites/assets", { deployId: otherId, manifest })).status,
+    ).toBe(200);
+    let otherFinish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && otherFinish.status === 503; attempt++)
+      otherFinish = await agentStep("folder-key.access", "/agent/sites/finish", {
+        deployId: otherId,
+        jwt: "done",
+      });
+    expect(otherFinish.status, JSON.stringify(otherFinish.body)).toBe(200);
+    const served = cloudflare.served("demo-site.example.com");
+    const refused = await admin("/api/undo", "POST", { revision: again.body["revision"] });
+    expect(refused.status).toBe(409);
+    expect(String(refused.body["error"])).toMatch(/taken/);
+    expect(cloudflare.served("demo-site.example.com")).toEqual(served);
     const noRight = [
       { _tag: "circle", id: "folders", after: agentCircle("folders", "folder-key.access", false) },
     ];

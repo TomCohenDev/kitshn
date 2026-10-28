@@ -1623,6 +1623,7 @@ export class Kitshn extends DurableObject<Env> {
     const apps = changes.flatMap((change) => (change._tag === "app" ? [change] : []));
     // Check first, so that a refused change tears nothing down.
     this.checked(changes);
+    for (const { after } of apps) if (after) this.refuseTakenBack(after);
     // K-410: a Worker address goes before its card, because the card keeps its Access application.
     for (const { before, after } of apps) {
       const teardown = before && !after ? appTeardown(before, this.env.KITSHN_ZONE) : null;
@@ -6230,6 +6231,35 @@ export class Kitshn extends DurableObject<Env> {
       if (!used(name)) return name;
     }
     return { error: "kitshn found no free random name; give one with --address.", status: 409 };
+  }
+
+  /**
+   * K-909, K-1122, K-1123: an Undo brings a removed app back only to addresses that no other card took since, and a
+   * folder site only while no new publish of its folder replaced it, so two cards never share a hostname.
+   */
+  private refuseTakenBack(card: AppCard) {
+    const now = Date.now();
+    const held = this.heldSiteAddresses(now);
+    for (const address of card.addresses) {
+      const other = [...this.state.resources.values()].find(
+        (resource) => resource.id !== card.id && resource.addresses.includes(address),
+      );
+      if (other)
+        throw new RuleError(
+          `${address} is taken by the card ${other.name} now, so this undo no longer fits.`,
+        );
+      if (held.some((row) => row.address === address && row.card_id !== card.id))
+        throw new RuleError(
+          `${address} is taken by a folder site that is being published, so this undo no longer fits.`,
+        );
+    }
+    if (
+      card.id.startsWith(FOLDER_SITE_PREFIX) &&
+      this.sql("SELECT 1 FROM agent_sites WHERE card_id = ?", card.id).length === 0
+    )
+      throw new RuleError(
+        `A new publish of the folder of ${card.name} replaced it, so this undo no longer fits.`,
+      );
   }
 
   /** K-1123: a folder site row counts while its card exists or a plan of it waits for its files. */

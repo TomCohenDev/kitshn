@@ -1107,7 +1107,7 @@ export function App() {
           heading={
             shownPanel !== "details"
               ? PANEL_HEADINGS[shownPanel]
-              : selection.circle !== null
+              : selection.circle !== null && state.circles.has(selection.circle)
                 ? "Circle"
                 : selection.cards.size === 1
                   ? "Card"

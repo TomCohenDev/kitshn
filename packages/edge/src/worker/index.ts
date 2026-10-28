@@ -210,6 +210,27 @@ function onOtherZone(host: string, env: Env) {
   }
 }
 
+/** K-1116: public in Access. Any site may read it, and the Worker asks the Durable Object at most every 5 minutes. */
+async function publicCards(request: Request, env: Env, ctx: ExecutionContext) {
+  const cache = caches.default;
+  // The query string does not split the cache.
+  const key = new Request(`${new URL(request.url).origin}/public/cards.json`);
+  const cached = await cache.match(key);
+  if (cached) return cached;
+  const answer = await env.KITSHN.getByName("kitshn").fetch("https://kitshn.internal/internal/public-cards");
+  const response = new Response(answer.body, {
+    status: answer.status,
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "public, max-age=300",
+      "access-control-allow-origin": "*",
+      "x-content-type-options": "nosniff",
+    },
+  });
+  if (response.ok) ctx.waitUntil(cache.put(key, response.clone()));
+  return response;
+}
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
@@ -302,6 +323,8 @@ export default {
       headers.set("x-kitshn-deployer", JSON.stringify(deployer));
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
     }
+    if (url.pathname === "/public/cards.json" && request.method === "GET")
+      return publicCards(request, env, ctx);
     // K-1706: "kitshn rekey" trades its one-time code in the same way.
     if ((url.pathname === "/join/exchange" || url.pathname === "/join/rekey") && request.method === "POST") {
       // A cheap shape check keeps junk away from the Durable Object; the code itself is the secret.

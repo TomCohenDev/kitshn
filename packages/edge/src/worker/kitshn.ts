@@ -113,6 +113,7 @@ import {
   newLibraryId,
   objectKey,
 } from "../core/library.ts";
+import { listedApps } from "../core/listing.ts";
 import { seed } from "../core/seed.ts";
 import { type Visitor, visitorLevel } from "../core/visitor.ts";
 import {
@@ -1199,6 +1200,7 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/join/rekey" && request.method === "POST") return this.rekey(request);
     if (path === "/internal/offline")
       return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
+    if (path === "/internal/public-cards") return this.publicCards();
     if (path === "/internal/content") return this.contentDecision((await request.json()) as ContentRequest);
     if (path.startsWith("/deploy/")) {
       const header = request.headers.get("x-kitshn-deployer");
@@ -2762,6 +2764,33 @@ export class Kitshn extends DurableObject<Env> {
       reason: offlineReason(machine?.name ?? "the machine", online),
       seen,
     });
+  }
+
+  /** K-1116: the public app cards with their main address and icon. The Worker caches the answer. */
+  private publicCards() {
+    const environments = new Map(
+      this.sql<{ resource_id: string; environment: string }>(
+        "SELECT DISTINCT resource_id, environment FROM deploys WHERE kind = 'deploy' AND state = 'done'",
+      ).map((row) => [row.resource_id, row.environment]),
+    );
+    const cards = listedApps(this.state, environments, Date.now()).map((resource) => {
+      const [icon] = this.sql<{ type: string; bytes: ArrayBuffer }>(
+        "SELECT type, bytes FROM icons WHERE id = ?",
+        resource.id,
+      );
+      if (!icon)
+        return { name: resource.name, address: resource.addresses[0], kind: resource.kind, icon: null };
+      // A spread of 100 KB into String.fromCharCode passes the argument limit, so one byte at a time.
+      let binary = "";
+      for (const byte of new Uint8Array(icon.bytes)) binary += String.fromCharCode(byte);
+      return {
+        name: resource.name,
+        address: resource.addresses[0],
+        kind: resource.kind,
+        icon: `data:${icon.type};base64,${btoa(binary)}`,
+      };
+    });
+    return Response.json({ cards });
   }
 
   /** K-1302: one alarm for the next due item. Access work, share end dates, and the daily run. */

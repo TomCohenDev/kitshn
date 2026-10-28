@@ -326,7 +326,9 @@ export function App() {
   const opener = useRef<HTMLElement | null>(null);
   const rememberOpener = () => {
     const active = document.activeElement;
-    if (active instanceof HTMLElement && active !== document.body) opener.current = active;
+    // A control inside the panel goes when the panel changes, so the control that opened the panel stays.
+    if (active instanceof HTMLElement && active !== document.body && !active.closest(".overlay-panel"))
+      opener.current = active;
   };
 
   /** Selects cards or a circle; a selection shows its details in the panel. */
@@ -746,7 +748,7 @@ export function App() {
     setPanel(null);
     setDetailsLarge(false);
     if (fullPage) location.hash = "map";
-    if (opener.current?.isConnected) opener.current.focus();
+    (opener.current?.isConnected ? opener.current : document.querySelector<HTMLElement>(".bar .seg button"))?.focus();
   };
 
   historyShow.current = showOnMap;
@@ -955,6 +957,8 @@ export function App() {
       ) : null}
       {shownPanel ? (
         <OverlayPanel
+          // New content mounts a new panel, so the focus moves to its heading.
+          key={shownPanel}
           heading={
             shownPanel !== "details"
               ? PANEL_HEADINGS[shownPanel]

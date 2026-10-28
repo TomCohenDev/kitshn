@@ -18,7 +18,7 @@ export interface VapidKey {
   readonly publicKey: string;
 }
 
-/** `delivered`, or `gone` when the push service no longer knows the subscription. */
+/** `delivered`, or `gone` when the push service no longer takes the subscription. */
 export type PushResult = "delivered" | "gone";
 
 /** A push service keeps a message this long for a device that is offline. */
@@ -173,7 +173,8 @@ export async function sendPush(
 ): Promise<PushResult> {
   const plain = encoder.encode(JSON.stringify(message));
   // The record holds the message, its delimiter and the 16-byte tag.
-  if (plain.length > RECORD_SIZE - 17) throw new Error("The push message is too long.");
+  // RFC 8291 section 4: at most 3993 bytes, so the body with its 86-byte header and the 17 bytes of record stays at 4096.
+  if (plain.length > RECORD_SIZE - 86 - 17) throw new Error("The push message is too long.");
   const response = await fetch(target.endpoint, {
     method: "POST",
     headers: {
@@ -186,7 +187,8 @@ export async function sendPush(
     },
     body: await encrypt(target, plain),
   });
-  if (response.status === 404 || response.status === 410) {
+  // 401 and 403 too: the subscription belongs to another key, for example after a restore or a rotation.
+  if ([401, 403, 404, 410].includes(response.status)) {
     await response.body?.cancel();
     return "gone";
   }

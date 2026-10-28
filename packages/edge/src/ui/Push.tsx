@@ -69,8 +69,9 @@ export function PushSection(props: { onToast: (text: string, error: boolean) => 
   useEffect(() => {
     if (!supported) return;
     void currentSubscription().then(async (current) => {
-      const mine = current ? `?mine=${encodeURIComponent(current.endpoint)}` : "";
-      const result = await callApi<PushState>("GET", `/api/push${mine}`);
+      const result = await callApi<PushState>("POST", "/api/push/devices", {
+        mine: current?.endpoint ?? null,
+      });
       if ("error" in result) return props.onToast(result.error, true);
       setState(result);
       const device = result.devices.find((each) => each.mine);

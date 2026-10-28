@@ -21,6 +21,11 @@ export interface PushDevice {
 }
 
 export const DEFAULT_LEVELS: ReadonlyArray<NotificationLevel> = ["warn", "error"];
+/**
+ * K-1907, K-406: pushes that one invocation sends at most. An alarm run spends up to 40 calls already, and the free
+ * plan allows 50 subrequests, so 5 keep 5 spare; the rest wait for the next alarm.
+ */
+export const PUSH_SENDS_PER_RUN = 5;
 /** K-1907: "Send a test" runs at most once in this time. */
 export const PUSH_TEST_MS = 60_000;
 

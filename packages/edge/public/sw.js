@@ -20,7 +20,15 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const path = (event.notification.data && event.notification.data.path) || "/#notifications";
+  // Only a path of this origin; anything else opens the Notifications view.
+  const asked = new URL(
+    (event.notification.data && event.notification.data.path) || "/#notifications",
+    self.location.origin,
+  );
+  const path =
+    asked.origin === self.location.origin
+      ? asked.href
+      : new URL("/#notifications", self.location.origin).href;
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) => {
       const open = windows.find((each) => new URL(each.url).origin === self.location.origin);

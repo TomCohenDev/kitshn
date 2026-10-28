@@ -105,7 +105,7 @@ export default {
       Object.defineProperty(page.Notification, "permission", { get: () => "default" });
     });
     await page.route(/\/api\/notifications$/, (route) => route.fulfill({ json: list }));
-    await page.route(/\/api\/push(\?.*)?$/, (route) => route.fulfill({ json: push }));
+    await page.route(/\/api\/push\/devices$/, (route) => route.fulfill({ json: push }));
     await page.routeWebSocket(/\/api\/ws/, (socket) => {
       const server = socket.connectToServer();
       server.onMessage((message) => {

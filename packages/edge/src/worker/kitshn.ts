@@ -169,7 +169,14 @@ import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
 import { seed } from "../core/seed.ts";
 import { type Visitor, circleMatches, visitorLevel } from "../core/visitor.ts";
-import { DEFAULT_LEVELS, PUSH_TEST_MS, type PushDevice, deviceWants, pushMessage } from "../core/push.ts";
+import {
+  DEFAULT_LEVELS,
+  PUSH_SENDS_PER_RUN,
+  PUSH_TEST_MS,
+  type PushDevice,
+  deviceWants,
+  pushMessage,
+} from "../core/push.ts";
 import { type VapidKey, generateVapidJwk, pushTopic, sendPush, vapidKey } from "./push.ts";
 import {
   type Mute,
@@ -182,6 +189,7 @@ import {
   NOTIFICATION_SOURCES,
   changed,
   clip,
+  muted,
   onBell,
 } from "../core/notifications.ts";
 import {
@@ -376,14 +384,30 @@ const pushDeviceOf = (row: PushRow): PushDevice => ({
   lastOkAt: row.last_ok_at,
 });
 
+/** The bytes of a base64url text, or null when it is not base64url. */
+function base64UrlBytes(text: string): Uint8Array | null {
+  try {
+    return Uint8Array.from(atob(text.replaceAll("-", "+").replaceAll("_", "/")), (c) => c.charCodeAt(0));
+  } catch {
+    return null;
+  }
+}
+
 /** K-1907: a subscription from the browser, checked. A push endpoint is an https address of a push service. */
 function pushInput(body: unknown) {
   if (!isRecord(body)) return "Send the subscription as JSON.";
   const { endpoint, p256dh, auth, label, levels, quiet } = body;
   if (typeof endpoint !== "string" || !URL.canParse(endpoint) || new URL(endpoint).protocol !== "https:")
     return "The endpoint is not an https address.";
-  if (typeof p256dh !== "string" || typeof auth !== "string" || p256dh === "" || auth === "")
-    return "The subscription has no keys.";
+  // RFC 8291: the browser key is an uncompressed P-256 point (65 bytes), the auth secret 16 bytes.
+  if (
+    typeof p256dh !== "string" ||
+    base64UrlBytes(p256dh)?.length !== 65 ||
+    base64UrlBytes(p256dh)?.[0] !== 4
+  )
+    return "The browser key is not a P-256 point of 65 bytes.";
+  if (typeof auth !== "string" || base64UrlBytes(auth)?.length !== 16)
+    return "The auth secret is not 16 bytes.";
   if (typeof label !== "string" || label.trim() === "" || label.length > 80)
     return "Name the device in at most 80 characters.";
   const chosen = Array.isArray(levels) ? levels : DEFAULT_LEVELS;
@@ -4604,6 +4628,8 @@ export class Kitshn extends DurableObject<Env> {
     if (ends.some((end) => end !== null && end <= now) && this.expiredShares(now).length > 0) next = now;
     // K-1126: a connected daemon keeps the 2-minute alarm going; without one, uptime wakes at most every 10 minutes.
     if (this.uptimeTargets().length > 0) next = Math.min(next, now + UPTIME_IDLE_MS);
+    // K-1907: pushes that wait go out in the next second.
+    if (this.pushQueue.length > 0) next = Math.min(next, now + 1000);
     const bellEnd = this.nextBellEnd(now);
     if (bellEnd !== null) next = Math.min(next, bellEnd);
     // Never move a pending alarm later: frequent wake-ups would otherwise push it away for good.
@@ -8547,33 +8573,47 @@ export class Kitshn extends DurableObject<Env> {
     return this.vapid;
   }
 
-  /** K-1907: pushes wait until the change commits, then go out in one task. */
-  private pushQueue: Array<Notification> = [];
+  /**
+   * K-1907: pushes wait until the change commits. Each entry is one notification for every device (`device` null),
+   * or one send that waits or failed once. Known limit: the queue lives in memory, so a wake drops what waits; the
+   * alarm runs within a second while it holds anything. Revisit if pushes get lost.
+   */
+  private pushQueue: Array<{ notification: Notification; device: number | null; tries: number }> = [];
   private queuePush(notification: Notification) {
-    this.pushQueue.push(notification);
+    this.pushQueue.push({ notification, device: null, tries: 0 });
     if (this.pushQueue.length === 1) this.ctx.waitUntil(Promise.resolve().then(() => this.flushPushes()));
   }
 
+  /** K-1907: sends at most PUSH_SENDS_PER_RUN pushes; the rest, and a send that failed once, wait for the alarm. */
   private async flushPushes() {
-    const notifications = this.pushQueue;
+    const queue = this.pushQueue;
     this.pushQueue = [];
-    const devices = this.sql<PushRow>("SELECT * FROM push_subscriptions");
-    if (devices.length === 0) return;
-    const key = await this.vapidKey();
+    if (queue.length === 0) return;
+    const devices = new Map(
+      this.sql<PushRow>("SELECT * FROM push_subscriptions").map((row) => [row.id, row]),
+    );
     const now = Date.now();
-    const sends = notifications.flatMap((notification) =>
-      notification.state === "open" && !onBell(notification, this.mutes, now)
+    const sends = queue.flatMap(({ notification, device, tries }) =>
+      // A mute holds for every push of its card and source, also a state change of priority high.
+      (notification.state === "open" && !onBell(notification, this.mutes, now)) ||
+      muted(notification, this.mutes, now)
         ? []
-        : devices
+        : [...devices.values()]
             .filter(
               (row) =>
+                (device === null || row.id === device) &&
                 this.receives({ email: row.email, clientId: null, ip: null }, notification) &&
                 deviceWants(pushDeviceOf(row), notification, now),
             )
-            .map((row) => ({ row, notification })),
+            .map((row) => ({ row, notification, tries })),
     );
+    const batch = sends.slice(0, PUSH_SENDS_PER_RUN);
+    for (const { row, notification, tries } of sends.slice(PUSH_SENDS_PER_RUN))
+      this.pushQueue.push({ notification, device: row.id, tries });
+    if (batch.length === 0) return;
+    const key = await this.vapidKey();
     const results = await Promise.all(
-      sends.map(async ({ row, notification }) => {
+      batch.map(async ({ row, notification, tries }) => {
         const card =
           notification.card === null ? null : (this.state.resources.get(notification.card)?.name ?? null);
         try {
@@ -8587,18 +8627,21 @@ export class Kitshn extends DurableObject<Env> {
               topic: await pushTopic(`${notification.source}:${notification.key}`),
             },
           );
-          return { id: row.id, result };
+          return { row, notification, tries, result };
         } catch (error) {
           console.warn(`kitshn could not push to device ${row.id}: ${String(error).slice(0, 200)}`);
-          return { id: row.id, result: "failed" as const };
+          return { row, notification, tries, result: "failed" as const };
         }
       }),
     );
-    for (const { id, result } of results) {
-      if (result === "gone") this.sql("DELETE FROM push_subscriptions WHERE id = ?", id);
+    for (const { row, notification, tries, result } of results) {
+      if (result === "gone") this.sql("DELETE FROM push_subscriptions WHERE id = ?", row.id);
       else if (result === "delivered")
-        this.sql("UPDATE push_subscriptions SET last_ok_at = ? WHERE id = ?", now, id);
+        this.sql("UPDATE push_subscriptions SET last_ok_at = ? WHERE id = ?", now, row.id);
+      // One retry on the next alarm, then kitshn drops the push; the warning above names the device.
+      else if (tries === 0) this.pushQueue.push({ notification, device: row.id, tries: 1 });
     }
+    if (this.pushQueue.length > 0) await this.scheduleAlarm();
   }
 
   /** K-1907: the devices of push, for the Owner circle only in this version (K-1902). */
@@ -8613,8 +8656,9 @@ export class Kitshn extends DurableObject<Env> {
       return Response.json({ error: "Push needs a person, not a service token." }, { status: 403 });
     const now = Date.now();
     const body = request.method === "POST" ? ((await request.json().catch(() => null)) as unknown) : null;
-    if (path === "/api/push" && request.method === "GET") {
-      const mine = new URL(request.url).searchParams.get("mine");
+    // The endpoint of this browser goes in the body: a query string would leave it in request logs.
+    if (path === "/api/push/devices" && request.method === "POST") {
+      const mine = isRecord(body) && typeof body["mine"] === "string" ? body["mine"] : null;
       const rows = this.sql<PushRow>("SELECT * FROM push_subscriptions ORDER BY created_at");
       return Response.json({
         publicKey: (await this.vapidKey()).publicKey,
@@ -8706,6 +8750,8 @@ export class Kitshn extends DurableObject<Env> {
     const uptime = await this.checkUptime(now, daily ? 0 : UPTIME_FETCHES_PER_RUN);
     if (uptime.changed) changed = true;
     if (this.bellEnded(now)) changed = true;
+    // K-1907, K-406: the waiting pushes count against this run; PUSH_SENDS_PER_RUN keeps them inside the 50.
+    await this.flushPushes();
     // K-1817: the nightly backups run at 03:00 UTC, a quiet hour, not with the daily run at midnight.
     if (this.backupAt() <= now) {
       this.backupAtMemory = nextBackupAt(now);

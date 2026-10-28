@@ -59,13 +59,17 @@ export const clip = (text: string, max: number) => (text.length <= max ? text : 
 export function onBell(notification: Notification, mutes: ReadonlyArray<Mute>, now: number): boolean {
   if (notification.state !== "open") return false;
   if (notification.snoozedUntil !== null && notification.snoozedUntil > now) return false;
-  return !mutes.some(
+  return !muted(notification, mutes, now);
+}
+
+/** K-1905: a mute of the card and source of a notification holds now. */
+export const muted = (notification: Notification, mutes: ReadonlyArray<Mute>, now: number) =>
+  mutes.some(
     (mute) =>
       mute.card === notification.card &&
       mute.source === notification.source &&
       (mute.until === null || mute.until > now),
   );
-}
 
 /** True when the notification differs from what a source sends now, so it needs a write (K-1302). */
 export const changed = (before: Notification, input: NotificationInput) =>

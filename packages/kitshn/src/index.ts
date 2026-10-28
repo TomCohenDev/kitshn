@@ -36,13 +36,54 @@ export interface ComposeApp {
   readonly file?: string;
 }
 
+/**
+ * K-806: a Worker app. kitshn bundles `main` with esbuild and gives each environment its own name, addresses and
+ * storage, so the recipe names none of them. A binding name is a JavaScript identifier, unique in the app.
+ */
+export interface WorkerApp {
+  /** The entry module, a path inside the repo. */
+  readonly main: string;
+  /** `YYYY-MM-DD`. */
+  readonly compatibilityDate: string;
+  /** At most 20. */
+  readonly compatibilityFlags?: ReadonlyArray<string>;
+  /** Runs before the bundle, as for a static site. */
+  readonly build?: string;
+  /** Static files that the Worker serves through the binding `ASSETS` (K-805 rules for `_headers` and `_redirects`). */
+  readonly assets?: {
+    /** A folder inside the repo. */
+    readonly folder: string;
+    /** `true`, or path patterns such as `/api/*`, that reach the Worker before the files. */
+    readonly runWorkerFirst?: boolean | ReadonlyArray<string>;
+  };
+  /** KV binding names, at most 10. Each environment gets its own namespace. */
+  readonly kv?: ReadonlyArray<string>;
+  /** Durable Object binding names to the class that `main` exports, at most 10. Each class uses SQLite storage. */
+  readonly durableObjects?: { readonly [binding: string]: string };
+  /** Cron expressions, at most 3. Only push environments run them, never previews. */
+  readonly crons?: ReadonlyArray<string>;
+  /** Plain text values, at most 50. Secrets come from `KITSHN_<NAME>` (K-808), never from the recipe. */
+  readonly vars?: { readonly [name: string]: string };
+}
+
 /** 1 to 20 entries. */
 type Deploy = readonly [DeployEntry, ...Array<DeployEntry>];
 
-/** K-801, K-804: a recipe has exactly one kind: `static` or `compose`. */
+/** K-801, K-804: a recipe has exactly one kind: `static`, `compose` or `worker`. */
 export type Recipe =
-  | { readonly static: StaticApp; readonly compose?: never; readonly deploy: Deploy }
-  | { readonly compose: ComposeApp; readonly static?: never; readonly deploy: Deploy };
+  | { readonly static: StaticApp; readonly compose?: never; readonly worker?: never; readonly deploy: Deploy }
+  | {
+      readonly compose: ComposeApp;
+      readonly static?: never;
+      readonly worker?: never;
+      readonly deploy: Deploy;
+    }
+  | {
+      readonly worker: WorkerApp;
+      readonly static?: never;
+      readonly compose?: never;
+      readonly deploy: Deploy;
+    };
 
 /**
  * K-801: the one export of `kitshn.config.ts`. The value is one object literal; `kitshn check` refuses

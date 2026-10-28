@@ -155,8 +155,11 @@ export const MACHINE_TIPS = {
     "Remove machine: deletes its service token, its tunnel and its queue at once. History records it; Undo cannot bring it back.",
 } as const;
 
-export const REMOVE_APP_TIP =
-  "Remove app: take down what the deploy made and keep the volumes. Undo starts it again.";
+/** K-523, K-909: the label of "Remove app" names what goes and what stays, by the kind of the card. */
+export const removeAppTip = (kind: Resource["kind"]) =>
+  kind === "site.worker"
+    ? "Remove app: take its addresses off and keep the Worker, its Durable Objects and its KV. Undo puts the addresses back."
+    : "Remove app: take down what the deploy made and keep the volumes. Undo starts it again.";
 
 /** K-205: the edit that gives a card its own level in a circle, or with null follows the circle again. */
 export function levelEdit(state: State, resource: Resource, circle: Circle, level: Level | null): Edit {
@@ -598,7 +601,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
             {
               id: "remove-app",
               label: "Remove app",
-              tip: REMOVE_APP_TIP,
+              tip: removeAppTip(resource.kind),
               danger: true as const,
               run: () => h.removeApp(resource),
             },

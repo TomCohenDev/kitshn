@@ -9,6 +9,8 @@ import type { State } from "./model.ts";
  */
 export type Teardown =
   | { readonly kind: "worker"; readonly addresses: ReadonlyArray<string>; readonly script: string }
+  /** K-909: a Worker app loses its addresses and keeps its script, so its Durable Objects and KV stay. */
+  | { readonly kind: "domains"; readonly addresses: ReadonlyArray<string>; readonly script: string }
   | {
       readonly kind: "compose";
       readonly machineId: string | null;
@@ -20,6 +22,8 @@ export function appTeardown(card: AppCard, zone: string): Teardown {
   if (address === undefined) throw new Error(`The app ${card.name} has no address.`);
   // The Worker script of an environment is `kitshn-<card id>` (environmentNames in worker/deploys.ts).
   // K-817: a static site loses every custom domain of its card.
+  if (card.kind === "site.worker")
+    return { kind: "domains", addresses: card.addresses, script: `kitshn-${card.id}` };
   if (card.kind !== "site.compose")
     return { kind: "worker", addresses: card.addresses, script: `kitshn-${card.id}` };
   // K-909: a removal keeps the volumes and the last good build on the machine, so undo can start it again.
@@ -66,7 +70,7 @@ export function appRestart(
     return none(
       `The pull request of the preview ${last.environment} is closed, so the preview does not come back.`,
     );
-  if (last.app === "static" && isPreview(last.environment))
+  if (last.app !== "compose" && isPreview(last.environment))
     return none(`The preview ${last.environment} comes back on the next push to its pull request.`);
   const plan = agentDeployPlan(last, last.app === "compose" ? "redeploy" : "build", machine);
   return plan.kind === "refused" ? none(plan.error) : plan;

@@ -15,7 +15,8 @@ name: kitshn 2 deploy
 #       uses: Yarden-zamir/kitshn/.github/workflows/kitshn2-deploy.yml@main
 #       secrets: inherit
 #
-# A static site with its own build job passes `artifact` and `artifact-path` (K-805). The closing of a pull request
+# A static site with its own build job passes `artifact` and `artifact-path` (K-805). Use that pattern for a build
+# that runs untrusted code: its job has no `id-token: write`, so it cannot ask for the token that deploys. The closing of a pull request
 # builds nothing but must still remove its preview, so the caller uses this pattern:
 #
 #   jobs:
@@ -32,7 +33,8 @@ name: kitshn 2 deploy
 #       secrets: inherit
 #
 # A Compose app gets each KITSHN_<NAME> secret and variable as <NAME> (K-808), from the GitHub Environment
-# "prod" for pushes and "pr-<number>" for pull requests, as in KitSHn 1.
+# "prod" for pushes and "pr-<number>" for pull requests, as in KitSHn 1. A Worker app gets them as secret bindings.
+# A repo secret also reaches the previews of pull requests; a secret for production only goes in the Environment "prod".
 #
 # It reads kitshn.config.ts without running it, and sends it with the GitHub OIDC token (K-811).
 # KitSHn 1 apps keep calling deploy.yml in this repo.

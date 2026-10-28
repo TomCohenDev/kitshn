@@ -385,12 +385,13 @@ export function ActionMenu(props: {
 }
 
 /**
- * A card in a portal under `anchor` that explains more than a tooltip can. It takes the focus and gives it
- * back on close; Escape, Tab out or a press outside closes it.
+ * A card in a portal under `anchor` (the button that opens it) that explains more than a tooltip can. It
+ * takes the focus and gives it back on close; Escape, Tab out or a press outside closes it. A press on the
+ * anchor is left to the anchor, so its click can close the card.
  */
 export function Popover(props: {
   readonly label: string;
-  readonly anchor: Rect;
+  readonly anchor: HTMLElement;
   readonly onClose: () => void;
   readonly class?: string;
   readonly children: ComponentChildren;
@@ -403,7 +404,7 @@ export function Popover(props: {
   useLayoutEffect(() => {
     const element = card.current;
     if (!element) return;
-    const place = placeFloating(props.anchor, element.getBoundingClientRect(), viewport(), {
+    const place = placeFloating(props.anchor.getBoundingClientRect(), element.getBoundingClientRect(), viewport(), {
       side: "bottom",
       align: "start",
     });
@@ -415,7 +416,8 @@ export function Popover(props: {
     const before = document.activeElement;
     card.current?.focus();
     const outside = (event: PointerEvent) => {
-      if (!card.current?.contains(event.target as Node | null)) onClose.current();
+      const target = event.target as Node | null;
+      if (!card.current?.contains(target) && !props.anchor.contains(target)) onClose.current();
     };
     addEventListener("pointerdown", outside, true);
     return () => {
@@ -439,7 +441,7 @@ export function Popover(props: {
       onFocusOut={(event) => {
         // No related target: the window lost the focus, or a press outside, which `outside` handles.
         const next = event.relatedTarget as Node | null;
-        if (next && !card.current?.contains(next)) onClose.current();
+        if (next && !card.current?.contains(next) && !props.anchor.contains(next)) onClose.current();
       }}
     >
       {props.children}

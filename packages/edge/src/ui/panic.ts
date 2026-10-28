@@ -4,6 +4,8 @@
  */
 
 let audio: AudioContext | undefined;
+/** Oscillators that still play; the last one to end suspends the context, so it uses no CPU when quiet. */
+let playing = 0;
 
 /**
  * Browsers allow sound only after a gesture, so only a press on this device calls this, before it awaits
@@ -26,37 +28,50 @@ interface Sweep {
 }
 
 function play(sweeps: ReadonlyArray<Sweep>): void {
-  if (!audio) return;
-  const now = audio.currentTime;
+  const context = audio;
+  if (!context) return;
+  // The page had its gesture when the context started, so a resume after the server answers is allowed.
+  if (context.state === "suspended") void context.resume();
+  const now = context.currentTime;
   for (const sweep of sweeps) {
     const start = now + sweep.at;
     const end = start + sweep.length;
-    const oscillator = audio.createOscillator();
-    const gain = audio.createGain();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
     oscillator.type = sweep.wave;
     oscillator.frequency.setValueAtTime(sweep.from, start);
     oscillator.frequency.exponentialRampToValueAtTime(sweep.to, end);
     gain.gain.setValueAtTime(sweep.volume, start);
     gain.gain.exponentialRampToValueAtTime(0.001, end);
-    oscillator.connect(gain).connect(audio.destination);
+    oscillator.connect(gain).connect(context.destination);
+    oscillator.onended = () => {
+      playing -= 1;
+      if (playing === 0) void context.suspend();
+    };
+    playing += 1;
     oscillator.start(start);
     oscillator.stop(end);
   }
 }
 
-/** A heavy thunk, three klaxon whoops, then a slide down as everything powers off. */
+/** The press itself: a heavy thunk. It claims nothing, so it plays before the server answers. */
+export function pressSound(): void {
+  unlockAudio();
+  play([{ wave: "sine", from: 170, to: 45, at: 0, length: 0.3, volume: 0.5 }]);
+}
+
+/** After the server took the pause: three klaxon whoops, then a slide down as everything powers off. */
 const playPanicSound = () =>
   play([
-    { wave: "sine", from: 170, to: 45, at: 0, length: 0.3, volume: 0.5 },
     ...[0, 1, 2].map((index) => ({
       wave: "sawtooth" as const,
       from: 380,
       to: 640,
-      at: 0.15 + index * 0.38,
+      at: index * 0.38,
       length: 0.34,
       volume: 0.11,
     })),
-    { wave: "triangle", from: 640, to: 90, at: 1.3, length: 0.8, volume: 0.2 },
+    { wave: "triangle", from: 640, to: 90, at: 1.15, length: 0.8, volume: 0.2 },
   ]);
 
 /** A short rising chime for Resume. */
@@ -82,8 +97,8 @@ function once(element: HTMLElement, keyframes: Array<Keyframe>, options: Keyfram
 }
 
 /**
- * A press that the server took: the sound, a red flash over the page, a stamp that slams down, and one shake
- * of the map. With reduced motion, only the sound and the flash.
+ * A pause that the server took after a press here: the klaxon, a red flash over the page, a stamp that slams
+ * down, and one shake of the map. With reduced motion, only the sound and the flash.
  */
 export function showPanic(stamp: string): void {
   playPanicSound();

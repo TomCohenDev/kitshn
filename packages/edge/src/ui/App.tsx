@@ -57,6 +57,7 @@ import {
 } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import {
+  type Action,
   type ActionContext,
   type ActionHandlers,
   type MenuTarget,
@@ -71,6 +72,7 @@ import {
   paletteEntries,
   NEW_CIRCLE,
   reshareEdits,
+  selectionActions,
   type StackPart,
   stackChoice,
   stackOntoEdits,
@@ -891,10 +893,10 @@ export function App() {
       showToast({ text: result.error, error: true, undo: null });
       return;
     }
-    const moved = plan.moved;
+    const { moved, cards } = plan;
     selectAndFocus({ cards: new Set(), circle: id }, ".add-member input");
     showToast({
-      text: `Made a circle for ${selection.cards.size} cards${moved > 0 ? `; ${plural(moved, "card")} moved to keep their circles` : ""}. Add members next.`,
+      text: `Made a circle for ${cards} cards${moved > 0 ? `; ${plural(moved, "card")} moved to keep their circles` : ""}. Add members next.`,
       error: false,
       undo: result.revision,
     });
@@ -1169,7 +1171,7 @@ export function App() {
               onRunJob={runJob}
               warnings={store.snapshot.accessWarnings}
               onOpenSafety={openSafety}
-              onNewCircleFor={() => void newCircleFor()}
+              newCircleFor={selectionActions(actionContext, handlers).find((action) => action.id === "new-circle-for") ?? null}
               onSignOut={(retry) => void signOut(retry)}
               signOutWarning={store.snapshot.signOutWarning}
               signingOut={signingOut}
@@ -1630,7 +1632,8 @@ function Panel(props: {
   version: string;
   onToast: (text: string, error: boolean) => void;
   onOpenSafety: () => void;
-  onNewCircleFor: () => void;
+  /** K-529: the shared action, so the panel shows the same refusal as the menu and the palette. */
+  newCircleFor: Action | null;
   onSignOut: (retry: boolean) => void;
   signOutWarning: string | null;
   signingOut: boolean;
@@ -1714,13 +1717,16 @@ function Panel(props: {
         >
           Stack these
         </button>
-        <button
-          class="btn"
-          data-tip="Make one new circle with no members around these cards. Every card keeps its circles; cards in the way move out. Undo takes it all back."
-          onClick={props.onNewCircleFor}
-        >
-          New circle for these
-        </button>
+        {props.newCircleFor && "run" in props.newCircleFor ? (
+          <button
+            class="btn"
+            disabled={props.newCircleFor.refused !== undefined}
+            data-tip={props.newCircleFor.refused ?? `${props.newCircleFor.tip} Undo takes it all back.`}
+            onClick={props.newCircleFor.run}
+          >
+            New circle for these
+          </button>
+        ) : null}
       </section>
     );
     if (stackOfAll) body = (

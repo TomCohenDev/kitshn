@@ -42,11 +42,14 @@ function apply(state: State, selected: ReadonlyArray<string>) {
   const after = applyChanges(state, changes);
   const made = after.circles.get("new");
   if (!made) throw new Error("no new circle");
+  // A selected card takes its stack along (K-521).
+  const chosen = new Set(selected);
+  for (const stack of state.stacks.values()) if (stack.members.some((id) => chosen.has(id))) for (const id of stack.members) chosen.add(id);
   for (const id of state.places.keys()) {
     const before = circlesHolding(state, id).map((each) => each.id).sort();
     const now = circlesHolding(after, id).map((each) => each.id).filter((each) => each !== "new").sort();
     expect(now, `${id} keeps its circles`).toEqual(before);
-    expect(insideCircle(after.places.get(id) as Point, made), `${id} is inside the new circle only when selected`).toBe(selected.includes(id));
+    expect(insideCircle(after.places.get(id) as Point, made), `${id} is inside the new circle only when selected`).toBe(chosen.has(id));
   }
   return { plan, changes, after, made };
 }
@@ -67,11 +70,49 @@ describe("New circle for these (K-529)", () => {
   });
 
   it("pulls spread cards together when that moves fewer cards than pushing others out", () => {
-    const others = Object.fromEntries([-300, -150, 0, 150, 300].map((x) => [`o${x}`, { x, y: 40 }]));
+    // The circle around a and b as they are would hold all four others; pulled to the free middle, it holds none.
+    const others = Object.fromEntries([-500, -350, 350, 500].map((x) => [`o${x}`, { x, y: 0 }]));
     const state = world([circle("her", 0, 0, 1000)], { a: { x: -700, y: 0 }, b: { x: 700, y: 0 }, ...others });
     const { plan, after } = apply(state, ["a", "b"]);
-    expect(plan.moved).toBeLessThan(5);
-    expect(after.places.get("o0")).toBeDefined();
+    expect(plan.moved).toBe(2);
+    for (const id of Object.keys(others)) expect(after.places.get(id)).toEqual(state.places.get(id));
+  });
+
+  it("keeps pulled cards apart unless they are one stack", () => {
+    // The reviewer's case: a and b would both land on the middle of A.
+    const state = world(
+      [circle("A", 0, 0, 700)],
+      {
+        a: { x: -400, y: 0 },
+        b: { x: 400, y: 0 },
+        s1: { x: 0, y: -400 },
+        s2: { x: 0, y: -400 },
+        u1: { x: -300, y: 0 },
+        u2: { x: -200, y: 0 },
+        u3: { x: 200, y: 0 },
+        u4: { x: 300, y: 0 },
+      },
+      { st: ["s1", "s2"] },
+    );
+    const { after } = apply(state, ["a", "b", "s1"]);
+    const cards = ["a", "b", "s1", "s2", "u1", "u2", "u3", "u4"];
+    for (const one of cards)
+      for (const other of cards) {
+        // Only pulled cards must keep clear; u1 to u4 already overlap each other in this layout.
+        const pulled = (id: string) => !id.startsWith("u");
+        if (one >= other || !(pulled(one) || pulled(other)) || (one.startsWith("s") && other.startsWith("s"))) continue;
+        const p = after.places.get(one) as Point;
+        const q = after.places.get(other) as Point;
+        const apart = Math.abs(p.x - q.x) >= 190 || Math.abs(p.y - q.y) >= 86;
+        expect(apart, `${one} and ${other} do not overlap`).toBe(true);
+      }
+    expect(after.places.get("s1")).toEqual(after.places.get("s2"));
+  });
+
+  it("leaves a selected card that sits in the middle where it is", () => {
+    const state = world([circle("her", 0, 0, 900)], { a: { x: 0, y: 0 }, b: { x: 600, y: 0 }, u: { x: 300, y: 0 } });
+    const { after } = apply(state, ["a", "b"]);
+    expect(after.places.get("a")).toEqual({ x: 0, y: 0 });
   });
 
   it("keeps a card in no circle in no other circle, and an unselected one out of the new circle", () => {

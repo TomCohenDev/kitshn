@@ -1,4 +1,5 @@
 import type { Circle, Point, ResourceKind, State } from "../core/model.ts";
+import { CARD_BOX } from "../core/place.ts";
 
 /** Map geometry for fit, pan and circle heads. Pure, so the rules are testable without a DOM. */
 
@@ -15,8 +16,7 @@ export interface View {
   readonly s: number;
 }
 
-/** A card on the map, around its place: the width and the top margin come from `.card` in styles.css. */
-const CARD = { half: 95, above: 36, below: 50 } as const;
+const CARD = CARD_BOX;
 /** A circle head sits this far above the circle edge and is about this tall (`.circle .head`). */
 const HEAD = { above: 20, below: 16 } as const;
 

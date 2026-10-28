@@ -386,7 +386,7 @@ const circlePlans = new WeakMap<State, Map<string, ReturnType<typeof circleForCa
  * K-529: the actions on every selected card at once, in the menu of a selected card and in the palette. The plan
  * is cached per state and selection, so an open menu does not place the circle again on each render.
  */
-function selectionActions(ctx: ActionContext, h: ActionHandlers): Array<Action> {
+export function selectionActions(ctx: ActionContext, h: ActionHandlers): Array<Action> {
   if (ctx.selected.size < 2) return [];
   const cache = circlePlans.get(ctx.state) ?? new Map<string, ReturnType<typeof circleForCards>>();
   circlePlans.set(ctx.state, cache);

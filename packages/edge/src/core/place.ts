@@ -1,6 +1,13 @@
 import type { Edit } from "./changes.ts";
 import { type Circle, type Point, type State, insideCircle } from "./model.ts";
 
+/** A card on the map, around its place: the width and the top margin come from `.card` in styles.css. */
+export const CARD_BOX = { half: 95, above: 36, below: 50 } as const;
+
+/** Two cards whose boxes overlap on the map; a card keeps this clear of the spots in `taken`. */
+const cardsOverlap = (a: Point, b: Point) =>
+  Math.abs(a.x - b.x) < 2 * CARD_BOX.half && Math.abs(a.y - b.y) < CARD_BOX.above + CARD_BOX.below;
+
 /** Distance a card centre keeps from every circle edge, so a small move does not change its shares. */
 const EDGE_MARGIN = 24;
 
@@ -14,11 +21,16 @@ const fits = (point: Point, circles: Iterable<Circle>, wanted: ReadonlySet<strin
 };
 
 /**
- * Finds the point nearest to `from` that sits inside exactly the wanted circles (K-511, K-209).
- * Returns null when the circles do not overlap that way.
+ * Finds the point nearest to `from` that sits inside exactly the wanted circles (K-511, K-209), and, when
+ * `taken` names card spots, where the card box overlaps none of them. Returns null when no candidate fits.
  * It tries a fixed set of candidates, so it can miss a very thin overlap. Revisit if users report that.
  */
-export function placeInside(state: State, from: Point, wanted: ReadonlySet<string>): Point | null {
+export function placeInside(
+  state: State,
+  from: Point,
+  wanted: ReadonlySet<string>,
+  taken: ReadonlyArray<Point> = [],
+): Point | null {
   const circles = [...state.circles.values()];
   const candidates: Array<Point> = [from];
   const anchors = wanted.size > 0 ? circles.filter((circle) => wanted.has(circle.id)) : circles;
@@ -33,8 +45,8 @@ export function placeInside(state: State, from: Point, wanted: ReadonlySet<strin
       }
     }
   }
-  if (wanted.size === 0) {
-    // Outside every circle: walk outward from the card on rings.
+  if (wanted.size === 0 || taken.length > 0) {
+    // Outside every circle, or clear of other cards: walk outward from the card on rings.
     for (let ring = 1; ring <= 40; ring++) {
       for (let step = 0; step < 16; step++) {
         const angle = (step / 16) * 2 * Math.PI;
@@ -45,7 +57,7 @@ export function placeInside(state: State, from: Point, wanted: ReadonlySet<strin
   let best: Point | null = null;
   let bestDistance = Infinity;
   for (const candidate of candidates) {
-    if (!fits(candidate, circles, wanted)) continue;
+    if (!fits(candidate, circles, wanted) || taken.some((spot) => cardsOverlap(candidate, spot))) continue;
     const distance = Math.hypot(candidate.x - from.x, candidate.y - from.y);
     if (distance < bestDistance) {
       best = { x: Math.round(candidate.x), y: Math.round(candidate.y) };
@@ -102,7 +114,7 @@ export function circleForCards(
   state: State,
   selected: Iterable<string>,
   template: Omit<Circle, "x" | "y" | "r">,
-): { readonly edits: Array<Edit>; readonly moved: number } | { readonly refused: string } {
+): { readonly edits: Array<Edit>; readonly moved: number; readonly cards: number } | { readonly refused: string } {
   const ids = new Set(selected);
   for (const stack of state.stacks.values()) if (stack.members.some((id) => ids.has(id))) for (const id of stack.members) ids.add(id);
   const placed = [...ids].map((id) => ({ id, place: state.places.get(id) }));
@@ -133,10 +145,28 @@ export function circleForCards(
 
   const asIs = plan(new Map());
   const middle = enclosingCircle(placed.map((card) => card.place as Point));
+  const distance = (point: Point) => Math.hypot(point.x - middle.x, point.y - middle.y);
+  // A stack sits on one spot, so it moves as one unit; the units nearest to the middle choose first.
+  const units = new Map<string, Array<string>>();
+  for (const { id } of placed) {
+    const stack = [...state.stacks.values()].find((each) => each.members.includes(id));
+    const key = stack ? `stack:${stack.id}` : id;
+    units.set(key, [...(units.get(key) ?? []), id]);
+  }
+  const ordered = [...units.values()].sort(
+    (a, b) => distance(state.places.get(a[0] as string) as Point) - distance(state.places.get(b[0] as string) as Point),
+  );
+  // Pulled cards keep clear of every other card on the map and of each other.
+  const taken: Array<Point> = [...state.places].filter(([id]) => !ids.has(id)).map(([, place]) => place);
   const pulled = new Map<string, Point>();
-  for (const { id, place } of placed) {
-    const to = placeInside(state, middle, holding(id));
-    if (to && (to.x !== place?.x || to.y !== place?.y)) pulled.set(id, to);
+  for (const unit of ordered) {
+    const first = unit[0] as string;
+    const place = state.places.get(first) as Point;
+    const to = placeInside(state, middle, holding(first), taken);
+    // A card that sits as close to the middle as it could get stays where it is, so the count of moves is honest.
+    const stays = !to || distance(to) >= distance(place);
+    taken.push(stays ? place : to);
+    if (!stays) for (const id of unit) pulled.set(id, to);
   }
   const together = pulled.size > 0 ? plan(pulled) : asIs;
   const options = [asIs, together].flatMap((option) => ("refused" in option ? [] : [option]));
@@ -153,5 +183,6 @@ export function circleForCards(
       ...[...best.moves].map(([id, after]): Edit => ({ _tag: "place", id, after })),
     ],
     moved: best.moves.size,
+    cards: ids.size,
   };
 }

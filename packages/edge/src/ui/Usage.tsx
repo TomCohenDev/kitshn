@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import type { MachineView } from "../core/protocol.ts";
-import { type Usage, type UsageRow, USAGE_WARNING, usageLevel } from "../core/usage.ts";
+import type { BucketSize } from "../core/backups.ts";
+import { type Usage, type UsageRow, USAGE_WARNING, usageLevel, withBucket } from "../core/usage.ts";
 import { callApi } from "./store.ts";
 
 const number = new Intl.NumberFormat("en");
@@ -72,7 +73,7 @@ function Gauge(props: {
 }
 
 /** K-1303: how close the account is to the free plan limits, and how full each machine is. */
-export function UsageView(props: { machines: ReadonlyArray<MachineView> }) {
+export function UsageView(props: { machines: ReadonlyArray<MachineView>; r2Bucket: BucketSize | null }) {
   const [usage, setUsage] = useState<Usage | { error: string } | null>(null);
 
   useEffect(() => {
@@ -97,7 +98,7 @@ export function UsageView(props: { machines: ReadonlyArray<MachineView> }) {
             </p>
           ) : null}
           <div class="gauges">
-            {usage.rows.map((row) => (
+            {withBucket(usage.rows, props.r2Bucket).map((row) => (
               <Gauge
                 key={row.label}
                 label={row.label}

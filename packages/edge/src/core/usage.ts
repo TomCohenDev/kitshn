@@ -358,3 +358,31 @@ export function countRows(counts: Counts): Array<UsageRow> {
     ),
   ];
 }
+
+/**
+ * K-1303, K-1818: the `kitshn` bucket on its own, from the size that the daily backup run measures. Backups wait at
+ * 8 GB (K-1818), which is the warning at 80% of the 10 GB of the free plan.
+ */
+export function bucketRow(size: { readonly bytes: number; readonly at: number }): UsageRow {
+  return {
+    label: "R2 bucket kitshn",
+    used: size.bytes,
+    limit: 10 * GB,
+    period: "now",
+    unit: "bytes",
+    docs: R2_DOCS,
+    note: `Measured ${new Date(size.at).toISOString().slice(0, 16).replace("T", " ")} UTC by the daily backup run; backups wait at 8 GB.`,
+  };
+}
+
+/** The rows with the bucket row right after the account's R2 storage, when the daily run measured the bucket. */
+export function withBucket(
+  rows: ReadonlyArray<UsageRow>,
+  size: { readonly bytes: number; readonly at: number } | null,
+) {
+  if (size === null) return rows;
+  const at = rows.findIndex((row) => row.label === "R2 storage");
+  return at === -1
+    ? [...rows, bucketRow(size)]
+    : [...rows.slice(0, at + 1), bucketRow(size), ...rows.slice(at + 1)];
+}

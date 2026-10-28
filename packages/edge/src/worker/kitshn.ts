@@ -25,6 +25,7 @@ import {
   removeAppChanges,
   resolveEdits,
   restoredResource,
+  revisionTargets,
   ruleViolation,
   stacksWithout,
   summarize,
@@ -351,9 +352,13 @@ export class Kitshn extends DurableObject<Env> {
       summary: string;
       undoes: number | null;
       empty: number;
+      targets: string;
     }>(
+      // K-1508: only the tag and id of each change, so the load never parses whole circles of old revisions.
       `SELECT id, at, actor, summary, undoes,
-         NOT EXISTS (SELECT 1 FROM json_each(changes) WHERE json_extract(value, '$._tag') != 'forget') AS empty
+         NOT EXISTS (SELECT 1 FROM json_each(changes) WHERE json_extract(value, '$._tag') != 'forget') AS empty,
+         (SELECT json_group_array(json_object('_tag', json_extract(value, '$._tag'), 'id', json_extract(value, '$.id')))
+           FROM json_each(changes)) AS targets
        FROM revisions ORDER BY id DESC LIMIT ?`,
       RECENT_REVISIONS,
     );
@@ -371,6 +376,7 @@ export class Kitshn extends DurableObject<Env> {
       undoes: row.undoes,
       undoneBy: undone.get(row.id) ?? null,
       undoable: row.empty === 0,
+      ...revisionTargets(JSON.parse(row.targets) as Array<Pick<Change | Forget, "_tag" | "id">>),
     }));
   }
 
@@ -569,9 +575,22 @@ export class Kitshn extends DurableObject<Env> {
         for (const id of this.stuckShares) if (id.startsWith(`${change.id}/`)) this.stuckShares.delete(id);
     }
     if (merge) {
-      this.revisions = this.revisions.map((revision) => (revision.id === id ? { ...revision, at: now, summary } : revision));
+      const targets = revisionTargets(merge.changes);
+      this.revisions = this.revisions.map((revision) =>
+        revision.id === id ? { ...revision, at: now, summary, ...targets } : revision,
+      );
       this.broadcast();
-    } else this.showRevision({ id, at: now, actor, summary, undoes, undoneBy: null, undoable: true });
+    } else
+      this.showRevision({
+        id,
+        at: now,
+        actor,
+        summary,
+        undoes,
+        undoneBy: null,
+        undoable: true,
+        ...revisionTargets(changes),
+      });
     void this.scheduleAlarm();
     return id;
   }
@@ -2574,7 +2593,16 @@ export class Kitshn extends DurableObject<Env> {
    */
   private recordRevision(actor: Actor, summary: string) {
     const id = this.insertRevision(actor, summary, [], null);
-    this.showRevision({ id, at: Date.now(), actor, summary, undoes: null, undoneBy: null, undoable: false });
+    this.showRevision({
+      id,
+      at: Date.now(),
+      actor,
+      summary,
+      undoes: null,
+      undoneBy: null,
+      undoable: false,
+      ...revisionTargets([]),
+    });
   }
 
   /** Puts a new revision at the top of the in-memory History (K-519), marks what it undoes, and tells everyone. */

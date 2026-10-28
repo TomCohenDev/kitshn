@@ -294,6 +294,48 @@ export interface Item {
   readonly id: string;
 }
 
+/** K-1508: what a History entry is about, for its kind filter. "action" changes nothing that Undo reverses. */
+export type RevisionKind = "card" | "circle" | "stack" | "app" | "pause" | "action";
+
+/** A big revision (the setup) sends at most this many items, so the snapshot stays small. */
+const MAX_REVISION_ITEMS = 30;
+
+/**
+ * K-1508: the kind of a revision and the cards and circles that it changes, from the tag and id of each change.
+ * The first kind in the order app, pause, circle, stack, card wins.
+ */
+export function revisionTargets(changes: ReadonlyArray<Pick<Change | Forget, "_tag" | "id">>): {
+  readonly kind: RevisionKind;
+  readonly items: ReadonlyArray<Item>;
+} {
+  const tags = new Set(changes.map((change) => change._tag));
+  const kind: RevisionKind = tags.has("app")
+    ? "app"
+    : tags.has("pause")
+      ? "pause"
+      : tags.has("circle")
+        ? "circle"
+        : tags.has("stack")
+          ? "stack"
+          : tags.has("place") || tags.has("shareSetting")
+            ? "card"
+            : "action";
+  const items = new Map<string, Item>();
+  const add = (item: Item) => items.set(`${item.kind}:${item.id}`, item);
+  for (const change of changes) {
+    if (change._tag === "circle") add({ kind: "circle", id: change.id });
+    else if (change._tag === "place" || change._tag === "app" || change._tag === "forget")
+      add({ kind: "card", id: change.id });
+    else if (change._tag === "shareSetting") {
+      // A share setting id is `card/circle` (shareKey). Circle ids have no slash, so the last one splits it.
+      const cut = change.id.lastIndexOf("/");
+      add({ kind: "card", id: change.id.slice(0, cut) });
+      add({ kind: "circle", id: change.id.slice(cut + 1) });
+    }
+  }
+  return { kind, items: [...items.values()].slice(0, MAX_REVISION_ITEMS) };
+}
+
 /** K-1507: whether a change is part of an item: a card's place, shares, app and stack membership; a circle and its shares. */
 export function touches(change: Change, item: Item): boolean {
   if (item.kind === "circle")

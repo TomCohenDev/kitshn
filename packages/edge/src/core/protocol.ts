@@ -1,4 +1,4 @@
-import type { Actor } from "./changes.ts";
+import type { Actor, Item, RevisionKind } from "./changes.ts";
 import type { Command, Machine, MachineStatus, ProjectVolume, Sample } from "./machine.ts";
 import type { Circle, PauseMode, Point, Resource, ShareSetting, Stack } from "./model.ts";
 import type { RepoGate } from "./repos.ts";
@@ -19,6 +19,9 @@ export interface RevisionView {
   readonly undoneBy: number | null;
   /** False for a revision that records an action, such as a shell command, and changes nothing. */
   readonly undoable: boolean;
+  /** K-1508: for the History filters and the map highlight. */
+  readonly kind: RevisionKind;
+  readonly items: ReadonlyArray<Item>;
 }
 
 /** K-407: whether Cloudflare has the Access state of a card. */

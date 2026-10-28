@@ -18,6 +18,7 @@ import {
   refuseResume,
   removeAppChanges,
   resolveEdits,
+  revisionTargets,
   ruleViolation,
   shareDiff,
   stacksWithout,
@@ -979,6 +980,31 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     expect(undoItemAnswer(state, revisions, A, { kind: "circle", id: EVERYONE_CIRCLE_ID })).toEqual({
       allowed: false,
       reason,
+    });
+  });
+});
+
+describe("History targets (K-1508)", () => {
+  it("names the cards and circles of a revision once, and its kind", () => {
+    expect(
+      revisionTargets([
+        { _tag: "place", id: "tick3d" },
+        { _tag: "shareSetting", id: "tick3d/everyone" },
+        { _tag: "circle", id: "everyone" },
+      ]),
+    ).toEqual({
+      kind: "circle",
+      items: [
+        { kind: "card", id: "tick3d" },
+        { kind: "circle", id: "everyone" },
+      ],
+    });
+  });
+
+  it("calls a revision without changes an action", () => {
+    expect(revisionTargets([{ _tag: "forget", id: "page-1" }])).toEqual({
+      kind: "action",
+      items: [{ kind: "card", id: "page-1" }],
     });
   });
 });

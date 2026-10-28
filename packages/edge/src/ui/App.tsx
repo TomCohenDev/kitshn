@@ -34,6 +34,8 @@ import { circleForCards, placeInside } from "../core/place.ts";
 import { awaitsAllow } from "../core/repos.ts";
 import type { Command } from "../core/machine.ts";
 import { ROLLBACK_DATA, RollbackDialog } from "./Rollback.tsx";
+import { LogsDialog } from "./Logs.tsx";
+import { hasLogs } from "../core/logs.ts";
 import type {
   DeployNote,
   JobView,
@@ -79,6 +81,7 @@ import {
   settleUndoCheck,
   slowUndoCheck,
   removeAppTip,
+  LOGS_TIP,
   levelEdit,
   paletteEntries,
   NEW_CIRCLE,
@@ -238,6 +241,7 @@ export function App() {
   const [addingMachine, setAddingMachine] = useState(false);
   const [secret, setSecret] = useState<DeviceSecret | null>(null);
   const [rollback, setRollback] = useState<{ card: Resource; mode: "card" | "run" } | null>(null);
+  const [logs, setLogs] = useState<Resource | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [trayFilter, setTrayFilter] = useState("");
   const [previews, setPreviews] = useState(() => localStorage.getItem(PREVIEWS_KEY) === "on");
@@ -1135,6 +1139,7 @@ export function App() {
     restorePrevious: (resource) => void restorePrevious(resource),
     editAddress: (resource) =>
       selectAndFocus({ cards: new Set([resource.id]), circle: null }, 'input[aria-label="Address name"]'),
+    logs: setLogs,
     runJob: (machine, command) => void runJob(machine, command),
     removeMachine: (machine) => void removeMachine(machine),
     editCircle: (circleId) => {
@@ -1279,6 +1284,7 @@ export function App() {
               previousVersions={previousVersions}
               onRestorePrevious={(resource) => void restorePrevious(resource)}
               onSetAddress={setAddress}
+              onLogs={setLogs}
               orphanWorkers={store.snapshot.orphanWorkers}
               onDeleteOrphanWorker={(orphan) => void deleteOrphanWorker(orphan)}
               deployed={deployed}
@@ -1319,6 +1325,7 @@ export function App() {
           onDone={(text, error) => showToast({ text, error, undo: null })}
         />
       ) : null}
+      {logs ? <LogsDialog card={logs} onClose={() => setLogs(null)} /> : null}
       {progress ? (
         <div class="progress" role="status">
           <span class="sticker wait" data-tip="Upload: kitshn sends the files one after the other.">
@@ -1776,6 +1783,7 @@ function Panel(props: {
   previousVersions: ReadonlySet<string>;
   onRestorePrevious: (resource: Resource) => void;
   onSetAddress: (resource: Resource, name: string) => Promise<boolean>;
+  onLogs: (resource: Resource) => void;
   orphanWorkers: ReadonlyArray<OrphanWorker>;
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
   /** K-909 */
@@ -1840,6 +1848,7 @@ function Panel(props: {
         onRollback={props.onRollback}
         onRestorePrevious={props.previousVersions.has(cards[0].id) ? props.onRestorePrevious : null}
         onSetAddress={props.onSetAddress}
+        onLogs={props.onLogs}
         orphanWorkers={cards[0].id === ADMIN_RESOURCE_ID ? props.orphanWorkers : []}
         onDeleteOrphanWorker={props.onDeleteOrphanWorker}
         deployed={props.deployed.has(cards[0].id)}
@@ -2143,6 +2152,7 @@ function CardPanel(props: {
   onRestorePrevious: ((resource: Resource) => void) | null;
   /** K-1120: a page or a file gets a new address name. */
   onSetAddress: (resource: Resource, name: string) => Promise<boolean>;
+  onLogs: (resource: Resource) => void;
   /** K-909: on the admin card, what removed Worker apps left in Cloudflare. */
   orphanWorkers: ReadonlyArray<OrphanWorker>;
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
@@ -2304,6 +2314,11 @@ function CardPanel(props: {
           onClick={() => props.onPlace(resource)}
         >
           Place on the map
+        </button>
+      ) : null}
+      {hasLogs(resource.kind) && props.deployed ? (
+        <button class="btn" data-tip={LOGS_TIP} onClick={() => props.onLogs(resource)}>
+          Logs…
         </button>
       ) : null}
       {isAppCard(resource) && props.deployed && !props.preview ? (

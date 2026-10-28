@@ -156,10 +156,14 @@ describe("card actions", () => {
       "select-kind",
       "add-to-stack",
       "tray",
+      "logs",
       "rollback",
       "rollback-run",
       "remove-app",
     ]);
+    // K-1801: Logs opens the logs of this card.
+    run(find(groups, "logs"));
+    expect(calls.at(-1)).toMatchObject(["logs", { id: "riffle" }]);
     expect(find(groups, "remove-app").danger).toBe(true);
     // K-821: a preview has no rollback, but it can still go.
     const preview = actionsFor({ ...context(), previews: new Set(["riffle"]) }, handlers, {

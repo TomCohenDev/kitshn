@@ -68,6 +68,15 @@ import {
   verifyText,
 } from "../core/machine.ts";
 import { placeInside } from "../core/place.ts";
+import {
+  type LogAnswer,
+  type LogSearch,
+  type TailAnswer,
+  TAIL_BATCH,
+  logAnswerOf,
+  logLinesOf,
+} from "../core/logs.ts";
+import { type RunSource, deployRuns, searchWorker, startWorkerTail, stopWorkerTail } from "./logs.ts";
 import type {
   DeployNote,
   MachineView,
@@ -86,7 +95,7 @@ import {
   gateDecision,
   keyRemoved,
 } from "../core/repos.ts";
-import { ClientMessage } from "../core/schema.ts";
+import { ClientMessage, LogQuery, TailMessage } from "../core/schema.ts";
 import {
   type LastDeploy,
   agentDeployPlan,
@@ -213,7 +222,12 @@ import type { Env } from "./env.ts";
 
 /** What a WebSocket of this Durable Object belongs to. */
 type Attachment =
-  | { readonly kind: "map"; readonly caller: Caller }
+  | {
+      readonly kind: "map";
+      readonly caller: Caller;
+      /** K-1805, K-1807: the tails of this map; kept on the socket, so they survive hibernation. */
+      readonly tails?: ReadonlyArray<MapTail>;
+    }
   | {
       readonly kind: "machine";
       readonly machineId: string;
@@ -231,6 +245,11 @@ type Attachment =
       /** K-909: the idle volumes of kitshn apps; a socket from before this field has none. */
       readonly volumes?: ReadonlyArray<ProjectVolume>;
     };
+
+/** K-1805: a Compose tail runs on the daemon; K-1807: a Worker tail is a Cloudflare tail of the script. */
+type MapTail =
+  | { readonly kind: "compose"; readonly id: string; readonly machineId: string }
+  | { readonly kind: "worker"; readonly id: string; readonly script: string };
 
 /** The attachment of a socket; null for one that never got one, which every reader skips. */
 const attachmentOf = (socket: WebSocket) => socket.deserializeAttachment() as Attachment | null;
@@ -254,6 +273,11 @@ const DAY = 24 * 60 * 60 * 1000;
 const nextUtcMidnight = (now: number) => Math.floor(now / DAY) * DAY + DAY;
 
 const decodeClientMessage = Schema.decodeUnknownSync(ClientMessage);
+const decodeLogQuery = Schema.decodeUnknownSync(LogQuery);
+const decodeTailMessage = Schema.decodeUnknownSync(TailMessage);
+
+/** K-1804 */
+const LOG_ANSWER_MS = 20_000;
 
 /** K-1502, K-1507: the revision that an undo reverses; `item` names the card or circle of a per-item undo. */
 interface UndoOf {
@@ -994,6 +1018,204 @@ export class Kitshn extends DurableObject<Env> {
     if (!this.deployedCards(card).includes(card))
       return Response.json({ error: `A deploy did not make the card "${card}" (K-821).` }, { status: 409 });
     return Response.json({ choices: this.rollbackChoices(card) });
+  }
+
+  /** K-1804: searches that wait on a daemon, by id. In memory: the request keeps the object awake. */
+  private readonly logSearches = new Map<string, (answer: LogAnswer) => void>();
+
+  /** K-1801: the app logs or the deploy runs of a Compose or Worker card. */
+  private async logsResponse(card: string, body: unknown) {
+    let query: typeof LogQuery.Type;
+    try {
+      query = decodeLogQuery(body);
+    } catch (error) {
+      return Response.json({ error: String(error) }, { status: 400 });
+    }
+    const resource = this.state.resources.get(card);
+    if (resource?.kind !== "site.compose" && resource?.kind !== "site.worker")
+      return Response.json({ error: `The card "${card}" has no logs (K-1802).` }, { status: 409 });
+    const search: LogSearch = { text: query.text, from: query.from, to: query.to };
+    if (query.tab === "deploys") return Response.json({ runs: deployRuns(this.runSources(card), search) });
+    const answer =
+      resource.kind === "site.compose"
+        ? await this.searchCompose(resource, search)
+        : await this.searchWorkerCard(card, search);
+    return Response.json({ answer });
+  }
+
+  /** K-1804 */
+  private searchCompose(resource: Resource, search: LogSearch): Promise<LogAnswer> {
+    const daemon = this.logDaemon(resource);
+    if ("error" in daemon) return Promise.resolve({ state: "error", error: daemon.error });
+    const id = crypto.randomUUID();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.logSearches.delete(id);
+        resolve({
+          state: "error",
+          error: `The daemon of ${daemon.name} did not answer in 20 seconds (K-1804).`,
+        });
+      }, LOG_ANSWER_MS);
+      this.logSearches.set(id, (answer) => {
+        clearTimeout(timer);
+        this.logSearches.delete(id);
+        resolve(answer);
+      });
+      send(daemon.socket, { type: "logs", id, project: resource.id, search } satisfies ServerToDaemon);
+    });
+  }
+
+  /** K-1804, K-1805: the connection of the card's machine, when it is online and its daemon reads logs. */
+  private logDaemon(resource: Resource): { socket: WebSocket; name: string } | { error: string } {
+    const machine = resource.machine ? this.state.machines.get(resource.machine) : undefined;
+    if (!machine) return { error: "The card has no machine, so it has no logs to read." };
+    const socket = this.checkedSockets(machine.id).at(-1);
+    const attachment = socket ? attachmentOf(socket) : null;
+    if (!socket || attachment?.kind !== "machine")
+      return { error: `${machine.name} is offline, so kitshn cannot read the logs of its apps.` };
+    if (attachment.check === "token")
+      return { error: `${machine.name} has no machine key yet, so it only reports (K-1708).` };
+    if (!attachment.status?.capabilities?.includes("logs"))
+      return { error: `Update the daemon of ${machine.name} to read logs (K-1804).` };
+    return { socket, name: machine.name };
+  }
+
+  /** K-1806: the script of the newest Worker deploy of the card. */
+  private workerScript(card: string): string | null {
+    const [row] = this.sql<{ script: string }>(
+      "SELECT script FROM deploys WHERE resource_id = ? AND kind = 'deploy' AND app = 'worker' AND script != '' ORDER BY expires_at DESC LIMIT 1",
+      card,
+    );
+    return row?.script ?? null;
+  }
+
+  /** K-1806 */
+  private async searchWorkerCard(card: string, search: LogSearch): Promise<LogAnswer> {
+    const api = this.api();
+    if (!api)
+      return { state: "error", error: "This kitshn has no Cloudflare token, so it reads no Worker logs." };
+    const script = this.workerScript(card);
+    if (!script)
+      return { state: "error", error: "A deploy did not make this Worker yet, so it has no logs." };
+    try {
+      return await searchWorker(api, this.env.CLOUDFLARE_ACCOUNT_ID, script, search);
+    } catch (error) {
+      return { state: "error", error: String(error instanceof Error ? error.message : error) };
+    }
+  }
+
+  /** K-1808: the newest 20 deploys of a card, with the job output of each Compose deploy. */
+  private runSources(card: string): Array<RunSource> {
+    return this.sql<DeployRow & { job_output: string | null }>(
+      `SELECT deploys.*, jobs.output AS job_output FROM deploys LEFT JOIN jobs ON jobs.id = deploys.job_id
+       WHERE deploys.resource_id = ? AND deploys.kind = 'deploy' ORDER BY deploys.expires_at DESC LIMIT 20`,
+      card,
+    ).map((row) => ({
+      id: row.id,
+      at: row.expires_at - DEPLOY_MS,
+      repo: row.repo,
+      sha: row.sha,
+      state: row.state,
+      reason: row.reason,
+      runId: row.run_id,
+      runAttempt: row.run_attempt,
+      output: row.app === "compose" ? (row.job_output ?? "") : null,
+    }));
+  }
+
+  /** K-1805, K-1807: "Live" in the logs view of one map. */
+  private async tailMessage(socket: WebSocket, message: TailMessage) {
+    const attachment = attachmentOf(socket);
+    if (attachment?.kind !== "map") return;
+    if (message.type === "tailStop") {
+      const tail = attachment.tails?.find((item) => item.id === message.tail);
+      if (!tail) return;
+      this.setTails(socket, (tails) => tails.filter((item) => item !== tail));
+      await this.stopTail(tail);
+      return;
+    }
+    let started: { answer: TailAnswer; tail: MapTail | null };
+    try {
+      started = await this.startTail(message.card);
+    } catch (error) {
+      started = {
+        answer: { kind: "error", error: String(error instanceof Error ? error.message : error) },
+        tail: null,
+      };
+    }
+    const tail = started.tail;
+    if (tail) this.setTails(socket, (tails) => [...tails, tail]);
+    send(socket, { type: "tail", requestId: message.requestId, answer: started.answer });
+  }
+
+  private async startTail(card: string): Promise<{ answer: TailAnswer; tail: MapTail | null }> {
+    const refuse = (error: string) => ({ answer: { kind: "error", error } as const, tail: null });
+    const resource = this.state.resources.get(card);
+    if (resource?.kind === "site.compose") {
+      const daemon = this.logDaemon(resource);
+      if ("error" in daemon) return refuse(daemon.error);
+      const id = crypto.randomUUID();
+      send(daemon.socket, { type: "tail", id, project: resource.id } satisfies ServerToDaemon);
+      return {
+        answer: { kind: "compose", tail: id },
+        tail: { kind: "compose", id, machineId: resource.machine ?? "" },
+      };
+    }
+    if (resource?.kind === "site.worker") {
+      const api = this.api();
+      if (!api) return refuse("This kitshn has no Cloudflare token, so it reads no Worker logs.");
+      const script = this.workerScript(card);
+      if (!script) return refuse("A deploy did not make this Worker yet, so it has no logs.");
+      const { id, url } = await startWorkerTail(api, this.env.CLOUDFLARE_ACCOUNT_ID, script);
+      return { answer: { kind: "worker", tail: id, url }, tail: { kind: "worker", id, script } };
+    }
+    return refuse(`The card "${card}" has no logs (K-1802).`);
+  }
+
+  private async stopTail(tail: MapTail) {
+    if (tail.kind === "compose") {
+      for (const socket of this.checkedSockets(tail.machineId))
+        send(socket, { type: "tailStop", id: tail.id } satisfies ServerToDaemon);
+      return;
+    }
+    const api = this.api();
+    if (!api) return;
+    // K-1807: a tail that kitshn could not delete ends by itself when it expires, after a few hours.
+    await stopWorkerTail(api, this.env.CLOUDFLARE_ACCOUNT_ID, tail.script, tail.id).catch((error: unknown) =>
+      console.error(`kitshn could not delete the tail ${tail.id}: ${String(error)}`),
+    );
+  }
+
+  private setTails(socket: WebSocket, change: (tails: ReadonlyArray<MapTail>) => ReadonlyArray<MapTail>) {
+    const attachment = attachmentOf(socket);
+    if (attachment?.kind !== "map") return;
+    socket.serializeAttachment({ ...attachment, tails: change(attachment.tails ?? []) } satisfies Attachment);
+  }
+
+  /** K-1805: the map that holds a Compose tail of this machine. */
+  private tailOwner(id: string, machineId: string): WebSocket | null {
+    for (const socket of this.ctx.getWebSockets("map")) {
+      const attachment = attachmentOf(socket);
+      if (
+        attachment?.kind === "map" &&
+        attachment.tails?.some(
+          (tail) => tail.kind === "compose" && tail.id === id && tail.machineId === machineId,
+        )
+      )
+        return socket;
+    }
+    return null;
+  }
+
+  /** K-1805: tells each map that its matching tails ended, and forgets them. */
+  private endTails(ends: (tail: MapTail) => boolean, reason: string) {
+    for (const socket of this.ctx.getWebSockets("map")) {
+      const attachment = attachmentOf(socket);
+      const ended = attachment?.kind === "map" ? (attachment.tails ?? []).filter(ends) : [];
+      if (ended.length === 0) continue;
+      this.setTails(socket, (tails) => tails.filter((tail) => !ended.includes(tail)));
+      for (const tail of ended) send(socket, { type: "tailEnd", tail: tail.id, reason });
+    }
   }
 
   private async rollbackResponse(caller: Caller, card: string, deployId: string) {
@@ -1757,6 +1979,11 @@ export class Kitshn extends DurableObject<Env> {
         caller,
         decodeURIComponent(path.slice("/api/worker-storage/".length)),
       );
+    if (path.startsWith("/api/apps/") && path.endsWith("/logs") && request.method === "POST")
+      return await this.logsResponse(
+        decodeURIComponent(path.slice("/api/apps/".length, -"/logs".length)),
+        await request.json().catch(() => null),
+      );
     if (path.startsWith("/api/apps/") && path.endsWith("/rollbacks") && request.method === "GET")
       return this.rollbackChoicesResponse(
         decodeURIComponent(path.slice("/api/apps/".length, -"/rollbacks".length)),
@@ -1866,9 +2093,10 @@ export class Kitshn extends DurableObject<Env> {
     }
     let message: ClientMessage;
     try {
-      message = decodeClientMessage(
-        JSON.parse(typeof data === "string" ? data : new TextDecoder().decode(data)),
-      );
+      const parsed: unknown = JSON.parse(typeof data === "string" ? data : new TextDecoder().decode(data));
+      if (isRecord(parsed) && (parsed.type === "tail" || parsed.type === "tailStop"))
+        return await this.tailMessage(socket, decodeTailMessage(parsed));
+      message = decodeClientMessage(parsed);
     } catch (error) {
       socket.close(4000, `kitshn cannot read the message: ${String(error).slice(0, 100)}`);
       return;
@@ -1897,9 +2125,18 @@ export class Kitshn extends DurableObject<Env> {
 
   private socketGone(socket: WebSocket) {
     const attachment = attachmentOf(socket);
+    if (attachment?.kind === "map") {
+      for (const tail of attachment.tails ?? []) void this.stopTail(tail);
+      return;
+    }
     if (attachment?.kind !== "machine") return;
     // A socket that never passed its check (K-1704) never made the machine online.
     if (attachment.check === "waiting") return;
+    // K-1805: the daemon stops the tails of a closed connection.
+    this.endTails(
+      (tail) => tail.kind === "compose" && tail.machineId === attachment.machineId,
+      "The machine's connection closed (K-1805).",
+    );
     const others = this.checkedSockets(attachment.machineId).filter((other) => other !== socket);
     if (others.length > 0) return;
     // A job that the machine had when its connection ended has no result coming.
@@ -2202,6 +2439,21 @@ export class Kitshn extends DurableObject<Env> {
         }));
       socket.serializeAttachment({ ...attachment, volumes } satisfies Attachment);
       this.sendMachine(machine);
+    } else if (message.type === "logs" && typeof message.id === "string") {
+      this.logSearches.get(message.id)?.(logAnswerOf(message.answer));
+    } else if (message.type === "tailLines" && typeof message.id === "string") {
+      const lines = logLinesOf(message.lines, TAIL_BATCH);
+      const skipped = typeof message.skipped === "number" ? message.skipped : 0;
+      const owner = this.tailOwner(message.id, machine.id);
+      if (owner) send(owner, { type: "tailLines", tail: message.id, lines, skipped });
+      // A tail that no map holds stops, so a lost stop costs no more messages.
+      else send(socket, { type: "tailStop", id: message.id } satisfies ServerToDaemon);
+    } else if (message.type === "tailEnd" && typeof message.id === "string") {
+      const reason = typeof message.reason === "string" ? message.reason.slice(0, 500) : "The tail stopped.";
+      this.endTails(
+        (tail) => tail.id === message.id && tail.kind === "compose" && tail.machineId === machine.id,
+        reason,
+      );
     } else if (message.type === "jobResult" && typeof message.id === "number" && isRecord(message.result)) {
       const result = message.result;
       this.sql(

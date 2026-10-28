@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import type { Edit } from "../core/changes.ts";
 import type { State } from "../core/model.ts";
+import type { LogLine, TailAnswer } from "../core/logs.ts";
 import type { ServerMessage, Snapshot } from "../core/protocol.ts";
 import { type Held, isNewer, settle } from "./held.ts";
 
@@ -22,6 +23,13 @@ let current: StoreState = { snapshot: null, connection: "connecting", reason: nu
 const listeners = new Set<() => void>();
 const waiting = new Map<string, (result: Result) => void>();
 let socket: WebSocket | null = null;
+
+/** K-1805: what a Compose tail of this map sends after it started. */
+export type TailEvent =
+  | { readonly type: "lines"; readonly lines: ReadonlyArray<LogLine>; readonly skipped: number }
+  | { readonly type: "end"; readonly reason: string };
+const tailStarts = new Map<string, (answer: TailAnswer) => void>();
+const tailListeners = new Map<string, (event: TailEvent) => void>();
 let retryDelay = 1000;
 
 const set = (next: Partial<StoreState>) => {
@@ -66,6 +74,14 @@ export function connect() {
         );
         set({ snapshot: { ...snapshot, machines } });
       }
+    } else if (message.type === "tail") {
+      tailStarts.get(message.requestId)?.(message.answer);
+      tailStarts.delete(message.requestId);
+    } else if (message.type === "tailLines") {
+      tailListeners.get(message.tail)?.({ type: "lines", lines: message.lines, skipped: message.skipped });
+    } else if (message.type === "tailEnd") {
+      tailListeners.get(message.tail)?.({ type: "end", reason: message.reason });
+      tailListeners.delete(message.tail);
     } else {
       waiting.get(message.requestId)?.(
         message.ok ? { ok: true, revision: message.revision, notes: message.notes } : message,
@@ -83,6 +99,11 @@ export function connect() {
       });
     }
     waiting.clear();
+    const lost = "The connection to kitshn closed. Turn Live on again when it is back.";
+    for (const resolve of tailStarts.values()) resolve({ kind: "error", error: lost });
+    tailStarts.clear();
+    for (const listener of tailListeners.values()) listener({ type: "end", reason: lost });
+    tailListeners.clear();
     if (event.code === 4003 || event.code === 1008) {
       set({ connection: "refused", reason: event.reason || "kitshn refused the connection." });
       return;
@@ -224,4 +245,24 @@ export function toState(snapshot: Snapshot): State {
     paused: snapshot.paused,
     machines: new Map(snapshot.machines.map((view) => [view.machine.id, view.machine])),
   };
+}
+
+/** K-1805, K-1807: starts "Live" for a card. A Compose tail then sends its lines to `listener`. */
+export function startTail(card: string, listener: (event: TailEvent) => void): Promise<TailAnswer> {
+  if (!socket || socket.readyState !== WebSocket.OPEN)
+    return Promise.resolve({ kind: "error", error: "kitshn is not connected. Wait for the live sticker." });
+  const requestId = crypto.randomUUID();
+  socket.send(JSON.stringify({ type: "tail", requestId, card }));
+  return new Promise((resolve) =>
+    tailStarts.set(requestId, (answer) => {
+      if (answer.kind === "compose") tailListeners.set(answer.tail, listener);
+      resolve(answer);
+    }),
+  );
+}
+
+/** K-1805, K-1807: kitshn stops the tail; a closed connection stops it too. */
+export function stopTail(tail: string) {
+  tailListeners.delete(tail);
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "tailStop", tail }));
 }

@@ -21,6 +21,7 @@ import { gunzipSync } from "node:zlib";
 import type { Answer, Request } from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { keyPlan } from "./keys.ts";
+import { composeLogs, followLogs, rangeArgs, searchLogs, withLogLimits } from "./logs.ts";
 import { type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from "./local.ts";
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
 import { localUsersOf, peerDecision } from "./peer.ts";
@@ -800,7 +801,7 @@ async function composeUp(
     for (const folder of [data, env.KITSHN_LOG_DIR]) mkdirSync(folder, { recursive: true });
     // Build and start from the checked config itself, so the repo's files are not read again. It stays with
     // the last good build, so a teardown reads the same services.
-    writeFileSync(checked, JSON.stringify(config), { mode: 0o600 });
+    writeFileSync(checked, JSON.stringify(withLogLimits(config)), { mode: 0o600 });
     // The params file again: without it Compose reads the repo's `.env`, and `COMPOSE_PROFILES` is lost.
     const run = [
       "compose",
@@ -1199,6 +1200,7 @@ function report() {
         "compose-redeploy",
         "compose-guard",
         "compose-rollback",
+        "logs",
       ],
       ...(keptBytes === undefined ? {} : { keptBytes }),
       version: VERSION,
@@ -1226,6 +1228,19 @@ function watchTunnel() {
 }
 
 const pendingResults: Array<DaemonMessage> = [];
+
+/** K-1805: the running tails by id; each ends when its connection closes. */
+const tails = new Map<string, () => void>();
+
+function stopTails() {
+  for (const stopTail of tails.values()) stopTail();
+  tails.clear();
+}
+
+/** K-1804, K-1805: log answers go out on the connection that asked, and are lost with it. */
+function sendOn(ws: WebSocket, message: DaemonMessage) {
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+}
 
 function flushResults() {
   while (socket?.readyState === WebSocket.OPEN && pendingResults.length > 0) {
@@ -1404,6 +1419,28 @@ function connect(config: JoinSecrets) {
         accepted(`with the key ${message.fingerprint}`);
       } else if (message.type === "rotateKey") {
         void rotateKey(ws);
+      } else if (message.type === "logs") {
+        // K-1804: the data folder holds no Compose file, so Compose finds the app by its project label alone.
+        void searchLogs(composeLogs(message.project, rangeArgs(message.search)), message.search, paths.data)
+          .catch((error: unknown) => ({ state: "error" as const, error: String(error) }))
+          .then((answer) => sendOn(ws, { type: "logs", id: message.id, answer }));
+      } else if (message.type === "tail") {
+        tails.get(message.id)?.();
+        tails.set(
+          message.id,
+          followLogs(
+            composeLogs(message.project, ["--follow", "--tail", "100"]),
+            paths.data,
+            (lines, skipped) => sendOn(ws, { type: "tailLines", id: message.id, lines, skipped }),
+            (reason) => {
+              tails.delete(message.id);
+              sendOn(ws, { type: "tailEnd", id: message.id, reason });
+            },
+          ),
+        );
+      } else if (message.type === "tailStop") {
+        tails.get(message.id)?.();
+        tails.delete(message.id);
       } else if (message.type === "job") {
         log(`job ${message.id}: ${message.command.kind}`);
         // A job that throws (for example a file it cannot delete) still sends a result, and never ends the daemon.
@@ -1425,6 +1462,8 @@ function connect(config: JoinSecrets) {
     };
     ws.onclose = (event) => {
       if (ping) clearInterval(ping);
+      // K-1805: kitshn forgets the tails of a closed connection.
+      if (socket === ws) stopTails();
       if (socket === ws) socket = null;
       // K-1705: kitshn stored the new key; the next connection signs with it.
       if (event.code === 4004 && existsSync(nextKeyFile)) renameSync(nextKeyFile, keyFile);

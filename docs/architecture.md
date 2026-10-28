@@ -52,7 +52,8 @@ This page says what the parts are, where each piece of state lives, how requests
 | Used pass ids (planned, K-1715) | Durable Object SQLite | Deleted by the daily alarm after expiry. |
 | Recipe | App repo | The only state in Git. |
 | Page and file bytes | R2 | |
-| Compose data, logs | Machine disk | Same layout ideas as KitSHn 1. |
+| Compose data, logs | Machine disk | Same layout ideas as KitSHn 1. Docker keeps at most 30 MB of logs per container (K-1803). |
+| Worker app logs | Workers Logs in Cloudflare | Cloudflare keeps them for its retention; kitshn stores none (K-1806). |
 | Device view (zoom, pan) | Browser local storage | |
 
 ## Request paths

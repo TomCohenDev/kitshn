@@ -208,17 +208,23 @@ export function App() {
       return;
     }
     setUndoCheck((check) => (check?.key === undoKey ? check : { key: undoKey, answer: null, slow: false }));
+    // Each request is live until this effect ends, so an answer from an earlier opening is dropped.
+    let live = true;
     const slow = setTimeout(() => setUndoCheck((check) => slowUndoCheck(check, undoKey)), 150);
     void callApi<UndoAnswer>(
       "GET",
       `/api/undo-item?kind=${undoItemOf.kind}&id=${encodeURIComponent(undoItemOf.id)}`,
     ).then((answer) => {
       clearTimeout(slow);
+      if (!live) return;
       setUndoCheck((check) =>
         settleUndoCheck(check, undoKey, "error" in answer ? { allowed: false, reason: answer.error } : answer),
       );
     });
-    return () => clearTimeout(slow);
+    return () => {
+      live = false;
+      clearTimeout(slow);
+    };
   }, [undoKey, newestRevision]);
 
   useEffect(() => {

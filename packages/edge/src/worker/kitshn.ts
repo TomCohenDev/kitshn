@@ -17,6 +17,7 @@ import {
   mergeMoves,
   mergedSummary,
   type StoredRevision,
+  undoStatus,
   undoTarget,
   refuseRaiseWhilePaused,
   refuseResume,
@@ -632,10 +633,11 @@ export class Kitshn extends DurableObject<Env> {
     return this.commitUndo(actor, target.changes, { revision: target.revision, item: name });
   }
 
-  /** Every revision that History keeps (K-1503: at most 5,000). */
-  private storedRevisions(): Array<StoredRevision> {
+  /** The newest `limit` revisions; by default every one that History keeps (K-1503: at most 5,000). */
+  private storedRevisions(limit = -1): Array<StoredRevision> {
     return this.sql<{ id: number; actor: string; summary: string; changes: string; undoes: number | null }>(
-      "SELECT id, actor, summary, changes, undoes FROM revisions",
+      "SELECT id, actor, summary, changes, undoes FROM revisions ORDER BY id DESC LIMIT ?",
+      limit,
     ).map((row) => ({
       id: row.id,
       actor: JSON.parse(row.actor) as Actor,
@@ -858,6 +860,8 @@ export class Kitshn extends DurableObject<Env> {
       paused: this.state.paused,
       repos,
       deployedCards: this.deployedCards(),
+      // The menus read the recent History only; the server checks all of it when the undo runs.
+      undoItems: undoStatus(this.state, this.storedRevisions(RECENT_REVISIONS), me),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),

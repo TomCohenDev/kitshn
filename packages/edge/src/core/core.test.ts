@@ -10,6 +10,7 @@ import {
   MOVE_MERGE_MS,
   mergeMoves,
   type StoredRevision,
+  undoStatus,
   undoTarget,
   mergedSummary,
   refuseRaiseWhilePaused,
@@ -948,5 +949,18 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     const trayed = history(move(withTray(), "box", 400, 0).after, [[A, [{ _tag: "place", id: "box", after: null }]]]);
     expect(() => undoTarget(trayed.state, [...trayed.revisions, forget(2)], A, { revision: 1 })).toThrow(/#2/);
     expect(() => undoTarget(trayed.state, [forget(1)], KITSHN, { revision: 1 })).toThrow(/records an action/);
+  });
+
+  it("tells the menus which items of the caller undo now, and why the others do not", () => {
+    const { state, revisions } = history(withTray(), [
+      [A, [place("box", 1500, 1500)]],
+      [A, [herAs({ level: "view" })]],
+      [B, [place("riffle", 400, 0)]],
+    ]);
+    expect(undoStatus(state, revisions, A)).toEqual({
+      "card:box": null,
+      "circle:her": '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
+    });
+    expect(undoStatus(state, revisions, B)).toEqual({ "card:riffle": null });
   });
 });

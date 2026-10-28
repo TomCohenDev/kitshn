@@ -90,7 +90,13 @@ function context(version = "0123456789ab"): ActionContext {
     keyFailure: null,
     orphanVolumes: [],
   };
-  return { state, deployed: new Set(["riffle"]), machines: new Map([["vps", machine]]), version };
+  return {
+    state,
+    deployed: new Set(["riffle"]),
+    machines: new Map([["vps", machine]]),
+    version,
+    undoItems: { "card:riffle": null, "circle:her": "#9 \"Moved b\" changed the same cards or circles later." },
+  };
 }
 
 /** Handlers that record each call by name. */
@@ -118,7 +124,18 @@ describe("card actions", () => {
   it("offers a deployed app its address, shares, tray and Remove app, and nothing of a machine", () => {
     const { handlers, calls } = recorder();
     const groups = actionsFor(context(), handlers, { _tag: "card", id: "riffle" });
-    expect(ids(groups)).toEqual(["details", "open", "copy", "share", "unshare", "select-kind", "add-to-stack", "tray", "remove-app"]);
+    expect(ids(groups)).toEqual([
+      "details",
+      "open",
+      "copy",
+      "share",
+      "unshare",
+      "select-kind",
+      "add-to-stack",
+      "tray",
+      "undo-item",
+      "remove-app",
+    ]);
     expect(find(groups, "remove-app").danger).toBe(true);
     // The card sits in the Owner circle only, so it can join Everyone and Her.
     expect(items(find(groups, "share")).map((item) => item.id)).toEqual([`share:${EVERYONE_CIRCLE_ID}`, "share:her"]);
@@ -301,5 +318,19 @@ describe("levelEdit (K-205)", () => {
     const ending: State = { ...ctx.state, shareSettings: new Map([[shareKey("vps", OWNER_CIRCLE_ID), { level: "use", endsAt: 9 }]]) };
     expect(levelEdit(ending, vps, owner, null).after).toEqual({ level: null, endsAt: 9 });
     expect(levelEdit(ending, vps, owner, "view").after).toEqual({ level: "view", endsAt: 9 });
+  });
+});
+
+describe("per-item undo (K-1507)", () => {
+  it("runs when kitshn allows it, and shows the reason when it refuses or no change of the caller exists", () => {
+    const { handlers, calls } = recorder();
+    const card = find(actionsFor(context(), handlers, { _tag: "card", id: "riffle" }), "undo-item");
+    expect(card.refused).toBeUndefined();
+    run(card);
+    expect(calls).toEqual([["undoItem", { kind: "card", id: "riffle" }]]);
+    const circle = find(actionsFor(context(), handlers, { _tag: "circle", id: "her" }), "undo-item");
+    expect(circle.refused).toMatch(/changed the same cards or circles later/);
+    const none = find(actionsFor(context(), handlers, { _tag: "card", id: "vps" }), "undo-item");
+    expect(none.refused).toBe("You have no recent change to this card to undo.");
   });
 });

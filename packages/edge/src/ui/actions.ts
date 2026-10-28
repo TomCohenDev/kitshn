@@ -1,8 +1,10 @@
 import {
   type Edit,
+  type Item,
   RuleError,
   applyChanges,
   isAppCard,
+  itemKey,
   refuseRaiseWhilePaused,
   resolveEdits,
   ruleViolation,
@@ -61,6 +63,8 @@ export interface ActionContext {
   readonly machines: ReadonlyMap<string, MachineView>;
   /** K-617: the release of this kitshn, or a local build. */
   readonly version: string;
+  /** K-1507: per item, null when its per-item undo works, or why not. */
+  readonly undoItems: Readonly<Record<string, string | null>>;
 }
 
 export interface ActionHandlers {
@@ -87,6 +91,20 @@ export interface ActionHandlers {
   readonly addSite: () => void;
   readonly addMachine: () => void;
   readonly fit: () => void;
+  readonly undoItem: (item: Item) => void;
+}
+
+/** K-523, K-1507: "Undo last change to this card" or "… circle", disabled with the reason when kitshn refuses it. */
+function undoItemAction(ctx: ActionContext, h: ActionHandlers, item: Item): Action {
+  const status = ctx.undoItems[itemKey(item)];
+  const reason = status === undefined ? `You have no recent change to this ${item.kind} to undo.` : status;
+  return {
+    id: "undo-item",
+    label: `Undo last change to this ${item.kind}`,
+    tip: `Undo your newest change to this ${item.kind}, and only its part of that change.`,
+    ...(reason === null ? {} : { refused: reason }),
+    run: () => h.undoItem(item),
+  };
 }
 
 /** K-617: a local build names no release, so there is nothing to update a daemon to. */
@@ -409,6 +427,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
             : []),
         ]
       : [],
+    [undoItemAction(ctx, h, { kind: "card", id: resource.id })],
     [
       ...(isAppCard(resource) && ctx.deployed.has(resource.id)
         ? [{ id: "remove-app", label: "Remove app", tip: REMOVE_APP_TIP, danger: true as const, run: () => h.removeApp(resource) }]
@@ -488,6 +507,7 @@ export function circleActions(ctx: ActionContext, h: ActionHandlers, circle: Cir
         run: () => h.addMember(circle.id),
       },
     ],
+    [undoItemAction(ctx, h, { kind: "circle", id: circle.id })],
     // K-211: the Owner circle cannot be deleted.
     circle.id === OWNER_CIRCLE_ID
       ? []

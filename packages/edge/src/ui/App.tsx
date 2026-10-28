@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 import {
   type Actor,
   type Edit,
+  type Item,
   type ShareDiff,
   applyChanges,
   deepEqual,
@@ -460,6 +461,18 @@ export function App() {
     );
   };
 
+  /** K-1507: undoes the caller's own newest change to one card or circle. */
+  const undoItem = async (item: Item) => {
+    const result = await callApi<{ revision: number | null; notes: ReadonlyArray<string> }>("POST", "/api/undo-item", {
+      item,
+    });
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: ["Undone.", ...result.notes].join(" "), error: false, undo: null },
+    );
+  };
+
   /** K-909: no confirm; the toast and History undo it. */
   const removeApp = async (resource: Resource) => {
     const result = await callApi<{ revision: number | null; notes: ReadonlyArray<string> }>(
@@ -674,8 +687,15 @@ export function App() {
     addSite: () => setAddingSite(true),
     addMachine: () => setAddingMachine(true),
     fit,
+    undoItem: (item) => void undoItem(item),
   };
-  const actionContext: ActionContext = { state, deployed, machines, version: store.snapshot.version };
+  const actionContext: ActionContext = {
+    state,
+    deployed,
+    machines,
+    version: store.snapshot.version,
+    undoItems: store.snapshot.undoItems,
+  };
 
   const waitingRepos = store.snapshot?.repos.filter((repo) => repo.state === "waiting").length ?? 0;
   return (

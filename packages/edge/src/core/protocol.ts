@@ -42,6 +42,8 @@ export interface Snapshot {
   readonly paused: PauseMode | null;
   /** K-819: the repos that deployed or wait to deploy, newest first. */
   readonly repos: ReadonlyArray<RepoView>;
+  /** K-523, K-1507: per `card:<id>` or `circle:<id>`, null when its per-item undo works, or why not. */
+  readonly undoItems: Readonly<Record<string, string | null>>;
   /** K-909: the cards that a deploy made; only these show "Remove app". */
   readonly deployedCards: ReadonlyArray<string>;
   /** K-1504: who paused and when, while paused. */

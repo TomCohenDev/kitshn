@@ -5,6 +5,9 @@ import {
   conflictOf,
   type Edit,
   invert,
+  itemUndo,
+  MOVE_MERGE_MS,
+  mergeMoves,
   refuseRaiseWhilePaused,
   refuseResume,
   removeAppChanges,
@@ -13,6 +16,7 @@ import {
   shareDiff,
   stacksWithout,
   summarize,
+  undoPlan,
   withStackMates,
 } from "./changes.ts";
 import {
@@ -742,5 +746,124 @@ describe("emergency pause (K-1504)", () => {
     });
     expect(() => refuseRaiseWhilePaused(withDevice(device), withDevice({ ...device, publishes: true }))).toThrow(/only goes down/);
     expect(() => refuseRaiseWhilePaused(withDevice({ ...device, publishes: true }), withDevice(device))).not.toThrow();
+  });
+});
+
+describe("undo that follows intent (K-1505 to K-1507)", () => {
+  const A = { _tag: "person", email: "a@example.com" } as const;
+  const B = { _tag: "person", email: "b@example.com" } as const;
+  /** The start state with a card "notes" that waits in the tray. */
+  const withTray = (): State => {
+    const state = start();
+    const notes: Resource = { ...state.resources.get("riffle")!, id: "notes", name: "notes" };
+    return { ...state, resources: new Map([...state.resources, ["notes", notes]]) };
+  };
+  const move = (state: State, id: string, x: number, y: number) => edit(state, [{ _tag: "place", id, after: { x, y } }]);
+  const undone = (state: State, changes: Parameters<typeof undoPlan>[1]) => {
+    const plan = undoPlan(state, changes);
+    return { ...plan, after: applyChanges(state, plan.changes) };
+  };
+
+  it("merges moves of the same card by the same actor into the drop, and undo sends the card to the tray", () => {
+    const drop = move(withTray(), "notes", 400, 0);
+    const first = move(drop.after, "notes", 420, 10);
+    const merged = mergeMoves({ actor: A, at: 0, changes: drop.changes, undoes: null }, A, 60_000, first.changes);
+    expect(merged).toEqual([{ _tag: "place", id: "notes", before: null, after: { x: 420, y: 10 } }]);
+    const second = move(first.after, "notes", 900, 900);
+    const again = mergeMoves({ actor: A, at: 60_000, changes: merged!, undoes: null }, A, 170_000, second.changes);
+    expect(again).toEqual([{ _tag: "place", id: "notes", before: null, after: { x: 900, y: 900 } }]);
+    expect(undone(second.after, again!).after.places.has("notes")).toBe(false);
+  });
+
+  it("keeps moves apart for another actor, after the window, for another card and after a share change", () => {
+    const drop = move(withTray(), "notes", 400, 0);
+    const previous = { actor: A, at: 0, changes: drop.changes, undoes: null };
+    const later = move(drop.after, "notes", 420, 10).changes;
+    expect(mergeMoves(previous, B, 1, later)).toBeNull();
+    expect(mergeMoves(previous, A, MOVE_MERGE_MS + 1, later)).toBeNull();
+    expect(mergeMoves(previous, A, 1, move(drop.after, "riffle", 5, 5).changes)).toBeNull();
+    expect(mergeMoves({ ...previous, undoes: 3 }, A, 1, later)).toBeNull();
+    const share = edit(drop.after, [
+      { _tag: "shareSetting", resourceId: "notes", circleId: "her", after: { level: "view", endsAt: null } },
+    ]);
+    expect(mergeMoves({ ...previous, changes: share.changes }, A, 1, later)).toBeNull();
+  });
+
+  it("sends a dropped card to the tray after a later move by someone else, but moves a card back only while it is where the move put it", () => {
+    const drop = move(withTray(), "notes", 400, 0);
+    const moved = move(drop.after, "notes", 900, 900);
+    expect(undone(moved.after, drop.changes).after.places.has("notes")).toBe(false);
+
+    const byA = move(start(), "riffle", 400, 0);
+    const byB = move(byA.after, "riffle", 900, 900);
+    const plan = undone(byB.after, byA.changes);
+    expect(plan.changes).toEqual([]);
+    expect(plan.kept).toEqual(["riffle stays where it is: a later change moved it."]);
+  });
+
+  it("reverts a share setting while nobody changed it since, field by field", () => {
+    const set = (state: State, level: "view" | "use" | null, endsAt: number | null) =>
+      edit(state, [{ _tag: "shareSetting", resourceId: "riffle", circleId: "owner", after: { level, endsAt } }]);
+    const created = set(start(), null, 5);
+    const level = set(created.after, "view", 5);
+    const ends = set(level.after, "view", 9);
+    expect(undone(ends.after, level.changes).after.shareSettings.get(shareKey("riffle", "owner"))).toEqual({
+      level: null,
+      endsAt: 9,
+    });
+    const relevel = set(ends.after, "use", 9);
+    expect(undone(relevel.after, level.changes)).toMatchObject({
+      changes: [],
+      kept: ["The share of riffle with Owner keeps its level: a later change set it."],
+    });
+    expect(undone(relevel.after, created.changes).kept).toEqual([
+      "The share of riffle with Owner stays as it is: a later change changed it.",
+    ]);
+  });
+
+  it("reverts a circle edit field by field, and deletes a new circle while only its place changed", () => {
+    const her = circle(start(), "her");
+    const member = edit(start(), [
+      { _tag: "circle", id: "her", after: { ...her, members: [...her.members, { _tag: "domain", domain: "x.com" }] } },
+    ]);
+    const moved = edit(member.after, [{ _tag: "circle", id: "her", after: { ...circle(member.after, "her"), x: 600 } }]);
+    expect(undone(moved.after, member.changes).after.circles.get("her")).toEqual({ ...her, x: 600 });
+
+    const created = edit(start(), [{ _tag: "circle", id: "new", after: { ...her, id: "new", name: "New" } }]);
+    const shifted = edit(created.after, [{ _tag: "circle", id: "new", after: { ...her, id: "new", name: "New", x: 9 } }]);
+    expect(undone(shifted.after, created.changes).after.circles.has("new")).toBe(false);
+    const renamed = edit(shifted.after, [{ _tag: "circle", id: "new", after: { ...her, id: "new", name: "Newer" } }]);
+    expect(undone(renamed.after, created.changes).kept).toEqual(["The circle New stays as it is: a later change changed it."]);
+  });
+
+  it("says plainly that a removed card is gone, and refuses the undo of a removal once a deploy made the card again", () => {
+    const moved = move(start(), "riffle", 400, 0);
+    const removal = removeAppChanges(moved.after, "riffle");
+    const removed = applyChanges(moved.after, removal);
+    expect(undone(removed, moved.changes)).toMatchObject({ changes: [], kept: ["riffle no longer exists."] });
+    expect(undoPlan(removed, removal).changes).toEqual(invert(removal));
+    const redeployed = applyChanges(removed, [invert(removal).at(-1)!]);
+    expect(() => undoPlan(redeployed, removal)).toThrow(/no longer fits/);
+  });
+
+  it("undoes only one card's part of the newest revision that touched it, one step further back each time", () => {
+    const drop = move(withTray(), "notes", 400, 0);
+    const both = edit(drop.after, [
+      { _tag: "place", id: "notes", after: { x: 900, y: 900 } },
+      { _tag: "place", id: "riffle", after: { x: 950, y: 900 } },
+    ]);
+    const history = [
+      { id: 2, changes: both.changes },
+      { id: 1, changes: drop.changes },
+    ];
+    const first = itemUndo(both.after, history, { kind: "card", id: "notes" });
+    expect(first?.revision).toBe(2);
+    const once = applyChanges(both.after, first!.plan.changes);
+    expect(once.places.get("notes")).toEqual({ x: 400, y: 0 });
+    expect(once.places.get("riffle")).toEqual({ x: 950, y: 900 });
+    const second = itemUndo(once, history, { kind: "card", id: "notes" });
+    expect(second?.revision).toBe(1);
+    expect(applyChanges(once, second!.plan.changes).places.has("notes")).toBe(false);
+    expect(itemUndo(both.after, history, { kind: "circle", id: "her" })).toBeNull();
   });
 });

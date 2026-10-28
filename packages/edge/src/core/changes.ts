@@ -222,6 +222,192 @@ export function removeAppChanges(state: State, id: string): Array<Change> {
 export const invert = (changes: ReadonlyArray<Change>): Array<Change> =>
   changes.map((change) => ({ ...change, before: change.after, after: change.before }) as Change);
 
+/**
+ * K-1505: moves of the same cards or circles by the same actor join the revision of the move or drop that
+ * started them, while each comes within this time of the one before. Two minutes covers the nudges after a
+ * drop, and a later rearrangement gets its own History entry.
+ */
+export const MOVE_MERGE_MS = 2 * 60 * 1000;
+
+const onlyMoved = (before: Circle, after: Circle) => deepEqual({ ...before, x: 0, y: 0 }, { ...after, x: 0, y: 0 });
+
+/** K-1505: a card or circle that lands somewhere: a drop from the tray, a new circle, or a move. */
+const lands = (change: Change) =>
+  (change._tag === "place" && change.after !== null) ||
+  (change._tag === "circle" &&
+    change.after !== null &&
+    (change.before === null || onlyMoved(change.before, change.after)));
+
+const isMove = (change: Change) => change.before !== null && lands(change);
+
+/**
+ * K-1505: the changes of `previous` with the moves of `changes` merged in (first `before`, last `after`), or
+ * null when the moves start a revision of their own. `previous` must be the newest revision.
+ */
+export function mergeMoves(
+  previous: Pick<Revision, "actor" | "at" | "changes" | "undoes">,
+  actor: Actor,
+  now: number,
+  changes: ReadonlyArray<Change>,
+): Array<Change> | null {
+  if (previous.undoes !== null || !deepEqual(previous.actor, actor) || now - previous.at > MOVE_MERGE_MS) return null;
+  if (previous.changes.length === 0 || !previous.changes.every(lands) || !changes.every(isMove)) return null;
+  const key = (change: Change) => `${change._tag}:${change.id}`;
+  const merged = new Map(previous.changes.map((change) => [key(change), change]));
+  for (const change of changes) {
+    const first = merged.get(key(change));
+    if (!first) return null;
+    merged.set(key(change), { ...first, after: change.after } as Change);
+  }
+  return [...merged.values()];
+}
+
+/** K-1506: what an undo reverses now, and a plain note for each part that it leaves as it is. */
+export interface UndoPlan {
+  readonly changes: Array<Change>;
+  readonly kept: Array<string>;
+}
+
+const FIELD_NAMES: Readonly<Record<string, string>> = {
+  x: "place",
+  y: "place",
+  r: "size",
+  needsPasskey: "passkey rule",
+  match: "match rule",
+  endsAt: "end date",
+};
+
+const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * K-1506: the value an undo sets for one change, from the current value. With `byField`, when `before`, `after`
+ * and the current value are records, each field that the change set goes back only while nobody changed it since;
+ * `kept` names the others. Otherwise the whole value goes back only while it is still `after`, else "changed".
+ */
+function revertValue(
+  now: unknown,
+  before: unknown,
+  after: unknown,
+  byField: boolean,
+): { readonly value: unknown; readonly kept: ReadonlyArray<string> } | "changed" {
+  if (deepEqual(now, before)) return { value: now, kept: [] };
+  if (deepEqual(now, after)) return { value: before, kept: [] };
+  if (!byField || !isRecord(now) || !isRecord(before) || !isRecord(after)) return "changed";
+  const value: Record<string, unknown> = { ...now };
+  const kept = new Set<string>();
+  for (const field of Object.keys(before)) {
+    if (deepEqual(before[field], after[field])) continue;
+    if (deepEqual(value[field], after[field])) value[field] = before[field];
+    else if (!deepEqual(value[field], before[field])) kept.add(FIELD_NAMES[field] ?? field);
+  }
+  return { value, kept: [...kept] };
+}
+
+/**
+ * K-1506: the undo of a revision, against the current state. A card that the revision put on the map goes back
+ * to the tray from wherever it is now, and a circle that it made goes while only its place changed since.
+ * Every other part goes back only where nobody changed it since, field by field; the rest stays, with a note.
+ * An app part that no longer fits refuses the whole undo (K-909).
+ */
+export function undoPlan(state: State, changes: ReadonlyArray<Change>): UndoPlan {
+  const restored = new Set(
+    changes.flatMap((change) => (change._tag === "app" && change.before && !change.after ? [change.id] : [])),
+  );
+  const exists = (id: string) => state.resources.has(id) || restored.has(id);
+  const cardName = (id: string) => state.resources.get(id)?.name ?? id;
+  const out: Array<Change> = [];
+  const kept: Array<string> = [];
+  for (const change of changes) {
+    const now = current(state, change);
+    if (change._tag === "app") {
+      if (!deepEqual(now, change.after))
+        throw new RuleError(`A later deploy or removal changed the app "${change.id}", so this undo no longer fits (K-909).`);
+      out.push({ ...change, before: change.after, after: change.before });
+      continue;
+    }
+    const [cardId, circleId] =
+      change._tag === "place" ? [change.id] : change._tag === "shareSetting" ? change.id.split("/") : [];
+    const what =
+      change._tag === "place"
+        ? cardName(change.id)
+        : change._tag === "circle"
+          ? `The circle ${(change.after ?? change.before)?.name ?? change.id}`
+          : change._tag === "stack"
+            ? `The stack ${(change.after ?? change.before)?.name ?? change.id}`
+            : change._tag === "shareSetting"
+              ? `The share of ${cardName(cardId ?? "")} with ${state.circles.get(circleId ?? "")?.name ?? circleId}`
+              : "The pause";
+    // The card or circle of the change itself is gone, or a card or circle that it names.
+    const self = (change._tag === "place" && !exists(change.id)) || (change._tag === "circle" && change.before && change.after && !now);
+    const gone =
+      cardId !== undefined && !exists(cardId)
+        ? cardId
+        : circleId !== undefined && !state.circles.has(circleId)
+          ? circleId
+          : change._tag === "stack"
+            ? change.before?.members.find((id) => !exists(id))
+            : undefined;
+    if (self) {
+      kept.push(`${what} no longer exists.`);
+      continue;
+    }
+    if (gone !== undefined) {
+      kept.push(`${what} stays as it is: ${gone} no longer exists.`);
+      continue;
+    }
+    if (deepEqual(now, change.before)) continue;
+    const back =
+      (change._tag === "place" && change.before === null) ||
+      (change._tag === "circle" &&
+        change.before === null &&
+        change.after !== null &&
+        onlyMoved(state.circles.get(change.id) ?? change.after, change.after));
+    const reverted = back
+      ? { value: change.before, kept: [] }
+      : revertValue(now, change.before, change.after, change._tag !== "place");
+    if (reverted === "changed") {
+      kept.push(
+        change._tag === "place"
+          ? `${what} stays where it is: a later change moved it.`
+          : `${what} stays as it is: a later change changed it.`,
+      );
+      continue;
+    }
+    if (reverted.kept.length > 0) kept.push(`${what} keeps its ${reverted.kept.join(", ")}: a later change set it.`);
+    if (!deepEqual(reverted.value, now))
+      out.push({ _tag: change._tag, id: change.id, before: now, after: reverted.value } as Change);
+  }
+  return { changes: out, kept };
+}
+
+/** K-1507: a card or a circle that a per-item undo names. */
+export interface Item {
+  readonly kind: "card" | "circle";
+  readonly id: string;
+}
+
+/** K-1507: whether a change is part of an item: a card's place, shares, app and stack membership; a circle and its shares. */
+export function touches(change: Change, item: Item): boolean {
+  if (item.kind === "circle")
+    return (
+      (change._tag === "circle" && change.id === item.id) ||
+      (change._tag === "shareSetting" && change.id.endsWith(`/${item.id}`))
+    );
+  switch (change._tag) {
+    case "place":
+    case "app":
+      return change.id === item.id;
+    case "shareSetting":
+      return change.id.startsWith(`${item.id}/`);
+    case "stack":
+      return (change.before?.members.includes(item.id) ?? false) !== (change.after?.members.includes(item.id) ?? false);
+    case "circle":
+    case "pause":
+      return false;
+  }
+}
+
 /** The first change whose current value is not its `before`, or null. */
 export function conflictOf(state: State, changes: ReadonlyArray<Change>): Change | null {
   return changes.find((change) => !deepEqual(current(state, change), change.before)) ?? null;
@@ -455,4 +641,23 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
     )
       throw new RuleError(`While paused, access only goes down: the circle ${circle.name} would let in more.`);
   }
+}
+
+/**
+ * K-1507: the newest revision whose part for the item still has something to undo, and the plan for that
+ * part. `revisions` come newest first, without undos and without undone revisions. A revision whose part is
+ * back as before already is skipped, so each per-item undo goes one step further back.
+ */
+export function itemUndo(
+  state: State,
+  revisions: Iterable<{ readonly id: number; readonly changes: ReadonlyArray<Change> }>,
+  item: Item,
+): { readonly revision: number; readonly plan: UndoPlan } | null {
+  for (const revision of revisions) {
+    const parts = revision.changes.filter((change) => touches(change, item));
+    if (parts.length === 0) continue;
+    const plan = undoPlan(state, parts);
+    if (plan.changes.length > 0 || plan.kept.length > 0) return { revision: revision.id, plan };
+  }
+  return null;
 }

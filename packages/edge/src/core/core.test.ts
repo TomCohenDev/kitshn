@@ -5,6 +5,7 @@ import {
   applyChanges,
   type Change,
   conflictOf,
+  describeDiff,
   type Edit,
   invert,
   MOVE_MERGE_MS,
@@ -1013,10 +1014,30 @@ describe("History targets (K-1508)", () => {
     ]);
   });
 
+  it("files a share that ends and takes its card out of a stack under shares", () => {
+    expect(
+      revisionTargets([
+        { _tag: "shareSetting", id: "a/her" },
+        { _tag: "stack", id: "s-1", members: [["a", "b", "c"], ["b", "c"]] },
+      ]).kind,
+    ).toBe("share");
+  });
+
   it("calls a revision without changes an action", () => {
     expect(revisionTargets([{ _tag: "forget", id: "page-1" }])).toEqual({
       kind: "action",
       items: [{ kind: "card", id: "page-1" }],
     });
+  });
+});
+
+describe("share summaries (K-1501, K-1508)", () => {
+  it("names a new level of a share apart from a new share", () => {
+    const state = start();
+    const riffle = state.resources.get("riffle");
+    const her = circle(state, "her");
+    if (!riffle) throw new Error("The fixture has riffle.");
+    expect(describeDiff({ resource: riffle, circle: her, from: null, to: "view" })).toBe("riffle: + Her · view");
+    expect(describeDiff({ resource: riffle, circle: her, from: "view", to: "use" })).toBe("riffle: Her · view → use");
   });
 });

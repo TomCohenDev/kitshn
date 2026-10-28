@@ -71,7 +71,19 @@ import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
 import { overlay } from "./held.ts";
 import { HistoryView } from "./History.tsx";
-import { type Box, cardBox, circleBox, fitView, headBox, mapBox, openArea, panInto, union } from "./layout.ts";
+import {
+  type Box,
+  cardBox,
+  circleBox,
+  fitView,
+  headAngle,
+  headBox,
+  mapBox,
+  openArea,
+  panInto,
+  shownCardBoxes,
+  union,
+} from "./layout.ts";
 import { actorLabel } from "./revisions.ts";
 import {
   type Connection,
@@ -88,7 +100,7 @@ import {
 
 const PREVIEWS_KEY = "kitshn.previews";
 /**
- * On a wide screen the fit stays at least this close, so card names stay readable on a
+ * On a wide screen the fit and a saved view stay at least this close, so card names stay readable on a
  * laptop. A bigger map is then centred, not shown whole; the wheel still zooms out to 0.15.
  */
 const FIT_MIN_SCALE = 0.85;
@@ -103,8 +115,26 @@ interface Toast {
   readonly alsoUndo?: ReadonlyArray<number>;
 }
 
-/** The view until the first fit (K-514). */
-const START_VIEW: View = { x: 0, y: 0, s: 1 };
+const VIEW_KEY = "kitshn.view";
+
+/** K-514: this device's saved view, or null when it has none, so the map fits on load. */
+const loadView = (): View | null => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(VIEW_KEY) ?? "null") as View | null;
+    if (saved && [saved.x, saved.y, saved.s].every(Number.isFinite))
+      return wideScreen() ? { ...saved, s: Math.max(saved.s, FIT_MIN_SCALE) } : saved;
+  } catch {
+    // A broken saved view falls back to a fit.
+  }
+  return null;
+};
+
+/** Typing in a field or working in a dialog keeps its own Escape. */
+const ownsEscape = (target: EventTarget | null) =>
+  target instanceof Element &&
+  target.closest(
+    'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="dialog"], [role="alertdialog"]',
+  ) !== null;
 
 const CONNECTION_TIPS: Record<Connection, string> = {
   connecting: "Connecting: the map opens a connection to kitshn.",
@@ -114,7 +144,7 @@ const CONNECTION_TIPS: Record<Connection, string> = {
 };
 
 const TABS = {
-  map: "Map: circles say who, and a card inside a circle is shared with it. The panel shows what you select.",
+  map: "Map: circles say who, and a card inside a circle is shared with it. The panel shows what you select; after Close, this opens it again.",
   machines: "Machines: every machine and its status, in a panel over the map. Enlarge shows the full table.",
   library:
     "Library: every page and file, with a search, a preview and Delete, in a panel over the map. Enlarge shows the full table.",
@@ -153,9 +183,12 @@ export function App() {
   const store = useStore();
   const [selection, setSelection] = useState<Selection>({ cards: new Set(), circle: null });
   const [hidden, setHidden] = useState<ReadonlySet<ResourceKind>>(new Set());
-  const [view, setView] = useState<View>(START_VIEW);
+  const [savedView] = useState(loadView);
+  const [view, setView] = useState<View>(() => savedView ?? { x: 0, y: 0, s: 1 });
   /** K-514: once the owner pans or zooms, the map stops fitting on its own until the next load. */
   const userMoved = useRef(false);
+  /** The first fit check ran; it fits only a device without a saved view. */
+  const loaded = useRef(false);
   const [openStacks, setOpenStacks] = useState<ReadonlySet<string>>(new Set());
   const [toast, setToast] = useState<Toast | null>(null);
   /** The palette's first query, or null while it is closed. */
@@ -258,7 +291,7 @@ export function App() {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setPalette((open) => (open === null ? "" : null));
-      } else if (event.key === "Escape") escapeRef.current();
+      } else if (event.key === "Escape" && !ownsEscape(event.target)) escapeRef.current();
     };
     // A file dropped outside the map would make the browser open it and leave kitshn.
     const keepFiles = (event: DragEvent) => {
@@ -284,7 +317,10 @@ export function App() {
     }
   }, [store.connection, store.snapshot]);
 
-  const changeView = (next: View) => setView(next);
+  const changeView = (next: View) => {
+    setView(next);
+    localStorage.setItem(VIEW_KEY, JSON.stringify(next));
+  };
 
   /** The control that opened the panel; Close and Escape give it the focus back. */
   const opener = useRef<HTMLElement | null>(null);
@@ -573,10 +609,30 @@ export function App() {
   const floating = shownPanel !== null && !large;
 
   const ready = state !== null;
-  // K-514: fits on load and when the panel opens or closes, until the owner pans or zooms.
+  // K-514: fits on load without a saved view, and when the panel opens or closes until the owner pans or zooms.
   useEffect(() => {
-    if (ready && !userMoved.current) fitRef.current?.();
+    if (!ready) return;
+    const first = !loaded.current;
+    loaded.current = true;
+    if (first ? savedView === null : !userMoved.current) fitRef.current?.();
   }, [ready, floating]);
+
+  // History renders only when its data changes, not on each pan of the map; its callbacks read the latest ones.
+  const historyShow = useRef<(revision: RevisionView) => void>(() => undefined);
+  const historyUndo = useRef<(id: number) => void>(() => undefined);
+  const historyView = useMemo(
+    () =>
+      state && store.snapshot ? (
+        <HistoryView
+          revisions={store.snapshot.revisions}
+          me={store.snapshot.me}
+          state={state}
+          onUndo={(id) => historyUndo.current(id)}
+          onShow={(revision) => historyShow.current(revision)}
+        />
+      ) : null,
+    [store.snapshot, state],
+  );
 
   /** K-519: the toolbar's height, for the tray and the full view below it (styles.css `--bar-bottom`). */
   const barRef = useMemo(() => {
@@ -693,10 +749,13 @@ export function App() {
     if (opener.current?.isConnected) opener.current.focus();
   };
 
-  // Escape closes the palette, then clears a selection, then closes the panel.
+  historyShow.current = showOnMap;
+  historyUndo.current = (id) => void undo(id);
+
+  // Escape clears a selection first, then closes the panel; the palette and dialogs handle their own.
   escapeRef.current = () => {
-    if (palette !== null) setPalette(null);
-    else if (selection.cards.size > 0 || selection.circle !== null) setSelection({ cards: new Set(), circle: null });
+    if (selection.cards.size > 0 || selection.circle !== null)
+      setSelection({ cards: new Set(), circle: null });
     else if (shownPanel !== null) closePanel();
   };
 
@@ -803,7 +862,7 @@ export function App() {
           return place ? [cardBox(place)] : [];
         }),
         ...[state.circles.get(selected.circle ?? "")].flatMap((circle) =>
-          circle ? [headBox(circle, 0)] : [],
+          circle ? [headBox(circle, headAngle(circle, shownCardBoxes(state, hidden)))] : [],
         ),
       ];
       if (boxes.length > 0) {
@@ -912,13 +971,7 @@ export function App() {
           onClose={closePanel}
         >
           {shownPanel === "history" ? (
-            <HistoryView
-              revisions={store.snapshot.revisions}
-              me={store.snapshot.me}
-              state={state}
-              onUndo={(id) => void undo(id)}
-              onShow={showOnMap}
-            />
+            historyView
           ) : shownPanel === "library" ? (
             <LibraryView
               state={state}
@@ -1007,11 +1060,7 @@ export function App() {
             <button
               key={tab}
               aria-pressed={
-                fullPage
-                  ? route.tab === tab
-                  : tab === "map"
-                    ? panel === null || panel === "details"
-                    : panel === tab
+                fullPage ? route.tab === tab : tab === "map" ? panel === "details" : panel === tab
               }
               data-tip={TABS[tab]}
               onClick={() => openTab(tab)}
@@ -1883,7 +1932,9 @@ function Palette(props: {
             setCursor({ label: null, picked: false });
           }}
           onKeyDown={(event) => {
-            if (event.key === "ArrowDown" || event.key === "ArrowUp") setCursor(paletteArrow(event.key, labels, cursor));
+            if (event.key === "Escape") props.onClose();
+            else if (event.key === "ArrowDown" || event.key === "ArrowUp")
+              setCursor(paletteArrow(event.key, labels, cursor));
             else if (event.key === "Enter") {
               const index = paletteEnter(matches, active, picked);
               if (index !== null) run(index);

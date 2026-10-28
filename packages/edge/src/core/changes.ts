@@ -295,7 +295,7 @@ export interface Item {
 }
 
 /** K-1508: what a History entry is about, for its kind filter. "action" changes nothing that Undo reverses. */
-export type RevisionKind = "card" | "circle" | "stack" | "app" | "pause" | "action";
+export type RevisionKind = "card" | "share" | "circle" | "stack" | "app" | "pause" | "action";
 
 /** K-1508: the tag and id of a change, and for a stack the members before and after. */
 export type RevisionTarget = Pick<Change | Forget, "_tag" | "id"> & {
@@ -312,7 +312,8 @@ const MAX_REVISION_ITEMS = 30;
 
 /**
  * K-1508: the kind of a revision and the cards and circles that it changes, from the tag and id of each change.
- * The first kind in the order app, pause, circle, stack, card wins.
+ * The first kind in the order app, pause, circle, share, stack, card wins, so a share that ends and takes its card
+ * out of a stack is a share.
  */
 export function revisionTargets(changes: ReadonlyArray<RevisionTarget>): {
   readonly kind: RevisionKind;
@@ -325,11 +326,13 @@ export function revisionTargets(changes: ReadonlyArray<RevisionTarget>): {
       ? "pause"
       : tags.has("circle")
         ? "circle"
-        : tags.has("stack")
-          ? "stack"
-          : tags.has("place") || tags.has("shareSetting")
-            ? "card"
-            : "action";
+        : tags.has("shareSetting")
+          ? "share"
+          : tags.has("stack")
+            ? "stack"
+            : tags.has("place")
+              ? "card"
+              : "action";
   const items = new Map<string, Item>();
   const add = (item: Item) => items.set(`${item.kind}:${item.id}`, item);
   for (const change of changes) {
@@ -643,10 +646,13 @@ export function shareDiff(before: State, after: State): Array<ShareDiff> {
   return diffs;
 }
 
+/** "riffle: + Her · view", "riffle: − Her", or for a new level of a share "riffle: Her · view → use". */
 export const describeDiff = (diff: ShareDiff) =>
-  diff.to
-    ? `${diff.resource.name}: + ${diff.circle.name} · ${diff.to}`
-    : `${diff.resource.name}: − ${diff.circle.name}`;
+  diff.to === null
+    ? `${diff.resource.name}: − ${diff.circle.name}`
+    : diff.from === null
+      ? `${diff.resource.name}: + ${diff.circle.name} · ${diff.to}`
+      : `${diff.resource.name}: ${diff.circle.name} · ${diff.from} → ${diff.to}`;
 
 export function summarize(before: State, after: State, changes: ReadonlyArray<Change>): string {
   const app = changes.find((change) => change._tag === "app");

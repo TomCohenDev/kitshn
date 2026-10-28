@@ -36,8 +36,18 @@ const VERBS = new Set([
   "Unstacked",
 ]);
 
-/** "tick3d: + Everyone · view" (describeDiff) as "shared tick3d with Everyone at view", else null. */
+/**
+ * A part of a share summary (describeDiff) in words, else null: "tick3d: + Everyone · view" is "shared tick3d with
+ * Everyone at view", and "tick3d: Her · view → use" is "changed the level of tick3d in Her from view to use".
+ */
 function shareSentence(part: string): string | null {
+  const arrow = part.lastIndexOf(" → ");
+  if (arrow > 0) {
+    const name = part.lastIndexOf(": ", arrow);
+    const dot = part.lastIndexOf(" · ", arrow);
+    if (name <= 0 || dot <= name) return null;
+    return `changed the level of ${part.slice(0, name)} in ${part.slice(name + 2, dot)} from ${part.slice(dot + 3, arrow)} to ${part.slice(arrow + 3)}`;
+  }
   const added = part.lastIndexOf(": + ");
   if (added > 0) {
     const rest = part.slice(added + 4);
@@ -59,7 +69,7 @@ function phrase(summary: string): string | null {
     const rest = colon > 0 ? phrase(summary.slice(colon + 2)) : null;
     // "Undo #12" or "Undo #12 for tick3d"; the rest says what the undo changed.
     const head = `undid #${summary.slice("Undo #".length, colon > 0 ? colon : undefined)}`;
-    return rest === null ? null : `${head}: ${rest}`;
+    return rest === null ? null : `${head} and so ${rest}`;
   }
   const parts = summary.split("; ");
   // summarize() ends a long list with "and 3 more".

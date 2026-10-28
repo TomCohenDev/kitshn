@@ -1,4 +1,4 @@
-import type { Circle, Point } from "../core/model.ts";
+import type { Circle, Point, ResourceKind, State } from "../core/model.ts";
 
 /** Map geometry for fit, pan and circle heads. Pure, so the rules are testable without a DOM. */
 
@@ -34,6 +34,16 @@ export const cardBox = (at: Point): Box => ({
   right: at.x + CARD.half,
   bottom: at.y + CARD.below,
 });
+
+/** The cards that the map draws, for the head rule: every placed card of a shown kind. */
+export const shownCardBoxes = (
+  state: Pick<State, "places" | "resources">,
+  hidden: ReadonlySet<ResourceKind>,
+) =>
+  [...state.places].flatMap(([id, place]) => {
+    const kind = state.resources.get(id)?.kind;
+    return kind !== undefined && !hidden.has(kind) ? [cardBox(place)] : [];
+  });
 
 /** The head of a circle at `angle` (radians from the top, positive to the right), in map units. */
 export const headBox = (circle: Circle, angle: number): Box => {

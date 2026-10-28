@@ -32,8 +32,9 @@ describe("History rows start with the verb, under their actor (K-1508)", () => {
     ],
     ["Set up kitshn", "set up kitshn"],
     ["Created circle Agents", "created circle Agents"],
-    ["Undo #12: tick3d: − Her", "undid #12: removed tick3d from Her"],
-    ["Undo #12 for tick3d: Moved a card", "undid #12 for tick3d: moved a card"],
+    ["riffle: Her · view → use", "changed the level of riffle in Her from view to use"],
+    ["Undo #12: tick3d: − Her", "undid #12 and so removed tick3d from Her"],
+    ["Undo #12 for tick3d: Moved a card", "undid #12 for tick3d and so moved a card"],
   ])("says %s as %s", (summary, said) => {
     expect(rowText(summary)).toBe(said);
   });

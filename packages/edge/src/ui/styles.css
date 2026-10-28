@@ -1229,11 +1229,21 @@ input:focus-visible {
   border-radius: var(--radius);
   box-shadow: var(--shadow);
 }
+/* The head stays at the top while the panel scrolls, so Close is always in reach, also on a phone. */
 .overlay-head {
+  position: sticky;
+  top: -12px;
+  z-index: 1;
   display: flex;
   gap: 6px;
   align-items: center;
-  margin-bottom: 8px;
+  margin: -12px -12px 8px;
+  padding: 12px 12px 6px;
+  background: var(--surface);
+  border-bottom: var(--bw) solid var(--border);
+}
+.overlay-head h2:focus {
+  outline: none;
 }
 .overlay-head h2 {
   flex: 1;

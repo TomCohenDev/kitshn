@@ -16,7 +16,8 @@ import {
 import { callApi } from "./store.ts";
 
 const KIND_LABELS: Record<RevisionKind, { readonly label: string; readonly tip: string }> = {
-  card: { label: "Cards", tip: "Cards: moves and shares of cards." },
+  card: { label: "Cards", tip: "Cards: cards moved, also into or out of a circle." },
+  share: { label: "Shares", tip: "Shares: the level and the end of a share, and a share that ended." },
   circle: { label: "Circles", tip: "Circles: new, changed and deleted circles, also a circle moved with its cards." },
   stack: { label: "Stacks", tip: "Stacks: cards stacked, pulled out and unstacked." },
   app: { label: "Apps", tip: "Apps: apps removed and restored." },
@@ -51,10 +52,9 @@ export function HistoryView(props: {
     [props.revisions, filter, state],
   );
   const undoable = undoableRow(props.revisions, props.me);
-  const newest = props.revisions[0]?.id ?? 0;
   /** kitshn's answer for the undoable row; null while it checks. */
   const [answer, setAnswer] = useState<{ readonly id: number; readonly answer: UndoAnswer } | null>(null);
-  // Asks once for the undoable row, and again when any new revision arrives, since a later change can block it.
+  // Asks when History opens and when the caller's own newest revision changes; the undo itself checks again.
   useEffect(() => {
     if (undoable === null) return;
     let live = true;
@@ -65,11 +65,13 @@ export function HistoryView(props: {
     return () => {
       live = false;
     };
-  }, [undoable, newest]);
+  }, [undoable]);
   const undoAnswer = answer?.id === undoable ? answer.answer : null;
   const kinds = [...new Set(props.revisions.map((revision) => revision.kind))];
   const actors = [...new Map(props.revisions.map((revision) => [actorKey(revision.actor), revision.actor])).values()];
-  const who = (actor: Actor) => (actorKey(actor) === actorKey(props.me) ? "You" : actorLabel(actor));
+  // Every kitshn reason groups as one actor "kitshn"; each row of it names its own reason.
+  const who = (actor: Actor) =>
+    actor._tag === "kitshn" ? "kitshn" : actorKey(actor) === actorKey(props.me) ? "You" : actorLabel(actor);
 
   return (
     <div class="history-view">
@@ -115,7 +117,7 @@ export function HistoryView(props: {
             data-tip={`Only the changes by ${who(actor)}.`}
             onClick={() => setFilter({ ...filter, actor: actorKey(actor) })}
           >
-            {actor._tag === "kitshn" ? "kitshn" : who(actor)}
+            {who(actor)}
           </button>
         ))}
       </div>
@@ -126,6 +128,10 @@ export function HistoryView(props: {
         placeholder="Card or circle"
         value={filter.item}
         onInput={(event) => setFilter({ ...filter, item: event.currentTarget.value })}
+        onKeyDown={(event) => {
+          // Escape clears the search first; the panel closes on the next Escape outside the field.
+          if (event.key === "Escape" && filter.item !== "") setFilter({ ...filter, item: "" });
+        }}
       />
       {groups.length === 0 ? (
         <p class="muted">{props.revisions.length === 0 ? "No change yet." : "No change matches the filters."}</p>
@@ -151,7 +157,9 @@ export function HistoryView(props: {
                     >
                       <span>{rowText(revision.summary)}</span>
                       <span class="muted">
-                        <span class="mono">#{revision.id}</span> · {timeOf(revision.at, group.day === "Older")}
+                        <span class="mono">#{revision.id}</span> ·{" "}
+                        {timeOf(revision.at, group.day === "Older")}
+                        {revision.actor._tag === "kitshn" ? ` · ${revision.actor.reason}` : ""}
                       </span>
                     </button>
                     {revision.undoneBy !== null ? (

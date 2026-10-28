@@ -22,7 +22,7 @@ import type { MenuTarget } from "./actions.ts";
 import { MoreButton } from "./controls.tsx";
 import type { Rect } from "./popover.ts";
 import { HOLD_MS, type Press, startPress, stepPress } from "./press.ts";
-import { type View, cardBox, headAngle } from "./layout.ts";
+import { type View, headAngle, shownCardBoxes } from "./layout.ts";
 
 export type { View };
 
@@ -166,12 +166,7 @@ export function MapView(props: Props) {
   // A head slides along its circle off the cards (layout.ts). It follows the stored map, not a drag in flight,
   // so a head never jumps while a card passes it.
   const headAngles = useMemo(() => {
-    const cards = [...state.places]
-      .filter(([id]) => {
-        const kind = state.resources.get(id)?.kind;
-        return kind !== undefined && !props.hidden.has(kind);
-      })
-      .map(([, place]) => cardBox(place));
+    const cards = shownCardBoxes(state, props.hidden);
     return new Map([...state.circles.values()].map((circle) => [circle.id, headAngle(circle, cards)]));
   }, [state, props.hidden]);
   const toWorld = (clientX: number, clientY: number): Point => ({

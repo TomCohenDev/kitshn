@@ -1,5 +1,5 @@
 import { type ComponentChildren, Fragment, createPortal } from "preact";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { Action, ActionGroups } from "./actions.ts";
 import { type Rect, type Side, menuMove, placeFloating, tipTimer } from "./popover.ts";
 
@@ -417,10 +417,16 @@ export function OverlayPanel(props: {
   readonly onClose: () => void;
   readonly children: ComponentChildren;
 }) {
+  const id = useId();
+  const heading = useRef<HTMLHeadingElement>(null);
+  // A panel that opens takes the focus at its heading, so the keyboard and a screen reader land in it.
+  useEffect(() => heading.current?.focus({ preventScroll: true }), []);
   return (
-    <section class={`overlay-panel${props.large ? " large" : ""}`} aria-label={props.heading}>
+    <section class={`overlay-panel${props.large ? " large" : ""}`} aria-labelledby={id}>
       <header class="overlay-head">
-        <h2>{props.heading}</h2>
+        <h2 id={id} ref={heading} tabIndex={-1}>
+          {props.heading}
+        </h2>
         <button
           type="button"
           class="btn"

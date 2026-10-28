@@ -360,7 +360,8 @@ export class Kitshn extends DurableObject<Env> {
       `SELECT id, at, actor, summary, undoes,
          NOT EXISTS (SELECT 1 FROM json_each(changes) WHERE json_extract(value, '$._tag') != 'forget') AS empty,
          (SELECT json_group_array(json_object('_tag', json_extract(value, '$._tag'), 'id', json_extract(value, '$.id'),
-             'members', json_array(json_extract(value, '$.before.members'), json_extract(value, '$.after.members'))))
+             'members', CASE WHEN json_extract(value, '$._tag') = 'stack'
+               THEN json_array(json_extract(value, '$.before.members'), json_extract(value, '$.after.members')) END))
            FROM json_each(changes)) AS targets
        FROM revisions ORDER BY id DESC LIMIT ?`,
       RECENT_REVISIONS,

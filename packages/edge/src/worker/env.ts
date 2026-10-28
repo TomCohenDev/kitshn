@@ -52,6 +52,16 @@ export interface Env {
   readonly DEV_DEMO?: string;
 }
 
-/** K-1209: the admin host, then the old one during the host move. */
-export const adminHosts = (env: Pick<Env, "KITSHN_HOST" | "KITSHN_OLD_HOST">): ReadonlyArray<string> =>
-  env.KITSHN_OLD_HOST ? [env.KITSHN_HOST, env.KITSHN_OLD_HOST] : [env.KITSHN_HOST];
+/**
+ * K-1209: the admin host, then the old one during the host move. An old host outside the kitshn zone does not count,
+ * so a broken value fails closed.
+ */
+export function adminHosts(
+  env: Pick<Env, "KITSHN_HOST" | "KITSHN_OLD_HOST" | "KITSHN_ZONE">,
+): ReadonlyArray<string> {
+  const trimmed = (env.KITSHN_OLD_HOST ?? "").trim().toLowerCase();
+  const old = trimmed.endsWith(".") ? trimmed.slice(0, -1) : trimmed;
+  return old !== "" && old !== env.KITSHN_HOST && old.endsWith(`.${env.KITSHN_ZONE}`)
+    ? [env.KITSHN_HOST, old]
+    : [env.KITSHN_HOST];
+}

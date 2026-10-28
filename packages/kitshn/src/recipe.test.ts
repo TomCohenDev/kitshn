@@ -202,6 +202,14 @@ describe("kitshn's own names (K-817)", () => {
       });
     expect(planOf(["x.example.com", "y.example.com"])).toMatchObject({ kind: "deploy" });
   });
+
+  it("refuses kitshn's names as the main address too", () => {
+    for (const main of ["kit.example.com", "pages.example.com"])
+      expect(planOf([main])).toMatchObject({
+        kind: "error",
+        reason: expect.stringContaining("keeps for itself"),
+      });
+  });
 });
 
 describe("Worker recipes (K-806)", () => {

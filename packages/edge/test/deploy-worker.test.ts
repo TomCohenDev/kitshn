@@ -419,6 +419,24 @@ describe("several apps per repo (K-804, K-820)", () => {
     expect((await plan(app, { key: "Bad-Key" })).status).toBe(400);
   });
 
+  it("refuses an admin host as the main or an extra address, also the old host during the move (K-817, K-1209)", async () => {
+    fakeCloudflare();
+    const app = repo("1209", "hosts");
+    await allow(app);
+    const withAddress = (address: string | ReadonlyArray<string>) => {
+      const body = recipe();
+      return step(app, "/deploy/plan", {
+        recipe: { ...body, deploy: [{ ...body.deploy[0], address }] },
+        event: {},
+      });
+    };
+    for (const address of ["old.example.com", ["hosts.example.com", "old.example.com"]]) {
+      const refused = await withAddress(address);
+      expect(refused.status).toBe(409);
+      expect(String(refused.body["error"])).toMatch(/old\.example\.com is the kitshn admin host/);
+    }
+  });
+
   it("names the card with its key, and shows a skipped and a failed deploy on it", async () => {
     fakeCloudflare();
     const app = repo("51", "shop");

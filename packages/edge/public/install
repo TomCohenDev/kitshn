@@ -207,7 +207,9 @@ if [ -z "${KITSHN_OLD_HOST:-}" ] && try GET "/accounts/$ACCOUNT/workers/scripts/
   KITSHN_OLD_HOST=$(jq -r '.result.bindings[]? | select(.name == "KITSHN_OLD_HOST") | .text // empty' "$WORK/out")
 fi
 [ "${KITSHN_OLD_HOST:-}" = none ] && KITSHN_OLD_HOST=""
-KITSHN_OLD_HOST=${KITSHN_OLD_HOST:-}
+KITSHN_OLD_HOST=$(printf '%s' "${KITSHN_OLD_HOST:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+KITSHN_OLD_HOST=${KITSHN_OLD_HOST%.}
+case "$KITSHN_OLD_HOST" in "" | *".$ZONE_NAME") ;; *) die "KITSHN_OLD_HOST=$KITSHN_OLD_HOST is not a host under $ZONE_NAME (K-1209)." ;; esac
 # with_old TAG PATH: TAG, and during the move also the tag of the old host's kitshn application on PATH.
 with_old() {
   old=""

@@ -54,6 +54,8 @@ export default defineConfig({
                 DEV_IDENTITY: "",
                 DEV_DEMO: "",
                 CLOUDFLARE_API_TOKEN: "test-token",
+                // K-1209: these deploys run during a host move.
+                KITSHN_OLD_HOST: "old.example.com",
                 CLOUDFLARE_ACCOUNT_ID: "acct",
                 CLOUDFLARE_ZONE_ID: "zone",
                 DEPLOY_OWNER_IDS: "1",

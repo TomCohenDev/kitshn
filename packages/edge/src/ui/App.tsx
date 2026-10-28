@@ -1617,7 +1617,11 @@ function Panel(props: {
           <button
             type="button"
             class="btn danger"
-            data-tip={props.pause ? RESUME_TIP : "Open the big red button: lift its lid, then press to pause everything."}
+            data-tip={
+              props.pause
+                ? "Open the big red button: see who paused, what is closed, and close public sites too."
+                : "Open the big red button: lift its lid, then press to pause everything."
+            }
             onClick={props.onOpenSafety}
           >
             {props.pause ? `Big red button: ${props.pause.mode === "lockdown" ? "locked down" : "paused"}` : "Big red button…"}

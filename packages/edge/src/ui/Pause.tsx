@@ -102,6 +102,13 @@ export function SafetyView(props: {
 }) {
   const [lifted, setLifted] = useState(false);
   const pause = props.pause;
+  // A pause or a resume, also from another device, closes the lid, so a resume never leaves it lifted.
+  const pauseKey = pause === null ? null : `${pause.mode}:${pause.at ?? ""}`;
+  const [seenPause, setSeenPause] = useState(pauseKey);
+  if (seenPause !== pauseKey) {
+    setSeenPause(pauseKey);
+    setLifted(false);
+  }
   const hint = pause
     ? `${pausedLabel(pause)}. Resume is in the toolbar and the banner.`
     : lifted
@@ -222,6 +229,9 @@ export function PausedBanner(props: {
         <section
           class={`paused-banner${slim ? " slim" : ""}`}
           role="status"
+          // A hand or the focus on the open banner keeps it open; the shrink waits only on an idle banner.
+          onPointerEnter={() => setShown((now) => (now === "auto" ? "open" : now))}
+          onFocusIn={() => setShown((now) => (now === "auto" ? "open" : now))}
           onClick={(event) => {
             // A click on the banner, not on one of its buttons, opens or shrinks it.
             if ((event.target as Element).closest("button")) return;

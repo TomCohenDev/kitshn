@@ -925,6 +925,8 @@ input[type="search"]::-webkit-search-cancel-button {
   border: var(--bw) solid #000000;
   border-radius: 9px;
   box-shadow: inset 0 3px 0 0 #000000;
+  /* The lid of the Safety panel sits on it. */
+  position: relative;
 }
 /* A domed cap on a deep skirt: an inner hard rim, and a skirt that the press pushes into the well. */
 .mushroom {
@@ -984,12 +986,12 @@ input[type="search"]::-webkit-search-cancel-button {
 .panic.is-paused .panic-label span {
   color: var(--error-fg);
 }
-/* The big one in the Safety section of the map panel. */
+/* The big one in the Safety panel. */
 .panic.panel {
   --well: 4.6rem;
   --cap: 3.8rem;
   --skirt: 9px;
-  margin: 6px 0 14px;
+  margin: 16px 0 14px;
 }
 .panic.panel .panic-inner {
   gap: 14px;
@@ -1036,9 +1038,6 @@ input[type="search"]::-webkit-search-cancel-button {
   transform: translate(3px, 3px);
   box-shadow: none;
 }
-.panic.opener .panic-inner {
-  display: flex;
-}
 .panic.opener .mushroom {
   display: grid;
   place-items: center;
@@ -1047,10 +1046,7 @@ input[type="search"]::-webkit-search-cancel-button {
   background: var(--select);
   color: var(--select-fg);
 }
-/* The flip-up lid of the big button (MM-708): clear hatched plastic on a left hinge. */
-.panic-well {
-  position: relative;
-}
+/* The flip-up lid of the big button (MM-708): clear hatched plastic on a top hinge. */
 .lid {
   position: absolute;
   inset: -2px;
@@ -1100,9 +1096,6 @@ input[type="search"]::-webkit-search-cancel-button {
   z-index: 3;
   --tilt: 3deg;
   background: var(--yellow);
-}
-.safety .panic.panel {
-  margin-top: 16px;
 }
 .safety-head {
   margin: 4px 0 0;
@@ -1190,6 +1183,7 @@ input[type="search"]::-webkit-search-cancel-button {
   width: min(36rem, 100%);
   overflow: hidden;
   pointer-events: auto;
+  cursor: pointer;
   background: var(--error-surface);
   border: var(--bw) solid var(--border);
   border-radius: var(--radius);
@@ -1218,9 +1212,6 @@ input[type="search"]::-webkit-search-cancel-button {
   justify-self: stretch;
   align-items: center;
   justify-content: space-between;
-}
-.paused-banner {
-  cursor: pointer;
 }
 .paused-banner.slim {
   width: auto;

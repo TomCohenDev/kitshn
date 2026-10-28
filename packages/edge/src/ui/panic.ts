@@ -30,8 +30,9 @@ interface Sweep {
 function play(sweeps: ReadonlyArray<Sweep>): void {
   const context = audio;
   if (!context) return;
-  // The page had its gesture when the context started, so a resume after the server answers is allowed.
-  if (context.state === "suspended") void context.resume();
+  // The page had its gesture when the context started, so a resume after the server answers is allowed. It
+  // runs always: a suspend that is still in flight reports "running" and would mute the next sound.
+  void context.resume();
   const now = context.currentTime;
   for (const sweep of sweeps) {
     const start = now + sweep.at;

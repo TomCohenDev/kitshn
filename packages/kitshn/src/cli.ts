@@ -524,13 +524,26 @@ async function deployCompose(
  * service token of the key (CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET), so it needs no other login. The
  * same name again updates the card and keeps the previous version (K-1117).
  */
-async function publish(server: string, file: string, name: string, circle: string, open: boolean) {
+/** K-1116, K-1120: the service token headers of an agent key, for the `/agent` routes of `server`. */
+function agentHeaders(server: string): Record<string, string> {
   if (!server)
     fail("name the kitshn server with --server or KITSHN_SERVER, for example https://kit.example.com.");
   const id = process.env["CF_ACCESS_CLIENT_ID"];
   const secret = process.env["CF_ACCESS_CLIENT_SECRET"];
   if (!id || !secret)
     fail("set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET to the service token of your agent key.");
+  return { "cf-access-client-id": id ?? "", "cf-access-client-secret": secret ?? "" };
+}
+
+async function publish(
+  server: string,
+  file: string,
+  name: string,
+  circle: string,
+  address: string,
+  open: boolean,
+) {
+  const credentials = agentHeaders(server);
   if (!existsSync(file)) fail(`${file} does not exist.`);
   // Known limit: a folder becomes a static site without a repo in a later change (K-1116); until then, one file.
   if (statSync(file).isDirectory())
@@ -538,12 +551,12 @@ async function publish(server: string, file: string, name: string, circle: strin
   const body = readFileSync(file);
   const fileName = name || file.slice(file.lastIndexOf(sep) + 1);
   const headers: Record<string, string> = {
-    "cf-access-client-id": id ?? "",
-    "cf-access-client-secret": secret ?? "",
+    ...credentials,
     "x-kitshn-name": encodeURIComponent(fileName),
     "content-type": contentType(fileName),
   };
   if (circle) headers["x-kitshn-circle"] = encodeURIComponent(circle);
+  if (address) headers["x-kitshn-address"] = encodeURIComponent(address);
   if (open) headers["x-kitshn-public"] = "true";
   const response = await fetch(new URL("/agent/library", server), { method: "POST", headers, body });
   const data = (await response.json().catch(() => null)) as {
@@ -557,6 +570,18 @@ async function publish(server: string, file: string, name: string, circle: strin
   );
 }
 
+/** K-1120: gives a page or a file card, by its id or its address name, a new address name. */
+async function setAddress(server: string, card: string, name: string) {
+  const response = await fetch(new URL(`/agent/cards/${encodeURIComponent(card)}/address`, server), {
+    method: "POST",
+    headers: { ...agentHeaders(server), "content-type": "application/json" },
+    body: JSON.stringify({ address: name }),
+  });
+  const data = (await response.json().catch(() => null)) as { error?: string; address?: string } | null;
+  if (!response.ok) fail(data?.error ?? `/agent/cards answered ${response.status}.`);
+  console.log(`kitshn: ${card} is now at https://${data?.address ?? ""}`);
+}
+
 const [command, ...args] = process.argv.slice(2);
 const flag = (name: string, fallback: string) => {
   const index = args.indexOf(name);
@@ -567,26 +592,34 @@ try {
   if (command === "check") console.log(JSON.stringify(loadApps(flag("--dir", ".")), null, 2));
   else if (command === "deploy") await deploy(flag("--server", ""), flag("--dir", "."));
   else if (command === "publish") {
-    const valued = new Set(["--name", "--circle", "--server"]);
+    const valued = new Set(["--name", "--circle", "--address", "--server"]);
     const file = args.find((arg, index) => !arg.startsWith("--") && !valued.has(args[index - 1] ?? ""));
     if (!file)
-      fail("name the file to publish: kitshn publish <file> [--name <name>] [--circle <circle>] [--public].");
+      fail(
+        "name the file to publish: kitshn publish <file> [--name <name>] [--address <name>] [--circle <circle>] [--public].",
+      );
     await publish(
       flag("--server", process.env["KITSHN_SERVER"] ?? ""),
       file ?? "",
       flag("--name", ""),
       flag("--circle", ""),
+      flag("--address", ""),
       args.includes("--public"),
     );
+  } else if (command === "address") {
+    const [card, name] = args.filter((arg, index) => !arg.startsWith("--") && args[index - 1] !== "--server");
+    if (!card || !name) fail("name the card and its new address name: kitshn address <card> <name>.");
+    await setAddress(flag("--server", process.env["KITSHN_SERVER"] ?? ""), card ?? "", name ?? "");
   }
 } catch (error) {
   if (!(error instanceof CliError)) throw error;
   console.error(`kitshn: ${error.message}`);
   process.exit(1);
 }
-if (command !== "check" && command !== "deploy" && command !== "publish") {
+if (command !== "check" && command !== "deploy" && command !== "publish" && command !== "address") {
   console.log(`kitshn check [--dir <app>]                  check kitshn.config.ts and print it as JSON (K-802)
 kitshn deploy --server <address> [--dir <app>]   deploy from GitHub Actions (K-803)
-kitshn publish <file> [--name <name>] [--circle <circle>] [--public]
-                                             publish a page or a file with an agent key (K-1116)`);
+kitshn publish <file> [--name <name>] [--address <name>] [--circle <circle>] [--public]
+                                             publish a page or a file with an agent key (K-1116)
+kitshn address <card> <name>                 give a page or a file a new address name (K-1120)`);
 }

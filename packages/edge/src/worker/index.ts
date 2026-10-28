@@ -1,6 +1,8 @@
 import {
   contentSecurityPolicy,
   type LibraryItem,
+  addressNameError,
+  addressSegment,
   isLibraryId,
   loginStep,
   objectKey,
@@ -58,7 +60,7 @@ async function offline(request: Request, env: Env, ctx: ExecutionContext): Promi
 
 /** What the Durable Object decides for one page or file request (K-1004). */
 type ContentAnswer = { readonly stale: boolean } & (
-  | { readonly decision: "allow"; readonly item: LibraryItem }
+  | { readonly decision: "allow"; readonly item: LibraryItem; readonly address: string }
   | { readonly decision: "login" | "passkey" | "deny" | "missing" }
 );
 
@@ -132,13 +134,14 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
     return new Response(null, { status: 302, headers });
   }
   if (request.method !== "GET" && request.method !== "HEAD") return text("Use GET.", 405);
-  const [, id = "", ...rest] = url.pathname.split("/");
-  if (!isLibraryId(id)) return text(`kitshn has no ${kind} here.`, 404);
+  const [, segment = "", ...rest] = url.pathname.split("/");
+  if (!isLibraryId(segment) && addressNameError(segment) !== null)
+    return text(`kitshn has no ${kind} here.`, 404);
   const { visitor, problem, seen } = await contentVisitorOf(request, env, logins);
   const answer = (await (
     await env.KITSHN.getByName("kitshn").fetch("https://kitshn.internal/internal/content", {
       method: "POST",
-      body: JSON.stringify({ id, visitor }),
+      body: JSON.stringify({ segment, kind, visitor }),
     })
   ).json()) as ContentAnswer;
   const back = `?next=${encodeURIComponent(url.pathname)}`;
@@ -176,9 +179,11 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
   if (answer.decision !== "allow" || answer.item.kind !== kind)
     return text(`kitshn has no ${kind} here.`, 404);
   const item = answer.item;
-  if (kind === "file" && decoded(rest.join("/")) !== item.fileName) {
-    return Response.redirect(`${url.origin}/${id}/${encodeURIComponent(item.fileName ?? "")}`, 302);
-  }
+  // K-1120: an old name or the id sends the visitor to the current address, only after the share check, so a
+  // stranger learns no new name. 302, because Undo can move the card back.
+  const current = addressSegment(answer.address);
+  if (segment !== current || (kind === "file" && decoded(rest.join("/")) !== item.fileName))
+    return Response.redirect(`https://${answer.address}`, 302);
   if (!env.BUCKET) return text("R2 is off for this kitshn. Run the bootstrap again after R2 is on.", 503);
   const object = request.method === "HEAD" ? null : await env.BUCKET.get(objectKey(item));
   if (request.method === "GET" && !object) return text(`The bytes of this ${kind} are missing in R2.`, 404);

@@ -29,7 +29,7 @@ import {
   shareKey,
   shareLevel,
 } from "../core/model.ts";
-import { MAX_UPLOAD_BYTES } from "../core/library.ts";
+import { MAX_UPLOAD_BYTES, isLibraryId } from "../core/library.ts";
 import { circleForCards, placeInside } from "../core/place.ts";
 import { awaitsAllow } from "../core/repos.ts";
 import type { Command } from "../core/machine.ts";
@@ -702,6 +702,21 @@ export function App() {
 
   /** K-909: no confirm; the toast and History undo it. */
   /** K-1117: no undo of its own: a second restore swaps the versions back, and History records each. */
+  /** K-1120: a new address name for a page or a file; History and Undo hold the change. */
+  const setAddress = async (resource: Resource, name: string) => {
+    const result = await callApi<{ address: string; revision: number | null }>(
+      "POST",
+      `/api/cards/${encodeURIComponent(resource.id)}/address`,
+      { address: name },
+    );
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: `${resource.name} is now at ${result.address}.`, error: false, undo: result.revision },
+    );
+    return !("error" in result);
+  };
+
   const restorePrevious = async (resource: Resource) => {
     const result = await callApi<{ revision: number }>(
       "POST",
@@ -1118,6 +1133,8 @@ export function App() {
     removeApp: (resource) => void removeApp(resource),
     rollback: (resource, mode) => setRollback({ card: resource, mode }),
     restorePrevious: (resource) => void restorePrevious(resource),
+    editAddress: (resource) =>
+      selectAndFocus({ cards: new Set([resource.id]), circle: null }, 'input[aria-label="Address name"]'),
     runJob: (machine, command) => void runJob(machine, command),
     removeMachine: (machine) => void removeMachine(machine),
     editCircle: (circleId) => {
@@ -1261,6 +1278,7 @@ export function App() {
               onRollback={(resource, mode) => setRollback({ card: resource, mode })}
               previousVersions={previousVersions}
               onRestorePrevious={(resource) => void restorePrevious(resource)}
+              onSetAddress={setAddress}
               orphanWorkers={store.snapshot.orphanWorkers}
               onDeleteOrphanWorker={(orphan) => void deleteOrphanWorker(orphan)}
               deployed={deployed}
@@ -1757,6 +1775,7 @@ function Panel(props: {
   /** K-1117: the pages and files that have a previous version. */
   previousVersions: ReadonlySet<string>;
   onRestorePrevious: (resource: Resource) => void;
+  onSetAddress: (resource: Resource, name: string) => Promise<boolean>;
   orphanWorkers: ReadonlyArray<OrphanWorker>;
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
   /** K-909 */
@@ -1820,6 +1839,7 @@ function Panel(props: {
         onRemoveApp={props.onRemoveApp}
         onRollback={props.onRollback}
         onRestorePrevious={props.previousVersions.has(cards[0].id) ? props.onRestorePrevious : null}
+        onSetAddress={props.onSetAddress}
         orphanWorkers={cards[0].id === ADMIN_RESOURCE_ID ? props.orphanWorkers : []}
         onDeleteOrphanWorker={props.onDeleteOrphanWorker}
         deployed={props.deployed.has(cards[0].id)}
@@ -2063,6 +2083,49 @@ function StackPanel(props: {
   );
 }
 
+/**
+ * K-1120: the name in the address of a page or a file. Enter or Save sends a changed name; leaving the field sends
+ * nothing, and a refused name or Escape puts the current one back. An id address shows an empty field.
+ */
+function AddressName(props: { address: string; onSave: (name: string) => Promise<boolean> }) {
+  const segment = props.address.split("/")[1] ?? "";
+  const current = isLibraryId(segment) ? "" : segment;
+  const field = useRef<HTMLInputElement>(null);
+  // A second Enter while the first save runs would send the same name again and replace its Undo toast.
+  const saving = useRef(false);
+  const save = async () => {
+    const input = field.current;
+    const name = input?.value.trim() ?? "";
+    if (!input || name === "" || name === current || saving.current) return;
+    saving.current = true;
+    try {
+      if (!(await props.onSave(name)) && input.isConnected) input.value = current;
+    } finally {
+      saving.current = false;
+    }
+  };
+  return (
+    <div class="row">
+      <span class="label">Name</span>
+      <input
+        ref={field}
+        aria-label="Address name"
+        data-tip="The name in the address: a to z, 0 to 9 and hyphens. Enter saves it; the old address keeps working."
+        placeholder="a name, such as my-design"
+        key={props.address}
+        defaultValue={current}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") void save();
+          if (event.key === "Escape") event.currentTarget.value = current;
+        }}
+      />
+      <button type="button" class="btn" data-tip="Save the new address name." onClick={() => void save()}>
+        Save
+      </button>
+    </div>
+  );
+}
+
 function CardPanel(props: {
   resource: Resource;
   state: State;
@@ -2078,6 +2141,8 @@ function CardPanel(props: {
   onRollback: (resource: Resource, mode: "card" | "run") => void;
   /** K-1117: swaps a page or a file with its previous version, or null when it has none. */
   onRestorePrevious: ((resource: Resource) => void) | null;
+  /** K-1120: a page or a file gets a new address name. */
+  onSetAddress: (resource: Resource, name: string) => Promise<boolean>;
   /** K-909: on the admin card, what removed Worker apps left in Cloudflare. */
   orphanWorkers: ReadonlyArray<OrphanWorker>;
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
@@ -2150,6 +2215,12 @@ function CardPanel(props: {
       ) : null}
       {props.peek && peekable(resource) ? (
         <PeekArrow resource={resource} state={state} zone={props.zone} />
+      ) : null}
+      {address && (resource.kind === "page" || resource.kind === "file") ? (
+        <AddressName address={address} onSave={(name) => props.onSetAddress(resource, name)} />
+      ) : null}
+      {address && props.deployed ? (
+        <p class="help">Its repo sets this address: change it in kitshn.config.ts.</p>
       ) : null}
       {props.repo ? (
         <div class="row">

@@ -1,12 +1,12 @@
 // Screenshots and clips of the UI for pull requests, from one scenario file:
 //
-//   pnpm --filter edge capture scripts/captures/pause.ts [--out <dir>]
+//   pnpm --filter @kitshn/edge capture scripts/captures/pause.ts [--out <dir>]
 //
 // For each view and colour scheme the scenario names, it starts `vite dev` on fresh local state (never yours,
 // see KITSHN_DEV_STATE in vite.config.ts), runs the scenario in Chromium, and stops the server. A scenario
 // with `clip` also records a video with the page's Web Audio and writes an MP4 (needs ffmpeg). Files land in
 // --out, by default ~/.cache/kitshn-captures/<scenario>, as `<view>-<name>-<scheme>.png` and `<view>-<scheme>.mp4`.
-// Chromium comes once with `pnpm --filter edge exec playwright install chromium`.
+// Chromium comes once with `pnpm --filter @kitshn/edge exec playwright install chromium`.
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";

@@ -391,6 +391,13 @@ interface DeployFacts {
   /** `id` is the newest deploy of the card, the episode of its deploy notification (K-1905). */
   readonly notes: ReadonlyArray<{ resource_id: string; id: string; state: string; reason: string | null }>;
   readonly repoCards: ReadonlyArray<{ repo_id: string; resource_id: string }>;
+  /** K-817, K-901: the Compose deploys that are planned or running, with the addresses that they serve. */
+  readonly composeRuns: ReadonlyArray<{
+    card: string;
+    addresses: ReadonlyArray<string>;
+    machineId: string | null;
+    expiresAt: number;
+  }>;
 }
 
 /** The POST paths that take a client message as their body. */
@@ -2442,6 +2449,7 @@ export class Kitshn extends DurableObject<Env> {
     const pullRequests = new Map<string, number>();
     const repoCards = new Map<string, Set<string>>();
     const newest = new Map<string, { id: string; state: string; reason: string | null }>();
+    const composeRuns: Array<DeployFacts["composeRuns"][number]> = [];
     for (const row of this.sql<{
       id: string;
       resource_id: string;
@@ -2449,9 +2457,22 @@ export class Kitshn extends DurableObject<Env> {
       environment: string;
       state: string;
       reason: string | null;
+      app: string;
+      address: string;
+      addresses: string | null;
+      machine_id: string | null;
+      expires_at: number;
     }>(
-      "SELECT id, resource_id, repo_id, environment, state, reason FROM deploys WHERE kind = 'deploy' ORDER BY rowid",
+      `SELECT id, resource_id, repo_id, environment, state, reason, app, address, addresses, machine_id, expires_at
+       FROM deploys WHERE kind = 'deploy' ORDER BY rowid`,
     )) {
+      if (row.app === "compose" && (row.state === "planned" || row.state === "running"))
+        composeRuns.push({
+          card: row.resource_id,
+          addresses: row.addresses === null ? [row.address] : (JSON.parse(row.addresses) as Array<string>),
+          machineId: row.machine_id,
+          expiresAt: row.expires_at,
+        });
       if (row.repo_id !== null || row.state === "done") {
         deployed.add(row.resource_id);
         // As the GLOB 'pr-[0-9]*' of K-821: "pr-" and a digit.
@@ -2476,6 +2497,7 @@ export class Kitshn extends DurableObject<Env> {
       repoCards: [...repoCards].flatMap(([repo_id, cards]) =>
         [...cards].map((resource_id) => ({ repo_id, resource_id })),
       ),
+      composeRuns,
     };
     return this.deployFacts;
   }
@@ -4212,14 +4234,28 @@ export class Kitshn extends DurableObject<Env> {
       const row = rows.get(address);
       return !row?.error || row.retry_at <= now;
     };
-    const wanted = new Map(
-      this.protectedSites().flatMap((site) => {
+    // K-817, K-901: a Compose deploy gets the records of its addresses at plan time, before its build, so no lookup
+    // during the build caches another answer, such as a wildcard of KitSHn 1. The tunnel has no ingress for the
+    // address until the site is live and its Access application exists (K-410), so the record exposes nothing.
+    // When the deploy fails, is cut off, or expires, the record goes unless the site went live.
+    const planned = this.deploys().composeRuns.flatMap((run) => {
+      const machine = run.machineId ? this.state.machines.get(run.machineId) : undefined;
+      return machine && run.expiresAt > now
+        ? run.addresses.map(
+            (address) =>
+              [address, { content: `${machine.tunnelId}.cfargotunnel.com`, cardId: run.card }] as const,
+          )
+        : [];
+    });
+    const wanted = new Map([
+      ...planned,
+      ...this.protectedSites().flatMap((site) => {
         const machine = this.state.machines.get(site.machineId);
         return machine
           ? [[site.address, { content: `${machine.tunnelId}.cfargotunnel.com`, cardId: site.id }] as const]
           : [];
       }),
-    );
+    ]);
     const routed = reachableAddresses({
       ingress: this.tunnelRows().map((row) => row.applied),
       records: [],
@@ -5515,6 +5551,8 @@ export class Kitshn extends DurableObject<Env> {
       JSON.stringify(recipe.needs?.apps ?? []),
       deployer.workflow,
     );
+    // K-817, K-901: the alarm makes the DNS records of a Compose deploy now, before its build (dnsWork).
+    if (compose && result.kind === "deploy") void this.scheduleAlarm();
     return Response.json({ deployId, plan: result });
   }
 

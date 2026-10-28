@@ -466,6 +466,58 @@ describe("several apps per repo (K-804, K-820)", () => {
   });
 });
 
+describe("DNS records at plan time (K-817, K-901)", () => {
+  type DnsWork = Array<{ address: string; content: string | null; cardId: string | null }>;
+  const dnsWork = () =>
+    runInDurableObject(env.KITSHN.getByName("kitshn"), (instance) =>
+      (instance as unknown as { dnsWork(): DnsWork }).dnsWork(),
+    );
+
+  it("wants the record of a Compose address from the plan on, and gives it up when the deploy fails", async () => {
+    fakeCloudflare();
+    const app = repo("70", "early");
+    await allow(app);
+    const planned = await step(app, "/deploy/plan", { recipe: recipe(), event: {} });
+    const deployId = String(planned.body["deployId"]);
+    const stub = env.KITSHN.getByName("kitshn");
+    await runInDurableObject(stub, (_instance, durable) => {
+      const machine: Machine = {
+        id: "m-70",
+        name: "m-70",
+        labels: ["deploy"],
+        order: 0,
+        serviceTokenId: "token-m-70",
+        clientId: "m-70.access",
+        tunnelId: "tunnel-m-70",
+      };
+      durable.storage.sql.exec("INSERT INTO machines (id, body) VALUES ('m-70', ?)", JSON.stringify(machine));
+      durable.storage.sql.exec(
+        "UPDATE deploys SET app = 'compose', machine_id = 'm-70' WHERE id = ?",
+        deployId,
+      );
+    });
+    // The Durable Object reads the machine and the deploy rows again when it starts.
+    await evictDurableObject(stub);
+    // A lookup during the build finds this record, not a wildcard of another server.
+    expect(await dnsWork()).toContainEqual({
+      address: app.address,
+      content: "tunnel-m-70.cfargotunnel.com",
+      cardId: app.card,
+    });
+    await runInDurableObject(stub, (_instance, durable) =>
+      durable.storage.sql.exec(
+        "INSERT INTO dns_objects (address, record_id, content, error, retry_at, card_id) VALUES (?, 'rec-70', ?, NULL, 0, ?)",
+        app.address,
+        "tunnel-m-70.cfargotunnel.com",
+        app.card,
+      ),
+    );
+    expect((await step(app, "/deploy/fail", { deployId, reason: "the build failed." })).status).toBe(200);
+    // The site never went live, so the record that the plan made goes.
+    expect(await dnsWork()).toContainEqual({ address: app.address, content: null, cardId: app.card });
+  });
+});
+
 describe("rollback (K-821)", () => {
   type Choice = { deployId: string; sha: string; why: string | null };
   const choices = async (card: string) =>

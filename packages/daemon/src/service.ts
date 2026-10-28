@@ -56,19 +56,29 @@ const sharedSocketOf = (uid: number) => `/tmp/kitshn-${uid}/kitshn.sock`;
  * K-701: the user id of the daemon that a client expects at the socket: `KITSHN_DAEMON_UID`, else the id in the
  * name of a shared socket folder, else its own. A string is the reason when `KITSHN_DAEMON_UID` is not a user id.
  */
-export function expectedDaemonUid(env: Record<string, string | undefined>, socket: string, own: number): number | string {
+export function expectedDaemonUid(
+  env: Record<string, string | undefined>,
+  socket: string,
+  own: number,
+): number | string {
   const given = env["KITSHN_DAEMON_UID"];
-  if (given !== undefined && given !== "") return isDigits(given) ? Number(given) : `KITSHN_DAEMON_UID=${given} is not a user id.`;
-  const shared = socket.startsWith("/tmp/kitshn-") ? socket.slice("/tmp/kitshn-".length, -"/kitshn.sock".length) : "";
+  if (given !== undefined && given !== "")
+    return isDigits(given) ? Number(given) : `KITSHN_DAEMON_UID=${given} is not a user id.`;
+  const shared = socket.startsWith("/tmp/kitshn-")
+    ? socket.slice("/tmp/kitshn-".length, -"/kitshn.sock".length)
+    : "";
   // The private socket of a Linux daemon: /run/user/<uid>/kitshn/kitshn.sock, which root also uses.
-  const runtime = socket.startsWith("/run/user/") ? socket.slice("/run/user/".length).split("/")[0] ?? "" : "";
+  const runtime = socket.startsWith("/run/user/")
+    ? (socket.slice("/run/user/".length).split("/")[0] ?? "")
+    : "";
   if (socket.endsWith("/kitshn.sock") && isDigits(shared)) return Number(shared);
   if (isDigits(runtime)) return Number(runtime);
   return own;
 }
 
 /** A user id in decimal digits only, as `kitshn local-users` takes it. */
-export const isDigits = (text: string) => text !== "" && [...text].every((char) => char >= "0" && char <= "9");
+export const isDigits = (text: string) =>
+  text !== "" && [...text].every((char) => char >= "0" && char <= "9");
 
 const xml = (text: string) =>
   text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
@@ -165,7 +175,10 @@ export function tunnelCommands(platform: Platform, file: string, uid: number) {
   }
   const reload = { argv: ["systemctl", "--user", "daemon-reload"], mayFail: false };
   return {
-    start: [reload, { argv: ["systemctl", "--user", "enable", "--now", "kitshn-tunnel.service"], mayFail: false }],
+    start: [
+      reload,
+      { argv: ["systemctl", "--user", "enable", "--now", "kitshn-tunnel.service"], mayFail: false },
+    ],
     restart: [
       reload,
       { argv: ["systemctl", "--user", "enable", "kitshn-tunnel.service"], mayFail: false },

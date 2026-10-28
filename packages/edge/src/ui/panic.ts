@@ -58,7 +58,9 @@ function play(sweeps: ReadonlyArray<Sweep>): void {
 /** The lid: a short click up when it opens, down when it closes. A click on it is a gesture, so it may start the audio. */
 export function lidSound(open: boolean): void {
   unlockAudio();
-  play([{ wave: "square", from: open ? 1800 : 900, to: open ? 700 : 400, at: 0, length: 0.05, volume: 0.06 }]);
+  play([
+    { wave: "square", from: open ? 1800 : 900, to: open ? 700 : 400, at: 0, length: 0.05, volume: 0.06 },
+  ]);
 }
 
 /** The press itself: a heavy thunk. It claims nothing, so it plays before the server answers. */

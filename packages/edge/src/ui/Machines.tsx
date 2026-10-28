@@ -41,7 +41,10 @@ export function KeySticker(props: { view: MachineView }) {
   const key = props.view.machine.key;
   if (key === undefined)
     return (
-      <span class="sticker wait" data-tip="Needs a key: it reports status but gets no job until kitshn rekey runs on it.">
+      <span
+        class="sticker wait"
+        data-tip="Needs a key: it reports status but gets no job until kitshn rekey runs on it."
+      >
         needs a key
       </span>
     );
@@ -64,7 +67,10 @@ function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error
   const path = `/api/machines/${encodeURIComponent(machine.id)}`;
   const rotate = async () => {
     const result = await callApi<{ rotating: string }>("POST", `${path}/rotate-key`, {});
-    props.onToast("error" in result ? result.error : `${machine.name} rotates its key now.`, "error" in result);
+    props.onToast(
+      "error" in result ? result.error : `${machine.name} rotates its key now.`,
+      "error" in result,
+    );
   };
   const reset = async () => {
     const result = await callApi<{ command: string; expiresAt: number }>("POST", `${path}/reset-key`, {});
@@ -143,7 +149,11 @@ export function AddMachine(props: { onClose: () => void }) {
               >
                 Copy
               </button>
-              <button class="btn" data-tip="Close this dialog. The command keeps working until it expires." onClick={props.onClose}>
+              <button
+                class="btn"
+                data-tip="Close this dialog. The command keeps working until it expires."
+                onClick={props.onClose}
+              >
                 Done
               </button>
             </div>
@@ -167,9 +177,7 @@ export function AddMachine(props: { onClose: () => void }) {
               else setResult(response);
             }}
           >
-            <p class="muted">
-              The new machine card starts in the tray, so it is private until you place it.
-            </p>
+            <p class="muted">The new machine card starts in the tray, so it is private until you place it.</p>
             <input
               aria-label="Machine name"
               data-tip="The name of the machine card."
@@ -185,10 +193,18 @@ export function AddMachine(props: { onClose: () => void }) {
               onInput={(event) => setLabels((event.target as HTMLInputElement).value)}
             />
             <div class="row">
-              <button class="btn primary" data-tip="Make a join command with a code that works once, for 10 minutes.">
+              <button
+                class="btn primary"
+                data-tip="Make a join command with a code that works once, for 10 minutes."
+              >
                 Make a join code
               </button>
-              <button class="btn" type="button" data-tip="Close this dialog; nothing changes." onClick={props.onClose}>
+              <button
+                class="btn"
+                type="button"
+                data-tip="Close this dialog; nothing changes."
+                onClick={props.onClose}
+              >
                 Cancel
               </button>
             </div>
@@ -210,9 +226,14 @@ const describe = (command: Command) =>
         : command.kind;
 
 /** K-612: queues one command on a machine, and says what happened. */
-export async function queueJob(machineId: string, command: Command): Promise<{ text: string; error: boolean }> {
+export async function queueJob(
+  machineId: string,
+  command: Command,
+): Promise<{ text: string; error: boolean }> {
   const result = await callApi<{ id: number }>("POST", "/api/jobs", { machineId, command });
-  return "error" in result ? { text: result.error, error: true } : { text: `Job #${result.id} is queued.`, error: false };
+  return "error" in result
+    ? { text: result.error, error: true }
+    : { text: `Job #${result.id} is queued.`, error: false };
 }
 
 /** The machine part of the card panel: status, sample, commands (K-612) and removal (K-615). */
@@ -303,7 +324,10 @@ export function MachinePanel(props: {
             .filter((words) => words[0]);
           const long = lines.find((words) => words.length > 2);
           if (long) {
-            props.onToast(`"${long.join(" ")}" has more than a repo and one setting; write one setting per line.`, true);
+            props.onToast(
+              `"${long.join(" ")}" has more than a repo and one setting; write one setting per line.`,
+              true,
+            );
             return;
           }
           const allow = lines.map(([repo = "", setting = ""]) => ({ repo, setting }));
@@ -318,12 +342,16 @@ export function MachinePanel(props: {
           );
         }}
       >
-        <span class="label" data-tip="Allowed Compose settings: the risky settings that deploys on this machine may use.">
+        <span
+          class="label"
+          data-tip="Allowed Compose settings: the risky settings that deploys on this machine may use."
+        >
           Allowed Compose settings
         </span>
         <p class="help">
-          One line per repo and setting, for example <code>Yarden-zamir/dozzle bind:/var/run/docker.sock</code>. A
-          deploy names the setting it needs when it stops.
+          One line per repo and setting, for example{" "}
+          <code>Yarden-zamir/dozzle bind:/var/run/docker.sock</code>. A deploy names the setting it needs when
+          it stops.
         </p>
         <textarea
           name="allow"
@@ -332,7 +360,9 @@ export function MachinePanel(props: {
           rows={3}
           class="mono"
           key={(view.machine.allow ?? []).map((entry) => `${entry.repo} ${entry.setting}`).join("|")}
-          defaultValue={(view.machine.allow ?? []).map((entry) => `${entry.repo} ${entry.setting}`).join("\n")}
+          defaultValue={(view.machine.allow ?? [])
+            .map((entry) => `${entry.repo} ${entry.setting}`)
+            .join("\n")}
         />
         <button class="btn" data-tip="Save the allowed Compose settings of this machine.">
           Save
@@ -372,11 +402,7 @@ export function MachinePanel(props: {
         >
           Diagnostics
         </button>
-        <button
-          class="btn"
-          data-tip={MACHINE_TIPS.restart}
-          onClick={() => void run({ kind: "restart" })}
-        >
+        <button class="btn" data-tip={MACHINE_TIPS.restart} onClick={() => void run({ kind: "restart" })}>
           Restart daemon
         </button>
         {/* A local build names no release, so there is nothing to update to (K-617). */}
@@ -401,9 +427,7 @@ export function MachinePanel(props: {
           >
             Orphaned volumes
           </div>
-          <p class="help">
-            Volumes of removed apps. Undo of a removal does not bring back a deleted volume.
-          </p>
+          <p class="help">Volumes of removed apps. Undo of a removal does not bring back a deleted volume.</p>
           <ul>
             {view.orphanVolumes.map((volume) => (
               <li key={volume.name}>
@@ -412,7 +436,13 @@ export function MachinePanel(props: {
                   <button
                     class="btn danger"
                     data-tip={`Delete the volume ${volume.name} and its data. Undo cannot bring it back.`}
-                    onClick={() => void run({ kind: "compose-volume-remove", project: volume.project, volume: volume.name })}
+                    onClick={() =>
+                      void run({
+                        kind: "compose-volume-remove",
+                        project: volume.project,
+                        volume: volume.name,
+                      })
+                    }
                   >
                     Delete
                   </button>
@@ -438,11 +468,7 @@ export function MachinePanel(props: {
           </li>
         ))}
       </ul>
-      <button
-        class="btn danger"
-        data-tip={MACHINE_TIPS.remove}
-        onClick={props.onRemove}
-      >
+      <button class="btn danger" data-tip={MACHINE_TIPS.remove} onClick={props.onRemove}>
         Remove machine: deletes its token and tunnel
       </button>
     </>
@@ -479,7 +505,10 @@ export function MachinesView(props: { machines: ReadonlyArray<MachineView>; onAd
           {props.machines.map((view) => (
             <tr key={view.machine.id}>
               <td>
-                <a href={`#map/${view.machine.id}`} data-tip="Show the machine card and its panel on the map.">
+                <a
+                  href={`#map/${view.machine.id}`}
+                  data-tip="Show the machine card and its panel on the map."
+                >
                   {view.machine.name}
                 </a>
               </td>
@@ -490,7 +519,9 @@ export function MachinesView(props: { machines: ReadonlyArray<MachineView>; onAd
               <td data-label="CPU">{percent(view.sample?.cpu)}</td>
               <td data-label="Memory">{percent(view.sample?.memory)}</td>
               <td data-label="Disk">{percent(view.sample?.disk)}</td>
-              <td data-label="Daemon">{view.status ? `${view.status.version} · ${view.status.arch}` : "–"}</td>
+              <td data-label="Daemon">
+                {view.status ? `${view.status.version} · ${view.status.arch}` : "–"}
+              </td>
             </tr>
           ))}
           {props.machines.length === 0 ? (

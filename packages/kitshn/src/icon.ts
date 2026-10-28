@@ -6,7 +6,14 @@
 /** K-1113: the largest icon that kitshn keeps. */
 export const ICON_LIMIT = 100 * 1024;
 
-export const ICON_TYPES = ["image/png", "image/x-icon", "image/gif", "image/jpeg", "image/webp", "image/svg+xml"] as const;
+export const ICON_TYPES = [
+  "image/png",
+  "image/x-icon",
+  "image/gif",
+  "image/jpeg",
+  "image/webp",
+  "image/svg+xml",
+] as const;
 export type IconType = (typeof ICON_TYPES)[number];
 
 const startsWith = (bytes: Uint8Array, prefix: ReadonlyArray<number>, at = 0) =>
@@ -23,7 +30,10 @@ export function iconType(bytes: Uint8Array): IconType | null {
   if (startsWith(bytes, ascii("RIFF")) && startsWith(bytes, ascii("WEBP"), 8)) return "image/webp";
   // An SVG is text: an optional XML prolog and comments, then the svg element.
   const head = new TextDecoder().decode(bytes.subarray(0, 1024)).trimStart().toLowerCase();
-  if ((head.startsWith("<svg") || head.startsWith("<?xml") || head.startsWith("<!--")) && head.includes("<svg"))
+  if (
+    (head.startsWith("<svg") || head.startsWith("<?xml") || head.startsWith("<!--")) &&
+    head.includes("<svg")
+  )
     return "image/svg+xml";
   return null;
 }
@@ -125,7 +135,12 @@ function sitePath(href: string, from: string): string | null {
 }
 
 const relHas = (link: Map<string, string>, token: string) =>
-  (link.get("rel") ?? "").toLowerCase().replaceAll("\t", " ").replaceAll("\n", " ").split(" ").includes(token);
+  (link.get("rel") ?? "")
+    .toLowerCase()
+    .replaceAll("\t", " ")
+    .replaceAll("\n", " ")
+    .split(" ")
+    .includes(token);
 
 /** One candidate and why it counts, for the deploy log. */
 export interface IconCandidate {
@@ -141,7 +156,10 @@ export type SiteReader = (path: string) => Uint8Array | null | Promise<Uint8Arra
  * icon of the web manifest that the entry page links. The entry page is /index.html of built files, or / of a
  * running app. Known limit: `<base href>` is ignored; revisit when a site with a base element shows the wrong icon.
  */
-async function iconCandidates(readText: (path: string) => Promise<string | null>, entry: string): Promise<Array<IconCandidate>> {
+async function iconCandidates(
+  readText: (path: string) => Promise<string | null>,
+  entry: string,
+): Promise<Array<IconCandidate>> {
   const html = await readText(entry);
   const links = html === null ? [] : tags(html, "link");
   const candidates: Array<IconCandidate> = [];
@@ -220,7 +238,8 @@ export async function pickSiteIcon(
   for (const candidate of await iconCandidates(text, entry)) {
     const bytes = await read(candidate.path);
     if (bytes === null) {
-      if (candidate.path !== "/favicon.ico") notes.push(`${candidate.path} from ${candidate.source} is missing.`);
+      if (candidate.path !== "/favicon.ico")
+        notes.push(`${candidate.path} from ${candidate.source} is missing.`);
       continue;
     }
     if (bytes.length > ICON_LIMIT) {

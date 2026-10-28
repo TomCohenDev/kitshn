@@ -86,7 +86,8 @@ export const MATCH_TIPS = {
 } as const;
 
 /** K-103 */
-export const PASSKEY_TIP = "Needs a passkey: after the login, a visitor also confirms with a passkey or a security key.";
+export const PASSKEY_TIP =
+  "Needs a passkey: after the login, a visitor also confirms with a passkey or a security key.";
 
 const DAY = 24 * 60 * 60 * 1000;
 const END_PRESETS = [
@@ -187,7 +188,8 @@ export function EndsPicker(props: {
         <p class="help">
           <span class="sticker wait" data-tip={`Ends: ${props.ends} at this time.`}>
             ends
-          </span> {new Date(props.endsAt).toLocaleString()}
+          </span>{" "}
+          {new Date(props.endsAt).toLocaleString()}
         </p>
       ) : null}
     </div>
@@ -229,7 +231,6 @@ export function LevelOverride(props: {
     </div>
   );
 }
-
 
 function MemberSticker(props: {
   member: Member;
@@ -285,8 +286,10 @@ type DeviceMember = Extract<Member, { _tag: "device" }>;
 
 const RIGHT_STICKERS: Record<AgentRight, string> = { addsApps: "adds apps", publishes: "publishes" };
 const RIGHT_HELP: Record<AgentRight, string> = {
-  addsApps: "Adds apps: the key allows a waiting repo. Its new cards start in the key's first agent circle at control.",
-  publishes: "Publishes: the key publishes a card of a repo that it allowed, into the overlap of an agent circle and Everyone.",
+  addsApps:
+    "Adds apps: the key allows a waiting repo. Its new cards start in the key's first agent circle at control.",
+  publishes:
+    "Publishes: the key publishes a card of a repo that it allowed, into the overlap of an agent circle and Everyone.",
 };
 
 export const AGENT_TIP =
@@ -472,7 +475,11 @@ function DeviceList(props: {
               placeholder="+ New device, for example Her phone"
               onInput={(event) => setName((event.target as HTMLInputElement).value)}
             />
-            <button class="btn" disabled={busy} data-tip="Make a service token for the new device and show its secret once.">
+            <button
+              class="btn"
+              disabled={busy}
+              data-tip="Make a service token for the new device and show its secret once."
+            >
               Make
             </button>
           </form>
@@ -652,7 +659,9 @@ export function CircleEditor(props: {
               member._tag === "device" && agentCircle && isAgentKey(state, member, Date.now())
                 ? (right, on) =>
                     void put({
-                      members: circle.members.map((other, at) => (at === index ? withRight(member, right, on) : other)),
+                      members: circle.members.map((other, at) =>
+                        at === index ? withRight(member, right, on) : other,
+                      ),
                     })
                 : null
             }
@@ -769,7 +778,9 @@ export function CircleEditor(props: {
                 </span>
                 <span
                   class="sticker"
-                  data-tip={level ? LEVEL_TIPS[level] : "None: this kind has no level at or below the circle's level."}
+                  data-tip={
+                    level ? LEVEL_TIPS[level] : "None: this kind has no level at or below the circle's level."
+                  }
                   style={{
                     "--tilt": level ? LEVEL_TILTS[level] : "0deg",
                     background: level ? LEVEL_COLORS[level] : undefined,

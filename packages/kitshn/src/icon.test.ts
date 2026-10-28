@@ -39,7 +39,9 @@ describe("site icon (K-1112, K-1113)", () => {
     const picked = await pickSiteIcon(
       site({
         "/index.html": text("<link rel=manifest href=/assets/site.webmanifest>"),
-        "/assets/site.webmanifest": text(JSON.stringify({ icons: [{ src: "icon-192.png" }, { src: "/big.png" }] })),
+        "/assets/site.webmanifest": text(
+          JSON.stringify({ icons: [{ src: "icon-192.png" }, { src: "/big.png" }] }),
+        ),
         "/assets/icon-192.png": PNG,
       }),
     );
@@ -60,7 +62,9 @@ describe("site icon (K-1112, K-1113)", () => {
   });
 
   it("has no icon for a site without one, so the card shows its kind icon", async () => {
-    const picked = await pickSiteIcon(site({ "/index.html": text('<link rel="icon" href="https://cdn.example.com/x.png">') }));
+    const picked = await pickSiteIcon(
+      site({ "/index.html": text('<link rel="icon" href="https://cdn.example.com/x.png">') }),
+    );
     expect(picked).toEqual({ icon: null, notes: [] });
   });
 
@@ -82,15 +86,25 @@ describe("site icon (K-1112, K-1113)", () => {
     const b64 = btoa(String.fromCharCode(...PNG));
     expect(pageDataIcon(`<!-- <link rel="icon" href="data:image/png;base64,${b64}"> -->`)).toBeNull();
     expect(pageDataIcon(`<!-- old --><link rel="icon" href="data:image/png;base64,${b64}">`)).toEqual(PNG);
-    const quoted = pageDataIcon('<link rel="icon" href="data:image/svg+xml,<svg xmlns=&quot;http://www.w3.org/2000/svg&quot;></svg>">');
+    const quoted = pageDataIcon(
+      '<link rel="icon" href="data:image/svg+xml,<svg xmlns=&quot;http://www.w3.org/2000/svg&quot;></svg>">',
+    );
     expect(new TextDecoder().decode(quoted!)).toBe('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
-    expect(pageDataIcon(`<link rel="icon" href="data:image/png;base64,%%%"><link rel="icon" href="data:image/png;base64,${b64}">`)).toBeNull();
+    expect(
+      pageDataIcon(
+        `<link rel="icon" href="data:image/png;base64,%%%"><link rel="icon" href="data:image/png;base64,${b64}">`,
+      ),
+    ).toBeNull();
   });
 
   it("reads a data: icon of a page, as base64 or as text, and ignores a link to a path (K-1115)", () => {
     const b64 = btoa(String.fromCharCode(...PNG));
-    expect(pageDataIcon(`<link rel="icon" href="/a.png"><link rel="icon" href="data:image/png;base64,${b64}">`)).toEqual(PNG);
-    expect(iconType(pageDataIcon(`<link rel=icon href="data:image/svg+xml,%3Csvg%3E%3C/svg%3E">`)!)).toBe("image/svg+xml");
+    expect(
+      pageDataIcon(`<link rel="icon" href="/a.png"><link rel="icon" href="data:image/png;base64,${b64}">`),
+    ).toEqual(PNG);
+    expect(iconType(pageDataIcon(`<link rel=icon href="data:image/svg+xml,%3Csvg%3E%3C/svg%3E">`)!)).toBe(
+      "image/svg+xml",
+    );
     expect(pageDataIcon('<link rel="icon" href="/favicon.ico">')).toBeNull();
     expect(pageDataIcon('<link rel="icon" href="data:image/png;base64,%%%">')).toBeNull();
   });

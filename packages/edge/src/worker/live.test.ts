@@ -42,7 +42,9 @@ const appRow = (key: string, policyIds: Array<string>, aud: string, body?: strin
 
 describe("live sites (K-1104 to K-1108)", () => {
   it("routes each site through the tunnel, with Host localhost for a dev server", () => {
-    expect(tunnelConfig([site("b", "m", true, true), site("a", "m", true)], () => bypass).config.ingress).toEqual([
+    expect(
+      tunnelConfig([site("b", "m", true, true), site("a", "m", true)], () => bypass).config.ingress,
+    ).toEqual([
       { hostname: "a.example.com", service: "http://localhost:5173" },
       {
         hostname: "b.example.com",

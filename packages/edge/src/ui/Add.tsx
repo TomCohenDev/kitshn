@@ -218,7 +218,12 @@ export function AddSite(props: {
               >
                 Share it
               </button>
-              <button type="button" class="btn" data-tip="Close this dialog; nothing changes." onClick={props.onClose}>
+              <button
+                type="button"
+                class="btn"
+                data-tip="Close this dialog; nothing changes."
+                onClick={props.onClose}
+              >
                 Cancel
               </button>
             </div>

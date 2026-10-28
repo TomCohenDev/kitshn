@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { environmentNames, eventOf, legacyRepos, parseHeadersFile, parseManifest, parseSiteIcon, repoIdOf } from "./deploys.ts";
+import {
+  environmentNames,
+  eventOf,
+  legacyRepos,
+  parseHeadersFile,
+  parseManifest,
+  parseSiteIcon,
+  repoIdOf,
+} from "./deploys.ts";
 
 describe("deploys (K-811, K-903)", () => {
   it("takes the event, branch and pull request from the token, not from the request", () => {

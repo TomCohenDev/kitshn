@@ -265,7 +265,12 @@ export function MapView(props: Props) {
     if (event.pointerType === "touch") {
       // A second finger turns any one-finger gesture into a pinch; a card drag in progress drops nothing, and
       // the card under the first finger is not selected.
-      const both = fingerDown(fingers.current, event.pointerId, { x: event.clientX, y: event.clientY }, event.isPrimary);
+      const both = fingerDown(
+        fingers.current,
+        event.pointerId,
+        { x: event.clientX, y: event.clientY },
+        event.isPrimary,
+      );
       if (both) {
         tap.current = null;
         props.onMenu(null);
@@ -321,7 +326,8 @@ export function MapView(props: Props) {
       // A closed stack of the owner is selected whole, so its panel shows (K-521).
       const whole = stack && !props.openStacks.has(stack[0]) && stack[0].startsWith(USER_STACK);
       const choose = () => {
-        if (!props.selection.cards.has(id)) props.onSelect({ cards: whole ? new Set(ids) : new Set([id]), circle: null });
+        if (!props.selection.cards.has(id))
+          props.onSelect({ cards: whole ? new Set(ids) : new Set([id]), circle: null });
       };
       const origins = new Map<string, Point>();
       for (const card of ids) origins.set(card, state.places.get(card) ?? world);
@@ -565,7 +571,10 @@ export function MapView(props: Props) {
         // A right release, Ctrl and a click on macOS, the menu key or Shift+F10: the clicked or focused item.
         const element = event.target as HTMLElement;
         const box = element.getBoundingClientRect();
-        const at = event.clientX || event.clientY ? { x: event.clientX, y: event.clientY } : { x: box.left, y: box.bottom };
+        const at =
+          event.clientX || event.clientY
+            ? { x: event.clientX, y: event.clientY }
+            : { x: box.left, y: box.bottom };
         setDrag(null);
         setDraft(null);
         props.onMenu({
@@ -630,7 +639,9 @@ export function MapView(props: Props) {
               : place;
           const selected = props.selection.cards.has(resource.id);
           // A closed stack shows the highlight of any of its cards.
-          const flash = (stack && !open ? stack[1] : [resource.id]).some((id) => props.flash.has(`card:${id}`));
+          const flash = (stack && !open ? stack[1] : [resource.id]).some((id) =>
+            props.flash.has(`card:${id}`),
+          );
           if (zoomedOut) {
             return (
               <div
@@ -803,7 +814,10 @@ function CircleView(props: {
       {props.zoomedOut ? (
         <div class="counts">
           {[...counts].map(([kind, count]) => (
-            <span key={kind} data-tip={`${count} ${KINDS[kind].label.toLowerCase()} in ${circle.name}. Zoom in to see the cards.`}>
+            <span
+              key={kind}
+              data-tip={`${count} ${KINDS[kind].label.toLowerCase()} in ${circle.name}. Zoom in to see the cards.`}
+            >
               {KINDS[kind].icon} {count}
             </span>
           ))}
@@ -953,7 +967,11 @@ function CardPreview(props: { address: string }) {
         <button
           type="button"
           class="btn"
-          data-tip={interact ? "Done: the preview takes no clicks again." : "Interact: the preview takes clicks and keys."}
+          data-tip={
+            interact
+              ? "Done: the preview takes no clicks again."
+              : "Interact: the preview takes clicks and keys."
+          }
           onClick={() => setInteract(!interact)}
         >
           {interact ? "Done" : "Interact"}
@@ -993,7 +1011,10 @@ function StackCard(props: {
       data-card={props.id}
       style={{ left: px(props.at.x), top: px(props.at.y) }}
     >
-      <span class="sticker count" data-tip={`${props.members.length} cards in this stack. A click opens it as a column.`}>
+      <span
+        class="sticker count"
+        data-tip={`${props.members.length} cards in this stack. A click opens it as a column.`}
+      >
         {props.members.length} ▸
       </span>
       <div class="name">🗃 {props.name}</div>

@@ -90,7 +90,10 @@ export function RepoList(props: {
   };
   return (
     <>
-      <div class="label" data-tip="Repos that deploy: repos with a recipe. The first deploy of each waits for one click.">
+      <div
+        class="label"
+        data-tip="Repos that deploy: repos with a recipe. The first deploy of each waits for one click."
+      >
         Repos that deploy
       </div>
       <ul class="repo-list">
@@ -105,7 +108,10 @@ export function RepoList(props: {
                   deleted on GitHub
                 </span>
               ) : (
-                <span class={`sticker ${REPO_STICKERS[repo.state].style}`} data-tip={REPO_STICKERS[repo.state].tip}>
+                <span
+                  class={`sticker ${REPO_STICKERS[repo.state].style}`}
+                  data-tip={REPO_STICKERS[repo.state].tip}
+                >
                   {repo.state}
                 </span>
               )}

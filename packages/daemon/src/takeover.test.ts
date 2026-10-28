@@ -34,12 +34,17 @@ const never = new Promise<never>(() => undefined);
 describe("KitSHn 1 takeover by root (K-1404)", () => {
   it("names the KitSHn 1 project and data, and the app folder of the daemon user, with its XDG_DATA_HOME", () => {
     expect(rootTakeoverPlan({ ...base, exists: (path) => path === plan.oldData })).toEqual(plan);
-    const moved = rootTakeoverPlan({ ...base, user: { ...user, env: { XDG_DATA_HOME: "/srv/kitshn" } }, exists: () => true });
+    const moved = rootTakeoverPlan({
+      ...base,
+      user: { ...user, env: { XDG_DATA_HOME: "/srv/kitshn" } },
+      exists: () => true,
+    });
     expect(moved).toMatchObject({ appDir: "/srv/kitshn/kitshn/apps/app-tick3d-123-prod" });
   });
 
   it("refuses an XDG_DATA_HOME with a control character or a relative path, as root prints it", () => {
-    const withEnv = (XDG_DATA_HOME: string) => rootTakeoverPlan({ ...base, user: { ...user, env: { XDG_DATA_HOME } }, exists: () => true });
+    const withEnv = (XDG_DATA_HOME: string) =>
+      rootTakeoverPlan({ ...base, user: { ...user, env: { XDG_DATA_HOME } }, exists: () => true });
     expect(withEnv("/srv/\u001b[2Jkitshn")).toMatch("control characters");
     expect(withEnv("/srv/kitshn\nfake line")).toMatch("control characters");
     expect(withEnv("srv/kitshn")).toMatch("absolute");
@@ -47,7 +52,9 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
 
   it("refuses missing data and names that leave their folders", () => {
     expect(rootTakeoverPlan({ ...base, exists: () => false })).toMatch("no KitSHn 1 data");
-    expect(rootTakeoverPlan({ ...base, project: "../etc", exists: () => true })).toMatch("not the Compose project");
+    expect(rootTakeoverPlan({ ...base, project: "../etc", exists: () => true })).toMatch(
+      "not the Compose project",
+    );
     expect(rootTakeoverPlan({ ...base, repo: "Yarden-zamir/../x", exists: () => true })).toMatch("could use");
   });
 
@@ -74,10 +81,14 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
     const { volumes } = await preflight(plan, user, fake);
     const steps = takeoverSteps(plan, user, volumes);
     const all = steps.flatMap((step): Array<Step> => [step, ...(step.undo ?? [])]);
-    const programs = [...recorded, ...all.flatMap((step) => [step.run, ...(step.pipeTo ? [step.pipeTo] : [])])];
+    const programs = [
+      ...recorded,
+      ...all.flatMap((step) => [step.run, ...(step.pipeTo ? [step.pipeTo] : [])]),
+    ];
     expect(programs.some((program) => program[0] === "du")).toBe(true);
     for (const program of programs) {
-      const asUser = program[0] === "/usr/bin/setsid" && program[2] === "/usr/sbin/runuser" && program[4] === "kitshn";
+      const asUser =
+        program[0] === "/usr/bin/setsid" && program[2] === "/usr/sbin/runuser" && program[4] === "kitshn";
       if (asUser) {
         // A new session without a terminal, a clean environment, and no Docker CLI hooks of the user.
         expect(program[1]).toBe("--wait");
@@ -108,8 +119,11 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
       if (text.includes(" df ")) return "Mounted on Avail\n/ 1000000\n/ 1000000\n";
       return "";
     };
-    const capture = (found: string, sockets: string) => (program: Program) => Promise.resolve(answers(found, sockets)(program));
-    await expect(preflight(plan, user, capture(`${plan.oldData}/fifo\n`, ""))).rejects.toThrow("Remove or move it");
+    const capture = (found: string, sockets: string) => (program: Program) =>
+      Promise.resolve(answers(found, sockets)(program));
+    await expect(preflight(plan, user, capture(`${plan.oldData}/fifo\n`, ""))).rejects.toThrow(
+      "Remove or move it",
+    );
     const checked = await preflight(plan, user, capture("", `${plan.oldData}/run/app.sock\n`));
     expect(checked.skipped).toEqual([`${plan.oldData}/run/app.sock`]);
     // A linked data folder is scanned through the link, as tar -C copies it.
@@ -122,9 +136,18 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
     expect(NO_TERMINAL).not.toContain("inherit");
     const children = new Set<never>();
     const noTerminal = "if [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; then exit 9; fi";
-    await expect(runStep({ name: "terminal", run: ["sh", "-c", noTerminal] }, children)).resolves.toBeUndefined();
     await expect(
-      runStep({ name: "terminal", run: ["sh", "-c", "printf x"], pipeTo: ["sh", "-c", `cat >/dev/null; ${noTerminal}`] }, children),
+      runStep({ name: "terminal", run: ["sh", "-c", noTerminal] }, children),
+    ).resolves.toBeUndefined();
+    await expect(
+      runStep(
+        {
+          name: "terminal",
+          run: ["sh", "-c", "printf x"],
+          pipeTo: ["sh", "-c", `cat >/dev/null; ${noTerminal}`],
+        },
+        children,
+      ),
     ).resolves.toBeUndefined();
   });
 
@@ -137,7 +160,10 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
     const runner = {
       run: (step: Step) => {
         order.push(`run ${step.name}`);
-        if (step.name.startsWith("copy")) return new Promise<void>((_, reject) => (end = () => (order.push("copy ended"), reject(new Error("killed")))));
+        if (step.name.startsWith("copy"))
+          return new Promise<void>(
+            (_, reject) => (end = () => (order.push("copy ended"), reject(new Error("killed")))),
+          );
         return Promise.resolve();
       },
       log: () => undefined,
@@ -160,13 +186,19 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
     const steps = takeoverSteps(plan, user, []);
     const finish = steps.find((step) => step.name === "make the copy the data folder")!;
     expect(finish.run.join(" ")).toContain("if [ -e /app/data ]; then");
-    expect(finish.undo![0]!.run.join(" ")).toContain("if [ -e /app/data.kitshn1 ]; then rm -rf /app/data.kitshn1; else");
+    expect(finish.undo![0]!.run.join(" ")).toContain(
+      "if [ -e /app/data.kitshn1 ]; then rm -rf /app/data.kitshn1; else",
+    );
   });
 
   it("stops a deploy when docker info fails, instead of copying on a Docker it cannot name", () => {
     expect(dockerKind({ ok: false, output: "" })).toBe("unknown");
-    expect(dockerKind({ ok: true, output: '["name=seccomp,profile=builtin","name=rootless"]' })).toBe("rootless");
-    expect(dockerKind({ ok: true, output: '["name=apparmor","name=seccomp,profile=builtin"]' })).toBe("system");
+    expect(dockerKind({ ok: true, output: '["name=seccomp,profile=builtin","name=rootless"]' })).toBe(
+      "rootless",
+    );
+    expect(dockerKind({ ok: true, output: '["name=apparmor","name=seccomp,profile=builtin"]' })).toBe(
+      "system",
+    );
   });
 
   it("removes the renamed data and starts KitSHn 1 again when the marker fails, and prints each undo", async () => {
@@ -176,7 +208,8 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
     const runner = {
       run: (step: Step) => {
         ran.push(step.name);
-        if (step.name === "make the copy the data folder") return Promise.reject(new Error("no space for the marker"));
+        if (step.name === "make the copy the data folder")
+          return Promise.reject(new Error("no space for the marker"));
         if (step.name.startsWith("start the KitSHn 1")) return Promise.reject(new Error("docker is down"));
         return Promise.resolve();
       },
@@ -184,7 +217,11 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
     };
     await expect(executeSteps(steps, runner, never)).rejects.toThrow("no space for the marker");
     const undone = ran.slice(ran.indexOf("make the copy the data folder") + 1);
-    expect(undone).toEqual(["remove the copy", "remove the copy", "start the KitSHn 1 project yarden-zamir-tick3d-prod"]);
+    expect(undone).toEqual([
+      "remove the copy",
+      "remove the copy",
+      "start the KitSHn 1 project yarden-zamir-tick3d-prod",
+    ]);
     const remove = steps.find((step) => step.name === "make the copy the data folder")!.undo![0]!;
     expect(remove.run.join(" ")).toContain("/app/data ");
     expect(log.some((line) => line.includes("undo failed: start the KitSHn 1 project"))).toBe(true);
@@ -192,10 +229,23 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
 
   it("fails a pipe when either side fails", async () => {
     const children = new Set<never>();
-    const step = (run: Step["run"], pipeTo: Step["pipeTo"]): Step => ({ name: "pipe", run, ...(pipeTo ? { pipeTo } : {}) });
-    await expect(runStep(step(["sh", "-c", "printf data"], ["sh", "-c", "cat >/dev/null"]), children)).resolves.toBeUndefined();
-    await expect(runStep(step(["sh", "-c", "printf data"], ["sh", "-c", "cat >/dev/null; echo broken >&2; exit 3"]), children)).rejects.toThrow("broken");
-    await expect(runStep(step(["sh", "-c", "exit 2"], ["sh", "-c", "cat >/dev/null"]), children)).rejects.toThrow("failed");
+    const step = (run: Step["run"], pipeTo: Step["pipeTo"]): Step => ({
+      name: "pipe",
+      run,
+      ...(pipeTo ? { pipeTo } : {}),
+    });
+    await expect(
+      runStep(step(["sh", "-c", "printf data"], ["sh", "-c", "cat >/dev/null"]), children),
+    ).resolves.toBeUndefined();
+    await expect(
+      runStep(
+        step(["sh", "-c", "printf data"], ["sh", "-c", "cat >/dev/null; echo broken >&2; exit 3"]),
+        children,
+      ),
+    ).rejects.toThrow("broken");
+    await expect(
+      runStep(step(["sh", "-c", "exit 2"], ["sh", "-c", "cat >/dev/null"]), children),
+    ).rejects.toThrow("failed");
     await expect(runStep(step(["kitshn-no-such-program"], undefined), children)).rejects.toThrow("failed");
   });
 });

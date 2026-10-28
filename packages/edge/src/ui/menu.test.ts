@@ -28,7 +28,9 @@ function Harness() {
     Fragment,
     null,
     h(MoreButton, { name: "riffle", onOpen: setAnchor }),
-    anchor ? h(ActionMenu, { label: "Actions for riffle", anchor, groups, onClose: () => setAnchor(null) }) : null,
+    anchor
+      ? h(ActionMenu, { label: "Actions for riffle", anchor, groups, onClose: () => setAnchor(null) })
+      : null,
   );
 }
 
@@ -96,8 +98,18 @@ describe("a sub-list inside a sub-list (K-527)", () => {
               label: "Owner",
               tip: "Owner.",
               items: [
-                { id: "unshare:owner:card", label: "This card", tip: "Card.", run: () => nestedRan.push("card") },
-                { id: "unshare:owner:stack", label: "Apps (2)", tip: "Stack.", run: () => nestedRan.push("stack") },
+                {
+                  id: "unshare:owner:card",
+                  label: "This card",
+                  tip: "Card.",
+                  run: () => nestedRan.push("card"),
+                },
+                {
+                  id: "unshare:owner:stack",
+                  label: "Apps (2)",
+                  tip: "Stack.",
+                  run: () => nestedRan.push("stack"),
+                },
               ],
             },
           ],
@@ -107,7 +119,12 @@ describe("a sub-list inside a sub-list (K-527)", () => {
     const root = document.createElement("div");
     document.body.append(root);
     const anchor = { left: 0, top: 0, width: 0, height: 0 };
-    await act(() => render(h(ActionMenu, { label: "Actions for riffle", anchor, groups: nested, onClose: () => undefined }), root));
+    await act(() =>
+      render(
+        h(ActionMenu, { label: "Actions for riffle", anchor, groups: nested, onClose: () => undefined }),
+        root,
+      ),
+    );
     expect(focused()).toBe("Unshare from▸");
     await press();
     await key("ArrowDown");

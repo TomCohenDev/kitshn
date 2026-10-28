@@ -22,7 +22,12 @@ export interface Machine {
 
 export type MachineKey =
   /** K-1702: the public half of the machine key pair, and when it became valid. */
-  | { readonly kind: "public"; readonly publicKey: string; readonly fingerprint: string; readonly since: number }
+  | {
+      readonly kind: "public";
+      readonly publicKey: string;
+      readonly fingerprint: string;
+      readonly since: number;
+    }
   /** K-1703, K-1706: the machine waits for its key from a join code or a rekey code, and cannot connect. */
   | { readonly kind: "waiting"; readonly since: number };
 
@@ -34,7 +39,9 @@ export interface ComposeAllowance {
 
 /** K-818: the settings that a machine allows for one repo. */
 export const allowedFor = (machine: Machine, repo: string): Array<string> =>
-  (machine.allow ?? []).filter((entry) => entry.repo.toLowerCase() === repo.toLowerCase()).map((entry) => entry.setting);
+  (machine.allow ?? [])
+    .filter((entry) => entry.repo.toLowerCase() === repo.toLowerCase())
+    .map((entry) => entry.setting);
 
 /** K-605: what a daemon reports about itself. */
 export interface MachineStatus {
@@ -298,7 +305,11 @@ export function parseAllowances(value: unknown): Array<ComposeAllowance> | strin
     const setting = typeof entry["setting"] === "string" ? entry["setting"].trim() : "";
     const parts = repo.split("/");
     const blank = (text: string) => [...text].some((char) => char.trim() === "");
-    if (parts.length !== 2 || blank(repo) || parts.some((part) => part === "" || part === "." || part === ".."))
+    if (
+      parts.length !== 2 ||
+      blank(repo) ||
+      parts.some((part) => part === "" || part === "." || part === "..")
+    )
       return `"${repo}" is not a repo; write owner/name.`;
     if (!setting || setting.length > 200 || blank(setting))
       return `"${setting}" is not a setting name, for example bind:/var/run/docker.sock.`;

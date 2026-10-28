@@ -13,10 +13,16 @@ import {
   publishPlace,
 } from "./agent.ts";
 import { type Edit, applyChanges, resolveEdits } from "./changes.ts";
-import { type AgentRight, type Circle, type Point, type Resource, type State, circlesHolding } from "./model.ts";
+import {
+  type AgentRight,
+  type Circle,
+  type Point,
+  type Resource,
+  type State,
+  circlesHolding,
+} from "./model.ts";
 import { placeInside } from "./place.ts";
 import { seed } from "./seed.ts";
-
 
 function start(): State {
   const s = seed(["owner@example.com"], "kit.example.com");
@@ -92,7 +98,14 @@ describe("agent keys (K-718)", () => {
     expect(check(start(), [{ _tag: "place", id: "site", after: { x: 1800, y: 1000 } }])).toMatch(/public/);
     expect(check(start(), [{ _tag: "place", id: "site", after: { x: 1200, y: 1000 } }])).toMatch(/watch/);
     expect(
-      check(start(), [{ _tag: "shareSetting", resourceId: "site", circleId: "agents", after: { level: "view", endsAt: null } }]),
+      check(start(), [
+        {
+          _tag: "shareSetting",
+          resourceId: "site",
+          circleId: "agents",
+          after: { level: "view", endsAt: null },
+        },
+      ]),
     ).toMatch(/only move/);
   });
   it("gets nothing from network or Everyone circles, and a token that no circle names manages nothing", () => {
@@ -112,10 +125,19 @@ describe("agent keys (K-718)", () => {
   it("counts only circles of devices that have not ended, and may take a card out of every circle", () => {
     const base = start();
     const agents = base.circles.get("agents")!;
-    const mixed = { ...agents, members: [...agents.members, { _tag: "email", email: "her@example.com" } as const] };
-    expect(cardsControlledBy({ ...base, circles: new Map(base.circles).set("agents", mixed) }, as("agent-1"), 0).size).toBe(0);
+    const mixed = {
+      ...agents,
+      members: [...agents.members, { _tag: "email", email: "her@example.com" } as const],
+    };
+    expect(
+      cardsControlledBy({ ...base, circles: new Map(base.circles).set("agents", mixed) }, as("agent-1"), 0)
+        .size,
+    ).toBe(0);
     const ended = { ...agents, endsAt: 1 };
-    expect(cardsControlledBy({ ...base, circles: new Map(base.circles).set("agents", ended) }, as("agent-1"), 5).size).toBe(0);
+    expect(
+      cardsControlledBy({ ...base, circles: new Map(base.circles).set("agents", ended) }, as("agent-1"), 5)
+        .size,
+    ).toBe(0);
     expect(check(base, [{ _tag: "place", id: "site", after: null }])).toBeNull();
   });
   it("runs jobs on a machine only when it manages every card on it", () => {
@@ -124,14 +146,25 @@ describe("agent keys (K-718)", () => {
     const app = { ...base.resources.get("site")!, id: "app", machine: "m1" };
     const resources = new Map(base.resources).set("m1", machine).set("app", app);
     const places = new Map(base.places).set("m1", { x: 0, y: 1000 }).set("app", { x: -5000, y: 0 });
-    const m1 = { id: "m1", name: "m1", labels: [], order: 0, serviceTokenId: "s", clientId: "m1-token", tunnelId: "t" };
+    const m1 = {
+      id: "m1",
+      name: "m1",
+      labels: [],
+      order: 0,
+      serviceTokenId: "s",
+      clientId: "m1-token",
+      tunnelId: "t",
+    };
     const state = { ...base, resources, places, machines: new Map([["m1", m1]]) };
     expect(agentMayRunOn(state, as("agent-1"), "m1", 0)).toBe(false);
     const inside = { ...state, places: new Map(places).set("app", { x: 0, y: 1000 }) };
     expect(agentMayRunOn(inside, as("agent-1"), "m1", 0)).toBe(true);
     // The machine's own token opens the NAS through the "home" circle, which the agent does not manage.
     const home = inside.circles.get("home")!;
-    const circles = new Map(inside.circles).set("home", { ...home, members: [{ _tag: "machine", machineId: "m1" }] });
+    const circles = new Map(inside.circles).set("home", {
+      ...home,
+      members: [{ _tag: "machine", machineId: "m1" }],
+    });
     expect(agentMayRunOn({ ...inside, circles }, as("agent-1"), "m1", 0)).toBe(false);
   });
   it("calls a device an agent only when it has an agent circle", () => {
@@ -165,14 +198,25 @@ describe("agent keys (K-718)", () => {
       command: { kind: "compose-redeploy", project: "app-o-1-prod", name: "app" },
     });
     expect(agentDeployPlan(last, "build", null)).toEqual({ kind: "build", repo: "o/app", branch: "main" });
-    expect(agentDeployPlan(last, "redeploy", { ...ready, canRedeploy: false })).toMatchObject({ error: /Update the daemon/ });
-    expect(agentDeployPlan(last, "redeploy", { ...ready, takesDeploys: false })).toMatchObject({ error: /label deploy/ });
-    expect(agentDeployPlan(last, "redeploy", { ...ready, runsCard: false })).toMatchObject({ error: /no longer runs/ });
+    expect(agentDeployPlan(last, "redeploy", { ...ready, canRedeploy: false })).toMatchObject({
+      error: /Update the daemon/,
+    });
+    expect(agentDeployPlan(last, "redeploy", { ...ready, takesDeploys: false })).toMatchObject({
+      error: /label deploy/,
+    });
+    expect(agentDeployPlan(last, "redeploy", { ...ready, runsCard: false })).toMatchObject({
+      error: /no longer runs/,
+    });
     expect(agentDeployPlan(last, "redeploy", null)).toMatchObject({ kind: "refused" });
     expect(agentDeployPlan({ ...last, app: "static" }, "redeploy", ready)).toMatchObject({ kind: "refused" });
     expect(agentDeployPlan({ ...last, branch: "" }, "build", null)).toMatchObject({ kind: "refused" });
-    expect(agentDeployPlan({ ...last, environment: "pr-7" }, "build", null)).toMatchObject({ error: /preview/ });
-    expect(agentDeployPlan(null, "build", null)).toMatchObject({ kind: "refused", error: /no finished deploy/ });
+    expect(agentDeployPlan({ ...last, environment: "pr-7" }, "build", null)).toMatchObject({
+      error: /preview/,
+    });
+    expect(agentDeployPlan(null, "build", null)).toMatchObject({
+      kind: "refused",
+      error: /no finished deploy/,
+    });
   });
 });
 
@@ -180,7 +224,9 @@ describe("agent keys (K-718)", () => {
 function withRights(circleId: string, rights: Partial<Record<AgentRight, true>>): State {
   const base = start();
   const circle = base.circles.get(circleId)!;
-  const members = circle.members.map((member) => (member._tag === "device" ? { ...member, ...rights } : member));
+  const members = circle.members.map((member) =>
+    member._tag === "device" ? { ...member, ...rights } : member,
+  );
   return { ...base, circles: new Map(base.circles).set(circleId, { ...circle, members }) };
 }
 
@@ -197,13 +243,24 @@ describe("agent keys that add and publish apps (K-718, K-819)", () => {
     const place = publishPlace(state, as("agent-1"), "site", true, 0, ADDED);
     if (typeof place === "string" || place === null) throw new Error(String(place));
     const after = moved(state, place);
-    expect(circlesHolding(after, "site").map((circle) => circle.id).sort()).toEqual(["agents", "everyone"]);
+    expect(
+      circlesHolding(after, "site")
+        .map((circle) => circle.id)
+        .sort(),
+    ).toEqual(["agents", "everyone"]);
     expect(check(state, [{ _tag: "place", id: "site", after: place }])).toBeNull();
     // It still manages the card, so redeploy, unpublish and the machine rule keep working.
     expect(cardsControlledBy(after, as("agent-1"), 0).has("site")).toBe(true);
   });
   it("refuses a publish without the right, of a card that it did not add, or of a live site", () => {
-    const place = publishPlace(overlapping({ publishes: true }), as("agent-1"), "site", true, 0, ADDED) as Point;
+    const place = publishPlace(
+      overlapping({ publishes: true }),
+      as("agent-1"),
+      "site",
+      true,
+      0,
+      ADDED,
+    ) as Point;
     const into = (state: State, added: ReadonlySet<string>) => {
       const changes = resolveEdits(state, [{ _tag: "place", id: "site", after: place }]);
       return agentRefusal(state, applyChanges(state, changes), as("agent-1"), changes, 0, added);
@@ -212,17 +269,19 @@ describe("agent keys that add and publish apps (K-718, K-819)", () => {
     expect(into(overlapping({ publishes: true }), new Set())).toMatch(/Everyone/);
     const live = overlapping({ publishes: true });
     const site = { ...live.resources.get("site")!, kind: "site.live" as const };
-    expect(into({ ...live, resources: new Map(live.resources).set("site", site) }, new Set(["site"]))).toMatch(
-      /Everyone/,
-    );
+    expect(
+      into({ ...live, resources: new Map(live.resources).set("site", site) }, new Set(["site"])),
+    ).toMatch(/Everyone/);
   });
   it("refuses a publish that leaves every agent circle, and names the missing overlap", () => {
     const apart = withRights("agents", { publishes: true });
     expect(publishPlace(apart, as("agent-1"), "site", true, 0, ADDED)).toMatch(/overlaps Everyone/);
-    expect(check(apart, [{ _tag: "place", id: "site", after: { x: 760, y: 0 } }])).toMatch(/overlaps Everyone/);
-    expect(check(overlapping({ publishes: true }), [{ _tag: "place", id: "site", after: { x: 760, y: -100 } }])).toMatch(
-      /overlap of an agent circle/,
+    expect(check(apart, [{ _tag: "place", id: "site", after: { x: 760, y: 0 } }])).toMatch(
+      /overlaps Everyone/,
     );
+    expect(
+      check(overlapping({ publishes: true }), [{ _tag: "place", id: "site", after: { x: 760, y: -100 } }]),
+    ).toMatch(/overlap of an agent circle/);
   });
   it("takes a published card back into the agent circle alone, also without the right", () => {
     const published = overlapping({ publishes: true });
@@ -248,17 +307,26 @@ describe("agent keys that add and publish apps (K-718, K-819)", () => {
     const staging = { ...base.circles.get("staging")!, x: 760, y: 360 };
     const state = { ...base, circles: new Map(base.circles).set("staging", staging) };
     const published = moved(state, { x: 760, y: 230 });
-    const inAll = circlesHolding(published, "site").map((circle) => circle.id).sort();
+    const inAll = circlesHolding(published, "site")
+      .map((circle) => circle.id)
+      .sort();
     expect(inAll).toEqual(["agents", "everyone", "staging"]);
     const back = publishPlace(published, as("agent-1"), "site", false, 0, ADDED) as Point;
-    expect(circlesHolding(moved(published, back), "site").map((circle) => circle.id).sort()).toEqual(["agents", "staging"]);
+    expect(
+      circlesHolding(moved(published, back), "site")
+        .map((circle) => circle.id)
+        .sort(),
+    ).toEqual(["agents", "staging"]);
   });
   it("treats a repurposed Everyone circle as any other circle", () => {
     const state = overlapping({ publishes: true });
     const place = publishPlace(state, as("agent-1"), "site", true, 0, ADDED) as Point;
     const everyone = state.circles.get("everyone")!;
     const members = [...everyone.members, { _tag: "email", email: "her@example.com" } as const];
-    const repurposed = { ...state, circles: new Map(state.circles).set("everyone", { ...everyone, members }) };
+    const repurposed = {
+      ...state,
+      circles: new Map(state.circles).set("everyone", { ...everyone, members }),
+    };
     expect(check(repurposed, [{ _tag: "place", id: "site", after: place }])).toMatch(/Everyone/);
   });
   it("starts a new card in the first agent circle at control of the key", () => {
@@ -272,8 +340,20 @@ describe("agent keys that add and publish apps (K-718, K-819)", () => {
   it("deploys the Compose apps of an agent-allowed repo only to machines that the key runs jobs on", () => {
     const base = start();
     const machine = { ...base.resources.get("site")!, id: "m1", name: "m1", kind: "machine" as const };
-    const m1 = { id: "m1", name: "m1", labels: ["deploy"], order: 0, serviceTokenId: "s", clientId: "m1-token", tunnelId: "t" };
-    const state = { ...base, resources: new Map(base.resources).set("m1", machine), machines: new Map([["m1", m1]]) };
+    const m1 = {
+      id: "m1",
+      name: "m1",
+      labels: ["deploy"],
+      order: 0,
+      serviceTokenId: "s",
+      clientId: "m1-token",
+      tunnelId: "t",
+    };
+    const state = {
+      ...base,
+      resources: new Map(base.resources).set("m1", machine),
+      machines: new Map([["m1", m1]]),
+    };
     expect(mayDeployOn(state, null, "m1", 0)).toBe(true);
     expect(mayDeployOn(state, "agent-1", "m1", 0)).toBe(false);
     const managed = { ...state, places: new Map(state.places).set("m1", { x: 0, y: 1000 }) };
@@ -295,4 +375,7 @@ function overlapping(rights: Partial<Record<AgentRight, true>>): State {
 
 const ADDED: ReadonlySet<string> = new Set(["site"]);
 
-const moved = (state: State, place: Point): State => ({ ...state, places: new Map(state.places).set("site", place) });
+const moved = (state: State, place: Point): State => ({
+  ...state,
+  places: new Map(state.places).set("site", place),
+});

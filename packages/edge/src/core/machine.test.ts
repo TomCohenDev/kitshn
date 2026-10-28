@@ -42,7 +42,9 @@ describe("machine keys (K-1701 to K-1705)", () => {
     expect(await verifyText(key.x, connectText(host, "m1", newChallenge()), signature)).toBe(false);
     expect(await verifyText(key.x, connectText("kit.other.com", "m1", challenge), signature)).toBe(false);
     expect(await verifyText(key.x, connectText(host, "m2", challenge), signature)).toBe(false);
-    expect(await verifyText((await newMachineKey()).x, connectText(host, "m1", challenge), signature)).toBe(false);
+    expect(await verifyText((await newMachineKey()).x, connectText(host, "m1", challenge), signature)).toBe(
+      false,
+    );
   });
 
   it("never takes a connect answer as a rotation", async () => {

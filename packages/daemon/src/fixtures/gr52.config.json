@@ -33,12 +33,7 @@
         "KITSHN_SOCKET_DIR": "placeholder"
       },
       "healthcheck": {
-        "test": [
-          "CMD",
-          "test",
-          "-S",
-          "/apps/gr52-prod/sockets/default.sock"
-        ],
+        "test": ["CMD", "test", "-S", "/apps/gr52-prod/sockets/default.sock"],
         "timeout": "5s",
         "interval": "30s",
         "retries": 5,

@@ -43,7 +43,9 @@ describe("the repo gate (K-819)", () => {
   it("keeps the agent key that allowed a repo when a deploy step writes the row", () => {
     const agent = { clientId: "agent-1", name: "Builder" };
     const allowed = { ...repo, state: "allowed" as const, firstSeen: 1, allowedBy: agent };
-    expect(gateDecision(allowed, { ...repo, name: "o/renamed" }, 7).record).toMatchObject({ allowedBy: agent });
+    expect(gateDecision(allowed, { ...repo, name: "o/renamed" }, 7).record).toMatchObject({
+      allowedBy: agent,
+    });
     expect(gateDecision(undefined, repo, 7).record).toMatchObject({ allowedBy: null });
   });
   it("lets an agent key allow only a waiting repo, and only with the right to add apps (K-718)", () => {

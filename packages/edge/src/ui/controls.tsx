@@ -13,7 +13,8 @@ const TIP_ID = "kitshn-tip";
 const viewport = () => ({ width: innerWidth, height: innerHeight });
 
 /** A label describes its control, so a screen reader reads the tooltip with the focused input. */
-const describedOf = (anchor: HTMLElement) => (anchor instanceof HTMLLabelElement ? (anchor.control ?? anchor) : anchor);
+const describedOf = (anchor: HTMLElement) =>
+  anchor instanceof HTMLLabelElement ? (anchor.control ?? anchor) : anchor;
 
 const anchorOf = (target: EventTarget | null) =>
   target instanceof Element ? target.closest<HTMLElement>("[data-tip]") : null;
@@ -73,7 +74,8 @@ export function TooltipLayer() {
       ["scroll", timer.hide],
       ["resize", timer.hide],
     ] as const;
-    for (const [name, handler] of events) addEventListener(name, handler as EventListener, { capture: true, passive: true });
+    for (const [name, handler] of events)
+      addEventListener(name, handler as EventListener, { capture: true, passive: true });
     return () => {
       for (const [name, handler] of events) removeEventListener(name, handler as EventListener, true);
     };
@@ -330,7 +332,9 @@ export function ActionMenu(props: {
   let depth = 0;
   for (const id of path.open) {
     const list: ReadonlyArray<Action> = open ? open.items : props.groups.flat();
-    const next = list.find((action): action is Extract<Action, { items: unknown }> => action.id === id && "items" in action);
+    const next = list.find(
+      (action): action is Extract<Action, { items: unknown }> => action.id === id && "items" in action,
+    );
     if (!next) break;
     open = next;
     depth += 1;
@@ -352,7 +356,11 @@ export function ActionMenu(props: {
         </MenuItem>
       );
     return "items" in action ? (
-      <MenuItem {...shared} opens onSelect={() => setPath({ open: [...path.open.slice(0, depth), action.id], from: null })}>
+      <MenuItem
+        {...shared}
+        opens
+        onSelect={() => setPath({ open: [...path.open.slice(0, depth), action.id], from: null })}
+      >
         {action.label}
         <span class="menu-key">▸</span>
       </MenuItem>
@@ -447,7 +455,13 @@ export function OverlayPanel(props: {
         >
           {props.large ? "To the map" : "Enlarge"}
         </button>
-        <button type="button" class="btn" aria-label="Close" data-tip={`Close ${props.heading}.`} onClick={props.onClose}>
+        <button
+          type="button"
+          class="btn"
+          aria-label="Close"
+          data-tip={`Close ${props.heading}.`}
+          onClick={props.onClose}
+        >
           ×
         </button>
       </header>
@@ -498,7 +512,8 @@ export function ResizeEdge(props: {
   const drag = useRef<{ readonly x: number; readonly start: number; shown: number } | null>(null);
   // One listener for the life of the edge, so a render during a drag never leaves an old one behind.
   const escape = useRef<((event: KeyboardEvent) => void) | null>(null);
-  const show = (width: number) => document.documentElement.style.setProperty(latest.current.cssVar, `${width}px`);
+  const show = (width: number) =>
+    document.documentElement.style.setProperty(latest.current.cssVar, `${width}px`);
   const end = (keep: boolean) => {
     const now = drag.current;
     if (!now) return;

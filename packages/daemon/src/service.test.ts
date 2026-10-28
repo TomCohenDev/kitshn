@@ -22,7 +22,9 @@ describe("daemon service (K-601)", () => {
     );
     expect(pathsFor("linux", { XDG_RUNTIME_DIR: "/x" }, "/home/u", 7).socket).toBe("/x/kitshn/kitshn.sock");
     expect(pathsFor("linux", {}, "/home/u", 7).socket).toBe("/run/user/7/kitshn/kitshn.sock");
-    expect(pathsFor("darwin", {}, "/Users/u").socket).toBe("/Users/u/Library/Application Support/kitshn/kitshn.sock");
+    expect(pathsFor("darwin", {}, "/Users/u").socket).toBe(
+      "/Users/u/Library/Application Support/kitshn/kitshn.sock",
+    );
   });
 
   it("restarts the daemon after every exit", () => {
@@ -41,11 +43,15 @@ describe("daemon service (K-601)", () => {
   });
 
   it("runs the tunnel as its own service, with the token in a file (K-603)", () => {
-    expect(pathsFor("linux", {}, "/home/u").tunnelService).toBe("/home/u/.config/systemd/user/kitshn-tunnel.service");
+    expect(pathsFor("linux", {}, "/home/u").tunnelService).toBe(
+      "/home/u/.config/systemd/user/kitshn-tunnel.service",
+    );
     const unit = tunnelServiceFile("linux", "/d/cloudflared", "/d/tunnel-token");
     expect(unit).toContain('--token-file "/d/tunnel-token"');
     expect(unit).toContain("Restart=always");
-    expect(tunnelServiceFile("darwin", "/d/cloudflared", "/d/t")).toContain("<string>--token-file</string><string>/d/t</string>");
+    expect(tunnelServiceFile("darwin", "/d/cloudflared", "/d/t")).toContain(
+      "<string>--token-file</string><string>/d/t</string>",
+    );
   });
 
   it("reads the tunnel state from its service manager (K-605)", () => {
@@ -82,4 +88,3 @@ describe("daemon service (K-601)", () => {
     expect(expectedDaemonUid({}, "/tmp/kitshn-x/kitshn.sock", 5)).toBe(5);
   });
 });
-

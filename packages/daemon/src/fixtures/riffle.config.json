@@ -33,9 +33,7 @@
         "RIFFLE_REFRESH_WINDOW": "placeholder",
         "RIFFLE_SEED_DEFAULT_SOURCES": "placeholder"
       },
-      "expose": [
-        "8000"
-      ],
+      "expose": ["8000"],
       "healthcheck": {
         "test": [
           "CMD",
@@ -75,12 +73,7 @@
       },
       "entrypoint": null,
       "healthcheck": {
-        "test": [
-          "CMD",
-          "test",
-          "-S",
-          "/apps/riffle-prod/sockets/default.sock"
-        ],
+        "test": ["CMD", "test", "-S", "/apps/riffle-prod/sockets/default.sock"],
         "timeout": "5s",
         "interval": "10s",
         "retries": 5

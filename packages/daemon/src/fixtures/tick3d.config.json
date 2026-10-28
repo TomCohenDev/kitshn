@@ -33,12 +33,7 @@
         "TESTER_CODES": "placeholder"
       },
       "healthcheck": {
-        "test": [
-          "CMD",
-          "wget",
-          "-qO-",
-          "http://127.0.0.1:8080/api/health"
-        ],
+        "test": ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/health"],
         "timeout": "5s",
         "interval": "30s",
         "retries": 5,
@@ -94,12 +89,7 @@
         "KITSHN_SOCKET_DIR": "placeholder"
       },
       "healthcheck": {
-        "test": [
-          "CMD",
-          "test",
-          "-S",
-          "/apps/tick3d-prod/sockets/default.sock"
-        ],
+        "test": ["CMD", "test", "-S", "/apps/tick3d-prod/sockets/default.sock"],
         "timeout": "5s",
         "interval": "30s",
         "retries": 5,

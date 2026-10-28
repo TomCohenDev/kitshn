@@ -1,5 +1,11 @@
 import { useId, useLayoutEffect, useRef, useState } from "preact/hooks";
-import { type PaletteCursor, type PaletteEntry, paletteActive, paletteArrow, paletteEnter } from "./actions.ts";
+import {
+  type PaletteCursor,
+  type PaletteEntry,
+  paletteActive,
+  paletteArrow,
+  paletteEnter,
+} from "./actions.ts";
 
 /** The entries whose label or keywords hold every word of the query, at most 50. */
 const matching = (entries: ReadonlyArray<PaletteEntry>, query: string) => {
@@ -93,7 +99,11 @@ export function Palette(props: {
               key={entry.label}
               id={`${listId}-${index}`}
               role="option"
-              data-tip={entry.danger && matches.length > 1 ? `${entry.tip} Pick it with the arrows or a click; Enter alone does not run it.` : entry.tip}
+              data-tip={
+                entry.danger && matches.length > 1
+                  ? `${entry.tip} Pick it with the arrows or a click; Enter alone does not run it.`
+                  : entry.tip
+              }
               data-danger={entry.danger || undefined}
               aria-selected={index === active}
               onClick={() => run(entry)}

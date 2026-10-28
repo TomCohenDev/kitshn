@@ -21,13 +21,20 @@ const server = await listenLocal(path, {
   access: "private",
 });
 // The client side reads the peer user id too, before it sends (K-701).
-const outcome = await askLocal(path, { id: "selftest", type: "reconnect" }, 5000, { platform, daemonUid: own }).catch((error: unknown) => {
+const outcome = await askLocal(path, { id: "selftest", type: "reconnect" }, 5000, {
+  platform,
+  daemonUid: own,
+}).catch((error: unknown) => {
   console.error(`kitshn self-test: ${String(error)}`);
   return null;
 });
 server.stop();
 if (seen !== own || outcome?.kind !== "answer") {
-  console.error(`kitshn self-test failed: peer user id ${String(seen)}, own ${own}, outcome ${JSON.stringify(outcome)}`);
+  console.error(
+    `kitshn self-test failed: peer user id ${String(seen)}, own ${own}, outcome ${JSON.stringify(outcome)}`,
+  );
   process.exit(1);
 }
-console.log(`kitshn self-test: the compiled binary read the peer user id ${seen} (${process.platform} ${process.arch}).`);
+console.log(
+  `kitshn self-test: the compiled binary read the peer user id ${seen} (${process.platform} ${process.arch}).`,
+);

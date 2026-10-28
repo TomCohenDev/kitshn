@@ -45,7 +45,9 @@ const isId = Schema.is(Id);
 export const line = (message: Request | Answer): string => `${JSON.stringify(message)}\n`;
 
 /** One line from a client: the request, or the error answer that the daemon sends back for it. */
-export function readRequest(text: string): { ok: true; request: Request } | { ok: false; answer: ErrorAnswer } {
+export function readRequest(
+  text: string,
+): { ok: true; request: Request } | { ok: false; answer: ErrorAnswer } {
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -55,8 +57,16 @@ export function readRequest(text: string): { ok: true; request: Request } | { ok
   try {
     return { ok: true, request: decodeRequest(value) };
   } catch (error) {
-    const id = typeof value === "object" && value !== null && "id" in value && isId(value.id) ? value.id : null;
-    return { ok: false, answer: { id, type: "error", error: `The request does not match K-702: ${error instanceof Error ? error.message : String(error)}` } };
+    const id =
+      typeof value === "object" && value !== null && "id" in value && isId(value.id) ? value.id : null;
+    return {
+      ok: false,
+      answer: {
+        id,
+        type: "error",
+        error: `The request does not match K-702: ${error instanceof Error ? error.message : String(error)}`,
+      },
+    };
   }
 }
 

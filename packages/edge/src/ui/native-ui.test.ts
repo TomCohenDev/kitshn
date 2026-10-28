@@ -8,9 +8,24 @@ const sources = import.meta.glob<string>(["./**/*.{ts,tsx}", "!./**/*.test.ts"],
 });
 const files = Object.entries(sources).map(([path, text]) => ({ name: path.slice(2), text }));
 
-const NATIVE_TYPES = ["date", "datetime-local", "time", "month", "week", "range", "color", "checkbox", "radio"];
+const NATIVE_TYPES = [
+  "date",
+  "datetime-local",
+  "time",
+  "month",
+  "week",
+  "range",
+  "color",
+  "checkbox",
+  "radio",
+];
 /** Every way JSX can write a type attribute. */
-const typeAttributes = (type: string) => [`type="${type}"`, `type='${type}'`, `type={"${type}"}`, `type={'${type}'}`];
+const typeAttributes = (type: string) => [
+  `type="${type}"`,
+  `type='${type}'`,
+  `type={"${type}"}`,
+  `type={'${type}'}`,
+];
 const FORBIDDEN = ["title=", "<select", "<datalist", ...NATIVE_TYPES.flatMap(typeAttributes)];
 
 const occurrences = (text: string, needle: string) => text.split(needle).length - 1;
@@ -23,7 +38,9 @@ describe("no native browser UI in the map", () => {
 
   it("has native checkbox and radio inputs only inside Check, Switch and Radio", () => {
     const found = files.flatMap((file) =>
-      FORBIDDEN.flatMap((needle) => Array<string>(occurrences(file.text, needle)).fill(`${file.name}: ${needle}`)),
+      FORBIDDEN.flatMap((needle) =>
+        Array<string>(occurrences(file.text, needle)).fill(`${file.name}: ${needle}`),
+      ),
     );
     expect(found.sort()).toEqual([
       'controls.tsx: type="checkbox"',

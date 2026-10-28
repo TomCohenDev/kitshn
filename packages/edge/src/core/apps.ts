@@ -61,7 +61,9 @@ export function appRestart(
   if (refusal !== null) return none(refusal);
   if (!last) return none("kitshn has no finished deploy of this app; the next deploy starts it.");
   if (isPreview(last.environment) && closed)
-    return none(`The pull request of the preview ${last.environment} is closed, so the preview does not come back.`);
+    return none(
+      `The pull request of the preview ${last.environment} is closed, so the preview does not come back.`,
+    );
   if (last.app === "static" && isPreview(last.environment))
     return none(`The preview ${last.environment} comes back on the next push to its pull request.`);
   const plan = agentDeployPlan(last, last.app === "compose" ? "redeploy" : "build", machine);

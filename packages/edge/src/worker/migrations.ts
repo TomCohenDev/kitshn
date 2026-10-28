@@ -68,9 +68,14 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   // 7: the audience tag of each Access application, for the Access check on tunnel ingress (K-603).
   ["ALTER TABLE access_objects ADD COLUMN aud TEXT NOT NULL DEFAULT ''"],
   // 8: the agent key that allowed a repo (K-718, K-819); null when the owner allowed it.
-  ["ALTER TABLE repos ADD COLUMN allowed_by_client TEXT", "ALTER TABLE repos ADD COLUMN allowed_by_name TEXT"],
+  [
+    "ALTER TABLE repos ADD COLUMN allowed_by_client TEXT",
+    "ALTER TABLE repos ADD COLUMN allowed_by_name TEXT",
+  ],
   // 9: the one-time codes of "Reset key" (K-1706). They hold no secret, unlike join codes.
-  ["CREATE TABLE rekey_codes (lookup TEXT PRIMARY KEY, machine_id TEXT NOT NULL, expires_at INTEGER NOT NULL)"],
+  [
+    "CREATE TABLE rekey_codes (lookup TEXT PRIMARY KEY, machine_id TEXT NOT NULL, expires_at INTEGER NOT NULL)",
+  ],
   // 10: the revision that a per-item undo reverses (K-1507); moves never join such an undo (K-1505).
   ["ALTER TABLE revisions ADD COLUMN item_undo INTEGER"],
   // 11: card icons. A static site keeps one small icon (K-1113); a machine keeps the system of its last status

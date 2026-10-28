@@ -360,9 +360,14 @@ export class Kitshn extends DurableObject<Env> {
     this.iconChangedAt = new Map(icons.map((row) => [row.id, row.changed_at]));
     this.accessWarnings = JSON.parse(this.meta("access_warnings") ?? "[]") as Array<string>;
     this.access = new Map(
-      this.sql<{ key: string; cf_id: string; aud: string; body: string; tried: string; error: string | null }>(
-        "SELECT key, cf_id, aud, body, tried, error FROM access_objects",
-      ).map((row) => [
+      this.sql<{
+        key: string;
+        cf_id: string;
+        aud: string;
+        body: string;
+        tried: string;
+        error: string | null;
+      }>("SELECT key, cf_id, aud, body, tried, error FROM access_objects").map((row) => [
         row.key,
         { key: row.key, cfId: row.cf_id, aud: row.aud, body: row.body, tried: row.tried, error: row.error },
       ]),
@@ -461,8 +466,17 @@ export class Kitshn extends DurableObject<Env> {
             new TextEncoder().encode(icon.svg).slice().buffer,
           );
         for (const { machine, os } of DEMO_MACHINES) {
-          this.sql("INSERT OR IGNORE INTO machines (id, body) VALUES (?, ?)", machine.id, JSON.stringify(machine));
-          this.sql("INSERT OR IGNORE INTO presence (id, online, last_seen, os) VALUES (?, 0, ?, ?)", machine.id, Date.now() - 3_600_000, os);
+          this.sql(
+            "INSERT OR IGNORE INTO machines (id, body) VALUES (?, ?)",
+            machine.id,
+            JSON.stringify(machine),
+          );
+          this.sql(
+            "INSERT OR IGNORE INTO presence (id, online, last_seen, os) VALUES (?, 0, ?, ?)",
+            machine.id,
+            Date.now() - 3_600_000,
+            os,
+          );
         }
       }
       // The demo's riffle card counts as deployed, so the card panel shows "Remove app" (K-909).
@@ -583,9 +597,19 @@ export class Kitshn extends DurableObject<Env> {
     const now = Date.now();
     const merge = undo === null ? this.movesToMerge(actor, now, changes) : null;
     const label =
-      undo === null ? "" : undo.item === null ? `Undo #${undo.revision}: ` : `Undo #${undo.revision} for ${undo.item}: `;
+      undo === null
+        ? ""
+        : undo.item === null
+          ? `Undo #${undo.revision}: `
+          : `Undo #${undo.revision} for ${undo.item}: `;
     const summary = merge
-      ? mergedSummary(merge.summary, applyChanges(before, invert(merge.previous)), before, after, merge.changes)
+      ? mergedSummary(
+          merge.summary,
+          applyChanges(before, invert(merge.previous)),
+          before,
+          after,
+          merge.changes,
+        )
       : label + summarize(before, after, changes);
     // A per-item undo is a change of its own (K-1507); only a whole undo marks its revision as undone.
     const undoes = undo?.item === null ? undo.revision : null;
@@ -670,7 +694,10 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1504: "Resume", after the Worker checked a passkey login of at most ten minutes. */
   private resume(caller: Caller) {
     if (!this.authorized(caller))
-      return Response.json({ error: "You have no control level on the kitshn admin (K-104)." }, { status: 403 });
+      return Response.json(
+        { error: "You have no control level on the kitshn admin (K-104)." },
+        { status: 403 },
+      );
     if (!this.state.paused) return Response.json({ revision: null });
     try {
       return Response.json({
@@ -970,7 +997,10 @@ export class Kitshn extends DurableObject<Env> {
     }
   }
 
-  private async handle(caller: Caller, message: ClientMessage): Promise<Extract<ServerMessage, { type: "result" }>> {
+  private async handle(
+    caller: Caller,
+    message: ClientMessage,
+  ): Promise<Extract<ServerMessage, { type: "result" }>> {
     try {
       const { revision, notes } =
         message.type === "apply"
@@ -1014,7 +1044,8 @@ export class Kitshn extends DurableObject<Env> {
         { status: 403 },
       );
     }
-    if (path.startsWith("/api/icons/") && request.method === "GET") return this.icon(path.slice("/api/icons/".length));
+    if (path.startsWith("/api/icons/") && request.method === "GET")
+      return this.icon(path.slice("/api/icons/".length));
     if (path === "/api/ws") {
       if (request.headers.get("upgrade") !== "websocket")
         return new Response("Expected a WebSocket.", { status: 426 });
@@ -1030,9 +1061,15 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/api/machines" && request.method === "POST")
       return this.addMachine(caller, await request.json().catch(() => null), new URL(request.url).origin);
     if (path.startsWith("/api/machines/") && path.endsWith("/rotate-key") && request.method === "POST")
-      return this.rotateFromPanel(caller, decodeURIComponent(path.slice("/api/machines/".length, -"/rotate-key".length)));
+      return this.rotateFromPanel(
+        caller,
+        decodeURIComponent(path.slice("/api/machines/".length, -"/rotate-key".length)),
+      );
     if (path.startsWith("/api/machines/") && path.endsWith("/reset-key") && request.method === "POST")
-      return this.resetKey(caller, decodeURIComponent(path.slice("/api/machines/".length, -"/reset-key".length)));
+      return this.resetKey(
+        caller,
+        decodeURIComponent(path.slice("/api/machines/".length, -"/reset-key".length)),
+      );
     if (path.startsWith("/api/machines/") && request.method === "POST")
       return this.updateMachine(
         caller,
@@ -1072,8 +1109,13 @@ export class Kitshn extends DurableObject<Env> {
       const kind = query.get("kind");
       const id = query.get("id");
       if ((kind !== "card" && kind !== "circle") || !id)
-        return Response.json({ error: "Name the item with kind=card or kind=circle and an id." }, { status: 400 });
-      return Response.json(undoAnswer(this.state, this.storedRevisions(), caller.actor, { item: { kind, id } }));
+        return Response.json(
+          { error: "Name the item with kind=card or kind=circle and an id." },
+          { status: 400 },
+        );
+      return Response.json(
+        undoAnswer(this.state, this.storedRevisions(), caller.actor, { item: { kind, id } }),
+      );
     }
     if (path === "/api/undo" && request.method === "GET") {
       // K-1508: History asks once for the caller's newest row, by the same checks as the undo.
@@ -1213,7 +1255,8 @@ export class Kitshn extends DurableObject<Env> {
     for (const [id, value] of this.presence)
       if (value.online && this.openSocket(id) === null) this.setPresence(id, false);
     // K-909: a restart closed every socket without a close event, so no stop stays sent forever.
-    for (const id of this.state.machines.keys()) if (this.openSocket(id) === null) requeueDowns(this.query, id);
+    for (const id of this.state.machines.keys())
+      if (this.openSocket(id) === null) requeueDowns(this.query, id);
   }
 
   /**
@@ -1309,7 +1352,11 @@ export class Kitshn extends DurableObject<Env> {
     if (!now || !deepEqual(now.key, machine.key))
       return this.refuseSocket(socket, machine, "The key of this machine changed during the check.");
     if (!valid)
-      return this.refuseSocket(socket, machine, `The answer does not carry a signature of ${plan.fingerprint}.`);
+      return this.refuseSocket(
+        socket,
+        machine,
+        `The answer does not carry a signature of ${plan.fingerprint}.`,
+      );
     this.acceptMachine(socket, { ...attachment, answered: true, check: "signed" });
   }
 
@@ -1326,7 +1373,8 @@ export class Kitshn extends DurableObject<Env> {
     if (machine.key?.kind !== "public")
       return this.refuseSocket(socket, machine, "A machine without a key gets one on its next connection.");
     const publicKey = parsePublicKey(message["publicKey"]);
-    if (publicKey === null) return this.refuseSocket(socket, machine, "The rotation has no valid public key.");
+    if (publicKey === null)
+      return this.refuseSocket(socket, machine, "The rotation has no valid public key.");
     const key = await this.publicKey(publicKey);
     const valid = await verifyText(
       machine.key.publicKey,
@@ -1337,7 +1385,11 @@ export class Kitshn extends DurableObject<Env> {
     if (!now || !deepEqual(now.key, machine.key))
       return this.refuseSocket(socket, machine, "The key of this machine changed during the rotation.");
     if (!valid)
-      return this.refuseSocket(socket, machine, `The rotation does not carry a signature of ${machine.key.fingerprint}.`);
+      return this.refuseSocket(
+        socket,
+        machine,
+        `The rotation does not carry a signature of ${machine.key.fingerprint}.`,
+      );
     this.setKey(
       machine,
       key,
@@ -1383,7 +1435,11 @@ export class Kitshn extends DurableObject<Env> {
       return this.answerChallenge(socket, attachment, machine, message);
     // K-1704: until the check passes, kitshn reads nothing else from the socket.
     if (attachment.check === "waiting")
-      return this.refuseSocket(socket, machine, "The daemon sent a message before it answered the challenge.");
+      return this.refuseSocket(
+        socket,
+        machine,
+        "The daemon sent a message before it answered the challenge.",
+      );
     if (!isRecord(message)) return;
     // K-1708: a connection on the token alone only reports; it changes no site, volume or job.
     if (attachment.check === "token" && message.type !== "status" && message.type !== "sample") return;
@@ -1424,9 +1480,14 @@ export class Kitshn extends DurableObject<Env> {
       await this.liveIcon(machine, message.site, message.icon);
     } else if (message.type === "volumes" && Array.isArray(message.volumes)) {
       const volumes = message.volumes
-        .filter((item) => isRecord(item) && typeof item["name"] === "string" && typeof item["project"] === "string")
+        .filter(
+          (item) => isRecord(item) && typeof item["name"] === "string" && typeof item["project"] === "string",
+        )
         .slice(0, 200)
-        .map((item): ProjectVolume => ({ name: item.name.slice(0, 255), project: item.project.slice(0, 63) }));
+        .map((item): ProjectVolume => ({
+          name: item.name.slice(0, 255),
+          project: item.project.slice(0, 63),
+        }));
       socket.serializeAttachment({ ...attachment, volumes } satisfies Attachment);
       this.sendMachine(machine);
     } else if (message.type === "jobResult" && typeof message.id === "number" && isRecord(message.result)) {
@@ -1446,7 +1507,10 @@ export class Kitshn extends DurableObject<Env> {
       const [{ taken } = { taken: 0 }] = this.sql<{ taken: number }>("SELECT changes() AS taken");
       // K-812: the source and params of a Compose deploy live only as long as its job.
       const [job] = taken
-        ? this.sql<{ command: string; actor: string }>("SELECT command, actor FROM jobs WHERE id = ?", message.id)
+        ? this.sql<{ command: string; actor: string }>(
+            "SELECT command, actor FROM jobs WHERE id = ?",
+            message.id,
+          )
         : [];
       const command = job ? (JSON.parse(job.command) as Command) : null;
       // K-909: undo never brings a deleted volume back, so History records the delete as an action once it ran.
@@ -1595,12 +1659,22 @@ export class Kitshn extends DurableObject<Env> {
     if (row.expires_at < Date.now() || !machine) {
       used();
       return Response.json(
-        { error: machine ? "This join code expired. Make a new one with Add machine." : "The machine of this join code is gone." },
+        {
+          error: machine
+            ? "This join code expired. Make a new one with Add machine."
+            : "The machine of this join code is gone.",
+        },
         { status: machine ? 410 : 404 },
       );
     }
     // K-1703: the key and the use of the code are one step.
-    this.setKey(machine, key, deviceActor(machine), `${machine.name} joined with the key ${key.fingerprint}`, used);
+    this.setKey(
+      machine,
+      key,
+      deviceActor(machine),
+      `${machine.name} joined with the key ${key.fingerprint}`,
+      used,
+    );
     return Response.json({ iv: row.iv, sealed: row.sealed });
   }
 
@@ -1615,7 +1689,10 @@ export class Kitshn extends DurableObject<Env> {
     const publicKey = parsePublicKey(body?.publicKey);
     const machineId = typeof body?.machineId === "string" ? body.machineId : "";
     if (!code || publicKey === null || !machineId)
-      return Response.json({ error: "Send the rekey code, the machine id and the public key." }, { status: 400 });
+      return Response.json(
+        { error: "Send the rekey code, the machine id and the public key." },
+        { status: 400 },
+      );
     const key = await this.publicKey(publicKey);
     const lookup = await joinLookup(code);
     const [row] = this.sql<{ machine_id: string; expires_at: number }>(
@@ -1623,17 +1700,31 @@ export class Kitshn extends DurableObject<Env> {
       lookup,
     );
     if (!row)
-      return Response.json({ error: "This rekey code is not valid, or someone used it already." }, { status: 404 });
+      return Response.json(
+        { error: "This rekey code is not valid, or someone used it already." },
+        { status: 404 },
+      );
     const machine = this.state.machines.get(row.machine_id);
     const used = () => this.sql("DELETE FROM rekey_codes WHERE lookup = ?", lookup);
-    const decision = rekeyDecision({ machineId: row.machine_id, expiresAt: row.expires_at }, machineId, machine, Date.now());
+    const decision = rekeyDecision(
+      { machineId: row.machine_id, expiresAt: row.expires_at },
+      machineId,
+      machine,
+      Date.now(),
+    );
     if (decision.kind === "refuse") {
       if (!decision.keepCode) used();
       return Response.json({ error: decision.reason }, { status: decision.status });
     }
     if (!machine) throw new Error(`rekeyDecision stored a key for the unknown machine ${row.machine_id}.`);
     // The key and the use of the code are one step, so a failed write keeps the code.
-    this.setKey(machine, key, deviceActor(machine), `${machine.name} got the key ${key.fingerprint} with a rekey code`, used);
+    this.setKey(
+      machine,
+      key,
+      deviceActor(machine),
+      `${machine.name} got the key ${key.fingerprint} with a rekey code`,
+      used,
+    );
     // K-1708: a connection on the token alone ends; the daemon connects again and signs.
     for (const socket of this.ctx.getWebSockets(machine.id))
       socket.close(4001, "This machine has a key now; connect again and sign.");
@@ -1670,7 +1761,12 @@ export class Kitshn extends DurableObject<Env> {
     const expiresAt = Date.now() + JOIN_CODE_MS;
     const newCode = () => {
       this.sql("DELETE FROM rekey_codes WHERE machine_id = ?", id);
-      this.sql("INSERT INTO rekey_codes (lookup, machine_id, expires_at) VALUES (?, ?, ?)", lookup, id, expiresAt);
+      this.sql(
+        "INSERT INTO rekey_codes (lookup, machine_id, expires_at) VALUES (?, ?, ?)",
+        lookup,
+        id,
+        expiresAt,
+      );
     };
     const answer = Response.json({ machineId: id, code, expiresAt, command: `kitshn rekey ${code}` });
     // K-1708: a machine without a key keeps its status connection until its first key arrives.
@@ -1683,7 +1779,13 @@ export class Kitshn extends DurableObject<Env> {
       return answer;
     }
     const old = machine.key.kind === "public" ? ` ${machine.key.fingerprint}` : "";
-    this.setKey(machine, { kind: "waiting", since: Date.now() }, caller.actor, `Reset the key${old} of ${machine.name}`, newCode);
+    this.setKey(
+      machine,
+      { kind: "waiting", since: Date.now() },
+      caller.actor,
+      `Reset the key${old} of ${machine.name}`,
+      newCode,
+    );
     for (const socket of this.ctx.getWebSockets(id))
       socket.close(KEY_RESET, "The owner reset the key of this machine.");
     return answer;
@@ -1773,7 +1875,9 @@ export class Kitshn extends DurableObject<Env> {
     // K-909: only a volume that the machine reports as orphaned, with the project from that report.
     const orphan =
       parsed.kind === "compose-volume-remove"
-        ? (target ? this.machineView(target).orphanVolumes : []).find((volume) => volume.name === parsed.volume)
+        ? (target ? this.machineView(target).orphanVolumes : []).find(
+            (volume) => volume.name === parsed.volume,
+          )
         : undefined;
     if (parsed.kind === "compose-volume-remove" && !orphan)
       return Response.json(
@@ -2017,7 +2121,9 @@ export class Kitshn extends DurableObject<Env> {
       for (const site of this.protectedSites(machine.id)) {
         const access = accessOf(site);
         if (access.kind === "pending")
-          console.warn(`kitshn writes the ingress of ${site.address} without the Access check: ${access.reason}.`);
+          console.warn(
+            `kitshn writes the ingress of ${site.address} without the Access check: ${access.reason}.`,
+          );
       }
       try {
         await api(
@@ -2093,7 +2199,8 @@ export class Kitshn extends DurableObject<Env> {
       (row) => JSON.parse(row.body) as Stack,
     );
     for (const change of stacksWithout(stacks, id)) {
-      if (change.after) this.sql("UPDATE stacks SET body = ? WHERE id = ?", JSON.stringify(change.after), change.id);
+      if (change.after)
+        this.sql("UPDATE stacks SET body = ? WHERE id = ?", JSON.stringify(change.after), change.id);
       else this.sql("DELETE FROM stacks WHERE id = ?", change.id);
     }
     return { _tag: "forget", id, before: null, after: null };
@@ -2475,7 +2582,14 @@ export class Kitshn extends DurableObject<Env> {
     const desired = this.desired(now);
     if (
       this.env.CLOUDFLARE_API_TOKEN &&
-      (hasAccessWork(desired, this.access, this.reachableAddresses(), loginHeld(this.meta("login_held") ?? "")) || this.launcherWork() || this.loginWork())
+      (hasAccessWork(
+        desired,
+        this.access,
+        this.reachableAddresses(),
+        loginHeld(this.meta("login_held") ?? ""),
+      ) ||
+        this.launcherWork() ||
+        this.loginWork())
     )
       next = now;
     // A failed tunnel, DNS or route write tries again after five minutes (K-410). Only a future retry
@@ -2532,9 +2646,10 @@ export class Kitshn extends DurableObject<Env> {
           { _tag: "kitshn", reason: `share with ${circle?.name ?? circleId} ended` },
           resolveEdits(this.state, [
             // K-521: the card leaves its stack, so the rest of the stack stays where it is.
-            ...stacksWithout(this.state.stacks.values(), resourceId).map(
-              (change): Edit => ({ _tag: "stack", ...change }),
-            ),
+            ...stacksWithout(this.state.stacks.values(), resourceId).map((change): Edit => ({
+              _tag: "stack",
+              ...change,
+            })),
             { _tag: "place", id: resourceId, after: to },
             { _tag: "shareSetting", resourceId, circleId, after: { ...setting, endsAt: null } },
           ]),
@@ -2569,7 +2684,9 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("DELETE FROM join_codes WHERE expires_at < ?", now);
       this.sql("DELETE FROM rekey_codes WHERE expires_at < ?", now);
       // K-1113: a removed card keeps its icon until this run, so a quick Undo keeps it; a deploy sends it again.
-      for (const { id } of this.sql<{ id: string }>("DELETE FROM icons WHERE id NOT IN (SELECT id FROM resources) RETURNING id")) {
+      for (const { id } of this.sql<{ id: string }>(
+        "DELETE FROM icons WHERE id NOT IN (SELECT id FROM resources) RETURNING id",
+      )) {
         // The same id can get a card again (K-1114), so memory forgets the icon too.
         this.iconHashes.delete(id);
         this.iconChangedAt.delete(id);
@@ -2602,11 +2719,16 @@ export class Kitshn extends DurableObject<Env> {
     const busy = this.signOutBusy();
     if (busy) return busy;
     const left = this.signOutLeft();
-    if (!left) return Response.json({ error: "Every session of the last sign-out ended already." }, { status: 409 });
+    if (!left)
+      return Response.json({ error: "Every session of the last sign-out ended already." }, { status: 409 });
     return this.finishSignOut(caller, true, async (api) => {
       const apps = await this.listSessionApps(api);
       if ("listFailed" in apps) return apps;
-      return revokeSessions(api, this.env.CLOUDFLARE_ACCOUNT_ID, "listFailed" in left ? apps : retryApps(left.left, apps));
+      return revokeSessions(
+        api,
+        this.env.CLOUDFLARE_ACCOUNT_ID,
+        "listFailed" in left ? apps : retryApps(left.left, apps),
+      );
     });
   }
 
@@ -2614,14 +2736,20 @@ export class Kitshn extends DurableObject<Env> {
   private signOutBusy(): Response | null {
     const since = Number(this.meta("sign_out_running") || 0);
     if (Date.now() - since < SIGN_OUT_RUN_MS)
-      return Response.json({ error: "A sign-out everywhere runs already. Try again in a minute." }, { status: 409 });
+      return Response.json(
+        { error: "A sign-out everywhere runs already. Try again in a minute." },
+        { status: 409 },
+      );
     return null;
   }
 
   /** K-110: the applications whose sessions a sign-out ends, or why kitshn could not list them. */
   private async listSessionApps(
     api: Api,
-  ): Promise<Array<{ readonly key: string; readonly cfId: string }> | { readonly ended: 0; readonly listFailed: string }> {
+  ): Promise<
+    | Array<{ readonly key: string; readonly cfId: string }>
+    | { readonly ended: 0; readonly listFailed: string }
+  > {
     const logins = new Set(
       ["pages", "files"].flatMap((host) => [
         `${host}.${this.env.KITSHN_ZONE}/login`,
@@ -2656,7 +2784,10 @@ export class Kitshn extends DurableObject<Env> {
     this.recordRevision(caller.actor, signOutSummary(outcome, retry));
     return "listFailed" in outcome
       ? Response.json({ error: signOutWarning(outcome) }, { status: 502 })
-      : Response.json({ ended: outcome.ended, failed: outcome.left.map((app) => `${app.key}: ${app.reason}`) });
+      : Response.json({
+          ended: outcome.ended,
+          failed: outcome.left.map((app) => `${app.key}: ${app.reason}`),
+        });
   }
 
   /** K-110: what the last sign-out left to do, or null when every session ended. */
@@ -2690,7 +2821,6 @@ export class Kitshn extends DurableObject<Env> {
     ].slice(0, RECENT_REVISIONS);
     this.broadcast();
   }
-
 
   /** K-106: the Access service tokens of the account, to pick a device member. */
   private async listDevices() {
@@ -2836,7 +2966,10 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-819: the agent key that allowed this repo has no agent circle anymore (keyRemoved). */
   private keyRemoved(gate: RepoGate) {
-    return keyRemoved(gate, (clientId) => circlesOf(this.state, { email: null, clientId, ip: null }, Date.now()).size > 0);
+    return keyRemoved(
+      gate,
+      (clientId) => circlesOf(this.state, { email: null, clientId, ip: null }, Date.now()).size > 0,
+    );
   }
 
   /** K-819: the repo id of a card that a deploy made, or null when kitshn does not know it. */
@@ -2869,7 +3002,12 @@ export class Kitshn extends DurableObject<Env> {
    * GitHub App, except during the pause. Block fails the repo's deploys and jobs that have not finished.
    * An agent key with "adds apps" allows a waiting repo too (K-718); `allowedBy` then names it.
    */
-  private async setRepoState(caller: Caller, repoId: string, body: unknown, allowedBy: AllowingAgent | null = null) {
+  private async setRepoState(
+    caller: Caller,
+    repoId: string,
+    body: unknown,
+    allowedBy: AllowingAgent | null = null,
+  ) {
     const state = isRecord(body) ? body["state"] : null;
     if (state !== "allowed" && state !== "blocked" && state !== "forget")
       return Response.json({ error: 'Send {"state": "allowed" | "blocked" | "forget"}.' }, { status: 400 });
@@ -3042,7 +3180,8 @@ export class Kitshn extends DurableObject<Env> {
         "SELECT * FROM deploys WHERE id = ?",
         String(input["deployId"] ?? ""),
       );
-      if (!row || row.repo_id !== deployer.repoId) return fail(404, "kitshn knows no such deploy of this repo.");
+      if (!row || row.repo_id !== deployer.repoId)
+        return fail(404, "kitshn knows no such deploy of this repo.");
       if (row.expires_at < Date.now() || row.state !== "planned")
         return fail(410, "This deploy expired or ended. Run it again.");
       // A blocked repo still tears down what it made (K-819).
@@ -3133,13 +3272,25 @@ export class Kitshn extends DurableObject<Env> {
           );
         }
         // A teardown skips the agent machine check (K-819); the label and address checks still apply.
-        if (result.kind === "deploy" && !mayDeployOn(this.state, allowedBy?.clientId ?? null, existing.machine, Date.now()))
-          return Response.json({ error: `${existing.name} runs on a machine that it may no longer use.${agentLimit}` }, { status: 409 });
+        if (
+          result.kind === "deploy" &&
+          !mayDeployOn(this.state, allowedBy?.clientId ?? null, existing.machine, Date.now())
+        )
+          return Response.json(
+            { error: `${existing.name} runs on a machine that it may no longer use.${agentLimit}` },
+            { status: 409 },
+          );
         machineId = existing.machine;
         const running = this.state.machines.get(existing.machine);
-        if (result.kind === "deploy" && running && !this.machineView(running).status?.capabilities?.includes("compose-guard"))
+        if (
+          result.kind === "deploy" &&
+          running &&
+          !this.machineView(running).status?.capabilities?.includes("compose-guard")
+        )
           return Response.json(
-            { error: `Update the daemon on ${running.name} first: it does not check Compose settings yet (K-818).` },
+            {
+              error: `Update the daemon on ${running.name} first: it does not check Compose settings yet (K-818).`,
+            },
             { status: 409 },
           );
       } else if (result.kind === "deploy") {
@@ -3423,7 +3574,9 @@ export class Kitshn extends DurableObject<Env> {
     const allowedBy = this.allowingAgent(row.repo_id);
     if (!mayDeployOn(this.state, allowedBy?.clientId ?? null, machine.id, Date.now()))
       return Response.json(
-        { error: `The agent key ${allowedBy?.name} that allowed this repo no longer manages ${machine.name} (K-819).` },
+        {
+          error: `The agent key ${allowedBy?.name} that allowed this repo no longer manages ${machine.name} (K-819).`,
+        },
         { status: 409 },
       );
     const card = this.ensureCard(row, deployer, "site.compose", machine.id);
@@ -3533,7 +3686,8 @@ export class Kitshn extends DurableObject<Env> {
     if (typeof jwt !== "string" || !jwt)
       return Response.json({ error: "The deploy needs the upload completion token." }, { status: 400 });
     const headers = parseHeadersFile(headersValue);
-    if (typeof headers === "object" && headers !== null) return Response.json({ error: headers.error }, { status: 400 });
+    if (typeof headers === "object" && headers !== null)
+      return Response.json({ error: headers.error }, { status: 400 });
     const icon = parseSiteIcon(iconValue);
     if (typeof icon === "string") return Response.json({ error: icon }, { status: 400 });
     const card = this.ensureCard(row, deployer, "site.static", null);
@@ -3673,7 +3827,10 @@ export class Kitshn extends DurableObject<Env> {
     } catch {
       return Response.json({ error: "The icon address is not valid." }, { status: 404 });
     }
-    const [row] = this.sql<{ type: string; bytes: ArrayBuffer }>("SELECT type, bytes FROM icons WHERE id = ?", id);
+    const [row] = this.sql<{ type: string; bytes: ArrayBuffer }>(
+      "SELECT type, bytes FROM icons WHERE id = ?",
+      id,
+    );
     if (!row) return Response.json({ error: `kitshn has no icon for ${id}.` }, { status: 404 });
     return new Response(row.bytes, {
       headers: {
@@ -3774,7 +3931,9 @@ export class Kitshn extends DurableObject<Env> {
     // A key that publishes also sees the Everyone circle, where its published cards sit.
     const visible = (id: string) => {
       const circle = this.state.circles.get(id);
-      return own.has(id) || (rights.includes("publishes") && circle !== undefined && isEveryoneCircle(circle));
+      return (
+        own.has(id) || (rights.includes("publishes") && circle !== undefined && isEveryoneCircle(circle))
+      );
     };
     // K-718: the cards of repos that this key allowed (K-819); only these may become public.
     const added = new Set(
@@ -3787,7 +3946,14 @@ export class Kitshn extends DurableObject<Env> {
     const move = (edits: ReadonlyArray<Edit>) => {
       try {
         const changes = resolveEdits(this.state, edits);
-        const refusal = agentRefusal(this.state, applyChanges(this.state, changes), caller.visitor, changes, now, added);
+        const refusal = agentRefusal(
+          this.state,
+          applyChanges(this.state, changes),
+          caller.visitor,
+          changes,
+          now,
+          added,
+        );
         if (refusal) return Response.json({ error: refusal }, { status: 403 });
         return Response.json({ revision: this.commit(agent.actor, changes, null) });
       } catch (error) {
@@ -3800,7 +3966,9 @@ export class Kitshn extends DurableObject<Env> {
         rights,
         // K-819: with "may add apps", the waiting repos that the key may allow.
         repos: rights.includes("addsApps")
-          ? this.sql<RepoRow>("SELECT * FROM repos WHERE state = 'waiting' AND gone_at IS NULL ORDER BY first_seen DESC").map((row) => ({
+          ? this.sql<RepoRow>(
+              "SELECT * FROM repos WHERE state = 'waiting' AND gone_at IS NULL ORDER BY first_seen DESC",
+            ).map((row) => ({
               repoId: row.repo_id,
               name: row.name,
               branch: row.branch,
@@ -3866,7 +4034,10 @@ export class Kitshn extends DurableObject<Env> {
       // K-718, K-909: an agent key removes nothing, also no orphaned volume.
       const command = isRecord(body) && isRecord(body["command"]) ? body["command"] : null;
       if (command?.["kind"] === "compose-volume-remove")
-        return Response.json({ error: "An agent key does not delete volumes (K-718, K-909)." }, { status: 403 });
+        return Response.json(
+          { error: "An agent key does not delete volumes (K-718, K-909)." },
+          { status: 403 },
+        );
       // Only the machines whose cards it manages; a label job could land on any machine.
       if (typeof machineId !== "string" || !agentMayRunOn(this.state, caller.visitor, machineId, Date.now()))
         return Response.json(
@@ -3886,14 +4057,16 @@ export class Kitshn extends DurableObject<Env> {
       const sender = row ? (JSON.parse(row.visitor) as Visitor).clientId : null;
       const [job] = sender !== null && sender === caller.visitor.clientId ? this.recentJobs(1, 4000, id) : [];
       // Only its own jobs: their state, exit code and output.
-      if (!job)
-        return Response.json({ error: `This key sent no job ${id}.` }, { status: 404 });
+      if (!job) return Response.json({ error: `This key sent no job ${id}.` }, { status: 404 });
       return Response.json(job);
     }
     if (path.startsWith("/agent/repos/") && request.method === "POST") {
       // K-1504: the pause stops agent keys.
       if (this.state.paused)
-        return Response.json({ error: "kitshn is paused (Emergency pause). Agent keys wait until Resume." }, { status: 423 });
+        return Response.json(
+          { error: "kitshn is paused (Emergency pause). Agent keys wait until Resume." },
+          { status: 423 },
+        );
       const repoId = decodeURIComponent(path.slice("/agent/repos/".length));
       const body: unknown = await request.json().catch(() => null);
       const [row] = this.sql<RepoRow>("SELECT * FROM repos WHERE repo_id = ?", repoId);
@@ -3905,15 +4078,24 @@ export class Kitshn extends DurableObject<Env> {
       );
       if (refusal) return Response.json({ error: refusal.error }, { status: refusal.status });
       // An agent circle names this key, so its device member exists.
-      if (device?._tag !== "device") throw new Error("An agent key without its device member allowed a repo.");
-      return this.setRepoState(agent, repoId, { state: "allowed" }, { clientId: device.clientId, name: device.name });
+      if (device?._tag !== "device")
+        throw new Error("An agent key without its device member allowed a repo.");
+      return this.setRepoState(
+        agent,
+        repoId,
+        { state: "allowed" },
+        { clientId: device.clientId, name: device.name },
+      );
     }
     if (path === "/agent/deploy" && request.method === "POST") {
       const body: unknown = await request.json().catch(() => null);
       const card = isRecord(body) && typeof body["card"] === "string" ? body["card"] : null;
       const mode = isRecord(body) ? body["mode"] : null;
       if (card === null || (mode !== "redeploy" && mode !== "build"))
-        return Response.json({ error: 'Send {"card": <id>, "mode": "redeploy" | "build"}.' }, { status: 400 });
+        return Response.json(
+          { error: 'Send {"card": <id>, "mode": "redeploy" | "build"}.' },
+          { status: 400 },
+        );
       if (!cardsControlledBy(this.state, caller.visitor, Date.now()).has(card))
         return Response.json({ error: `This key has no control on the card "${card}".` }, { status: 403 });
       const row = this.lastDone(card);
@@ -3939,11 +4121,17 @@ export class Kitshn extends DurableObject<Env> {
     const machine = machineId === null ? undefined : this.state.machines.get(machineId);
     if (!machine || this.state.resources.get(card)?.machine !== machine.id)
       return "This app no longer runs on the machine of its last deploy.";
-    return machine.labels.includes("deploy") ? null : "The machine of this app no longer has the label deploy (K-610).";
+    return machine.labels.includes("deploy")
+      ? null
+      : "The machine of this app no longer has the label deploy (K-610).";
   }
 
   /** K-718: queues the start of the last build that came up; kitshn makes the job, the key reads it. */
-  private agentRedeploy(caller: Caller, machineId: string, command: Extract<Command, { kind: "compose-redeploy" }>) {
+  private agentRedeploy(
+    caller: Caller,
+    machineId: string,
+    command: Extract<Command, { kind: "compose-redeploy" }>,
+  ) {
     const now = Date.now();
     const id = this.ctx.storage.transactionSync(() => {
       failQueuedDowns(this.query, command.project, REPLACED);
@@ -3975,7 +4163,10 @@ export class Kitshn extends DurableObject<Env> {
     try {
       repo = await this.dispatchBuild(repoId, branch);
     } catch (error) {
-      return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
+      return Response.json(
+        { error: error instanceof Error ? error.message : String(error) },
+        { status: 502 },
+      );
     }
     this.ctx.storage.transactionSync(() =>
       this.insertRevision(caller.actor, `Started a deploy of ${repo} from ${branch}`, [], null),
@@ -4087,7 +4278,8 @@ export class Kitshn extends DurableObject<Env> {
       kind === "page" || size <= ICON_LIMIT ? request.body.tee() : ([request.body, null] as const);
     // The icon comes first, before any R2 write, so a CPU limit while it decodes leaves no object behind.
     const head = sniffed ? await readStart(sniffed, kind === "page" ? PAGE_ICON_SCAN : ICON_LIMIT) : null;
-    const iconBytes = head === null ? null : kind === "page" ? pageDataIcon(new TextDecoder().decode(head)) : head;
+    const iconBytes =
+      head === null ? null : kind === "page" ? pageDataIcon(new TextDecoder().decode(head)) : head;
     const iconKind = iconBytes !== null && iconBytes.length <= ICON_LIMIT ? iconType(iconBytes) : null;
     // The stream fails when the body is not exactly Content-Length bytes, so the limit holds.
     const { readable, writable } = new FixedLengthStream(size);
@@ -4112,29 +4304,30 @@ export class Kitshn extends DurableObject<Env> {
       group: null,
       machine: null,
     };
-    const record = () => this.ctx.storage.transactionSync(() => {
-      this.sql(
-        `INSERT INTO library (id, kind, title, file_name, thread, machine, size, content_type, created_at, source)
+    const record = () =>
+      this.ctx.storage.transactionSync(() => {
+        this.sql(
+          `INSERT INTO library (id, kind, title, file_name, thread, machine, size, content_type, created_at, source)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        item.id,
-        item.kind,
-        item.title,
-        item.fileName,
-        item.thread,
-        item.machine,
-        item.size,
-        item.contentType,
-        item.createdAt,
-        source,
-      );
-      this.putResource(resource);
-      if (!place)
-        return this.insertRevision(caller.actor, `Added the ${kind} ${title} to the tray`, [], null);
-      // The UI asks before a drop makes a card public (K-210); an agent tool must ask the same way (K-715).
-      const changes: Array<Change> = [{ _tag: "place", id: item.id, before: null, after: place }];
-      this.persist(changes);
-      return this.insertRevision(caller.actor, `Added the ${kind} ${title} on the map`, changes, null);
-    });
+          item.id,
+          item.kind,
+          item.title,
+          item.fileName,
+          item.thread,
+          item.machine,
+          item.size,
+          item.contentType,
+          item.createdAt,
+          source,
+        );
+        this.putResource(resource);
+        if (!place)
+          return this.insertRevision(caller.actor, `Added the ${kind} ${title} to the tray`, [], null);
+        // The UI asks before a drop makes a card public (K-210); an agent tool must ask the same way (K-715).
+        const changes: Array<Change> = [{ _tag: "place", id: item.id, before: null, after: place }];
+        this.persist(changes);
+        return this.insertRevision(caller.actor, `Added the ${kind} ${title} on the map`, changes, null);
+      });
     let revision: number;
     try {
       revision = record();
@@ -4143,7 +4336,8 @@ export class Kitshn extends DurableObject<Env> {
       await bucket.delete(objectKey(item)).catch(() => undefined);
       throw error;
     }
-    if (iconBytes !== null && iconKind !== null) await this.setIcon(item.id, { bytes: iconBytes, type: iconKind });
+    if (iconBytes !== null && iconKind !== null)
+      await this.setIcon(item.id, { bytes: iconBytes, type: iconKind });
     this.load();
     this.broadcast();
     return Response.json({ id: item.id, address: resource.addresses[0], revision }, { status: 201 });
@@ -4180,7 +4374,12 @@ export class Kitshn extends DurableObject<Env> {
         id,
       );
       this.sql("DELETE FROM library WHERE id = ?", id);
-      this.insertRevision(caller.actor, `Deleted the ${item.kind} ${item.title}`, [this.forgetCard(id)], null);
+      this.insertRevision(
+        caller.actor,
+        `Deleted the ${item.kind} ${item.title}`,
+        [this.forgetCard(id)],
+        null,
+      );
     });
     this.load();
     this.broadcast();
@@ -4299,7 +4498,9 @@ export class Kitshn extends DurableObject<Env> {
     if (rowsWithoutAud(this.access).length === 0 || this.audRetryAt > now) return 0;
     try {
       // In the lock, so a deploy's Access sync never writes a row between the read and the put.
-      return await this.withAccessLock(() => fillAudiences(this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID));
+      return await this.withAccessLock(() =>
+        fillAudiences(this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID),
+      );
     } catch (error) {
       console.warn(`kitshn could not read the audience tags of Access: ${String(error)}`);
       return 1;
@@ -4392,8 +4593,7 @@ export class Kitshn extends DurableObject<Env> {
       // A policy that the sync just made goes on the App Launcher in the same run.
       await this.syncLauncher(api, false);
 
-      changed ||=
-        daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
+      changed ||= daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
     }
     if (changed) this.broadcast();
     await this.scheduleAlarm();
@@ -4442,7 +4642,9 @@ const repoGateOf = (row: RepoRow): RepoGate => ({
   firstSeen: row.first_seen,
   branch: row.branch,
   allowedBy:
-    row.allowed_by_client === null ? null : { clientId: row.allowed_by_client, name: row.allowed_by_name ?? "" },
+    row.allowed_by_client === null
+      ? null
+      : { clientId: row.allowed_by_client, name: row.allowed_by_name ?? "" },
 });
 
 interface DeployRow extends Record<string, SqlStorageValue> {
@@ -4476,7 +4678,11 @@ const DAY_MS = 24 * 3_600_000;
 const GITHUB_CALLS_PER_CHECK = 40;
 
 /** A machine as the actor of what its daemon does, such as a key rotation (K-1705). */
-const deviceActor = (machine: Machine): Actor => ({ _tag: "device", clientId: machine.clientId, name: machine.name });
+const deviceActor = (machine: Machine): Actor => ({
+  _tag: "device",
+  clientId: machine.clientId,
+  name: machine.name,
+});
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
@@ -4519,7 +4725,10 @@ const deployObject = (deployId: string, file: string) => `deploys/${deployId}/${
 /** The requester of a job that kitshn makes itself, such as a deploy (K-614). */
 
 /** K-1504: who paused and when, from the meta rows that a pause writes. */
-function parsePausedBy(actor: string | null, at: string | null): { readonly actor: Actor; readonly at: number } | null {
+function parsePausedBy(
+  actor: string | null,
+  at: string | null,
+): { readonly actor: Actor; readonly at: number } | null {
   if (!actor || !at) return null;
   return { actor: JSON.parse(actor) as Actor, at: Number(at) };
 }

@@ -67,7 +67,12 @@ export type Change =
       readonly before: ShareSetting | null;
       readonly after: ShareSetting | null;
     }
-  | { readonly _tag: "pause"; readonly id: "pause"; readonly before: PauseMode | null; readonly after: PauseMode | null }
+  | {
+      readonly _tag: "pause";
+      readonly id: "pause";
+      readonly before: PauseMode | null;
+      readonly after: PauseMode | null;
+    }
   | {
       readonly _tag: "stack";
       readonly id: string;
@@ -86,10 +91,16 @@ export type Change =
  * K-1506: a card that kitshn deleted outside an edit (a live site that stopped, a closed preview, a removed
  * machine, a deleted page or file). It only marks the card for the undo rules; nothing applies or reverses it.
  */
-export type Forget = { readonly _tag: "forget"; readonly id: string; readonly before: null; readonly after: null };
+export type Forget = {
+  readonly _tag: "forget";
+  readonly id: string;
+  readonly before: null;
+  readonly after: null;
+};
 
 /** K-1506: a revision with only forgets records an action, which has nothing to undo. */
-export const isAction = (changes: ReadonlyArray<Change | Forget>) => changes.every((change) => change._tag === "forget");
+export const isAction = (changes: ReadonlyArray<Change | Forget>) =>
+  changes.every((change) => change._tag === "forget");
 
 export type Actor =
   | { readonly _tag: "person"; readonly email: string }
@@ -205,7 +216,8 @@ export function withStackMates(state: State, changes: ReadonlyArray<Change>): Ar
       if (placed.has(mate)) continue;
       placed.add(mate);
       const before = state.places.get(mate) ?? null;
-      if (!deepEqual(before, change.after)) mates.push({ _tag: "place", id: mate, before, after: change.after });
+      if (!deepEqual(before, change.after))
+        mates.push({ _tag: "place", id: mate, before, after: change.after });
     }
   }
   return [...changes, ...mates];
@@ -224,7 +236,12 @@ export function removeAppChanges(state: State, id: string): Array<Change> {
     ...(state.places.has(id) ? [{ _tag: "place", id, after: null } as const] : []),
     ...[...state.shareSettings.keys()]
       .filter((key) => key.startsWith(`${id}/`))
-      .map((key): Edit => ({ _tag: "shareSetting", resourceId: id, circleId: key.slice(id.length + 1), after: null })),
+      .map((key): Edit => ({
+        _tag: "shareSetting",
+        resourceId: id,
+        circleId: key.slice(id.length + 1),
+        after: null,
+      })),
   ];
   return [...resolveEdits(state, edits), { _tag: "app", id, before: card, after: null }];
 }
@@ -239,7 +256,8 @@ export const invert = (changes: ReadonlyArray<Change>): Array<Change> =>
  */
 export const MOVE_MERGE_MS = 2 * 60 * 1000;
 
-const onlyMoved = (before: Circle, after: Circle) => deepEqual({ ...before, x: 0, y: 0 }, { ...after, x: 0, y: 0 });
+const onlyMoved = (before: Circle, after: Circle) =>
+  deepEqual({ ...before, x: 0, y: 0 }, { ...after, x: 0, y: 0 });
 
 /** K-1505: a card or circle that lands somewhere: a drop from the tray, a new circle, or a move. */
 const lands = (change: Change) =>
@@ -260,7 +278,8 @@ export function mergeMoves(
   now: number,
   changes: ReadonlyArray<Change>,
 ): Array<Change> | null {
-  if (previous.undoes !== null || !deepEqual(previous.actor, actor) || now - previous.at > MOVE_MERGE_MS) return null;
+  if (previous.undoes !== null || !deepEqual(previous.actor, actor) || now - previous.at > MOVE_MERGE_MS)
+    return null;
   if (previous.changes.length === 0 || !previous.changes.every(lands) || !changes.every(isMove)) return null;
   const key = (change: Change) => `${change._tag}:${change.id}`;
   const merged = new Map(previous.changes.map((change) => [key(change), change]));
@@ -284,7 +303,8 @@ export function mergedSummary(
   merged: ReadonlyArray<Change>,
 ): string {
   if (shareDiff(before, after).length > 0) return summarize(start, after, merged);
-  if (first.startsWith("Moved ") || first.endsWith(" and moved it") || first.endsWith(" and moved them")) return first;
+  if (first.startsWith("Moved ") || first.endsWith(" and moved it") || first.endsWith(" and moved them"))
+    return first;
   return `${first}${merged.length === 1 ? " and moved it" : " and moved them"}`;
 }
 
@@ -304,7 +324,11 @@ export type RevisionTarget = Pick<Change | Forget, "_tag" | "id"> & {
 
 export const targetOf = (change: Change | Forget): RevisionTarget =>
   change._tag === "stack"
-    ? { _tag: "stack", id: change.id, members: [change.before?.members ?? null, change.after?.members ?? null] }
+    ? {
+        _tag: "stack",
+        id: change.id,
+        members: [change.before?.members ?? null, change.after?.members ?? null],
+      }
     : { _tag: change._tag, id: change.id };
 
 /** A big revision (the setup) sends at most this many items, so the snapshot stays small. */
@@ -365,7 +389,10 @@ export function touches(change: Change, item: Item): boolean {
     case "shareSetting":
       return change.id.startsWith(`${item.id}/`);
     case "stack":
-      return (change.before?.members.includes(item.id) ?? false) !== (change.after?.members.includes(item.id) ?? false);
+      return (
+        (change.before?.members.includes(item.id) ?? false) !==
+        (change.after?.members.includes(item.id) ?? false)
+      );
     case "circle":
     case "pause":
       return false;
@@ -392,7 +419,10 @@ export function itemParts(changes: ReadonlyArray<Change>, item: Item): Array<Cha
     change._tag === "circle" && change.id === item.id && change.before ? [change.before] : [],
   )[0];
   const inside = (change: Change) =>
-    change._tag === "place" && change.before !== null && circleBefore !== undefined && insideCircle(change.before, circleBefore);
+    change._tag === "place" &&
+    change.before !== null &&
+    circleBefore !== undefined &&
+    insideCircle(change.before, circleBefore);
   return changes.filter((change) => touches(change, item) || (dragged && inside(change)));
 }
 
@@ -407,7 +437,8 @@ function footprint(changes: ReadonlyArray<Change | Forget>, state: State, pool: 
   const points: Array<Point> = [];
   for (const change of changes) {
     if (change._tag === "place" || change._tag === "app" || change._tag === "forget") cards.add(change.id);
-    if (change._tag === "place") points.push(...[change.before, change.after].filter((point) => point !== null));
+    if (change._tag === "place")
+      points.push(...[change.before, change.after].filter((point) => point !== null));
     if (change._tag === "circle") changed.add(change.id);
     if (change._tag === "stack")
       for (const id of [...(change.before?.members ?? []), ...(change.after?.members ?? [])]) cards.add(id);
@@ -427,7 +458,9 @@ function footprint(changes: ReadonlyArray<Change | Forget>, state: State, pool: 
 }
 
 const circleShapes = (changes: ReadonlyArray<Change | Forget>) =>
-  changes.flatMap((change) => (change._tag === "circle" ? [change.before, change.after].filter((c) => c !== null) : []));
+  changes.flatMap((change) =>
+    change._tag === "circle" ? [change.before, change.after].filter((c) => c !== null) : [],
+  );
 
 /**
  * K-1506: whether two sets of changes depend on each other: they touch the same card, or one changes a
@@ -467,7 +500,9 @@ export function undoTarget(
   actor: Actor,
   target: { readonly revision: number } | { readonly item: Item },
 ): { readonly revision: number; readonly changes: ReadonlyArray<Change> } {
-  const undone = new Set(revisions.flatMap((revision) => (revision.undoes === null ? [] : [revision.undoes])));
+  const undone = new Set(
+    revisions.flatMap((revision) => (revision.undoes === null ? [] : [revision.undoes])),
+  );
   const own = revisions
     .filter(
       (revision) =>
@@ -481,10 +516,16 @@ export function undoTarget(
   let changes: ReadonlyArray<Change>;
   if ("revision" in target) {
     const asked = revisions.find((revision) => revision.id === target.revision);
-    if (!asked) throw new RuleError(`Revision #${target.revision} does not exist, or it is older than the history keeps.`);
+    if (!asked)
+      throw new RuleError(
+        `Revision #${target.revision} does not exist, or it is older than the history keeps.`,
+      );
     if (isAction(asked.changes))
-      throw new RuleError(`Revision #${asked.id} records an action, not a change, so it has nothing to undo.`);
-    if (asked.undoes !== null) throw new RuleError(`Revision #${asked.id} is an undo. Make the change again instead.`);
+      throw new RuleError(
+        `Revision #${asked.id} records an action, not a change, so it has nothing to undo.`,
+      );
+    if (asked.undoes !== null)
+      throw new RuleError(`Revision #${asked.id} is an undo. Make the change again instead.`);
     if (undone.has(asked.id)) throw new RuleError(`Revision #${asked.id} is undone already.`);
     found = own[0];
     if (found?.id !== asked.id)
@@ -503,7 +544,9 @@ export function undoTarget(
     // The rest of the revision can depend on this part, such as a circle that opened while the card left it.
     const rest = all.filter((change) => !changes.includes(change));
     if (rest.length > 0 && overlaps(changes, rest, state))
-      throw new RuleError(`#${found.id} "${found.summary}" changed more that depends on this item: undo the whole change instead.`);
+      throw new RuleError(
+        `#${found.id} "${found.summary}" changed more that depends on this item: undo the whole change instead.`,
+      );
   }
   const start = found.id;
   const later = revisions
@@ -521,7 +564,9 @@ export function undoTarget(
       `#${later.id} "${later.summary}" changed the same cards or circles later, so this undo no longer fits. Change it by hand.`,
     );
   // A card that is gone gets nothing back, also when a later card has its id; an app removal restores its card.
-  const restored = new Set(changes.flatMap((change) => (change._tag === "app" && change.before ? [change.id] : [])));
+  const restored = new Set(
+    changes.flatMap((change) => (change._tag === "app" && change.before ? [change.id] : [])),
+  );
   const missing = changes
     .flatMap((change) =>
       change._tag === "place" && change.before
@@ -533,10 +578,10 @@ export function undoTarget(
             : [],
     )
     .find((id) => !state.resources.has(id) && !restored.has(id));
-  if (missing !== undefined) throw new RuleError(`The card "${missing}" no longer exists, so this undo no longer fits.`);
+  if (missing !== undefined)
+    throw new RuleError(`The card "${missing}" no longer exists, so this undo no longer fits.`);
   return { revision: start, changes };
 }
-
 
 /** The first change whose current value is not its `before`, or null. */
 export function conflictOf(state: State, changes: ReadonlyArray<Change>): Change | null {
@@ -661,8 +706,11 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
   const pause = changes.find((change) => change._tag === "pause");
   if (pause) {
     if (pause.after === null) return "Resumed all shares";
-    if (pause.after === "keep-public") return "Paused all shares except public sites, apps, pages and files (K-1504)";
-    return pause.before ? "Closed public sites too: lockdown (K-1504)" : "Paused all shares: lockdown (K-1504)";
+    if (pause.after === "keep-public")
+      return "Paused all shares except public sites, apps, pages and files (K-1504)";
+    return pause.before
+      ? "Closed public sites too: lockdown (K-1504)"
+      : "Paused all shares: lockdown (K-1504)";
   }
   const diffs = shareDiff(before, after);
   if (diffs.length > 0) {
@@ -689,7 +737,9 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
         const removed = was.members.filter((member) => !is.members.includes(member));
         if (added.length > 0) return `Added ${names(added)} to ${is.name}`;
         if (removed.length > 0) return `Took ${names(removed)} out of ${is.name}`;
-        return was.name === is.name ? `Changed the stack ${is.name || id}` : `Renamed ${was.name} to ${is.name}`;
+        return was.name === is.name
+          ? `Changed the stack ${is.name || id}`
+          : `Renamed ${was.name} to ${is.name}`;
       })
       .join("; ");
   }
@@ -714,7 +764,10 @@ function rightChanges(before: Circle | null, after: Circle | null): Array<string
 }
 
 /** K-522: the stacks that change when a card is gone; a stack left with fewer than two cards goes. */
-export function stacksWithout(stacks: Iterable<Stack>, id: string): Array<{ id: string; after: Stack | null }> {
+export function stacksWithout(
+  stacks: Iterable<Stack>,
+  id: string,
+): Array<{ id: string; after: Stack | null }> {
   return [...stacks]
     .filter((stack) => stack.members.includes(id))
     .map((stack) => {
@@ -729,9 +782,9 @@ export function stacksWithout(stacks: Iterable<Stack>, id: string): Array<{ id: 
  */
 export function refuseResume(changes: Array<Change>): Array<Change> {
   const opens = (change: Change) =>
-    change._tag === "pause" && (!change.after || (change.before === "lockdown" && change.after === "keep-public"));
-  if (changes.some(opens))
-    throw new RuleError("Resume needs your passkey again: press Resume on the map.");
+    change._tag === "pause" &&
+    (!change.after || (change.before === "lockdown" && change.after === "keep-public"));
+  if (changes.some(opens)) throw new RuleError("Resume needs your passkey again: press Resume on the map.");
   return changes;
 }
 
@@ -746,7 +799,9 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
     (diff) => diff.to !== null && (diff.from === null || levelRank(diff.to) > levelRank(diff.from)),
   );
   if (raised)
-    throw new RuleError(`While paused, access only goes down: ${raised.resource.name} would gain ${raised.circle.name}.`);
+    throw new RuleError(
+      `While paused, access only goes down: ${raised.resource.name} would gain ${raised.circle.name}.`,
+    );
   const ends = (time: number | null | undefined) => time ?? Number.POSITIVE_INFINITY;
   for (const key of new Set([...before.shareSettings.keys(), ...after.shareSettings.keys()]))
     if (ends(after.shareSettings.get(key)?.endsAt) > ends(before.shareSettings.get(key)?.endsAt))
@@ -756,10 +811,14 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
     if (!old) continue;
     // A device stays the same member when its name or an agent right changes; only a right that turns on raises.
     const key = (member: Member) =>
-      JSON.stringify(member._tag === "device" ? { tokenId: member.tokenId, clientId: member.clientId } : member);
+      JSON.stringify(
+        member._tag === "device" ? { tokenId: member.tokenId, clientId: member.clientId } : member,
+      );
     const rights = (members: ReadonlyArray<Member>) =>
       members.flatMap((member) =>
-        member._tag === "device" ? AGENT_RIGHTS.filter((right) => member[right]).map((right) => `${key(member)}/${right}`) : [],
+        member._tag === "device"
+          ? AGENT_RIGHTS.filter((right) => member[right]).map((right) => `${key(member)}/${right}`)
+          : [],
       );
     const had = new Set([...old.members.map(key), ...rights(old.members)]);
     const has = new Set(circle.members.map(key));
@@ -772,7 +831,9 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
       ends(circle.endsAt) > ends(old.endsAt) ||
       levelRank(circle.level) > levelRank(old.level)
     )
-      throw new RuleError(`While paused, access only goes down: the circle ${circle.name} would let in more.`);
+      throw new RuleError(
+        `While paused, access only goes down: the circle ${circle.name} would let in more.`,
+      );
   }
 }
 
@@ -786,8 +847,11 @@ export function prepareUndo(state: State, original: ReadonlyArray<Change>): Arra
   const inverted = invert(original);
   const conflict = conflictOf(state, inverted);
   if (conflict?._tag === "app")
-    throw new RuleError(`A later deploy or removal changed the app "${conflict.id}", so this undo no longer fits (K-909).`);
-  if (conflict) throw new RuleError(`${conflict._tag} "${conflict.id}" changed since, so this undo no longer fits.`);
+    throw new RuleError(
+      `A later deploy or removal changed the app "${conflict.id}", so this undo no longer fits (K-909).`,
+    );
+  if (conflict)
+    throw new RuleError(`${conflict._tag} "${conflict.id}" changed since, so this undo no longer fits.`);
   // A card that joined a stack since then takes its stack along (K-521).
   const changes = refuseResume(withStackMates(state, inverted));
   const after = applyChanges(state, changes);

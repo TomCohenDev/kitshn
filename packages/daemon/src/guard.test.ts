@@ -2,7 +2,16 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { bindSources, composeFiles, composeRisks, envFileRisks, nestedSources, rawRisks, realpathOf, realpathOnDisk } from "./guard.ts";
+import {
+  bindSources,
+  composeFiles,
+  composeRisks,
+  envFileRisks,
+  nestedSources,
+  rawRisks,
+  realpathOf,
+  realpathOnDisk,
+} from "./guard.ts";
 
 const roots = ["/apps/a/src", "/apps/a/data", "/apps/a/logs", "/apps/a/sockets"] as const;
 const same = (path: string) => path;
@@ -75,7 +84,9 @@ describe("risky Compose settings (K-818)", () => {
     const exists = (path: string) => path === "/apps/a/src/etc" || !path.startsWith("/apps/a/src/etc");
     const real = (path: string) => realpathOf(path, (p) => links[p] ?? p, exists);
     expect(real("/apps/a/src/etc/systemd/system/ssh.service.d")).toBe("/etc/systemd/system/ssh.service.d");
-    const config = { services: { web: { volumes: [{ type: "bind", source: "/apps/a/src/etc/systemd", target: "/x" }] } } };
+    const config = {
+      services: { web: { volumes: [{ type: "bind", source: "/apps/a/src/etc/systemd", target: "/x" }] } },
+    };
     expect(composeRisks(config, "a", roots, real)).toEqual([
       "bind:/apps/a/src/etc/systemd",
       "link:/apps/a/src/etc/systemd",
@@ -86,13 +97,23 @@ describe("risky Compose settings (K-818)", () => {
     const config = {
       services: {
         web: {
-          build: { context: "/apps/a/src", dockerfile: "../../b/Dockerfile", tags: ["postgres:16"], cache_from: ["type=local,src=/"] },
+          build: {
+            context: "/apps/a/src",
+            dockerfile: "../../b/Dockerfile",
+            tags: ["postgres:16"],
+            cache_from: ["type=local,src=/"],
+          },
           image: "busybox:1.38",
           container_name: "b-web",
           logging: { driver: "fluentd", options: { "fluentd-address": "unix:///run/x.sock" } },
           networks: { "kitshn-edge": { aliases: ["other-db"] } },
         },
-        ok: { build: { context: "/apps/a/src" }, image: "a-ok", container_name: "a-ok", logging: { driver: "local", options: { "max-size": "10m" } } },
+        ok: {
+          build: { context: "/apps/a/src" },
+          image: "a-ok",
+          container_name: "a-ok",
+          logging: { driver: "local", options: { "max-size": "10m" } },
+        },
       },
       networks: { inner: { ipam: { config: [{ subnet: "169.254.0.0/16" }] } } },
       secrets: { s: { environment: "HOME" } },
@@ -112,13 +133,23 @@ describe("risky Compose settings (K-818)", () => {
   });
   it("names only the app's own service as an image, container or build tag", () => {
     const named = (name: string, tag: string) => ({
-      services: { web: { build: { context: "/apps/a/src", tags: [tag] }, image: name, container_name: name } },
+      services: {
+        web: { build: { context: "/apps/a/src", tags: [tag] }, image: name, container_name: name },
+      },
     });
     const preview = (config: unknown) => composeRisks(config, "a-pr-1", roots, same);
     expect(preview(named("a-pr-1-web", "a-pr-1-web:v2"))).toEqual([]);
     // Another app's project starts with this one's name: a-pr-12 owns a-pr-12-web.
-    expect(preview(named("a-pr-12-web", "a-pr-12-web:latest"))).toEqual(["build.tags", "container_name", "image"]);
-    expect(preview(named("a-pr-1-db", "a-pr-1-web:5000/x"))).toEqual(["build.tags", "container_name", "image"]);
+    expect(preview(named("a-pr-12-web", "a-pr-12-web:latest"))).toEqual([
+      "build.tags",
+      "container_name",
+      "image",
+    ]);
+    expect(preview(named("a-pr-1-db", "a-pr-1-web:5000/x"))).toEqual([
+      "build.tags",
+      "container_name",
+      "image",
+    ]);
   });
   it("needs an allowance for the shared kitshn-edge network, also under another key", () => {
     const config = {
@@ -133,7 +164,9 @@ describe("real apps (K-818)", () => {
   // `docker compose config --format json` of real repos, with placeholder params and values.
   const real = (repo: string) => {
     const project = `${repo}-prod`;
-    const config: unknown = JSON.parse(readFileSync(new URL(`fixtures/${repo}.config.json`, import.meta.url), "utf8"));
+    const config: unknown = JSON.parse(
+      readFileSync(new URL(`fixtures/${repo}.config.json`, import.meta.url), "utf8"),
+    );
     const folders = ["src", "data", "logs", "sockets"].map((folder) => `/apps/${project}/${folder}`);
     return composeRisks(config, project, [folders[0] ?? "", ...folders.slice(1)], same);
   };
@@ -146,7 +179,12 @@ describe("real apps (K-818)", () => {
 });
 
 describe("binds under other binds (K-818)", () => {
-  const bind = (source: string, readOnly = false) => ({ type: "bind", source, target: `/m${source}`, read_only: readOnly });
+  const bind = (source: string, readOnly = false) => ({
+    type: "bind",
+    source,
+    target: `/m${source}`,
+    read_only: readOnly,
+  });
   const app = (...services: Array<Array<ReturnType<typeof bind>>>) => ({
     services: Object.fromEntries(services.map((volumes, index) => [`s${index}`, { volumes }])),
   });
@@ -163,7 +201,10 @@ describe("binds under other binds (K-818)", () => {
   });
   // A link can change after the check: the app re-points it through a writable bind before a restart.
   it("refuses a bind or file source that is a link, also one that the repo ships", () => {
-    const links: Record<string, string> = { "/apps/a/data/link": "/apps/a/src/sub", "/apps/a/src/link": "/apps/a/src/sub" };
+    const links: Record<string, string> = {
+      "/apps/a/data/link": "/apps/a/src/sub",
+      "/apps/a/src/link": "/apps/a/src/sub",
+    };
     const real = (path: string) => links[path] ?? path;
     const check = (config: unknown) => composeRisks(config, "a", roots, real);
     expect(check(app([bind("/apps/a/src")], [bind("/apps/a/data/link")]))).toEqual([
@@ -205,7 +246,9 @@ describe("settings that need no allowance (K-818)", () => {
   });
   it("keeps build inputs and env files in the new source, which no running container can change", () => {
     const config = {
-      services: { web: { build: { context: "/apps/a/data", additional_contexts: { up: "/apps/a/data/x" } } } },
+      services: {
+        web: { build: { context: "/apps/a/data", additional_contexts: { up: "/apps/a/data/x" } } },
+      },
     };
     const uninterpolated = { services: { web: { env_file: ["/apps/a/data/.env"] } } };
     expect(risks(config, uninterpolated)).toEqual([
@@ -245,14 +288,19 @@ describe("Compose files of an app (K-818)", () => {
   const files = (present: ReadonlyArray<string>, file: string | null = null) =>
     composeFiles(source, file, (path) => present.includes(path), same);
   it("picks the files that Compose picks on its own: one main file and its override", () => {
-    expect(files(["/apps/a/src/compose.yml", "/apps/a/src/docker-compose.yml", "/apps/a/src/compose.override.yaml"])).toEqual([
-      "/apps/a/src/compose.yml",
-      "/apps/a/src/compose.override.yaml",
-    ]);
+    expect(
+      files([
+        "/apps/a/src/compose.yml",
+        "/apps/a/src/docker-compose.yml",
+        "/apps/a/src/compose.override.yaml",
+      ]),
+    ).toEqual(["/apps/a/src/compose.yml", "/apps/a/src/compose.override.yaml"]);
     expect(() => files([])).toThrow();
   });
   it("takes a named file only inside the source, and only when it exists", () => {
-    expect(files(["/apps/a/src/deploy/compose.yml"], "deploy/compose.yml")).toEqual(["/apps/a/src/deploy/compose.yml"]);
+    expect(files(["/apps/a/src/deploy/compose.yml"], "deploy/compose.yml")).toEqual([
+      "/apps/a/src/deploy/compose.yml",
+    ]);
     expect(() => files(["/apps/a/src/deploy/compose.yml"], "compose.yml")).toThrow();
     expect(() => files(["/apps/b/src/compose.yml"], "../../b/src/compose.yml")).toThrow();
     expect(() => files(["/etc/compose.yml"], "/etc/compose.yml")).toThrow();

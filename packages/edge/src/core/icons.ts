@@ -28,7 +28,13 @@ export function repoOwner(name: string): string | null {
     !owner.startsWith("-") &&
     !owner.endsWith("-") &&
     !owner.includes("--") &&
-    [...owner].every((char) => char === "-" || (char >= "a" && char <= "z") || (char >= "A" && char <= "Z") || (char >= "0" && char <= "9"));
+    [...owner].every(
+      (char) =>
+        char === "-" ||
+        (char >= "a" && char <= "z") ||
+        (char >= "A" && char <= "Z") ||
+        (char >= "0" && char <= "9"),
+    );
   return login && repo.length > 0 ? owner : null;
 }
 
@@ -43,13 +49,23 @@ export type CardIcon =
   | { readonly _tag: "kind" };
 
 /** K-1113, K-1114, K-1115: the kinds whose card shows a stored icon. */
-const STORED_ICON_KINDS: ReadonlySet<Resource["kind"]> = new Set(["site.static", "site.compose", "site.live", "page", "file"]);
+const STORED_ICON_KINDS: ReadonlySet<Resource["kind"]> = new Set([
+  "site.static",
+  "site.compose",
+  "site.live",
+  "page",
+  "file",
+]);
 
 /**
  * K-524: the own icon of a card, or its kind icon. `icons` are the stored icon hashes of the snapshot (K-1113),
  * and `os` is the system of the machine with the card's id.
  */
-export function cardIcon(resource: Resource, icons: Readonly<Record<string, string>>, os: MachineOs | null): CardIcon {
+export function cardIcon(
+  resource: Resource,
+  icons: Readonly<Record<string, string>>,
+  os: MachineOs | null,
+): CardIcon {
   const hash = icons[resource.id];
   if (STORED_ICON_KINDS.has(resource.kind) && hash !== undefined)
     return { _tag: "site", src: `/api/icons/${encodeURIComponent(resource.id)}?v=${hash}` };

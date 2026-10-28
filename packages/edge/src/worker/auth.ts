@@ -102,7 +102,10 @@ export async function freshCallerOf(request: Request, env: Env, now: number): Pr
   if (identity.issuedAt === null || now / 1000 - identity.issuedAt > FRESH_SECONDS)
     return "The passkey check is older than 10 minutes. Press Resume again.";
   const ip = request.headers.get("cf-connecting-ip");
-  return { visitor: { email: identity.email, clientId: null, ip }, actor: { _tag: "person", email: identity.email } };
+  return {
+    visitor: { email: identity.email, clientId: null, ip },
+    actor: { _tag: "person", email: identity.email },
+  };
 }
 
 /** The two login applications of a content host: `/login`, and `/login/passkey` with the passkey check. */

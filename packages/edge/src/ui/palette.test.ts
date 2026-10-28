@@ -8,13 +8,18 @@ import { Palette } from "./Palette.tsx";
 /** K-511, K-523: the palette takes the focus, and its keys act only on what the current query shows. */
 
 /** Opens the palette with the focus on another button, as the panel heading has it in the app; unmounts after. */
-function withPalette(entries: ReadonlyArray<PaletteEntry>, test: (input: HTMLInputElement, before: HTMLElement) => void) {
+function withPalette(
+  entries: ReadonlyArray<PaletteEntry>,
+  test: (input: HTMLInputElement, before: HTMLElement) => void,
+) {
   const root = document.createElement("div");
   const before = document.createElement("button");
   document.body.append(root, before);
   before.focus();
   try {
-    act(() => render(h(Palette, { initialQuery: "", onClose: () => act(() => render(null, root)), entries }), root));
+    act(() =>
+      render(h(Palette, { initialQuery: "", onClose: () => act(() => render(null, root)), entries }), root),
+    );
     const input = root.querySelector<HTMLInputElement>('input[aria-label="Find"]');
     if (!input) throw new Error("no input");
     test(input, before);

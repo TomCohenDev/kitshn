@@ -140,7 +140,8 @@ function undoItemAction(ctx: ActionContext, h: ActionHandlers, item: Item): Arra
     tip: `Undo your newest change to this ${item.kind}, and only its part of that change.`,
     run: () => h.undoItem(item),
   };
-  if (check.answer === null) return [{ ...base, label: check.slow ? `${label} (checking…)` : label, refused: CHECKING_TIP }];
+  if (check.answer === null)
+    return [{ ...base, label: check.slow ? `${label} (checking…)` : label, refused: CHECKING_TIP }];
   return [{ ...base, label, ...(check.answer.allowed ? {} : { refused: check.answer.reason }) }];
 }
 
@@ -150,10 +151,12 @@ export const isRelease = (version: string) => /^[0-9a-f]{12}$/.test(version);
 export const MACHINE_TIPS = {
   restart: "Restart the daemon. The tunnel keeps running, so apps and sites keep serving.",
   update: (version: string) => `Update daemon: install the daemon of release ${version}.`,
-  remove: "Remove machine: deletes its service token, its tunnel and its queue at once. History records it; Undo cannot bring it back.",
+  remove:
+    "Remove machine: deletes its service token, its tunnel and its queue at once. History records it; Undo cannot bring it back.",
 } as const;
 
-export const REMOVE_APP_TIP = "Remove app: take down what the deploy made and keep the volumes. Undo starts it again.";
+export const REMOVE_APP_TIP =
+  "Remove app: take down what the deploy made and keep the volumes. Undo starts it again.";
 
 /** K-205: the edit that gives a card its own level in a circle, or with null follows the circle again. */
 export function levelEdit(state: State, resource: Resource, circle: Circle, level: Level | null): Edit {
@@ -238,11 +241,17 @@ export function stackOntoEdits(
   edits.push({
     _tag: "stack",
     id,
-    after: { id, name: into?.name ?? targetName ?? "Stack", members: [...(into?.members ?? [target]), ...moving] },
+    after: {
+      id,
+      name: into?.name ?? targetName ?? "Stack",
+      members: [...(into?.members ?? [target]), ...moving],
+    },
   });
   const names = moving.flatMap((card) => state.resources.get(card)?.name ?? []).join(", ");
   const refused = refusal(state, edits);
-  return refused ? { refused } : { edits, done: `Stacked ${names} with ${into?.name ?? targetName ?? "the card"}.` };
+  return refused
+    ? { refused }
+    : { edits, done: `Stacked ${names} with ${into?.name ?? targetName ?? "the card"}.` };
 }
 
 /**
@@ -273,12 +282,22 @@ const ownStack = (state: State, id: string): Stack | undefined =>
 export const stackChoice = (stack: Stack) =>
   [
     { part: "card", label: "This card", tip: "Take only this card out of its stack and" },
-    { part: "stack", label: `${stack.name} (${stack.members.length})`, tip: `Move all ${stack.members.length} cards of ${stack.name}` },
+    {
+      part: "stack",
+      label: `${stack.name} (${stack.members.length})`,
+      tip: `Move all ${stack.members.length} cards of ${stack.name}`,
+    },
   ] as const satisfies ReadonlyArray<{ part: StackPart; label: string; tip: string }>;
 
 const plans = new WeakMap<State, Map<string, ReturnType<typeof reshareEdits>>>();
 /** `reshareEdits`, cached per state like `refusedBy`. */
-const cachedReshare = (state: State, resource: Resource, circle: Circle, share: boolean, part: StackPart = "stack") => {
+const cachedReshare = (
+  state: State,
+  resource: Resource,
+  circle: Circle,
+  share: boolean,
+  part: StackPart = "stack",
+) => {
   const cache = plans.get(state) ?? new Map<string, ReturnType<typeof reshareEdits>>();
   plans.set(state, cache);
   const key = `${resource.id}/${circle.id}/${share}/${part}`;
@@ -333,13 +352,19 @@ function shareActions(state: State, h: ActionHandlers, resource: Resource): Arra
                 };
               };
               if (!stack)
-                return option("stack", circle.name, `Move ${resource.name} out of ${circle.name}. Its other circles stay.`);
+                return option(
+                  "stack",
+                  circle.name,
+                  `Move ${resource.name} out of ${circle.name}. Its other circles stay.`,
+                );
               // K-527: a stacked card asks which part leaves; it is a choice, not a confirm.
               return {
                 id: `unshare:${circle.id}`,
                 label: circle.name,
                 tip: `Move ${resource.name} or its whole stack out of ${circle.name}.`,
-                items: stackChoice(stack).map(({ part, label, tip }) => option(part, label, `${tip} out of ${circle.name}.`)),
+                items: stackChoice(stack).map(({ part, label, tip }) =>
+                  option(part, label, `${tip} out of ${circle.name}.`),
+                ),
               };
             }),
           },
@@ -413,7 +438,9 @@ export function selectionActions(ctx: ActionContext, h: ActionHandlers): Array<A
   // K-521: the first selected card on the map is the one the others stack onto, as a drop onto it would. The
   // target depends on the order of the selection, so its cache key keeps that order.
   const target = ids.find((id) => ctx.state.places.has(id)) ?? ids[0] ?? "";
-  const stack = cached(stackPlans, ctx.state, ids.join(","), () => stackOntoEdits(ctx.state, ids, target, "preview"));
+  const stack = cached(stackPlans, ctx.state, ids.join(","), () =>
+    stackOntoEdits(ctx.state, ids, target, "preview"),
+  );
   return [
     // No entry when the cards already are one stack: there is nothing to stack.
     ...(stack
@@ -567,7 +594,15 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
     undoItemAction(ctx, h, { kind: "card", id: resource.id }),
     [
       ...(isAppCard(resource) && ctx.deployed.has(resource.id)
-        ? [{ id: "remove-app", label: "Remove app", tip: REMOVE_APP_TIP, danger: true as const, run: () => h.removeApp(resource) }]
+        ? [
+            {
+              id: "remove-app",
+              label: "Remove app",
+              tip: REMOVE_APP_TIP,
+              danger: true as const,
+              run: () => h.removeApp(resource),
+            },
+          ]
         : []),
       ...(machine
         ? [
@@ -636,7 +671,12 @@ export function circleActions(ctx: ActionContext, h: ActionHandlers, circle: Cir
         tip: `Edit ${circle.name}: its members, level, match and end.`,
         run: () => h.editCircle(circle.id),
       },
-      { id: "rename", label: "Rename", tip: `Rename ${circle.name} in its panel.`, run: () => h.renameCircle(circle.id) },
+      {
+        id: "rename",
+        label: "Rename",
+        tip: `Rename ${circle.name} in its panel.`,
+        run: () => h.renameCircle(circle.id),
+      },
       {
         id: "add-member",
         label: "Add a member",
@@ -771,7 +811,9 @@ export function flatten(groups: ActionGroups, prefix: string): Array<PaletteEntr
               ...(action.keywords ? { keywords: action.keywords } : {}),
             },
           ];
-  return groups.flat().flatMap((action) => walk(action, prefix ? `${prefix} · ${action.label}` : action.label));
+  return groups
+    .flat()
+    .flatMap((action) => walk(action, prefix ? `${prefix} · ${action.label}` : action.label));
 }
 
 /**
@@ -798,13 +840,20 @@ export interface PaletteCursor {
 }
 
 /** The index of the active entry: the one with the cursor's label, else the first match. */
-export function paletteActive(labels: ReadonlyArray<string>, cursor: PaletteCursor): { index: number; picked: boolean } {
+export function paletteActive(
+  labels: ReadonlyArray<string>,
+  cursor: PaletteCursor,
+): { index: number; picked: boolean } {
   const index = cursor.label === null ? -1 : labels.indexOf(cursor.label);
   return index === -1 ? { index: 0, picked: false } : { index, picked: cursor.picked };
 }
 
 /** ArrowDown and ArrowUp move the cursor; a key that does not move it changes nothing. */
-export function paletteArrow(key: "ArrowDown" | "ArrowUp", labels: ReadonlyArray<string>, cursor: PaletteCursor): PaletteCursor {
+export function paletteArrow(
+  key: "ArrowDown" | "ArrowUp",
+  labels: ReadonlyArray<string>,
+  cursor: PaletteCursor,
+): PaletteCursor {
   const { index } = paletteActive(labels, cursor);
   const next = key === "ArrowDown" ? Math.min(index + 1, labels.length - 1) : Math.max(index - 1, 0);
   const label = labels[next];
@@ -824,6 +873,8 @@ export function paletteEntries(ctx: ActionContext, h: ActionHandlers): Array<Pal
       ),
     ),
     ...[...state.stacks.values()].flatMap((stack) => flatten(stackActions(ctx, h, stack), `🗃 ${stack.name}`)),
-    ...[...state.circles.values()].flatMap((circle) => flatten(circleActions(ctx, h, circle), `⭕ ${circle.name}`)),
+    ...[...state.circles.values()].flatMap((circle) =>
+      flatten(circleActions(ctx, h, circle), `⭕ ${circle.name}`),
+    ),
   ];
 }

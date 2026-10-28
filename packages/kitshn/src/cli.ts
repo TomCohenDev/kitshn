@@ -193,7 +193,11 @@ async function deploy(server: string, dir: string) {
     return file === undefined ? null : readFileSync(file);
   });
   for (const note of notes) console.log(`kitshn: icon: ${note}`);
-  console.log(icon ? `kitshn: the card icon is ${icon.path}.` : "kitshn: the site has no icon; the card shows the kind icon.");
+  console.log(
+    icon
+      ? `kitshn: the card icon is ${icon.path}.`
+      : "kitshn: the site has no icon; the card shows the kind icon.",
+  );
   const done = await call<{ address: string; status: number; card: string }>(server, "/deploy/finish", {
     deployId: plan.deployId,
     jwt: completion,

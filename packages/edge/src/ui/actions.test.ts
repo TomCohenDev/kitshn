@@ -71,9 +71,10 @@ function context(version = "0123456789ab"): ActionContext {
   const state: State = {
     // Everyone overlaps Owner, so a card fits into both; Her overlaps Owner on the other side.
     circles: new Map(
-      [...s.circles.map((circle) => (circle.id === EVERYONE_CIRCLE_ID ? { ...circle, x: 500 } : circle)), her].map(
-        (circle) => [circle.id, circle],
-      ),
+      [
+        ...s.circles.map((circle) => (circle.id === EVERYONE_CIRCLE_ID ? { ...circle, x: 500 } : circle)),
+        her,
+      ].map((circle) => [circle.id, circle]),
     ),
     resources: new Map(resources.map((resource) => [resource.id, resource])),
     places: new Map([
@@ -89,7 +90,15 @@ function context(version = "0123456789ab"): ActionContext {
     machines: new Map(),
   };
   const machine: MachineView = {
-    machine: { id: "vps", name: "vps", labels: [], order: 0, serviceTokenId: "t", clientId: "c", tunnelId: "u" },
+    machine: {
+      id: "vps",
+      name: "vps",
+      labels: [],
+      order: 0,
+      serviceTokenId: "t",
+      clientId: "c",
+      tunnelId: "u",
+    },
     online: true,
     lastSeen: null,
     status: null,
@@ -112,7 +121,10 @@ function context(version = "0123456789ab"): ActionContext {
 function recorder() {
   const calls: Array<[string, ...Array<unknown>]> = [];
   const handlers = new Proxy({} as ActionHandlers, {
-    get: (_target, name) => (...args: Array<unknown>) => calls.push([String(name), ...args]),
+    get:
+      (_target, name) =>
+      (...args: Array<unknown>) =>
+        calls.push([String(name), ...args]),
   });
   return { calls, handlers };
 }
@@ -146,7 +158,10 @@ describe("card actions", () => {
     ]);
     expect(find(groups, "remove-app").danger).toBe(true);
     // The card sits in the Owner circle only, so it can join Everyone and Her.
-    expect(items(find(groups, "share")).map((item) => item.id)).toEqual([`share:${EVERYONE_CIRCLE_ID}`, "share:her"]);
+    expect(items(find(groups, "share")).map((item) => item.id)).toEqual([
+      `share:${EVERYONE_CIRCLE_ID}`,
+      "share:her",
+    ]);
     run(find(groups, "remove-app"));
     run(items(find(groups, "share"))[1] as Action);
     expect(calls.map(([name]) => name)).toEqual(["removeApp", "reshare"]);
@@ -167,14 +182,20 @@ describe("card actions", () => {
       `level:${OWNER_CIRCLE_ID}:control`,
     ]);
     run(find(groups, "update"));
-    expect(calls[0]).toMatchObject(["runJob", { machine: { id: "vps" } }, { kind: "update", version: "0123456789ab" }]);
+    expect(calls[0]).toMatchObject([
+      "runJob",
+      { machine: { id: "vps" } },
+      { kind: "update", version: "0123456789ab" },
+    ]);
     expect(ids(actionsFor(context("local"), handlers, { _tag: "card", id: "vps" }))).not.toContain("update");
   });
 
   it("has no level list for a kind with one level, no tray for the admin, and Place for a tray card", () => {
     const { handlers } = recorder();
     const ctx = context();
-    expect(ids(actionsFor(ctx, handlers, { _tag: "card", id: "riffle" })).some((id) => id.startsWith("level:"))).toBe(false);
+    expect(
+      ids(actionsFor(ctx, handlers, { _tag: "card", id: "riffle" })).some((id) => id.startsWith("level:")),
+    ).toBe(false);
     expect(ids(actionsFor(ctx, handlers, { _tag: "card", id: ADMIN_RESOURCE_ID }))).not.toContain("tray");
     const loose = ids(actionsFor(ctx, handlers, { _tag: "card", id: "loose" }));
     expect(loose).toContain("place");
@@ -208,7 +229,9 @@ describe("stack, circle and map actions", () => {
 
   it("never offers to delete the Owner circle (K-211), and deletes another at once", () => {
     const { handlers, calls } = recorder();
-    expect(ids(actionsFor(context(), handlers, { _tag: "circle", id: OWNER_CIRCLE_ID }))).not.toContain("delete");
+    expect(ids(actionsFor(context(), handlers, { _tag: "circle", id: OWNER_CIRCLE_ID }))).not.toContain(
+      "delete",
+    );
     const groups = actionsFor(context(), handlers, { _tag: "circle", id: "her" });
     expect(find(groups, "delete").danger).toBe(true);
     run(find(groups, "delete"));
@@ -296,7 +319,9 @@ describe("New circle for these (K-529)", () => {
     run(find(actionsFor(ctx, handlers, { _tag: "card", id: "riffle" }), "new-circle-for"));
     expect(calls[0]).toEqual(["newCircleFor"]);
     expect(ids(actionsFor(ctx, handlers, { _tag: "card", id: "a" }))).not.toContain("new-circle-for");
-    expect(paletteEntries(ctx, handlers).filter((entry) => entry.label.startsWith("New circle for these"))).toHaveLength(1);
+    expect(
+      paletteEntries(ctx, handlers).filter((entry) => entry.label.startsWith("New circle for these")),
+    ).toHaveLength(1);
     const one = { ...context(), selected: new Set(["riffle"]) };
     expect(ids(actionsFor(one, handlers, { _tag: "card", id: "riffle" }))).not.toContain("new-circle-for");
   });
@@ -308,7 +333,9 @@ describe("Stack these (K-521)", () => {
     const ctx = { ...context(), selected: new Set(["riffle", "vps"]) };
     run(find(actionsFor(ctx, handlers, { _tag: "card", id: "vps" }), "stack-these"));
     expect(calls[0]).toEqual(["stackOnto", ["riffle", "vps"], "riffle"]);
-    expect(paletteEntries(ctx, handlers).filter((entry) => entry.label.startsWith("Stack these"))).toHaveLength(1);
+    expect(
+      paletteEntries(ctx, handlers).filter((entry) => entry.label.startsWith("Stack these")),
+    ).toHaveLength(1);
   });
 
   it("skips a selected card that no longer exists", () => {
@@ -335,12 +362,15 @@ describe("the palette", () => {
     for (const id of ctx.state.resources.keys()) {
       const groups = actionsFor(ctx, handlers, { _tag: "card", id });
       // flatten leaves out refused actions, in the menu and in the palette alike.
-      for (const entry of flatten(groups ?? [], "")) expect([...palette].some((label) => label.endsWith(entry.label))).toBe(true);
+      for (const entry of flatten(groups ?? [], ""))
+        expect([...palette].some((label) => label.endsWith(entry.label))).toBe(true);
     }
     // K-511: the words of "Share <card> with <circle>" find the entry.
-    expect([...palette].filter((label) => ["share", "riffle", "her"].every((word) => label.toLowerCase().includes(word)))).toEqual([
-      "📦 riffle · Share with: Her",
-    ]);
+    expect(
+      [...palette].filter((label) =>
+        ["share", "riffle", "her"].every((word) => label.toLowerCase().includes(word)),
+      ),
+    ).toEqual(["📦 riffle · Share with: Her"]);
   });
 });
 
@@ -349,11 +379,18 @@ describe("refused actions", () => {
     const { handlers, calls } = recorder();
     const ctx = context();
     // K-105: the admin card stays in the Owner circle, so the menu says why before anything is sent.
-    const unshare = items(find(actionsFor(ctx, handlers, { _tag: "card", id: ADMIN_RESOURCE_ID }), "unshare"));
+    const unshare = items(
+      find(actionsFor(ctx, handlers, { _tag: "card", id: ADMIN_RESOURCE_ID }), "unshare"),
+    );
     expect(unshare.find((item) => item.id === `unshare:${OWNER_CIRCLE_ID}`)?.refused).toMatch(/admin/);
-    expect(paletteEntries(ctx, handlers).map((entry) => entry.label)).not.toContain("🔐 kitshn admin · Unshare from: Owner");
+    expect(paletteEntries(ctx, handlers).map((entry) => entry.label)).not.toContain(
+      "🔐 kitshn admin · Unshare from: Owner",
+    );
     // A card in Everyone only cannot also be in Her: the two circles do not overlap.
-    const loose = { ...ctx, state: { ...ctx.state, places: new Map([...ctx.state.places, ["loose", { x: 700, y: 0 }]]) } };
+    const loose = {
+      ...ctx,
+      state: { ...ctx.state, places: new Map([...ctx.state.places, ["loose", { x: 700, y: 0 }]]) },
+    };
     const share = items(find(actionsFor(loose, handlers, { _tag: "card", id: "loose" }), "share"));
     expect(share.find((item) => item.id === "share:her")?.refused).toMatch(/No spot/);
     expect(calls).toEqual([]);
@@ -366,14 +403,21 @@ describe("refused actions", () => {
       ...ctx.state,
       places: new Map([...ctx.state.places, ["a", { x: 5000, y: 0 }], ["b", { x: 5000, y: 0 }]]),
     };
-    const groups = actionsFor({ ...ctx, state }, recorder().handlers, { _tag: "card", id: ADMIN_RESOURCE_ID });
-    expect(items(find(groups, "add-to-stack")).find((item) => item.id === "add-to-stack:s1")?.refused).toMatch(/admin/);
+    const groups = actionsFor({ ...ctx, state }, recorder().handlers, {
+      _tag: "card",
+      id: ADMIN_RESOURCE_ID,
+    });
+    expect(
+      items(find(groups, "add-to-stack")).find((item) => item.id === "add-to-stack:s1")?.refused,
+    ).toMatch(/admin/);
   });
 
   it("marks the current level as the checked radio item", () => {
     const groups = actionsFor(context(), recorder().handlers, { _tag: "card", id: "vps" });
     const levels = items(find(groups, `level:${OWNER_CIRCLE_ID}`));
-    expect(levels.filter((item) => item.checked).map((item) => item.id)).toEqual([`level:${OWNER_CIRCLE_ID}:default`]);
+    expect(levels.filter((item) => item.checked).map((item) => item.id)).toEqual([
+      `level:${OWNER_CIRCLE_ID}:default`,
+    ]);
   });
 });
 
@@ -419,7 +463,10 @@ describe("levelEdit (K-205)", () => {
     const vps = ctx.state.resources.get("vps") as Resource;
     const owner = ctx.state.circles.get(OWNER_CIRCLE_ID) as Circle;
     expect(levelEdit(ctx.state, vps, owner, null).after).toBeNull();
-    const ending: State = { ...ctx.state, shareSettings: new Map([[shareKey("vps", OWNER_CIRCLE_ID), { level: "use", endsAt: 9 }]]) };
+    const ending: State = {
+      ...ctx.state,
+      shareSettings: new Map([[shareKey("vps", OWNER_CIRCLE_ID), { level: "use", endsAt: 9 }]]),
+    };
     expect(levelEdit(ending, vps, owner, null).after).toEqual({ level: null, endsAt: 9 });
     expect(levelEdit(ending, vps, owner, "view").after).toEqual({ level: "view", endsAt: 9 });
   });
@@ -429,7 +476,9 @@ describe("per-item undo (K-1507)", () => {
   const withCheck = (check: UndoCheck | null) => ({ ...context(), undoCheck: check });
   const undoOf = (check: UndoCheck | null, target: MenuTarget) => {
     const { handlers, calls } = recorder();
-    const action = (actionsFor(withCheck(check), handlers, target) ?? []).flat().find((entry) => entry.id === "undo-item");
+    const action = (actionsFor(withCheck(check), handlers, target) ?? [])
+      .flat()
+      .find((entry) => entry.id === "undo-item");
     return { action, calls };
   };
 

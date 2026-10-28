@@ -18,11 +18,17 @@ import { callApi } from "./store.ts";
 const KIND_LABELS: Record<RevisionKind, { readonly label: string; readonly tip: string }> = {
   card: { label: "Cards", tip: "Cards: cards moved, also into or out of a circle." },
   share: { label: "Shares", tip: "Shares: the level and the end of a share, and a share that ended." },
-  circle: { label: "Circles", tip: "Circles: new, changed and deleted circles, also a circle moved with its cards." },
+  circle: {
+    label: "Circles",
+    tip: "Circles: new, changed and deleted circles, also a circle moved with its cards.",
+  },
   stack: { label: "Stacks", tip: "Stacks: cards stacked, pulled out and unstacked." },
   app: { label: "Apps", tip: "Apps: apps removed and restored." },
   pause: { label: "Pause", tip: "Pause: the emergency pause, the lockdown and Resume." },
-  action: { label: "Actions", tip: "Actions: records such as a command, a deploy or a sign-out, with nothing to undo." },
+  action: {
+    label: "Actions",
+    tip: "Actions: records such as a command, a deploy or a sign-out, with nothing to undo.",
+  },
 };
 
 const NO_FILTER: HistoryFilter = { kind: null, actor: null, item: "" };
@@ -64,7 +70,10 @@ export function HistoryView(props: {
     let live = true;
     void callApi<UndoAnswer>("GET", `/api/undo?revision=${undoable}`).then((result) => {
       if (live)
-        setAnswer({ key: undoKey, answer: "error" in result ? { allowed: false, reason: result.error } : result });
+        setAnswer({
+          key: undoKey,
+          answer: "error" in result ? { allowed: false, reason: result.error } : result,
+        });
     });
     return () => {
       live = false;
@@ -73,7 +82,9 @@ export function HistoryView(props: {
   // A new row or a changed one shows "checking" until its own answer comes.
   const undoAnswer = answer?.key === undoKey ? answer.answer : null;
   const kinds = [...new Set(props.revisions.map((revision) => revision.kind))];
-  const actors = [...new Map(props.revisions.map((revision) => [actorKey(revision.actor), revision.actor])).values()];
+  const actors = [
+    ...new Map(props.revisions.map((revision) => [actorKey(revision.actor), revision.actor])).values(),
+  ];
   // Every kitshn reason groups as one actor "kitshn"; each row of it names its own reason.
   const who = (actor: Actor) =>
     actor._tag === "kitshn" ? "kitshn" : actorKey(actor) === actorKey(props.me) ? "You" : actorLabel(actor);
@@ -81,8 +92,8 @@ export function HistoryView(props: {
   return (
     <div class="history-view">
       <p class="muted">
-        Every change is one revision. Undo makes a new revision that reverses it. A click on a change shows its
-        cards and circles on the map.
+        Every change is one revision. Undo makes a new revision that reverses it. A click on a change shows
+        its cards and circles on the map.
       </p>
       <div class="pills" role="group" aria-label="Kind of change">
         <button
@@ -139,7 +150,9 @@ export function HistoryView(props: {
         }}
       />
       {groups.length === 0 ? (
-        <p class="muted">{props.revisions.length === 0 ? "No change yet." : "No change matches the filters."}</p>
+        <p class="muted">
+          {props.revisions.length === 0 ? "No change yet." : "No change matches the filters."}
+        </p>
       ) : null}
       {groups.map((group, index) => (
         <Fragment key={group.revisions[0]?.id}>
@@ -168,7 +181,10 @@ export function HistoryView(props: {
                       </span>
                     </button>
                     {revision.undoneBy !== null ? (
-                      <span class="stamp" data-tip={`Undone: revision #${revision.undoneBy} reverses this one.`}>
+                      <span
+                        class="stamp"
+                        data-tip={`Undone: revision #${revision.undoneBy} reverses this one.`}
+                      >
                         ✓ undone
                       </span>
                     ) : revision.id === undoable ? (

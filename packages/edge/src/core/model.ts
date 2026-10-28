@@ -46,7 +46,10 @@ export type Member =
 /** K-718: the rights that the owner can give an agent key on its device member. */
 export const AGENT_RIGHTS = ["addsApps", "publishes"] as const;
 export type AgentRight = (typeof AGENT_RIGHTS)[number];
-export const AGENT_RIGHT_NAMES: Record<AgentRight, string> = { addsApps: "may add apps", publishes: "may publish" };
+export const AGENT_RIGHT_NAMES: Record<AgentRight, string> = {
+  addsApps: "may add apps",
+  publishes: "may publish",
+};
 
 export interface Circle {
   readonly id: string;
@@ -123,7 +126,14 @@ export function pauseModeOf(stored: string | null): PauseMode | null {
 }
 
 /** K-1504: the kinds whose public shares a pause keeps open; machines, repos and the admin always close. */
-const KEPT_PUBLIC: ReadonlySet<ResourceKind> = new Set(["site.static", "site.worker", "site.compose", "site.live", "page", "file"]);
+const KEPT_PUBLIC: ReadonlySet<ResourceKind> = new Set([
+  "site.static",
+  "site.worker",
+  "site.compose",
+  "site.live",
+  "page",
+  "file",
+]);
 
 export const levelRank = (level: Level) => LEVELS.indexOf(level);
 
@@ -189,7 +199,8 @@ export function activeShares(state: State, resource: Resource, now: number): Arr
     if (share.circle.endsAt !== null && share.circle.endsAt <= now) return false;
     const shareEnds = state.shareSettings.get(shareKey(resource.id, share.circle.id))?.endsAt ?? null;
     if (shareEnds !== null && shareEnds <= now) return false;
-    if (!state.paused || (resource.id === ADMIN_RESOURCE_ID && share.circle.id === OWNER_CIRCLE_ID)) return true;
+    if (!state.paused || (resource.id === ADMIN_RESOURCE_ID && share.circle.id === OWNER_CIRCLE_ID))
+      return true;
     return (
       state.paused === "keep-public" &&
       KEPT_PUBLIC.has(resource.kind) &&
@@ -211,7 +222,8 @@ export interface PauseReach {
 
 /** K-1504: the reach of a pause, from the shares the state gives without a pause; works while paused too. */
 export function pauseReach(state: State, now: number): PauseReach {
-  const count = (paused: PauseMode | null, resource: Resource) => activeShares({ ...state, paused }, resource, now).length;
+  const count = (paused: PauseMode | null, resource: Resource) =>
+    activeShares({ ...state, paused }, resource, now).length;
   let closes = 0;
   let cards = 0;
   let keptPublic = 0;

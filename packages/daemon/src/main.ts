@@ -25,7 +25,14 @@ import { type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from ".
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
 import { localUsersOf, peerDecision } from "./peer.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
-import { HELPER_IMAGE, daemonUser, dockerKind, printable, rootTakeover, rootTakeoverPlan } from "./takeover.ts";
+import {
+  HELPER_IMAGE,
+  daemonUser,
+  dockerKind,
+  printable,
+  rootTakeover,
+  rootTakeoverPlan,
+} from "./takeover.ts";
 import {
   chmodSync,
   copyFileSync,
@@ -260,7 +267,8 @@ function localUsersCommand(action: string | undefined, who: string | undefined) 
     console.log([`${own} (the daemon user)`, ...users.map(String)].join("\n"));
     return;
   }
-  if ((action !== "add" && action !== "remove") || !who) fail("usage: kitshn local-users list|add|remove <user or uid>");
+  if ((action !== "add" && action !== "remove") || !who)
+    fail("usage: kitshn local-users list|add|remove <user or uid>");
   const uid = uidOf(who);
   if (uid === own) fail("the daemon user always can use the local socket.");
   const next = action === "add" ? [...new Set([...users, uid])] : users.filter((user) => user !== uid);
@@ -277,11 +285,18 @@ function localUsersCommand(action: string | undefined, who: string | undefined) 
 async function kitshn1TakeoverCommand(repo?: string, environment?: string, project?: string, user?: string) {
   if (!repo || !environment || !project || !user)
     fail("usage: kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>");
-  if (process.getuid!() !== 0) fail("kitshn1-takeover runs as root: it stops KitSHn 1 and reads /persistent.");
-  const failWith = (error: unknown) => fail(printable(error instanceof Error ? error.message : String(error)));
+  if (process.getuid!() !== 0)
+    fail("kitshn1-takeover runs as root: it stops KitSHn 1 and reads /persistent.");
+  const failWith = (error: unknown) =>
+    fail(printable(error instanceof Error ? error.message : String(error)));
   const daemon = await daemonUser(user).catch(failWith);
   const plan = rootTakeoverPlan({
-    repo, environment, project, user: daemon, persistentRoot: KITSHN1_PERSISTENT, exists: existsSync,
+    repo,
+    environment,
+    project,
+    user: daemon,
+    persistentRoot: KITSHN1_PERSISTENT,
+    exists: existsSync,
   });
   if (typeof plan === "string") fail(printable(plan));
   await rootTakeover(plan, daemon).catch(failWith);
@@ -320,7 +335,11 @@ async function ensureTunnel(config: JoinSecrets) {
   const { file: binary, fresh } = await ensureCloudflared();
   const tokenFile = join(paths.data, "tunnel-token");
   const tokenChanged = writeChanged(tokenFile, config.tunnelToken, 0o600);
-  const unitChanged = writeChanged(paths.tunnelService, tunnelServiceFile(platform, binary, tokenFile), 0o644);
+  const unitChanged = writeChanged(
+    paths.tunnelService,
+    tunnelServiceFile(platform, binary, tokenFile),
+    0o644,
+  );
   const steps = fresh || tokenChanged || unitChanged ? tunnel.restart : tunnel.start;
   for (const step of steps) run(step.argv, step.mayFail);
 }
@@ -577,7 +596,9 @@ async function composeUp(
       chmodSync(join(dir, "params.env"), 0o600);
     } else {
       writeFileSync(join(dir, "source.tgz"), await deployFile(command.deployId, "source.tgz"));
-      writeFileSync(join(dir, "params.env"), await deployFile(command.deployId, "params.env"), { mode: 0o600 });
+      writeFileSync(join(dir, "params.env"), await deployFile(command.deployId, "params.env"), {
+        mode: 0o600,
+      });
     }
     mkdirSync(source);
     await step("unpack the source", "tar", ["-xzf", join(dir, "source.tgz"), "-C", source]);
@@ -651,10 +672,15 @@ async function composeUp(
     const readConfig = async (extra: ReadonlyArray<string>) => {
       const file = join(scratch, "compose.config.json");
       try {
-        await step("read the Compose settings", "docker", [...composeArgs, "config", "--format", "json", ...extra, "-o", file], {
-          cwd: source,
-          env,
-        });
+        await step(
+          "read the Compose settings",
+          "docker",
+          [...composeArgs, "config", "--format", "json", ...extra, "-o", file],
+          {
+            cwd: source,
+            env,
+          },
+        );
         return JSON.parse(readFileSync(file, "utf8")) as unknown;
       } finally {
         rmSync(file, { force: true });
@@ -670,7 +696,9 @@ async function composeUp(
       // A Docker that kitshn cannot name stops the deploy too, so it never copies on the wrong Docker.
       const kind = dockerKind(await runProgram("docker", ["info", "--format", "{{json .SecurityOptions}}"]));
       if (kind === "unknown")
-        throw new Error(`KitSHn 1 data waits at ${takeover.dataDir}, and docker info failed, so kitshn copies nothing (K-1404).`);
+        throw new Error(
+          `KitSHn 1 data waits at ${takeover.dataDir}, and docker info failed, so kitshn copies nothing (K-1404).`,
+        );
       if (kind === "rootless") {
         const self = userInfo();
         throw new Error(
@@ -681,33 +709,67 @@ async function composeUp(
       }
       // Set first: a stop that fails half-way still gets its start back.
       stoppedKitshn1 = takeover.project;
-      await step("stop the KitSHn 1 app", "docker", ["compose", "-p", takeover.project, "stop"], { cwd: paths.data });
+      await step("stop the KitSHn 1 app", "docker", ["compose", "-p", takeover.project, "stop"], {
+        cwd: paths.data,
+      });
       // A staged copy becomes the data folder only when it is complete.
       const staged = `${data}.kitshn1`;
       output += await removeAsRoot(staged, `${command.project}-stage`);
       mkdirSync(staged, { recursive: true });
       await step("copy the KitSHn 1 data", "docker", [
-        "run", "--rm", "--network", "none", "-v", `${takeover.dataDir}:/from:ro`, "-v", `${staged}:/to`,
-        HELPER_IMAGE, "cp", "-a", "/from/.", "/to/",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "-v",
+        `${takeover.dataDir}:/from:ro`,
+        "-v",
+        `${staged}:/to`,
+        HELPER_IMAGE,
+        "cp",
+        "-a",
+        "/from/.",
+        "/to/",
       ]);
       const volumes = await runProgram("docker", [
-        "volume", "ls", "-q", "--filter", `label=com.docker.compose.project=${takeover.project}`,
+        "volume",
+        "ls",
+        "-q",
+        "--filter",
+        `label=com.docker.compose.project=${takeover.project}`,
       ]);
       if (!volumes.ok) throw new Error(`docker volume ls failed: ${volumes.output}`);
-      for (const volume of volumes.output.split("\n").map((line) => line.trim()).filter(Boolean)) {
+      for (const volume of volumes.output
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)) {
         const target = movedVolume(volume, takeover.project, command.project);
         if (!target) continue;
         const suffix = target.slice(command.project.length + 1);
         madeVolumes.push(target);
         await step(`create the volume ${target}`, "docker", [
-          "volume", "create",
-          "--label", `com.docker.compose.project=${command.project}`,
-          "--label", `com.docker.compose.volume=${suffix}`,
+          "volume",
+          "create",
+          "--label",
+          `com.docker.compose.project=${command.project}`,
+          "--label",
+          `com.docker.compose.volume=${suffix}`,
           target,
         ]);
         await step(`copy the volume ${volume}`, "docker", [
-          "run", "--rm", "--network", "none", "-v", `${volume}:/from:ro`, "-v", `${target}:/to`,
-          HELPER_IMAGE, "cp", "-a", "/from/.", "/to/",
+          "run",
+          "--rm",
+          "--network",
+          "none",
+          "-v",
+          `${volume}:/from:ro`,
+          "-v",
+          `${target}:/to`,
+          HELPER_IMAGE,
+          "cp",
+          "-a",
+          "/from/.",
+          "/to/",
         ]);
       }
       renameSync(staged, data);
@@ -737,9 +799,17 @@ async function composeUp(
     await step("docker compose build", "nice", ["-n", "19", "docker", ...run, "build"], { cwd: source, env });
     // K-818: no container of the app runs from here to `up`, so none can swap a path in the data, log or
     // sockets folder between the check below and `up`. Orphans and one-off runs count too.
-    const running = await runProgram("docker", ["ps", "-q", "--filter", `label=com.docker.compose.project=${command.project}`]);
+    const running = await runProgram("docker", [
+      "ps",
+      "-q",
+      "--filter",
+      `label=com.docker.compose.project=${command.project}`,
+    ]);
     if (!running.ok) throw new Error(`docker ps failed: ${running.output}`);
-    const ids = running.output.split("\n").map((id) => id.trim()).filter(Boolean);
+    const ids = running.output
+      .split("\n")
+      .map((id) => id.trim())
+      .filter(Boolean);
     // Set first: a stop that fails half-way still gets its start back.
     stoppedIds = ids;
     if (ids.length > 0) await step("stop the app", "docker", ["stop", ...ids]);
@@ -750,7 +820,10 @@ async function composeUp(
     copyFileSync(checked, join(scratch, "down.json"));
     copyFileSync(env.KITSHN_PARAMS_FILE, join(scratch, "down.env"));
     upStarted = true;
-    await step("docker compose up", "docker", [...run, "up", "-d", "--no-build", "--remove-orphans"], { cwd: source, env });
+    await step("docker compose up", "docker", [...run, "up", "-d", "--no-build", "--remove-orphans"], {
+      cwd: source,
+      env,
+    });
     const until = Date.now() + SOCKET_WAIT_MS;
     while (!(await probe(`unix:${socketPath}`))) {
       if (Date.now() > until) throw new Error(`the app opened no socket at ${socketPath} within 3 minutes`);
@@ -803,11 +876,15 @@ async function composeUp(
       await runProgram("docker", ["compose", "-p", command.project, "down"], { cwd: dir });
       rmSync(join(dir, "kitshn1-taken"), { force: true });
       for (const folder of ["data", "data.kitshn1"])
-        output += await removeAsRoot(join(dir, folder), `${command.project}-${folder.replace(".", "-")}`).catch(
-          (cleanup: unknown) => `${String(cleanup)}\n`,
-        );
-      for (const volume of madeVolumes) output += (await runProgram("docker", ["volume", "rm", volume])).output;
-      const started = await runProgram("docker", ["compose", "-p", stoppedKitshn1, "start"], { cwd: paths.data });
+        output += await removeAsRoot(
+          join(dir, folder),
+          `${command.project}-${folder.replace(".", "-")}`,
+        ).catch((cleanup: unknown) => `${String(cleanup)}\n`);
+      for (const volume of madeVolumes)
+        output += (await runProgram("docker", ["volume", "rm", volume])).output;
+      const started = await runProgram("docker", ["compose", "-p", stoppedKitshn1, "start"], {
+        cwd: paths.data,
+      });
       output += `$ start the KitSHn 1 app ${stoppedKitshn1} again\n${started.output}`;
     }
     return { ok: false, exitCode: null, output };
@@ -834,13 +911,30 @@ async function removeAsRoot(dir: string, name: string): Promise<string> {
   if (!existsSync(dir)) return "";
   const inside = await runProgram(
     "docker",
-    ["run", "--rm", "--name", `kitshn-clean-${name}`, "--network", "none", "-v", `${dir}:/app`, HELPER_IMAGE, "find", "/app", "-mindepth", "1", "-delete"],
+    [
+      "run",
+      "--rm",
+      "--name",
+      `kitshn-clean-${name}`,
+      "--network",
+      "none",
+      "-v",
+      `${dir}:/app`,
+      HELPER_IMAGE,
+      "find",
+      "/app",
+      "-mindepth",
+      "1",
+      "-delete",
+    ],
     { timeoutMs: COMPOSE_TIMEOUT_MS },
   );
   try {
     rmSync(dir, { recursive: true, force: true });
   } catch (error) {
-    throw new Error(`${dir} stays: ${error instanceof Error ? error.message : String(error)}\n${inside.output}`);
+    throw new Error(
+      `${dir} stays: ${error instanceof Error ? error.message : String(error)}\n${inside.output}`,
+    );
   }
   return `$ remove ${dir}\n${inside.output}`;
 }
@@ -872,15 +966,29 @@ async function composeDown(command: Extract<Command, { kind: "compose-down" }>):
   // Containers that may still run could write while the files go, so a failed down keeps them for a retry.
   if (!command.removeData || !result.ok) return result;
   // Also the volumes that no kept config names, such as those of an earlier build.
-  const volumes = await runProgram("docker", ["volume", "ls", "-q", "--filter", `label=com.docker.compose.project=${command.project}`]);
-  const names = volumes.output.split("\n").map((name) => name.trim()).filter(Boolean);
-  const removed = volumes.ok && names.length > 0 ? await runProgram("docker", ["volume", "rm", ...names]) : volumes;
+  const volumes = await runProgram("docker", [
+    "volume",
+    "ls",
+    "-q",
+    "--filter",
+    `label=com.docker.compose.project=${command.project}`,
+  ]);
+  const names = volumes.output
+    .split("\n")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  const removed =
+    volumes.ok && names.length > 0 ? await runProgram("docker", ["volume", "rm", ...names]) : volumes;
   const output = `${result.output}${removed.output}`;
   if (!removed.ok) return { ok: false, exitCode: removed.exitCode, output };
   try {
     return { ...result, output: output + (await removeAsRoot(dir, command.project)) };
   } catch (error) {
-    return { ok: false, exitCode: null, output: `${output}\n[kitshn: ${error instanceof Error ? error.message : String(error)}]` };
+    return {
+      ok: false,
+      exitCode: null,
+      output: `${output}\n[kitshn: ${error instanceof Error ? error.message : String(error)}]`,
+    };
   }
 }
 
@@ -904,9 +1012,12 @@ async function reportVolumes() {
 }
 
 /** K-909: deletes one volume, only while it is still an idle volume of that kitshn app. */
-async function removeVolume(command: Extract<Command, { kind: "compose-volume-remove" }>): Promise<JobOutcome> {
+async function removeVolume(
+  command: Extract<Command, { kind: "compose-volume-remove" }>,
+): Promise<JobOutcome> {
   const idle = await readIdleVolumes();
-  if (idle === null) return { ok: false, exitCode: null, output: "Docker does not answer, so the volume stays." };
+  if (idle === null)
+    return { ok: false, exitCode: null, output: "Docker does not answer, so the volume stays." };
   const refusal = volumeRemoveRefusal(idle, command);
   if (refusal !== null) return { ok: false, exitCode: null, output: refusal };
   return runProgram("docker", ["volume", "rm", command.volume]);
@@ -924,7 +1035,8 @@ function runJob(command: Command): Promise<JobOutcome> {
   if (command.kind === "compose" || command.kind === "compose-redeploy")
     return oneAtATime(command.project, () => composeUp(command));
   if (command.kind === "compose-down") return oneAtATime(command.project, () => composeDown(command));
-  if (command.kind === "compose-volume-remove") return oneAtATime(command.project, () => removeVolume(command));
+  if (command.kind === "compose-volume-remove")
+    return oneAtATime(command.project, () => removeVolume(command));
   if (command.kind === "diagnostics") {
     const text = [
       `kitshn ${VERSION}`,
@@ -1017,12 +1129,16 @@ async function answerChallenge(
   // A rotation that kitshn never took; a new "Rotate key" or `kitshn rotate-key` asks again.
   if (plan.dropNext) rmSync(nextKeyFile, { force: true });
   if (message.fingerprint === null) {
-    log("kitshn has no key for this machine, so it gets status only and no job. Run kitshn rekey with the key code of its panel.");
+    log(
+      "kitshn has no key for this machine, so it gets status only and no job. Run kitshn rekey with the key code of its panel.",
+    );
     return "token-only";
   }
   const key = readKey(keyFile);
   if (!key) {
-    log(`kitshn expects the key ${message.fingerprint}, and ${keyFile} is missing. Use Reset key on the map, then kitshn rekey <code>.`);
+    log(
+      `kitshn expects the key ${message.fingerprint}, and ${keyFile} is missing. Use Reset key on the map, then kitshn rekey <code>.`,
+    );
     return "no-key";
   }
   const signing = await fingerprintOf(key.x);
@@ -1030,7 +1146,9 @@ async function answerChallenge(
   ws.send(JSON.stringify({ type: "answer", signature } satisfies DaemonMessage));
   challenge = message.challenge;
   if (message.fingerprint === signing) return "answered";
-  log(`kitshn expects the key ${message.fingerprint}, but this machine has ${signing}. Use Reset key on the map, then kitshn rekey <code>.`);
+  log(
+    `kitshn expects the key ${message.fingerprint}, but this machine has ${signing}. Use Reset key on the map, then kitshn rekey <code>.`,
+  );
   return "wrong-key";
 }
 
@@ -1181,7 +1299,9 @@ function connect(config: JoinSecrets) {
       settleRotation(
         event.code === 4004 && rotatingTo !== null
           ? { fingerprint: rotatingTo }
-          : { error: `the connection closed (${event.code}) before kitshn stored the new key. See kitshn status.` },
+          : {
+              error: `the connection closed (${event.code}) before kitshn stored the new key. See kitshn status.`,
+            },
       );
       challenge = null;
       rotating = false;
@@ -1192,7 +1312,9 @@ function connect(config: JoinSecrets) {
       if (event.code === 4001 || event.code === 4002 || event.code === 4005 || wrongKey) stopped = true;
       // K-615: kitshn deleted the tunnel of this machine; its service has nothing left to serve.
       if (event.code === 4002) {
-        log("the owner removed this machine; removing the tunnel service. Run kitshn service uninstall to stop the daemon.");
+        log(
+          "the owner removed this machine; removing the tunnel service. Run kitshn service uninstall to stop the daemon.",
+        );
         removeTunnel();
       }
       if (current === ws) current = null;
@@ -1302,7 +1424,8 @@ async function sendIcons(ws: WebSocket, reports: ReadonlyArray<LiveSiteReport>) 
       }
       memory.set(report.name, { readAt: now, up: true, sent: send ? { hash, at: now } : sent });
     }
-    for (const name of memory.keys()) if (!reports.some((report) => report.name === name)) memory.delete(name);
+    for (const name of memory.keys())
+      if (!reports.some((report) => report.name === name)) memory.delete(name);
   } finally {
     readingIcons = false;
   }
@@ -1325,10 +1448,12 @@ async function runCommand() {
   const local = await listenLocal(paths.socket, { ...socketOptions, access: "private" });
   process.on("exit", local.stop);
   // K-701: the users in `localUsers` connect here. An unsafe folder costs only this socket, not the daemon.
-  const shared = await listenLocal(paths.sharedSocket, { ...socketOptions, access: "shared" }).catch((error: unknown) => {
-    log(`no shared socket: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
-  });
+  const shared = await listenLocal(paths.sharedSocket, { ...socketOptions, access: "shared" }).catch(
+    (error: unknown) => {
+      log(`no shared socket: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    },
+  );
   if (shared) process.on("exit", shared.stop);
   // The service manager stops the daemon with SIGTERM; an exit runs the clean-up of the socket and the jobs.
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => process.exit(0));
@@ -1383,7 +1508,9 @@ async function answerLocal(request: Request): Promise<Answer> {
   }
   const ws = socket;
   if (ws === null || challenge === null)
-    throw new Error("the daemon has no signed connection to kitshn, and a rotation needs one (K-1705). See kitshn status.");
+    throw new Error(
+      "the daemon has no signed connection to kitshn, and a rotation needs one (K-1705). See kitshn status.",
+    );
   const outcome = await new Promise<RotationOutcome>((resolve) => {
     rotationWaiters.push(resolve);
     void rotateKey(ws);

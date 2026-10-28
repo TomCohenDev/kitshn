@@ -48,7 +48,17 @@ const SAFE_SERVICE_KEYS = new Set([
   "profiles",
   "scale",
 ]);
-const SAFE_BUILD_KEYS = new Set(["context", "additional_contexts", "dockerfile", "args", "target", "labels", "cache_from", "tags", "platforms"]);
+const SAFE_BUILD_KEYS = new Set([
+  "context",
+  "additional_contexts",
+  "dockerfile",
+  "args",
+  "target",
+  "labels",
+  "cache_from",
+  "tags",
+  "platforms",
+]);
 const SAFE_TOP_KEYS = new Set(["name", "services", "volumes", "networks", "secrets", "configs"]);
 
 type Json = Record<string, unknown>;
@@ -57,20 +67,29 @@ const record = (value: unknown): Json =>
 const list = (value: unknown): Array<unknown> => (Array.isArray(value) ? value : []);
 /** Label names of a map or of a list of `name=value`. */
 const labelNames = (labels: unknown): Array<string> =>
-  Array.isArray(labels) ? labels.map((label) => String(label).split("=")[0] ?? "") : Object.keys(record(labels));
+  Array.isArray(labels)
+    ? labels.map((label) => String(label).split("=")[0] ?? "")
+    : Object.keys(record(labels));
 /** Compose finds the containers, networks and volumes of a project by these labels. */
-const composeLabel = (labels: unknown) => labelNames(labels).some((name) => name.startsWith("com.docker.compose."));
+const composeLabel = (labels: unknown) =>
+  labelNames(labels).some((name) => name.startsWith("com.docker.compose."));
 const under = (path: string, root: string) => path === root || path.startsWith(`${root}/`);
 
 /**
  * Follows symlinks of the longest part of a path that exists, then adds the rest, so a link in the repo or
  * a folder that Docker would create cannot point out of the app's folders.
  */
-export function realpathOf(path: string, realpath: (path: string) => string, exists: (path: string) => boolean): string {
+export function realpathOf(
+  path: string,
+  realpath: (path: string) => string,
+  exists: (path: string) => boolean,
+): string {
   const absolute = resolve(path);
   if (exists(absolute)) return realpath(absolute);
   const parent = dirname(absolute);
-  return parent === absolute ? absolute : join(realpathOf(parent, realpath, exists), absolute.slice(parent.length + 1));
+  return parent === absolute
+    ? absolute
+    : join(realpathOf(parent, realpath, exists), absolute.slice(parent.length + 1));
 }
 
 /**
@@ -96,7 +115,11 @@ type Roots = readonly [source: string, ...others: Array<string>];
  * K-818: the env and label files of `docker compose config --format json --no-interpolate`, which names them
  * without reading them. Checked before the run with the params, which reads them.
  */
-export function envFileRisks(uninterpolated: unknown, roots: Roots, real: (path: string) => string): Array<string> {
+export function envFileRisks(
+  uninterpolated: unknown,
+  roots: Roots,
+  real: (path: string) => string,
+): Array<string> {
   const source = real(roots[0]);
   const risks = new Set<string>();
   for (const service of Object.values(record(record(uninterpolated)["services"]))) {
@@ -140,14 +163,21 @@ export function sourceRisks(config: unknown, roots: Roots, real: (path: string) 
 }
 
 /** K-818: the settings of a Compose app that need an allowance. `config` is `docker compose config --format json`. */
-export function composeRisks(config: unknown, project: string, roots: Roots, real: (path: string) => string): Array<string> {
+export function composeRisks(
+  config: unknown,
+  project: string,
+  roots: Roots,
+  real: (path: string) => string,
+): Array<string> {
   const risks = new Set<string>(sourceRisks(config, roots, real));
   const inSource = (path: string) => under(real(path), real(roots[0]));
   const top = record(config);
-  for (const key of Object.keys(top)) if (!SAFE_TOP_KEYS.has(key) && !key.startsWith("x-")) risks.add(`top:${key}`);
+  for (const key of Object.keys(top))
+    if (!SAFE_TOP_KEYS.has(key) && !key.startsWith("x-")) risks.add(`top:${key}`);
   for (const [serviceName, service] of Object.entries(record(top["services"]))) {
     const s = record(service);
-    for (const key of Object.keys(s)) if (!SAFE_SERVICE_KEYS.has(key) && !key.startsWith("x-")) risks.add(key);
+    for (const key of Object.keys(s))
+      if (!SAFE_SERVICE_KEYS.has(key) && !key.startsWith("x-")) risks.add(key);
     // A built image or a container name of another app would take its place on this machine. A plain
     // prefix is not enough: the project a-pr-1 is a prefix of the project a-pr-12.
     const ownName = `${project}-${serviceName}`;
@@ -159,7 +189,8 @@ export function composeRisks(config: unknown, project: string, roots: Roots, rea
     };
     if (s["build"] !== undefined && s["image"] !== undefined && !own(s["image"])) risks.add("image");
     if (s["container_name"] !== undefined && s["container_name"] !== ownName) risks.add("container_name");
-    if ([s["labels"], record(s["build"])["labels"], record(s["deploy"])["labels"]].some(composeLabel)) risks.add("labels");
+    if ([s["labels"], record(s["build"])["labels"], record(s["deploy"])["labels"]].some(composeLabel))
+      risks.add("labels");
     const logging = record(s["logging"]);
     if (logging["driver"] !== undefined && logging["driver"] !== "json-file" && logging["driver"] !== "local")
       risks.add("logging");
@@ -169,7 +200,8 @@ export function composeRisks(config: unknown, project: string, roots: Roots, rea
       if (value !== null && Object.keys(record(value)).length > 0) risks.add("networks.options");
     for (const volume of list(s["volumes"])) {
       const v = record(volume);
-      if (v["type"] !== "bind" && v["type"] !== "volume" && v["type"] !== "tmpfs") risks.add(`volume:${String(v["type"])}`);
+      if (v["type"] !== "bind" && v["type"] !== "volume" && v["type"] !== "tmpfs")
+        risks.add(`volume:${String(v["type"])}`);
     }
     const build = record(s["build"]);
     for (const key of Object.keys(build)) if (!SAFE_BUILD_KEYS.has(key)) risks.add(`build.${key}`);
@@ -177,19 +209,23 @@ export function composeRisks(config: unknown, project: string, roots: Roots, rea
     for (const input of [context, ...Object.values(record(build["additional_contexts"]))])
       if (input !== null && (typeof input !== "string" || input.includes("://") || !inSource(input)))
         risks.add(`build:${String(input)}`);
-    if (context !== null && typeof build["dockerfile"] === "string" && !inSource(resolve(context, build["dockerfile"])))
+    if (
+      context !== null &&
+      typeof build["dockerfile"] === "string" &&
+      !inSource(resolve(context, build["dockerfile"]))
+    )
       risks.add(`build:${build["dockerfile"]}`);
     for (const tag of list(build["tags"])) if (!own(tag)) risks.add("build.tags");
     for (const source of list(build["cache_from"]))
       if (typeof source !== "string" || (source.includes("type=") && !source.includes("type=registry")))
         risks.add("build.cache_from");
     for (const name of Object.keys(record(s["networks"])))
-      if (name !== "default" && !Object.hasOwn(record(top["networks"]), name))
-        risks.add(`network:${name}`);
+      if (name !== "default" && !Object.hasOwn(record(top["networks"]), name)) risks.add(`network:${name}`);
     const deploy = record(s["deploy"]);
     for (const key of Object.keys(deploy))
       if (!["resources", "restart_policy", "replicas", "labels"].includes(key)) risks.add(`deploy.${key}`);
-    if (Object.keys(record(record(deploy["resources"])["reservations"])).includes("devices")) risks.add("devices");
+    if (Object.keys(record(record(deploy["resources"])["reservations"])).includes("devices"))
+      risks.add("devices");
   }
   for (const [name, volume] of Object.entries(record(top["volumes"]))) {
     const v = record(volume);
@@ -208,7 +244,8 @@ export function composeRisks(config: unknown, project: string, roots: Roots, rea
     // Only a name, labels and `internal`; ipam, ipv6 and drivers can change routing on the host. Compose
     // writes an empty ipam on every network.
     const plain = (key: string) =>
-      ["name", "labels", "external", "internal"].includes(key) || (key === "ipam" && Object.keys(record(n[key])).length === 0);
+      ["name", "labels", "external", "internal"].includes(key) ||
+      (key === "ipam" && Object.keys(record(n[key])).length === 0);
     if (Object.keys(n).some((key) => !plain(key))) risks.add(risk);
     if (composeLabel(n["labels"])) risks.add("labels");
     const own = typeof n["name"] !== "string" || n["name"] === `${project}_${name}`;
@@ -231,7 +268,9 @@ export function nestedSources(config: unknown, real: (path: string) => string): 
   const writable = Object.values(record(record(config)["services"])).flatMap((service) =>
     list(record(service)["volumes"]).flatMap((volume) => {
       const v = record(volume);
-      return v["type"] === "bind" && typeof v["source"] === "string" && v["read_only"] !== true ? [real(v["source"])] : [];
+      return v["type"] === "bind" && typeof v["source"] === "string" && v["read_only"] !== true
+        ? [real(v["source"])]
+        : [];
     }),
   );
   return [...bindSources(config), ...fileSources(config)].filter((path) => {
@@ -304,7 +343,8 @@ export function composeFiles(
   }
   const first = (names: ReadonlyArray<string>) => names.map((name) => join(source, name)).find(exists);
   const main = first(DEFAULT_FILES);
-  if (main === undefined) throw new Error(`the repo has none of the Compose files ${DEFAULT_FILES.join(", ")}`);
+  if (main === undefined)
+    throw new Error(`the repo has none of the Compose files ${DEFAULT_FILES.join(", ")}`);
   const override = first(OVERRIDE_FILES);
   const files = override === undefined ? [main] : [main, override];
   for (const path of files)

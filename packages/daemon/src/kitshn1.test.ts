@@ -10,7 +10,8 @@ describe("KitSHn 1 data of a moving app (K-1404)", () => {
     expect(kitshn1Deployment("Owner/My.App", "pr-7", "/p")?.project).toBe("owner-my-app-pr-7");
   });
   it("refuses names that would leave the persistent root", () => {
-    for (const repo of ["../x", "a/..", "a/b/c", "a", "a/b c"]) expect(kitshn1Deployment(repo, "prod", "/p")).toBeNull();
+    for (const repo of ["../x", "a/..", "a/b/c", "a", "a/b c"])
+      expect(kitshn1Deployment(repo, "prod", "/p")).toBeNull();
     expect(kitshn1Deployment("a/b", "..", "/p")).toBeNull();
   });
 });

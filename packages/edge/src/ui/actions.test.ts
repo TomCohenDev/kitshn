@@ -104,6 +104,7 @@ function context(version = "0123456789ab"): ActionContext {
     machines: new Map([["vps", machine]]),
     version,
     undoCheck: null,
+    selected: new Set(),
   };
 }
 
@@ -285,6 +286,19 @@ describe("a stacked card leaves a circle (K-527)", () => {
     const stack = moved("stack");
     expect(stack.stack?.members).toEqual(["a", "b"]);
     expect(stack.b).toEqual(stack.a);
+  });
+});
+
+describe("New circle for these (K-529)", () => {
+  it("is in the menu of a selected card and once in the palette, only for two or more cards", () => {
+    const { handlers, calls } = recorder();
+    const ctx = { ...context(), selected: new Set(["riffle", "vps"]) };
+    run(find(actionsFor(ctx, handlers, { _tag: "card", id: "riffle" }), "new-circle-for"));
+    expect(calls[0]).toEqual(["newCircleFor"]);
+    expect(ids(actionsFor(ctx, handlers, { _tag: "card", id: "a" }))).not.toContain("new-circle-for");
+    expect(paletteEntries(ctx, handlers).filter((entry) => entry.label.startsWith("New circle for these"))).toHaveLength(1);
+    const one = { ...context(), selected: new Set(["riffle"]) };
+    expect(ids(actionsFor(one, handlers, { _tag: "card", id: "riffle" }))).not.toContain("new-circle-for");
   });
 });
 

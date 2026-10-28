@@ -256,7 +256,12 @@ const API_MESSAGES: Readonly<Record<string, ClientMessage["type"]>> = {
 export class Kitshn extends DurableObject<Env> {
   private state!: State;
   private revisions: Array<RevisionView> = [];
-  /** K-909: the cards whose orphaned Worker storage kitshn deletes now; their deploys and Undo wait. */
+  /**
+   * K-909: the cards whose orphaned Worker storage kitshn deletes now; their deploys and Undo wait. Known limit: it
+   * lives in memory. A restart in the middle of a delete ends the delete with no History entry for the part that went,
+   * and can leave a KV row whose namespace Cloudflare already deleted; the storage step of the next deploy finds such a
+   * row and makes the namespace again. Revisit when a delete must survive a restart, for example with a row per delete.
+   */
   private readonly deletingStorage = new Set<string>();
   private access = new Map<string, AccessRow>();
   /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
@@ -904,12 +909,18 @@ export class Kitshn extends DurableObject<Env> {
         continue;
       }
       await this.removeDomains(api, teardown.addresses, teardown.script);
-      // A removed app runs no crons either, so it does not write to its kept storage; Undo puts them back.
-      await api(
+      // A removed app runs no crons either, so it does not write to its kept storage; Undo puts them back. A script
+      // that does not exist (a first upload failed, or someone deleted it) has none, and there is nothing to keep.
+      const kept = await api(
         "PUT",
         `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${teardown.script}/schedules`,
         [],
+      ).then(
+        () => true,
+        (error: unknown) =>
+          error instanceof CloudflareError && error.status === 404 ? false : Promise.reject(error),
       );
+      if (!kept) continue;
       // K-909: the kept script is listed under "Orphaned" while its card is gone, with a way to delete it.
       this.sql(
         "INSERT OR REPLACE INTO worker_storage (card_id, kind, name, cf_id) VALUES (?, 'script', 'script', ?)",
@@ -4134,8 +4145,9 @@ export class Kitshn extends DurableObject<Env> {
   /**
    * K-806: the crons that the other Workers of the account run, from one script list and the schedules of each
    * script with a scheduled handler. It runs in the storage step, before the upload, so the limit never fails a live
-   * deploy. K-406: that step makes at most 20 calls for 10 KV bindings, so this reads at most 24 schedules and keeps
-   * the step under 45 subrequests; with more such Workers, the deploy fails and says so.
+   * deploy. K-406: that step makes at most 11 calls for 10 KV bindings (one list and one create each), so this reads
+   * at most 24 schedules and keeps the step at most 36 subrequests; with more such Workers, the deploy fails and says
+   * so.
    */
   private async cronsOfOtherWorkers(api: Api, script: string): Promise<number> {
     const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
@@ -4182,30 +4194,34 @@ export class Kitshn extends DurableObject<Env> {
           { status: 409 },
         );
     }
-    const have = new Set(
-      this.sql<{ name: string }>(
-        "SELECT name FROM worker_storage WHERE card_id = ? AND kind = 'kv'",
+    const have = new Map(
+      this.sql<{ name: string; cf_id: string }>(
+        "SELECT name, cf_id FROM worker_storage WHERE card_id = ? AND kind = 'kv'",
         row.resource_id,
-      ).map((item) => item.name),
+      ).map((item) => [item.name, item.cf_id]),
     );
+    const bindings = app.kv ?? [];
+    // One list of the namespaces: it shows a row whose namespace is gone (a delete that a restart cut off, or one
+    // outside kitshn), and the namespace that an earlier run made before kitshn wrote its row. Known limit: it reads
+    // the first 100 namespaces of the account only, and with a full page it trusts every row; revisit when the
+    // account has more.
+    const list =
+      bindings.length === 0
+        ? []
+        : await api<Array<{ id: string; title: string }>>(
+            "GET",
+            `${account}/storage/kv/namespaces?per_page=100`,
+          );
+    const complete = list.length < 100;
     const created: Array<string> = [];
-    for (const binding of app.kv ?? []) {
-      if (have.has(binding)) continue;
+    for (const binding of bindings) {
+      const known = have.get(binding);
+      if (known !== undefined && (!complete || list.some((item) => item.id === known))) continue;
       const title = `kitshn-${row.resource_id}-${binding}`;
-      let id: string;
-      try {
-        id = (await api<{ id: string }>("POST", `${account}/storage/kv/namespaces`, { title })).id;
-      } catch (error) {
-        // A namespace that an earlier run made before kitshn wrote its row has this title. Known limit: this reads
-        // only the first 100 namespaces of the account; revisit when the account has more.
-        const list = await api<Array<{ id: string; title: string }>>(
-          "GET",
-          `${account}/storage/kv/namespaces?per_page=100`,
-        );
-        const found = list.find((item) => item.title === title);
-        if (!found) throw error;
-        id = found.id;
-      }
+      const found = list.find((item) => item.title === title);
+      const id = found
+        ? found.id
+        : (await api<{ id: string }>("POST", `${account}/storage/kv/namespaces`, { title })).id;
       this.sql(
         "INSERT OR REPLACE INTO worker_storage (card_id, kind, name, cf_id) VALUES (?, 'kv', ?, ?)",
         row.resource_id,

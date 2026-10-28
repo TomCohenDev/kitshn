@@ -25,8 +25,9 @@ function fakeCloudflare(others: Record<string, number> = {}) {
     scripts.set(id, { classes: new Set(), crons: Array.from({ length: count }, () => "0 * * * *") });
   const domains: Array<{ id: string; hostname: string; service: string }> = [];
   const uploads: Array<Record<string, unknown>> = [];
-  const state: { failDomains: number; onDelete: (() => Promise<void>) | null } = {
+  const state: { failDomains: number; failUploads: number; onDelete: (() => Promise<void>) | null } = {
     failDomains: 0,
+    failUploads: 0,
     onDelete: null,
   };
   let next = 1;
@@ -58,6 +59,10 @@ function fakeCloudflare(others: Record<string, number> = {}) {
       const form = await request.formData();
       const metadata = JSON.parse(await (form.get("metadata") as Blob).text()) as Record<string, unknown>;
       uploads.push(metadata);
+      if (state.failUploads > 0) {
+        state.failUploads--;
+        return refuse("the upload failed");
+      }
       const known = scripts.get(script)?.classes ?? new Set<string>();
       const migration = metadata["migrations"] as { new_sqlite_classes?: Array<string> } | undefined;
       const added = migration?.new_sqlite_classes?.find((name) => known.has(name));
@@ -89,7 +94,11 @@ function fakeCloudflare(others: Record<string, number> = {}) {
     const schedules = /^\/accounts\/acct\/workers\/scripts\/([^/]+)\/schedules$/.exec(path)?.[1];
     if (schedules) {
       const item = scripts.get(schedules);
-      if (!item) return refuse("no such script");
+      if (!item)
+        return Response.json(
+          { success: false, errors: [{ code: 10007, message: "no such script" }] },
+          { status: 404 },
+        );
       if (method === "PUT")
         item.crons = ((await request.json()) as Array<{ cron: string }>).map((entry) => entry.cron);
       return ok({ schedules: item.crons.map((cron) => ({ cron })) });
@@ -143,7 +152,9 @@ function fakeCloudflare(others: Record<string, number> = {}) {
   });
   const served = (hostname: string) =>
     domains.filter((item) => item.hostname === hostname).map((item) => item.service);
-  return { uploads, state, scripts, served };
+  /** Deletes a KV namespace behind kitshn's back, as a restart in the middle of an orphan delete can leave it. */
+  const dropKv = (id: string) => collection("/accounts/acct/storage/kv/namespaces").delete(id);
+  return { uploads, state, scripts, served, dropKv };
 }
 
 /** One repo of the test, so each test has its own cards. */
@@ -276,6 +287,34 @@ describe("Worker deploys (K-806, K-909)", () => {
     expect(undone.status, JSON.stringify(undone.body)).toBe(200);
     expect(cloudflare.served(app.address)).toEqual([app.script]);
     expect(cloudflare.scripts.get(app.script)?.crons).toEqual(["*/30 * * * *"]);
+  });
+
+  it("removes an app whose first upload failed, so it has no script", async () => {
+    const cloudflare = fakeCloudflare();
+    const app = repo("46", "broken");
+    await allow(app);
+    cloudflare.state.failUploads = 1;
+    expect((await deploy(app)).status).toBe(502);
+    expect(cloudflare.scripts.has(app.script)).toBe(false);
+    const removed = await admin(`/api/apps/${app.card}`, "DELETE");
+    expect(removed.status, JSON.stringify(removed.body)).toBe(200);
+    expect(await storageRows(app.card)).toEqual([]);
+  });
+
+  it("makes a KV namespace again when its row points to one that is gone", async () => {
+    const cloudflare = fakeCloudflare();
+    const app = repo("47", "notes");
+    await allow(app);
+    expect((await deploy(app, { kv: ["DATA"] })).status).toBe(200);
+    const bound = (index: number) =>
+      (cloudflare.uploads[index]?.["bindings"] as Array<Record<string, string>>).find(
+        (item) => item["name"] === "DATA",
+      )?.["namespace_id"];
+    const first = bound(0);
+    cloudflare.dropKv(first ?? "");
+    expect((await deploy(app, { kv: ["DATA"] })).status).toBe(200);
+    expect(bound(1)).toEqual(expect.any(String));
+    expect(bound(1)).not.toBe(first);
   });
 
   it("deletes orphaned storage only while no deploy runs, and refuses a deploy that starts during the delete", async () => {

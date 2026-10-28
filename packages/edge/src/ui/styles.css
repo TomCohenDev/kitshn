@@ -1907,6 +1907,12 @@ a > code {
   flex-wrap: wrap;
 }
 
+/* K-526: the one add button of the toolbar; a big "+" so it reads as add, not as a dot. */
+.bar .btn.add {
+  font-size: 1.35rem;
+  line-height: 1;
+  padding: 2px 14px 4px;
+}
 /* K-525: the drag edges of the side panel and the shelf. A thin strip that shows a bar on hover and focus. */
 .resize-edge {
   position: fixed;

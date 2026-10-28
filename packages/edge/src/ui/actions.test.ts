@@ -223,6 +223,21 @@ describe("stack, circle and map actions", () => {
     ]);
   });
 
+  it("offers in the toolbar + exactly the add items of an empty spot (K-526)", () => {
+    const { handlers, calls } = recorder();
+    const add = actionsFor(context(), handlers, { _tag: "add" });
+    const spot = actionsFor(context(), handlers, { _tag: "map", at: { x: 5, y: 6 } });
+    expect(ids(add)).toEqual(spot?.[0]?.map((action) => action.id));
+    expect(ids(add)).toEqual(["new-circle", "upload", "add-site", "add-machine", "add-member"]);
+    run(find(add, "new-circle"));
+    expect(calls[0]).toEqual(["newCircle", null]);
+    expect(items(find(add, "add-member")).map((item) => item.id)).toContain(`add-member:${OWNER_CIRCLE_ID}`);
+    const owner = items(find(add, "add-member")).find((item) => item.id === `add-member:${OWNER_CIRCLE_ID}`);
+    if (!owner) throw new Error("no Owner item");
+    run(owner);
+    expect(calls[1]).toEqual(["addMember", OWNER_CIRCLE_ID]);
+  });
+
   it("has no menu for an item that is gone", () => {
     expect(actionsFor(context(), recorder().handlers, { _tag: "card", id: "gone" })).toBeNull();
   });

@@ -294,6 +294,63 @@ export interface Item {
   readonly id: string;
 }
 
+/** K-1508: what a History entry is about, for its kind filter. "action" changes nothing that Undo reverses. */
+export type RevisionKind = "card" | "share" | "circle" | "stack" | "app" | "pause" | "action";
+
+/** K-1508: the tag and id of a change, and for a stack the members before and after. */
+export type RevisionTarget = Pick<Change | Forget, "_tag" | "id"> & {
+  readonly members?: ReadonlyArray<ReadonlyArray<string> | null>;
+};
+
+export const targetOf = (change: Change | Forget): RevisionTarget =>
+  change._tag === "stack"
+    ? { _tag: "stack", id: change.id, members: [change.before?.members ?? null, change.after?.members ?? null] }
+    : { _tag: change._tag, id: change.id };
+
+/** A big revision (the setup) sends at most this many items, so the snapshot stays small. */
+const MAX_REVISION_ITEMS = 30;
+
+/**
+ * K-1508: the kind of a revision and the cards and circles that it changes, from the tag and id of each change.
+ * The first kind in the order app, pause, circle, share, stack, card wins, so a share that ends and takes its card
+ * out of a stack is a share.
+ */
+export function revisionTargets(changes: ReadonlyArray<RevisionTarget>): {
+  readonly kind: RevisionKind;
+  readonly items: ReadonlyArray<Item>;
+} {
+  const tags = new Set(changes.map((change) => change._tag));
+  const kind: RevisionKind = tags.has("app")
+    ? "app"
+    : tags.has("pause")
+      ? "pause"
+      : tags.has("circle")
+        ? "circle"
+        : tags.has("shareSetting")
+          ? "share"
+          : tags.has("stack")
+            ? "stack"
+            : tags.has("place")
+              ? "card"
+              : "action";
+  const items = new Map<string, Item>();
+  const add = (item: Item) => items.set(`${item.kind}:${item.id}`, item);
+  for (const change of changes) {
+    if (change._tag === "circle") add({ kind: "circle", id: change.id });
+    else if (change._tag === "place" || change._tag === "app" || change._tag === "forget")
+      add({ kind: "card", id: change.id });
+    else if (change._tag === "stack")
+      for (const id of (change.members ?? []).flatMap((members) => members ?? [])) add({ kind: "card", id });
+    else if (change._tag === "shareSetting") {
+      // A share setting id is `card/circle` (shareKey). Circle ids have no slash, so the last one splits it.
+      const cut = change.id.lastIndexOf("/");
+      add({ kind: "card", id: change.id.slice(0, cut) });
+      add({ kind: "circle", id: change.id.slice(cut + 1) });
+    }
+  }
+  return { kind, items: [...items.values()].slice(0, MAX_REVISION_ITEMS) };
+}
+
 /** K-1507: whether a change is part of an item: a card's place, shares, app and stack membership; a circle and its shares. */
 export function touches(change: Change, item: Item): boolean {
   if (item.kind === "circle")
@@ -589,10 +646,13 @@ export function shareDiff(before: State, after: State): Array<ShareDiff> {
   return diffs;
 }
 
+/** "riffle: + Her · view", "riffle: − Her", or for a new level of a share "riffle: Her · view → use". */
 export const describeDiff = (diff: ShareDiff) =>
-  diff.to
-    ? `${diff.resource.name}: + ${diff.circle.name} · ${diff.to}`
-    : `${diff.resource.name}: − ${diff.circle.name}`;
+  diff.to === null
+    ? `${diff.resource.name}: − ${diff.circle.name}`
+    : diff.from === null
+      ? `${diff.resource.name}: + ${diff.circle.name} · ${diff.to}`
+      : `${diff.resource.name}: ${diff.circle.name} · ${diff.from} → ${diff.to}`;
 
 export function summarize(before: State, after: State, changes: ReadonlyArray<Change>): string {
   const app = changes.find((change) => change._tag === "app");
@@ -750,15 +810,18 @@ export function prepareUndo(state: State, original: ReadonlyArray<Change>): Arra
   return changes;
 }
 
-/** K-523, K-1507: whether the per-item undo of `actor` works now, or why kitshn refuses it. */
-export function undoItemAnswer(
+/**
+ * K-523, K-1507, K-1508: whether the undo of a revision or the per-item undo of `actor` works now, or why
+ * kitshn refuses it.
+ */
+export function undoAnswer(
   state: State,
   revisions: ReadonlyArray<StoredRevision>,
   actor: Actor,
-  item: Item,
+  target: { readonly revision: number } | { readonly item: Item },
 ): { readonly allowed: true } | { readonly allowed: false; readonly reason: string } {
   try {
-    prepareUndo(state, undoTarget(state, revisions, actor, { item }).changes);
+    prepareUndo(state, undoTarget(state, revisions, actor, target).changes);
     return { allowed: true };
   } catch (error) {
     if (!(error instanceof RuleError)) throw error;

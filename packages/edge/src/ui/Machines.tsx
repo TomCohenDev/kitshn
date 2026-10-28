@@ -452,8 +452,7 @@ export function MachinePanel(props: {
 /** K-519: the Machines view, a table of status and health. */
 export function MachinesView(props: { machines: ReadonlyArray<MachineView>; onAdd: () => void }) {
   return (
-    <section class="history">
-      <h2>Machines</h2>
+    <div class="table-view">
       <p class="muted">
         Each machine runs the kitshn daemon. Commands and jobs need control on the machine card.
       </p>
@@ -484,14 +483,14 @@ export function MachinesView(props: { machines: ReadonlyArray<MachineView>; onAd
                   {view.machine.name}
                 </a>
               </td>
-              <td>
+              <td data-label="Status">
                 <PresenceSticker view={view} />
               </td>
-              <td>{view.machine.labels.join(", ")}</td>
-              <td>{percent(view.sample?.cpu)}</td>
-              <td>{percent(view.sample?.memory)}</td>
-              <td>{percent(view.sample?.disk)}</td>
-              <td>{view.status ? `${view.status.version} · ${view.status.arch}` : "–"}</td>
+              <td data-label="Labels">{view.machine.labels.join(", ")}</td>
+              <td data-label="CPU">{percent(view.sample?.cpu)}</td>
+              <td data-label="Memory">{percent(view.sample?.memory)}</td>
+              <td data-label="Disk">{percent(view.sample?.disk)}</td>
+              <td data-label="Daemon">{view.status ? `${view.status.version} · ${view.status.arch}` : "–"}</td>
             </tr>
           ))}
           {props.machines.length === 0 ? (
@@ -501,6 +500,6 @@ export function MachinesView(props: { machines: ReadonlyArray<MachineView>; onAd
           ) : null}
         </tbody>
       </table>
-    </section>
+    </div>
   );
 }

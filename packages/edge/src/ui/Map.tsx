@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { type Change, type Edit, type ShareDiff, applyChanges, shareDiff } from "../core/changes.ts";
 import {
   type Circle,
@@ -22,12 +22,9 @@ import type { MenuTarget } from "./actions.ts";
 import { MoreButton } from "./controls.tsx";
 import type { Rect } from "./popover.ts";
 import { HOLD_MS, type Press, startPress, stepPress } from "./press.ts";
+import { type View, headAngle, shownCardBoxes } from "./layout.ts";
 
-export interface View {
-  readonly x: number;
-  readonly y: number;
-  readonly s: number;
-}
+export type { View };
 
 export type Selection = { readonly cards: ReadonlySet<string>; readonly circle: string | null };
 
@@ -99,6 +96,10 @@ interface Props {
   /** Live previews of site and page cards (when the zoom allows). */
   readonly previews: boolean;
   readonly onView: (view: View) => void;
+  /** The left edge of a panel that floats over the map, or null; live previews skip cards under it. */
+  readonly panelLeft: number | null;
+  /** K-1508: `itemKey`s of the cards and circles that a History row highlights now. */
+  readonly flash: ReadonlySet<string>;
   readonly openStacks: ReadonlySet<string>;
   readonly onToggleStack: (key: string) => void;
   readonly onCommit: (edits: Array<Edit>, diffs: Array<ShareDiff>) => void;
@@ -162,6 +163,12 @@ export function MapView(props: Props) {
   const previewed = useRef<ReadonlySet<string>>(new Set());
 
   const shown = draft?.state ?? state;
+  // A head slides along its circle off the cards (layout.ts). It follows the stored map, not a drag in flight,
+  // so a head never jumps while a card passes it.
+  const headAngles = useMemo(() => {
+    const cards = shownCardBoxes(state, props.hidden);
+    return new Map([...state.circles.values()].map((circle) => [circle.id, headAngle(circle, cards)]));
+  }, [state, props.hidden]);
   const toWorld = (clientX: number, clientY: number): Point => ({
     x: (clientX - view.x) / view.s,
     y: (clientY - view.y) / view.s,
@@ -445,7 +452,9 @@ export function MapView(props: Props) {
             return kind !== undefined && PREVIEW_KINDS.has(kind) && !props.hidden.has(kind) && drawn;
           })
           .map(([id, place]) => ({ id, x: place.x * view.s + view.x, y: place.y * view.s + view.y }))
-          .filter((card) => card.x > 240 && card.y > 120 && card.x < innerWidth - 400 && card.y < innerHeight)
+          .filter(
+            (card) => card.x > 240 && card.y > 120 && card.x < (props.panelLeft ?? innerWidth) && card.y < innerHeight,
+          )
           .sort(
             (a, b) =>
               Math.hypot(a.x - innerWidth / 2, a.y - innerHeight / 2) -
@@ -529,6 +538,8 @@ export function MapView(props: Props) {
             state={shown}
             selected={props.selection.circle === circle.id}
             preview={previewCircles.has(circle.id)}
+            flash={props.flash.has(`circle:${circle.id}`)}
+            headAngle={headAngles.get(circle.id) ?? 0}
             zoomedOut={zoomedOut}
             hidden={props.hidden}
             onMenu={(anchor) => props.onMenu({ target: { _tag: "circle", id: circle.id }, anchor })}
@@ -555,12 +566,14 @@ export function MapView(props: Props) {
                 : { x: head.x + index * STACK_GAP, y: head.y }
               : place;
           const selected = props.selection.cards.has(resource.id);
+          // A closed stack shows the highlight of any of its cards.
+          const flash = (stack && !open ? stack[1] : [resource.id]).some((id) => props.flash.has(`card:${id}`));
           if (zoomedOut) {
             return (
               <div
                 key={resource.id}
                 data-card={resource.id}
-                class={`mini${selected ? " sel" : ""}${stackTarget === resource.id ? " stack-target" : ""}`}
+                class={`mini${selected ? " sel" : ""}${stackTarget === resource.id ? " stack-target" : ""}${flash ? " flash" : ""}`}
                 style={{ left: px(at.x), top: px(at.y), background: KINDS[resource.kind].color }}
                 tabIndex={0}
                 role="img"
@@ -582,6 +595,7 @@ export function MapView(props: Props) {
                 selected={stack[1].some((id) => props.selection.cards.has(id))}
                 dragging={draggedIds.has(resource.id)}
                 target={stackTarget === resource.id}
+                flash={flash}
                 onMenu={(anchor) =>
                   props.onMenu({ target: { _tag: "stack", id: stack[0].slice(USER_STACK.length) }, anchor })
                 }
@@ -597,6 +611,7 @@ export function MapView(props: Props) {
               selected={selected}
               dragging={draggedIds.has(resource.id)}
               target={stackTarget === resource.id}
+              flash={flash}
               count={stack && index === 0 ? stack[1].length : null}
               open={open}
               access={props.access[resource.id] ?? null}
@@ -659,6 +674,9 @@ function CircleView(props: {
   state: State;
   selected: boolean;
   preview: boolean;
+  flash: boolean;
+  /** Where the head sits on the edge, in radians from the top (layout.ts). */
+  headAngle: number;
   zoomedOut: boolean;
   hidden: ReadonlySet<ResourceKind>;
   onMenu: (anchor: Rect) => void;
@@ -678,7 +696,7 @@ function CircleView(props: {
   }
   return (
     <div
-      class={`circle${props.selected ? " sel" : ""}${props.preview ? " preview" : ""}`}
+      class={`circle${props.selected ? " sel" : ""}${props.preview ? " preview" : ""}${props.flash ? " flash" : ""}`}
       style={{
         left: px(circle.x - circle.r),
         top: px(circle.y - circle.r),
@@ -690,6 +708,10 @@ function CircleView(props: {
       <div
         class="head"
         data-head={circle.id}
+        style={{
+          left: px(circle.r + circle.r * Math.sin(props.headAngle)),
+          top: px(circle.r - circle.r * Math.cos(props.headAngle) - 20),
+        }}
         tabIndex={0}
         role="group"
         aria-label={`Circle ${circle.name}`}
@@ -765,6 +787,7 @@ function CardView(props: {
   selected: boolean;
   dragging: boolean;
   target: boolean;
+  flash: boolean;
   count: number | null;
   open: boolean;
   access: AccessState | null;
@@ -777,7 +800,7 @@ function CardView(props: {
   const holding = circlesHolding(state, resource.id);
   return (
     <div
-      class={`card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}`}
+      class={`card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}${props.flash ? " flash" : ""}`}
       data-card={resource.id}
       style={{ left: px(props.at.x), top: px(props.at.y) }}
     >
@@ -896,12 +919,13 @@ function StackCard(props: {
   selected: boolean;
   dragging: boolean;
   target: boolean;
+  flash: boolean;
   onMenu: (anchor: Rect) => void;
 }) {
   const holding = circlesHolding(props.state, props.id);
   return (
     <div
-      class={`card stack-card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}`}
+      class={`card stack-card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}${props.flash ? " flash" : ""}`}
       data-card={props.id}
       style={{ left: px(props.at.x), top: px(props.at.y) }}
     >

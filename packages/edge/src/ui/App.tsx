@@ -5,7 +5,6 @@ import {
   type Item,
   type ShareDiff,
   applyChanges,
-  deepEqual,
   isAppCard,
   resolveEdits,
   shareDiff,
@@ -41,7 +40,7 @@ import {
   MEMBER_HELP,
   SecretDialog,
 } from "./Circle.tsx";
-import { ActionMenu, MoreButton, TooltipLayer } from "./controls.tsx";
+import { ActionMenu, Menu, MenuItem, MoreButton, OverlayPanel, TooltipLayer } from "./controls.tsx";
 import {
   type ActionContext,
   type ActionHandlers,
@@ -71,6 +70,20 @@ import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
 import { overlay } from "./held.ts";
+import { HistoryView } from "./History.tsx";
+import {
+  type Box,
+  cardBox,
+  circleBox,
+  fitMap,
+  headAngle,
+  headBox,
+  openArea,
+  panInto,
+  shownCardBoxes,
+  union,
+} from "./layout.ts";
+import { actorLabel } from "./revisions.ts";
 import {
   type Connection,
   applyEdits,
@@ -84,11 +97,10 @@ import {
   useStore,
 } from "./store.ts";
 
-const VIEW_KEY = "kitshn.view";
 const PREVIEWS_KEY = "kitshn.previews";
 /**
- * On a wide screen the fit and a saved view stay at least this close, so card names stay readable on a
- * laptop. A bigger map is then centred, not shown whole; the wheel still zooms out to 0.15.
+ * On a wide screen a saved view stays at least this close, so card names stay readable on a laptop. A fit
+ * zooms out further when the map needs it (layout.ts fitMap).
  */
 const FIT_MIN_SCALE = 0.85;
 const wideScreen = () => innerWidth > 720;
@@ -102,23 +114,26 @@ interface Toast {
   readonly alsoUndo?: ReadonlyArray<number>;
 }
 
-const loadView = (): View => {
+const VIEW_KEY = "kitshn.view";
+
+/** K-514: this device's saved view, or null when it has none, so the map fits on load. */
+const loadView = (): View | null => {
   try {
     const saved = JSON.parse(localStorage.getItem(VIEW_KEY) ?? "null") as View | null;
     if (saved && [saved.x, saved.y, saved.s].every(Number.isFinite))
       return wideScreen() ? { ...saved, s: Math.max(saved.s, FIT_MIN_SCALE) } : saved;
   } catch {
-    // A broken saved view falls back to the default.
+    // A broken saved view falls back to a fit.
   }
-  return { x: innerWidth / 2 - 200, y: innerHeight / 2, s: 1 };
+  return null;
 };
 
-const actorLabel = (actor: Actor) =>
-  actor._tag === "person"
-    ? actor.email
-    : actor._tag === "device"
-      ? `📱 ${actor.name}`
-      : `kitshn (${actor.reason})`;
+/** Typing in a field or working in a dialog keeps its own Escape. */
+const ownsEscape = (target: EventTarget | null) =>
+  target instanceof Element &&
+  target.closest(
+    'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="dialog"], [role="alertdialog"]',
+  ) !== null;
 
 const CONNECTION_TIPS: Record<Connection, string> = {
   connecting: "Connecting: the map opens a connection to kitshn.",
@@ -128,11 +143,29 @@ const CONNECTION_TIPS: Record<Connection, string> = {
 };
 
 const TABS = {
-  map: "Map: circles say who, and a card inside a circle is shared with it.",
-  machines: "Machines: a table of every machine and its status.",
-  library: "Library: every page and file, with a search, a preview and Delete.",
-  history: "History: every change as one revision, with Undo.",
+  map: "Map: circles say who, and a card inside a circle is shared with it. The panel shows what you select; after Close, this opens it again.",
+  machines: "Machines: every machine and its status, in a panel over the map. Enlarge shows the full table.",
+  library:
+    "Library: every page and file, with a search, a preview and Delete, in a panel over the map. Enlarge shows the full table.",
+  history:
+    "History: every change as a sentence, with filters and Undo, in a panel over the map. Enlarge shows the full page.",
 } as const;
+
+/** K-516, K-519: what the overlay panel shows. History, Library and Machines also have a full view (a tab). */
+type PanelKind = "details" | "history" | "library" | "machines";
+
+/** `html` font size in styles.css; the panel width is 26rem (`--panel-width`). */
+const REM = 18;
+/** The left edge of the overlay panel on a wide screen. */
+const panelLeft = () => innerWidth - 12 - Math.min(26 * REM, innerWidth - 24);
+const PANEL_HEADINGS: Record<Exclude<PanelKind, "details">, string> = {
+  history: "History",
+  library: "Library",
+  machines: "Machines",
+};
+
+/** A highlight from History shows this long, once (K-1508). */
+const FLASH_MS = 1200;
 
 /** K-1504 */
 const PAUSE_TIP =
@@ -140,16 +173,21 @@ const PAUSE_TIP =
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
-const routeFromHash = () => {
+const routeFromHash = (): { readonly tab: "map" | Exclude<PanelKind, "details">; readonly id: string } => {
   const [tab = "map", id = ""] = location.hash.slice(1).split("/");
-  return { tab: tab === "history" || tab === "machines" || tab === "library" ? tab : ("map" as const), id };
+  return { tab: tab === "history" || tab === "machines" || tab === "library" ? tab : "map", id };
 };
 
 export function App() {
   const store = useStore();
   const [selection, setSelection] = useState<Selection>({ cards: new Set(), circle: null });
   const [hidden, setHidden] = useState<ReadonlySet<ResourceKind>>(new Set());
-  const [view, setView] = useState<View>(loadView);
+  const [savedView] = useState(loadView);
+  const [view, setView] = useState<View>(() => savedView ?? { x: 0, y: 0, s: 1 });
+  /** K-514: once the owner pans or zooms, the map stops fitting on its own until the next load. */
+  const userMoved = useRef(false);
+  /** The first fit check ran; it fits only a device without a saved view. */
+  const loaded = useRef(false);
   const [openStacks, setOpenStacks] = useState<ReadonlySet<string>>(new Set());
   const [toast, setToast] = useState<Toast | null>(null);
   /** The palette's first query, or null while it is closed. */
@@ -169,8 +207,17 @@ export function App() {
   const [pausing, setPausing] = useState(false);
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
   const [route, setRoute] = useState(routeFromHash);
+  /** The panel over the map, or null when closed. */
+  const [panel, setPanel] = useState<PanelKind | null>("details");
+  /** The details panel in its full view; History, Library and Machines use their tab for that. */
+  const [detailsLarge, setDetailsLarge] = useState(false);
+  /** K-1508: `itemKey`s of the cards and circles that a History row highlights now. */
+  const [flash, setFlash] = useState<ReadonlySet<string>>(new Set());
+  const flashTimer = useRef<number | null>(null);
+  const escapeRef = useRef<() => void>(() => undefined);
+  /** The anchor of the open "Show" menu of kinds, or null. */
+  const [showMenu, setShowMenu] = useState<Rect | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
-  const [fitted, setFitted] = useState(() => localStorage.getItem(VIEW_KEY) !== null);
   const toastTimer = useRef<number | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
 
@@ -229,17 +276,21 @@ export function App() {
 
   useEffect(() => {
     const onHash = () => {
-      setRoute(routeFromHash());
+      const next = routeFromHash();
+      setRoute(next);
       setMenu(null);
+      // K-519: `#map/<card id>` selects the card and shows its panel.
+      if (next.tab === "map" && next.id) {
+        setSelection({ cards: new Set([next.id]), circle: null });
+        setPanel("details");
+      }
     };
+    if (location.hash.startsWith("#map/")) onHash();
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setPalette((open) => (open === null ? "" : null));
-      } else if (event.key === "Escape") {
-        setPalette(null);
-        setSelection({ cards: new Set(), circle: null });
-      }
+      } else if (event.key === "Escape" && !ownsEscape(event.target)) escapeRef.current();
     };
     // A file dropped outside the map would make the browser open it and leave kitshn.
     const keepFiles = (event: DragEvent) => {
@@ -268,6 +319,24 @@ export function App() {
   const changeView = (next: View) => {
     setView(next);
     localStorage.setItem(VIEW_KEY, JSON.stringify(next));
+  };
+
+  /** The control that opened the panel; Close and Escape give it the focus back. */
+  const opener = useRef<HTMLElement | null>(null);
+  const rememberOpener = () => {
+    const active = document.activeElement;
+    // A control inside the panel goes when the panel changes, so the control that opened the panel stays.
+    if (active instanceof HTMLElement && active !== document.body && !active.closest(".overlay-panel"))
+      opener.current = active;
+  };
+
+  /** Selects cards or a circle; a selection shows its details in the panel. */
+  const select = (next: Selection) => {
+    setSelection(next);
+    if (next.cards.size > 0 || next.circle !== null) {
+      if (panel !== "details") rememberOpener();
+      setPanel("details");
+    }
   };
 
   /**
@@ -311,7 +380,7 @@ export function App() {
       else added.push(result);
     }
     setProgress(null);
-    if (added.length > 0) setSelection({ cards: new Set(added.map((item) => item.id)), circle: null });
+    if (added.length > 0) select({ cards: new Set(added.map((item) => item.id)), circle: null });
     const done =
       added.length === 0
         ? ""
@@ -407,12 +476,12 @@ export function App() {
       }));
     if (edits.length === 0) return;
     await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
-    setSelection({ cards: new Set(edits.map((edit) => edit.id)), circle: null });
+    select({ cards: new Set(edits.map((edit) => edit.id)), circle: null });
   };
 
   /** Selects an item and puts the focus into an input of its panel, after the panel renders. */
   const selectAndFocus = (next: Selection, selector: string) => {
-    setSelection(next);
+    select(next);
     location.hash = "map";
     queueMicrotask(() => setTimeout(() => document.querySelector<HTMLInputElement>(selector)?.focus()));
   };
@@ -534,6 +603,54 @@ export function App() {
     showToast({ text: [`Removed ${resource.name}.`, ...result.notes].join(" "), error: false, undo: result.revision });
   };
 
+  const fullPage = route.tab !== "map";
+  const shownPanel: PanelKind | null = fullPage ? route.tab : panel;
+  const large = fullPage || (panel === "details" && detailsLarge);
+  /** The panel floats over the map, so the map keeps its width and fit and pan leave its part free. */
+  const floating = shownPanel !== null && !large;
+
+  const ready = state !== null;
+  // K-514: fits on load without a saved view, and when the panel opens or closes until the owner pans or zooms.
+  useEffect(() => {
+    if (!ready) return;
+    const first = !loaded.current;
+    loaded.current = true;
+    if (first ? savedView === null : !userMoved.current) fitRef.current?.();
+  }, [ready, floating]);
+
+  // History renders only when its data changes, not on each pan of the map; its callbacks read the latest ones.
+  const historyShow = useRef<(revision: RevisionView) => void>(() => undefined);
+  const historyUndo = useRef<(id: number) => void>(() => undefined);
+  const historyView = useMemo(
+    () =>
+      state && store.snapshot ? (
+        <HistoryView
+          revisions={store.snapshot.revisions}
+          me={store.snapshot.me}
+          state={state}
+          onUndo={(id) => historyUndo.current(id)}
+          onShow={(revision) => historyShow.current(revision)}
+        />
+      ) : null,
+    [store.snapshot, state],
+  );
+
+  /** K-519: the toolbar's height, for the tray and the full view below it (styles.css `--bar-bottom`). */
+  const barRef = useMemo(() => {
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries)
+        document.documentElement.style.setProperty(
+          "--bar-bottom",
+          `${Math.round(entry.target.getBoundingClientRect().bottom)}px`,
+        );
+    });
+    return (element: HTMLElement | null) => {
+      if (!element) return;
+      observer.observe(element);
+      return () => observer.unobserve(element);
+    };
+  }, []);
+
   if (!state || !store.snapshot) {
     return (
       <div class="center">
@@ -551,10 +668,6 @@ export function App() {
     );
   }
 
-  if (!fitted) {
-    setFitted(true);
-    queueMicrotask(() => fitRef.current?.());
-  }
   const tray = [...state.resources.values()].filter((resource) => !state.places.has(resource.id));
   const shownTray = tray
     .filter((resource) =>
@@ -564,38 +677,92 @@ export function App() {
     )
     .reverse();
 
-  const fit = () => {
-    const points = [
-      ...[...state.circles.values()].flatMap((circle) => [
-        { x: circle.x - circle.r, y: circle.y - circle.r },
-        { x: circle.x + circle.r, y: circle.y + circle.r },
-      ]),
-      ...state.places.values(),
-    ];
-    if (points.length === 0) return;
-    const xs = points.map((point) => point.x);
-    const ys = points.map((point) => point.y);
-    const [minX, maxX, minY, maxY] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
-    const wide = wideScreen();
-    const top = (document.querySelector("header.bar")?.getBoundingClientRect().bottom ?? 70) + 30;
-    const left = tray.length > 0 ? (wide ? 230 : 170) : 10;
-    const width = Math.max(innerWidth - left - (wide ? 410 : 10), 200);
-    const height = Math.max(innerHeight - top - (wide ? 20 : innerHeight / 2), 200);
-    const s = Math.min(
-      2,
-      Math.max(
-        wide ? FIT_MIN_SCALE : 0.15,
-        Math.min(width / (maxX - minX + 120), height / (maxY - minY + 160)),
-      ),
-    );
-    changeView({
-      s,
-      x: left + (width - (maxX - minX) * s) / 2 - minX * s,
-      y: top + (height - (maxY - minY) * s) / 2 - minY * s,
+  /** The part of the screen where the map shows clear of the toolbar, the tray and a floating panel. */
+  const mapArea = (withPanel: boolean): Box =>
+    openArea({
+      width: innerWidth,
+      // The hint line at the bottom shows only on a wide screen; the map stays above it.
+      height: wideScreen() ? (document.querySelector(".hint")?.getBoundingClientRect().top ?? innerHeight) : innerHeight,
+      top: document.querySelector("header.bar")?.getBoundingClientRect().bottom ?? 70,
+      // The tray is not drawn yet when a full view switches to the map, so its width then comes from the tray cards.
+      left:
+        document.querySelector(".tray")?.getBoundingClientRect().right ??
+        (tray.length > 0 ? (wideScreen() ? 220 : 160) : 0),
+      panelLeft: withPanel ? panelLeft() : null,
+      narrow: !wideScreen(),
     });
+
+  const fit = () => {
+    const next = fitMap(state.circles.values(), state.places.values(), mapArea(floating));
+    if (next) changeView(next);
   };
 
   fitRef.current = fit;
+
+  /**
+   * K-1508: shows the cards and circles of a History row on the map: a pan that brings them clear of the
+   * panel, and one highlight that ends by itself.
+   */
+  const showOnMap = (revision: RevisionView) => {
+    const cards = revision.items.flatMap((item) => {
+      const place = item.kind === "card" ? state.places.get(item.id) : undefined;
+      const kind = state.resources.get(item.id)?.kind;
+      return place && kind && !hidden.has(kind) ? [{ item, box: cardBox(place) }] : [];
+    });
+    const circles = revision.items.flatMap((item) => {
+      const circle = item.kind === "circle" ? state.circles.get(item.id) : undefined;
+      return circle ? [{ item, box: circleBox(circle) }] : [];
+    });
+    const shown = [...cards, ...circles];
+    if (shown.length === 0) {
+      showToast({
+        text: "Nothing of this change shows on the map now: it is gone, in the tray, or of a hidden kind.",
+        error: false,
+        undo: null,
+      });
+      return;
+    }
+    if (fullPage) {
+      setPanel("history");
+      location.hash = "map";
+    }
+    // A pan to chosen items is the owner's view now, so a panel that opens next does not fit over it.
+    userMoved.current = true;
+    changeView(panInto(union(shown.map((entry) => entry.box)), mapArea(true), view));
+    setFlash(new Set(shown.map((entry) => itemKey(entry.item))));
+    if (flashTimer.current !== null) clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => setFlash(new Set()), FLASH_MS);
+  };
+
+  /** A toolbar tab opens its panel over the map; Enlarge in the panel opens the full view. */
+  const openTab = (tab: "map" | Exclude<PanelKind, "details">) => {
+    rememberOpener();
+    setPanel(tab === "map" ? "details" : tab);
+    location.hash = "map";
+  };
+
+  const resizePanel = (kind: PanelKind) => {
+    if (kind === "details") setDetailsLarge(!large);
+    else if (large) openTab(kind);
+    else location.hash = kind;
+  };
+
+  const closePanel = () => {
+    setPanel(null);
+    setDetailsLarge(false);
+    if (fullPage) location.hash = "map";
+    (opener.current?.isConnected ? opener.current : document.querySelector<HTMLElement>(".bar .seg button"))?.focus();
+  };
+
+  historyShow.current = showOnMap;
+  historyUndo.current = (id) => void undo(id);
+
+  // Escape clears a selection first, then closes the panel; the palette and dialogs handle their own.
+  escapeRef.current = () => {
+    if (selection.cards.size > 0 || selection.circle !== null)
+      setSelection({ cards: new Set(), circle: null });
+    else if (shownPanel !== null) closePanel();
+  };
 
   /** A new circle at `at`, or in the middle of the view. */
   const newCircle = async (at: Point | null) => {
@@ -615,7 +782,7 @@ export function App() {
       r: 220,
     };
     const result = await applyEdits([{ _tag: "circle", id, after: circle }]);
-    if (result.ok) setSelection({ cards: new Set(), circle: id });
+    if (result.ok) select({ cards: new Set(), circle: id });
     else showToast({ text: result.error, error: true, undo: null });
   };
 
@@ -691,8 +858,22 @@ export function App() {
   /** K-523: the menu and the palette run these, the same as the toolbar and the panel. */
   const handlers: ActionHandlers = {
     select: (selected) => {
-      setSelection(selected);
+      select(selected);
       location.hash = "map";
+      // "Show details" brings the item clear of the panel.
+      const boxes = [
+        ...[...selected.cards].flatMap((id) => {
+          const place = state.places.get(id);
+          return place ? [cardBox(place)] : [];
+        }),
+        ...[state.circles.get(selected.circle ?? "")].flatMap((circle) =>
+          circle ? [headBox(circle, headAngle(circle, shownCardBoxes(state, hidden)))] : [],
+        ),
+      ];
+      if (boxes.length > 0) {
+        userMoved.current = true;
+        changeView(panInto(union(boxes), mapArea(true), view));
+      }
     },
     openAddress: (address) => void open(`https://${address}`, "_blank", "noreferrer"),
     copyAddress: (address) => void navigator.clipboard.writeText(`https://${address}`),
@@ -722,7 +903,7 @@ export function App() {
     runJob: (machine, command) => void runJob(machine, command),
     removeMachine: (machine) => void removeMachine(machine),
     editCircle: (circleId) => {
-      setSelection({ cards: new Set(), circle: circleId });
+      select({ cards: new Set(), circle: circleId });
       location.hash = "map";
     },
     renameCircle: (circleId) =>
@@ -756,10 +937,15 @@ export function App() {
           state={state}
           access={store.snapshot.access}
           selection={selection}
-          onSelect={setSelection}
+          onSelect={select}
           hidden={hidden}
           view={view}
-          onView={changeView}
+          onView={(next) => {
+            userMoved.current = true;
+            changeView(next);
+          }}
+          panelLeft={floating && wideScreen() ? panelLeft() : null}
+          flash={flash}
           openStacks={openStacks}
           onToggleStack={(key) => {
             const next = new Set(openStacks);
@@ -771,21 +957,76 @@ export function App() {
           machines={machines}
           onMenu={setMenu}
         />
-      ) : route.tab === "library" ? (
-        <LibraryView
-          state={state}
-          revision={store.snapshot.revision}
-          onToast={(text, error) => showToast({ text, error, undo: null })}
-          onShowCard={(id) => {
-            setSelection({ cards: new Set([id]), circle: null });
-            location.hash = "map";
-          }}
-        />
-      ) : route.tab === "machines" ? (
-        <MachinesView machines={store.snapshot.machines} onAdd={() => setAddingMachine(true)} />
-      ) : (
-        <History revisions={store.snapshot.revisions} me={store.snapshot.me} onUndo={(id) => void undo(id)} />
-      )}
+      ) : null}
+      {shownPanel ? (
+        <OverlayPanel
+          // New content mounts a new panel, so the focus moves to its heading.
+          key={shownPanel}
+          heading={
+            shownPanel !== "details"
+              ? PANEL_HEADINGS[shownPanel]
+              : selection.circle !== null
+                ? "Circle"
+                : selection.cards.size === 1
+                  ? "Card"
+                  : selection.cards.size > 1
+                    ? "Selection"
+                    : "The map"
+          }
+          large={large}
+          onResize={() => resizePanel(shownPanel)}
+          onClose={closePanel}
+        >
+          {shownPanel === "history" ? (
+            historyView
+          ) : shownPanel === "library" ? (
+            <LibraryView
+              state={state}
+              revision={store.snapshot.revision}
+              onToast={(text, error) => showToast({ text, error, undo: null })}
+              onShowCard={(id) => handlers.select({ cards: new Set([id]), circle: null })}
+            />
+          ) : shownPanel === "machines" ? (
+            <MachinesView machines={store.snapshot.machines} onAdd={() => setAddingMachine(true)} />
+          ) : (
+            <Panel
+              state={state}
+              repos={store.snapshot.repos}
+              selection={selection}
+              access={store.snapshot.access}
+              me={store.snapshot.me}
+              accessTeam={store.snapshot.accessTeam}
+              onSelectCard={(id) => select({ cards: new Set([id]), circle: null })}
+              onSelectCircle={(id) => select({ cards: new Set(), circle: id })}
+              stacks={stacks}
+              onSecret={setSecret}
+              onEdit={async (edits) => {
+                const result = await applyEdits(edits);
+                if (result.ok) return null;
+                showToast({ text: result.error, error: true, undo: null });
+                return result.error;
+              }}
+              onDeleteCircle={handlers.deleteCircle}
+              onPlace={placeInView}
+              onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
+              onRemoveApp={(resource) => void removeApp(resource)}
+              deployed={deployed}
+              paused={store.snapshot.paused !== null}
+              machines={machines}
+              version={store.snapshot.version}
+              jobs={store.snapshot.jobs}
+              onToast={(text, error) => showToast({ text, error, undo: null })}
+              onRemoveMachine={handlers.removeMachine}
+              onRunJob={runJob}
+              warnings={store.snapshot.accessWarnings}
+              onPause={(pause) => (pause ? setPausing(true) : startResume())}
+              onSignOut={(retry) => void signOut(retry)}
+              signOutWarning={store.snapshot.signOutWarning}
+              signingOut={signingOut}
+            />
+          )}
+        </OverlayPanel>
+      ) : null}
       {addingMachine ? <AddMachine onClose={() => setAddingMachine(false)} /> : null}
       {addingSite ? (
         <AddSite
@@ -819,15 +1060,17 @@ export function App() {
           void uploadFiles(files, at);
         }}
       />
-      <header class="bar">
+      <header class={`bar${floating ? " beside-panel" : ""}`} ref={barRef}>
         <h1>kitshn</h1>
         <div class="seg">
           {(["map", "machines", "library", "history"] as const).map((tab) => (
             <button
               key={tab}
-              aria-pressed={route.tab === tab}
+              aria-pressed={
+                fullPage ? route.tab === tab : tab === "map" ? panel === "details" : panel === tab
+              }
               data-tip={TABS[tab]}
-              onClick={() => (location.hash = tab)}
+              onClick={() => openTab(tab)}
             >
               {tab[0]?.toUpperCase()}
               {tab.slice(1)}
@@ -837,24 +1080,39 @@ export function App() {
         {route.tab === "map" ? (
           <>
             <span class="sep" />
-            {(Object.keys(RESOURCE_KINDS) as Array<ResourceKind>)
-              .filter((kind) => [...state.resources.values()].some((resource) => resource.kind === kind))
-              .map((kind) => (
-                <button
-                  key={kind}
-                  class="btn toggle"
-                  aria-pressed={!hidden.has(kind)}
-                  data-tip={`${hidden.has(kind) ? "Show" : "Hide"} ${KINDS[kind].label.toLowerCase()} on the map. Hidden kinds still count for their circles.`}
-                  onClick={() => {
-                    const next = new Set(hidden);
-                    if (next.has(kind)) next.delete(kind);
-                    else next.add(kind);
-                    setHidden(next);
-                  }}
-                >
-                  {KINDS[kind].icon} {KINDS[kind].label}
-                </button>
-              ))}
+            {/* K-501: one menu for the kinds, so the toolbar stays short and "Machines" names only the tab. */}
+            <button
+              type="button"
+              class="btn"
+              aria-haspopup="menu"
+              data-tip="Show or hide kinds of cards on the map. Hidden kinds still count for their circles."
+              onClick={(event) => setShowMenu(event.currentTarget.getBoundingClientRect())}
+            >
+              Show{hidden.size > 0 ? ` (${hidden.size} hidden)` : ""} ▾
+            </button>
+            {showMenu ? (
+              <Menu label="Show kinds on the map" anchor={showMenu} onClose={() => setShowMenu(null)}>
+                {(Object.keys(RESOURCE_KINDS) as Array<ResourceKind>)
+                  .filter((kind) => [...state.resources.values()].some((resource) => resource.kind === kind))
+                  .map((kind) => (
+                    <MenuItem
+                      key={kind}
+                      checkbox
+                      checked={!hidden.has(kind)}
+                      keepOpen
+                      tip={`${hidden.has(kind) ? "Show" : "Hide"} ${KINDS[kind].label.toLowerCase()} on the map.`}
+                      onSelect={() => {
+                        const next = new Set(hidden);
+                        if (next.has(kind)) next.delete(kind);
+                        else next.add(kind);
+                        setHidden(next);
+                      }}
+                    >
+                      {KINDS[kind].icon} {KINDS[kind].label}
+                    </MenuItem>
+                  ))}
+              </Menu>
+            ) : null}
             <span class="sep" />
             <button
               class="btn primary"
@@ -913,8 +1171,8 @@ export function App() {
             class="btn"
             data-tip="Repos that wait for you to allow their first deploy. A click shows them in the panel."
             onClick={() => {
-              location.hash = "map";
               setSelection({ cards: new Set(), circle: null });
+              openTab("map");
             }}
           >
             <span class="sticker wait">{plural(waitingRepos, "repo")} waiting</span>
@@ -1001,7 +1259,7 @@ export function App() {
                   const cards = new Set(event.shiftKey ? selection.cards : []);
                   if (event.shiftKey && cards.has(resource.id)) cards.delete(resource.id);
                   else cards.add(resource.id);
-                  setSelection({ cards, circle: null });
+                  select({ cards, circle: null });
                 }}
               >
                 <div class="name">
@@ -1019,41 +1277,6 @@ export function App() {
           </div>
         </aside>
       ) : null}
-      <Panel
-        state={state}
-        repos={store.snapshot.repos}
-        selection={selection}
-        access={store.snapshot.access}
-        me={store.snapshot.me}
-        accessTeam={store.snapshot.accessTeam}
-        onSelectCard={(id) => setSelection({ cards: new Set([id]), circle: null })}
-        onSelectCircle={(id) => setSelection({ cards: new Set(), circle: id })}
-        stacks={stacks}
-        onSecret={setSecret}
-        onEdit={async (edits) => {
-          const result = await applyEdits(edits);
-          if (result.ok) return null;
-          showToast({ text: result.error, error: true, undo: null });
-          return result.error;
-        }}
-        onDeleteCircle={handlers.deleteCircle}
-        onPlace={placeInView}
-        onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
-        onRemoveApp={(resource) => void removeApp(resource)}
-        deployed={deployed}
-        paused={store.snapshot.paused !== null}
-        machines={machines}
-        version={store.snapshot.version}
-        jobs={store.snapshot.jobs}
-        onToast={(text, error) => showToast({ text, error, undo: null })}
-        onRemoveMachine={handlers.removeMachine}
-        onRunJob={runJob}
-        warnings={store.snapshot.accessWarnings}
-        onPause={(pause) => (pause ? setPausing(true) : startResume())}
-        onSignOut={(retry) => void signOut(retry)}
-        signOutWarning={store.snapshot.signOutWarning}
-        signingOut={signingOut}
-      />
       {store.snapshot.paused ? (
         <PausedBanner
           mode={store.snapshot.paused}
@@ -1069,7 +1292,7 @@ export function App() {
           initialQuery={palette}
           onClose={() => setPalette(null)}
           entries={[
-            { label: "Open History", tip: TABS.history, run: () => (location.hash = "history") },
+            { label: "Open History", tip: TABS.history, run: () => openTab("history") },
             {
               label: "Emergency pause, or Resume",
               tip: PAUSE_TIP,
@@ -1138,62 +1361,13 @@ export function App() {
         </div>
       ) : null}
       {route.tab === "map" ? (
-        <div class="hint">
-          Drag a card into a circle to share it · Right-click, a long press or ⋯ shows its actions · Shift-click or drag empty space to select many · {ALONE_KEY.label}-drag a
-          circle head to move it alone · Ctrl or ⌘ + wheel zooms
+        // Beside a floating panel the hint stops at the panel and wraps, so it stays readable.
+        <div class={`hint${floating ? " beside-panel" : ""}`}>
+          Drag a card into a circle to share it · Right-click, a long press or ⋯: actions · Shift-click or drag
+          empty space: select many · {ALONE_KEY.label}-drag a circle head: move it alone · Ctrl or ⌘ + wheel: zoom
         </div>
       ) : null}
     </>
-  );
-}
-
-function History(props: { revisions: ReadonlyArray<RevisionView>; me: Actor; onUndo: (id: number) => void }) {
-  // K-1506: Undo reverses only the caller's own newest change that is still in effect.
-  const newest = props.revisions.find(
-    (revision) =>
-      revision.undoable && revision.undoes === null && revision.undoneBy === null && deepEqual(revision.actor, props.me),
-  )?.id;
-  return (
-    <section class="history">
-      <h2>History</h2>
-      <p class="muted">Every change is one revision. Undo makes a new revision that reverses it.</p>
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>When</th>
-            <th>Who</th>
-            <th>What</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {props.revisions.map((revision) => (
-            <tr key={revision.id} id={`rev-${revision.id}`}>
-              <td class="id">{revision.id}</td>
-              <td>{new Date(revision.at).toLocaleString()}</td>
-              <td>{actorLabel(revision.actor)}</td>
-              <td>{revision.summary}</td>
-              <td>
-                {revision.undoneBy !== null ? (
-                  <span class="stamp" data-tip={`Undone: revision #${revision.undoneBy} reverses this one.`}>
-                    ✓ undone
-                  </span>
-                ) : revision.id === newest ? (
-                  <button
-                    class="btn"
-                    data-tip="Undo: a new revision that reverses this one."
-                    onClick={() => props.onUndo(revision.id)}
-                  >
-                    Undo
-                  </button>
-                ) : null}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </section>
   );
 }
 
@@ -1230,7 +1404,6 @@ function Panel(props: {
   onSecret: (secret: DeviceSecret) => void;
 }) {
   const { state, selection } = props;
-  const [sheetOpen, setSheetOpen] = useState(true);
   const circle = selection.circle ? state.circles.get(selection.circle) : undefined;
   const cards = [...selection.cards].flatMap((id) => {
     const resource = state.resources.get(id);
@@ -1309,8 +1482,6 @@ function Panel(props: {
   } else {
     body = (
       <section>
-        <div class="label">kitshn</div>
-        <h2>The map</h2>
         <p>
           Circles say <b>who</b>: people, email domains, devices, networks. A card inside a circle is shared
           with that circle at its level.
@@ -1401,18 +1572,7 @@ function Panel(props: {
       </section>
     );
   }
-  return (
-    <aside class={`side${sheetOpen ? "" : " closed"}`}>
-      <button
-        type="button"
-        class="handle"
-        aria-label={sheetOpen ? "Close the panel" : "Open the panel"}
-        data-tip={sheetOpen ? "Close the panel." : "Open the panel."}
-        onClick={() => setSheetOpen(!sheetOpen)}
-      />
-      {body}
-    </aside>
-  );
+  return body;
 }
 
 interface StackActions {
@@ -1779,7 +1939,9 @@ function Palette(props: {
             setCursor({ label: null, picked: false });
           }}
           onKeyDown={(event) => {
-            if (event.key === "ArrowDown" || event.key === "ArrowUp") setCursor(paletteArrow(event.key, labels, cursor));
+            if (event.key === "Escape") props.onClose();
+            else if (event.key === "ArrowDown" || event.key === "ArrowUp")
+              setCursor(paletteArrow(event.key, labels, cursor));
             else if (event.key === "Enter") {
               const index = paletteEnter(matches, active, picked);
               if (index !== null) run(index);

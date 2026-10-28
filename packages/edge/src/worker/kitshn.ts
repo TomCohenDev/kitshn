@@ -17,7 +17,7 @@ import {
   mergeMoves,
   mergedSummary,
   type StoredRevision,
-  undoItemAnswer,
+  undoAnswer,
   prepareUndo,
   undoTarget,
   refuseRaiseWhilePaused,
@@ -25,6 +25,9 @@ import {
   removeAppChanges,
   resolveEdits,
   restoredResource,
+  revisionTargets,
+  type RevisionTarget,
+  targetOf,
   ruleViolation,
   stacksWithout,
   summarize,
@@ -351,9 +354,15 @@ export class Kitshn extends DurableObject<Env> {
       summary: string;
       undoes: number | null;
       empty: number;
+      targets: string;
     }>(
+      // K-1508: only the tag, id and stack members of each change, so the load never parses whole circles.
       `SELECT id, at, actor, summary, undoes,
-         NOT EXISTS (SELECT 1 FROM json_each(changes) WHERE json_extract(value, '$._tag') != 'forget') AS empty
+         NOT EXISTS (SELECT 1 FROM json_each(changes) WHERE json_extract(value, '$._tag') != 'forget') AS empty,
+         (SELECT json_group_array(json_object('_tag', json_extract(value, '$._tag'), 'id', json_extract(value, '$.id'),
+             'members', CASE WHEN json_extract(value, '$._tag') = 'stack'
+               THEN json_array(json_extract(value, '$.before.members'), json_extract(value, '$.after.members')) END))
+           FROM json_each(changes)) AS targets
        FROM revisions ORDER BY id DESC LIMIT ?`,
       RECENT_REVISIONS,
     );
@@ -371,6 +380,7 @@ export class Kitshn extends DurableObject<Env> {
       undoes: row.undoes,
       undoneBy: undone.get(row.id) ?? null,
       undoable: row.empty === 0,
+      ...revisionTargets(JSON.parse(row.targets) as Array<RevisionTarget>),
     }));
   }
 
@@ -569,9 +579,22 @@ export class Kitshn extends DurableObject<Env> {
         for (const id of this.stuckShares) if (id.startsWith(`${change.id}/`)) this.stuckShares.delete(id);
     }
     if (merge) {
-      this.revisions = this.revisions.map((revision) => (revision.id === id ? { ...revision, at: now, summary } : revision));
+      const targets = revisionTargets(merge.changes.map(targetOf));
+      this.revisions = this.revisions.map((revision) =>
+        revision.id === id ? { ...revision, at: now, summary, ...targets } : revision,
+      );
       this.broadcast();
-    } else this.showRevision({ id, at: now, actor, summary, undoes, undoneBy: null, undoable: true });
+    } else
+      this.showRevision({
+        id,
+        at: now,
+        actor,
+        summary,
+        undoes,
+        undoneBy: null,
+        undoable: true,
+        ...revisionTargets(changes.map(targetOf)),
+      });
     void this.scheduleAlarm();
     return id;
   }
@@ -1005,7 +1028,14 @@ export class Kitshn extends DurableObject<Env> {
       const id = query.get("id");
       if ((kind !== "card" && kind !== "circle") || !id)
         return Response.json({ error: "Name the item with kind=card or kind=circle and an id." }, { status: 400 });
-      return Response.json(undoItemAnswer(this.state, this.storedRevisions(), caller.actor, { kind, id }));
+      return Response.json(undoAnswer(this.state, this.storedRevisions(), caller.actor, { item: { kind, id } }));
+    }
+    if (path === "/api/undo" && request.method === "GET") {
+      // K-1508: History asks once for the caller's newest row, by the same checks as the undo.
+      const revision = Number(new URL(request.url).searchParams.get("revision"));
+      if (!Number.isSafeInteger(revision) || revision <= 0)
+        return Response.json({ error: "Name the revision with revision=<id>." }, { status: 400 });
+      return Response.json(undoAnswer(this.state, this.storedRevisions(), caller.actor, { revision }));
     }
     const type = API_MESSAGES[path];
     if (type !== undefined) {
@@ -2574,7 +2604,16 @@ export class Kitshn extends DurableObject<Env> {
    */
   private recordRevision(actor: Actor, summary: string) {
     const id = this.insertRevision(actor, summary, [], null);
-    this.showRevision({ id, at: Date.now(), actor, summary, undoes: null, undoneBy: null, undoable: false });
+    this.showRevision({
+      id,
+      at: Date.now(),
+      actor,
+      summary,
+      undoes: null,
+      undoneBy: null,
+      undoable: false,
+      ...revisionTargets([]),
+    });
   }
 
   /** Puts a new revision at the top of the in-memory History (K-519), marks what it undoes, and tells everyone. */

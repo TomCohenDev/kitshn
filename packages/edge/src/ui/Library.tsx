@@ -47,8 +47,7 @@ export function LibraryView(props: {
   };
 
   return (
-    <section class="history">
-      <h2>Library</h2>
+    <div class="table-view">
       <p class="muted">
         Pages and files. A new one is private and waits in the tray; place its card in a circle to share it.
       </p>
@@ -86,7 +85,7 @@ export function LibraryView(props: {
             const circles = circlesHolding(props.state, item.id).map((circle) => circle.name);
             return (
               <tr key={item.id}>
-                <td>
+                <td data-label="Title">
                   {KINDS[item.kind].icon}{" "}
                   {resource?.addresses[0] ? (
                     <a href={`https://${resource.addresses[0]}`} target="_blank" rel="noreferrer">
@@ -96,11 +95,11 @@ export function LibraryView(props: {
                     item.title
                   )}
                 </td>
-                <td>{item.thread ?? "–"}</td>
-                <td>{item.machine ?? "–"}</td>
-                <td>{new Date(item.createdAt).toLocaleString()}</td>
-                <td>{size(item.size)}</td>
-                <td>
+                <td data-label="Thread">{item.thread ?? "–"}</td>
+                <td data-label="Machine">{item.machine ?? "–"}</td>
+                <td data-label="Added">{new Date(item.createdAt).toLocaleString()}</td>
+                <td data-label="Size">{size(item.size)}</td>
+                <td data-label="Shared with">
                   {circles.length > 0 ? (
                     circles.join(", ")
                   ) : (
@@ -144,6 +143,6 @@ export function LibraryView(props: {
           ) : null}
         </tbody>
       </table>
-    </section>
+    </div>
   );
 }

@@ -5,19 +5,21 @@ import {
   applyChanges,
   type Change,
   conflictOf,
+  describeDiff,
   type Edit,
   invert,
   MOVE_MERGE_MS,
   mergeMoves,
   type StoredRevision,
   prepareUndo,
-  undoItemAnswer,
+  undoAnswer,
   undoTarget,
   mergedSummary,
   refuseRaiseWhilePaused,
   refuseResume,
   removeAppChanges,
   resolveEdits,
+  revisionTargets,
   ruleViolation,
   shareDiff,
   stacksWithout,
@@ -958,14 +960,18 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
       [A, [herAs({ level: "view" })]],
       [B, [place("riffle", 400, 0)]],
     ]);
-    expect(undoItemAnswer(state, revisions, A, { kind: "card", id: "box" })).toEqual({ allowed: true });
-    expect(undoItemAnswer(state, revisions, A, { kind: "circle", id: "her" })).toEqual({
+    expect(undoAnswer(state, revisions, A, { item: { kind: "card", id: "box" } })).toEqual({ allowed: true });
+    expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: "her" } })).toEqual({
       allowed: false,
       reason: '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
     });
-    expect(undoItemAnswer(state, revisions, B, { kind: "card", id: "box" })).toEqual({
+    expect(undoAnswer(state, revisions, B, { item: { kind: "card", id: "box" } })).toEqual({
       allowed: false,
       reason: "You have no change to this item left to undo.",
+    });
+    expect(undoAnswer(state, revisions, A, { revision: 2 })).toEqual({
+      allowed: false,
+      reason: '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
     });
   });
 
@@ -976,9 +982,62 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     ]);
     const reason = "This undo would make riffle public in Everyone. An undo never does that without asking; share it by hand.";
     expect(() => prepareUndo(state, revisions[0]!.changes)).toThrow(reason);
-    expect(undoItemAnswer(state, revisions, A, { kind: "circle", id: EVERYONE_CIRCLE_ID })).toEqual({
+    expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: EVERYONE_CIRCLE_ID } })).toEqual({
       allowed: false,
       reason,
     });
+  });
+});
+
+describe("History targets (K-1508)", () => {
+  it("names the cards and circles of a revision once, and its kind", () => {
+    expect(
+      revisionTargets([
+        { _tag: "place", id: "tick3d" },
+        { _tag: "shareSetting", id: "tick3d/everyone" },
+        { _tag: "circle", id: "everyone" },
+      ]),
+    ).toEqual({
+      kind: "circle",
+      items: [
+        { kind: "card", id: "tick3d" },
+        { kind: "circle", id: "everyone" },
+      ],
+    });
+  });
+
+  it("names the cards of a stack before and after the change", () => {
+    expect(revisionTargets([{ _tag: "stack", id: "s-1", members: [["a", "b"], ["b", "c"]] }]).items).toEqual([
+      { kind: "card", id: "a" },
+      { kind: "card", id: "b" },
+      { kind: "card", id: "c" },
+    ]);
+  });
+
+  it("files a share that ends and takes its card out of a stack under shares", () => {
+    expect(
+      revisionTargets([
+        { _tag: "shareSetting", id: "a/her" },
+        { _tag: "stack", id: "s-1", members: [["a", "b", "c"], ["b", "c"]] },
+      ]).kind,
+    ).toBe("share");
+  });
+
+  it("calls a revision without changes an action", () => {
+    expect(revisionTargets([{ _tag: "forget", id: "page-1" }])).toEqual({
+      kind: "action",
+      items: [{ kind: "card", id: "page-1" }],
+    });
+  });
+});
+
+describe("share summaries (K-1501, K-1508)", () => {
+  it("names a new level of a share apart from a new share", () => {
+    const state = start();
+    const riffle = state.resources.get("riffle");
+    const her = circle(state, "her");
+    if (!riffle) throw new Error("The fixture has riffle.");
+    expect(describeDiff({ resource: riffle, circle: her, from: null, to: "view" })).toBe("riffle: + Her · view");
+    expect(describeDiff({ resource: riffle, circle: her, from: "view", to: "use" })).toBe("riffle: Her · view → use");
   });
 });

@@ -1,5 +1,5 @@
 import { type ComponentChildren, Fragment, createPortal } from "preact";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { Action, ActionGroups } from "./actions.ts";
 import { type Rect, type Side, menuMove, placeFloating, tipTimer } from "./popover.ts";
 
@@ -176,7 +176,8 @@ export function Radio(props: ChoiceProps & { readonly name: string; readonly onS
   );
 }
 
-const ITEMS = '[role="menuitem"]:not(:disabled), [role="menuitemradio"]:not(:disabled)';
+const ITEMS =
+  '[role="menuitem"]:not(:disabled), [role="menuitemradio"]:not(:disabled), [role="menuitemcheckbox"]:not(:disabled)';
 
 /**
  * A menu in a portal next to `anchor` (a button's rect, or a zero-size rect at the pointer for a context
@@ -272,8 +273,9 @@ export function MenuItem(props: {
   readonly opens?: boolean;
   /** A choice keeps the menu open (an item that opens a sub-list, or Back). */
   readonly keepOpen?: boolean;
-  /** A radio item of a group of options; true marks the current one. */
+  /** A radio item of a group of options; true marks the current one. With `checkbox`, an item that is on or off. */
   readonly checked?: boolean;
+  readonly checkbox?: boolean;
   /** kitshn refuses it now: it stays focusable so its tooltip says why, and a choice does nothing. */
   readonly unavailable?: boolean;
   /** Names the item for `Menu`'s `focus`. */
@@ -283,7 +285,7 @@ export function MenuItem(props: {
   return (
     <button
       type="button"
-      role={props.checked === undefined ? "menuitem" : "menuitemradio"}
+      role={props.checked === undefined ? "menuitem" : props.checkbox ? "menuitemcheckbox" : "menuitemradio"}
       aria-checked={props.checked}
       tabIndex={-1}
       class="menu-item"
@@ -404,19 +406,38 @@ export function MoreButton(props: { readonly name: string; readonly onOpen: (anc
   );
 }
 
-/** A panel that floats over the map, with its heading, "Enlarge" to the full view, and Close. */
+/**
+ * A panel that floats over the map, with its heading, "Enlarge" to the full view, and Close. `large` is the
+ * full view of the same content; its button "To the map" goes back to the panel.
+ */
 export function OverlayPanel(props: {
   readonly heading: string;
-  readonly onEnlarge: () => void;
+  readonly large: boolean;
+  readonly onResize: () => void;
   readonly onClose: () => void;
   readonly children: ComponentChildren;
 }) {
+  const id = useId();
+  const heading = useRef<HTMLHeadingElement>(null);
+  // A panel that opens takes the focus at its heading, so the keyboard and a screen reader land in it.
+  useEffect(() => heading.current?.focus({ preventScroll: true }), []);
   return (
-    <section class="overlay-panel" aria-label={props.heading}>
+    <section class={`overlay-panel${props.large ? " large" : ""}`} aria-labelledby={id}>
       <header class="overlay-head">
-        <h2>{props.heading}</h2>
-        <button type="button" class="btn" data-tip={`Open the full view of ${props.heading}.`} onClick={props.onEnlarge}>
-          Enlarge
+        <h2 id={id} ref={heading} tabIndex={-1}>
+          {props.heading}
+        </h2>
+        <button
+          type="button"
+          class="btn"
+          data-tip={
+            props.large
+              ? `Show ${props.heading} as a panel over the map again.`
+              : `Open the full view of ${props.heading}.`
+          }
+          onClick={props.onResize}
+        >
+          {props.large ? "To the map" : "Enlarge"}
         </button>
         <button type="button" class="btn" aria-label="Close" data-tip={`Close ${props.heading}.`} onClick={props.onClose}>
           ×

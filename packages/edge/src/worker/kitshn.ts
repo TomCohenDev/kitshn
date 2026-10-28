@@ -255,6 +255,8 @@ interface UndoOf {
 
 interface DeployFacts {
   readonly deployed: ReadonlyArray<string>;
+  /** The deployed cards with a deploy of a pull request environment (K-821). */
+  readonly previews: ReadonlyArray<string>;
   readonly notes: ReadonlyArray<{ resource_id: string; state: string; reason: string | null }>;
   readonly repoCards: ReadonlyArray<{ repo_id: string; resource_id: string }>;
 }
@@ -1356,39 +1358,47 @@ export class Kitshn extends DurableObject<Env> {
 
   /**
    * K-909: the cards that a deploy made, which "Remove app" accepts: a deploy with a repo id, or a finished one
-   * from before the repo id (K-819). With an id, only that card. The card panel reads the same list.
+   * from before the repo id (K-819). The card panel reads the same list.
    */
-  private deployedCards(id: string | null = null): Array<string> {
-    const cards =
-      id === null
-        ? this.deploys().deployed
-        : this.sql<{ resource_id: string }>(
-            `SELECT DISTINCT resource_id FROM deploys WHERE kind = 'deploy' AND (repo_id IS NOT NULL OR state = 'done')
-             AND resource_id = ?`,
-            id,
-          ).map((row) => row.resource_id);
-    return cards.filter((card) => this.state.resources.has(card));
+  private deployedCards(id: string): Array<string> {
+    return this.sql<{ resource_id: string }>(
+      `SELECT DISTINCT resource_id FROM deploys WHERE kind = 'deploy' AND (repo_id IS NOT NULL OR state = 'done')
+       AND resource_id = ?`,
+      id,
+    )
+      .map((row) => row.resource_id)
+      .filter((card) => this.state.resources.has(card));
   }
 
   /** One scan of the deploy rows; it grows with each deploy. Revisit with a prune when it passes 10,000 rows. */
   private deploys(): DeployFacts {
     if (this.deployFacts) return this.deployFacts;
     const deployed = new Set<string>();
+    const previews = new Set<string>();
     const repoCards = new Map<string, Set<string>>();
     const newest = new Map<string, { state: string; reason: string | null }>();
     for (const row of this.sql<{
       resource_id: string;
       repo_id: string | null;
+      environment: string;
       state: string;
       reason: string | null;
-    }>("SELECT resource_id, repo_id, state, reason FROM deploys WHERE kind = 'deploy' ORDER BY rowid")) {
-      if (row.repo_id !== null || row.state === "done") deployed.add(row.resource_id);
+    }>(
+      "SELECT resource_id, repo_id, environment, state, reason FROM deploys WHERE kind = 'deploy' ORDER BY rowid",
+    )) {
+      if (row.repo_id !== null || row.state === "done") {
+        deployed.add(row.resource_id);
+        // As the GLOB 'pr-[0-9]*' of K-821: "pr-" and a digit.
+        const digit = row.environment.charAt(3);
+        if (row.environment.startsWith("pr-") && digit >= "0" && digit <= "9") previews.add(row.resource_id);
+      }
       if (row.repo_id !== null)
         repoCards.set(row.repo_id, (repoCards.get(row.repo_id) ?? new Set()).add(row.resource_id));
       newest.set(row.resource_id, { state: row.state, reason: row.reason });
     }
     this.deployFacts = {
       deployed: [...deployed],
+      previews: [...previews],
       notes: [...newest]
         .filter(([, row]) => row.state === "failed" || row.state === "skipped")
         .map(([resource_id, row]) => ({ resource_id, ...row })),
@@ -1399,16 +1409,10 @@ export class Kitshn extends DurableObject<Env> {
     return this.deployFacts;
   }
 
-  /** K-909, K-821: the deployed cards and, of them, the preview cards, from one read of the deploy rows. */
+  /** K-909, K-821: the deployed cards on the map and, of them, the preview cards. */
   private deployedAndPreviewCards() {
-    const rows = this.sql<{ resource_id: string; preview: number }>(
-      `SELECT resource_id, MAX(environment GLOB 'pr-[0-9]*') AS preview FROM deploys
-       WHERE kind = 'deploy' AND (repo_id IS NOT NULL OR state = 'done') GROUP BY resource_id`,
-    ).filter((row) => this.state.resources.has(row.resource_id));
-    return {
-      deployedCards: rows.map((row) => row.resource_id),
-      previewCards: rows.filter((row) => row.preview === 1).map((row) => row.resource_id),
-    };
+    const onMap = (cards: ReadonlyArray<string>) => cards.filter((card) => this.state.resources.has(card));
+    return { deployedCards: onMap(this.deploys().deployed), previewCards: onMap(this.deploys().previews) };
   }
 
   /** K-820: the cards on the map whose newest deploy failed or was skipped. */

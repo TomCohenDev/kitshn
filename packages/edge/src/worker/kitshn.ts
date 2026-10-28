@@ -2404,8 +2404,17 @@ export class Kitshn extends DurableObject<Env> {
   private async signOut(caller: Caller) {
     // K-110: the Worker checks pages and files itself, so it refuses every login from before this second.
     this.setMeta("signed_out_at", String(Math.floor(Date.now() / 1000) * 1000));
+    // K-110: no confirm in the map, so History records each sign-out, also one that only the Worker did.
+    const record = (summary: string) => {
+      this.insertRevision(caller.actor, `Signed out everywhere: ${summary}`, [], null);
+      this.load();
+      this.broadcast();
+    };
     const api = this.api();
-    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    if (!api) {
+      record("page and file logins only, as kitshn has no Cloudflare API token");
+      return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    }
     try {
       const account = this.env.CLOUDFLARE_ACCOUNT_ID;
       const logins = new Set(
@@ -2422,13 +2431,11 @@ export class Kitshn extends DurableObject<Env> {
         .filter((app) => logins.has(app.domain) && app.name.startsWith(ACCESS_NAME_PREFIX))
         .map((app) => ({ key: app.domain, cfId: app.id }));
       const result = await signOutEverywhere(this.accessStore(), api, account, loginApps);
-      // K-110: no confirm in the map, so History records each sign-out.
       const failed = result.failed.length > 0 ? `; ${result.failed.length} failed` : "";
-      this.insertRevision(caller.actor, `Signed out everywhere: ended the sessions of ${result.ended} applications${failed}`, [], null);
-      this.load();
-      this.broadcast();
+      record(`ended the sessions of ${result.ended} applications${failed}`);
       return Response.json(result);
     } catch (error) {
+      record("page and file logins only, as Cloudflare refused the list of applications");
       return Response.json({ error: String(error) }, { status: 502 });
     }
   }

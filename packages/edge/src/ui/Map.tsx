@@ -191,6 +191,8 @@ export function MapView(props: Props) {
 
   /** A right press opens the menu on release; a touch opens it after `HOLD_MS` and then `then` runs. */
   const beginPress = (event: PointerEvent, then?: () => void) => {
+    // A second finger ends the first press, so its timer never opens a menu after it lifts.
+    endPress();
     const start = { x: event.clientX, y: event.clientY };
     const entry = {
       press: startPress(start),

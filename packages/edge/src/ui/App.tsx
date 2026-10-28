@@ -1365,7 +1365,7 @@ export function App() {
           ) : shownPanel === "machines" ? (
             <MachinesView machines={store.snapshot.machines} onAdd={() => setAddingMachine(true)} />
           ) : shownPanel === "usage" ? (
-            <UsageView machines={store.snapshot.machines} />
+            <UsageView machines={store.snapshot.machines} r2Bucket={store.snapshot.r2Bucket} />
           ) : shownPanel === "notifications" ? (
             <NotificationsView
               state={state}

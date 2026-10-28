@@ -15,6 +15,8 @@ export default {
       server.onMessage((message) => {
         const data = JSON.parse(String(message)) as { type: string; snapshot?: Record<string, unknown> };
         if (data.type === "snapshot" && data.snapshot)
+          data.snapshot["r2Bucket"] = { bytes: 18_400_000, at: Date.now() - 6 * 3_600_000 };
+        if (data.type === "snapshot" && data.snapshot)
           data.snapshot["machines"] = (data.snapshot["machines"] as Array<{ machine: { id: string } }>).map(
             (view) => {
               const sample = samples[view.machine.id];

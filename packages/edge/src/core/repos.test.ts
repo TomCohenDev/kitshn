@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentAllowRefusal, gateDecision, keyRemoved } from "./repos.ts";
+import { agentAllowRefusal, awaitsAllow, forgetRefusal, gateDecision, keyRemoved } from "./repos.ts";
 
 const repo = { repoId: "42", name: "o/new", branch: "main" };
 
@@ -68,5 +68,31 @@ describe("the repo gate (K-819)", () => {
       record: { state: "allowed", allowedBy: agent, branch: "main" },
       error: expect.stringMatching(/takes it over/),
     });
+  });
+  it("forgets a repo in every state while it has no cards, and a forgotten repo waits again", () => {
+    const agent = { clientId: "agent-1", name: "Builder" };
+    const base = { ...repo, firstSeen: 1, allowedBy: null };
+    for (const gate of [
+      { ...base, state: "waiting" as const },
+      { ...base, state: "allowed" as const },
+      { ...base, state: "allowed" as const, allowedBy: agent },
+      { ...base, state: "blocked" as const },
+    ]) {
+      expect(forgetRefusal(gate, [])).toBeNull();
+      expect(forgetRefusal(gate, ["card-1"])).toMatch(/Remove app/);
+    }
+    // Forget drops the row, so the next deploy finds none: it waits, with no agent key.
+    expect(gateDecision(undefined, repo, 9)).toMatchObject({
+      allow: false,
+      record: { state: "waiting", allowedBy: null },
+    });
+  });
+  it("counts a repo as waiting only while the owner can allow it", () => {
+    const view = { state: "waiting" as const, keyRemoved: false, goneOnGitHub: false };
+    expect(awaitsAllow(view)).toBe(true);
+    expect(awaitsAllow({ ...view, keyRemoved: true })).toBe(false);
+    expect(awaitsAllow({ ...view, goneOnGitHub: true })).toBe(false);
+    expect(awaitsAllow({ ...view, state: "allowed" })).toBe(false);
+    expect(awaitsAllow({ ...view, state: "blocked" })).toBe(false);
   });
 });

@@ -112,6 +112,7 @@ import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
 import { overlay } from "./held.ts";
 import { HistoryView } from "./History.tsx";
+import { UsageView } from "./Usage.tsx";
 import {
   type Box,
   cardBox,
@@ -196,11 +197,12 @@ const TABS = {
     "Library: every page and file, with a search, a preview and Delete, in a panel over the map. Enlarge shows the full table.",
   history:
     "History: every change as a sentence, with filters and Undo, in a panel over the map. Enlarge shows the full page.",
+  usage: "Usage: how close the account is to the Cloudflare free plan limits, and how full each machine is.",
 } as const;
 
-/** K-516, K-519: what the overlay panel shows. History, Library and Machines also have a full view (a tab). */
+/** K-516, K-519: what the overlay panel shows. History, Library, Machines and Usage also have a full view (a tab). */
 /** "safety" is the big red button (K-1504); like "details", it has no full view. */
-type PanelKind = "details" | "safety" | "history" | "library" | "machines";
+type PanelKind = "details" | "safety" | "history" | "library" | "machines" | "usage";
 
 /** `html` font size in styles.css. */
 const REM = 18;
@@ -213,6 +215,7 @@ const PANEL_HEADINGS: Record<Exclude<PanelKind, "details">, string> = {
   history: "History",
   library: "Library",
   machines: "Machines",
+  usage: "Usage",
 };
 
 /** A highlight from History shows this long, once (K-1508). */
@@ -225,7 +228,10 @@ const routeFromHash = (): {
   readonly id: string;
 } => {
   const [tab = "map", id = ""] = location.hash.slice(1).split("/");
-  return { tab: tab === "history" || tab === "machines" || tab === "library" ? tab : "map", id };
+  return {
+    tab: tab === "history" || tab === "machines" || tab === "library" || tab === "usage" ? tab : "map",
+    id,
+  };
 };
 
 export function App() {
@@ -1281,6 +1287,8 @@ export function App() {
             />
           ) : shownPanel === "machines" ? (
             <MachinesView machines={store.snapshot.machines} onAdd={() => setAddingMachine(true)} />
+          ) : shownPanel === "usage" ? (
+            <UsageView machines={store.snapshot.machines} />
           ) : (
             <Panel
               state={state}
@@ -1380,7 +1388,7 @@ export function App() {
         <h1>kitshn</h1>
         {wide ? (
           <div class="seg">
-            {(["map", "machines", "library", "history"] as const).map((tab) => (
+            {(["map", "machines", "library", "history", "usage"] as const).map((tab) => (
               <button
                 key={tab}
                 aria-pressed={
@@ -1409,7 +1417,7 @@ export function App() {
         )}
         {moreMenu ? (
           <Menu label="Menu" anchor={moreMenu} onClose={() => setMoreMenu(null)}>
-            {(["map", "machines", "library", "history"] as const).map((tab) => (
+            {(["map", "machines", "library", "history", "usage"] as const).map((tab) => (
               <MenuItem
                 key={tab}
                 checked={fullPage ? route.tab === tab : tab === "map" ? panel === "details" : panel === tab}
@@ -1666,6 +1674,7 @@ export function App() {
           onClose={() => setPalette(null)}
           entries={[
             { label: "Open History", tip: TABS.history, run: () => openTab("history") },
+            { label: "Open Usage", tip: TABS.usage, run: () => openTab("usage") },
             ...(pauseView
               ? [
                   { label: "Resume with passkey", tip: RESUME_TIP, run: startResume },

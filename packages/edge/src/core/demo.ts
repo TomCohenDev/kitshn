@@ -1,3 +1,4 @@
+import { type Usage, analyticsRows, countRows } from "./usage.ts";
 import type { MachineOs } from "./icons.ts";
 import type { Machine } from "./machine.ts";
 import type { Circle, Point, Resource } from "./model.ts";
@@ -127,3 +128,34 @@ export function demo() {
   };
   return { resources, places, circles: [her, qlik, agents] };
 }
+
+/** K-1303: the Usage view of the local demo, so captures show each level without a Cloudflare account. */
+export const demoUsage = (now: number): Usage => ({
+  at: now,
+  errors: [],
+  rows: [
+    ...analyticsRows({
+      workers: [{ sum: { requests: 6_100 } }],
+      objects: [{ sum: { requests: 12_400 } }],
+      rows: [{ sum: { rowsRead: 4_210_000, rowsWritten: 7_600 } }],
+      objectStorage: [{ max: { storedBytes: 48_000_000 } }],
+      kv: [
+        { sum: { requests: 424 }, dimensions: { actionType: "read" } },
+        { sum: { requests: 850 }, dimensions: { actionType: "write" } },
+      ],
+      kvStorage: [{ max: { byteCount: 85_000 } }],
+      r2: [
+        { sum: { requests: 1_200 }, dimensions: { actionType: "PutObject" } },
+        { sum: { requests: 3_400 }, dimensions: { actionType: "GetObject" } },
+      ],
+      r2Storage: [{ max: { payloadSize: 21_900_000, metadataSize: 1_400 } }],
+    }).rows,
+    ...countRows({
+      seats: 2,
+      applications: 47,
+      serviceTokens: 12,
+      scripts: 18,
+      zones: [{ name: "example.com", records: 70, createdOn: "2026-09-29T00:00:00Z" }],
+    }),
+  ],
+});

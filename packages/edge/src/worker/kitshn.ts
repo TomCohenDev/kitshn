@@ -117,7 +117,9 @@ import {
   mayDeployOn,
   agentUploadPlace,
 } from "../core/agent.ts";
-import { DEMO_MACHINES, DEMO_ICONS, demo } from "../core/demo.ts";
+import { DEMO_MACHINES, DEMO_ICONS, demo, demoUsage } from "../core/demo.ts";
+import type { Usage } from "../core/usage.ts";
+import { readUsage } from "./usage.ts";
 import { type MachineOs, machineOs } from "../core/icons.ts";
 import {
   contentSecurityPolicy,
@@ -276,6 +278,8 @@ const KEY_RESET = 4005;
 const SIGN_OUT_RUN_MS = 3 * 60_000;
 /** The map keeps this many recent revisions in memory; History reads them (K-519). */
 const RECENT_REVISIONS = 200;
+/** K-1305: how long the Durable Object keeps the Usage answer. */
+const USAGE_CACHE_MS = 5 * 60_000;
 /** K-1503 */
 const REVISION_DAYS = 90;
 const REVISION_COUNT = 5000;
@@ -393,6 +397,9 @@ export class Kitshn extends DurableObject<Env> {
   private deployFacts: DeployFacts | null = null;
 
   /** K-1708: the last failed challenge of each machine, for the panel. Memory only (K-1302). */
+  /** K-1305: the last Usage answer, kept in memory for 5 minutes, so the view costs no writes. */
+  private usage: Usage | null = null;
+
   private keyFailures = new Map<string, { readonly at: number; readonly reason: string }>();
 
   private meta(key: string): string | null {
@@ -2260,6 +2267,7 @@ export class Kitshn extends DurableObject<Env> {
       return this.addJob(caller, await request.json().catch(() => null));
     if (path === "/api/jobs" && request.method === "GET") return Response.json(this.recentJobs(100));
     if (path === "/api/devices" && request.method === "GET") return this.listDevices();
+    if (path === "/api/usage" && request.method === "GET") return Response.json(await this.readUsage());
     if (path === "/api/library" && request.method === "GET") return Response.json(this.libraryItems());
     if ((path === "/api/pages" || path === "/api/files") && request.method === "POST")
       return this.upload(caller, request, path === "/api/pages" ? "page" : "file").catch((error: unknown) => {
@@ -4110,6 +4118,29 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-106: the Access service tokens of the account, to pick a device member. */
+  /** A broken KITSHN_ZONES leaves only the kitshn zone, so a deploy there still works (K-1111). */
+  private zones(): Array<Zone> {
+    try {
+      return zonesOf(this.env);
+    } catch (error) {
+      console.error(`kitshn cannot read KITSHN_ZONES (K-1111): ${String(error)}`);
+      return [{ name: this.env.KITSHN_ZONE, id: this.env.CLOUDFLARE_ZONE_ID }];
+    }
+  }
+
+  /** K-1303, K-1305: the free plan use of the account; one read per 5 minutes at most. */
+  private async readUsage(): Promise<Usage> {
+    const now = Date.now();
+    if (this.usage && now - this.usage.at < USAGE_CACHE_MS) return this.usage;
+    const token = this.env.CLOUDFLARE_API_TOKEN;
+    if (!token) {
+      if (this.env.DEV_DEMO && this.env.KITSHN_HOST === "localhost") return demoUsage(now);
+      return { at: now, rows: [], errors: ["kitshn has no Cloudflare API token here."] };
+    }
+    this.usage = await readUsage(token, this.env.CLOUDFLARE_ACCOUNT_ID, this.zones(), now);
+    return this.usage;
+  }
+
   private async listDevices() {
     const api = this.api();
     if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
@@ -4647,14 +4678,7 @@ export class Kitshn extends DurableObject<Env> {
         { error: "A skip reason is text of at most 500 characters (K-820)." },
         { status: 400 },
       );
-    // A broken KITSHN_ZONES leaves only the kitshn zone, so a deploy there still works (K-1111).
-    let zones: Array<Zone>;
-    try {
-      zones = zonesOf(this.env);
-    } catch (error) {
-      console.error(`kitshn cannot read KITSHN_ZONES (K-1111): ${String(error)}`);
-      zones = [{ name: this.env.KITSHN_ZONE, id: this.env.CLOUDFLARE_ZONE_ID }];
-    }
+    const zones = this.zones();
     const result = plan(
       recipe,
       deployer.repo,

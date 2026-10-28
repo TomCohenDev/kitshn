@@ -2084,3 +2084,53 @@ a > code {
   background: #fff;
   border: var(--bw) solid var(--border);
 }
+
+/* Usage (K-1303) */
+.gauges {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(20rem, 100%), 1fr));
+  column-gap: 28px;
+}
+.usage-view h3 {
+  margin: 18px 0 6px;
+}
+.gauge {
+  margin: 10px 0;
+}
+.gauge-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.gauge-bar {
+  height: 14px;
+  margin: 4px 0 2px;
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
+  overflow: hidden;
+}
+.gauge-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--green);
+  border-right: var(--bw) solid var(--border);
+}
+.gauge.warn .gauge-bar > span {
+  background: var(--yellow);
+}
+.gauge.full .gauge-bar > span {
+  background: var(--error);
+}
+.gauge .muted {
+  margin: 0;
+  font-size: 0.8rem;
+}
+.usage-machine {
+  margin: 12px 0;
+  padding: 8px 10px;
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+}

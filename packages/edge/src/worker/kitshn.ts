@@ -249,6 +249,12 @@ interface UndoOf {
   readonly item: string | null;
 }
 
+interface DeployFacts {
+  readonly deployed: ReadonlyArray<string>;
+  readonly notes: ReadonlyArray<{ resource_id: string; state: string; reason: string | null }>;
+  readonly repoCards: ReadonlyArray<{ repo_id: string; resource_id: string }>;
+}
+
 /** The POST paths that take a client message as their body. */
 const API_MESSAGES: Readonly<Record<string, ClientMessage["type"]>> = {
   "/api/apply": "apply",
@@ -283,6 +289,12 @@ export class Kitshn extends DurableObject<Env> {
   private liveSites = new Map<string, LiveSite>();
   /** Address checks that failed, and when to try them again. Memory only; a restart retries at once. */
   private checkRetryAt = new Map<string, number>();
+  /**
+   * K-1302: the deploy rows that each snapshot needs, read once. Each scan reads the whole deploys table, which
+   * kitshn never prunes; `sql` drops this memo on every write that names the table.
+   */
+  private deployFacts: DeployFacts | null = null;
+
   /** K-1708: the last failed challenge of each machine, for the panel. Memory only (K-1302). */
   private keyFailures = new Map<string, { readonly at: number; readonly reason: string }>();
 
@@ -322,6 +334,7 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private sql<T extends Record<string, SqlStorageValue>>(query: string, ...bindings: Array<SqlStorageValue>) {
+    if (!query.trimStart().startsWith("SELECT") && query.includes("deploys")) this.deployFacts = null;
     return this.ctx.storage.sql.exec<T>(query, ...bindings).toArray();
   }
 
@@ -418,11 +431,9 @@ export class Kitshn extends DurableObject<Env> {
        FROM revisions ORDER BY id DESC LIMIT ?`,
       RECENT_REVISIONS,
     );
+    // An undo comes after the revision that it undoes, so the undo of a recent revision is a recent row too.
     const undone = new Map(
-      this.sql<{ id: number; undoes: number }>(
-        "SELECT id, undoes FROM revisions WHERE undoes IS NOT NULL ORDER BY id DESC LIMIT ?",
-        RECENT_REVISIONS,
-      ).map((row) => [row.undoes, row.id]),
+      rows.flatMap((row) => (row.undoes === null ? [] : [[row.undoes, row.id] as const])),
     );
     this.revisions = rows.map((row) => ({
       id: row.id,
@@ -972,23 +983,50 @@ export class Kitshn extends DurableObject<Env> {
    * from before the repo id (K-819). With an id, only that card. The card panel reads the same list.
    */
   private deployedCards(id: string | null = null): Array<string> {
-    return this.sql<{ resource_id: string }>(
-      `SELECT DISTINCT resource_id FROM deploys WHERE kind = 'deploy' AND (repo_id IS NOT NULL OR state = 'done')
-       AND (? IS NULL OR resource_id = ?)`,
-      id,
-      id,
-    )
-      .map((row) => row.resource_id)
-      .filter((card) => this.state.resources.has(card));
+    const cards =
+      id === null
+        ? this.deploys().deployed
+        : this.sql<{ resource_id: string }>(
+            `SELECT DISTINCT resource_id FROM deploys WHERE kind = 'deploy' AND (repo_id IS NOT NULL OR state = 'done')
+             AND resource_id = ?`,
+            id,
+          ).map((row) => row.resource_id);
+    return cards.filter((card) => this.state.resources.has(card));
+  }
+
+  /** One scan of the deploy rows; it grows with each deploy. Revisit with a prune when it passes 10,000 rows. */
+  private deploys(): DeployFacts {
+    if (this.deployFacts) return this.deployFacts;
+    const deployed = new Set<string>();
+    const repoCards = new Map<string, Set<string>>();
+    const newest = new Map<string, { state: string; reason: string | null }>();
+    for (const row of this.sql<{
+      resource_id: string;
+      repo_id: string | null;
+      state: string;
+      reason: string | null;
+    }>("SELECT resource_id, repo_id, state, reason FROM deploys WHERE kind = 'deploy' ORDER BY rowid")) {
+      if (row.repo_id !== null || row.state === "done") deployed.add(row.resource_id);
+      if (row.repo_id !== null)
+        repoCards.set(row.repo_id, (repoCards.get(row.repo_id) ?? new Set()).add(row.resource_id));
+      newest.set(row.resource_id, { state: row.state, reason: row.reason });
+    }
+    this.deployFacts = {
+      deployed: [...deployed],
+      notes: [...newest]
+        .filter(([, row]) => row.state === "failed" || row.state === "skipped")
+        .map(([resource_id, row]) => ({ resource_id, ...row })),
+      repoCards: [...repoCards].flatMap(([repo_id, cards]) =>
+        [...cards].map((resource_id) => ({ repo_id, resource_id })),
+      ),
+    };
+    return this.deployFacts;
   }
 
   /** K-820: the cards on the map whose newest deploy failed or was skipped. */
   private deployNotes(): Record<string, DeployNote> {
     const notes: Record<string, DeployNote> = {};
-    for (const row of this.sql<{ resource_id: string; state: string; reason: string | null }>(
-      `SELECT resource_id, state, reason FROM deploys AS newest WHERE kind = 'deploy' AND state IN ('failed', 'skipped')
-       AND rowid = (SELECT MAX(rowid) FROM deploys WHERE resource_id = newest.resource_id AND kind = 'deploy')`,
-    ))
+    for (const row of this.deploys().notes)
       if (this.state.resources.has(row.resource_id))
         notes[row.resource_id] = {
           state: row.state === "skipped" ? "skipped" : "failed",
@@ -3165,9 +3203,7 @@ export class Kitshn extends DurableObject<Env> {
   /** K-819: the cards on the map that each repo deployed. */
   private repoCards(): Map<string, Array<string>> {
     const cards = new Map<string, Array<string>>();
-    for (const { repo_id, resource_id } of this.sql<{ repo_id: string; resource_id: string }>(
-      "SELECT repo_id, resource_id FROM deploys WHERE repo_id IS NOT NULL AND kind = 'deploy' GROUP BY repo_id, resource_id",
-    ))
+    for (const { repo_id, resource_id } of this.deploys().repoCards)
       if (this.state.resources.has(resource_id))
         cards.set(repo_id, [...(cards.get(repo_id) ?? []), resource_id]);
     return cards;

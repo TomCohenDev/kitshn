@@ -299,6 +299,7 @@ export function App() {
   );
   const deployed = useMemo(() => new Set(store.snapshot?.deployedCards ?? []), [store.snapshot]);
   const previewCards = useMemo(() => new Set(store.snapshot?.previewCards ?? []), [store.snapshot]);
+  const previousVersions = useMemo(() => new Set(store.snapshot?.previousVersions ?? []), [store.snapshot]);
 
   /**
    * K-523, K-1507: the item whose per-item undo the open menu shows, or for the palette the selected card or
@@ -700,6 +701,20 @@ export function App() {
   };
 
   /** K-909: no confirm; the toast and History undo it. */
+  /** K-1117: no undo of its own: a second restore swaps the versions back, and History records each. */
+  const restorePrevious = async (resource: Resource) => {
+    const result = await callApi<{ revision: number }>(
+      "POST",
+      `/api/library/${encodeURIComponent(resource.id)}/previous`,
+      {},
+    );
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: `Restored the previous version of ${resource.name}.`, error: false, undo: null },
+    );
+  };
+
   const removeApp = async (resource: Resource) => {
     const result = await callApi<{ revision: number | null; notes: ReadonlyArray<string> }>(
       "DELETE",
@@ -1102,6 +1117,7 @@ export function App() {
       ),
     removeApp: (resource) => void removeApp(resource),
     rollback: (resource, mode) => setRollback({ card: resource, mode }),
+    restorePrevious: (resource) => void restorePrevious(resource),
     runJob: (machine, command) => void runJob(machine, command),
     removeMachine: (machine) => void removeMachine(machine),
     editCircle: (circleId) => {
@@ -1128,6 +1144,7 @@ export function App() {
     version: store.snapshot.version,
     undoCheck,
     selected: selection.cards,
+    previousVersions,
   };
 
   const waitingRepos = store.snapshot?.repos.filter(awaitsAllow).length ?? 0;
@@ -1242,6 +1259,8 @@ export function App() {
               onReshare={(resource, circle, share, part) => void reshare(resource, circle, share, part)}
               onRemoveApp={(resource) => void removeApp(resource)}
               onRollback={(resource, mode) => setRollback({ card: resource, mode })}
+              previousVersions={previousVersions}
+              onRestorePrevious={(resource) => void restorePrevious(resource)}
               orphanWorkers={store.snapshot.orphanWorkers}
               onDeleteOrphanWorker={(orphan) => void deleteOrphanWorker(orphan)}
               deployed={deployed}
@@ -1735,6 +1754,9 @@ function Panel(props: {
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
+  /** K-1117: the pages and files that have a previous version. */
+  previousVersions: ReadonlySet<string>;
+  onRestorePrevious: (resource: Resource) => void;
   orphanWorkers: ReadonlyArray<OrphanWorker>;
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
   /** K-909 */
@@ -1797,6 +1819,7 @@ function Panel(props: {
         onReshare={props.onReshare}
         onRemoveApp={props.onRemoveApp}
         onRollback={props.onRollback}
+        onRestorePrevious={props.previousVersions.has(cards[0].id) ? props.onRestorePrevious : null}
         orphanWorkers={cards[0].id === ADMIN_RESOURCE_ID ? props.orphanWorkers : []}
         onDeleteOrphanWorker={props.onDeleteOrphanWorker}
         deployed={props.deployed.has(cards[0].id)}
@@ -2053,6 +2076,8 @@ function CardPanel(props: {
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
+  /** K-1117: swaps a page or a file with its previous version, or null when it has none. */
+  onRestorePrevious: ((resource: Resource) => void) | null;
   /** K-909: on the admin card, what removed Worker apps left in Cloudflare. */
   orphanWorkers: ReadonlyArray<OrphanWorker>;
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
@@ -2227,6 +2252,15 @@ function CardPanel(props: {
             Roll back this run…
           </button>
         </div>
+      ) : null}
+      {props.onRestorePrevious ? (
+        <button
+          class="btn"
+          data-tip="Put the previous version back. The current one becomes the previous version, so a second restore swaps them back (K-1117)."
+          onClick={() => props.onRestorePrevious?.(resource)}
+        >
+          Restore previous version
+        </button>
       ) : null}
       {isAppCard(resource) && props.deployed ? (
         <button

@@ -128,6 +128,18 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   ["ALTER TABLE repos ADD COLUMN workflow TEXT", "ALTER TABLE deploys ADD COLUMN workflow TEXT"],
   // 20: the badge reads the newest deploy of a repo by name in any case (K-1119); anyone can ask for any name.
   ["CREATE INDEX deploys_badge ON deploys (lower(repo), app_key, environment)"],
+  // 21: agent uploads (K-1116, K-1117). `added_by` is the client id of the agent key that published a page or a file;
+  // only that key updates it by name. R2 keeps two slots of an item (`slotKey`); `current_slot` names the one that
+  // serves, with `size` and `content_type`. `previous_size` and `previous_type` describe the bytes of the other slot,
+  // the one previous version, and are null when the item has none. `agent_tray` is 1 while a card has waited in the
+  // tray since its key published it; the first move or share, or any change by the owner, sets it to 0.
+  [
+    "ALTER TABLE library ADD COLUMN added_by TEXT",
+    "ALTER TABLE library ADD COLUMN current_slot INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE library ADD COLUMN agent_tray INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE library ADD COLUMN previous_size INTEGER",
+    "ALTER TABLE library ADD COLUMN previous_type TEXT",
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

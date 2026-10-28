@@ -28,6 +28,8 @@ export interface LibraryItem {
   readonly size: number;
   readonly contentType: string;
   readonly createdAt: number;
+  /** K-1117: the slot in R2 whose bytes serve now. */
+  readonly slot: 0 | 1;
 }
 
 /** K-1003: 20 random characters, about 100 bits. */
@@ -35,9 +37,23 @@ export const newLibraryId = newJoinCode;
 
 export const isLibraryId = (id: string) => /^[23456789abcdefghjkmnpqrstuvwxyz]{20}$/.test(id);
 
-/** The R2 key of the bytes of an item. */
-export const objectKey = (item: Pick<LibraryItem, "id" | "kind" | "fileName">) =>
-  item.kind === "page" ? `pages/${item.id}.html` : `files/${item.id}/${item.fileName ?? ""}`;
+/**
+ * The R2 key of the current bytes of an item. K-1117: an item has two slots; an update writes the slot that is not
+ * current, and a restore only switches `slot`, so a failed upload never touches the bytes that serve.
+ */
+export const objectKey = (item: Pick<LibraryItem, "id" | "kind" | "fileName" | "slot">) =>
+  slotKey(item, item.slot);
+
+export const slotKey = (item: Pick<LibraryItem, "id" | "kind" | "fileName">, slot: 0 | 1) => {
+  const base = item.kind === "page" ? `pages/${item.id}.html` : `files/${item.id}/${item.fileName ?? ""}`;
+  return slot === 0 ? base : `${base}.1`;
+};
+
+/** K-1116: an agent upload of an HTML file becomes a page; any other file stays a file, as a drop on the map does. */
+export const uploadKind = (fileName: string): "page" | "file" => {
+  const lower = fileName.toLowerCase();
+  return lower.endsWith(".html") ? "page" : "file";
+};
 
 /** A file name that is safe as one path segment of `files.<zone>/<id>/<name>`. */
 export function fileNameError(name: string): string | null {

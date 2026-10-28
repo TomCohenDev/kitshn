@@ -12,7 +12,6 @@ import {
   type State,
   activeShares,
   circlesHolding,
-  insideCircle,
   isPublicCircle,
   shareKey,
 } from "./model.ts";
@@ -114,7 +113,14 @@ export function agentMayRunOn(state: State, visitor: Visitor, machineId: string,
 }
 
 /** K-718: the kinds that an agent key may publish. A live site serves a dev server on a machine, so never. */
-const PUBLISHABLE: ReadonlySet<ResourceKind> = new Set(["site.static", "site.worker", "site.compose"]);
+// K-1116: a page or a file that the key published itself may become public too, as an app of a repo that it allowed.
+const PUBLISHABLE: ReadonlySet<ResourceKind> = new Set([
+  "site.static",
+  "site.worker",
+  "site.compose",
+  "page",
+  "file",
+]);
 
 /** K-718: the Everyone circle as the seed makes it: public to all, with no other member, not repurposed. */
 export const isEveryoneCircle = (circle: Circle) =>
@@ -184,46 +190,39 @@ function publishRefusal(state: State, visitor: Visitor, now: number) {
 }
 
 /**
- * K-718: where a card goes when the key publishes it (into the overlap of one of its agent circles at
- * `control` and Everyone), or when it takes the card out of Everyone (the same circles without Everyone).
- * Null: the card is not in Everyone, so there is nothing to take out. A string names why not.
- * The caller still runs agentRefusal on the move.
+ * K-1116: where a page or a file that an agent key publishes lands: in the tray without a circle, else inside exactly
+ * `circleId`, which must be one of its agent circles at `control`. With `publish`, in the overlap of that circle (or
+ * its first agent circle) and Everyone, which needs "may publish" (K-718). It keeps clear of the cards on the map.
+ * A string names why not.
  */
-export function publishPlace(
+export function agentUploadPlace(
   state: State,
   visitor: Visitor,
-  cardId: string,
+  circleId: string | null,
   publish: boolean,
   now: number,
-  added: ReadonlySet<string>,
 ): Point | null | string {
-  const from = state.places.get(cardId);
-  const everyone = [...state.circles.values()].find(isEveryoneCircle);
-  if (!publish) {
-    const holding = circlesHolding(state, cardId);
-    if (!from || !everyone || !holding.some((circle) => circle.id === everyone.id)) return null;
-    const rest = new Set(holding.filter((circle) => circle.id !== everyone.id).map((circle) => circle.id));
+  if (circleId === null && !publish) return null;
+  const homes = controlCircles(state, visitor, now);
+  const home =
+    circleId === null ? homes[0] : homes.find((circle) => circle.id === circleId || circle.name === circleId);
+  if (!home)
+    return circleId === null
+      ? "This key has no agent circle with control to publish from (K-718)."
+      : `"${circleId}" is not an agent circle of this key with control (K-718).`;
+  const taken = [...state.places.values()];
+  if (!publish)
     return (
-      placeInside(state, from, rest) ??
-      "kitshn finds no place in the same circles without Everyone. Ask the owner."
+      placeInside(state, home, new Set([home.id]), taken) ??
+      `kitshn finds no free spot inside "${home.name}".`
     );
-  }
   if (!agentHas(state, visitor, "publishes", now))
     return 'This key may not publish. The owner turns on "may publish" for it (K-718).';
-  if (!added.has(cardId)) return "This key publishes only the apps of repos that it allowed (K-819).";
-  const kind = state.resources.get(cardId)?.kind;
-  if (kind === undefined || !PUBLISHABLE.has(kind))
-    return "Only a static site, a Worker site or a Compose app can be published, never a live site.";
-  if (!from) return "The card is in the tray. Move it into an agent circle first.";
+  const everyone = [...state.circles.values()].find(isEveryoneCircle);
   if (!everyone) return "The map has no Everyone circle.";
-  const homes = controlCircles(state, visitor, now);
-  // The circle that holds the card now comes first, so the card moves as little as possible.
-  const ordered = [...homes.filter((circle) => insideCircle(from, circle)), ...homes];
-  for (const home of ordered) {
-    const place = placeInside(state, from, new Set([home.id, everyone.id]));
-    if (place) return place;
-  }
-  return publishRefusal(state, visitor, now);
+  return (
+    placeInside(state, home, new Set([home.id, everyone.id]), taken) ?? publishRefusal(state, visitor, now)
+  );
 }
 
 /** K-718: a device member in an agent circle, without the admin card. The map calls it an agent. */

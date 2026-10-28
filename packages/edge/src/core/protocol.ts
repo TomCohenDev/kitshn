@@ -71,6 +71,8 @@ export interface Snapshot {
   readonly deployNotes: Readonly<Record<string, DeployNote>>;
   /** K-1113: the cards with a stored icon, each with the hash of its bytes, which versions its address. */
   readonly icons: Readonly<Record<string, string>>;
+  /** K-1117: the pages and files that have a previous version to restore. */
+  readonly previousVersions: ReadonlyArray<string>;
   /** K-1504: who paused and when, while paused. */
   readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;

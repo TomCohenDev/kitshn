@@ -124,12 +124,15 @@ import {
   FAILS_TO_DOWN,
   UPTIME_FETCHES_PER_RUN,
   UPTIME_KEEP_MS,
+  UPTIME_IDLE_MS,
   UPTIME_RUN_MS,
+  UP,
   type Uptime,
   type UptimeChange,
-  addressesOfRun,
+  cardsOfRun,
   nextUptime,
   probeUp,
+  stored,
 } from "../core/uptime.ts";
 import { type MachineOs, machineOs } from "../core/icons.ts";
 import {
@@ -336,7 +339,9 @@ export class Kitshn extends DurableObject<Env> {
    * costs about 4 rows per revision. Writers change it only when it is loaded, because SQL has their row.
    */
   private revisionCache: Array<RevisionView> | null = null;
-  /** K-1125: the uptime of each checked card, read on first use (K-1302). */
+  /** K-1126: the last uptime turn of this wake; an alarm in the same turn fetches nothing. */
+  private uptimeSlot: number | null = null;
+  /** K-1125: the cards that are down or failing, read on first use (K-1302); a card with no row is up. */
   private uptimeCache: Map<string, Uptime> | null = null;
   private get uptime(): Map<string, Uptime> {
     this.uptimeCache ??= new Map(
@@ -2101,10 +2106,12 @@ export class Kitshn extends DurableObject<Env> {
       ...this.deployedAndPreviewCards(),
       orphanWorkers: this.orphanWorkers(),
       deployNotes: this.deployNotes(),
+      // K-1125: only the cards that are still checked, so a card that leaves the check loses its DOWN sticker.
       uptime: Object.fromEntries(
-        [...this.uptime]
-          .filter(([id]) => this.state.resources.has(id))
-          .map(([id, value]) => [id, { up: value.up, since: value.since }]),
+        this.uptimeTargets().map((card) => {
+          const value = this.uptime.get(card.id) ?? UP;
+          return [card.id, { up: value.up, since: value.since }];
+        }),
       ),
       icons: Object.fromEntries([...this.iconHashes].filter(([id]) => this.state.resources.has(id))),
       previousVersions: this.sql<{ id: string }>(
@@ -3931,7 +3938,8 @@ export class Kitshn extends DurableObject<Env> {
     ];
     for (const end of ends) if (end !== null && end > now && end < next) next = end;
     if (ends.some((end) => end !== null && end <= now) && this.expiredShares(now).length > 0) next = now;
-    if (this.uptimeTargets().length > 0) next = Math.min(next, now + UPTIME_RUN_MS);
+    // K-1126: a connected daemon keeps the 2-minute alarm going; without one, uptime wakes at most every 10 minutes.
+    if (this.uptimeTargets().length > 0) next = Math.min(next, now + UPTIME_IDLE_MS);
     // Never move a pending alarm later: frequent wake-ups would otherwise push it away for good.
     const current = await this.ctx.storage.getAlarm();
     if (current === null || current <= now || next < current) await this.ctx.storage.setAlarm(next);
@@ -7197,51 +7205,71 @@ export class Kitshn extends DurableObject<Env> {
     );
   }
 
-  /** K-1125, K-1126: one uptime run. Writes a row only when a card changes. */
-  private async checkUptime(now: number): Promise<{ fetches: number; changed: boolean }> {
+  /**
+   * K-1125, K-1126: one uptime run, once per turn of 2 minutes. `fetchBudget` is the share of the 40 calls of this
+   * run (K-406). Writes a row only when a card changes, and keeps rows only for cards that are down or failing.
+   */
+  private async checkUptime(
+    now: number,
+    fetchBudget: number,
+  ): Promise<{ fetches: number; changed: boolean }> {
+    const slot = Math.floor(now / UPTIME_RUN_MS);
     const targets = this.uptimeTargets();
-    if (targets.length === 0) return { fetches: 0, changed: false };
+    if (targets.length === 0 || slot === this.uptimeSlot) return { fetches: 0, changed: false };
+    this.uptimeSlot = slot;
     const online = this.onlineMachines();
     const probes = new Map<string, { up: boolean; failsToDown: number }>();
     for (const card of targets) {
       const site = this.liveSites.get(card.id);
       if (site) probes.set(card.id, { up: site.up && online.has(site.machineId), failsToDown: 1 });
     }
-    const fetched = addressesOfRun(
-      targets
-        .filter((card) => !this.liveSites.has(card.id))
-        .flatMap((card) => card.addresses.map((address) => ({ card: card.id, address }))),
-      Math.floor(now / UPTIME_RUN_MS),
-      UPTIME_FETCHES_PER_RUN,
-    );
+    const fetched =
+      fetchBudget === 0
+        ? []
+        : cardsOfRun(
+            targets.filter((card) => !this.liveSites.has(card.id)),
+            slot,
+            Math.min(fetchBudget, UPTIME_FETCHES_PER_RUN),
+          );
     const answers = await Promise.all(
-      fetched.map(async ({ card, address }) => {
-        // A timer that ends with the fetch; AbortSignal.timeout keeps the run open for the full 10 seconds.
-        const abort = new AbortController();
-        const timer = setTimeout(() => abort.abort(), 10_000);
-        const response = await fetch(`https://${address}/`, { redirect: "manual", signal: abort.signal })
-          .catch(() => null)
-          .finally(() => clearTimeout(timer));
-        return { card, up: probeUp(response?.status ?? null) };
+      fetched.map(async (card) => {
+        const ups = await Promise.all(
+          card.addresses.map(async (address) => {
+            // A timer that ends with the fetch; AbortSignal.timeout keeps the run open for the full 10 seconds.
+            const abort = new AbortController();
+            const timer = setTimeout(() => abort.abort(), 10_000);
+            const response = await fetch(`https://${address}/`, { redirect: "manual", signal: abort.signal })
+              .catch(() => null)
+              .finally(() => clearTimeout(timer));
+            // The status is all that counts; an unread body would hold one of the 6 open connections.
+            await response?.body?.cancel();
+            return probeUp(response?.status ?? null);
+          }),
+        );
+        return { card: card.id, up: ups.every(Boolean), fetches: card.addresses.length };
       }),
     );
-    for (const { card, up } of answers)
-      probes.set(card, { up: up && (probes.get(card)?.up ?? true), failsToDown: FAILS_TO_DOWN });
+    for (const { card, up } of answers) probes.set(card, { up, failsToDown: FAILS_TO_DOWN });
     let changed = false;
     this.ctx.storage.transactionSync(() => {
       for (const [card, probe] of probes) {
-        const before = this.uptime.get(card);
+        const before = this.uptime.get(card) ?? UP;
         const after = nextUptime(before, probe.up, now, probe.failsToDown);
         if (after === before) continue;
-        this.uptime.set(card, after);
-        this.sql(
-          "INSERT OR REPLACE INTO uptime (card_id, up, fails, since) VALUES (?, ?, ?, ?)",
-          card,
-          after.up ? 1 : 0,
-          after.fails,
-          after.since,
-        );
-        if (before?.up === after.up) continue;
+        if (stored(after)) {
+          this.uptime.set(card, after);
+          this.sql(
+            "INSERT OR REPLACE INTO uptime (card_id, up, fails, since) VALUES (?, ?, ?, ?)",
+            card,
+            after.up ? 1 : 0,
+            after.fails,
+            after.since,
+          );
+        } else {
+          this.uptime.delete(card);
+          this.sql("DELETE FROM uptime WHERE card_id = ?", card);
+        }
+        if (before.up === after.up) continue;
         changed = true;
         this.sql(
           "INSERT OR REPLACE INTO uptime_changes (card_id, at, up) VALUES (?, ?, ?)",
@@ -7251,7 +7279,7 @@ export class Kitshn extends DurableObject<Env> {
         );
       }
     });
-    return { fetches: fetched.length, changed };
+    return { fetches: answers.reduce((total, answer) => total + answer.fetches, 0), changed };
   }
 
   /** K-1126: the changes of a card in the last 24 hours, and the one before them, for the strip in its panel. */
@@ -7277,8 +7305,9 @@ export class Kitshn extends DurableObject<Env> {
     this.endShares(now);
     const daily = this.dailyAt() <= now;
     if (daily) this.daily(now);
-    // K-1126: the uptime fetches count against the 40 calls of this run (K-406).
-    const uptime = await this.checkUptime(now);
+    // K-1126: the uptime fetches count against the 40 calls of this run (K-406). The daily run spends 40 already,
+    // so it fetches nothing and keeps 10 subrequests spare.
+    const uptime = await this.checkUptime(now, daily ? 0 : UPTIME_FETCHES_PER_RUN);
     if (uptime.changed) changed = true;
     const api = this.api();
     if (api) {

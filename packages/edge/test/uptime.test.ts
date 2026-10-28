@@ -12,18 +12,26 @@ const site = (status: number | null) =>
     const url = input instanceof Request ? input.url : String(input);
     if (url !== "https://shop.example.com/") throw new Error(`Unexpected fetch: ${url}`);
     if (status === null) throw new Error("timeout");
-    return new Response(null, { status });
+    return new Response("body", { status });
   });
 
 const uptimeOf = (stub: DurableObjectStub) =>
   runInDurableObject(stub, (instance, state) => ({
-    row: state.storage.sql.exec<{ up: number }>("SELECT up FROM uptime WHERE card_id = 'shop'").toArray()[0],
+    row: state.storage.sql
+      .exec<{ up: number; fails: number }>("SELECT up, fails FROM uptime WHERE card_id = 'shop'")
+      .toArray()[0],
     changes: (
       instance as unknown as { uptimeChanges(card: string): ReadonlyArray<UptimeChange> }
     ).uptimeChanges("shop"),
   }));
 
-it("records a static site down after two failed checks and up after one good one (K-1125)", async () => {
+/** A new turn of 2 minutes, without waiting for it. */
+const nextTurn = (stub: DurableObjectStub) =>
+  runInDurableObject(stub, (instance) => {
+    (instance as unknown as { uptimeSlot: number | null }).uptimeSlot = null;
+  });
+
+it("records a static site down after two failed turns and up after one good one (K-1125, K-1126)", async () => {
   const stub = env.KITSHN.getByName("kitshn");
   await runInDurableObject(stub, (instance, state) => {
     const shop: Resource = {
@@ -38,15 +46,22 @@ it("records a static site down after two failed checks and up after one good one
     state.storage.sql.exec("INSERT INTO resources (id, body) VALUES ('shop', ?)", JSON.stringify(shop));
     (instance as unknown as { load(): void }).load();
   });
-  site(502);
+  const failing = site(502);
   await runDurableObjectAlarm(stub);
-  expect((await uptimeOf(stub)).row?.up).toBe(1);
+  expect((await uptimeOf(stub)).row).toEqual({ up: 1, fails: 1 });
+  // An early alarm in the same turn fetches nothing, so one short error never counts twice.
+  await runDurableObjectAlarm(stub);
+  expect(failing).toHaveBeenCalledTimes(1);
+  expect((await uptimeOf(stub)).row).toEqual({ up: 1, fails: 1 });
+  await nextTurn(stub);
   site(null);
   await runDurableObjectAlarm(stub);
-  expect((await uptimeOf(stub)).row?.up).toBe(0);
+  expect((await uptimeOf(stub)).row).toEqual({ up: 0, fails: 0 });
+  await nextTurn(stub);
   site(302);
   await runDurableObjectAlarm(stub);
   const { row, changes } = await uptimeOf(stub);
-  expect(row?.up).toBe(1);
-  expect(changes.map((change) => change.up)).toEqual([true, false, true]);
+  // A card that is up again keeps no row; its changes remain.
+  expect(row).toBeUndefined();
+  expect(changes.map((change) => change.up)).toEqual([false, true]);
 });

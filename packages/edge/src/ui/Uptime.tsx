@@ -21,7 +21,11 @@ export function UptimeRow(props: {
 
   const now = Date.now();
   const start = now - DAY_MS;
-  const segments = (changes ?? []).map((change, index, all) => {
+  // An up card has no stored row (K-1126), so its time comes from its newest change.
+  const lastChange = changes?.at(-1);
+  // No change in the stored 30 days means the card was in its state the whole day.
+  const shown = changes && changes.length > 0 ? changes : [{ at: start, up: uptime.up }];
+  const segments = shown.map((change, index, all) => {
     const from = Math.max(change.at, start);
     const to = all[index + 1]?.at ?? now;
     return { up: change.up, left: (from - start) / DAY_MS, width: (to - from) / DAY_MS };
@@ -41,7 +45,13 @@ export function UptimeRow(props: {
           Uptime
         </span>
         <span class={`sticker${uptime.up ? " ok" : ""}`}>{uptime.up ? "up" : "down"}</span>
-        <span class="muted">since {new Date(uptime.since).toLocaleString()}</span>
+        <span class="muted">
+          {uptime.up
+            ? lastChange
+              ? `since ${new Date(lastChange.at).toLocaleString()}`
+              : "no down time in the last 30 days"
+            : `since ${new Date(uptime.since).toLocaleString()}`}
+        </span>
       </div>
       <div class="uptime-strip" role="img" aria-label="Up and down in the last 24 hours">
         {segments.map((segment) => (

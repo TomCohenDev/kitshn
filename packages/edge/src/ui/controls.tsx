@@ -486,23 +486,38 @@ export function ResizeEdge(props: {
   readonly fit: (wanted: number) => number;
   readonly onCommit: (width: number) => void;
 }) {
+  const latest = useRef(props);
+  latest.current = props;
   const drag = useRef<{ readonly x: number; readonly start: number; shown: number } | null>(null);
-  const show = (width: number) => document.documentElement.style.setProperty(props.cssVar, `${width}px`);
+  // One listener for the life of the edge, so a render during a drag never leaves an old one behind.
+  const escape = useRef<((event: KeyboardEvent) => void) | null>(null);
+  const show = (width: number) => document.documentElement.style.setProperty(latest.current.cssVar, `${width}px`);
   const end = (keep: boolean) => {
     const now = drag.current;
     if (!now) return;
     drag.current = null;
-    removeEventListener("keydown", escape, true);
-    if (keep && now.shown !== now.start) props.onCommit(now.shown);
+    if (escape.current) removeEventListener("keydown", escape.current, true);
+    if (keep && now.shown !== now.start) latest.current.onCommit(now.shown);
     else show(now.start);
   };
-  const escape = (event: KeyboardEvent) => {
-    if (event.key !== "Escape") return;
+  escape.current ??= (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || !drag.current) return;
     // The drag eats this Escape, so it never also closes the panel.
     event.stopPropagation();
     event.preventDefault();
     end(false);
   };
+  // A render during a drag rewrites the page's variables from state; the drag puts its own width back.
+  useLayoutEffect(() => {
+    if (drag.current) show(drag.current.shown);
+  });
+  useEffect(
+    () => () => {
+      if (escape.current) removeEventListener("keydown", escape.current, true);
+      drag.current = null;
+    },
+    [],
+  );
   return (
     <div
       class={`resize-edge ${props.grows === "left" ? "at-left" : "at-right"}`}
@@ -515,11 +530,11 @@ export function ResizeEdge(props: {
       tabIndex={0}
       data-tip={`${props.label}: drag, or focus and use the arrow keys.`}
       onPointerDown={(event) => {
-        if (event.button !== 0) return;
+        if (event.button !== 0 || drag.current) return;
         event.preventDefault();
         event.currentTarget.setPointerCapture(event.pointerId);
         drag.current = { x: event.clientX, start: props.width, shown: props.width };
-        addEventListener("keydown", escape, true);
+        if (escape.current) addEventListener("keydown", escape.current, true);
       }}
       onPointerMove={(event) => {
         const now = drag.current;

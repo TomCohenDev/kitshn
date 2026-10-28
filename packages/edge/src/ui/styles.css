@@ -1933,22 +1933,6 @@ a > code {
 .resize-edge:focus-visible::after {
   opacity: 1;
 }
-/* A finger needs a bigger target and has no hover. */
-@media (pointer: coarse) {
-  .resize-edge {
-    width: 24px;
-  }
-  .resize-edge::after {
-    left: 10px;
-    opacity: 1;
-  }
-  .resize-edge.at-left {
-    right: calc(var(--panel-width) + 12px - 12px);
-  }
-  .tray .resize-edge.at-right {
-    right: -14px;
-  }
-}
 .resize-edge:focus-visible {
   outline-offset: -2px;
 }
@@ -1964,4 +1948,20 @@ a > code {
   top: 0;
   bottom: 0;
   right: -8px;
+}
+/* A finger needs a bigger target and has no hover. */
+@media (pointer: coarse) {
+  .resize-edge {
+    width: 24px;
+  }
+  .resize-edge::after {
+    left: 10px;
+    opacity: 1;
+  }
+  .resize-edge.at-left {
+    right: calc(var(--panel-width) + 12px - 12px);
+  }
+  .tray .resize-edge.at-right {
+    right: -14px;
+  }
 }

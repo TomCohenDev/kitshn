@@ -117,56 +117,68 @@ export function circleForCards(
 ): { readonly edits: Array<Edit>; readonly moved: number; readonly cards: number } | { readonly refused: string } {
   const ids = new Set(selected);
   for (const stack of state.stacks.values()) if (stack.members.some((id) => ids.has(id))) for (const id of stack.members) ids.add(id);
-  const placed = [...ids].map((id) => ({ id, place: state.places.get(id) }));
-  const missing = placed.find((card) => !card.place);
-  if (missing) return { refused: `Place ${state.resources.get(missing.id)?.name ?? missing.id} on the map first.` };
+  const missing = [...ids].find((id) => !state.places.has(id));
+  if (missing) return { refused: `Place ${state.resources.get(missing)?.name ?? missing} on the map first.` };
   const circles = [...state.circles.values()];
   const cap = NEW_CIRCLE_CAP * Math.max(0, ...circles.map((circle) => circle.r));
   const holding = (id: string) => new Set(circles.filter((circle) => insideCircle(state.places.get(id) as Point, circle)).map((circle) => circle.id));
+  const nameOf = (id: string) => state.resources.get(id)?.name ?? id;
+  /** A stack sits on one spot, so it moves as one unit (K-521). */
+  const unitsOf = (cards: Iterable<string>) => {
+    const units = new Map<string, Array<string>>();
+    for (const id of cards) {
+      const stack = [...state.stacks.values()].find((each) => each.members.includes(id));
+      const key = stack ? `stack:${stack.id}` : id;
+      units.set(key, [...(units.get(key) ?? []), id]);
+    }
+    return [...units.values()];
+  };
+  /** Where every card sits in a plan; a moving unit keeps clear of all the others, so no two cards overlap. */
+  const others = (spots: ReadonlyMap<string, Point>, unit: ReadonlyArray<string>) =>
+    [...spots].filter(([id]) => !unit.includes(id)).map(([, spot]) => spot);
 
   type Plan = { readonly circle: Circle; readonly moves: Map<string, Point> } | { readonly refused: string };
   const plan = (moves: ReadonlyMap<string, Point>): Plan => {
-    const points = [...ids].map((id) => moves.get(id) ?? (state.places.get(id) as Point));
-    const around = enclosingCircle(points);
+    const spots = new Map([...state.places, ...moves]);
+    const around = enclosingCircle([...ids].map((id) => spots.get(id) as Point));
     const r = Math.ceil(around.r + CARD_REACH);
     if (circles.length > 0 && r > cap)
       return { refused: `The new circle would be wider than ${NEW_CIRCLE_CAP} times the widest circle. Select cards that sit closer together.` };
     const circle: Circle = { ...template, x: Math.round(around.x), y: Math.round(around.y), r };
     const withCircle: State = { ...state, circles: new Map(state.circles).set(circle.id, circle) };
-    const out = new Map<string, Point>();
-    for (const [id, place] of state.places) {
-      if (ids.has(id) || !insideCircle(place, circle)) continue;
-      const to = placeInside(withCircle, place, holding(id));
-      if (!to) return { refused: `${state.resources.get(id)?.name ?? id} cannot leave the new circle without changing its circles. Move it, then try again.` };
-      out.set(id, to);
+    const all = new Map(moves);
+    const inside = [...state.places].filter(([id, place]) => !ids.has(id) && insideCircle(place, circle)).map(([id]) => id);
+    for (const unit of unitsOf(inside)) {
+      const first = unit[0] as string;
+      const to = placeInside(withCircle, state.places.get(first) as Point, holding(first), others(spots, unit));
+      if (!to) return { refused: `${nameOf(first)} cannot leave the new circle without changing its circles. Move it, then try again.` };
+      for (const id of unit) {
+        spots.set(id, to);
+        all.set(id, to);
+      }
     }
-    return { circle, moves: new Map([...moves, ...out]) };
+    return { circle, moves: all };
   };
 
   const asIs = plan(new Map());
-  const middle = enclosingCircle(placed.map((card) => card.place as Point));
+  const middle = enclosingCircle([...ids].map((id) => state.places.get(id) as Point));
   const distance = (point: Point) => Math.hypot(point.x - middle.x, point.y - middle.y);
-  // A stack sits on one spot, so it moves as one unit; the units nearest to the middle choose first.
-  const units = new Map<string, Array<string>>();
-  for (const { id } of placed) {
-    const stack = [...state.stacks.values()].find((each) => each.members.includes(id));
-    const key = stack ? `stack:${stack.id}` : id;
-    units.set(key, [...(units.get(key) ?? []), id]);
-  }
-  const ordered = [...units.values()].sort(
+  // The units nearest to the middle choose first; each keeps clear of every other card where it sits now.
+  const ordered = unitsOf(ids).sort(
     (a, b) => distance(state.places.get(a[0] as string) as Point) - distance(state.places.get(b[0] as string) as Point),
   );
-  // Pulled cards keep clear of every other card on the map and of each other.
-  const taken: Array<Point> = [...state.places].filter(([id]) => !ids.has(id)).map(([, place]) => place);
+  const spots = new Map(state.places);
   const pulled = new Map<string, Point>();
   for (const unit of ordered) {
     const first = unit[0] as string;
     const place = state.places.get(first) as Point;
-    const to = placeInside(state, middle, holding(first), taken);
+    const to = placeInside(state, middle, holding(first), others(spots, unit));
     // A card that sits as close to the middle as it could get stays where it is, so the count of moves is honest.
-    const stays = !to || distance(to) >= distance(place);
-    taken.push(stays ? place : to);
-    if (!stays) for (const id of unit) pulled.set(id, to);
+    if (!to || distance(to) >= distance(place)) continue;
+    for (const id of unit) {
+      spots.set(id, to);
+      pulled.set(id, to);
+    }
   }
   const together = pulled.size > 0 ? plan(pulled) : asIs;
   const options = [asIs, together].flatMap((option) => ("refused" in option ? [] : [option]));

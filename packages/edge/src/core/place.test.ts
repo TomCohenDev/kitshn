@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { applyChanges, invert, resolveEdits } from "./changes.ts";
 import { type Circle, type Point, type Resource, type State, circlesHolding, insideCircle } from "./model.ts";
-import { circleForCards, enclosingCircle } from "./place.ts";
+import { CARD_BOX, circleForCards, enclosingCircle } from "./place.ts";
 
 /** K-529: "New circle for these" places one new circle around the selected cards and keeps every card's circles. */
 
@@ -33,6 +33,9 @@ function world(circles: ReadonlyArray<Circle>, places: Record<string, Point>, st
 }
 
 const template = { id: "new", name: "New circle", color: "#14B8A6", level: "view", members: [], match: "any", needsPasskey: false, endsAt: null } as const;
+
+const overlap = (a: Point, b: Point) =>
+  Math.abs(a.x - b.x) < 2 * CARD_BOX.half && Math.abs(a.y - b.y) < CARD_BOX.above + CARD_BOX.below;
 
 /** Applies the edits as the server does, and checks the rule of K-529 for every card of the map. */
 function apply(state: State, selected: ReadonlyArray<string>) {
@@ -109,6 +112,15 @@ describe("New circle for these (K-529)", () => {
     expect(after.places.get("s1")).toEqual(after.places.get("s2"));
   });
 
+  it("never pulls a card onto a selected card that stays (review repro)", () => {
+    const state = world([circle("c1", -328, -126, 438), circle("c2", -543, -487, 734)], {
+      k2: { x: -415, y: -291 },
+      k4: { x: -498, y: -139 },
+    });
+    const { after } = apply(state, ["k2", "k4"]);
+    expect(overlap(after.places.get("k2") as Point, after.places.get("k4") as Point)).toBe(false);
+  });
+
   it("leaves a selected card that sits in the middle where it is", () => {
     const state = world([circle("her", 0, 0, 900)], { a: { x: 0, y: 0 }, b: { x: 600, y: 0 }, u: { x: 300, y: 0 } });
     const { after } = apply(state, ["a", "b"]);
@@ -154,5 +166,54 @@ describe("New circle for these (K-529)", () => {
     expect(enclosingCircle([{ x: -1, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 0.5 }])).toMatchObject({ x: 0, y: 0, r: 1 });
     const triangle = enclosingCircle([{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 0, y: 3 }]);
     expect(triangle.r).toBeCloseTo(2.5);
+  });
+});
+
+/** A small seeded random generator (mulberry32), so the property test is the same on every run. */
+function seeded(seed: number) {
+  let a = seed;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+describe("New circle for these on random maps (K-529)", () => {
+  it("keeps every card's circles, holds exactly the selection, and adds no overlap", () => {
+    const random = seeded(529);
+    const between = (low: number, high: number) => Math.round(low + random() * (high - low));
+    let made = 0;
+    for (let layout = 0; layout < 300; layout++) {
+      const circles = Array.from({ length: between(1, 4) }, (_, i) =>
+        circle(`c${i}`, between(-800, 800), between(-800, 800), between(200, 800)),
+      );
+      const places: Record<string, Point> = {};
+      const count = between(3, 9);
+      for (let i = 0; i < count; i++) places[`k${i}`] = { x: between(-1000, 1000), y: between(-1000, 1000) };
+      const stacks: Record<string, Array<string>> = {};
+      if (random() < 0.3) {
+        places["k1"] = places["k0"] as Point;
+        stacks["st"] = ["k0", "k1"];
+      }
+      const state = world(circles, places, stacks);
+      const selected = Object.keys(places).filter(() => random() < 0.4);
+      if (selected.length < 2) continue;
+      const plan = circleForCards(state, selected, template);
+      if ("refused" in plan) continue;
+      made++;
+      const { after } = apply(state, selected);
+      const stackOf = (id: string) => (stacks["st"]?.includes(id) ? "st" : id);
+      const names = Object.keys(places);
+      for (const one of names)
+        for (const other of names) {
+          if (one >= other || stackOf(one) === stackOf(other)) continue;
+          if (overlap(places[one] as Point, places[other] as Point)) continue;
+          expect(overlap(after.places.get(one) as Point, after.places.get(other) as Point), `layout ${layout}: ${one} and ${other}`).toBe(false);
+        }
+    }
+    // Most layouts make a circle, so the checks above ran on real plans.
+    expect(made).toBeGreaterThan(100);
   });
 });

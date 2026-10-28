@@ -142,6 +142,9 @@ function fakeCloudflare(others: Record<string, number> = {}) {
         return refuse("the custom domain failed");
       }
       const body = (await request.json()) as { hostname: string; service: string };
+      // Like Cloudflare, an attach of a hostname replaces the custom domain that it had.
+      const known = domains.findIndex((item) => item.hostname === body.hostname);
+      if (known >= 0) domains.splice(known, 1);
       domains.push({ id: `d${next++}`, hostname: body.hostname, service: body.service });
       return ok({});
     }

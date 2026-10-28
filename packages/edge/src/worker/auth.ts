@@ -28,7 +28,11 @@ async function accessIdentity(
     }
   | string
 > {
-  const wanted = audiences.filter(Boolean);
+  // K-1209: during the host move, an `ACCESS_*_AUD` value lists the new and the old tag, comma-separated.
+  const wanted = audiences
+    .flatMap((value) => value.split(","))
+    .map((tag) => tag.trim())
+    .filter(Boolean);
   if (!env.ACCESS_TEAM_DOMAIN || wanted.length === 0) return "kitshn has no Access configuration.";
   if (jwks?.team !== env.ACCESS_TEAM_DOMAIN) {
     const certs = new URL(`https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`);

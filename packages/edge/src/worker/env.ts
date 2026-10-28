@@ -5,7 +5,7 @@ export interface Env {
   readonly KITSHN: DurableObjectNamespace<Kitshn>;
   /** The admin host, for example `kitshn.yarden-zamir.com` (K-1208). */
   readonly KITSHN_HOST: string;
-  /** K-1209: the old admin host, a Worker secret that exists only during the host move. */
+  /** K-1209: the old admin host, set by the bootstrap only during the host move. */
   readonly KITSHN_OLD_HOST?: string;
   /** The Zero Trust team domain, for example `team.cloudflareaccess.com`. */
   readonly ACCESS_TEAM_DOMAIN: string;

@@ -201,7 +201,21 @@ if ! printf '%s' "$APPS" | jq -e --arg d "$KITSHN_HOST" 'any(.[]; .domain == $d)
 fi
 public_policy=$(policy "kitshn public paths" '{"name":"kitshn public paths","decision":"bypass","include":[{"everyone":{}}],"require":[],"exclude":[]}')
 machines_policy=$(policy "kitshn machines" '{"name":"kitshn machines","decision":"non_identity","include":[{"any_valid_service_token":{}}],"require":[],"exclude":[]}')
-ADMIN_AUD=$(app "$KITSHN_HOST" "kitshn admin" 24h "$owner_policy")
+# K-1209: during the host move the Worker also takes the old host and the audience tags of its applications. A run
+# without KITSHN_OLD_HOST keeps the value of the running Worker, and KITSHN_OLD_HOST=none ends the move.
+if [ -z "${KITSHN_OLD_HOST:-}" ] && try GET "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/settings"; then
+  KITSHN_OLD_HOST=$(jq -r '.result.bindings[]? | select(.name == "KITSHN_OLD_HOST") | .text // empty' "$WORK/out")
+fi
+[ "${KITSHN_OLD_HOST:-}" = none ] && KITSHN_OLD_HOST=""
+KITSHN_OLD_HOST=${KITSHN_OLD_HOST:-}
+# with_old TAG PATH: TAG, and during the move also the tag of the old host's kitshn application on PATH.
+with_old() {
+  old=""
+  [ -n "$KITSHN_OLD_HOST" ] && old=$(printf '%s' "$APPS" | jq -r --arg d "$KITSHN_OLD_HOST$2" \
+    'map(select(.domain == $d and (.name | startswith("kitshn")))) | .[0].aud // empty')
+  if [ -n "$old" ] && [ "$old" != "$1" ]; then printf '%s,%s' "$1" "$old"; else printf '%s' "$1"; fi
+}
+ADMIN_AUD=$(with_old "$(app "$KITSHN_HOST" "kitshn admin" 24h "$owner_policy")" "")
 app "$KITSHN_HOST/install" "kitshn install (public)" 24h "$public_policy" >/dev/null
 # K-602: the join script and the join code exchange. The one-time code protects the exchange.
 app "$KITSHN_HOST/join" "kitshn join (public)" 24h "$public_policy" >/dev/null
@@ -211,9 +225,9 @@ app "$KITSHN_HOST/deploy" "kitshn deploy (public)" 24h "$public_policy" >/dev/nu
 app "$KITSHN_HOST/public/cards.json" "kitshn public cards (public)" 24h "$public_policy" >/dev/null
 # K-1119: deploy badges for READMEs. The path covers every badge below it.
 app "$KITSHN_HOST/public/badges" "kitshn badges (public)" 24h "$public_policy" >/dev/null
-CONNECT_AUD=$(app "$KITSHN_HOST/connect" "kitshn connect" 24h "$machines_policy")
+CONNECT_AUD=$(with_old "$(app "$KITSHN_HOST/connect" "kitshn connect" 24h "$machines_policy")" /connect)
 # K-718: agent keys reach /agent with their service token; the Worker decides what each key may do.
-AGENT_AUD=$(app "$KITSHN_HOST/agent" "kitshn agent keys" 24h "$machines_policy")
+AGENT_AUD=$(with_old "$(app "$KITSHN_HOST/agent" "kitshn agent keys" 24h "$machines_policy")" /agent)
 # K-1504: "Resume" needs a fresh passkey: a 10-minute application and MFA session for the owner emails.
 fresh_rules=$(printf '%s' "$KITSHN_OWNER_EMAILS" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0) | {email: {email: .}})')
 fresh_policy=$(policy "kitshn fresh passkey" "$(jq -nc --argjson include "$fresh_rules" \
@@ -229,6 +243,7 @@ else
     '{name:"kitshn fresh passkey",type:"self_hosted",domain:$domain,session_duration:"10m",same_site_cookie_attribute:"lax",path_cookie_attribute:true,policies:[{id:$policy,precedence:1}]}')" | jq -r .aud)
   changed "created the application \"kitshn fresh passkey\" on $KITSHN_HOST/api/fresh"
 fi
+FRESH_AUD=$(with_old "$FRESH_AUD" /api/fresh)
 # K-1004: pages and files have no Access application on the whole host; the Worker checks the shares.
 # Only the login paths have one. The Worker gives them the policies of the circles that may log in, so
 # the script makes them with the machines policy only (the passkey paths with none) and never changes
@@ -330,7 +345,7 @@ if [ "$(printf '%s' "$scripts" | jq -r --arg s "$SCRIPT" 'map(select(.id == $s))
 fi
 # run_worker_first: the offline routes of live sites (K-1108) need the Worker before the map's assets.
 metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --argjson migrations "$migrations" \
-  --arg host "$KITSHN_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" --arg agent_aud "$AGENT_AUD" --arg fresh_aud "$FRESH_AUD" \
+  --arg host "$KITSHN_HOST" --arg old_host "$KITSHN_OLD_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" --arg agent_aud "$AGENT_AUD" --arg fresh_aud "$FRESH_AUD" \
   --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" \
   --arg zone "$ZONE" --arg zone_name "$ZONE_NAME" --arg zones "$ZONES_JSON" --arg deployers "$DEPLOY_OWNER_IDS" \
   --arg version "$(cat "$WORK/bundle/version")" --arg r2 "$R2" --arg pages_login "$PAGES_LOGIN_AUD" \
@@ -361,7 +376,8 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
       {type: "plain_text", name: "PAGES_PASSKEY_AUD", text: $pages_passkey},
       {type: "plain_text", name: "FILES_LOGIN_AUD", text: $files_login},
       {type: "plain_text", name: "FILES_PASSKEY_AUD", text: $files_passkey}
-    ] + (if $r2 == "" then [] else [{type: "r2_bucket", name: "BUCKET", bucket_name: $r2}] end),
+    ] + (if $old_host == "" then [] else [{type: "plain_text", name: "KITSHN_OLD_HOST", text: $old_host}] end)
+      + (if $r2 == "" then [] else [{type: "r2_bucket", name: "BUCKET", bucket_name: $r2}] end),
     keep_bindings: ["secret_text"]
   } + (if $migrations == null then {} else {migrations: $migrations} end)')
 printf '%s' "$metadata" >"$WORK/metadata.json"

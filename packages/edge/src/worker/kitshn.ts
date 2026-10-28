@@ -2407,9 +2407,10 @@ export class Kitshn extends DurableObject<Env> {
     // K-110: no confirm in the map, so History records each sign-out before any Cloudflare call; the toast
     // says how many Access applications ended their sessions.
     const at = Date.now();
-    const id = this.insertRevision(caller.actor, "Signed out everywhere", [], null);
+    const summary = "Started sign-out everywhere: page and file logins end now; kitshn asks Cloudflare to end Access sessions";
+    const id = this.insertRevision(caller.actor, summary, [], null);
     this.revisions = [
-      { id, at, actor: caller.actor, summary: "Signed out everywhere", undoes: null, undoneBy: null, undoable: false },
+      { id, at, actor: caller.actor, summary, undoes: null, undoneBy: null, undoable: false },
       ...this.revisions,
     ].slice(0, RECENT_REVISIONS);
     this.broadcast();

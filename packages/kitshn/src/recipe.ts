@@ -129,8 +129,13 @@ const deploy = Schema.Array(DeployEntry).check(Schema.isMinLength(1), Schema.isM
 /** K-804: the key of an app; it has no `-`, so a card id reads left to right. */
 export const AppKey = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9]{0,19}$/));
 
-/** K-820: the keys of the apps of this repo that this app needs: they deploy first. */
-const needs = Schema.optionalKey(Schema.Array(AppKey).check(Schema.isMaxLength(9)));
+/**
+ * K-820, K-808: what an app needs. `apps` are keys of other apps of this repo, which deploy first. `vars` and
+ * `secrets` join it with K-808; until then the schema refuses them.
+ */
+const needs = Schema.optionalKey(
+  Schema.Struct({ apps: Schema.optionalKey(Schema.Array(AppKey).check(Schema.isMaxLength(9))) }),
+);
 
 /** K-801, K-804: a recipe has exactly one kind. */
 export const Recipe = Schema.Union([
@@ -141,15 +146,15 @@ export const Recipe = Schema.Union([
 export type Recipe = typeof Recipe.Type;
 
 /**
- * K-820: the keys in deploy order: each app after the apps that it names in `needs`, ties by key. A key that no app
+ * K-820: the keys in deploy order: each app after the apps that it names in `needs.apps`, ties by key. A key that no app
  * has, an app that names itself and a cycle are errors.
  */
 export function deployOrder(apps: {
-  readonly [key: string]: { readonly needs?: ReadonlyArray<string> };
+  readonly [key: string]: { readonly needs?: { readonly apps?: ReadonlyArray<string> } };
 }): { readonly order: ReadonlyArray<string> } | { readonly error: string } {
   const keys = Object.keys(apps).sort();
   for (const key of keys)
-    for (const before of apps[key]?.needs ?? []) {
+    for (const before of apps[key]?.needs?.apps ?? []) {
       if (before === key) return { error: `The app ${key} needs itself (K-820).` };
       if (!keys.includes(before))
         return { error: `The app ${key} needs ${before}, but no app has that key (K-820).` };
@@ -157,7 +162,8 @@ export function deployOrder(apps: {
   const order: Array<string> = [];
   while (order.length < keys.length) {
     const next = keys.find(
-      (key) => !order.includes(key) && (apps[key]?.needs ?? []).every((before) => order.includes(before)),
+      (key) =>
+        !order.includes(key) && (apps[key]?.needs?.apps ?? []).every((before) => order.includes(before)),
     );
     if (next === undefined) {
       const left = keys.filter((key) => !order.includes(key));
@@ -168,7 +174,16 @@ export function deployOrder(apps: {
   return { order };
 }
 
-/** K-804, K-820: the apps of a repo by key, 1 to 10, in an order that `needs` allows. */
+/** K-820: how one app of a run ended. An app with nothing to do for the event counts as `done`. */
+export type AppResult = "done" | "failed" | "skipped";
+
+/** K-820: the apps that this app needs and that did not deploy in this run, so this app does not deploy either. */
+export const missingNeeds = (
+  app: { readonly needs?: { readonly apps?: ReadonlyArray<string> } },
+  results: ReadonlyMap<string, AppResult>,
+): Array<string> => (app.needs?.apps ?? []).filter((key) => results.get(key) !== "done");
+
+/** K-804, K-820: the apps of a repo by key, 1 to 10, in an order that `needs.apps` allows. */
 export const Apps = Schema.Record(AppKey, Recipe).check(
   Schema.isMinProperties(1),
   Schema.isMaxProperties(10),

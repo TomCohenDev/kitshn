@@ -3386,8 +3386,11 @@ export class Kitshn extends DurableObject<Env> {
       if (path === "/deploy/fail") {
         const reason =
           typeof input["reason"] === "string" ? input["reason"].slice(0, 500) : "The deploy failed.";
+        // A running Compose deploy keeps running: its machine job decides the result and still lands, and the deploy
+        // still holds off a second deploy and a removal (deployRuns). The give-up of the CLI stays as its reason.
         this.sql(
-          "UPDATE deploys SET state = 'failed', reason = ? WHERE id = ? AND state IN ('planned', 'running', 'failed')",
+          `UPDATE deploys SET state = CASE WHEN state = 'running' THEN 'running' ELSE 'failed' END, reason = ?
+           WHERE id = ? AND state IN ('planned', 'running', 'failed')`,
           reason,
           row.id,
         );
@@ -3531,7 +3534,7 @@ export class Kitshn extends DurableObject<Env> {
         });
       }
     }
-    // K-820: an app whose `after` app did not deploy records why, so its card shows it, and changes nothing.
+    // K-820: an app whose needed app did not deploy records why, so its card shows it, and changes nothing.
     if (typeof skip === "string" && result.kind === "deploy") {
       this.sql(
         `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, addresses, app_key, reason, run_id, run_attempt)
@@ -3797,7 +3800,8 @@ export class Kitshn extends DurableObject<Env> {
     this.putResource({
       id: row.resource_id,
       kind,
-      name: row.environment === "prod" ? slug : `${slug} ${row.environment}`,
+      // K-804: an app other than `app` has its key in the name, as in its default address.
+      name: `${row.app_key === DEFAULT_APP ? slug : `${slug}-${row.app_key}`}${row.environment === "prod" ? "" : ` ${row.environment}`}`,
       addresses,
       status: "deploying",
       group: slug,
@@ -4180,14 +4184,20 @@ export class Kitshn extends DurableObject<Env> {
     );
     const uploaded = (await upload.json()) as { success: boolean; errors?: unknown };
     if (!uploaded.success) throw new Error(`the Worker upload failed: ${JSON.stringify(uploaded.errors)}`);
-    // K-820: the version that this upload made, for a later rollback to it.
-    const deployments = await api<{ deployments: Array<{ versions: Array<{ version_id: string }> }> }>(
+    // K-820: the version that this upload made, for a later rollback to it (K-821). The script is live already, so a
+    // failed read only takes the rollback to this deploy away; it logs a warning and stores null.
+    const versionId = await api<{ deployments: Array<{ versions: Array<{ version_id: string }> }> }>(
       "GET",
       `${account}/workers/scripts/${row.script}/deployments`,
+    ).then(
+      (result) => result.deployments[0]?.versions[0]?.version_id ?? null,
+      (error: unknown) => {
+        console.warn(`kitshn: the version of ${row.script} is unknown: ${String(error)}`);
+        return null;
+      },
     );
-    const versionId = deployments.deployments[0]?.versions[0]?.version_id;
-    if (typeof versionId !== "string")
-      throw new Error(`Cloudflare names no version of ${row.script} after the upload.`);
+    if (versionId === null)
+      console.warn(`kitshn: no version of ${row.script} after the upload; no rollback to it.`);
     this.sql("UPDATE deploys SET version_id = ? WHERE id = ?", versionId, row.id);
     // The workers.dev address would skip Access. If it cannot be turned off, a new script goes away again.
     try {

@@ -17,15 +17,17 @@ import { extname, join, relative, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 import { headersWarnings, redirectsWarnings } from "./headers.ts";
 import { pickSiteIcon } from "./icon.ts";
-import { DEFAULT_APP } from "./names.ts";
+import { type Artifact, artifactsByApp } from "./artifacts.ts";
 import { RecipeError, readApps } from "./parse.ts";
 import {
+  type AppResult,
   type Apps,
   type DeployEvent,
   type Recipe,
   type WorkerApp,
   decodeApps,
   deployOrder,
+  missingNeeds,
 } from "./recipe.ts";
 
 /** A step that cannot go on. The deploy of one app ends with it; the apps that do not need it go on (K-820). */
@@ -129,47 +131,6 @@ const TYPES: Record<string, string> = {
   ".webmanifest": "application/manifest+json",
 };
 
-/** K-805: an artifact of an earlier job of the run, which goes into the output folder of one app. */
-interface Artifact {
-  /** Where the artifact is now; null when the workflow downloaded it in place (`artifact-path`). */
-  readonly from: string | null;
-  /** The output folder that the workflow names for it, relative to the repo. */
-  readonly path: string;
-}
-
-/**
- * K-805, K-804: the artifacts by app key. `artifacts` of the workflow (KITSHN_ARTIFACTS, downloaded to
- * KITSHN_ARTIFACT_DIR) names them per app; `artifact` and `artifact-path` (KITSHN_ARTIFACT_PATH, downloaded in
- * place) are for the app `app`.
- */
-function artifactsByApp(apps: Apps): Map<string, Artifact> {
-  const byApp = new Map<string, Artifact>();
-  const legacy = process.env["KITSHN_ARTIFACT_PATH"];
-  if (legacy) byApp.set(DEFAULT_APP, { from: null, path: legacy });
-  const text = process.env["KITSHN_ARTIFACTS"];
-  if (!text) return byApp;
-  let map: unknown;
-  try {
-    map = JSON.parse(text);
-  } catch {
-    return fail(
-      'the artifacts input is not JSON. Write it as {"<app>": {"name": "<artifact>", "path": "<folder>"}}.',
-    );
-  }
-  if (typeof map !== "object" || map === null || Array.isArray(map))
-    fail("the artifacts input must be a JSON object.");
-  const root = process.env["KITSHN_ARTIFACT_DIR"] ?? "";
-  for (const [key, value] of Object.entries(map as Record<string, unknown>)) {
-    const item = value as { name?: unknown; path?: unknown } | null;
-    if (!(key in apps)) fail(`the artifacts input names the app ${key}, but the recipe has no such app.`);
-    if (typeof item?.name !== "string" || typeof item.path !== "string" || item.name.includes("/"))
-      fail(`the artifact of ${key} needs a name and a path.`);
-    if (byApp.has(key)) fail(`the app ${key} gets an artifact twice.`);
-    byApp.set(key, { from: join(root, item!.name as string), path: item!.path as string });
-  }
-  return byApp;
-}
-
 /**
  * K-804, K-820: deploys each app of the repo as its own deploy, after the apps that it needs. When an app does not
  * deploy, the apps that need it do not deploy either, and kitshn records why on their cards. A closed pull request
@@ -179,16 +140,17 @@ async function deploy(server: string, dir: string) {
   const env = params();
   const apps = loadApps(dir);
   const event = githubEvent();
-  const artifacts = artifactsByApp(apps);
+  const artifacts = artifactsByApp(Object.keys(apps), process.env);
+  if (!(artifacts instanceof Map)) return fail(artifacts.error);
   const ordered = deployOrder(apps);
   if ("error" in ordered) return fail(ordered.error);
   const closing = event.name === "pull_request" && event.action === "closed";
   const order = closing ? [...ordered.order].reverse() : ordered.order;
-  const results = new Map<string, "done" | "failed" | "skipped">();
+  const results = new Map<string, AppResult>();
   for (const key of order) {
     const recipe = apps[key]!;
     const label = Object.keys(apps).length === 1 ? "" : `[${key}] `;
-    const missing = closing ? [] : (recipe.needs ?? []).filter((needed) => results.get(needed) !== "done");
+    const missing = closing ? [] : missingNeeds(recipe, results);
     const run: { deployId: string | null } = { deployId: null };
     try {
       if (missing.length > 0) {

@@ -110,6 +110,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "ALTER TABLE deploys ADD COLUMN version_id TEXT",
     "ALTER TABLE deploys ADD COLUMN run_id TEXT",
     "ALTER TABLE deploys ADD COLUMN run_attempt TEXT",
+    // The card panel reads the newest deploy of each card (deployNotes), and deploy rows never go away.
+    "CREATE INDEX deploys_resource ON deploys (resource_id)",
   ],
 ];
 

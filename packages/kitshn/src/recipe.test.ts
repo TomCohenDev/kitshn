@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readApps } from "./parse.ts";
-import { decodeApps, decodeRecipe, deployOrder, plan } from "./recipe.ts";
+import { decodeApps, decodeRecipe, deployOrder, missingNeeds, plan } from "./recipe.ts";
 
 /** The recipe of a `defineApp` file: the app `app` (K-804). */
 const readRecipe = (source: string) => (readApps(source) as { readonly app: unknown }).app;
@@ -242,12 +242,12 @@ describe("several apps per repo (K-804, K-820)", () => {
   const app = (needs?: ReadonlyArray<string>) => ({
     static: { output: "site" },
     deploy: [{ on: "push", name: "prod" }],
-    ...(needs ? { needs } : {}),
+    ...(needs ? { needs: { apps: needs } } : {}),
   });
 
   it("reads defineApps by key, and defineApp as the app `app`", () => {
     const source = `import { defineApps } from "kitshn";
-export default defineApps({ app: { static: { output: "public" }, deploy: [{ on: "push", name: "prod" }] }, cv: { static: { output: "cv" }, deploy: [{ on: "push", name: "prod" }], needs: ["app"] } });
+export default defineApps({ app: { static: { output: "public" }, deploy: [{ on: "push", name: "prod" }] }, cv: { static: { output: "cv" }, deploy: [{ on: "push", name: "prod" }], needs: { apps: ["app"] } } });
 `;
     expect(Object.keys(decodeApps(readApps(source)))).toEqual(["app", "cv"]);
     expect(
@@ -271,6 +271,19 @@ export default defineApps({ app: { static: { output: "public" }, deploy: [{ on: 
     expect(() => decodeApps({ a: app(["b"]), b: app(["a"]) })).toThrow(/cycle/);
     expect(() => decodeApps({ "my-app": app() })).toThrow();
     expect(() => decodeApps({})).toThrow();
+    // K-808: `vars` and `secrets` join `needs` later; until then the schema refuses them.
+    expect(() => decodeApps({ web: { ...app(), needs: { vars: ["TOKEN"] } } })).toThrow();
+  });
+
+  it("skips an app when an app it needs failed or was skipped, and counts nothing to do as deployed", () => {
+    const results = new Map([
+      ["db", "done"],
+      ["api", "failed"],
+      ["queue", "skipped"],
+    ] as const);
+    expect(missingNeeds(app(["db"]), results)).toEqual([]);
+    expect(missingNeeds(app(["db", "api", "queue"]), results)).toEqual(["api", "queue"]);
+    expect(missingNeeds(app(), results)).toEqual([]);
   });
 
   it("puts the key in the default address of every app but `app`", () => {

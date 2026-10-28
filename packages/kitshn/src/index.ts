@@ -69,11 +69,14 @@ export interface WorkerApp {
 /** 1 to 20 entries. */
 type Deploy = readonly [DeployEntry, ...Array<DeployEntry>];
 
-/**
- * K-820: the keys of the apps of this repo that this app needs: they deploy first, and when one of them did not
- * deploy, this app does not deploy either.
- */
-type Needs = ReadonlyArray<string>;
+/** K-820, K-808: what an app needs. `vars` and `secrets` join `apps` with K-808. */
+interface Needs {
+  /**
+   * Keys of other apps of this repo. They deploy first, and when one of them did not deploy, this app does not deploy
+   * either. An app with nothing to do for the event counts as deployed.
+   */
+  readonly apps?: ReadonlyArray<string>;
+}
 
 /** K-801, K-804: a recipe has exactly one kind: `static`, `compose` or `worker`. */
 export type Recipe =

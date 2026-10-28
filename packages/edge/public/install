@@ -11,7 +11,8 @@
 # KITSHN_OWNER_DEVICES (a JSON list of {tokenId, clientId, name} service tokens that join the Owner
 # circle when kitshn starts for the first time, for agents; K-106), KITSHN_DEPLOY_OWNERS (comma-separated
 # GitHub user names whose repos may deploy, K-811; a second run keeps the list when it is not set),
-# KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY (the id and the private key file of the kitshn GitHub
+# KITSHN_ZONES (comma-separated further zones of the account that the extra addresses of an app may use, K-817;
+# a second run keeps the list when it is not set), KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY (the id and the private key file of the kitshn GitHub
 # App, so agent keys can start a repo's kitshn workflow, K-718; a second run keeps them unless
 # KITSHN_SET_GITHUB_APP=1).
 set -eu
@@ -291,6 +292,21 @@ if [ -n "${KITSHN_DEPLOY_OWNERS:-}" ]; then
   done
   kept "deploys from GitHub owners $KITSHN_DEPLOY_OWNERS ($DEPLOY_OWNER_IDS)"
 fi
+# K-1111, K-817: the further zones that kitshn publishes on, as JSON of zone name to id. A second run keeps them
+# when KITSHN_ZONES is not set. Known limit: the check reads DNS only; a token without DNS edit fails at the deploy.
+ZONES_JSON=$(printf "%s" "$settings" | jq -r '[.bindings[]? | select(.name == "KITSHN_ZONES") | .text][0] // ""')
+if [ -n "${KITSHN_ZONES:-}" ]; then
+  ZONES_JSON='{}'
+  for name in $(printf '%s' "$KITSHN_ZONES" | tr ',' ' '); do
+    [ "$name" = "$ZONE_NAME" ] && continue
+    id=$(printf '%s' "$zones" | jq -r --arg n "$name" '.[] | select(.name == $n) | .id // empty')
+    [ -n "$id" ] || die "the token sees no zone $name in this account (K-1111)."
+    NEED="DNS: Edit on $name"
+    api GET "/zones/$id/dns_records?per_page=1" >/dev/null
+    ZONES_JSON=$(printf '%s' "$ZONES_JSON" | jq -c --arg n "$name" --arg id "$id" '. + {($n): $id}')
+  done
+  kept "further zones $KITSHN_ZONES"
+fi
 if [ "$(printf '%s' "$scripts" | jq -r --arg s "$SCRIPT" 'map(select(.id == $s)) | .[0].migration_tag // empty')" = v1 ]; then
   migrations=null
 fi
@@ -298,7 +314,7 @@ fi
 metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --argjson migrations "$migrations" \
   --arg host "$KITSHN_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" --arg agent_aud "$AGENT_AUD" --arg fresh_aud "$FRESH_AUD" \
   --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" \
-  --arg zone "$ZONE" --arg zone_name "$ZONE_NAME" --arg deployers "$DEPLOY_OWNER_IDS" \
+  --arg zone "$ZONE" --arg zone_name "$ZONE_NAME" --arg zones "$ZONES_JSON" --arg deployers "$DEPLOY_OWNER_IDS" \
   --arg version "$(cat "$WORK/bundle/version")" --arg r2 "$R2" --arg pages_login "$PAGES_LOGIN_AUD" \
   --arg pages_passkey "$PAGES_PASSKEY_AUD" --arg files_login "$FILES_LOGIN_AUD" --arg files_passkey "$FILES_PASSKEY_AUD" '
   {
@@ -320,6 +336,7 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
       {type: "plain_text", name: "CLOUDFLARE_ACCOUNT_ID", text: $account},
       {type: "plain_text", name: "CLOUDFLARE_ZONE_ID", text: $zone},
       {type: "plain_text", name: "KITSHN_ZONE", text: $zone_name},
+      {type: "plain_text", name: "KITSHN_ZONES", text: $zones},
       {type: "plain_text", name: "DEPLOY_OWNER_IDS", text: $deployers},
       {type: "plain_text", name: "KITSHN_VERSION", text: $version},
       {type: "plain_text", name: "PAGES_LOGIN_AUD", text: $pages_login},

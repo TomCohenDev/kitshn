@@ -1,5 +1,6 @@
 import { RESERVED_SITE_NAMES } from "../core/library.ts";
 import type { LiveSiteReport } from "../core/machine.ts";
+import type { Resource } from "../core/model.ts";
 import { type AccessRow, appliesBypass } from "./access-sync.ts";
 
 /** One live site of a machine (K-1104), as the Durable Object keeps it. */
@@ -93,6 +94,47 @@ export function ingressAccess(
   return { kind: "check", teamName, aud: row.aud };
 }
 
+/**
+ * K-817: one entry for each address that serves a live site. The socket of a Compose app serves every address of
+ * its card, each with its own ingress rule, DNS record and Access application; any other site serves its own.
+ */
+export function servedSites(
+  site: LiveSite,
+  card: Pick<Resource, "kind" | "addresses"> | undefined,
+): Array<LiveSite> {
+  if (card?.kind !== "site.compose" || card.addresses[0] !== site.address) return [site];
+  return card.addresses.map((address) => ({ ...site, address }));
+}
+
+/**
+ * K-410, K-817: the live sites that may get ingress, a DNS record and an offline route: checked sites, one entry for
+ * each address that serves them, and only the addresses whose Access application exists.
+ */
+export function protectedLiveSites(
+  sites: Iterable<LiveSite>,
+  cardOf: (id: string) => Pick<Resource, "kind" | "addresses"> | undefined,
+  hasApplication: (site: LiveSite) => boolean,
+): Array<LiveSite> {
+  return [...sites]
+    .filter((site) => site.state === "ok")
+    .flatMap((site) => servedSites(site, cardOf(site.id)))
+    .filter(hasApplication);
+}
+
+/**
+ * K-817, K-410: the addresses of an existing card after a deploy. A Compose card takes the new list at once, because
+ * its tunnel sync drops an old address in order. A static card keeps its old addresses until the deploy has taken
+ * their custom domains off, so their Access applications stay meanwhile.
+ */
+export function nextCardAddresses(
+  kind: Resource["kind"],
+  addresses: ReadonlyArray<string>,
+  existing: ReadonlyArray<string>,
+): Array<string> {
+  if (kind === "site.compose") return [...addresses];
+  return [...addresses, ...existing.filter((address) => !addresses.includes(address))];
+}
+
 /** K-603, K-607, K-1105: the ingress of a machine's tunnel from its live sites. */
 export function tunnelConfig(sites: ReadonlyArray<LiveSite>, accessOf: (site: LiveSite) => IngressAccess) {
   return {
@@ -168,4 +210,21 @@ export function reachableAddresses(input: {
   for (const record of input.records) if (record.record_id) reachable.add(record.address);
   for (const route of input.routes) if (route.route_id) reachable.add(route.address);
   return reachable;
+}
+
+/**
+ * K-817, K-1404: why a deploy may not take an address with DNS records, or null. A record that kitshn made for this
+ * same card does not block; one that kitshn made for another card, also one that waits for removal, does until it
+ * is gone, and so does a record of anything else.
+ */
+export function dnsRecordRefusal(
+  address: string,
+  records: number,
+  kitshnRow: { readonly card_id: string | null } | undefined,
+  cardId: string,
+): string | null {
+  if (kitshnRow?.card_id === cardId || records === 0) return null;
+  if (kitshnRow)
+    return `${address} still has the DNS record of another kitshn card; it goes when that card lets go of ${address}. Deploy again then.`;
+  return `${address} already has a DNS record.`;
 }

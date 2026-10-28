@@ -7,7 +7,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./recipe": "./src/recipe.ts",
-    "./icon": "./src/icon.ts"
+    "./icon": "./src/icon.ts",
+    "./names": "./src/names.ts"
   },
   "publishConfig": {
     "exports": {

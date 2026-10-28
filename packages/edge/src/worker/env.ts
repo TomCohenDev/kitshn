@@ -32,6 +32,11 @@ export interface Env {
   /** The zone that kitshn publishes on (K-1111), and its id. */
   readonly KITSHN_ZONE: string;
   readonly CLOUDFLARE_ZONE_ID: string;
+  /**
+   * K-1111, K-817: the further zones that kitshn publishes on, as a JSON object of zone name to zone id. Only the
+   * extra addresses of a push entry use them. The bootstrap writes it from KITSHN_ZONES.
+   */
+  readonly KITSHN_ZONES?: string;
   /** K-811: comma-separated GitHub user ids whose repos may deploy. Empty refuses every deploy. */
   readonly DEPLOY_OWNER_IDS: string;
   /** The API token that writes Access changes (K-406). Missing in local development. */

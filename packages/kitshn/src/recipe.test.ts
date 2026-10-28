@@ -113,3 +113,90 @@ describe("Compose recipes (K-804, K-812)", () => {
     expect(() => decodeRecipe({ deploy })).toThrow();
   });
 });
+
+describe("several addresses (K-817)", () => {
+  const push = { name: "push", branch: "main", pr: null, action: null } as const;
+  const withAddress = (address: string | ReadonlyArray<string>, on: "push" | "pull_request" = "push") =>
+    decodeRecipe({ compose: {}, deploy: [{ on, name: on === "push" ? "prod" : "pr-{pr}", address }] });
+  const zones = ["onion-climbers.com"];
+
+  it("serves every listed address, the first under the kitshn zone as the main one", () => {
+    const recipe = withAddress(["onion-climbers.com", "climbing.example.com", "www.onion-climbers.com"]);
+    expect(plan(recipe, "me/climbing", push, "example.com", zones)).toMatchObject({
+      kind: "deploy",
+      address: "climbing.example.com",
+      addresses: ["climbing.example.com", "onion-climbers.com", "www.onion-climbers.com"],
+    });
+    expect(plan(withAddress("climbing.example.com"), "me/climbing", push, "example.com")).toMatchObject({
+      addresses: ["climbing.example.com"],
+    });
+  });
+
+  it("refuses a list without the kitshn zone, a zone kitshn does not publish on, a deep name and a repeat", () => {
+    const refused = (address: ReadonlyArray<string>) =>
+      plan(withAddress(address), "me/x", push, "example.com", zones);
+    expect(refused(["onion-climbers.com"])).toMatchObject({
+      kind: "error",
+      reason: expect.stringContaining("One address must be"),
+    });
+    expect(refused(["x.example.com", "other.org"])).toMatchObject({
+      kind: "error",
+      reason: expect.stringContaining("other.org"),
+    });
+    expect(refused(["x.example.com", "a.b.onion-climbers.com"])).toMatchObject({ kind: "error" });
+    expect(refused(["x.example.com", "x.example.com"])).toMatchObject({
+      kind: "error",
+      reason: expect.stringContaining("twice"),
+    });
+  });
+
+  it("keeps one address for a pull request (K-901)", () => {
+    const recipe = withAddress(["a.example.com", "b.example.com"], "pull_request");
+    expect(
+      plan(recipe, "me/x", { name: "pull_request", branch: "x", pr: 1, action: "opened" }, "example.com"),
+    ).toMatchObject({
+      kind: "error",
+      reason: expect.stringContaining("Only a push entry"),
+    });
+  });
+});
+
+describe("address limit (K-817)", () => {
+  it("takes at most 5 addresses, under the API calls of one deploy request", () => {
+    const deploy = (count: number) => [
+      {
+        on: "push",
+        name: "prod",
+        address: Array.from({ length: count }, (_, index) => `a${index}.example.com`),
+      },
+    ];
+    expect(() => decodeRecipe({ compose: {}, deploy: deploy(5) })).not.toThrow();
+    expect(() => decodeRecipe({ compose: {}, deploy: deploy(6) })).toThrow();
+  });
+});
+
+describe("kitshn's own names (K-817)", () => {
+  const push = { name: "push", branch: "main", pr: null, action: null } as const;
+  const planOf = (address: ReadonlyArray<string>) =>
+    plan(
+      decodeRecipe({ compose: {}, deploy: [{ on: "push", name: "prod", address }] }),
+      "me/x",
+      push,
+      "example.com",
+    );
+
+  it("refuses the zone apex and kitshn's names as extra addresses", () => {
+    for (const extra of [
+      "example.com",
+      "kit.example.com",
+      "pages.example.com",
+      "files.example.com",
+      "www.example.com",
+    ])
+      expect(planOf(["x.example.com", extra])).toMatchObject({
+        kind: "error",
+        reason: expect.stringContaining("keeps for itself"),
+      });
+    expect(planOf(["x.example.com", "y.example.com"])).toMatchObject({ kind: "deploy" });
+  });
+});

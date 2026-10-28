@@ -8,7 +8,7 @@ import type { State } from "./model.ts";
  * application follow the card through the alarm sync, in the order of K-410.
  */
 export type Teardown =
-  | { readonly kind: "worker"; readonly address: string; readonly script: string }
+  | { readonly kind: "worker"; readonly addresses: ReadonlyArray<string>; readonly script: string }
   | {
       readonly kind: "compose";
       readonly machineId: string | null;
@@ -19,7 +19,9 @@ export function appTeardown(card: AppCard, zone: string): Teardown {
   const address = card.addresses[0];
   if (address === undefined) throw new Error(`The app ${card.name} has no address.`);
   // The Worker script of an environment is `kitshn-<card id>` (environmentNames in worker/deploys.ts).
-  if (card.kind !== "site.compose") return { kind: "worker", address, script: `kitshn-${card.id}` };
+  // K-817: a static site loses every custom domain of its card.
+  if (card.kind !== "site.compose")
+    return { kind: "worker", addresses: card.addresses, script: `kitshn-${card.id}` };
   // K-909: a removal keeps the volumes and the last good build on the machine, so undo can start it again.
   const name = address.slice(0, -zone.length - 1);
   return {

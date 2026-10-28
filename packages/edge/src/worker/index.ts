@@ -17,6 +17,7 @@ import {
 } from "./auth.ts";
 import { escapeHtml, originDown, seenText } from "./live.ts";
 import type { Env } from "./env.ts";
+import { zoneFor, zonesOf } from "./zones.ts";
 
 export { Kitshn } from "./kitshn.ts";
 
@@ -199,12 +200,26 @@ interface OfflineInfo {
   readonly seen: number | null;
 }
 
+/** K-817: a host on a further zone of KITSHN_ZONES. A broken KITSHN_ZONES counts as none here. */
+function onOtherZone(host: string, env: Env) {
+  try {
+    const zone = zoneFor(host, zonesOf(env));
+    return zone !== null && zone.name !== env.KITSHN_ZONE;
+  } catch {
+    return false;
+  }
+}
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
     if (url.hostname === `pages.${env.KITSHN_ZONE}`) return content(request, env, "page");
     if (url.hostname === `files.${env.KITSHN_ZONE}`) return content(request, env, "file");
-    if (url.hostname !== env.KITSHN_HOST && url.hostname.endsWith(`.${env.KITSHN_ZONE}`)) {
+    // K-1108, K-817: only an offline route brings a live site's request here, on any zone that kitshn publishes on.
+    if (
+      url.hostname !== env.KITSHN_HOST &&
+      (url.hostname.endsWith(`.${env.KITSHN_ZONE}`) || onOtherZone(url.hostname, env))
+    ) {
       return offline(request, env, ctx);
     }
     // K-718: agent keys. Access lets any service token in; the Durable Object decides what each may do.

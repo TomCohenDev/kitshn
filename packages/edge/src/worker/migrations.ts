@@ -88,6 +88,11 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   ["ALTER TABLE repos ADD COLUMN checked_at INTEGER", "ALTER TABLE repos ADD COLUMN gone_at INTEGER"],
   // 13: when each icon last changed; a daemon changes the icon of a site at most once an hour (K-1114).
   ["ALTER TABLE icons ADD COLUMN changed_at INTEGER NOT NULL DEFAULT 0"],
+  // 14: every address that serves an environment, the main one first, as JSON (K-817). Null on older rows means
+  // the one address of the row.
+  ["ALTER TABLE deploys ADD COLUMN addresses TEXT"],
+  // 15: the card that made each DNS record (K-817); null on older rows, which then count as another card's.
+  ["ALTER TABLE dns_objects ADD COLUMN card_id TEXT"],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

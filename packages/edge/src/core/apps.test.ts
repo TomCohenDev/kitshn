@@ -27,9 +27,15 @@ describe("app removal (K-909)", () => {
   it("takes down the Worker of a site, and stops a Compose app with its data kept", () => {
     expect(appTeardown({ ...compose, kind: "site.static", machine: null }, "example.com")).toEqual({
       kind: "worker",
-      address: "riffle.example.com",
+      addresses: ["riffle.example.com"],
       script: `kitshn-${compose.id}`,
     });
+    // K-817: every address of the card loses its custom domain; the Compose down keeps the main name.
+    const several = { ...compose, addresses: ["riffle.example.com", "riffle.org"] };
+    expect(appTeardown({ ...several, kind: "site.static", machine: null }, "example.com")).toMatchObject({
+      addresses: ["riffle.example.com", "riffle.org"],
+    });
+    expect(appTeardown(several, "example.com")).toMatchObject({ command: { name: "riffle" } });
     expect(appTeardown(compose, "example.com")).toEqual({
       kind: "compose",
       machineId: "vps",

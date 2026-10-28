@@ -151,6 +151,7 @@ import {
   parseSiteIcon,
 } from "./deploys.ts";
 import { type Recipe, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
+import { type Zone, removeStaleDomains, zoneFor, zoneOfAddressIn, zonesOf } from "./zones.ts";
 import {
   type LiveSite,
   ingressAccess,
@@ -158,6 +159,10 @@ import {
   reachableAddresses,
   offlineReason,
   parseSites,
+  dnsRecordRefusal,
+  nextCardAddresses,
+  protectedLiveSites,
+  servedSites,
   sitesNeedingRoutes,
   tunnelConfig,
 } from "./live.ts";
@@ -775,7 +780,7 @@ export class Kitshn extends DurableObject<Env> {
       if (teardown?.kind !== "worker") continue;
       const api = this.api();
       if (!api) throw new RuleError("kitshn has no Cloudflare API token here.");
-      await this.removeWorker(api, teardown.address, teardown.script);
+      await this.removeWorker(api, teardown.addresses, teardown.script);
     }
     // The state can change while Cloudflare answers.
     const conflict = conflictOf(this.state, changes);
@@ -2217,11 +2222,12 @@ export class Kitshn extends DurableObject<Env> {
 
   /** Live sites whose address is checked and whose Access application exists in Cloudflare. */
   private protectedSites(machineId?: string) {
-    return [...this.liveSites.values()].filter((site) => {
-      if (site.state !== "ok" || (machineId !== undefined && site.machineId !== machineId)) return false;
+    return protectedLiveSites(
+      [...this.liveSites.values()].filter((site) => machineId === undefined || site.machineId === machineId),
+      (id) => this.state.resources.get(id),
       // The application exists in Cloudflare; a later failed update of it does not take the site down.
-      return Boolean(this.access.get(`app:${site.id}:${site.address}`)?.cfId);
-    });
+      (site) => Boolean(this.access.get(`app:${site.id}:${site.address}`)?.cfId),
+    );
   }
 
   /**
@@ -2389,6 +2395,7 @@ export class Kitshn extends DurableObject<Env> {
         address: string;
         record_id: string;
         content: string;
+        card_id: string | null;
         error: string | null;
         retry_at: number;
       }>("SELECT * FROM dns_objects").map((row) => [row.address, row]),
@@ -2400,7 +2407,9 @@ export class Kitshn extends DurableObject<Env> {
     const wanted = new Map(
       this.protectedSites().flatMap((site) => {
         const machine = this.state.machines.get(site.machineId);
-        return machine ? [[site.address, `${machine.tunnelId}.cfargotunnel.com`] as const] : [];
+        return machine
+          ? [[site.address, { content: `${machine.tunnelId}.cfargotunnel.com`, cardId: site.id }] as const]
+          : [];
       }),
     );
     const routed = reachableAddresses({
@@ -2410,14 +2419,17 @@ export class Kitshn extends DurableObject<Env> {
     });
     return [
       ...[...wanted]
-        .filter(([address, content]) => {
+        .filter(([address, { content, cardId }]) => {
           const row = rows.get(address);
-          return due(address) && (!row || row.error !== null || row.content !== content);
+          // An older row without its card gets the card at the next write (K-817).
+          return (
+            due(address) && (!row || row.error !== null || row.content !== content || row.card_id !== cardId)
+          );
         })
-        .map(([address, content]) => ({ address, content: content as string | null })),
+        .map(([address, { content, cardId }]) => ({ address, content: content as string | null, cardId })),
       ...[...rows.values()]
         .filter((row) => !wanted.has(row.address) && due(row.address) && !routed.has(row.address))
-        .map((row) => ({ address: row.address, content: null })),
+        .map((row) => ({ address: row.address, content: null, cardId: row.card_id })),
     ];
   }
 
@@ -2450,18 +2462,25 @@ export class Kitshn extends DurableObject<Env> {
     ];
   }
 
+  /** K-1111, K-817: the API path of the zone of an address. It fails for an address outside every zone. */
+  private zonePath(address: string) {
+    const zone = zoneOfAddressIn(address, this.env);
+    if (!zone) throw new Error(`kitshn does not publish on the zone of ${address} (K-1111).`);
+    return `/zones/${zone.id}`;
+  }
+
   /** K-1104: a proxied CNAME per live site to its machine's tunnel. kitshn deletes only records it made. */
   private async syncDns(api: Api, budget: number) {
     let calls = 0;
-    const zone = `/zones/${this.env.CLOUDFLARE_ZONE_ID}/dns_records`;
     for (const work of this.dnsWork()) {
       if (calls >= budget) return;
       calls++;
-      const [row] = this.sql<{ record_id: string }>(
-        "SELECT record_id FROM dns_objects WHERE address = ?",
+      const [row] = this.sql<{ record_id: string; card_id: string | null }>(
+        "SELECT record_id, card_id FROM dns_objects WHERE address = ?",
         work.address,
       );
       try {
+        const zone = `${this.zonePath(work.address)}/dns_records`;
         if (work.content !== null) {
           const body = {
             type: "CNAME",
@@ -2474,10 +2493,11 @@ export class Kitshn extends DurableObject<Env> {
             ? await api<{ id: string }>("PUT", `${zone}/${row.record_id}`, body)
             : await api<{ id: string }>("POST", zone, body);
           this.sql(
-            "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error, retry_at) VALUES (?, ?, ?, NULL, 0)",
+            "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error, retry_at, card_id) VALUES (?, ?, ?, NULL, 0, ?)",
             work.address,
             record.id,
             work.content,
+            work.cardId,
           );
         } else {
           if (row?.record_id) {
@@ -2489,12 +2509,13 @@ export class Kitshn extends DurableObject<Env> {
         }
       } catch (error) {
         this.sql(
-          "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error, retry_at) VALUES (?, ?, ?, ?, ?)",
+          "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error, retry_at, card_id) VALUES (?, ?, ?, ?, ?, ?)",
           work.address,
           row?.record_id ?? "",
           work.content ?? "",
           String(error),
           Date.now() + RETRY_MS,
+          row?.card_id ?? work.cardId,
         );
       }
     }
@@ -2510,10 +2531,10 @@ export class Kitshn extends DurableObject<Env> {
         site.address,
       );
     }
-    const routes = `/zones/${this.env.CLOUDFLARE_ZONE_ID}/workers/routes`;
     for (const work of this.routeWork()) {
       if (calls++ >= budget) return;
       try {
+        const routes = `${this.zonePath(work.address)}/workers/routes`;
         if (work.add) {
           const route = await api<{ id: string }>("POST", routes, {
             pattern: `${work.address}/*`,
@@ -2550,7 +2571,10 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-1110: what the offline page of an address shows. */
   private offlineInfo(address: string) {
-    const site = [...this.liveSites.values()].find((item) => item.address === address);
+    // K-817: an extra address of a Compose app shows the offline page of its site too.
+    const site = [...this.liveSites.values()]
+      .flatMap((item) => servedSites(item, this.state.resources.get(item.id)))
+      .find((item) => item.address === address);
     if (!site) return Response.json({ error: "No live site has this address." }, { status: 404 });
     const machine = this.state.machines.get(site.machineId);
     const online = this.onlineMachines().has(site.machineId);
@@ -3219,7 +3243,21 @@ export class Kitshn extends DurableObject<Env> {
     }
     const event = eventOf(deployer, input["event"]);
     if (typeof event === "string") return Response.json({ error: event }, { status: 400 });
-    const result = plan(recipe, deployer.repo, event, this.env.KITSHN_ZONE);
+    // A broken KITSHN_ZONES leaves only the kitshn zone, so a deploy there still works (K-1111).
+    let zones: Array<Zone>;
+    try {
+      zones = zonesOf(this.env);
+    } catch (error) {
+      console.error(`kitshn cannot read KITSHN_ZONES (K-1111): ${String(error)}`);
+      zones = [{ name: this.env.KITSHN_ZONE, id: this.env.CLOUDFLARE_ZONE_ID }];
+    }
+    const result = plan(
+      recipe,
+      deployer.repo,
+      event,
+      this.env.KITSHN_ZONE,
+      zones.slice(1).map((zone) => zone.name),
+    );
     if (result.kind === "error") return Response.json({ error: result.reason }, { status: 400 });
     if (result.kind === "skip") return Response.json({ deployId: null, plan: result });
     // K-1504: no new deploy while paused; a teardown still runs, because it only lowers access.
@@ -3316,7 +3354,7 @@ export class Kitshn extends DurableObject<Env> {
         machineId = pick.id;
       }
     }
-    if (existing && !existing.addresses.includes(result.address)) {
+    if (existing && existing.addresses[0] !== result.address) {
       return Response.json(
         {
           error: `${result.environment} lives at ${existing.addresses[0]}. To move it, remove its card on the map first.`,
@@ -3324,50 +3362,70 @@ export class Kitshn extends DurableObject<Env> {
         { status: 409 },
       );
     }
-    const other = [...this.state.resources.values()].find(
-      (resource) => resource.id !== resourceId && resource.addresses.includes(result.address),
-    );
-    if (other)
+    // K-817: the plan refuses kitshn's own names; the admin host can have another name.
+    if (result.addresses.slice(1).includes(this.env.KITSHN_HOST))
       return Response.json(
-        { error: `${result.address} belongs to the card ${other.name}.` },
+        { error: `${this.env.KITSHN_HOST} is the kitshn admin host (K-817).` },
         { status: 409 },
       );
+    for (const address of result.addresses) {
+      const other = [...this.state.resources.values()].find(
+        (resource) => resource.id !== resourceId && resource.addresses.includes(address),
+      );
+      if (other)
+        return Response.json({ error: `${address} belongs to the card ${other.name}.` }, { status: 409 });
+    }
     if (result.kind === "deploy") {
       // Never take over a hostname that another Worker serves, or that a foreign Access app covers (K-408).
       const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
-      const domains = await api<Array<{ service: string }>>(
-        "GET",
-        `${account}/workers/domains?hostname=${encodeURIComponent(result.address)}`,
-      );
-      const foreign = domains.find((domain) => domain.service !== script);
-      if (foreign) {
-        return Response.json(
-          { error: `${result.address} already serves the Worker ${foreign.service}.` },
-          { status: 409 },
-        );
-      }
       const apps = await api<Array<{ name: string; domain?: string }>>(
         "GET",
         `${account}/access/apps?per_page=1000`,
       );
-      const foreignApp = apps.find((app) => app.domain === result.address && !app.name.startsWith("kitshn "));
-      if (foreignApp) {
-        return Response.json(
-          {
-            error: `The Access application "${foreignApp.name}" covers ${result.address}; kitshn does not change it.`,
-          },
-          { status: 409 },
+      for (const address of result.addresses) {
+        const domains = await api<Array<{ service: string }>>(
+          "GET",
+          `${account}/workers/domains?hostname=${encodeURIComponent(address)}`,
         );
+        const foreign = domains.find((domain) => domain.service !== script);
+        if (foreign) {
+          return Response.json(
+            { error: `${address} already serves the Worker ${foreign.service}.` },
+            { status: 409 },
+          );
+        }
+        const foreignApp = apps.find((app) => app.domain === address && !app.name.startsWith("kitshn "));
+        if (foreignApp) {
+          return Response.json(
+            {
+              error: `The Access application "${foreignApp.name}" covers ${address}; kitshn does not change it.`,
+            },
+            { status: 409 },
+          );
+        }
+        // Only an address that nothing uses yet: kitshn never takes over a record that it did not make (K-1404).
+        // A record that kitshn made for this same card (an address that comes back before its record went) is fine.
+        if (existing?.addresses.includes(address)) continue;
+        const [kitshnRow] = this.sql<{ card_id: string | null }>(
+          "SELECT card_id FROM dns_objects WHERE address = ? AND record_id != ''",
+          address,
+        );
+        if (kitshnRow?.card_id === resourceId) continue;
+        const zone = zoneFor(address, zones);
+        if (!zone)
+          return Response.json(
+            { error: `kitshn does not publish on the zone of ${address} (K-1111).` },
+            { status: 409 },
+          );
+        const records = await api<Array<unknown>>(
+          "GET",
+          `/zones/${zone.id}/dns_records?name=${encodeURIComponent(address)}`,
+        );
+        const refusal = dnsRecordRefusal(address, records.length, kitshnRow, resourceId);
+        if (refusal) return Response.json({ error: refusal }, { status: 409 });
       }
     }
     if (result.kind === "deploy" && !existing) {
-      // Only an address that nothing uses yet: kitshn never takes over a record that it did not make.
-      const records = await api<Array<unknown>>(
-        "GET",
-        `/zones/${this.env.CLOUDFLARE_ZONE_ID}/dns_records?name=${encodeURIComponent(result.address)}`,
-      );
-      if (records.length > 0)
-        return Response.json({ error: `${result.address} already has a DNS record.` }, { status: 409 });
       if (result.ephemeral && !compose) {
         const scripts = await api<Array<unknown>>(
           "GET",
@@ -3400,8 +3458,8 @@ export class Kitshn extends DurableObject<Env> {
     }
     const deployId = crypto.randomUUID();
     this.sql(
-      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?)`,
+      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file, addresses)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?)`,
       deployId,
       deployer.repo,
       deployer.repoId,
@@ -3418,6 +3476,7 @@ export class Kitshn extends DurableObject<Env> {
       compose ? "compose" : "static",
       machineId,
       compose?.file ?? null,
+      JSON.stringify(result.addresses),
     );
     return Response.json({ deployId, plan: result });
   }
@@ -3449,8 +3508,18 @@ export class Kitshn extends DurableObject<Env> {
     machine: string | null,
   ) {
     const actor: Actor = { _tag: "kitshn", reason: `deploy of ${row.repo} ${deployer.sha.slice(0, 7)}` };
-    if (this.state.resources.has(row.resource_id))
+    const addresses = rowAddresses(row);
+    const existing = this.state.resources.get(row.resource_id);
+    if (existing) {
+      // K-817, K-410: a Compose card takes the new list at once; the tunnel sync drops an old address in order. A
+      // static card keeps its old addresses until finishDeploy has taken their custom domains off.
+      const next = nextCardAddresses(kind, addresses, existing.addresses);
+      if (JSON.stringify(next) !== JSON.stringify(existing.addresses)) {
+        this.putResource({ ...existing, addresses: next });
+        this.load();
+      }
       return "The card keeps its place; the map decides who opens it (K-807).";
+    }
     const slug = repoSlug(row.repo);
     // K-909: the row of a removed app with this id would take the new card with it (dropLiveSite).
     if (kind === "site.compose") dropLiveSite(this.query, row.resource_id);
@@ -3458,7 +3527,7 @@ export class Kitshn extends DurableObject<Env> {
       id: row.resource_id,
       kind,
       name: row.environment === "prod" ? slug : `${slug} ${row.environment}`,
-      addresses: [row.address],
+      addresses,
       status: "deploying",
       group: slug,
       machine,
@@ -3580,16 +3649,10 @@ export class Kitshn extends DurableObject<Env> {
         { status: 409 },
       );
     const card = this.ensureCard(row, deployer, "site.compose", machine.id);
-    // Fail closed: the Access application exists before the tunnel sends the address to the app (K-410).
+    // Fail closed: the Access application exists before the tunnel sends the address to the app (K-410, K-817).
     await this.syncAccessLocked(api, 20);
-    const app = this.access.get(`app:${row.resource_id}:${row.address}`);
-    if (!app?.cfId || app.error)
-      return Response.json(
-        {
-          error: `The Access application of ${row.address} is not ready: ${app?.error ?? "pending"}. Run the deploy again.`,
-        },
-        { status: 503 },
-      );
+    const notReady = this.accessNotReady(row);
+    if (notReady) return notReady;
     const ended = this.endedRefusal(row.id);
     if (ended) return ended;
     const command: Command = {
@@ -3675,6 +3738,21 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ removed: row.address });
   }
 
+  /** K-410, K-817: a 503 while the Access application of an address of the deploy is not made yet. */
+  private accessNotReady(row: DeployRow) {
+    for (const address of rowAddresses(row)) {
+      const app = this.access.get(`app:${row.resource_id}:${address}`);
+      if (!app?.cfId || app.error)
+        return Response.json(
+          {
+            error: `The Access application of ${address} is not ready: ${app?.error ?? "pending"}. Run the deploy again.`,
+          },
+          { status: 503 },
+        );
+    }
+    return null;
+  }
+
   private async finishDeploy(
     api: Api,
     row: DeployRow,
@@ -3691,17 +3769,10 @@ export class Kitshn extends DurableObject<Env> {
     const icon = parseSiteIcon(iconValue);
     if (typeof icon === "string") return Response.json({ error: icon }, { status: 400 });
     const card = this.ensureCard(row, deployer, "site.static", null);
-    // Fail closed: the Access application exists before the address does.
+    // Fail closed: the Access application of each address exists before the address does (K-817).
     await this.syncAccessLocked(api, 20);
-    const app = this.access.get(`app:${row.resource_id}:${row.address}`);
-    if (!app?.cfId || app.error) {
-      return Response.json(
-        {
-          error: `The Access application of ${row.address} is not ready: ${app?.error ?? "pending"}. Run the deploy again.`,
-        },
-        { status: 503 },
-      );
-    }
+    const notReady = this.accessNotReady(row);
+    if (notReady) return notReady;
     const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
     const metadata = {
       main_module: "worker.js",
@@ -3749,26 +3820,33 @@ export class Kitshn extends DurableObject<Env> {
         await api("DELETE", `${account}/workers/scripts/${row.script}?force=true`).catch(() => undefined);
       throw error;
     }
-    const domains = await api<Array<{ id: string; service: string }>>(
-      "GET",
-      `${account}/workers/domains?hostname=${encodeURIComponent(row.address)}`,
-    );
-    const attached = domains.find((domain) => domain.service === row.script);
-    const endedBeforeAddress = this.endedRefusal(row.id);
-    if (endedBeforeAddress) return endedBeforeAddress;
-    if (!attached) {
-      if (domains.length > 0) throw new Error(`${row.address} already serves another Worker.`);
+    const addresses = rowAddresses(row);
+    for (const address of addresses) {
+      const domains = await api<Array<{ id: string; service: string }>>(
+        "GET",
+        `${account}/workers/domains?hostname=${encodeURIComponent(address)}`,
+      );
+      const attached = domains.find((domain) => domain.service === row.script);
+      const endedBeforeAddress = this.endedRefusal(row.id);
+      if (endedBeforeAddress) return endedBeforeAddress;
+      if (attached) continue;
+      if (domains.length > 0) throw new Error(`${address} already serves another Worker.`);
+      const zone = zoneOfAddressIn(address, this.env);
+      if (!zone) throw new Error(`kitshn does not publish on the zone of ${address} (K-1111).`);
       await api("PUT", `${account}/workers/domains`, {
-        hostname: row.address,
+        hostname: address,
         service: row.script,
-        zone_id: this.env.CLOUDFLARE_ZONE_ID,
+        zone_id: zone.id,
         environment: "production",
       });
     }
+    // K-817, K-410: an address that left the recipe loses its custom domain first, and its card address (with its
+    // Access application) only after Cloudflare confirms that.
+    await removeStaleDomains(api, account, row.script, addresses);
     // K-814: the route check records what a visitor without a login gets.
     const check = await fetch(`https://${row.address}/`, { redirect: "manual" }).catch(() => null);
     const resource = this.state.resources.get(row.resource_id);
-    if (resource) this.putResource({ ...resource, status: "running" });
+    if (resource) this.putResource({ ...resource, addresses, status: "running" });
     this.sql("UPDATE deploys SET state = 'done' WHERE id = ? AND state = 'planned'", row.id);
     if (icon !== undefined) await this.setIcon(row.resource_id, icon);
     this.load();
@@ -3846,7 +3924,7 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-904: a closed pull request removes its preview: the address, the Worker, the card and its Access app. */
   private async teardown(api: Api, row: DeployRow, deployer: Deployer) {
-    await this.removeWorker(api, row.address, row.script);
+    await this.removeWorker(api, rowAddresses(row), row.script);
     const resource = this.state.resources.get(row.resource_id);
     this.ctx.storage.transactionSync(() => {
       const forgotten = this.forgetCard(row.resource_id);
@@ -3866,22 +3944,24 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-904, K-909: takes a Worker site's address off, confirms it, then deletes the Worker script. */
-  private async removeWorker(api: Api, address: string, script: string) {
+  private async removeWorker(api: Api, addresses: ReadonlyArray<string>, script: string) {
     const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
-    const domains = await api<Array<{ id: string; service: string }>>(
-      "GET",
-      `${account}/workers/domains?hostname=${encodeURIComponent(address)}`,
-    );
-    for (const domain of domains.filter((item) => item.service === script)) {
-      await api("DELETE", `${account}/workers/domains/${domain.id}`);
-    }
-    // K-006: the card, and with it the Access application, goes only after the address is confirmed gone.
-    const left = await api<Array<{ service: string }>>(
-      "GET",
-      `${account}/workers/domains?hostname=${encodeURIComponent(address)}`,
-    );
-    if (left.some((item) => item.service === script)) {
-      throw new Error(`${address} still serves ${script}; run the teardown again.`);
+    for (const address of addresses) {
+      const domains = await api<Array<{ id: string; service: string }>>(
+        "GET",
+        `${account}/workers/domains?hostname=${encodeURIComponent(address)}`,
+      );
+      for (const domain of domains.filter((item) => item.service === script)) {
+        await api("DELETE", `${account}/workers/domains/${domain.id}`);
+      }
+      // K-006: the card, and with it the Access application, goes only after each address is confirmed gone.
+      const left = await api<Array<{ service: string }>>(
+        "GET",
+        `${account}/workers/domains?hostname=${encodeURIComponent(address)}`,
+      );
+      if (left.some((item) => item.service === script)) {
+        throw new Error(`${address} still serves ${script}; run the teardown again.`);
+      }
     }
     await api("DELETE", `${account}/workers/scripts/${script}?force=true`).catch((error: unknown) =>
       error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error),
@@ -4667,6 +4747,17 @@ interface DeployRow extends Record<string, SqlStorageValue> {
   compose_file: string | null;
   /** The branch that the deploy came from (K-807). */
   branch: string;
+  /** K-817: every address that serves the environment, the main one first, as JSON; null on older rows. */
+  addresses: string | null;
+}
+
+/** K-817: the addresses of a deploy row, the main one first. */
+function rowAddresses(row: Pick<DeployRow, "address" | "addresses">): Array<string> {
+  if (!row.addresses) return [row.address];
+  const parsed: unknown = JSON.parse(row.addresses);
+  if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every((item) => typeof item === "string"))
+    throw new Error(`The addresses of the deploy of ${row.address} are not a list of names.`);
+  return parsed;
 }
 
 /** A failed tunnel, DNS or route write tries again after this time. */

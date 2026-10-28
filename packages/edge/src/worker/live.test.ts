@@ -10,7 +10,11 @@ import {
   offlineReason,
   parseSites,
   reachableAddresses,
+  dnsRecordRefusal,
+  nextCardAddresses,
+  protectedLiveSites,
   seenText,
+  servedSites,
   sitesNeedingRoutes,
   tunnelConfig,
 } from "./live.ts";
@@ -188,5 +192,75 @@ describe("live sites (K-1104 to K-1108)", () => {
       routes: [{ address: "route.example.com", route_id: "x" }],
     });
     expect([...reachable].sort()).toEqual(["dns.example.com", "old.example.com", "route.example.com"]);
+  });
+});
+
+describe("several addresses of a Compose app (K-817)", () => {
+  const app: LiveSite = {
+    id: "app-climbing-1-prod",
+    machineId: "m1",
+    name: "climbing",
+    address: "climbing.example.com",
+    target: "unix:/run/app.sock",
+    dev: false,
+    up: true,
+    lastUp: 0,
+    state: "ok",
+  };
+  const card = {
+    kind: "site.compose" as const,
+    addresses: ["climbing.example.com", "onion-climbers.com", "www.onion-climbers.com"],
+  };
+
+  it("serves every address of the card from the same socket, each with its own ingress rule", () => {
+    const served = servedSites(app, card);
+    expect(served.map((item) => item.address)).toEqual(card.addresses);
+    expect(new Set(served.map((item) => item.target))).toEqual(new Set(["unix:/run/app.sock"]));
+    const config = tunnelConfig(served, () => ({ kind: "bypass" }));
+    const hostnames = config.config.ingress.flatMap((rule) => ("hostname" in rule ? [rule.hostname] : []));
+    expect(hostnames.sort()).toEqual([...card.addresses].sort());
+  });
+
+  it("keeps a live site and a card of another kind to its own address", () => {
+    expect(servedSites(app, undefined)).toEqual([app]);
+    expect(servedSites(app, { ...card, kind: "site.live" })).toEqual([app]);
+    expect(servedSites(app, { ...card, addresses: ["other.example.com"] })).toEqual([app]);
+  });
+
+  it("gives an address no ingress, DNS record or route before its own Access application exists (K-410)", () => {
+    const pending = new Set(["onion-climbers.com"]);
+    const sites = protectedLiveSites(
+      [app, { ...app, id: "app-other", name: "other", address: "other.example.com", state: "checking" }],
+      (id) => (id === app.id ? card : undefined),
+      (item) => !pending.has(item.address),
+    );
+    expect(sites.map((item) => item.address)).toEqual(["climbing.example.com", "www.onion-climbers.com"]);
+  });
+
+  it("keeps the old addresses of a static card until the deploy took their domains off, and not of a Compose card", () => {
+    expect(nextCardAddresses("site.static", ["a.example.com"], ["a.example.com", "old.example.com"])).toEqual(
+      ["a.example.com", "old.example.com"],
+    );
+    expect(
+      nextCardAddresses("site.compose", ["a.example.com"], ["a.example.com", "old.example.com"]),
+    ).toEqual(["a.example.com"]);
+  });
+});
+
+describe("DNS records of an address that moves between cards (K-817, K-1404)", () => {
+  it("refuses card B while card A's record of X waits for removal, and lets B in once it is gone", () => {
+    // Card A dropped X; its record stays until the tunnel sync deletes it.
+    const aRow = { card_id: "app-a" };
+    expect(dnsRecordRefusal("x.example.com", 1, aRow, "app-b")).toMatch("another kitshn card");
+    // The same card that made the record may take X back.
+    expect(dnsRecordRefusal("x.example.com", 1, aRow, "app-a")).toBeNull();
+    // A row from before the owner column counts as another card's.
+    expect(dnsRecordRefusal("x.example.com", 1, { card_id: null }, "app-b")).toMatch("another kitshn card");
+    // Once the record is gone, B deploys.
+    expect(dnsRecordRefusal("x.example.com", 0, undefined, "app-b")).toBeNull();
+    // A record that kitshn did not make always blocks.
+    expect(dnsRecordRefusal("x.example.com", 1, undefined, "app-b")).toBe(
+      "x.example.com already has a DNS record.",
+    );
   });
 });

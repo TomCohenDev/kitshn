@@ -1990,16 +1990,27 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** Deletes a card's rows and takes it out of its stack, inside the caller's transaction (K-522). */
-  private forgetCard(id: string) {
+  /**
+   * Deletes a card with its place, share settings and stack entry. Returns those as changes, so the revision
+   * that records it touches the card, and an older undo cannot give a new card of the same id its shares (K-1506).
+   */
+  private forgetCard(id: string): Array<Change> {
+    const changes: Array<Change> = [];
+    const [place] = this.sql<{ x: number; y: number }>("SELECT x, y FROM places WHERE id = ?", id);
+    if (place) changes.push({ _tag: "place", id, before: { x: place.x, y: place.y }, after: null });
+    for (const row of this.sql<{ id: string; body: string }>("SELECT id, body FROM share_settings WHERE id LIKE ?", `${id}/%`))
+      changes.push({ _tag: "shareSetting", id: row.id, before: JSON.parse(row.body) as ShareSetting, after: null });
     for (const table of ["resources", "places"]) this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
     this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);
     const stacks = this.sql<{ id: string; body: string }>("SELECT id, body FROM stacks").map(
       (row) => JSON.parse(row.body) as Stack,
     );
     for (const change of stacksWithout(stacks, id)) {
+      changes.push({ _tag: "stack", id: change.id, before: stacks.find((stack) => stack.id === change.id) ?? null, after: change.after });
       if (change.after) this.sql("UPDATE stacks SET body = ? WHERE id = ?", JSON.stringify(change.after), change.id);
       else this.sql("DELETE FROM stacks WHERE id = ?", change.id);
     }
+    return changes;
   }
 
 
@@ -2084,12 +2095,12 @@ export class Kitshn extends DurableObject<Env> {
         this.sql("DELETE FROM live_sites WHERE id = ?", site.id);
         // A removed app has its History entry already (K-909).
         const hadCard = this.state.resources.has(site.id);
-        this.forgetCard(site.id);
-        if (site.state === "ok" && hadCard) {
+        const forgotten = this.forgetCard(site.id);
+        if (hadCard && (site.state === "ok" || forgotten.length > 0)) {
           this.insertRevision(
             { _tag: "kitshn", reason: `live site on ${machine.name}` },
             `${machine.name} stopped exposing ${site.address}`,
-            [],
+            forgotten,
             null,
           );
         }
@@ -3332,13 +3343,13 @@ export class Kitshn extends DurableObject<Env> {
     await this.removeWorker(api, row.address, row.script);
     const resource = this.state.resources.get(row.resource_id);
     this.ctx.storage.transactionSync(() => {
-      this.forgetCard(row.resource_id);
+      const forgotten = this.forgetCard(row.resource_id);
       this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
       if (resource)
         this.insertRevision(
           { _tag: "kitshn", reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}` },
           `Removed ${resource?.name ?? row.environment}, its preview closed (K-904)`,
-          [],
+          forgotten,
           null,
         );
     });

@@ -331,43 +331,48 @@ export function itemParts(changes: ReadonlyArray<Change>, item: Item): Array<Cha
 }
 
 /**
- * K-1506: the cards and circles that changes touch. A circle counts when it changes, when a share setting of
- * it changes, or when a card that the changes name sits inside it at any point that the changes or `state`
+ * K-1506: what changes touch. `changed` holds the circles that they change, also through a share setting;
+ * `all` adds every circle that holds or held one of their cards, at any point that the changes or `state`
  * give it. `pool` holds every circle shape to test, also shapes that no longer exist.
  */
 function footprint(changes: ReadonlyArray<Change>, state: State, pool: ReadonlyArray<Circle>) {
   const cards = new Set<string>();
-  const circles = new Set<string>();
+  const changed = new Set<string>();
   const points: Array<Point> = [];
   for (const change of changes) {
     if (change._tag === "place" || change._tag === "app") cards.add(change.id);
     if (change._tag === "place") points.push(...[change.before, change.after].filter((point) => point !== null));
-    if (change._tag === "circle") circles.add(change.id);
+    if (change._tag === "circle") changed.add(change.id);
     if (change._tag === "stack")
       for (const id of [...(change.before?.members ?? []), ...(change.after?.members ?? [])]) cards.add(id);
     if (change._tag === "shareSetting") {
       const [card = "", circle = ""] = change.id.split("/");
       cards.add(card);
-      circles.add(circle);
+      changed.add(circle);
     }
   }
   for (const card of cards) {
     const place = state.places.get(card);
     if (place) points.push(place);
   }
-  for (const circle of pool) if (points.some((point) => insideCircle(point, circle))) circles.add(circle.id);
-  return { cards, circles };
+  const all = new Set(changed);
+  for (const circle of pool) if (points.some((point) => insideCircle(point, circle))) all.add(circle.id);
+  return { cards, changed, all };
 }
 
 const circleShapes = (changes: ReadonlyArray<Change>) =>
   changes.flatMap((change) => (change._tag === "circle" ? [change.before, change.after].filter((c) => c !== null) : []));
 
-/** K-1506: whether two sets of changes touch the same cards or circles. */
+/**
+ * K-1506: whether two sets of changes depend on each other: they touch the same card, or one changes a
+ * circle that a card of the other is or was in.
+ */
 export function overlaps(a: ReadonlyArray<Change>, b: ReadonlyArray<Change>, state: State): boolean {
   const pool = [...state.circles.values(), ...circleShapes(a), ...circleShapes(b)];
   const one = footprint(a, state, pool);
   const two = footprint(b, state, pool);
-  return [...one.cards].some((id) => two.cards.has(id)) || [...one.circles].some((id) => two.circles.has(id));
+  const meets = (x: ReadonlySet<string>, y: ReadonlySet<string>) => [...x].some((id) => y.has(id));
+  return meets(one.cards, two.cards) || meets(one.changed, two.all) || meets(two.changed, one.all);
 }
 
 /** A revision as the undo rules read it. */
@@ -422,6 +427,10 @@ export function undoTarget(
     found = own.find((revision) => itemParts(revision.changes, item).length > 0);
     if (!found) throw new RuleError("You have no change to this item left to undo.");
     changes = itemParts(found.changes, item);
+    // The rest of the revision can depend on this part, such as a circle that opened while the card left it.
+    const rest = found.changes.filter((change) => !changes.includes(change));
+    if (rest.length > 0 && overlaps(changes, rest, state))
+      throw new RuleError(`#${found.id} "${found.summary}" changed more that depends on this item: undo the whole change instead.`);
   }
   const start = found.id;
   const later = revisions
@@ -438,6 +447,20 @@ export function undoTarget(
     throw new RuleError(
       `#${later.id} "${later.summary}" changed the same cards or circles later, so this undo no longer fits. Change it by hand.`,
     );
+  // A card that is gone gets nothing back, also when a later card has its id; an app removal restores its card.
+  const restored = new Set(changes.flatMap((change) => (change._tag === "app" && change.before ? [change.id] : [])));
+  const missing = changes
+    .flatMap((change) =>
+      change._tag === "place" && change.before
+        ? [change.id]
+        : change._tag === "shareSetting" && change.before
+          ? [change.id.split("/")[0] ?? ""]
+          : change._tag === "stack"
+            ? (change.before?.members ?? [])
+            : [],
+    )
+    .find((id) => !state.resources.has(id) && !restored.has(id));
+  if (missing !== undefined) throw new RuleError(`The card "${missing}" no longer exists, so this undo no longer fits.`);
   return { revision: start, changes };
 }
 

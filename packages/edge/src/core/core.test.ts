@@ -854,7 +854,8 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
 
   // Each access leak that the reviews of the first models found ends in a refusal.
   it.each<[string, Array<Edit>, Array<Edit>, boolean?]>([
-    ["another actor touched my circle", [place("box", 400, 0)], [place("riffle", 420, 10)]],
+    ["another actor changed the circle of my card", [place("box", 400, 0)], [herAs({ level: "view" })]],
+    ["a card enters a circle that my undo changes", [herAs({ level: "view" })], [place("box", 400, 0)]],
     ["remove a member, then a card enters, then undo", [herAs({ members: [] })], [place("box", 400, 0)]],
     ["shrink, then a card enters the freed area, then undo", [herAs({ r: 50 })], [place("box", 520, 0)]],
     ["move the circle away, then a card enters, then undo", [herAs({ x: 1400 })], [place("box", 400, 0)]],
@@ -897,5 +898,37 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     ]);
     const target = undoTarget(state, revisions, A, { item: { kind: "circle", id: "her" } });
     expect(target.changes.map((change) => change.id).sort()).toEqual(["her", "riffle"]);
+  });
+
+  it("does not refuse my undo for an unrelated new card in the same circle", () => {
+    const pr = { ...withTray().resources.get("box")!, id: "pr", name: "pr" };
+    const base = { ...withTray(), resources: new Map([...withTray().resources, ["pr", pr]]) };
+    const { state, revisions } = history(base, [
+      [A, [place("riffle", 10, -200)]],
+      [KITSHN, [place("pr", 0, 100)]],
+    ]);
+    expect(undoTarget(state, revisions, A, { revision: 1 }).revision).toBe(1);
+  });
+
+  it("refuses a per-item undo whose part the rest of its revision depends on, both ways", () => {
+    const inHer = move(withTray(), "box", 400, 0).after;
+    const { state, revisions } = history(inHer, [[A, [herAs({ members: [{ _tag: "everyone" }] }), place("box", 1500, 1500)]]]);
+    for (const item of [{ kind: "card", id: "box" }, { kind: "circle", id: "her" }] as const)
+      expect(() => undoTarget(state, revisions, A, { item })).toThrow(/undo the whole change instead/);
+    expect(undoTarget(state, revisions, A, { revision: 1 }).revision).toBe(1);
+  });
+
+  it("refuses an undo for a card whose id was forgotten and made again", () => {
+    const { state, revisions } = history(withTray(), [[A, [place("box", 400, 0)]]]);
+    // The live site stopped: kitshn forgot the card with its place (forgetCard), then the site came back.
+    const forgotten: StoredRevision = {
+      id: 2,
+      actor: KITSHN,
+      summary: "stopped exposing box",
+      changes: [{ _tag: "place", id: "box", before: { x: 400, y: 0 }, after: null }],
+      undoes: null,
+    };
+    const again = applyChanges(state, forgotten.changes);
+    expect(() => undoTarget(again, [...revisions, forgotten], A, { revision: 1 })).toThrow(/#2 "stopped exposing box"/);
   });
 });

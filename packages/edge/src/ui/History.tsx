@@ -52,21 +52,26 @@ export function HistoryView(props: {
     [props.revisions, filter, state],
   );
   const undoable = undoableRow(props.revisions, props.me);
+  /** A move that joins the row's revision (K-1505) changes its time, and its undo can change with it. */
+  const undoableAt = props.revisions.find((revision) => revision.id === undoable)?.at ?? 0;
   /** kitshn's answer for the undoable row; null while it checks. */
-  const [answer, setAnswer] = useState<{ readonly id: number; readonly answer: UndoAnswer } | null>(null);
-  // Asks when History opens and when the caller's own newest revision changes; the undo itself checks again.
+  const [answer, setAnswer] = useState<{ readonly key: string; readonly answer: UndoAnswer } | null>(null);
+  const undoKey = `${undoable}@${undoableAt}`;
+  // Asks when History opens and when the caller's own newest revision changes; the undo itself checks again,
+  // and closing and opening History asks again.
   useEffect(() => {
     if (undoable === null) return;
     let live = true;
     void callApi<UndoAnswer>("GET", `/api/undo?revision=${undoable}`).then((result) => {
       if (live)
-        setAnswer({ id: undoable, answer: "error" in result ? { allowed: false, reason: result.error } : result });
+        setAnswer({ key: undoKey, answer: "error" in result ? { allowed: false, reason: result.error } : result });
     });
     return () => {
       live = false;
     };
-  }, [undoable]);
-  const undoAnswer = answer?.id === undoable ? answer.answer : null;
+  }, [undoKey]);
+  // A new row or a changed one shows "checking" until its own answer comes.
+  const undoAnswer = answer?.key === undoKey ? answer.answer : null;
   const kinds = [...new Set(props.revisions.map((revision) => revision.kind))];
   const actors = [...new Map(props.revisions.map((revision) => [actorKey(revision.actor), revision.actor])).values()];
   // Every kitshn reason groups as one actor "kitshn"; each row of it names its own reason.

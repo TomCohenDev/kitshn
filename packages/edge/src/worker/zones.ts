@@ -1,4 +1,5 @@
 import { zoneOfAddress } from "kitshn/recipe";
+import type { Api } from "./access-sync.ts";
 import type { Env } from "./env.ts";
 
 export interface Zone {
@@ -50,4 +51,28 @@ export function zoneOfAddressIn(
     throw error;
   }
   return zoneFor(address, zones);
+}
+
+/**
+ * K-817, K-410: takes the custom domains of a static site's script off that are not in `addresses`, and confirms
+ * with a second read that none is left. Only then may the card drop those addresses and their Access applications.
+ */
+export async function removeStaleDomains(
+  api: Api,
+  account: string,
+  script: string,
+  addresses: ReadonlyArray<string>,
+): Promise<void> {
+  const list = `${account}/workers/domains?service=${script}`;
+  const stale = (await api<Array<{ id: string; hostname: string }>>("GET", list)).filter(
+    (domain) => !addresses.includes(domain.hostname),
+  );
+  for (const domain of stale) await api("DELETE", `${account}/workers/domains/${domain.id}`);
+  const left = (await api<Array<{ hostname: string }>>("GET", list)).filter(
+    (domain) => !addresses.includes(domain.hostname),
+  );
+  if (left.length > 0)
+    throw new Error(
+      `${left.map((domain) => domain.hostname).join(", ")} still serve ${script}; deploy again.`,
+    );
 }

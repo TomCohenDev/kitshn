@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { zoneFor, zoneOfAddressIn, zonesOf } from "./zones.ts";
+import { removeStaleDomains, zoneFor, zoneOfAddressIn, zonesOf } from "./zones.ts";
 
 const env = { KITSHN_ZONE: "example.com", CLOUDFLARE_ZONE_ID: "z1" };
 
@@ -36,5 +36,56 @@ describe("zones (K-1111, K-817)", () => {
     const broken = { ...env, KITSHN_ZONES: "not json" };
     expect(zoneOfAddressIn("climbing.example.com", broken)?.id).toBe("z1");
     expect(() => zoneOfAddressIn("onion-climbers.com", broken)).toThrow();
+  });
+});
+
+describe("zone lookup on the real zone names (K-817)", () => {
+  it("refuses evilyarden-zamir.com, a trailing dot and uppercase", () => {
+    const zones = zonesOf({
+      KITSHN_ZONE: "yarden-zamir.com",
+      CLOUDFLARE_ZONE_ID: "z1",
+      KITSHN_ZONES: '{"onion-climbers.com":"z2"}',
+    });
+    expect(zoneFor("evilyarden-zamir.com", zones)).toBeNull();
+    expect(zoneFor("climbing.yarden-zamir.com.", zones)).toBeNull();
+    expect(zoneFor("Climbing.yarden-zamir.com", zones)).toBeNull();
+    expect(zoneFor("climbing.yarden-zamir.com", zones)?.id).toBe("z1");
+    expect(zoneFor("www.onion-climbers.com", zones)?.id).toBe("z2");
+  });
+});
+
+describe("stale custom domains of a static site (K-817, K-410)", () => {
+  const fakeApi = (attached: Array<{ id: string; hostname: string }>, keep = false) => {
+    const calls: Array<string> = [];
+    const api = (<T>(method: string, path: string) => {
+      calls.push(`${method} ${path}`);
+      if (method === "DELETE" && !keep)
+        attached.splice(
+          attached.findIndex((domain) => path.endsWith(domain.id)),
+          1,
+        );
+      return Promise.resolve((method === "GET" ? [...attached] : null) as T);
+    }) as Parameters<typeof removeStaleDomains>[0];
+    return { api, calls };
+  };
+
+  it("deletes only the domains that left the list, then reads again to confirm", async () => {
+    const { api, calls } = fakeApi([
+      { id: "d1", hostname: "a.example.com" },
+      { id: "d2", hostname: "old.example.com" },
+    ]);
+    await removeStaleDomains(api, "/accounts/x", "kitshn-app", ["a.example.com"]);
+    expect(calls).toEqual([
+      "GET /accounts/x/workers/domains?service=kitshn-app",
+      "DELETE /accounts/x/workers/domains/d2",
+      "GET /accounts/x/workers/domains?service=kitshn-app",
+    ]);
+  });
+
+  it("fails while a stale domain still serves, so the card keeps its address and Access application", async () => {
+    const { api } = fakeApi([{ id: "d2", hostname: "old.example.com" }], true);
+    await expect(removeStaleDomains(api, "/accounts/x", "kitshn-app", ["a.example.com"])).rejects.toThrow(
+      "old.example.com",
+    );
   });
 });

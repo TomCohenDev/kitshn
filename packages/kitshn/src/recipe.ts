@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { RESERVED_SITE_NAMES } from "./names.ts";
 import type {
   ComposeApp as PublicComposeApp,
   DeployEntry as PublicDeployEntry,
@@ -193,11 +194,16 @@ export function plan(
     };
   }
   for (const address of listed) {
-    if (address !== main && zoneOfAddress(address, [zone, ...otherZones]) === null)
+    if (address === main) continue;
+    if (zoneOfAddress(address, [zone, ...otherZones]) === null)
       return {
         kind: "error",
         reason: `The address ${address} is not the apex or one name under a zone that kitshn publishes on (K-817, K-1111).`,
       };
+    // K-817: an extra address never takes the kitshn zone apex or a name that kitshn uses on its zone.
+    const label = address.endsWith(`.${zone}`) ? address.slice(0, -zone.length - 1) : null;
+    if (address === zone || (label !== null && RESERVED_SITE_NAMES.has(label)))
+      return { kind: "error", reason: `${address} is a name that kitshn keeps for itself (K-817).` };
   }
   const label =
     main !== undefined

@@ -99,7 +99,6 @@ import {
   type ContentVisitor,
   type LibraryItem,
   MAX_UPLOAD_BYTES,
-  RESERVED_SITE_NAMES,
   contentAccess,
   fileNameError,
   newLibraryId,
@@ -152,7 +151,7 @@ import {
   parseSiteIcon,
 } from "./deploys.ts";
 import { type Recipe, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
-import { type Zone, zoneFor, zoneOfAddressIn, zonesOf } from "./zones.ts";
+import { type Zone, removeStaleDomains, zoneFor, zoneOfAddressIn, zonesOf } from "./zones.ts";
 import {
   type LiveSite,
   ingressAccess,
@@ -3354,21 +3353,12 @@ export class Kitshn extends DurableObject<Env> {
         { status: 409 },
       );
     }
-    for (const address of result.addresses.slice(1)) {
-      // K-817: an extra address never takes a name that kitshn itself uses on its zone, nor the zone apex.
-      const label = address.endsWith(`.${this.env.KITSHN_ZONE}`)
-        ? address.slice(0, -this.env.KITSHN_ZONE.length - 1)
-        : null;
-      if (
-        address === this.env.KITSHN_ZONE ||
-        address === this.env.KITSHN_HOST ||
-        (label && RESERVED_SITE_NAMES.has(label))
-      )
-        return Response.json(
-          { error: `${address} is a name that kitshn keeps for itself (K-817).` },
-          { status: 409 },
-        );
-    }
+    // K-817: the plan refuses kitshn's own names; the admin host can have another name.
+    if (result.addresses.slice(1).includes(this.env.KITSHN_HOST))
+      return Response.json(
+        { error: `${this.env.KITSHN_HOST} is the kitshn admin host (K-817).` },
+        { status: 409 },
+      );
     for (const address of result.addresses) {
       const other = [...this.state.resources.values()].find(
         (resource) => resource.id !== resourceId && resource.addresses.includes(address),
@@ -3843,20 +3833,7 @@ export class Kitshn extends DurableObject<Env> {
     }
     // K-817, K-410: an address that left the recipe loses its custom domain first, and its card address (with its
     // Access application) only after Cloudflare confirms that.
-    const stale = (
-      await api<Array<{ id: string; hostname: string }>>(
-        "GET",
-        `${account}/workers/domains?service=${row.script}`,
-      )
-    ).filter((domain) => !addresses.includes(domain.hostname));
-    for (const domain of stale) await api("DELETE", `${account}/workers/domains/${domain.id}`);
-    const left = (
-      await api<Array<{ hostname: string }>>("GET", `${account}/workers/domains?service=${row.script}`)
-    ).filter((domain) => !addresses.includes(domain.hostname));
-    if (left.length > 0)
-      throw new Error(
-        `${left.map((domain) => domain.hostname).join(", ")} still serve ${row.script}; deploy again.`,
-      );
+    await removeStaleDomains(api, account, row.script, addresses);
     // K-814: the route check records what a visitor without a login gets.
     const check = await fetch(`https://${row.address}/`, { redirect: "manual" }).catch(() => null);
     const resource = this.state.resources.get(row.resource_id);

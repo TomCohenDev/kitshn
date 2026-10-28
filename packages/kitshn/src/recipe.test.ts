@@ -174,3 +174,29 @@ describe("address limit (K-817)", () => {
     expect(() => decodeRecipe({ compose: {}, deploy: deploy(6) })).toThrow();
   });
 });
+
+describe("kitshn's own names (K-817)", () => {
+  const push = { name: "push", branch: "main", pr: null, action: null } as const;
+  const planOf = (address: ReadonlyArray<string>) =>
+    plan(
+      decodeRecipe({ compose: {}, deploy: [{ on: "push", name: "prod", address }] }),
+      "me/x",
+      push,
+      "example.com",
+    );
+
+  it("refuses the zone apex and kitshn's names as extra addresses", () => {
+    for (const extra of [
+      "example.com",
+      "kit.example.com",
+      "pages.example.com",
+      "files.example.com",
+      "www.example.com",
+    ])
+      expect(planOf(["x.example.com", extra])).toMatchObject({
+        kind: "error",
+        reason: expect.stringContaining("keeps for itself"),
+      });
+    expect(planOf(["x.example.com", "y.example.com"])).toMatchObject({ kind: "deploy" });
+  });
+});

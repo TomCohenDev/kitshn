@@ -675,5 +675,5 @@ if (command !== "check" && command !== "deploy" && command !== "publish" && comm
 kitshn deploy --server <address> [--dir <app>]   deploy from GitHub Actions (K-803)
 kitshn publish <file|folder> [--name <name>] [--address <name>] [--zone <zone>] [--circle <circle>] [--public]
                                              publish a page, a file (K-1116) or a folder site (K-1123) with an agent key
-kitshn address <card> <name>                 give a page or a file a new address name (K-1120)`);
+kitshn address <card> <name>                 give a page, a file (K-1120) or a folder site (K-1124) a new address name`);
 }

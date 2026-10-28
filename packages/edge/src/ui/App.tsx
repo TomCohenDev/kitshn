@@ -2098,7 +2098,10 @@ function StackPanel(props: {
  * nothing, and a refused name or Escape puts the current one back. An id address shows an empty field.
  */
 function AddressName(props: { address: string; onSave: (name: string) => Promise<boolean> }) {
-  const segment = props.address.split("/")[1] ?? "";
+  // A page or a file has its name after the host; a folder site has it as the first label of its host (K-1123).
+  const segment = props.address.includes("/")
+    ? (props.address.split("/")[1] ?? "")
+    : (props.address.split(".")[0] ?? "");
   const current = isLibraryId(segment) ? "" : segment;
   const field = useRef<HTMLInputElement>(null);
   // A second Enter while the first save runs would send the same name again and replace its Undo toast.
@@ -2227,7 +2230,8 @@ function CardPanel(props: {
       {props.peek && peekable(resource) ? (
         <PeekArrow resource={resource} state={state} zone={props.zone} />
       ) : null}
-      {address && (resource.kind === "page" || resource.kind === "file") ? (
+      {address &&
+      (resource.kind === "page" || resource.kind === "file" || resource.id.startsWith(FOLDER_SITE_PREFIX)) ? (
         <AddressName address={address} onSave={(name) => props.onSetAddress(resource, name)} />
       ) : null}
       {address && props.repo ? (

@@ -1,7 +1,7 @@
 import { ICON_LIMIT, iconType, pageDataIcon } from "kitshn/icon";
 import { DurableObject } from "cloudflare:workers";
 import { Schema } from "effect";
-import { ACCESS_NAME_PREFIX, ENROLLMENT_KEY, desiredAccess } from "../core/access.ts";
+import { ACCESS_NAME_PREFIX, ENROLLMENT_KEY, type OldAddress, desiredAccess } from "../core/access.ts";
 import {
   FOLDER_SITE_PREFIX,
   appRestart,
@@ -177,6 +177,8 @@ import { REPO_GATE_MIGRATION, migrate } from "./migrations.ts";
 import {
   BADGE_DEPLOY_QUERY,
   DEPLOY_MS,
+  REDIRECT_SCRIPT,
+  REDIRECT_WORKER,
   SCRIPT_LIMIT,
   STATIC_WORKER,
   jobError,
@@ -727,12 +729,153 @@ export class Kitshn extends DurableObject<Env> {
     return row.id;
   }
 
+  /** K-1124: the old addresses of cards that exist and no longer serve them; a removed card's wait for its Undo. */
+  private oldAddresses(): Array<OldAddress> {
+    return this.sql<{ address: string; card_id: string }>(
+      "SELECT address, card_id FROM old_addresses ORDER BY rowid",
+    )
+      .filter((row) => this.state.resources.get(row.card_id)?.addresses.includes(row.address) === false)
+      .map((row) => ({ cardId: row.card_id, address: row.address }));
+  }
+
+  /**
+   * K-1124, K-1122: the addresses that a site card stops serving send their visitors on from now; an address that the
+   * card serves again is no old address. A card keeps its OLD_NAMES newest old addresses.
+   */
+  private rememberOld(cardId: string, dropped: ReadonlyArray<string>, serving: ReadonlyArray<string>) {
+    for (const address of serving)
+      this.sql("DELETE FROM old_addresses WHERE address = ? AND card_id = ?", address, cardId);
+    for (const address of dropped) {
+      this.sql("DELETE FROM old_addresses WHERE address = ?", address);
+      this.sql("INSERT INTO old_addresses (address, card_id) VALUES (?, ?)", address, cardId);
+    }
+    this.sql(
+      `DELETE FROM old_addresses WHERE card_id = ? AND rowid NOT IN
+       (SELECT rowid FROM old_addresses WHERE card_id = ? ORDER BY rowid DESC LIMIT ?)`,
+      cardId,
+      cardId,
+      OLD_NAMES,
+    );
+  }
+
+  /**
+   * K-1124: the redirect Worker serves the old addresses whose Access application exists (K-402) and that no other
+   * Worker or DNS record holds any more, and nothing else. It uploads the map again when it changed. K-406: at most
+   * `budget` Cloudflare calls.
+   */
+  private async syncRedirects(api: Api, budget: number) {
+    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+    const old = this.oldAddresses();
+    const map = Object.fromEntries(
+      old.map((item) => [item.address, this.state.resources.get(item.cardId)?.addresses[0] ?? ""]),
+    );
+    const text = JSON.stringify(map);
+    let calls = 0;
+    // Work that a later run finishes: an Access application or a DNS record that is not there yet, or the budget.
+    let waiting = false;
+    if (old.length > 0 && this.meta("redirects_map") !== text) {
+      const form = new FormData();
+      const metadata = {
+        main_module: "worker.js",
+        compatibility_date: "2026-10-20",
+        bindings: [{ type: "plain_text", name: "MAP", text }],
+      };
+      form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+      form.append(
+        "worker.js",
+        new Blob([REDIRECT_WORKER], { type: "application/javascript+module" }),
+        "worker.js",
+      );
+      const upload = await fetch(
+        `https://api.cloudflare.com/client/v4${account}/workers/scripts/${REDIRECT_SCRIPT}`,
+        {
+          method: "PUT",
+          headers: { authorization: `Bearer ${this.env.CLOUDFLARE_API_TOKEN}` },
+          body: form,
+        },
+      );
+      const uploaded = (await upload.json()) as { success: boolean; errors?: unknown };
+      if (!uploaded.success)
+        throw new Error(`the redirect Worker upload failed: ${JSON.stringify(uploaded.errors)}`);
+      // workers.dev would skip Access, as for every kitshn script.
+      await api("POST", `${account}/workers/scripts/${REDIRECT_SCRIPT}/subdomain`, {
+        enabled: false,
+        previews_enabled: false,
+      });
+      this.setMeta("redirects_map", text);
+      calls += 2;
+    }
+    const attached = await api<Array<{ id: string; hostname: string }>>(
+      "GET",
+      `${account}/workers/domains?service=${REDIRECT_SCRIPT}`,
+    );
+    calls++;
+    // K-410: an address that sends no one on any more loses its custom domain first.
+    for (const domain of attached) {
+      if (domain.hostname in map) continue;
+      if (calls >= budget) {
+        waiting = true;
+        break;
+      }
+      await api("DELETE", `${account}/workers/domains/${domain.id}`);
+      calls++;
+    }
+    for (const { cardId, address } of old) {
+      if (attached.some((domain) => domain.hostname === address)) continue;
+      if (calls >= budget) {
+        waiting = true;
+        break;
+      }
+      const app = this.access.get(`app:${cardId}:${address}`);
+      // A Compose route goes with its DNS record first (K-410); the custom domain makes its own record.
+      const [record] = this.sql("SELECT 1 FROM dns_objects WHERE address = ? AND record_id != ''", address);
+      if (!app?.cfId || app.error || record) {
+        waiting = true;
+        continue;
+      }
+      const domains = await api<Array<{ service: string }>>(
+        "GET",
+        `${account}/workers/domains?hostname=${encodeURIComponent(address)}`,
+      );
+      calls++;
+      // Another Worker still holds it: the deploy that dropped it takes it off. Anything else stays as it is.
+      if (domains.length > 0 || calls >= budget) {
+        waiting ||= calls >= budget;
+        continue;
+      }
+      const zone = zoneOfAddressIn(address, this.env);
+      if (!zone) continue;
+      await api("PUT", `${account}/workers/domains`, {
+        hostname: address,
+        service: REDIRECT_SCRIPT,
+        zone_id: zone.id,
+        environment: "production",
+      });
+      calls++;
+    }
+    this.setMeta("redirects_done", waiting ? "" : text);
+    return calls;
+  }
+
+  /** K-1124: the redirect Worker has a map or a custom domain to change. */
+  private redirectWork() {
+    const text = JSON.stringify(
+      Object.fromEntries(
+        this.oldAddresses().map((item) => [
+          item.address,
+          this.state.resources.get(item.cardId)?.addresses[0] ?? "",
+        ]),
+      ),
+    );
+    return this.meta("redirects_done") !== text;
+  }
+
   /** K-401, K-909: the Access objects, with the addresses that removed apps still serve. */
   private desired(now: number) {
     const removed = [...this.liveSites.values()].filter(
       (site) => site.state === "ok" && !this.state.resources.has(site.id),
     );
-    return desiredAccess(this.state, now, removed);
+    return desiredAccess(this.state, now, removed, this.oldAddresses());
   }
 
   /** The rules that every write keeps (K-105, K-1504). Returns the state after the changes. */
@@ -3686,7 +3829,8 @@ export class Kitshn extends DurableObject<Env> {
         loginHeld(this.meta("login_held") ?? ""),
       ) ||
         this.launcherWork() ||
-        this.loginWork())
+        this.loginWork() ||
+        this.redirectWork())
     )
       next = now;
     // A failed tunnel, DNS or route write tries again after five minutes (K-410). Only a future retry
@@ -4363,6 +4507,16 @@ export class Kitshn extends DurableObject<Env> {
           { error: `${address} is held by a folder site that is being published (K-1123).` },
           { status: 409 },
         );
+      // K-1124: an old address of another card sends its visitors on to that card until it goes free (K-1122).
+      const sends = this.oldAddresses().find(
+        (item) => item.address === address && item.cardId !== resourceId,
+      );
+      const sendsFor = sends ? this.state.resources.get(sends.cardId) : undefined;
+      if (sendsFor)
+        return Response.json(
+          { error: `${address} sends visitors on to the card ${sendsFor.name} (K-1124).` },
+          { status: 409 },
+        );
     }
     if (!onCloudflare) return null;
     // Never take over a hostname that another Worker serves, or that a foreign Access app covers (K-408).
@@ -4376,7 +4530,15 @@ export class Kitshn extends DurableObject<Env> {
         "GET",
         `${account}/workers/domains?hostname=${encodeURIComponent(address)}`,
       );
-      const foreign = domains.find((domain) => domain.service !== script);
+      // An old address of this same card that comes back: the deploy takes it off the redirect Worker.
+      const [own] = this.sql(
+        "SELECT 1 FROM old_addresses WHERE address = ? AND card_id = ?",
+        address,
+        resourceId,
+      );
+      const foreign = domains.find(
+        (domain) => domain.service !== script && !(own && domain.service === REDIRECT_SCRIPT),
+      );
       if (foreign) {
         return Response.json(
           { error: `${address} already serves the Worker ${foreign.service}.` },
@@ -4607,10 +4769,12 @@ export class Kitshn extends DurableObject<Env> {
         machineId = pick.id;
       }
     }
-    if (existing && existing.addresses[0] !== result.address) {
+    // K-1124: a static site or a Worker app moves, and its old address sends visitors on. A Compose app keeps its main
+    // address, because its machine serves it under that name (K-1104).
+    if (existing?.kind === "site.compose" && existing.addresses[0] !== result.address) {
       return Response.json(
         {
-          error: `${result.environment} lives at ${existing.addresses[0]}. To move it, remove its card on the map first.`,
+          error: `${result.environment} lives at ${existing.addresses[0]}. A Compose app keeps its main address; to move it, remove its card on the map first.`,
         },
         { status: 409 },
       );
@@ -4725,6 +4889,14 @@ export class Kitshn extends DurableObject<Env> {
       // K-817, K-410: a Compose card takes the new list at once; the tunnel sync drops an old address in order. A
       // static card keeps its old addresses until finishDeploy has taken their custom domains off.
       const next = nextCardAddresses(kind, addresses, existing.addresses);
+      // K-1124: a Compose address leaves the card at once; the tunnel sync takes its route and DNS record off, and
+      // then the redirect Worker takes it over.
+      if (kind === "site.compose")
+        this.rememberOld(
+          existing.id,
+          existing.addresses.filter((address) => !next.includes(address)),
+          next,
+        );
       if (JSON.stringify(next) !== JSON.stringify(existing.addresses)) {
         this.putResource({ ...existing, addresses: next });
         this.load();
@@ -5158,7 +5330,17 @@ export class Kitshn extends DurableObject<Env> {
       const endedBeforeAddress = this.endedRefusal(row.id);
       if (endedBeforeAddress) return endedBeforeAddress;
       if (attached) continue;
-      if (domains.length > 0) throw new Error(`${address} already serves another Worker.`);
+      // K-1124: an old address of this card that comes back leaves the redirect Worker first.
+      const [own] = this.sql(
+        "SELECT 1 FROM old_addresses WHERE address = ? AND card_id = ?",
+        address,
+        row.resource_id,
+      );
+      for (const domain of domains)
+        if (own && domain.service === REDIRECT_SCRIPT)
+          await api("DELETE", `${account}/workers/domains/${domain.id}`);
+      if (domains.some((domain) => domain.service !== REDIRECT_SCRIPT || !own))
+        throw new Error(`${address} already serves another Worker.`);
       const zone = zoneOfAddressIn(address, this.env);
       if (!zone) throw new Error(`kitshn does not publish on the zone of ${address} (K-1111).`);
       await api("PUT", `${account}/workers/domains`, {
@@ -5174,6 +5356,13 @@ export class Kitshn extends DurableObject<Env> {
     // K-814: the route check records what a visitor without a login gets.
     const check = await fetch(`https://${row.address}/`, { redirect: "manual" }).catch(() => null);
     const resource = this.state.resources.get(row.resource_id);
+    // K-1124: an address that the recipe dropped sends its visitors on to the main address from now.
+    if (resource)
+      this.rememberOld(
+        resource.id,
+        resource.addresses.filter((address) => !addresses.includes(address)),
+        addresses,
+      );
     if (resource) this.putResource({ ...resource, addresses, status: "running" });
     this.sql("UPDATE deploys SET state = 'done' WHERE id = ? AND state = 'planned'", row.id);
     if (icon !== undefined) await this.setIcon(row.resource_id, icon);
@@ -6207,6 +6396,64 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /**
+   * K-1123, K-1124: a folder site moves to `<name>.<zone>` on the zone of its address, and its old address sends
+   * visitors on. The Access application of the new address comes first (K-402), then its custom domain, and the old
+   * one goes over to the redirect Worker. A second call with the same name finishes what Cloudflare left undone. Known
+   * limit: the move has no Undo; a move back does the same. Revisit when a site needs the Undo of K-1506.
+   */
+  private async renameFolderSite(caller: Caller, resource: Resource, name: string) {
+    const fail = (status: number, error: string) => Response.json({ error }, { status });
+    const api = this.api();
+    if (!api) return fail(503, "kitshn has no Cloudflare API token here.");
+    const current = resource.addresses[0] ?? "";
+    const zone = current.slice(current.indexOf(".") + 1);
+    const after = `${name}.${zone}`;
+    const script = `kitshn-${resource.id}`;
+    if (after !== current) {
+      const free = this.folderSiteName(name, zone);
+      if (typeof free !== "string") return fail(free.status, free.error);
+      const refused = await this.addressRefusal(api, [after], resource.id, script, resource, true);
+      if (refused) return refused;
+      this.ctx.storage.transactionSync(() => {
+        this.putResource({ ...resource, addresses: [after] });
+        this.rememberOld(resource.id, [current], [after]);
+        this.sql("UPDATE agent_sites SET address = ? WHERE card_id = ?", after, resource.id);
+        this.insertRevision(
+          caller.actor,
+          `Moved the folder site ${resource.name} to ${after}; ${current} sends visitors on (K-1124)`,
+          [],
+          null,
+        );
+      });
+      this.load();
+      this.broadcast();
+    }
+    await this.syncAccessLocked(api, 20);
+    const app = this.access.get(`app:${resource.id}:${after}`);
+    if (!app?.cfId || app.error)
+      return fail(503, `The Access application of ${after} is not ready; run the same command again.`);
+    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+    const domains = await api<Array<{ service: string }>>(
+      "GET",
+      `${account}/workers/domains?hostname=${encodeURIComponent(after)}`,
+    );
+    if (!domains.some((domain) => domain.service === script)) {
+      if (domains.length > 0) return fail(409, `${after} already serves another Worker.`);
+      const zoneOf = zoneOfAddressIn(after, this.env);
+      if (!zoneOf) return fail(409, `kitshn does not publish on the zone of ${after} (K-1111).`);
+      await api("PUT", `${account}/workers/domains`, {
+        hostname: after,
+        service: script,
+        zone_id: zoneOf.id,
+        environment: "production",
+      });
+    }
+    await removeStaleDomains(api, account, script, [after]);
+    void this.scheduleAlarm();
+    return Response.json({ address: after, revision: null });
+  }
+
+  /**
    * K-1123: the name of a new folder site on `zone`: the one that the key gives, or a random readable one (K-1120).
    * A name is one label below the zone and not a name of kitshn itself (K-817).
    */
@@ -6352,19 +6599,25 @@ export class Kitshn extends DurableObject<Env> {
    * K-1120: gives a page or a file card a new address name. The old name stays with the item and sends its
    * visitors on, so no one else takes it; Undo moves the card back.
    */
-  private setAddress(caller: Caller, named: string, name: string, agent: boolean) {
-    // The card by its id, or by a name of its address, so `kitshn address` takes what the address shows.
+  private async setAddress(caller: Caller, named: string, name: string, agent: boolean) {
+    // The card by its id, by a name of its address, or for a folder site by its folder, so `kitshn address` takes
+    // what the key knows.
     const candidates = this.state.resources.has(named)
       ? [named]
-      : this.sql<{ item_id: string }>(
-          "SELECT DISTINCT item_id FROM library_addresses WHERE kind IN ('page', 'file') AND name = ?",
+      : this.sql<{ id: string }>(
+          `SELECT DISTINCT item_id AS id FROM library_addresses WHERE kind IN ('page', 'file') AND name = ?
+           UNION SELECT card_id AS id FROM agent_sites WHERE folder = ?`,
           named,
-        ).map((row) => row.item_id);
+          named,
+        ).map((row) => row.id);
     let card: string;
     if (agent) {
       // A key learns nothing about cards that it may not change: one answer for unknown and for not its own.
       const now = Date.now();
-      const mine = candidates.find((id) => this.agentMayChange(caller, id, now) === null);
+      const mine = candidates.find(
+        (id) =>
+          this.agentMayChange(caller, id, now) === null || this.agentSiteMayChange(caller, id, now) === null,
+      );
       if (!mine)
         return Response.json(
           { error: `This key cannot change the address of "${named}" (K-1117, K-1120).` },
@@ -6374,22 +6627,22 @@ export class Kitshn extends DurableObject<Env> {
     } else {
       if (candidates.length > 1)
         return Response.json(
-          { error: `A page and a file both have the name "${named}"; name the card by its id.` },
+          { error: `Several cards have the name "${named}"; name the card by its id.` },
           { status: 409 },
         );
       card = candidates[0] ?? named;
     }
     const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", card);
     const resource = this.state.resources.get(card);
+    if (resource && card.startsWith(FOLDER_SITE_PREFIX))
+      return await this.renameFolderSite(caller, resource, name);
     if (!row || !resource)
       return Response.json(
         {
           error:
-            resource && card.startsWith(FOLDER_SITE_PREFIX)
-              ? `A folder site keeps the address of its first publish for now (K-1123).`
-              : resource && this.deployedCards(card).includes(card)
-                ? `The address of ${resource.name} comes from its repo; set it in kitshn.config.ts (K-1120).`
-                : `Only a page or a file has an address that kitshn sets (K-1120).`,
+            resource && this.deployedCards(card).includes(card)
+              ? `The address of ${resource.name} comes from its repo; set it in kitshn.config.ts (K-1120).`
+              : `Only a page or a file has an address that kitshn sets (K-1120).`,
         },
         { status: 409 },
       );
@@ -6817,10 +7070,19 @@ export class Kitshn extends DurableObject<Env> {
       spent += await this.checkSites(api, 6);
       await this.syncDns(api, 5);
       await this.syncRoutes(api, 5);
+      // K-1124: after the tunnel and DNS steps, so an old Compose address has lost its record. The daily run spends
+      // its calls on the compare; redirectWork asks for the next run at once.
+      if (!daily)
+        try {
+          spent += await this.syncRedirects(api, 5);
+        } catch (error) {
+          console.warn(`kitshn could not update the redirect Worker: ${String(error)}`);
+          spent += 5;
+        }
       // K-113: take an unwanted enrollment policy off the App Launcher before the sync deletes it.
       spent += await this.syncLauncher(api, daily);
-      // K-406: at most 40 calls. `spent` counts the daily compare (12), the site checks (6) and the launcher
-      // step (3); the tunnels, DNS records and offline routes above made at most 6 + 5 + 5, and the launcher
+      // K-406: at most 40 calls. `spent` counts the daily compare (12), the site checks (6), the redirect step (5)
+      // and the launcher step (3); the tunnels, DNS records and offline routes above made at most 6 + 5 + 5, and the launcher
       // step after the sync needs 3. The login step and the sync share what is left. A policy that the sync
       // makes goes on the login applications in the next alarm, which runs at once (loginWork).
       await this.syncAccessLocked(api, CALLS_PER_RUN - spent - 16 - 3);

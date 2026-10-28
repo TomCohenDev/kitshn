@@ -766,6 +766,13 @@ const agentCircle = (id: string, clientId: string, addsApps: boolean) => ({
   r: 300,
 });
 
+/** The fake Cloudflare of each test starts empty, so the old addresses of an earlier test go too (K-1124). */
+const noOldAddresses = () =>
+  runInDurableObject(env.KITSHN.getByName("kitshn"), (_instance, durable) => {
+    durable.storage.sql.exec("DELETE FROM old_addresses");
+    durable.storage.sql.exec("DELETE FROM meta WHERE key IN ('redirects_map', 'redirects_done')");
+  });
+
 describe("folder sites (K-1123)", () => {
   it("publishes a folder with may add apps, keeps its script on Remove app, and Undo brings it back", async () => {
     const cloudflare = fakeCloudflare();
@@ -887,5 +894,92 @@ describe("folder sites (K-1123)", () => {
     expect((await agentStep("folder-key.access", "/agent/sites/plan", { folder: "one-more" })).status).toBe(
       409,
     );
+  });
+
+  it("moves a folder site, and its old address sends visitors on through the redirect Worker (K-1124)", async () => {
+    const cloudflare = fakeCloudflare();
+    await noOldAddresses();
+    const edits = [{ _tag: "circle", id: "folders", after: agentCircle("folders", "move-key.access", true) }];
+    expect((await admin("/api/apply", "POST", { edits })).status).toBe(200);
+    const plan = await agentStep("move-key.access", "/agent/sites/plan", {
+      folder: "moving",
+      address: "first",
+    });
+    const deployId = plan.body["deployId"];
+    expect(
+      (
+        await agentStep("move-key.access", "/agent/sites/assets", {
+          deployId,
+          manifest: { "/a.html": { hash: "1".repeat(32), size: 1 } },
+        })
+      ).status,
+    ).toBe(200);
+    let finish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && finish.status === 503; attempt++)
+      finish = await agentStep("move-key.access", "/agent/sites/finish", { deployId, jwt: "done" });
+    expect(finish.status, JSON.stringify(finish.body)).toBe(200);
+    const state = await admin("/api/state", "GET");
+    const card = (state.body["resources"] as Array<{ id: string; name: string }>).find(
+      (resource) => resource.name === "moving",
+    );
+    if (!card) throw new Error("The folder site has no card.");
+
+    let moved = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && moved.status === 503; attempt++)
+      moved = await agentStep("move-key.access", "/agent/cards/moving/address", { address: "second" });
+    expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+    expect(cloudflare.served("second.example.com")).toEqual([`kitshn-${card.id}`]);
+    expect(cloudflare.served("first.example.com")).toEqual([]);
+    // The alarm hands the old address to the redirect Worker, with the map of where it goes.
+    await runInDurableObject(env.KITSHN.getByName("kitshn"), (instance) =>
+      (instance as unknown as { alarm(): Promise<void> }).alarm(),
+    );
+    expect(cloudflare.served("first.example.com")).toEqual(["kitshn-redirects"]);
+    const bindings = (cloudflare.uploads.at(-1)?.["bindings"] ?? []) as Array<{ name: string; text: string }>;
+    const map = bindings.find((binding) => binding.name === "MAP");
+    expect(JSON.parse(map?.text ?? "{}")).toEqual({ "first.example.com": "second.example.com" });
+    // Another card cannot take the old address while it sends visitors on.
+    const taken = await agentStep("move-key.access", "/agent/sites/plan", {
+      folder: "other",
+      address: "first",
+    });
+    expect(taken.status).toBe(409);
+  });
+
+  it("moves a Worker app to a new main address, and the old one sends visitors on (K-817, K-1124)", async () => {
+    const cloudflare = fakeCloudflare();
+    await noOldAddresses();
+    const app = repo("70", "mover");
+    await allow(app);
+    const deployAt = async (address: string) => {
+      const plan = await step(app, "/deploy/plan", {
+        recipe: {
+          ...recipe(),
+          deploy: [{ on: "push", branch: "main", name: "prod", startsIn: "Everyone", address }],
+        },
+        event: {},
+      });
+      const deployId = plan.body["deployId"];
+      expect(deployId, JSON.stringify(plan.body)).toEqual(expect.any(String));
+      expect((await step(app, "/deploy/storage", { deployId })).status).toBe(200);
+      let finish = { status: 503, body: {} as Record<string, unknown> };
+      for (let attempt = 0; attempt < 10 && finish.status === 503; attempt++)
+        finish = await step(app, "/deploy/finish", {
+          deployId,
+          module: "export class Room {} export default {};",
+        });
+      return finish;
+    };
+    expect((await deployAt("mover-one.example.com")).status).toBe(200);
+    const second = await deployAt("mover-two.example.com");
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+    expect(cloudflare.served("mover-two.example.com")).toEqual([app.script]);
+    await runInDurableObject(env.KITSHN.getByName("kitshn"), (instance) =>
+      (instance as unknown as { alarm(): Promise<void> }).alarm(),
+    );
+    expect(cloudflare.served("mover-one.example.com")).toEqual(["kitshn-redirects"]);
+    // The address comes back: it leaves the redirect Worker and serves the app again.
+    expect((await deployAt("mover-one.example.com")).status).toBe(200);
+    expect(cloudflare.served("mover-one.example.com")).toEqual([app.script]);
   });
 });

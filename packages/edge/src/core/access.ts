@@ -193,10 +193,17 @@ export interface RemovedSite {
  * K-401, K-402: the Access objects that the shares compile to. K-909: while a removed app still answers, its
  * application lets in only the people of the Owner circle, also during the pause, so it fails closed.
  */
+/** K-1124: an old address of a site card, which the redirect Worker sends on to the card's main address. */
+export interface OldAddress {
+  readonly cardId: string;
+  readonly address: string;
+}
+
 export function desiredAccess(
   state: State,
   now: number,
   removed: ReadonlyArray<RemovedSite> = [],
+  old: ReadonlyArray<OldAddress> = [],
 ): DesiredAccess {
   const policies = new Map<string, PolicyBody>();
   const apps = new Map<string, AppBody>();
@@ -214,7 +221,10 @@ export function desiredAccess(
     // Bypass and Service Auth policies first, as the Access dashboard orders them.
     const order = { bypass: 0, non_identity: 1, allow: 2 } as const;
     policyKeys.sort((a, b) => order[policies.get(a)!.decision] - order[policies.get(b)!.decision]);
-    for (const address of resource.addresses) {
+    // K-1124: an old address keeps the card's own policies, so its redirect tells only who may open the card where
+    // it went.
+    const oldOfCard = old.filter((item) => item.cardId === resource.id).map((item) => item.address);
+    for (const address of [...resource.addresses, ...oldOfCard]) {
       apps.set(`app:${resource.id}:${address}`, {
         name: appName(resource.name),
         type: "self_hosted",

@@ -422,14 +422,16 @@ export function undoPlan(
   }
   // A share that a card does not have now comes back only while its circle and its share setting are
   // unchanged since the revision; otherwise the parts that give it stay out (fail closed).
-  const later = since();
+  // The history read runs only when a share or a re-created circle needs it.
+  let resolved: Since | undefined;
+  const later = () => (resolved ??= since());
   for (;;) {
     const after = applyChanges(state, withStackMates(state, plan));
     const gain = shareDiff(state, after).find(
       (diff) =>
         diff.to !== null &&
         (diff.from === null || levelRank(diff.to) > levelRank(diff.from)) &&
-        (later.circles.has(diff.circle.id) || later.shares.has(shareKey(diff.resource.id, diff.circle.id))),
+        (later().circles.has(diff.circle.id) || later().shares.has(shareKey(diff.resource.id, diff.circle.id))),
     );
     if (!gain) break;
     const card = gain.resource.id;
@@ -457,7 +459,7 @@ export function undoPlan(
     );
     if (held.length > 0 && isPublicCircle(circle))
       throw new RuleError(`Re-creating ${circle.name} would make its cards public; drag them in by hand.`);
-    const moved = held.filter((card) => later.moved.has(card.id)).map((card) => card.name);
+    const moved = held.filter((card) => later().moved.has(card.id)).map((card) => card.name);
     if (moved.length > 0)
       kept.push(`The circle ${circle.name} is back and now also holds ${moved.join(", ")}, which moved into its area since.`);
   }

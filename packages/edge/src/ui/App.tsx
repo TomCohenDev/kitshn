@@ -4,6 +4,7 @@ import {
   type Edit,
   type ShareDiff,
   applyChanges,
+  deepEqual,
   isAppCard,
   resolveEdits,
   shareDiff,
@@ -613,7 +614,7 @@ export function App() {
       ) : route.tab === "machines" ? (
         <MachinesView machines={store.snapshot.machines} onAdd={() => setAddingMachine(true)} />
       ) : (
-        <History revisions={store.snapshot.revisions} onUndo={(id) => void undo(id)} />
+        <History revisions={store.snapshot.revisions} me={store.snapshot.me} onUndo={(id) => void undo(id)} />
       )}
       {addingMachine ? <AddMachine onClose={() => setAddingMachine(false)} /> : null}
       {addingSite ? (
@@ -1004,7 +1005,12 @@ export function App() {
   );
 }
 
-function History(props: { revisions: ReadonlyArray<RevisionView>; onUndo: (id: number) => void }) {
+function History(props: { revisions: ReadonlyArray<RevisionView>; me: Actor; onUndo: (id: number) => void }) {
+  // K-1506: Undo reverses only the caller's own newest change that is still in effect.
+  const newest = props.revisions.find(
+    (revision) =>
+      revision.undoable && revision.undoes === null && revision.undoneBy === null && deepEqual(revision.actor, props.me),
+  )?.id;
   return (
     <section class="history">
       <h2>History</h2>
@@ -1031,7 +1037,7 @@ function History(props: { revisions: ReadonlyArray<RevisionView>; onUndo: (id: n
                   <span class="stamp" data-tip={`Undone: revision #${revision.undoneBy} reverses this one.`}>
                     ✓ undone
                   </span>
-                ) : revision.undoes === null && revision.undoable ? (
+                ) : revision.id === newest ? (
                   <button
                     class="btn"
                     data-tip="Undo: a new revision that reverses this one."

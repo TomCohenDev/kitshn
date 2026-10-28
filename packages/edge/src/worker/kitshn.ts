@@ -14,27 +14,24 @@ import {
   invert,
   type Item,
   mergeMoves,
+  mergedSummary,
+  type StoredRevision,
+  undoTarget,
   refuseRaiseWhilePaused,
   refuseResume,
   removeAppChanges,
   resolveEdits,
   restoredResource,
   ruleViolation,
+  shareDiff,
   stacksWithout,
   summarize,
-  itemKey,
-  itemUndo,
-  mergedSummary,
-  partsLeft,
-  type Since,
-  changedSince,
-  type UndoPlan,
-  undoneRevisions,
-  undoPlan,
+  withStackMates,
 } from "../core/changes.ts";
 import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
+  isPublicCircle,
   type Circle,
   type Member,
   type Point,
@@ -210,10 +207,11 @@ const nextUtcMidnight = (now: number) => Math.floor(now / DAY) * DAY + DAY;
 
 const decodeClientMessage = Schema.decodeUnknownSync(ClientMessage);
 
-/** K-1502, K-1507: the revision that an undo reverses; `item` is the card or circle of a per-item undo. */
-type UndoOf =
-  | { readonly revision: number; readonly item: null }
-  | { readonly revision: number; readonly item: string; readonly name: string };
+/** K-1502, K-1507: the revision that an undo reverses; `item` names the card or circle of a per-item undo. */
+interface UndoOf {
+  readonly revision: number;
+  readonly item: string | null;
+}
 
 /** The POST paths that take a client message as their body. */
 const API_MESSAGES: Readonly<Record<string, ClientMessage["type"]>> = {
@@ -349,7 +347,12 @@ export class Kitshn extends DurableObject<Env> {
       "SELECT id, at, actor, summary, undoes, changes = '[]' AS empty FROM revisions ORDER BY id DESC LIMIT ?",
       RECENT_REVISIONS,
     );
-    const undone = this.undone();
+    const undone = new Map(
+      this.sql<{ id: number; undoes: number }>(
+        "SELECT id, undoes FROM revisions WHERE undoes IS NOT NULL ORDER BY id DESC LIMIT ?",
+        RECENT_REVISIONS,
+      ).map((row) => [row.undoes, row.id]),
+    );
     this.revisions = rows.map((row) => ({
       id: row.id,
       at: row.at,
@@ -476,16 +479,14 @@ export class Kitshn extends DurableObject<Env> {
     summary: string,
     changes: ReadonlyArray<Change>,
     undoes: number | null,
-    item: string | null = null,
   ) {
     const [row] = this.sql<{ id: number }>(
-      "INSERT INTO revisions (at, actor, summary, changes, undoes, item) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+      "INSERT INTO revisions (at, actor, summary, changes, undoes) VALUES (?, ?, ?, ?, ?) RETURNING id",
       Date.now(),
       JSON.stringify(actor),
       summary,
       JSON.stringify(changes),
       undoes,
-      item,
     );
     if (!row) throw new Error("The revision insert returned no id.");
     return row.id;
@@ -519,11 +520,12 @@ export class Kitshn extends DurableObject<Env> {
     const now = Date.now();
     const merge = undo === null ? this.movesToMerge(actor, now, changes) : null;
     const label =
-      undo === null ? "" : undo.item === null ? `Undo #${undo.revision}: ` : `Undo #${undo.revision} for ${undo.name}: `;
+      undo === null ? "" : undo.item === null ? `Undo #${undo.revision}: ` : `Undo #${undo.revision} for ${undo.item}: `;
     const summary = merge
       ? mergedSummary(merge.summary, applyChanges(before, invert(merge.previous)), before, after, merge.changes)
       : label + summarize(before, after, changes);
-    const undoes = undo?.revision ?? null;
+    // A per-item undo is a change of its own (K-1507); only a whole undo marks its revision as undone.
+    const undoes = undo?.item === null ? undo.revision : null;
     const id = this.ctx.storage.transactionSync(() => {
       this.persist(changes);
       // A switch to a lockdown keeps who paused first and when.
@@ -546,7 +548,7 @@ export class Kitshn extends DurableObject<Env> {
         );
         return merge.id;
       }
-      return this.insertRevision(actor, summary, changes, undoes, undo?.item ?? null);
+      return this.insertRevision(actor, summary, changes, undoes);
     });
     this.state = after;
     for (const change of changes) {
@@ -556,20 +558,18 @@ export class Kitshn extends DurableObject<Env> {
     }
     this.revisions = merge
       ? this.revisions.map((revision) => (revision.id === id ? { ...revision, at: now, summary } : revision))
-      : [{ id, at: now, actor, summary, undoes, undoneBy: null, undoable: true }, ...this.revisions].slice(
-          0,
-          RECENT_REVISIONS,
-        );
-    if (undo?.item === null) {
-      const undone = this.undone();
-      this.revisions = this.revisions.map((revision) => ({ ...revision, undoneBy: undone.get(revision.id) ?? null }));
-    }
+      : [
+          { id, at: now, actor, summary, undoes, undoneBy: null, undoable: true },
+          ...this.revisions.map((revision) =>
+            revision.id === undoes ? { ...revision, undoneBy: id } : revision,
+          ),
+        ].slice(0, RECENT_REVISIONS);
     this.broadcast();
     void this.scheduleAlarm();
     return id;
   }
 
-  /** K-1505: the newest revision and its changes with these moves merged in, when they join it. */
+  /** K-1505: the newest revision with these moves merged in, when they join it. */
   private movesToMerge(actor: Actor, now: number, changes: ReadonlyArray<Change>) {
     const [row] = this.sql<{
       id: number;
@@ -609,85 +609,53 @@ export class Kitshn extends DurableObject<Env> {
     }
   }
 
-  /** K-1502, K-1506: Undo makes a new revision that reverses what of the old one still fits, by the same rules. */
+  /** K-1502, K-1506: Undo reverses the caller's own newest revision, and runs the same rules as an edit. */
   private undo(actor: Actor, revisionId: number) {
-    const [row] = this.sql<{ changes: string }>("SELECT changes FROM revisions WHERE id = ?", revisionId);
-    if (!row)
-      throw new RuleError(`Revision #${revisionId} does not exist, or it is older than the history keeps.`);
-    const changes = JSON.parse(row.changes) as Array<Change>;
-    if (changes.length === 0)
-      throw new RuleError(
-        `Revision #${revisionId} records an action, not a change, so it has nothing to undo.`,
-      );
-    const undone = this.undone();
-    const by = undone.get(revisionId);
-    if (by !== undefined) throw new RuleError(`Revision #${revisionId} is undone already, by #${by}.`);
-    // K-1507: the parts that a per-item undo in effect took back already stay out.
-    const reverted = this.sql<{ id: number; changes: string }>(
-      "SELECT id, changes FROM revisions WHERE undoes = ? AND item IS NOT NULL",
-      revisionId,
-    )
-      .filter((row) => !undone.has(row.id))
-      .flatMap((row) => JSON.parse(row.changes) as Array<Change>);
-    const plan = undoPlan(this.state, partsLeft(changes, reverted), () => this.since(revisionId));
-    return this.commitUndo(actor, plan, { revision: revisionId, item: null });
+    const target = undoTarget(this.state, this.storedRevisions(), actor, { revision: revisionId });
+    return this.commitUndo(actor, target.changes, { revision: target.revision, item: null });
   }
 
-  /** K-1506: what the revisions after `revisionId` changed. */
-  private since(revisionId: number): Since {
-    return changedSince(
-      this.sql<{ changes: string }>("SELECT changes FROM revisions WHERE id > ?", revisionId).map(
-        (row) => JSON.parse(row.changes) as Array<Change>,
-      ),
-    );
-  }
-
-  /** K-1502: each revision that a whole undo in effect reverses, with that undo. */
-  private undone() {
-    return undoneRevisions(
-      this.sql<{ id: number; undoes: number }>(
-        "SELECT id, undoes FROM revisions WHERE undoes IS NOT NULL AND item IS NULL",
-      ),
-    );
-  }
-
-  /** K-1507: undoes the newest change to one card or circle, by anyone, and only that item's part of it. */
+  /** K-1507: undoes the caller's own newest change to one card or circle, and only that item's part of it. */
   private undoItem(actor: Actor, item: Item) {
+    const target = undoTarget(this.state, this.storedRevisions(), actor, { item });
     const name =
       item.kind === "card"
         ? (this.state.resources.get(item.id)?.name ?? item.id)
         : `the circle ${this.state.circles.get(item.id)?.name ?? item.id}`;
-    const key = itemKey(item);
-    // Skips revisions that an undo in effect reverses: a whole undo, or one of this item. `instr` only
-    // narrows the rows; `touches` decides.
-    const undone = this.undone();
-    const skipped = new Set([
-      ...undone.keys(),
-      ...this.sql<{ id: number; undoes: number }>("SELECT id, undoes FROM revisions WHERE item = ?", key)
-        .filter((row) => !undone.has(row.id))
-        .map((row) => row.undoes),
-    ]);
-    const rows = this.sql<{ id: number; changes: string }>(
-      "SELECT id, changes FROM revisions WHERE undoes IS NULL AND instr(changes, ?) > 0 ORDER BY id DESC",
-      item.id,
-    )
-      .filter((row) => !skipped.has(row.id))
-      .map((row) => ({ id: row.id, changes: JSON.parse(row.changes) as Array<Change> }));
-    const found = itemUndo(this.state, rows, item, (revision) => this.since(revision));
-    if (!found) throw new RuleError(`History has no change to ${name} left to undo.`);
-    return this.commitUndo(actor, found.plan, { revision: found.revision, item: key, name });
+    return this.commitUndo(actor, target.changes, { revision: target.revision, item: name });
   }
 
-  /** K-1502: an undo runs the same rules as an edit, and its notes name each part that it left as it is. */
-  private async commitUndo(actor: Actor, plan: UndoPlan, undo: UndoOf) {
-    if (plan.changes.length === 0)
+  /** Every revision that History keeps (K-1503: at most 5,000). */
+  private storedRevisions(): Array<StoredRevision> {
+    return this.sql<{ id: number; actor: string; summary: string; changes: string; undoes: number | null }>(
+      "SELECT id, actor, summary, changes, undoes FROM revisions",
+    ).map((row) => ({
+      id: row.id,
+      actor: JSON.parse(row.actor) as Actor,
+      summary: row.summary,
+      changes: JSON.parse(row.changes) as Array<Change>,
+      undoes: row.undoes,
+    }));
+  }
+
+  private commitUndo(actor: Actor, original: ReadonlyArray<Change>, undo: UndoOf) {
+    const inverted = invert(original);
+    const conflict = conflictOf(this.state, inverted);
+    if (conflict?._tag === "app")
+      throw new RuleError(`A later deploy or removal changed the app "${conflict.id}", so this undo no longer fits (K-909).`);
+    if (conflict) throw new RuleError(`${conflict._tag} "${conflict.id}" changed since, so this undo no longer fits.`);
+    // A card that joined a stack since then takes its stack along (K-521), but never into a public circle
+    // without the question of K-210, which an undo does not ask.
+    const changes = withStackMates(this.state, inverted);
+    const own = new Set(inverted.flatMap((change) => (change._tag === "place" ? [change.id] : [])));
+    const goingPublic = shareDiff(this.state, applyChanges(this.state, changes)).find(
+      (diff) => !own.has(diff.resource.id) && diff.to && !diff.from && isPublicCircle(diff.circle),
+    );
+    if (goingPublic)
       throw new RuleError(
-        plan.kept.length > 0
-          ? `Nothing to undo. ${plan.kept.join(" ")}`
-          : `Everything that revision #${undo.revision} changed is back as before.`,
+        `This undo would make ${goingPublic.resource.name} public through its stack. Move the stack by hand.`,
       );
-    const result = await this.commitApps(actor, refuseResume(plan.changes), undo);
-    return { ...result, notes: [...plan.kept, ...result.notes] };
+    return this.commitApps(actor, refuseResume(changes), undo);
   }
 
   /** K-909: removes a deployed app; the card panel, the palette and `DELETE /api/apps/<card>` all come here. */

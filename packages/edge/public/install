@@ -396,8 +396,13 @@ else
 fi
 # K-1815: the key of the backup passwords, made once. Cloudflare never shows a secret again, so the owner keeps
 # this copy outside Cloudflare; without it nobody can read the backups.
+# It is made only on request and only for a terminal, so the owner saves it and it never lands in a log file.
 if printf '%s' "$secrets" | jq -e 'any(.[]; .name == "KITSHN_BACKUP_KEY")' >/dev/null; then
   kept "Worker secret KITSHN_BACKUP_KEY (K-1815)"
+elif [ "${KITSHN_BACKUP_KEY_NOW:-}" != 1 ]; then
+  say "  backups stay off until you run the bootstrap with KITSHN_BACKUP_KEY_NOW=1 (K-1815)"
+elif [ ! -t 1 ]; then
+  die "KITSHN_BACKUP_KEY_NOW=1 prints the backup key once; run it in a terminal, with no pipe or file (K-1815)."
 else
   backup_key=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
   api PUT "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/secrets" \

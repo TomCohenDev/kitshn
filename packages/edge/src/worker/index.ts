@@ -472,7 +472,13 @@ export default {
       const path = `/${rest.join("/")}`;
       if (path === "/key") {
         if (!env.KITSHN_BACKUP_KEY)
-          return Response.json({ error: "kitshn has no KITSHN_BACKUP_KEY (K-1815)." }, { status: 503 });
+          return Response.json(
+            {
+              error:
+                "Backups are off: kitshn has no KITSHN_BACKUP_KEY. Run the bootstrap with KITSHN_BACKUP_KEY_NOW=1 (K-1815).",
+            },
+            { status: 503 },
+          );
         return Response.json({ password: await backupPassword(env.KITSHN_BACKUP_KEY, card) });
       }
       if (!env.BUCKET) return Response.json({ error: "R2 is off on this account." }, { status: 503 });

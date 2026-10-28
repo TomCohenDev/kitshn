@@ -25,7 +25,7 @@ import { type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from ".
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
 import { localUsersOf, peerDecision } from "./peer.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
-import { HELPER_IMAGE, daemonUser, dockerKind, rootTakeover, rootTakeoverPlan } from "./takeover.ts";
+import { HELPER_IMAGE, daemonUser, dockerKind, printable, rootTakeover, rootTakeoverPlan } from "./takeover.ts";
 import {
   chmodSync,
   copyFileSync,
@@ -278,12 +278,12 @@ async function kitshn1TakeoverCommand(repo?: string, environment?: string, proje
   if (!repo || !environment || !project || !user)
     fail("usage: kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>");
   if (process.getuid!() !== 0) fail("kitshn1-takeover runs as root: it stops KitSHn 1 and reads /persistent.");
-  const failWith = (error: unknown) => fail(error instanceof Error ? error.message : String(error));
+  const failWith = (error: unknown) => fail(printable(error instanceof Error ? error.message : String(error)));
   const daemon = await daemonUser(user).catch(failWith);
   const plan = rootTakeoverPlan({
     repo, environment, project, user: daemon, persistentRoot: KITSHN1_PERSISTENT, exists: existsSync,
   });
-  if (typeof plan === "string") fail(plan);
+  if (typeof plan === "string") fail(printable(plan));
   await rootTakeover(plan, daemon).catch(failWith);
 }
 

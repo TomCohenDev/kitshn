@@ -38,6 +38,13 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
     expect(moved).toMatchObject({ appDir: "/srv/kitshn/kitshn/apps/app-tick3d-123-prod" });
   });
 
+  it("refuses an XDG_DATA_HOME with a control character or a relative path, as root prints it", () => {
+    const withEnv = (XDG_DATA_HOME: string) => rootTakeoverPlan({ ...base, user: { ...user, env: { XDG_DATA_HOME } }, exists: () => true });
+    expect(withEnv("/srv/\u001b[2Jkitshn")).toMatch("control characters");
+    expect(withEnv("/srv/kitshn\nfake line")).toMatch("control characters");
+    expect(withEnv("srv/kitshn")).toMatch("absolute");
+  });
+
   it("refuses missing data and names that leave their folders", () => {
     expect(rootTakeoverPlan({ ...base, exists: () => false })).toMatch("no KitSHn 1 data");
     expect(rootTakeoverPlan({ ...base, project: "../etc", exists: () => true })).toMatch("not the Compose project");

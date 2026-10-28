@@ -44,6 +44,10 @@ export function rootTakeoverPlan(input: {
   if (!old) return `${input.repo} ${input.environment} is not a name that KitSHn 1 could use.`;
   // /persistent belongs to root, so root may look there; the user's folder is checked by the user (`prepare`).
   if (!input.exists(old.dataDir)) return `there is no KitSHn 1 data at ${old.dataDir}.`;
+  // The user sets XDG_DATA_HOME, and root prints the paths below it, so it must be a plain absolute path.
+  const xdg = input.user.env["XDG_DATA_HOME"];
+  if (xdg !== undefined && xdg !== "" && (!xdg.startsWith("/") || hasControl(xdg)))
+    return "XDG_DATA_HOME of the daemon user is not an absolute path without control characters.";
   const data = pathsFor("linux", input.user.env, input.user.home, input.user.uid).data;
   return { oldProject: old.project, oldData: old.dataDir, project: input.project, appDir: join(data, "apps", input.project) };
 }
@@ -192,6 +196,8 @@ export async function executeSteps(steps: ReadonlyArray<Step>, runner: Runner, a
     }
   } catch (error) {
     // On a signal or the timeout, the programs of the current step end first, so no undo races them.
+    // Known limit: an undo step has no time limit, so a Docker that hangs after the 2-hour timeout holds it. The way
+    // out: a second Ctrl-C kills the programs of that undo step, and the undo goes on with the next one.
     if (current) await current.catch(() => undefined);
     runner.log(`kitshn: failed: ${error instanceof Error ? error.message : String(error)}`);
     for (const step of [...undo].reverse()) {
@@ -204,13 +210,18 @@ export async function executeSteps(steps: ReadonlyArray<Step>, runner: Runner, a
   }
 }
 
+const isControl = (char: string) => {
+  const code = char.codePointAt(0) ?? 0;
+  return code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f);
+};
+
+/** Whether a text has a control character, also a newline or a tab. */
+export const hasControl = (text: string) => [...text].some(isControl);
+
 /** Text of a program without control characters, so output of the user cannot drive root's terminal. */
 export function printable(text: string): string {
   return [...text]
-    .filter((char) => {
-      const code = char.codePointAt(0) ?? 0;
-      return char === "\n" || char === "\t" || (code >= 0x20 && code !== 0x7f && (code < 0x80 || code > 0x9f));
-    })
+    .filter((char) => char === "\n" || char === "\t" || !isControl(char))
     .join("");
 }
 
@@ -348,7 +359,9 @@ export async function preflight(plan: RootTakeover, user: DaemonUser, run: Captu
 export async function rootTakeover(plan: RootTakeover, user: DaemonUser): Promise<void> {
   const volumes = await preflight(plan, user, capture);
   // Printed before anything stops, so it is on the screen even after a hard kill.
-  console.log(`kitshn: if KitSHn 1 stays down after this command, start it with:\n  ${startCommand(plan.oldProject)}`);
+  // Every line that root prints goes through printable(): paths and output can hold text of the user.
+  const say = (text: string) => console.log(printable(text));
+  say(`kitshn: if KitSHn 1 stays down after this command, start it with:\n  ${startCommand(plan.oldProject)}`);
   const children = new Set<ChildProcess>();
   let abort: (reason: Error) => void = () => undefined;
   const aborted = new Promise<never>((_, reject) => {
@@ -368,13 +381,13 @@ export async function rootTakeover(plan: RootTakeover, user: DaemonUser): Promis
   process.on("SIGTERM", onSignal);
   const timer = setTimeout(() => stopAll("the takeover took longer than 2 hours"), TAKEOVER_TIMEOUT_MS);
   try {
-    await executeSteps(takeoverSteps(plan, user, volumes), { run: (step) => runStep(step, children), log: console.log }, aborted);
+    await executeSteps(takeoverSteps(plan, user, volumes), { run: (step) => runStep(step, children), log: say }, aborted);
   } finally {
     clearTimeout(timer);
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
   }
-  console.log(
+  say(
     `kitshn: KitSHn 1 data of ${plan.oldProject} is in ${plan.appDir}/data; it stays in ${plan.oldData} for a rollback.\n` +
       "kitshn: KitSHn 1 stays stopped, so the site is down until the kitshn 2 app deploys. To start KitSHn 1 again:\n" +
       `  ${startCommand(plan.oldProject)}`,

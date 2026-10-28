@@ -18,20 +18,27 @@ const site = (status: number | null) =>
 const uptimeOf = (stub: DurableObjectStub) =>
   runInDurableObject(stub, (instance, state) => ({
     row: state.storage.sql
-      .exec<{ up: number; fails: number }>("SELECT up, fails FROM uptime WHERE card_id = 'shop'")
+      .exec<{ up: number; failing: number }>(
+        "SELECT up, failing_since IS NOT NULL AS failing FROM uptime WHERE card_id = 'shop'",
+      )
       .toArray()[0],
     changes: (
       instance as unknown as { uptimeChanges(card: string): ReadonlyArray<UptimeChange> }
     ).uptimeChanges("shop"),
   }));
 
-/** A new turn of 2 minutes, without waiting for it. */
+/** A new turn of 2 minutes, without waiting for it: the turn resets and a first failure moves 3 minutes back. */
 const nextTurn = (stub: DurableObjectStub) =>
-  runInDurableObject(stub, (instance) => {
-    (instance as unknown as { uptimeSlot: number | null }).uptimeSlot = null;
+  runInDurableObject(stub, (instance, state) => {
+    state.storage.sql.exec(
+      "UPDATE uptime SET failing_since = failing_since - 180000 WHERE failing_since IS NOT NULL",
+    );
+    const kitshn = instance as unknown as { uptimeSlot: number | null; uptimeCache: unknown };
+    kitshn.uptimeSlot = null;
+    kitshn.uptimeCache = null;
   });
 
-it("records a static site down after two failed turns and up after one good one (K-1125, K-1126)", async () => {
+it("records a static site down when it still fails a turn after its first failure, and up after one good answer (K-1125, K-1126)", async () => {
   const stub = env.KITSHN.getByName("kitshn");
   await runInDurableObject(stub, (instance, state) => {
     const shop: Resource = {
@@ -48,15 +55,15 @@ it("records a static site down after two failed turns and up after one good one 
   });
   const failing = site(502);
   await runDurableObjectAlarm(stub);
-  expect((await uptimeOf(stub)).row).toEqual({ up: 1, fails: 1 });
+  expect((await uptimeOf(stub)).row).toEqual({ up: 1, failing: 1 });
   // An early alarm in the same turn fetches nothing, so one short error never counts twice.
   await runDurableObjectAlarm(stub);
   expect(failing).toHaveBeenCalledTimes(1);
-  expect((await uptimeOf(stub)).row).toEqual({ up: 1, fails: 1 });
+  expect((await uptimeOf(stub)).row).toEqual({ up: 1, failing: 1 });
   await nextTurn(stub);
   site(null);
   await runDurableObjectAlarm(stub);
-  expect((await uptimeOf(stub)).row).toEqual({ up: 0, fails: 0 });
+  expect((await uptimeOf(stub)).row).toEqual({ up: 0, failing: 0 });
   await nextTurn(stub);
   site(302);
   await runDurableObjectAlarm(stub);

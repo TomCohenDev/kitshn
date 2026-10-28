@@ -121,7 +121,7 @@ import { DEMO_MACHINES, DEMO_ICONS, demo, demoUsage } from "../core/demo.ts";
 import type { Usage } from "../core/usage.ts";
 import { readUsage } from "./usage.ts";
 import {
-  FAILS_TO_DOWN,
+  FAILING_FOR_MS,
   UPTIME_FETCHES_PER_RUN,
   UPTIME_KEEP_MS,
   UPTIME_IDLE_MS,
@@ -345,9 +345,9 @@ export class Kitshn extends DurableObject<Env> {
   private uptimeCache: Map<string, Uptime> | null = null;
   private get uptime(): Map<string, Uptime> {
     this.uptimeCache ??= new Map(
-      this.sql<{ card_id: string; up: number; fails: number; since: number }>(
-        "SELECT card_id, up, fails, since FROM uptime",
-      ).map((row) => [row.card_id, { up: row.up === 1, fails: row.fails, since: row.since }]),
+      this.sql<{ card_id: string; up: number; failing_since: number | null; since: number }>(
+        "SELECT card_id, up, failing_since, since FROM uptime",
+      ).map((row) => [row.card_id, { up: row.up === 1, failingSince: row.failing_since, since: row.since }]),
     );
     return this.uptimeCache;
   }
@@ -7218,10 +7218,10 @@ export class Kitshn extends DurableObject<Env> {
     if (targets.length === 0 || slot === this.uptimeSlot) return { fetches: 0, changed: false };
     this.uptimeSlot = slot;
     const online = this.onlineMachines();
-    const probes = new Map<string, { up: boolean; failsToDown: number }>();
+    const probes = new Map<string, { up: boolean; failingFor: number }>();
     for (const card of targets) {
       const site = this.liveSites.get(card.id);
-      if (site) probes.set(card.id, { up: site.up && online.has(site.machineId), failsToDown: 1 });
+      if (site) probes.set(card.id, { up: site.up && online.has(site.machineId), failingFor: 0 });
     }
     const fetched =
       fetchBudget === 0
@@ -7249,20 +7249,20 @@ export class Kitshn extends DurableObject<Env> {
         return { card: card.id, up: ups.every(Boolean), fetches: card.addresses.length };
       }),
     );
-    for (const { card, up } of answers) probes.set(card, { up, failsToDown: FAILS_TO_DOWN });
+    for (const { card, up } of answers) probes.set(card, { up, failingFor: FAILING_FOR_MS });
     let changed = false;
     this.ctx.storage.transactionSync(() => {
       for (const [card, probe] of probes) {
         const before = this.uptime.get(card) ?? UP;
-        const after = nextUptime(before, probe.up, now, probe.failsToDown);
+        const after = nextUptime(before, probe.up, now, probe.failingFor);
         if (after === before) continue;
         if (stored(after)) {
           this.uptime.set(card, after);
           this.sql(
-            "INSERT OR REPLACE INTO uptime (card_id, up, fails, since) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO uptime (card_id, up, failing_since, since) VALUES (?, ?, ?, ?)",
             card,
             after.up ? 1 : 0,
-            after.fails,
+            after.failingSince,
             after.since,
           );
         } else {

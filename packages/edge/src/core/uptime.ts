@@ -2,8 +2,8 @@
 
 export interface Uptime {
   readonly up: boolean;
-  /** Failures in a row of a fetched card; a daemon site never counts any. */
-  readonly fails: number;
+  /** When an up card first failed in a row of failures, or null; a daemon site never has one. */
+  readonly failingSince: number | null;
   /** When `up` last changed; 0 for a card that kitshn never saw down. */
   readonly since: number;
 }
@@ -14,13 +14,16 @@ export interface UptimeChange {
 }
 
 /** A card with no row: up, with no failure. kitshn keeps rows only for cards that are down or failing (K-1126). */
-export const UP: Uptime = { up: true, fails: 0, since: 0 };
+export const UP: Uptime = { up: true, failingSince: null, since: 0 };
 
 /** True when the state needs a row; a card that is up with no failure has none. */
-export const stored = (uptime: Uptime) => !uptime.up || uptime.fails > 0;
+export const stored = (uptime: Uptime) => !uptime.up || uptime.failingSince !== null;
 
-/** K-1125: two failures in a row, in two different runs, make a fetched card down. */
-export const FAILS_TO_DOWN = 2;
+/**
+ * K-1125: a fetched card goes down when it still fails at least one turn after its first failure. kitshn counts by
+ * time, not by alarm runs, so two runs close together after a wake never make a card down.
+ */
+export const FAILING_FOR_MS = 2 * 60_000;
 /** K-1126: fetches per alarm run, inside the 50 subrequests of one run (K-406). */
 export const UPTIME_FETCHES_PER_RUN = 8;
 /** K-1126: the length of one turn; an alarm in the same turn fetches nothing. */
@@ -34,17 +37,18 @@ export const UPTIME_KEEP_MS = 30 * 24 * 60 * 60_000;
 export const probeUp = (status: number | null) => status !== null && status < 500;
 
 /**
- * The next state of a card after one probe. `failsToDown` is 1 for a daemon site, whose daemon already checks every
+ * The next state of a card after one probe. `failingFor` is 0 for a daemon site, whose daemon already checks every
  * 10 seconds (K-1107). It returns the same object when nothing changes, so the caller writes no row.
  */
-export function nextUptime(before: Uptime, probe: boolean, now: number, failsToDown: number): Uptime {
+export function nextUptime(before: Uptime, probe: boolean, now: number, failingFor: number): Uptime {
   if (probe)
-    return before.up && before.fails === 0
+    return before.up && before.failingSince === null
       ? before
-      : { up: true, fails: 0, since: before.up ? before.since : now };
+      : { up: true, failingSince: null, since: before.up ? before.since : now };
   if (!before.up) return before;
-  const fails = before.fails + 1;
-  return fails >= failsToDown ? { up: false, fails: 0, since: now } : { ...before, fails };
+  const first = before.failingSince ?? now;
+  if (now - first >= failingFor) return { up: false, failingSince: null, since: now };
+  return before.failingSince === null ? { ...before, failingSince: now } : before;
 }
 
 /**

@@ -162,7 +162,7 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   // 25: uptime (K-1125, K-1126). One row of state per card, written only on change, and each change from up to down
   // or back, kept 30 days.
   [
-    "CREATE TABLE uptime (card_id TEXT PRIMARY KEY, up INTEGER NOT NULL, fails INTEGER NOT NULL, since INTEGER NOT NULL)",
+    "CREATE TABLE uptime (card_id TEXT PRIMARY KEY, up INTEGER NOT NULL, failing_since INTEGER, since INTEGER NOT NULL)",
     "CREATE TABLE uptime_changes (card_id TEXT NOT NULL, at INTEGER NOT NULL, up INTEGER NOT NULL, PRIMARY KEY (card_id, at))",
   ],
 ];

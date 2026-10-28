@@ -7,26 +7,29 @@ describe("uptime (K-1125, K-1126)", () => {
     expect([500, 502, 530, null].map(probeUp)).toEqual([false, false, false, false]);
   });
 
-  it("makes a fetched card down after two failures in a row, and up after one success", () => {
-    const once = nextUptime(UP, false, 10, 2);
-    expect(once).toEqual({ up: true, fails: 1, since: 0 });
-    expect(nextUptime(once, true, 20, 2)).toEqual(UP);
-    const down = nextUptime(once, false, 20, 2);
-    expect(down).toEqual({ up: false, fails: 0, since: 20 });
-    expect(nextUptime(down, true, 30, 2)).toEqual({ up: true, fails: 0, since: 30 });
+  it("makes a fetched card down when it still fails a turn after its first failure, and up after one success", () => {
+    const turn = 120_000;
+    const once = nextUptime(UP, false, 1_000, turn);
+    expect(once).toEqual({ up: true, failingSince: 1_000, since: 0 });
+    // A second run soon after, for example right after a wake, does not make the card down.
+    expect(nextUptime(once, false, 5_000, turn)).toBe(once);
+    expect(nextUptime(once, true, 5_000, turn)).toEqual(UP);
+    const down = nextUptime(once, false, 1_000 + turn, turn);
+    expect(down).toEqual({ up: false, failingSince: null, since: 1_000 + turn });
+    expect(nextUptime(down, true, 200_000, turn)).toEqual({ up: true, failingSince: null, since: 200_000 });
   });
 
   it("makes a daemon site down at once", () => {
-    expect(nextUptime(UP, false, 10, 1)).toEqual({ up: false, fails: 0, since: 10 });
+    expect(nextUptime(UP, false, 10, 0)).toEqual({ up: false, failingSince: null, since: 10 });
   });
 
   it("returns the same state when nothing changes, and keeps a row only for a card that is down or failing", () => {
-    const down = { up: false, fails: 0, since: 5 };
-    expect(nextUptime(UP, true, 10, 2)).toBe(UP);
-    expect(nextUptime(down, false, 10, 2)).toBe(down);
+    const down = { up: false, failingSince: null, since: 5 };
+    expect(nextUptime(UP, true, 10, 120_000)).toBe(UP);
+    expect(nextUptime(down, false, 10, 120_000)).toBe(down);
     expect(stored(UP)).toBe(false);
     expect(stored({ ...UP, since: 30 })).toBe(false);
-    expect(stored({ ...UP, fails: 1 })).toBe(true);
+    expect(stored({ ...UP, failingSince: 1 })).toBe(true);
     expect(stored(down)).toBe(true);
   });
 

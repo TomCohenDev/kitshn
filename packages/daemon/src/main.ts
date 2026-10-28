@@ -21,7 +21,7 @@ import { gunzipSync } from "node:zlib";
 import type { Answer, Request } from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { keyPlan } from "./keys.ts";
-import { type LocalOutcome, askLocal, listenLocal } from "./local.ts";
+import { type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from "./local.ts";
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
 import { localUsersOf, peerDecision } from "./peer.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
@@ -29,12 +29,14 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   statfsSync,
+  statSync,
   writeFileSync,
   appendFileSync,
 } from "node:fs";
@@ -54,7 +56,9 @@ import {
   type Platform,
   RELEASES,
   cloudflaredUrl,
+  expectedDaemonUid,
   expectedHash,
+  isDigits,
   pathsFor,
   releaseAsset,
   serviceCommands,
@@ -192,14 +196,14 @@ async function rekeyCommand(code: string | undefined) {
 /** K-1705: asks the running daemon to rotate its key over its connection. */
 async function rotateKeyCommand() {
   const answer = await ask({ id: "1", type: "rotate-key" });
-  if (answer === null) fail(notRunning);
+  if (answer === null) fail(notRunning());
   if (answer.type !== "rotate-key") fail(`the daemon answered ${answer.type} to rotate-key.`);
   console.log(`Rotated. The new key is ${answer.fingerprint}.`);
 }
 
 async function statusCommand() {
   const answer = await ask({ id: "1", type: "status" });
-  if (answer === null) fail(notRunning);
+  if (answer === null) fail(notRunning());
   if (answer.type !== "status") fail(`the daemon answered ${answer.type} to status.`);
   const { status } = answer;
   console.log(
@@ -215,12 +219,24 @@ async function statusCommand() {
 
 /** K-701: where the commands find the daemon. `KITSHN_LOCAL_SOCKET` names the socket for a user other than its own. */
 const socketPath = process.env["KITSHN_LOCAL_SOCKET"] || paths.socket;
-const notRunning = `the daemon is not running (no daemon listens on ${socketPath}). Start it with: kitshn service install`;
+const daemonUid = expectedDaemonUid(process.env, socketPath, process.getuid!());
+/** K-701: why no daemon answers. A shared folder that another user made first keeps the daemon out of it. */
+function notRunning(): string {
+  const folder = dirname(socketPath);
+  if (socketPath.startsWith("/tmp/kitshn-") && typeof daemonUid === "number" && existsSync(folder)) {
+    const problem = sharedFolderProblem(lstatSync(folder), statSync(dirname(folder)), daemonUid);
+    if (problem)
+      return `${folder} belongs to another user or is not safe (${problem}), so the daemon cannot listen there. Ask root to remove it, then restart the daemon.`;
+  }
+  return `the daemon is not running (no daemon listens on ${socketPath}). Start it with: kitshn service install`;
+}
 
 /** K-702: one request to the running daemon; null when it does not run. An error answer ends the command. */
 async function ask(request: Request): Promise<Exclude<Answer, { type: "error" }> | null> {
   // A rotation waits for kitshn to store the new key (K-1705).
-  const outcome: LocalOutcome = await askLocal(socketPath, request, 30_000).catch((error: unknown) =>
+  if (typeof daemonUid === "string") fail(daemonUid);
+  const peer = { platform, daemonUid: daemonUid as number };
+  const outcome: LocalOutcome = await askLocal(socketPath, request, 30_000, peer).catch((error: unknown) =>
     fail(error instanceof Error ? error.message : String(error)),
   );
   if (outcome.kind === "not-running") return null;
@@ -245,20 +261,19 @@ function localUsersCommand(action: string | undefined, who: string | undefined) 
   if ((action !== "add" && action !== "remove") || !who) fail("usage: kitshn local-users list|add|remove <user or uid>");
   const uid = uidOf(who);
   if (uid === own) fail("the daemon user always can use the local socket.");
-  // K-701: the socket folder is 0700 (on Linux also the folder $XDG_RUNTIME_DIR), so only root reaches it.
-  if (action === "add" && uid !== 0)
-    fail(`only root can reach the socket of this user, so the user id ${uid} cannot connect (K-701).`);
   const next = action === "add" ? [...new Set([...users, uid])] : users.filter((user) => user !== uid);
   // Through a rename, so a stop never leaves half of the file that holds the machine token.
   const temporary = `${paths.config}.${process.pid}.tmp`;
   writeFileSync(temporary, `${JSON.stringify({ ...machine, localUsers: next }, null, 2)}\n`, { mode: 0o600 });
   renameSync(temporary, paths.config);
   console.log(`Local users: ${next.length > 0 ? next.join(", ") : "none"}, and the daemon user ${own}.`);
+  if (action === "add")
+    console.log(`The user ${who} sets KITSHN_LOCAL_SOCKET=${paths.sharedSocket} to reach the daemon.`);
 }
 
 /** A user id, from a number or a user name. */
 function uidOf(who: string): number {
-  if ([...who].every((char) => char >= "0" && char <= "9")) return Number(who);
+  if (isDigits(who)) return Number(who);
   const result = spawnSync("id", ["-u", who], { encoding: "utf8" });
   if (result.status !== 0) fail(`there is no user ${who}.`);
   return Number(result.stdout.trim());
@@ -1272,14 +1287,21 @@ async function runCommand() {
   joined = config;
   // First, so a second daemon stops before it touches the tunnel or the connection of the running one.
   const own = process.getuid!();
-  const local = await listenLocal(paths.socket, {
+  const socketOptions = {
     platform,
     // Read at each connection, so `kitshn local-users` needs no restart.
-    decide: (peer) => peerDecision(peer, own, localUsersOf(readMachineFile())),
+    decide: (peer: number) => peerDecision(peer, own, localUsersOf(readMachineFile())),
     handle: answerLocal,
     log,
-  });
+  };
+  const local = await listenLocal(paths.socket, { ...socketOptions, access: "private" });
   process.on("exit", local.stop);
+  // K-701: the users in `localUsers` connect here. An unsafe folder costs only this socket, not the daemon.
+  const shared = await listenLocal(paths.sharedSocket, { ...socketOptions, access: "shared" }).catch((error: unknown) => {
+    log(`no shared socket: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  });
+  if (shared) process.on("exit", shared.stop);
   // The service manager stops the daemon with SIGTERM; an exit runs the clean-up of the socket and the jobs.
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => process.exit(0));
   pruneSamples();

@@ -25,9 +25,17 @@ function fakeCloudflare(others: Record<string, number> = {}) {
     scripts.set(id, { classes: new Set(), crons: Array.from({ length: count }, () => "0 * * * *") });
   const domains: Array<{ id: string; hostname: string; service: string }> = [];
   const uploads: Array<Record<string, unknown>> = [];
-  const state: { failDomains: number; failUploads: number; onDelete: (() => Promise<void>) | null } = {
+  /** K-821: each rollback of a script to a version, in order. */
+  const rollbacks: Array<{ script: string; version: string }> = [];
+  const state: {
+    failDomains: number;
+    failUploads: number;
+    refuseRollbacks: Array<string>;
+    onDelete: (() => Promise<void>) | null;
+  } = {
     failDomains: 0,
     failUploads: 0,
+    refuseRollbacks: [],
     onDelete: null,
   };
   let next = 1;
@@ -103,8 +111,15 @@ function fakeCloudflare(others: Record<string, number> = {}) {
         item.crons = ((await request.json()) as Array<{ cron: string }>).map((entry) => entry.cron);
       return ok({ schedules: item.crons.map((cron) => ({ cron })) });
     }
-    if (/^\/accounts\/acct\/workers\/scripts\/[^/]+\/deployments$/.test(path))
-      return ok({ deployments: [{ versions: [{ version_id: `version-${uploads.length}` }] }] });
+    const deployed = /^\/accounts\/acct\/workers\/scripts\/([^/]+)\/deployments$/.exec(path)?.[1];
+    if (deployed && method === "POST") {
+      const body = (await request.json()) as { versions: Array<{ version_id: string }> };
+      if (state.refuseRollbacks.includes(deployed))
+        return refuse("a Durable Object class changed since that version");
+      rollbacks.push({ script: deployed, version: body.versions[0]?.version_id ?? "" });
+      return ok({});
+    }
+    if (deployed) return ok({ deployments: [{ versions: [{ version_id: `version-${uploads.length}` }] }] });
     if (path.startsWith("/accounts/acct/workers/scripts/")) return ok({});
     if (path === "/accounts/acct/workers/domains") {
       if (method === "GET")
@@ -156,18 +171,22 @@ function fakeCloudflare(others: Record<string, number> = {}) {
     domains.filter((item) => item.hostname === hostname).map((item) => item.service);
   /** Deletes a KV namespace behind kitshn's back, as a restart in the middle of an orphan delete can leave it. */
   const dropKv = (id: string) => collection("/accounts/acct/storage/kv/namespaces").delete(id);
-  return { uploads, state, scripts, served, dropKv };
+  return { uploads, state, scripts, served, dropKv, rollbacks };
 }
 
 /** One repo of the test, so each test has its own cards. */
 function repo(id: string, name: string) {
   const card = environmentNames(id, `owner/${name}`, "prod").resourceId;
+  /** The workflow run and the commit that the next token names. */
+  const run = { id: "100", sha: "0123456789abcdef" };
   const token = () =>
     new SignJWT({
       repository: `owner/${name}`,
       repository_id: id,
       repository_owner_id: "1",
-      sha: "0123456789abcdef",
+      sha: run.sha,
+      run_id: run.id,
+      run_attempt: "1",
       event_name: "push",
       ref: "refs/heads/main",
     })
@@ -177,7 +196,7 @@ function repo(id: string, name: string) {
       .setIssuedAt()
       .setExpirationTime("5m")
       .sign(github.privateKey);
-  return { id, name, card, script: `kitshn-${card}`, address: `${name}.example.com`, token };
+  return { id, name, card, script: `kitshn-${card}`, address: `${name}.example.com`, token, run };
 }
 
 async function call(path: string, method: string, headers: Record<string, string>, body?: unknown) {
@@ -213,7 +232,8 @@ const admin = async (path: string, method: string, body?: unknown) =>
     body,
   );
 
-const recipe = (worker: Record<string, unknown> = {}, name = "prod") => ({
+const recipe = (worker: Record<string, unknown> = {}, name = "prod", needs?: ReadonlyArray<string>) => ({
+  ...(needs ? { needs: { apps: needs } } : {}),
   worker: {
     main: "worker.js",
     compatibilityDate: "2026-10-01",
@@ -234,9 +254,14 @@ async function allow(app: ReturnType<typeof repo>) {
 }
 
 /** One deploy from the plan to the finish. The Access sync has a budget per step, so a 503 finish runs again. */
-async function deploy(app: ReturnType<typeof repo>, worker: Record<string, unknown> = {}, key?: string) {
+async function deploy(
+  app: ReturnType<typeof repo>,
+  worker: Record<string, unknown> = {},
+  key?: string,
+  needs?: ReadonlyArray<string>,
+) {
   const plan = await step(app, "/deploy/plan", {
-    recipe: recipe(worker),
+    recipe: recipe(worker, "prod", needs),
     event: {},
     ...(key ? { key } : {}),
   });
@@ -428,5 +453,67 @@ describe("several apps per repo (K-804, K-820)", () => {
       durable.storage.sql.exec("SELECT state, reason FROM deploys WHERE id = ?", deployId).one(),
     );
     expect(row).toEqual({ state: "running", reason: "the deploy did not end within 38 minutes." });
+  });
+});
+
+describe("rollback (K-821)", () => {
+  type Choice = { deployId: string; sha: string; why: string | null };
+  const choices = async (card: string) =>
+    ((await admin(`/api/apps/${card}/rollbacks`, "GET")).body["choices"] ?? []) as Array<Choice>;
+
+  it("serves an earlier Cloudflare version again, and the card then counts it as its current deploy", async () => {
+    const cloudflare = fakeCloudflare();
+    const app = repo("60", "board");
+    await allow(app);
+    app.run.sha = "1111111aaaaaaa";
+    expect((await deploy(app)).status).toBe(200);
+    app.run.sha = "2222222bbbbbbb";
+    app.run.id = "101";
+    expect((await deploy(app)).status).toBe(200);
+    const [current, before] = await choices(app.card);
+    expect(current?.sha).toBe("2222222bbbbbbb");
+    expect(before).toMatchObject({ sha: "1111111aaaaaaa", why: null });
+    const rolled = await admin(`/api/apps/${app.card}/rollback`, "POST", { deployId: before?.deployId });
+    expect(rolled.status, JSON.stringify(rolled.body)).toBe(200);
+    expect(String(rolled.body["note"])).toMatch(/data did not roll back/);
+    expect(cloudflare.rollbacks).toEqual([{ script: app.script, version: "version-1" }]);
+    expect((await choices(app.card))[0]?.sha).toBe("1111111aaaaaaa");
+  });
+
+  it("shows the refusal of Cloudflare and changes nothing", async () => {
+    const cloudflare = fakeCloudflare();
+    const app = repo("61", "rooms2");
+    await allow(app);
+    expect((await deploy(app)).status).toBe(200);
+    app.run.id = "101";
+    expect((await deploy(app)).status).toBe(200);
+    cloudflare.state.refuseRollbacks = [app.script];
+    const before = (await choices(app.card))[1];
+    const refused = await admin(`/api/apps/${app.card}/rollback`, "POST", { deployId: before?.deployId });
+    expect(refused.status).toBe(409);
+    expect(String(refused.body["error"])).toMatch(/Durable Object class changed/);
+    expect((await choices(app.card))[0]?.deployId).not.toBe(before?.deployId);
+  });
+
+  it("rolls a run back app by app, each before the apps that it needs, and stops at the first refusal", async () => {
+    const cloudflare = fakeCloudflare();
+    const app = repo("62", "pair");
+    const cv = { ...app, card: environmentNames("62", "owner/pair", "prod", "cv").resourceId };
+    await allow(app);
+    for (const run of ["100", "101"]) {
+      app.run.id = run;
+      expect((await deploy(app, {}, "app")).status).toBe(200);
+      expect((await deploy(app, {}, "cv", ["app"])).status).toBe(200);
+    }
+    const plan = await admin(`/api/apps/${app.card}/run-rollback`, "GET");
+    expect((plan.body["steps"] as Array<{ card: string }>).map((step) => step.card)).toEqual([
+      cv.card,
+      app.card,
+    ]);
+    cloudflare.state.refuseRollbacks = [`kitshn-${app.card}`];
+    const result = await admin(`/api/apps/${app.card}/run-rollback`, "POST");
+    expect(result.body["state"]).toBe("failed");
+    expect(cloudflare.rollbacks.map((item) => item.script)).toEqual([`kitshn-${cv.card}`]);
+    expect((result.body["notes"] as Array<string>).at(-1)).toMatch(/stopped here/);
   });
 });

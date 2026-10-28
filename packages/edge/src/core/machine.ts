@@ -52,6 +52,8 @@ export interface MachineStatus {
   readonly tunnel: "starting" | "running" | "stopped";
   /** Job kinds that this daemon knows beyond shell, diagnostics and restart. Old daemons send none. */
   readonly capabilities?: ReadonlyArray<string>;
+  /** K-821: the bytes of the images that the daemon keeps for rollbacks, at most; shared layers count once per image. */
+  readonly keptBytes?: number;
 }
 
 /** K-605, K-606: the latest resource sample. The Durable Object keeps it in memory only. */
@@ -109,7 +111,23 @@ export type Command =
    * K-909: delete one orphaned volume. kitshn fills in the project from the daemon's report; the daemon
    * deletes only a volume that it still reports as idle.
    */
-  | { readonly kind: "compose-volume-remove"; readonly project: string; readonly volume: string };
+  | { readonly kind: "compose-volume-remove"; readonly project: string; readonly volume: string }
+  /**
+   * K-821: start the build before the last one of a Compose app again, from its kept source, params and image tags,
+   * without a build. The daemon checks that its kept build is the deploy `deployId`. Only kitshn makes this job.
+   */
+  | {
+      readonly kind: "compose-rollback";
+      readonly deployId: string;
+      readonly allowed: ReadonlyArray<string>;
+      readonly project: string;
+      readonly name: string;
+      readonly environment: string;
+      readonly repo: string;
+      readonly file: string | null;
+      /** K-821: the run rollback that this job is one step of, if any. */
+      readonly group: string | null;
+    };
 
 /** K-909: a Docker volume with the Compose project label of a kitshn app that runs no container. */
 export interface ProjectVolume {
@@ -121,6 +139,8 @@ export interface JobResult {
   readonly ok: boolean;
   readonly exitCode: number | null;
   readonly output: string;
+  /** K-821: after a Compose build came up, the image id of each service, which the daemon tagged to keep. */
+  readonly images?: Readonly<Record<string, string>>;
 }
 
 /** K-1104, K-1107: a live site that a machine exposes, and whether its local server answers. */

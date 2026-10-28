@@ -78,6 +78,7 @@ import {
 } from "./service.ts";
 import { type SiteEntry, addSite, parseSiteFile, probe, targetOf } from "./sites.ts";
 import { RUNNING_FORMAT, VOLUME_FORMAT, idleVolumes, volumeRemoveRefusal } from "./volumes.ts";
+import { keptTag, serviceImages, staleTags } from "./keep.ts";
 
 declare const KITSHN_VERSION: string;
 const VERSION = typeof KITSHN_VERSION === "string" ? KITSHN_VERSION : "dev";
@@ -480,7 +481,13 @@ process.on("exit", () => {
   }
 });
 
-type JobOutcome = { ok: boolean; exitCode: number | null; output: string };
+type JobOutcome = {
+  ok: boolean;
+  exitCode: number | null;
+  output: string;
+  /** K-821: the image id of each service of a Compose build that came up. */
+  images?: Record<string, string>;
+};
 
 /** Runs a program with a time limit; it gets its own process group, so the limit also ends its children. */
 function runProgram(
@@ -557,7 +564,7 @@ const KITSHN1_PERSISTENT = process.env["KITSHN1_PERSISTENT"] ?? "/persistent";
  * name of the address, and the tunnel sends the address there.
  */
 async function composeUp(
-  command: Extract<Command, { kind: "compose" | "compose-redeploy" }>,
+  command: Extract<Command, { kind: "compose" | "compose-redeploy" | "compose-rollback" }>,
 ): Promise<JobOutcome> {
   const dir = join(paths.data, "apps", command.project);
   // K-818: each deploy unpacks into a new folder that no running container mounts, so the old app runs on
@@ -586,9 +593,21 @@ async function composeUp(
     mkdirSync(dir, { recursive: true });
     // K-718: the last build that came up stays in good/ with its params; a redeploy starts it again.
     const good = join(dir, "good");
+    // K-821: the build before it stays in good.prev/, with the image tags of both, for a rollback.
+    const previous = join(dir, "good.prev");
     // A stop in the middle of the swap below leaves only good.old; it is still the last good build.
     if (!existsSync(good) && existsSync(`${good}.old`)) renameSync(`${good}.old`, good);
-    if (command.kind === "compose-redeploy") {
+    const keptId = (set: string) =>
+      existsSync(join(set, "deploy-id")) ? readFileSync(join(set, "deploy-id"), "utf8").trim() : null;
+    if (command.kind === "compose-rollback") {
+      if (keptId(previous) !== command.deployId)
+        throw new Error(
+          `this machine keeps no build of the deploy ${command.deployId} to roll back to; it keeps ${keptId(previous) ?? "none"} (K-821)`,
+        );
+      copyFileSync(join(previous, "source.tgz"), join(dir, "source.tgz"));
+      copyFileSync(join(previous, "params.env"), join(dir, "params.env"));
+      chmodSync(join(dir, "params.env"), 0o600);
+    } else if (command.kind === "compose-redeploy") {
       if (!existsSync(join(good, "source.tgz")) || !existsSync(join(good, "params.env")))
         throw new Error("this machine keeps no build of the app that came up; deploy it from the repo");
       copyFileSync(join(good, "source.tgz"), join(dir, "source.tgz"));
@@ -796,7 +815,20 @@ async function composeUp(
       "--env-file",
       env.KITSHN_PARAMS_FILE,
     ];
-    await step("docker compose build", "nice", ["-n", "19", "docker", ...run, "build"], { cwd: source, env });
+    // K-821: a rollback runs the kept images of that deploy under the names that Compose runs, with no build.
+    const images = serviceImages(config, command.project);
+    if (command.kind === "compose-rollback") {
+      for (const [service, image] of images)
+        await step(`take the kept image of ${service}`, "docker", [
+          "tag",
+          keptTag(command.project, service, command.deployId),
+          image,
+        ]);
+    } else
+      await step("docker compose build", "nice", ["-n", "19", "docker", ...run, "build"], {
+        cwd: source,
+        env,
+      });
     // K-818: no container of the app runs from here to `up`, so none can swap a path in the data, log or
     // sockets folder between the check below and `up`. Orphans and one-off runs count too.
     const running = await runProgram("docker", [
@@ -835,6 +867,16 @@ async function composeUp(
     if (typeof next === "string") throw new Error(next);
     writeSites(next);
     void checkSites();
+    // K-821: the deploy of this build: a redeploy starts the build of good/ again, so it keeps its id.
+    const deployId = command.kind === "compose-redeploy" ? keptId(good) : command.deployId;
+    const kept: Record<string, string> = {};
+    if (deployId !== null)
+      for (const [service, image] of images) {
+        const id = await runProgram("docker", ["image", "inspect", "--format", "{{.Id}}", image]);
+        if (!id.ok) continue;
+        kept[service] = id.output.trim();
+        await runProgram("docker", ["tag", image, keptTag(command.project, service, deployId)]);
+      }
     // The build and its params change together: a stop in between leaves the old pair, the new pair or none.
     const staged = join(dir, "good.next");
     rmSync(staged, { recursive: true, force: true });
@@ -842,11 +884,23 @@ async function composeUp(
     renameSync(join(dir, "source.tgz"), join(staged, "source.tgz"));
     copyFileSync(join(dir, "params.env"), join(staged, "params.env"));
     chmodSync(join(staged, "params.env"), 0o600);
+    if (deployId !== null) writeFileSync(join(staged, "deploy-id"), `${deployId}\n`);
     rmSync(checked, { force: true });
     rmSync(`${good}.old`, { recursive: true, force: true });
-    if (existsSync(good)) renameSync(good, `${good}.old`);
+    // K-821: a new build or a rollback moves the build that ran so far to good.prev/; a preview keeps only one build.
+    const preview = /^pr-\d+$/.test(command.environment);
+    if (command.kind === "compose-redeploy") {
+      if (existsSync(good)) renameSync(good, `${good}.old`);
+    } else {
+      rmSync(previous, { recursive: true, force: true });
+      if (existsSync(good)) renameSync(good, preview ? `${good}.old` : previous);
+    }
     renameSync(staged, good);
     rmSync(`${good}.old`, { recursive: true, force: true });
+    output += await pruneKept(
+      command.project,
+      [keptId(good), keptId(previous)].flatMap((id) => (id ? [id] : [])),
+    );
     // The containers of the last build may have written into their source as root (a bind mount of `.`).
     // A folder that stays costs disk only; the app is up, so the deploy still succeeds.
     for (const old of sourceFolders(dir).filter((folder) => folder !== source))
@@ -854,7 +908,7 @@ async function composeUp(
         (cleanup: unknown) => `${String(cleanup)}\n`,
       );
     output += `\nThe app answers on its socket; the tunnel sends ${command.name} there.\n`;
-    return { ok: true, exitCode: 0, output };
+    return { ok: true, exitCode: 0, output, images: kept };
   } catch (error) {
     output += `\n[kitshn: ${error instanceof Error ? error.message : String(error)}]`;
     rmSync(checked, { force: true });
@@ -889,6 +943,67 @@ async function composeUp(
     }
     return { ok: false, exitCode: null, output };
   }
+}
+
+/**
+ * K-821: removes the kept image tags of an app that no kept build names, then the images that no tag holds any more
+ * (dangling only, so no other image goes), and counts what the daemon keeps for the machine card.
+ */
+async function pruneKept(project: string, keep: ReadonlyArray<string>): Promise<string> {
+  const listed = await runProgram("docker", [
+    "image",
+    "ls",
+    "--format",
+    "{{.Repository}}:{{.Tag}}",
+    "--filter",
+    `reference=kitshn-keep/${project}/*`,
+  ]);
+  if (!listed.ok) return `$ list the kept images\n${listed.output}`;
+  let output = "";
+  const stale = staleTags(
+    listed.output.split("\n").map((line) => line.trim()),
+    project,
+    keep,
+  );
+  if (stale.length > 0) output += (await runProgram("docker", ["image", "rm", ...stale])).output;
+  await runProgram("docker", ["image", "prune", "-f"]);
+  await countKept();
+  return output;
+}
+
+/** K-821: the bytes of the kept images of all apps, at most: an image counts whole, also its shared layers. */
+let keptBytes: number | undefined;
+
+async function countKept() {
+  const ids = await runProgram("docker", [
+    "image",
+    "ls",
+    "-q",
+    "--no-trunc",
+    "--filter",
+    "reference=kitshn-keep/*/*",
+  ]);
+  if (!ids.ok) return;
+  const unique = [
+    ...new Set(
+      ids.output
+        .split("\n")
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (unique.length === 0) {
+    keptBytes = 0;
+  } else {
+    const sizes = await runProgram("docker", ["image", "inspect", "--format", "{{.Size}}", ...unique]);
+    if (!sizes.ok) return;
+    keptBytes = sizes.output
+      .split("\n")
+      .map((line) => Number(line.trim()))
+      .filter((size) => Number.isFinite(size))
+      .reduce((sum, size) => sum + size, 0);
+  }
+  report();
 }
 
 /** Short root jobs on app folders (copy, clean-up); busybox has `cp -a` and `find -delete` and is a few MB. */
@@ -965,6 +1080,8 @@ async function composeDown(command: Extract<Command, { kind: "compose-down" }>):
   );
   // Containers that may still run could write while the files go, so a failed down keeps them for a retry.
   if (!command.removeData || !result.ok) return result;
+  // K-821: a removed preview keeps no build, so its kept image tags go too.
+  await pruneKept(command.project, []);
   // Also the volumes that no kept config names, such as those of an earlier build.
   const volumes = await runProgram("docker", [
     "volume",
@@ -1032,7 +1149,11 @@ function oneAtATime(project: string, work: () => Promise<JobOutcome>): Promise<J
 }
 
 function runJob(command: Command): Promise<JobOutcome> {
-  if (command.kind === "compose" || command.kind === "compose-redeploy")
+  if (
+    command.kind === "compose" ||
+    command.kind === "compose-redeploy" ||
+    command.kind === "compose-rollback"
+  )
     return oneAtATime(command.project, () => composeUp(command));
   if (command.kind === "compose-down") return oneAtATime(command.project, () => composeDown(command));
   if (command.kind === "compose-volume-remove")
@@ -1068,7 +1189,15 @@ function report() {
   const message: DaemonMessage = {
     type: "status",
     status: {
-      capabilities: ["update", "update-gz", "compose", "compose-redeploy", "compose-guard"],
+      capabilities: [
+        "update",
+        "update-gz",
+        "compose",
+        "compose-redeploy",
+        "compose-guard",
+        "compose-rollback",
+      ],
+      ...(keptBytes === undefined ? {} : { keptBytes }),
       version: VERSION,
       os: `${osPlatform()} ${release()}`,
       arch: arch(),
@@ -1460,6 +1589,8 @@ async function runCommand() {
   pruneSamples();
   await ensureTunnel(config);
   watchTunnel();
+  // K-821: the machine card shows what the kept builds take on disk.
+  void countKept();
   connect(config);
   setInterval(() => {
     const value = sample();

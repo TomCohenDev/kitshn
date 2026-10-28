@@ -113,6 +113,14 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     // The card panel reads the newest deploy of each card (deployNotes), and deploy rows never go away.
     "CREATE INDEX deploys_resource ON deploys (resource_id)",
   ],
+  // 18: rollback (K-821). `images` holds the image id of each service of a Compose deploy that came up; `needs` the
+  // keys of `needs.apps`, so a run rolls back in its own order. `rollbacks` holds the steps of a run rollback.
+  [
+    "ALTER TABLE deploys ADD COLUMN images TEXT",
+    "ALTER TABLE deploys ADD COLUMN needs TEXT",
+    `CREATE TABLE rollbacks (id TEXT PRIMARY KEY, steps TEXT NOT NULL, next INTEGER NOT NULL, state TEXT NOT NULL,
+      actor TEXT NOT NULL, notes TEXT NOT NULL)`,
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

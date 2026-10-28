@@ -86,6 +86,8 @@ export interface ActionHandlers {
   readonly unstack: (stackId: string) => void;
   readonly renameStack: (stackId: string) => void;
   readonly removeApp: (resource: Resource) => void;
+  /** K-821: opens the rollback of one card, or of the run that made its current deploy. */
+  readonly rollback: (resource: Resource, mode: "card" | "run") => void;
   readonly runJob: (view: MachineView, command: Command) => void;
   readonly removeMachine: (view: MachineView) => void;
   readonly editCircle: (circleId: string) => void;
@@ -598,6 +600,18 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
     [
       ...(isAppCard(resource) && ctx.deployed.has(resource.id)
         ? [
+            {
+              id: "rollback",
+              label: "Roll back…",
+              tip: "Roll back: serve an earlier deploy of this card again. Data does not roll back.",
+              run: () => h.rollback(resource, "card"),
+            },
+            {
+              id: "rollback-run",
+              label: "Roll back this run…",
+              tip: "Roll back every card of the workflow run that made this deploy. Data does not roll back.",
+              run: () => h.rollback(resource, "run"),
+            },
             {
               id: "remove-app",
               label: "Remove app",

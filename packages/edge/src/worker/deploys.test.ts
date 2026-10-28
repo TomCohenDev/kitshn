@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   environmentNames,
+  jobError,
+  keptImages,
   eventOf,
   legacyRepos,
   parseConfigFile,
@@ -231,5 +233,21 @@ describe("card ids of several apps (K-804)", () => {
       "statsdashboarx",
     );
     expect(other.resourceId).not.toBe(long.resourceId);
+  });
+});
+
+describe("Compose results for rollback (K-820, K-821)", () => {
+  it("keeps only image ids from a job result", () => {
+    const id = `sha256:${"a".repeat(64)}`;
+    expect(keptImages({ app: id, cache: "not-an-id", other: 3 })).toBe(JSON.stringify({ app: id }));
+    expect(keptImages({ app: "x" })).toBeNull();
+    expect(keptImages(null)).toBeNull();
+  });
+
+  it("takes the error that a failed job names at the end of its output", () => {
+    expect(jobError("$ docker compose up\n...\n[kitshn: the app opened no socket within 3 minutes]")).toBe(
+      "the app opened no socket within 3 minutes",
+    );
+    expect(jobError("killed")).toBe("The machine job failed.");
   });
 });

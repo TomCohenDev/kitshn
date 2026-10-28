@@ -142,7 +142,7 @@ const run = (action: Action) => {
 const items = (action: Action) => ("items" in action ? action.items : []);
 
 describe("card actions", () => {
-  it("offers a deployed app its address, shares, tray and Remove app, and nothing of a machine", () => {
+  it("offers a deployed app its address, shares, tray, rollbacks and Remove app, and nothing of a machine", () => {
     const { handlers, calls } = recorder();
     const groups = actionsFor(context(), handlers, { _tag: "card", id: "riffle" });
     expect(ids(groups)).toEqual([
@@ -154,9 +154,14 @@ describe("card actions", () => {
       "select-kind",
       "add-to-stack",
       "tray",
+      "rollback",
+      "rollback-run",
       "remove-app",
     ]);
     expect(find(groups, "remove-app").danger).toBe(true);
+    run(find(groups, "rollback-run"));
+    expect(calls.at(-1)).toMatchObject(["rollback", { id: "riffle" }, "run"]);
+    calls.length = 0;
     // The card sits in the Owner circle only, so it can join Everyone and Her.
     expect(items(find(groups, "share")).map((item) => item.id)).toEqual([
       `share:${EVERYONE_CIRCLE_ID}`,

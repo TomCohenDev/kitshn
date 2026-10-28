@@ -1,6 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { MIGRATIONS, migrate } from "./migrations.ts";
+import { type Change, type Forget, invert } from "../core/changes.ts";
+import { type Circle, type Resource, type State, shareKey } from "../core/model.ts";
+import { seed } from "../core/seed.ts";
+import { MIGRATIONS, levelSummaries, migrate } from "./migrations.ts";
 
 const columns = (db: DatabaseSync, table: string) =>
   (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((column) => column.name);
@@ -37,5 +40,83 @@ describe("Durable Object migrations", () => {
     expect(migrate((query) => run.push(query), MIGRATIONS.length)).toBe(MIGRATIONS.length);
     expect(run).toEqual([]);
     expect(() => migrate(() => undefined, MIGRATIONS.length + 1)).toThrow(/newer/);
+  });
+});
+
+describe("migration 12: History words a new level of a share apart (K-1508)", () => {
+  const her: Circle = {
+    id: "her",
+    name: "Her",
+    color: "#FF5277",
+    level: "use",
+    members: [{ _tag: "email", email: "her@example.com" }],
+    match: "any",
+    needsPasskey: false,
+    endsAt: null,
+    x: 400,
+    y: 0,
+    r: 200,
+  };
+  const box: Resource = {
+    id: "box",
+    kind: "machine",
+    name: "box",
+    addresses: [],
+    status: "running",
+    group: null,
+    machine: null,
+  };
+  const s = seed(["owner@example.com"], "kit.example.com");
+  // The state now: box sits in Her at view, after a drop (1), a new level (2) and its undo and redo (3, 4).
+  const now: State = {
+    circles: new Map([...s.circles, her].map((circle) => [circle.id, circle])),
+    resources: new Map([...s.resources, box].map((resource) => [resource.id, resource])),
+    places: new Map([...s.places, ["box", { x: 400, y: 0 }]]),
+    shareSettings: new Map([[shareKey("box", "her"), { level: "view", endsAt: null }]]),
+    stacks: new Map(),
+    paused: null,
+    machines: new Map(),
+  };
+  const toView: Change = {
+    _tag: "shareSetting",
+    id: shareKey("box", "her"),
+    before: null,
+    after: { level: "view", endsAt: null },
+  };
+  const row = (id: number, summary: string, changes: ReadonlyArray<Change | Forget>) => ({
+    id,
+    summary,
+    changes: JSON.stringify(changes),
+  });
+  const rows = [
+    row(5, "Deployed riffle", []),
+    row(4, "box: + Her · view", [toView]),
+    row(3, "Undo #2: box: + Her · use", invert([toView])),
+    row(2, "box: + Her · view", [toView]),
+    row(1, "box: + Her · use", [{ _tag: "place", id: "box", before: null, after: { x: 400, y: 0 } }]),
+  ];
+
+  it("rewrites only the summaries of a new level, from the stored changes, and keeps undo labels", () => {
+    expect(levelSummaries(now, rows)).toEqual({
+      updates: [
+        { id: 4, summary: "box: Her · use → view" },
+        { id: 3, summary: "Undo #2: box: Her · view → use" },
+        { id: 2, summary: "box: Her · use → view" },
+      ],
+      skipped: 0,
+    });
+  });
+
+  it("skips a row that the stored changes do not explain, and finds nothing more on a second run", () => {
+    // Without the card, the walk back cannot rebuild the share that the stored text names; the row without changes is an action.
+    const forgotten = { ...now, resources: new Map(s.resources.map((resource) => [resource.id, resource])) };
+    expect(levelSummaries(forgotten, rows.slice(0, 2))).toEqual({ updates: [], skipped: 1 });
+    expect(levelSummaries(now, [row(2, "box: + Her · use", [toView])])).toEqual({ updates: [], skipped: 1 });
+    const { updates } = levelSummaries(now, rows);
+    const done = rows.map((old) => ({
+      ...old,
+      summary: updates.find((update) => update.id === old.id)?.summary ?? old.summary,
+    }));
+    expect(levelSummaries(now, done)).toEqual({ updates: [], skipped: 0 });
   });
 });

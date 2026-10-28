@@ -654,7 +654,12 @@ export const describeDiff = (diff: ShareDiff) =>
       ? `${diff.resource.name}: + ${diff.circle.name} · ${diff.to}`
       : `${diff.resource.name}: ${diff.circle.name} · ${diff.from} → ${diff.to}`;
 
-export function summarize(before: State, after: State, changes: ReadonlyArray<Change>): string {
+export function summarize(
+  before: State,
+  after: State,
+  changes: ReadonlyArray<Change>,
+  describe: (diff: ShareDiff) => string = describeDiff,
+): string {
   const app = changes.find((change) => change._tag === "app");
   if (app?.after) return `Restored the app ${app.after.name} (K-909)`;
   if (app?.before) return `Removed the app ${app.before.name} (K-909)`;
@@ -666,7 +671,7 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
   }
   const diffs = shareDiff(before, after);
   if (diffs.length > 0) {
-    const shown = diffs.slice(0, 3).map(describeDiff).join("; ");
+    const shown = diffs.slice(0, 3).map(describe).join("; ");
     return diffs.length > 3 ? `${shown}; and ${diffs.length - 3} more` : shown;
   }
   const circles = changes.filter((change) => change._tag === "circle");

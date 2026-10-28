@@ -1,3 +1,6 @@
+import { type Change, type Forget, type ShareDiff, applyChanges, describeDiff, invert, summarize } from "../core/changes.ts";
+import type { State } from "../core/model.ts";
+
 /**
  * The schema of the Durable Object as numbered migrations. Each list runs once, in order, in one
  * transaction with the new version number. Never change a migration that shipped; add a new one.
@@ -79,10 +82,65 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "CREATE TABLE icons (id TEXT PRIMARY KEY, type TEXT NOT NULL, hash TEXT NOT NULL, bytes BLOB NOT NULL)",
     "ALTER TABLE presence ADD COLUMN os TEXT",
   ],
+  // 12: History words a new level of a share apart from a new share (K-1508). Only code: levelSummaries.
+  [],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */
 export const REPO_GATE_MIGRATION = 6;
+
+/** K-1508: the migration after which the Durable Object words older new levels of a share in the new way. */
+export const LEVEL_SUMMARY_MIGRATION = 12;
+
+export type SummaryRow = {
+  readonly id: number;
+  readonly summary: string;
+  readonly changes: string;
+};
+
+/** Before K-1508 worded a new level apart, every share that ends at a level read as a new share. */
+const oldDescribe = (diff: ShareDiff) => describeDiff({ ...diff, from: null });
+
+/**
+ * K-1508: part of migration 12. Gives the revisions that name a new level of a share as a new share the summary of
+ * the new rule. It walks back from `state` through `rows` (newest first) to the state around each revision, and
+ * rewrites a summary only when the old rule on those states gives the stored text, so a row never gets a fact
+ * that its changes do not hold. A row with changes whose stored text neither rule gives stays as it is and counts
+ * as skipped: the walk cannot rebuild it (a card that kitshn forgot or renamed), or its text is not a plain summary
+ * (moves that joined it, K-1505).
+ */
+export function levelSummaries(
+  state: State,
+  rows: ReadonlyArray<SummaryRow>,
+): { readonly updates: Array<{ readonly id: number; readonly summary: string }>; readonly skipped: number } {
+  const updates: Array<{ id: number; summary: string }> = [];
+  let skipped = 0;
+  let after = state;
+  for (const row of rows) {
+    const changes = (JSON.parse(row.changes) as Array<Change | Forget>).filter(
+      (change): change is Change => change._tag !== "forget",
+    );
+    const before = applyChanges(after, invert(changes));
+    const summary = summarize(before, after, changes);
+    const old = summarize(before, after, changes, oldDescribe);
+    after = before;
+    // A revision without changes records an action in its own words.
+    if (changes.length === 0) continue;
+    // An undo starts with its label, "Undo #12: " or "Undo #12 for tick3d: ".
+    const labelOf = (text: string) => {
+      const label = row.summary.slice(0, row.summary.length - text.length);
+      return row.summary.endsWith(text) &&
+        (label === "" || (label.startsWith("Undo #") && label.endsWith(": ")))
+        ? label
+        : null;
+    };
+    if (labelOf(summary) !== null) continue;
+    const label = labelOf(old);
+    if (label === null) skipped++;
+    else updates.push({ id: row.id, summary: label + summary });
+  }
+  return { updates, skipped };
+}
 
 /** Runs the migrations after `from`. Returns the new version. The caller provides the transaction. */
 export function migrate(exec: (query: string) => void, from: number): number {

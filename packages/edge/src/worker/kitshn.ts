@@ -136,7 +136,7 @@ import type { Caller, Deployer } from "./auth.ts";
 import { CloudflareError, cloudflare } from "./cloudflare.ts";
 import { dispatchDeploy } from "./github.ts";
 import { REPLACED, dropLiveSite, failQueuedDowns, removalDown, requeueDowns } from "./downs.ts";
-import { REPO_GATE_MIGRATION, migrate } from "./migrations.ts";
+import { LEVEL_SUMMARY_MIGRATION, REPO_GATE_MIGRATION, type SummaryRow, levelSummaries, migrate } from "./migrations.ts";
 import {
   DEPLOY_MS,
   SCRIPT_LIMIT,
@@ -278,6 +278,11 @@ export class Kitshn extends DurableObject<Env> {
         migrate((query) => ctx.storage.sql.exec(query), from);
         // The rest of migration 6 needs code: the repo id comes out of each card id.
         if (from < REPO_GATE_MIGRATION) this.backfillRepoIds();
+        // The rest of migration 12 rewinds the state from the stored revisions.
+        if (from < LEVEL_SUMMARY_MIGRATION) {
+          this.load();
+          this.rewriteLevelSummaries();
+        }
       });
       this.load();
       if (this.state.circles.size === 0) this.seed();
@@ -2733,6 +2738,18 @@ export class Kitshn extends DurableObject<Env> {
       console.error(
         `K-819: the card ids of the deploys ${unknown.join(", ")} hold no repo id; their repos wait.`,
       );
+  }
+
+  /** K-1508: part of migration 12; see levelSummaries. */
+  private rewriteLevelSummaries() {
+    const { updates, skipped } = levelSummaries(
+      this.state,
+      this.sql<SummaryRow>("SELECT id, summary, changes FROM revisions ORDER BY id DESC"),
+    );
+    for (const { id, summary } of updates) this.sql("UPDATE revisions SET summary = ? WHERE id = ?", summary, id);
+    console.log(
+      `K-1508: migration 12 worded ${updates.length} History summaries of a new share level anew; ${skipped} revisions keep a summary that their changes do not give.`,
+    );
   }
 
   /** K-819: refuses a deploy step of a repo that waits for the owner or that the owner blocked. */

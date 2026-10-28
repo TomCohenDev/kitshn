@@ -167,7 +167,10 @@ export function MapView(props: Props) {
   // so a head never jumps while a card passes it.
   const headAngles = useMemo(() => {
     const cards = [...state.places]
-      .filter(([id]) => !props.hidden.has(state.resources.get(id)?.kind ?? "page"))
+      .filter(([id]) => {
+        const kind = state.resources.get(id)?.kind;
+        return kind !== undefined && !props.hidden.has(kind);
+      })
       .map(([, place]) => cardBox(place));
     return new Map([...state.circles.values()].map((circle) => [circle.id, headAngle(circle, cards)]));
   }, [state, props.hidden]);

@@ -210,3 +210,27 @@ export function keyWidth(key: string, width: number, limits: WidthLimits, grows:
   if (key === "End") return limits.max;
   return null;
 }
+
+/** The zoom range of the wheel and of a pinch. */
+export const ZOOM = { min: 0.15, max: 2.5 } as const;
+
+/** Two fingers on the screen. */
+export interface Fingers {
+  readonly a: Point;
+  readonly b: Point;
+}
+
+/**
+ * K-516: the view after a pinch. The spread of the fingers zooms, inside `ZOOM`, and the map point that sat
+ * between them at the start stays between them, so the same move also pans with two fingers.
+ */
+export function pinchView(start: View, from: Fingers, to: Fingers): View {
+  const spread = (fingers: Fingers) => Math.hypot(fingers.a.x - fingers.b.x, fingers.a.y - fingers.b.y);
+  const middle = (fingers: Fingers) => ({ x: (fingers.a.x + fingers.b.x) / 2, y: (fingers.a.y + fingers.b.y) / 2 });
+  const before = spread(from);
+  const s = Math.min(ZOOM.max, Math.max(ZOOM.min, start.s * (before > 0 ? spread(to) / before : 1)));
+  const was = middle(from);
+  const now = middle(to);
+  const world = { x: (was.x - start.x) / start.s, y: (was.y - start.y) / start.s };
+  return { s, x: now.x - world.x * s, y: now.y - world.y * s };
+}

@@ -23,7 +23,7 @@ import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import type { Rect } from "./popover.ts";
 import { HOLD_MS, type Press, startPress, stepPress } from "./press.ts";
-import { type View, headAngle, shownCardBoxes } from "./layout.ts";
+import { type Fingers, type View, ZOOM, headAngle, pinchView, shownCardBoxes } from "./layout.ts";
 
 export type { View };
 
@@ -48,6 +48,8 @@ type Drag =
       moved: boolean;
     }
   | { readonly type: "resize"; readonly origin: Circle }
+  /** K-516: two fingers zoom and pan; the cards stay where they are. */
+  | { readonly type: "pinch"; readonly from: Fingers; readonly view: View }
   | { readonly type: "box"; readonly start: Point; readonly end: Point; readonly base: ReadonlySet<string> };
 
 /** Cards with one group stack when they share the same circles (K-508). */
@@ -140,6 +142,12 @@ const ZOOMED_OUT = 0.4;
 export function MapView(props: Props) {
   const { state, view } = props;
   const [drag, setDrag] = useState<Drag | null>(null);
+  /** The fingers on the map now, by pointer id, for a pinch. */
+  const fingers = useRef(new Map<number, Point>());
+  const twoFingers = (): Fingers | null => {
+    const [a, b] = [...fingers.current.values()];
+    return a && b ? { a, b } : null;
+  };
   const [stackTarget, setStackTarget] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ state: State; diffs: Array<ShareDiff>; pointer: Point } | null>(null);
   /** K-523: a right press or a touch that may open the context menu. */
@@ -246,6 +254,18 @@ export function MapView(props: Props) {
     const world = toWorld(event.clientX, event.clientY);
     // A new press ends an older one, also a touch whose release never came.
     endPress();
+    if (event.pointerType === "touch") {
+      fingers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      // A second finger turns any one-finger gesture into a pinch; a card drag in progress drops nothing.
+      const both = twoFingers();
+      if (both) {
+        props.onMenu(null);
+        setStackTarget(null);
+        setDraft(null);
+        setDrag({ type: "pinch", from: both, view });
+        return;
+      }
+    }
     try {
       (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
     } catch {
@@ -321,6 +341,12 @@ export function MapView(props: Props) {
 
   const onPointerMove = (event: PointerEvent) => {
     const pointer = { x: event.clientX, y: event.clientY };
+    if (fingers.current.has(event.pointerId)) fingers.current.set(event.pointerId, pointer);
+    if (drag?.type === "pinch") {
+      const both = twoFingers();
+      if (both) props.onView(pinchView(drag.view, drag.from, both));
+      return;
+    }
     const entry = hold.current;
     if (entry) {
       const was = entry.press.phase;
@@ -397,6 +423,13 @@ export function MapView(props: Props) {
   };
 
   const onPointerUp = (event: PointerEvent) => {
+    fingers.current.delete(event.pointerId);
+    // The pinch ends with the first finger that lifts; the other one starts nothing until it lifts too.
+    if (drag?.type === "pinch") {
+      endPress();
+      setDrag(null);
+      return;
+    }
     const press = endPress();
     // No `contextmenu` came during the press, so it follows the release; a press that opened the menu is done.
     if (event.button === 2 && press && press.press.phase !== "held")
@@ -432,7 +465,7 @@ export function MapView(props: Props) {
     event.preventDefault();
     if (event.ctrlKey || event.metaKey) {
       const world = toWorld(event.clientX, event.clientY);
-      const s = Math.min(2.5, Math.max(0.15, view.s * Math.exp(-event.deltaY / 300)));
+      const s = Math.min(ZOOM.max, Math.max(ZOOM.min, view.s * Math.exp(-event.deltaY / 300)));
       props.onView({ x: event.clientX - world.x * s, y: event.clientY - world.y * s, s });
     } else props.onView({ ...view, x: view.x - event.deltaX, y: view.y - event.deltaY });
   };
@@ -482,8 +515,9 @@ export function MapView(props: Props) {
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onPointerCancel={() => {
+      onPointerCancel={(event) => {
         // A cancelled pointer drops nothing; the cards go back.
+        fingers.current.delete(event.pointerId);
         endPress();
         rightRelease.current = null;
         setStackTarget(null);

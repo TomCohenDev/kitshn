@@ -115,8 +115,8 @@ export interface ActionHandlers {
   readonly upload: (at: Point | null) => void;
   readonly addSite: () => void;
   readonly addMachine: () => void;
-  /** K-529: one new circle around the selected cards. */
-  readonly newCircleFor: () => void;
+  /** K-529: one new circle around these cards (the selection, or one card from "Share with"). */
+  readonly newCircleFor: (ids: ReadonlyArray<string>) => void;
   readonly fit: () => void;
   readonly undoItem: (item: Item) => void;
 }
@@ -340,26 +340,32 @@ function shareActions(state: State, h: ActionHandlers, resource: Resource): Arra
   const circles = [...state.circles.values()];
   const others = circles.filter((circle) => !holding.has(circle.id));
   const held = circles.filter((circle) => holding.has(circle.id));
+  const refused = newCircleRefusal(state, [resource.id]);
   return [
-    ...(others.length > 0
-      ? [
-          {
-            id: "share",
-            label: "Share with",
-            tip: `Put ${resource.name} where one more circle holds it, without a drag.`,
-            items: others.map((circle) => {
-              const plan = cachedReshare(state, resource, circle, true);
-              return {
-                id: `share:${circle.id}`,
-                label: circle.name,
-                tip: `Share ${resource.name} with ${circle.name} at ${circle.level}. Its other circles stay.`,
-                ...("refused" in plan ? { refused: plan.refused } : {}),
-                run: () => h.reshare(resource, circle, true, "stack"),
-              };
-            }),
-          },
-        ]
-      : []),
+    {
+      id: "share",
+      label: "Share with",
+      tip: `Put ${resource.name} where one more circle holds it, without a drag.`,
+      items: [
+        ...others.map((circle) => {
+          const plan = cachedReshare(state, resource, circle, true);
+          return {
+            id: `share:${circle.id}`,
+            label: circle.name,
+            tip: `Share ${resource.name} with ${circle.name} at ${circle.level}. Its other circles stay.`,
+            ...("refused" in plan ? { refused: plan.refused } : {}),
+            run: () => h.reshare(resource, circle, true, "stack"),
+          };
+        }),
+        {
+          id: "share:new-circle",
+          label: "New circle…",
+          tip: `Make a new circle with no members around ${resource.name}; add its members next. Its other circles stay.`,
+          ...(refused ? { refused } : {}),
+          run: () => h.newCircleFor([resource.id]),
+        },
+      ],
+    },
     ...(held.length > 0
       ? [
           {
@@ -439,6 +445,12 @@ export const NEW_CIRCLE = {
 const SELECTION_IDS = new Set(["stack-these", "new-circle-for"]);
 
 const circlePlans = new WeakMap<State, Map<string, { readonly refused: string | null }>>();
+/** K-529: why no new circle fits around these cards, or null. Only the refusal is kept: the handler plans again. */
+const newCircleRefusal = (state: State, ids: ReadonlyArray<string>) =>
+  cached(circlePlans, state, [...ids].sort().join(","), () => {
+    const plan = circleForCards(state, ids, { ...NEW_CIRCLE, id: "preview", color: "#6C5CE7" });
+    return { refused: "refused" in plan ? plan.refused : refusal(state, plan.edits) };
+  }).refused;
 const stackPlans = new WeakMap<State, Map<string, ReturnType<typeof stackOntoEdits>>>();
 /** A plan per state and key, so an open menu or palette does not plan the same action again on each render. */
 function cached<T>(plans: WeakMap<State, Map<string, T>>, state: State, key: string, make: () => T): T {
@@ -457,11 +469,7 @@ export function selectionActions(ctx: ActionContext, h: ActionHandlers): Array<A
   // A card that another device removed while it was selected drops out, as it does from the panel.
   const ids = [...ctx.selected].filter((id) => ctx.state.resources.has(id));
   if (ids.length < 2) return [];
-  // Only the refusal of the circle plan is kept: the handler plans again with the real id and colour.
-  const { refused } = cached(circlePlans, ctx.state, [...ids].sort().join(","), () => {
-    const plan = circleForCards(ctx.state, ids, { ...NEW_CIRCLE, id: "preview", color: "#6C5CE7" });
-    return { refused: "refused" in plan ? plan.refused : refusal(ctx.state, plan.edits) };
-  });
+  const refused = newCircleRefusal(ctx.state, ids);
   // K-521: the first selected card on the map is the one the others stack onto, as a drop onto it would. The
   // target depends on the order of the selection, so its cache key keeps that order.
   const target = ids.find((id) => ctx.state.places.has(id)) ?? ids[0] ?? "";
@@ -488,7 +496,7 @@ export function selectionActions(ctx: ActionContext, h: ActionHandlers): Array<A
       short: "New circle for these",
       tip: "Make one new circle with no members around the selected cards. Every card keeps its circles; cards in the way move out. Undo takes it all back.",
       ...(refused ? { refused } : {}),
-      run: h.newCircleFor,
+      run: () => h.newCircleFor(ids),
     },
   ];
 }

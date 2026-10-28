@@ -982,11 +982,11 @@ export function App() {
    * K-529: one new circle around the selected cards, as one edit, so one undo takes it back. Its editor opens
    * next, because it has no members until the owner adds some.
    */
-  const newCircleFor = async () => {
+  const newCircleFor = async (wanted: ReadonlyArray<string>) => {
     const id = `c-${crypto.randomUUID().slice(0, 8)}`;
     const color = CIRCLE_COLORS[state.circles.size % CIRCLE_COLORS.length] ?? "#6C5CE7";
-    // A card that another device removed while it was selected drops out, as in `selectionActions`.
-    const ids = [...selection.cards].filter((card) => state.resources.has(card));
+    // A card that another device removed meanwhile drops out, as in `selectionActions`.
+    const ids = wanted.filter((card) => state.resources.has(card));
     const plan = circleForCards(state, ids, { ...NEW_CIRCLE, id, color });
     if ("refused" in plan) {
       showToast({ text: plan.refused, error: true, undo: null });
@@ -1157,7 +1157,7 @@ export function App() {
     upload: uploadTo,
     addSite: () => setAddingSite(true),
     addMachine: () => setAddingMachine(true),
-    newCircleFor: () => void newCircleFor(),
+    newCircleFor: (ids) => void newCircleFor(ids),
     fit,
     undoItem: (item) => void undoItem(item),
   };
@@ -1282,6 +1282,7 @@ export function App() {
               onDeleteCircle={handlers.deleteCircle}
               onPlace={placeInView}
               onReshare={(resource, circle, share, part) => void reshare(resource, circle, share, part)}
+              onNewCircle={(ids) => void newCircleFor(ids)}
               onRemoveApp={(resource) => void removeApp(resource)}
               onRollback={(resource, mode) => setRollback({ card: resource, mode })}
               previousVersions={previousVersions}
@@ -1780,6 +1781,7 @@ function Panel(props: {
   onDeleteCircle: (circle: Circle) => void;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
+  onNewCircle: (ids: ReadonlyArray<string>) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
   /** K-1117: the pages and files that have a previous version. */
@@ -1847,6 +1849,7 @@ function Panel(props: {
         onEdit={props.onEdit}
         onPlace={props.onPlace}
         onReshare={props.onReshare}
+        onNewCircle={props.onNewCircle}
         onRemoveApp={props.onRemoveApp}
         onRollback={props.onRollback}
         onRestorePrevious={props.previousVersions.has(cards[0].id) ? props.onRestorePrevious : null}
@@ -2153,6 +2156,7 @@ function CardPanel(props: {
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
+  onNewCircle: (ids: ReadonlyArray<string>) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
   /** K-1117: swaps a page or a file with its previous version, or null when it has none. */
@@ -2521,6 +2525,13 @@ function CardPanel(props: {
                   <span class="swatch" style={{ background: circle.color }} /> {circle.name}
                 </button>
               ))}
+            <button
+              class="btn"
+              data-tip={`Make a new circle with no members around ${resource.name}; add its members next.`}
+              onClick={() => props.onNewCircle([resource.id])}
+            >
+              New circle…
+            </button>
           </div>
         </>
       ) : null}

@@ -37,15 +37,18 @@ function stubGitHubForbidden() {
 }
 
 async function check() {
-  const request = new Request<unknown, IncomingRequestCfProperties>("https://kit.example.com/api/repos/check", {
-    method: "POST",
-    headers: {
-      "cf-access-jwt-assertion": await ownerToken(),
-      origin: "https://kit.example.com",
-      "content-type": "application/json",
+  const request = new Request<unknown, IncomingRequestCfProperties>(
+    "https://kit.example.com/api/repos/check",
+    {
+      method: "POST",
+      headers: {
+        "cf-access-jwt-assertion": await ownerToken(),
+        origin: "https://kit.example.com",
+        "content-type": "application/json",
+      },
+      body: "{}",
     },
-    body: "{}",
-  });
+  );
   const ctx = createExecutionContext();
   const response = await worker.fetch(request, env, ctx);
   await waitOnExecutionContext(ctx);

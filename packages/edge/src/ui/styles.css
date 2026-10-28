@@ -60,6 +60,8 @@ html {
 }
 body {
   margin: 0;
+  /* No double-tap zoom on iOS; the map zooms with a pinch (K-516). */
+  touch-action: manipulation;
   height: 100dvh;
   overflow: hidden;
   font: 1rem/1.5 var(--sans);
@@ -308,7 +310,7 @@ input[type="search"]::-webkit-search-cancel-button {
   position: absolute;
   inset: 0;
   /* Circles past the screen edge never widen the page; a phone would otherwise lay it out wider. */
-  overflow: hidden;
+  overflow: clip;
   touch-action: none;
   /* A drag on the map never selects text; panels and inputs stay selectable. */
   user-select: none;

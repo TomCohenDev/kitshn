@@ -754,6 +754,12 @@ export function App() {
     )
     .reverse();
 
+  /** The right edge of the shelf where it covers the map, or 0: a closed shelf on a phone covers none of it. */
+  const shelfRight = () => {
+    if (!trayShown || (!wide && !trayOpen)) return 0;
+    return document.querySelector(".tray")?.getBoundingClientRect().right ?? 10 + (wide ? widths.tray : Math.min(16 * REM, screenWidth - 20));
+  };
+
   /** The part of the screen where the map shows clear of the toolbar, the tray and a floating panel. */
   const mapArea = (withPanel: boolean, panelWidth?: number): Box =>
     openArea({
@@ -762,9 +768,8 @@ export function App() {
       height: wideScreen() ? (document.querySelector(".hint")?.getBoundingClientRect().top ?? innerHeight) : innerHeight,
       top: document.querySelector("header.bar")?.getBoundingClientRect().bottom ?? 70,
       // The tray is not drawn yet when a full view switches to the map, so its width then comes from the tray cards.
-      left:
-        document.querySelector(".tray")?.getBoundingClientRect().right ??
-        (tray.length > 0 ? (wideScreen() ? widths.tray + 10 : 160) : 0),
+      // On a phone a closed shelf is a chip above the map, so the map takes the full width (K-528).
+      left: shelfRight(),
       panelLeft: withPanel ? panelLeft(panelWidth) : null,
       narrow: !wideScreen(),
     });
@@ -835,7 +840,10 @@ export function App() {
     setPanel(null);
     setDetailsLarge(false);
     if (fullPage) location.hash = "map";
-    (opener.current?.isConnected ? opener.current : document.querySelector<HTMLElement>(".bar .seg button"))?.focus();
+    (opener.current?.isConnected
+      ? opener.current
+      : document.querySelector<HTMLElement>(".bar .seg button, .bar button[aria-label='Menu']")
+    )?.focus();
   };
 
   historyShow.current = showOnMap;
@@ -1040,7 +1048,7 @@ export function App() {
             changeView(next);
           }}
           panelLeft={floating && wideScreen() ? panelLeft() : null}
-          trayRight={trayShown ? 10 + (wide ? widths.tray : 150) : 0}
+          trayRight={shelfRight()}
           flash={flash}
           openStacks={openStacks}
           onToggleStack={(key) => {
@@ -1221,6 +1229,17 @@ export function App() {
                 {tab.slice(1)}
               </MenuItem>
             ))}
+            {waitingRepos > 0 ? (
+              <MenuItem
+                tip="Repos that wait for you to allow their first deploy. It shows them in the panel."
+                onSelect={() => {
+                  setSelection({ cards: new Set(), circle: null });
+                  openTab("map");
+                }}
+              >
+                {plural(waitingRepos, "repo")} waiting
+              </MenuItem>
+            ) : null}
             {route.tab === "map" ? (
               <>
                 <MenuSep />
@@ -1242,7 +1261,7 @@ export function App() {
                     setPreviews(!previews);
                   }}
                 >
-                  Previews
+                  Previews{previews && view.s < 0.8 ? " (zoom in)" : ""}
                 </MenuItem>
               </>
             ) : null}
@@ -1319,7 +1338,7 @@ export function App() {
           </>
         ) : null}
         <span class="grow" />
-        {waitingRepos > 0 ? (
+        {waitingRepos > 0 && wide ? (
           <button
             class="btn"
             data-tip="Repos that wait for you to allow their first deploy. A click shows them in the panel."
@@ -1331,7 +1350,10 @@ export function App() {
             <span class="sticker wait">{wide ? `${plural(waitingRepos, "repo")} waiting` : `${waitingRepos} waiting`}</span>
           </button>
         ) : null}
-        <PanicOpener pause={pauseView} open={shownPanel === "safety"} onOpen={openSafety} />
+        {/* On a phone Resume takes the opener's place while paused; the banner shows the paused state. */}
+        {wide || !pauseView ? (
+          <PanicOpener pause={pauseView} open={shownPanel === "safety"} onOpen={openSafety} />
+        ) : null}
         {pauseView ? (
           <button class="btn resume" onClick={startResume} data-tip={RESUME_TIP}>
             Resume

@@ -169,7 +169,7 @@ describe("resizable widths (K-525)", () => {
   });
 });
 
-describe("pinch (K-528)", () => {
+describe("pinch (K-516)", () => {
   const view = { x: 100, y: 50, s: 1 };
   const at = (view: { x: number; y: number; s: number }, point: { x: number; y: number }) => ({
     x: (point.x - view.x) / view.s,

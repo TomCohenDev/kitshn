@@ -22,7 +22,7 @@ import type { MenuTarget } from "./actions.ts";
 import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import type { Rect } from "./popover.ts";
-import { HOLD_MS, type Press, startPress, stepPress } from "./press.ts";
+import { HOLD_MS, type Press, fingerDown, startPress, stepPress } from "./press.ts";
 import { type Fingers, type View, ZOOM, headAngle, pinchView, shownCardBoxes } from "./layout.ts";
 
 export type { View };
@@ -148,6 +148,8 @@ export function MapView(props: Props) {
     const [a, b] = [...fingers.current.values()];
     return a && b ? { a, b } : null;
   };
+  /** A touch on a card that selects it on release, unless it moved, held or became a pinch. */
+  const tap = useRef<{ readonly choose: () => void; readonly stack: string | null } | null>(null);
   const [stackTarget, setStackTarget] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ state: State; diffs: Array<ShareDiff>; pointer: Point } | null>(null);
   /** K-523: a right press or a touch that may open the context menu. */
@@ -254,22 +256,24 @@ export function MapView(props: Props) {
     const world = toWorld(event.clientX, event.clientY);
     // A new press ends an older one, also a touch whose release never came.
     endPress();
+    try {
+      // Every pointer, also each finger of a pinch, so its release always reaches the map.
+      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    } catch {
+      // A pointer that is gone cannot be captured; the drag still works inside the viewport.
+    }
     if (event.pointerType === "touch") {
-      fingers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-      // A second finger turns any one-finger gesture into a pinch; a card drag in progress drops nothing.
-      const both = twoFingers();
+      // A second finger turns any one-finger gesture into a pinch; a card drag in progress drops nothing, and
+      // the card under the first finger is not selected.
+      const both = fingerDown(fingers.current, event.pointerId, { x: event.clientX, y: event.clientY }, event.isPrimary);
       if (both) {
+        tap.current = null;
         props.onMenu(null);
         setStackTarget(null);
         setDraft(null);
         setDrag({ type: "pinch", from: both, view });
         return;
       }
-    }
-    try {
-      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-    } catch {
-      // A pointer that is gone cannot be captured; the drag still works inside the viewport.
     }
     if (event.button === 1 || event.button === 2) {
       if (event.button === 2) beginPress(event);
@@ -316,16 +320,21 @@ export function MapView(props: Props) {
       }
       // A closed stack of the owner is selected whole, so its panel shows (K-521).
       const whole = stack && !props.openStacks.has(stack[0]) && stack[0].startsWith(USER_STACK);
-      if (!props.selection.cards.has(id))
-        props.onSelect({ cards: whole ? new Set(ids) : new Set([id]), circle: null });
+      const choose = () => {
+        if (!props.selection.cards.has(id)) props.onSelect({ cards: whole ? new Set(ids) : new Set([id]), circle: null });
+      };
       const origins = new Map<string, Point>();
       for (const card of ids) origins.set(card, state.places.get(card) ?? world);
       const under = stackTargetAt(event.clientX, event.clientY, ids);
-      const start = () =>
+      const start = () => {
+        choose();
         setDrag({ type: "cards", start: world, origins, clicked: id, under, moved: false });
-      // K-516, K-523: on touch, a long press opens the menu and starts the drag, so a swipe still pans.
+      };
+      // K-516, K-523: on touch, a long press opens the menu and starts the drag, so a swipe still pans; a tap
+      // selects on release, so a pinch that starts on a card does not select it.
       if (event.pointerType === "touch") {
         setDrag({ type: "pan", sx: event.clientX, sy: event.clientY, view });
+        tap.current = { choose, stack: stack?.[0] ?? null };
         beginPress(event, start);
       } else start();
       return;
@@ -430,7 +439,14 @@ export function MapView(props: Props) {
       setDrag(null);
       return;
     }
+    const pending = tap.current;
+    tap.current = null;
     const press = endPress();
+    // A touch on a card that neither moved nor held is a tap: it selects, and opens a stack as a click does.
+    if (pending && press?.press.phase === "waiting") {
+      pending.choose();
+      if (pending.stack) props.onToggleStack(pending.stack);
+    }
     // No `contextmenu` came during the press, so it follows the release; a press that opened the menu is done.
     if (event.button === 2 && press && press.press.phase !== "held")
       rightRelease.current = { panned: press.press.phase === "moved" };
@@ -515,8 +531,14 @@ export function MapView(props: Props) {
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onLostPointerCapture={(event) => {
+        // A finger that the page lost ends a pinch, so it never turns a later touch into one.
+        fingers.current.delete(event.pointerId);
+        if (drag?.type === "pinch") setDrag(null);
+      }}
       onPointerCancel={(event) => {
         // A cancelled pointer drops nothing; the cards go back.
+        tap.current = null;
         fingers.current.delete(event.pointerId);
         endPress();
         rightRelease.current = null;

@@ -24,3 +24,19 @@ export function stepPress(press: Press, event: PressEvent): Press {
   const far = Math.hypot(event.at.x - press.start.x, event.at.y - press.start.y) > SLOP_PX;
   return far ? { ...press, phase: "moved" } : press;
 }
+
+/**
+ * K-516: the fingers on the map after one touches it, and the two of a pinch, or null. A primary touch is the
+ * first finger of a new gesture, so every finger before it is gone, also one whose release the page never got.
+ */
+export function fingerDown(
+  fingers: Map<number, Point>,
+  id: number,
+  at: Point,
+  primary: boolean,
+): { readonly a: Point; readonly b: Point } | null {
+  if (primary) fingers.clear();
+  fingers.set(id, at);
+  const [a, b] = [...fingers.values()];
+  return a && b ? { a, b } : null;
+}

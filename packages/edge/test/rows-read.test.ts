@@ -116,3 +116,41 @@ it("applies and undoes right after a wake, before History is read", async () => 
   expect(older.find((item) => item.id === revision)?.undoneBy).toBe(undo?.id);
   expect(new Set(state.revisions.map((item) => item.id)).size).toBe(state.revisions.length);
 });
+
+it("reads few rows in an alarm run that checks a static site that is up (K-1126)", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("ok", { status: 200 }));
+  // Its own object, so the rows of the tests above do not count here.
+  const stub = env.KITSHN.getByName("uptime-rows");
+  let rowsRead = 0;
+  await runInDurableObject(stub, (instance, state) => {
+    const sql = state.storage.sql;
+    for (let i = 0; i < 20; i++) {
+      const card = {
+        id: `static-${i}`,
+        kind: "site.static",
+        name: `static-${i}`,
+        addresses: [`static-${i}.example.com`],
+        status: "running",
+        group: null,
+        machine: null,
+      };
+      sql.exec("INSERT INTO resources (id, body) VALUES (?, ?)", card.id, JSON.stringify(card));
+    }
+    (instance as unknown as { load(): void }).load();
+    const exec = sql.exec.bind(sql);
+    sql.exec = ((query: string, ...bindings: Array<SqlStorageValue>) => {
+      const cursor = exec(query, ...bindings);
+      const toArray = cursor.toArray.bind(cursor);
+      cursor.toArray = () => {
+        const rows = toArray();
+        rowsRead += cursor.rowsRead;
+        return rows;
+      };
+      return cursor;
+    }) as typeof sql.exec;
+    // What a wake reads, then one alarm run with its uptime turn; every site is up, so no uptime row exists.
+    (instance as unknown as { load(): void }).load();
+    return instance.alarm();
+  });
+  expect(rowsRead).toBeLessThan(100);
+});

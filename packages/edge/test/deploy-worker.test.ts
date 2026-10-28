@@ -306,10 +306,11 @@ describe("Worker deploys (K-806, K-909)", () => {
     const app = repo("47", "notes");
     await allow(app);
     expect((await deploy(app, { kv: ["DATA"] })).status).toBe(200);
-    const bound = (index: number) =>
-      (cloudflare.uploads[index]?.["bindings"] as Array<Record<string, string>>).find(
-        (item) => item["name"] === "DATA",
-      )?.["namespace_id"];
+    const bound = (index: number) => {
+      const bindings = cloudflare.uploads[index]?.["bindings"] as Array<Record<string, string>> | undefined;
+      if (!bindings) throw new Error(`There is no upload ${index}.`);
+      return bindings.find((item) => item["name"] === "DATA")?.["namespace_id"];
+    };
     const first = bound(0);
     cloudflare.dropKv(first ?? "");
     expect((await deploy(app, { kv: ["DATA"] })).status).toBe(200);

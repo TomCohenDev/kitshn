@@ -12,6 +12,9 @@ export default {
       await page.locator('[data-card="riffle"]').first().tap();
       await page.waitForTimeout(300);
       await shot("group-open");
+      await page.locator('[data-card="riffle-pr-41"]').first().tap();
+      await page.waitForTimeout(300);
+      await shot("second-tap");
       await page.getByRole("button", { name: "Menu", exact: true }).tap();
       await shot("more-menu");
       return;

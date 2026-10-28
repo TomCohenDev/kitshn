@@ -146,7 +146,11 @@ export function MapView(props: Props) {
     return a && b ? { a, b } : null;
   };
   /** A touch on a card that selects it on release, unless it moved, held or became a pinch. */
-  const tap = useRef<{ readonly choose: () => void; readonly stack: string | null } | null>(null);
+  const tap = useRef<{
+    readonly choose: () => void;
+    readonly stack: string | null;
+    readonly world: Point;
+  } | null>(null);
   const [stackTarget, setStackTarget] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ state: State; diffs: Array<ShareDiff>; pointer: Point } | null>(null);
   /** K-523: a right press or a touch that may open the context menu. */
@@ -344,7 +348,7 @@ export function MapView(props: Props) {
       if (event.pointerType === "touch") {
         setDrag({ type: "pan", sx: event.clientX, sy: event.clientY, view });
         // K-521: a tap opens a closed stack; in an open one it only selects the card, so the stack stays open.
-        tap.current = { choose, stack: stack && !props.openStacks.has(stack[0]) ? stack[0] : null };
+        tap.current = { choose, stack: stack && !props.openStacks.has(stack[0]) ? stack[0] : null, world };
         beginPress(event, start);
       } else start();
       return;
@@ -453,8 +457,11 @@ export function MapView(props: Props) {
     tap.current = null;
     const press = endPress();
     // A touch on a card that neither moved nor held is a tap: it selects, and opens a stack as a click does.
+    // Zoomed out, a card is a dot too small to read, so the tap first zooms to it under the finger.
     if (pending && press?.press.phase === "waiting") {
-      pending.choose();
+      if (view.s < ZOOMED_OUT)
+        props.onView({ x: event.clientX - pending.world.x, y: event.clientY - pending.world.y, s: 1 });
+      else pending.choose();
       if (pending.stack) props.onToggleStack(pending.stack);
     }
     // No `contextmenu` came during the press, so it follows the release; a press that opened the menu is done.

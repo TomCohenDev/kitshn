@@ -1539,6 +1539,8 @@ function Panel(props: {
   else if (cards.length === 1 && cards[0]) {
     body = (
       <CardPanel
+        // A new card is a new panel, so an open choice of another card never shows again.
+        key={cards[0].id}
         resource={cards[0]}
         state={state}
         repo={props.repos.find((repo) => repo.resourceIds.includes(cards[0]?.id ?? "")) ?? null}
@@ -1796,6 +1798,8 @@ function CardPanel(props: {
   const address = resource.addresses[0];
   const stack = [...state.stacks.values()].find((each) => each.members.includes(resource.id));
   const [removing, setRemoving] = useState<{ readonly circle: Circle; readonly anchor: Rect } | null>(null);
+  // The stack went while the choice was open (another device, or undo): the choice ends with it.
+  if (removing && !stack) setRemoving(null);
   return (
     <section>
       {removing && stack ? (
@@ -1967,6 +1971,7 @@ function CardPanel(props: {
                   <button
                     class="btn"
                     aria-haspopup={stack ? "menu" : undefined}
+                    aria-expanded={stack ? removing?.circle.id === circle.id : undefined}
                     data-tip={
                       stack
                         ? `Remove ${resource.name} or all of ${stack.name} from ${circle.name}, without a drag.`

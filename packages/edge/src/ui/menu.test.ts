@@ -80,3 +80,53 @@ describe("the ⋯ menu from the keyboard", () => {
     render(null, root);
   });
 });
+
+describe("a sub-list inside a sub-list (K-527)", () => {
+  it("opens two levels deep, runs the inner action, and Back goes up one level at a time", async () => {
+    const nestedRan: Array<string> = [];
+    const nested: ActionGroups = [
+      [
+        {
+          id: "unshare",
+          label: "Unshare from",
+          tip: "Unshare it.",
+          items: [
+            {
+              id: "unshare:owner",
+              label: "Owner",
+              tip: "Owner.",
+              items: [
+                { id: "unshare:owner:card", label: "This card", tip: "Card.", run: () => nestedRan.push("card") },
+                { id: "unshare:owner:stack", label: "Apps (2)", tip: "Stack.", run: () => nestedRan.push("stack") },
+              ],
+            },
+          ],
+        },
+      ],
+    ];
+    const root = document.createElement("div");
+    document.body.append(root);
+    const anchor = { left: 0, top: 0, width: 0, height: 0 };
+    await act(() => render(h(ActionMenu, { label: "Actions for riffle", anchor, groups: nested, onClose: () => undefined }), root));
+    expect(focused()).toBe("Unshare from▸");
+    await press();
+    await key("ArrowDown");
+    expect(focused()).toBe("Owner▸");
+    await press();
+    expect(focused()).toBe("◂ Back");
+    await key("ArrowDown");
+    expect(focused()).toBe("This card");
+    // Escape climbs one level: to Owner in the Unshare list, then to Unshare from at the top.
+    await key("Escape");
+    expect(focused()).toBe("Owner▸");
+    await key("Escape");
+    expect(focused()).toBe("Unshare from▸");
+    await press();
+    await key("ArrowDown");
+    await press();
+    await key("ArrowDown");
+    await press();
+    expect(nestedRan).toEqual(["card"]);
+    render(null, root);
+  });
+});

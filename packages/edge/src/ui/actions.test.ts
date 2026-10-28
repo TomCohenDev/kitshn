@@ -29,7 +29,7 @@ import {
   paletteEntries,
   reshareEdits,
 } from "./actions.ts";
-import { applyChanges, resolveEdits } from "../core/changes.ts";
+import { applyChanges, invert, resolveEdits } from "../core/changes.ts";
 
 /** K-523: the action list per item kind. The menu and the palette both read these lists. */
 
@@ -274,6 +274,13 @@ describe("a stacked card leaves a circle (K-527)", () => {
     expect(card.stack).toBeNull();
     expect(card.b).toEqual({ x: -500, y: 0 });
     expect(card.a).not.toEqual({ x: -500, y: 0 });
+    // Undo of "This card" puts the card back on its stack and brings the stack back.
+    const plan = reshareEdits(state, a, her, false, "card");
+    if ("refused" in plan) throw new Error(plan.refused);
+    const changes = resolveEdits(state, plan.edits);
+    const undone = applyChanges(applyChanges(state, changes), invert(changes));
+    expect(undone.stacks.get("s1")?.members).toEqual(["a", "b"]);
+    expect(undone.places.get("a")).toEqual({ x: -500, y: 0 });
     // The stack leaves together, as before.
     const stack = moved("stack");
     expect(stack.stack?.members).toEqual(["a", "b"]);

@@ -211,3 +211,20 @@ export function reachableAddresses(input: {
   for (const route of input.routes) if (route.route_id) reachable.add(route.address);
   return reachable;
 }
+
+/**
+ * K-817, K-1404: why a deploy may not take an address with DNS records, or null. A record that kitshn made for this
+ * same card does not block; one that kitshn made for another card, also one that waits for removal, does until it
+ * is gone, and so does a record of anything else.
+ */
+export function dnsRecordRefusal(
+  address: string,
+  records: number,
+  kitshnRow: { readonly card_id: string | null } | undefined,
+  cardId: string,
+): string | null {
+  if (kitshnRow?.card_id === cardId || records === 0) return null;
+  if (kitshnRow)
+    return `${address} still has the DNS record of another kitshn card; it goes when that card lets go of ${address}. Deploy again then.`;
+  return `${address} already has a DNS record.`;
+}

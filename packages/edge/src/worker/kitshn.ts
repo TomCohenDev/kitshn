@@ -159,6 +159,7 @@ import {
   reachableAddresses,
   offlineReason,
   parseSites,
+  dnsRecordRefusal,
   nextCardAddresses,
   protectedLiveSites,
   servedSites,
@@ -2394,6 +2395,7 @@ export class Kitshn extends DurableObject<Env> {
         address: string;
         record_id: string;
         content: string;
+        card_id: string | null;
         error: string | null;
         retry_at: number;
       }>("SELECT * FROM dns_objects").map((row) => [row.address, row]),
@@ -2405,7 +2407,9 @@ export class Kitshn extends DurableObject<Env> {
     const wanted = new Map(
       this.protectedSites().flatMap((site) => {
         const machine = this.state.machines.get(site.machineId);
-        return machine ? [[site.address, `${machine.tunnelId}.cfargotunnel.com`] as const] : [];
+        return machine
+          ? [[site.address, { content: `${machine.tunnelId}.cfargotunnel.com`, cardId: site.id }] as const]
+          : [];
       }),
     );
     const routed = reachableAddresses({
@@ -2415,14 +2419,17 @@ export class Kitshn extends DurableObject<Env> {
     });
     return [
       ...[...wanted]
-        .filter(([address, content]) => {
+        .filter(([address, { content, cardId }]) => {
           const row = rows.get(address);
-          return due(address) && (!row || row.error !== null || row.content !== content);
+          // An older row without its card gets the card at the next write (K-817).
+          return (
+            due(address) && (!row || row.error !== null || row.content !== content || row.card_id !== cardId)
+          );
         })
-        .map(([address, content]) => ({ address, content: content as string | null })),
+        .map(([address, { content, cardId }]) => ({ address, content: content as string | null, cardId })),
       ...[...rows.values()]
         .filter((row) => !wanted.has(row.address) && due(row.address) && !routed.has(row.address))
-        .map((row) => ({ address: row.address, content: null })),
+        .map((row) => ({ address: row.address, content: null, cardId: row.card_id })),
     ];
   }
 
@@ -2468,8 +2475,8 @@ export class Kitshn extends DurableObject<Env> {
     for (const work of this.dnsWork()) {
       if (calls >= budget) return;
       calls++;
-      const [row] = this.sql<{ record_id: string }>(
-        "SELECT record_id FROM dns_objects WHERE address = ?",
+      const [row] = this.sql<{ record_id: string; card_id: string | null }>(
+        "SELECT record_id, card_id FROM dns_objects WHERE address = ?",
         work.address,
       );
       try {
@@ -2486,10 +2493,11 @@ export class Kitshn extends DurableObject<Env> {
             ? await api<{ id: string }>("PUT", `${zone}/${row.record_id}`, body)
             : await api<{ id: string }>("POST", zone, body);
           this.sql(
-            "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error, retry_at) VALUES (?, ?, ?, NULL, 0)",
+            "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error, retry_at, card_id) VALUES (?, ?, ?, NULL, 0, ?)",
             work.address,
             record.id,
             work.content,
+            work.cardId,
           );
         } else {
           if (row?.record_id) {
@@ -2501,12 +2509,13 @@ export class Kitshn extends DurableObject<Env> {
         }
       } catch (error) {
         this.sql(
-          "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error, retry_at) VALUES (?, ?, ?, ?, ?)",
+          "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error, retry_at, card_id) VALUES (?, ?, ?, ?, ?, ?)",
           work.address,
           row?.record_id ?? "",
           work.content ?? "",
           String(error),
           Date.now() + RETRY_MS,
+          row?.card_id ?? work.cardId,
         );
       }
     }
@@ -3395,13 +3404,13 @@ export class Kitshn extends DurableObject<Env> {
           );
         }
         // Only an address that nothing uses yet: kitshn never takes over a record that it did not make (K-1404).
-        // A record that kitshn made itself (an address that comes back before its old record went) does not count.
+        // A record that kitshn made for this same card (an address that comes back before its record went) is fine.
         if (existing?.addresses.includes(address)) continue;
-        if (
-          this.sql("SELECT address FROM dns_objects WHERE address = ? AND record_id != ''", address).length >
-          0
-        )
-          continue;
+        const [kitshnRow] = this.sql<{ card_id: string | null }>(
+          "SELECT card_id FROM dns_objects WHERE address = ? AND record_id != ''",
+          address,
+        );
+        if (kitshnRow?.card_id === resourceId) continue;
         const zone = zoneFor(address, zones);
         if (!zone)
           return Response.json(
@@ -3412,8 +3421,8 @@ export class Kitshn extends DurableObject<Env> {
           "GET",
           `/zones/${zone.id}/dns_records?name=${encodeURIComponent(address)}`,
         );
-        if (records.length > 0)
-          return Response.json({ error: `${address} already has a DNS record.` }, { status: 409 });
+        const refusal = dnsRecordRefusal(address, records.length, kitshnRow, resourceId);
+        if (refusal) return Response.json({ error: refusal }, { status: 409 });
       }
     }
     if (result.kind === "deploy" && !existing) {

@@ -46,6 +46,7 @@ export function zoneOfAddressIn(
   try {
     zones = zonesOf(env);
   } catch (error) {
+    // Known limit: a further zone inside the kitshn zone then counts as the kitshn zone; Free zones cannot be nested.
     if (zoneOfAddress(address, [env.KITSHN_ZONE]))
       return { name: env.KITSHN_ZONE, id: env.CLOUDFLARE_ZONE_ID };
     throw error;

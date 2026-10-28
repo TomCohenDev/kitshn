@@ -10,6 +10,7 @@ import {
   offlineReason,
   parseSites,
   reachableAddresses,
+  dnsRecordRefusal,
   nextCardAddresses,
   protectedLiveSites,
   seenText,
@@ -243,5 +244,23 @@ describe("several addresses of a Compose app (K-817)", () => {
     expect(
       nextCardAddresses("site.compose", ["a.example.com"], ["a.example.com", "old.example.com"]),
     ).toEqual(["a.example.com"]);
+  });
+});
+
+describe("DNS records of an address that moves between cards (K-817, K-1404)", () => {
+  it("refuses card B while card A's record of X waits for removal, and lets B in once it is gone", () => {
+    // Card A dropped X; its record stays until the tunnel sync deletes it.
+    const aRow = { card_id: "app-a" };
+    expect(dnsRecordRefusal("x.example.com", 1, aRow, "app-b")).toMatch("another kitshn card");
+    // The same card that made the record may take X back.
+    expect(dnsRecordRefusal("x.example.com", 1, aRow, "app-a")).toBeNull();
+    // A row from before the owner column counts as another card's.
+    expect(dnsRecordRefusal("x.example.com", 1, { card_id: null }, "app-b")).toMatch("another kitshn card");
+    // Once the record is gone, B deploys.
+    expect(dnsRecordRefusal("x.example.com", 0, undefined, "app-b")).toBeNull();
+    // A record that kitshn did not make always blocks.
+    expect(dnsRecordRefusal("x.example.com", 1, undefined, "app-b")).toBe(
+      "x.example.com already has a DNS record.",
+    );
   });
 });

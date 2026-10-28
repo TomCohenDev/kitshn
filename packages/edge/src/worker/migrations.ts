@@ -91,6 +91,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   // 14: every address that serves an environment, the main one first, as JSON (K-817). Null on older rows means
   // the one address of the row.
   ["ALTER TABLE deploys ADD COLUMN addresses TEXT"],
+  // 15: the card that made each DNS record (K-817); null on older rows, which then count as another card's.
+  ["ALTER TABLE dns_objects ADD COLUMN card_id TEXT"],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

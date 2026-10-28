@@ -70,7 +70,8 @@ export interface ActionHandlers {
   readonly select: (selection: Selection) => void;
   readonly openAddress: (address: string) => void;
   readonly copyAddress: (address: string) => void;
-  readonly reshare: (resource: Resource, circle: Circle, share: boolean) => void;
+  /** `part` says whether a stacked card leaves alone (and leaves its stack) or takes its stack along. */
+  readonly reshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   readonly setLevel: (resource: Resource, circle: Circle, level: Level | null) => void;
   readonly place: (resource: Resource) => void;
   readonly toTray: (resource: Resource) => void;
@@ -169,12 +170,19 @@ export function refusal(state: State, edits: ReadonlyArray<Edit>): string | null
   }
 }
 
-/** K-511: the edit that shares or unshares a card without a drag, or why no spot on the map fits. */
+/** K-527: a stacked card that leaves a circle leaves alone, out of its stack, or takes its stack along. */
+export type StackPart = "card" | "stack";
+
+/**
+ * K-511: the edit that shares or unshares a card without a drag, or why no spot on the map fits. With `part`
+ * "card", a stacked card also leaves its stack (K-527), and a stack left with one card goes.
+ */
 export function reshareEdits(
   state: State,
   resource: Resource,
   circle: Circle,
   share: boolean,
+  part: StackPart = "stack",
 ): { readonly edits: Array<Edit> } | { readonly refused: string } {
   const wanted = new Set(circlesHolding(state, resource.id).map((held) => held.id));
   if (share) wanted.add(circle.id);
@@ -184,8 +192,14 @@ export function reshareEdits(
     return {
       refused: `No spot on the map is inside exactly those circles. Move "${circle.name}" so it overlaps the others, or drag the card.`,
     };
-  // A stacked card takes its stack along (K-521); resolveEdits adds its mates.
+  // A stacked card takes its stack along (K-521); resolveEdits adds its mates. A card that leaves its stack
+  // in the same change moves alone, because the mates follow the stack as it is after the change.
   const edits: Array<Edit> = [{ _tag: "place", id: resource.id, after: to }];
+  const stack = part === "card" ? ownStack(state, resource.id) : undefined;
+  if (stack) {
+    const rest = stack.members.filter((id) => id !== resource.id);
+    edits.push({ _tag: "stack", id: stack.id, after: rest.length > 1 ? { ...stack, members: rest } : null });
+  }
   const refused = refusal(state, edits);
   return refused ? { refused } : { edits };
 }
@@ -249,11 +263,11 @@ const ownStack = (state: State, id: string): Stack | undefined =>
 
 const plans = new WeakMap<State, Map<string, ReturnType<typeof reshareEdits>>>();
 /** `reshareEdits`, cached per state like `refusedBy`. */
-const cachedReshare = (state: State, resource: Resource, circle: Circle, share: boolean) => {
+const cachedReshare = (state: State, resource: Resource, circle: Circle, share: boolean, part: StackPart = "stack") => {
   const cache = plans.get(state) ?? new Map<string, ReturnType<typeof reshareEdits>>();
   plans.set(state, cache);
-  const key = `${resource.id}/${circle.id}/${share}`;
-  const plan = cache.get(key) ?? reshareEdits(state, resource, circle, share);
+  const key = `${resource.id}/${circle.id}/${share}/${part}`;
+  const plan = cache.get(key) ?? reshareEdits(state, resource, circle, share, part);
   cache.set(key, plan);
   return plan;
 };

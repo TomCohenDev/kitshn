@@ -49,7 +49,7 @@ export function AskList(props: {
               {MACHINE_RIGHT_NAMES[proposal.right]}
             </span>
             <span class="name">
-              {proposal.machineName}: <code>{`${proposal.action} ${proposal.target}`.trim()}</code>
+              {proposal.machineName}: <code>{proposal.shown}</code>
               {proposal.reason ? <span class="muted"> · {proposal.reason}</span> : null}
               {Object.entries(proposal.labels).map(([key, value]) => (
                 <span
@@ -66,7 +66,11 @@ export function AskList(props: {
               type="button"
               disabled={busy.has(proposal.id)}
               data-tip="Approve: a fresh passkey check, then kitshn runs the ask."
-              onClick={() => location.assign(`/api/fresh/start?approve=${encodeURIComponent(proposal.id)}`)}
+              onClick={() =>
+                location.assign(
+                  `/api/fresh/start?approve=${encodeURIComponent(proposal.id)}&hash=${proposal.shownHash}`,
+                )
+              }
             >
               Approve
             </button>
@@ -85,9 +89,15 @@ export function AskList(props: {
   );
 }
 
-/** K-1723: the id of an approval that the fresh passkey check sent back, from `#approve/<id>`. */
-export const approveFromHash = (hash: string) =>
-  hash.startsWith("#approve/") ? decodeURIComponent(hash.slice("#approve/".length)) : null;
+/**
+ * K-1723: the id of an approval that the fresh passkey check sent back, and the hash of the text that the approver
+ * read (K-1722), from `#approve/<id>/<hash>`.
+ */
+export function approveFromHash(hash: string): { readonly id: string; readonly seen: string } | null {
+  if (!hash.startsWith("#approve/")) return null;
+  const [id, seen] = hash.slice("#approve/".length).split("/");
+  return id && seen ? { id: decodeURIComponent(id), seen } : null;
+}
 
 const OUTCOME_TEXT: Record<AskEventView["outcome"], string> = {
   done: "ran",

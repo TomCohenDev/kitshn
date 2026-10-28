@@ -22,6 +22,7 @@ import { gunzipSync } from "node:zlib";
 import { ASK_ACTIONS, type Answer, type AskAction, type Request } from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { keyPlan } from "./keys.ts";
+import { attesterPrefixes, dropAttested } from "./attest.ts";
 import { composeLogs, followLogs, rangeArgs, searchLogs, withLogLimits } from "./logs.ts";
 import { type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from "./local.ts";
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
@@ -1394,7 +1395,12 @@ async function askKitshn(
       "the daemon has no signed connection to kitshn, so it cannot ask (K-1710). See kitshn status.",
     );
   const requestId = crypto.randomUUID();
-  const { id, type: _type, ...ask } = request;
+  const { id, type: _type, labels, ...rest } = request;
+  // K-1753: only an attester sets the labels of its prefix.
+  const ask = {
+    ...rest,
+    ...(labels ? { labels: dropAttested(labels, attesterPrefixes(readMachineFile())) } : {}),
+  };
   const outcome = await new Promise<AskOutcome>((resolve) => {
     const timer = setTimeout(() => {
       askWaiters.delete(requestId);

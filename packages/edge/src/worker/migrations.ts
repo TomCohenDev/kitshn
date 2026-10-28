@@ -181,9 +181,10 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   [
     `CREATE TABLE proposals (id TEXT PRIMARY KEY, machine_id TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL,
       body TEXT NOT NULL, reason TEXT, labels TEXT NOT NULL, right_name TEXT NOT NULL, circle_id TEXT NOT NULL,
-      state TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, decided_at INTEGER,
+      shown TEXT NOT NULL, shown_hash TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, decided_at INTEGER,
       decided_by TEXT, result TEXT)`,
     "CREATE INDEX proposals_state ON proposals (state, expires_at)",
+    "CREATE INDEX proposals_machine ON proposals (machine_id, state)",
     `CREATE TABLE ask_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, machine_id TEXT NOT NULL,
       action TEXT NOT NULL, target TEXT NOT NULL, reason TEXT, labels TEXT NOT NULL, outcome TEXT NOT NULL,
       detail TEXT NOT NULL)`,

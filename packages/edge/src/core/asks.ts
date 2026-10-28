@@ -100,7 +100,8 @@ export function askRequest(
         body: { card: target, mode: object["mode"] === "build" ? "build" : "redeploy" },
       };
     case "job":
-      return { method: "POST", path: "/agent/jobs", body };
+      // The target names the machine, so the shown target binds the run (K-1722).
+      return { method: "POST", path: "/agent/jobs", body: { machineId: target, command: object["command"] } };
     case "job-read":
       return { method: "GET", path: `/agent/jobs/${encodeURIComponent(target)}`, body: null };
     case "publish":
@@ -115,6 +116,37 @@ export function askRequest(
   }
 }
 
+/**
+ * K-1722: what an approver reads before an approval: the action, the target and every field of the body that
+ * decides the effect. The proposal stores its hash, and the approval runs exactly the stored body.
+ */
+export function shownAsk(action: AskAction, target: string, body: unknown): string {
+  const object = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+  switch (action) {
+    case "job":
+      return `run on ${target}: ${JSON.stringify(object["command"] ?? null)}`;
+    case "deploy":
+      return `deploy ${target} (${object["mode"] === "build" ? "build" : "redeploy"})`;
+    case "apply":
+      return `move: ${JSON.stringify(object["edits"] ?? null)}`;
+    case "publish":
+      return `${object["public"] === false ? "unpublish" : "publish"} ${target}`;
+    case "allow":
+      return `allow the repo ${target}`;
+    default:
+      return `${action} ${target} ${JSON.stringify(body ?? null)}`.trim();
+  }
+}
+
+/** K-1722: the SHA-256 of the shown text, hex. */
+export async function shownHash(shown: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(shown)));
+  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** K-1722: at most 20 open proposals for each machine; a new ask past it is refused. */
+export const MAX_OPEN_PROPOSALS = 20;
+
 /** K-1722: a proposal of an ask that waits for its approver circle. */
 export interface Proposal {
   readonly id: string;
@@ -126,6 +158,9 @@ export interface Proposal {
   readonly labels: Readonly<Record<string, string>>;
   readonly right: MachineRight;
   readonly circleId: string;
+  /** What the approver reads, and its SHA-256 hex (shownAsk). */
+  readonly shown: string;
+  readonly shownHash: string;
   readonly state: "pending" | "approved" | "denied" | "expired";
   readonly createdAt: number;
   readonly expiresAt: number;
@@ -133,9 +168,6 @@ export interface Proposal {
 
 /** K-1724: a proposal expires 24 hours after the ask (K-1607). */
 export const PROPOSAL_MS = 24 * 60 * 60_000;
-
-/** K-1723: after an approval for an offline machine, the same ask runs at once for this long. */
-export const APPROVED_WINDOW_MS = 60 * 60_000;
 
 /**
  * K-1727: kitshn takes an approve or a deny from the machine that asked; K-1725 warns about it. Pending owner decision:

@@ -395,13 +395,17 @@ export default {
       }
       // K-1504: "Resume" passes the passkey check of `/api/fresh` first; Access sends the owner back here.
       if (url.pathname === "/api/fresh/start" && request.method === "GET") {
-        // K-1723: an approve comes back to its proposal; only an id of letters, digits and dashes passes.
+        // K-1723: an approve comes back to its proposal with the hash of the text that its approver read (K-1722);
+        // only hex digits and dashes pass.
         const approve = url.searchParams.get("approve") ?? "";
+        const seen = url.searchParams.get("hash") ?? "";
         const safe =
           approve !== "" &&
           approve.length <= 64 &&
-          [...approve].every((char) => "0123456789abcdef-".includes(char));
-        return Response.redirect(`${url.origin}/${safe ? `#approve/${approve}` : "#resume"}`, 302);
+          [...approve].every((char) => "0123456789abcdef-".includes(char)) &&
+          seen.length === 64 &&
+          [...seen].every((char) => "0123456789abcdef".includes(char));
+        return Response.redirect(`${url.origin}/${safe ? `#approve/${approve}/${seen}` : "#resume"}`, 302);
       }
       if (url.pathname === "/api/fresh/resume" && request.method === "POST") {
         const fresh = await freshCallerOf(request, env, Date.now());

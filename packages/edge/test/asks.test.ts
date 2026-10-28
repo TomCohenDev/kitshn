@@ -72,7 +72,12 @@ async function setup(rights: Partial<Record<string, RightMode>>) {
 
 type Instance = {
   webSocketMessage(socket: WebSocket, text: string): Promise<void>;
-  decide(id: string, decision: "approved" | "denied", by: object): Promise<{ ok: boolean; error?: string }>;
+  decide(
+    id: string,
+    decision: "approved" | "denied",
+    by: object,
+    seen?: string | null,
+  ): Promise<{ ok: boolean; error?: string }>;
   expireProposals(now: number): void;
 };
 
@@ -197,13 +202,50 @@ it("reads only what its own event write reads for a refused ask, and a few rows 
   const sent: Array<ServerToDaemon> = [];
   const message = (action: string) =>
     JSON.stringify({ type: "ask", requestId: "r", ask: { action, target: "card" } });
-  // The event insert reads its AUTOINCREMENT counter.
+  // The event insert reads its AUTOINCREMENT counter, and the trim to 5,000 reads its last id.
   expect(
     await counted((instance) => instance.webSocketMessage(daemonSocket(sent), message("allow"))),
-  ).toBeLessThanOrEqual(2);
+  ).toBeLessThanOrEqual(4);
   const proposalReads = await counted((instance) =>
     instance.webSocketMessage(daemonSocket(sent), message("deploy")),
   );
   // The proposal itself reads nothing; the alarm schedule reads its next due items (jobs, retries, the expiry).
   expect(proposalReads).toBeLessThanOrEqual(20);
+});
+
+it("ends an approval that is no longer allowed, and refuses one for a text that the approver did not read (K-1712, K-1722)", async () => {
+  const stub = await setup({ deploys: { mode: "ask", circleId: "owner" } });
+  const waiting = await ask(stub, "deploy", "card");
+  const id = waiting.outcome === "waiting" ? waiting.proposalId : "";
+  const approve = (seen: string | null) =>
+    runInDurableObject(stub, (instance) =>
+      (instance as unknown as Instance).decide(id, "approved", owner, seen),
+    );
+  expect(await approve("0".repeat(64))).toMatchObject({
+    ok: false,
+    error: expect.stringContaining("changed"),
+  });
+  // The owner turns the right to automatic meanwhile: the ask no longer asks this circle.
+  await setup({ deploys: { mode: "automatic" } });
+  await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec(
+      `INSERT INTO proposals (id, machine_id, action, target, body, reason, labels, right_name, circle_id, shown, shown_hash, state, created_at, expires_at)
+       VALUES ('p1', 'vps', 'deploy', 'card', 'null', NULL, '{}', 'deploys', 'owner', 'deploy card', 'h', 'pending', 0, ?)`,
+      Date.now() + 60_000,
+    ),
+  );
+  const late = await runInDurableObject(stub, (instance) =>
+    (instance as unknown as Instance).decide("p1", "approved", owner, null),
+  );
+  expect(late).toMatchObject({ ok: false, error: expect.stringContaining("no longer allowed") });
+});
+
+it("refuses a new ask past 20 open asks of one machine (K-1722)", async () => {
+  const stub = await setup({ deploys: { mode: "ask", circleId: "owner" } });
+  for (let at = 0; at < 20; at++)
+    expect(await ask(stub, "deploy", `card-${at}`)).toMatchObject({ outcome: "waiting" });
+  expect(await ask(stub, "deploy", "card-20")).toEqual({
+    outcome: "refused",
+    reason: expect.stringContaining("20 open asks"),
+  });
 });

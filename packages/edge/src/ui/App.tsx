@@ -651,13 +651,13 @@ export function App() {
     );
   };
 
-  const finishApprove = async (id: string) => {
+  const finishApprove = async ({ id, seen }: { readonly id: string; readonly seen: string }) => {
     history.replaceState(null, "", location.pathname + location.search);
     if (!(await ask("Your passkey check passed. Approve this ask now? kitshn runs it at once."))) return;
     const result = await callApi<{ result: unknown }>(
       "POST",
       `/api/fresh/approve/${encodeURIComponent(id)}`,
-      {},
+      { hash: seen },
     );
     showToast(
       "error" in result

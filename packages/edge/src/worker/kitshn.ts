@@ -123,6 +123,7 @@ import {
   isPreview,
   mayDeployOn,
   agentUploadPlace,
+  machineOf,
   machineRightMode,
 } from "../core/agent.ts";
 import { DEMO_MACHINES, DEMO_ICONS, demo, demoUsage } from "../core/demo.ts";
@@ -150,9 +151,12 @@ import {
   PROPOSAL_MS,
   type Proposal,
   SELF_APPROVAL_ALLOWED,
+  MAX_OPEN_PROPOSALS,
   askRequest,
   isAskAction,
   labelProblem,
+  shownAsk,
+  shownHash,
 } from "../core/asks.ts";
 import { type MachineOs, machineOs } from "../core/icons.ts";
 import {
@@ -2358,12 +2362,15 @@ export class Kitshn extends DurableObject<Env> {
       const body: unknown = await request.json().catch(() => null);
       const reason =
         isRecord(body) && typeof body["reason"] === "string" ? body["reason"].slice(0, 500) : null;
-      const decided = await this.decide(decodeURIComponent(proposalAnswer.id), proposalAnswer.decision, {
-        actor: caller.actor,
-        visitor: caller.visitor,
-        machineId: null,
-        reason,
-      });
+      const seen = isRecord(body) && typeof body["hash"] === "string" ? body["hash"] : null;
+      if (proposalAnswer.decision === "approved" && seen === null)
+        return Response.json({ error: "Send the hash of the ask that you read (K-1722)." }, { status: 400 });
+      const decided = await this.decide(
+        decodeURIComponent(proposalAnswer.id),
+        proposalAnswer.decision,
+        { actor: caller.actor, visitor: caller.visitor, machineId: null, reason },
+        seen,
+      );
       return decided.ok
         ? Response.json({ result: decided.result ?? null })
         : Response.json({ error: decided.error }, { status: 409 });
@@ -5987,6 +5994,31 @@ export class Kitshn extends DurableObject<Env> {
     approved: MachineRight | null = null,
   ) {
     const now = Date.now();
+    // K-1714: a machine asks only over its signed connection (`ask`), never with its token over HTTP, so the
+    // modes, the pause check and the ask events always apply.
+    const machine = machineOf(this.state, caller.visitor);
+    if (machine && caller.actor._tag !== "machine")
+      return Response.json(
+        {
+          error:
+            "A machine asks kitshn over its signed connection with kitshn agent, not over HTTP (K-1714).",
+        },
+        { status: 403 },
+      );
+    // K-1712: a machine's job and deploy need their right now: automatic, or the approval of this ask.
+    const machineMay = (right: MachineRight) => {
+      if (!machine) return true;
+      const mode = machineRightMode(this.state, machine.id, right, now);
+      return mode !== null && (mode.mode === "automatic" || approved === right);
+    };
+    const machinePaths = ["/agent/state", "/agent/apply", "/agent/jobs", "/agent/deploy"];
+    if (
+      machine &&
+      !machinePaths.includes(path) &&
+      !path.startsWith("/agent/jobs/") &&
+      !path.startsWith("/agent/repos/")
+    )
+      return Response.json({ error: `A machine has no ask for ${path} yet (K-1711).` }, { status: 403 });
     const own = circlesOf(this.state, caller.visitor, now);
     if (own.size === 0)
       return Response.json(
@@ -6111,6 +6143,11 @@ export class Kitshn extends DurableObject<Env> {
     if (path.startsWith("/agent/library/") && path.endsWith("/previous") && request.method === "POST")
       return this.restorePrevious(agent, path.slice("/agent/library/".length, -"/previous".length), "agent");
     if (path === "/agent/jobs" && request.method === "POST") {
+      if (!machineMay("runsCommands"))
+        return Response.json(
+          { error: 'The right "runs commands" is off for this machine (K-1720).' },
+          { status: 403 },
+        );
       const body: unknown = await request.json().catch(() => null);
       const machineId =
         typeof body === "object" && body !== null && "machineId" in body ? body.machineId : undefined;
@@ -6171,6 +6208,11 @@ export class Kitshn extends DurableObject<Env> {
       );
     }
     if (path === "/agent/deploy" && request.method === "POST") {
+      if (!machineMay("deploys"))
+        return Response.json(
+          { error: 'The right "deploys" is off for this machine (K-1720).' },
+          { status: 403 },
+        );
       const body: unknown = await request.json().catch(() => null);
       const card = isRecord(body) && typeof body["card"] === "string" ? body["card"] : null;
       const mode = isRecord(body) ? body["mode"] : null;
@@ -6255,7 +6297,7 @@ export class Kitshn extends DurableObject<Env> {
         });
       if (mode.mode === "ask")
         return event(
-          this.propose(machine, action, target, raw["body"], reason, labels, needs, mode.circleId, now),
+          await this.propose(machine, action, target, raw["body"], reason, labels, needs, mode.circleId, now),
         );
     }
     if (needs === "apply") {
@@ -6266,7 +6308,7 @@ export class Kitshn extends DurableObject<Env> {
         const withApproval = this.askEdits(machine, action, target, raw["body"], now, "publishes");
         if (mode?.mode === "ask" && typeof withApproval !== "string")
           return event(
-            this.propose(
+            await this.propose(
               machine,
               action,
               target,
@@ -6386,7 +6428,7 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-1722: an ask that waits for one member of its approver circle. */
-  private propose(
+  private async propose(
     machine: Machine,
     action: AskAction,
     target: string,
@@ -6396,11 +6438,22 @@ export class Kitshn extends DurableObject<Env> {
     right: MachineRight,
     circleId: string,
     now: number,
-  ): AskOutcome {
+  ): Promise<AskOutcome> {
+    // K-1722: a loop of asks cannot fill the Inbox or each snapshot.
+    const [open] = this.sql<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM proposals WHERE machine_id = ? AND state = 'pending'",
+      machine.id,
+    );
+    if ((open?.count ?? 0) >= MAX_OPEN_PROPOSALS)
+      return {
+        outcome: "refused",
+        reason: `This machine has ${MAX_OPEN_PROPOSALS} open asks already. Wait for their answers (K-1722).`,
+      };
     const id = crypto.randomUUID();
+    const shown = shownAsk(action, target, body);
     this.sql(
-      `INSERT INTO proposals (id, machine_id, action, target, body, reason, labels, right_name, circle_id, state, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      `INSERT INTO proposals (id, machine_id, action, target, body, reason, labels, right_name, circle_id, shown, shown_hash, state, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
       id,
       machine.id,
       action,
@@ -6410,6 +6463,8 @@ export class Kitshn extends DurableObject<Env> {
       JSON.stringify(labels),
       right,
       circleId,
+      shown,
+      await shownHash(shown),
       now,
       now + PROPOSAL_MS,
     );
@@ -6431,6 +6486,8 @@ export class Kitshn extends DurableObject<Env> {
       readonly machineId: string | null;
       readonly reason: string | null;
     },
+    /** K-1722: the hash of the text that the approver read; a different one refuses, so nothing else runs. */
+    seenHash: string | null = null,
   ): Promise<
     { readonly ok: true; readonly result?: unknown } | { readonly ok: false; readonly error: string }
   > {
@@ -6443,9 +6500,36 @@ export class Kitshn extends DurableObject<Env> {
         ok: false,
         error: `Only a member of the approver circle ${circle?.name ?? proposal.circleId} answers this ask (K-1723).`,
       };
+    if (proposal.state !== "pending")
+      return { ok: false, error: `This ask is already decided (${proposal.state}).` };
     if (!SELF_APPROVAL_ALLOWED && by.machineId === proposal.machineId)
       return { ok: false, error: "The machine that asked does not answer its own ask (K-1727)." };
+    if (decision === "approved" && seenHash !== null && seenHash !== proposal.shownHash)
+      return {
+        ok: false,
+        error: "The ask changed since you read it. Read it again in the Asks list (K-1722).",
+      };
     const now = Date.now();
+    // K-1712: an approval checks again that the ask may still run: the right still asks this circle, the circle is in
+    // force, and the target is still there. Otherwise the proposal ends "no longer allowed".
+    const gone = decision === "approved" ? this.proposalGone(proposal, now) : null;
+    if (gone !== null) {
+      const [ended] = this.sql<{ id: string }>(
+        "UPDATE proposals SET state = 'denied', decided_at = ?, decided_by = ? WHERE id = ? AND state = 'pending' RETURNING id",
+        now,
+        JSON.stringify({ actor: { _tag: "kitshn", reason: "no longer allowed" }, reason: gone }),
+        proposalId,
+      );
+      if (ended) {
+        this.sendAskResult(proposal.machineId, {
+          proposalId,
+          outcome: "denied",
+          reason: `no longer allowed: ${gone}`,
+        });
+        this.broadcast();
+      }
+      return { ok: false, error: `This ask is no longer allowed: ${gone}` };
+    }
     const [won] = this.sql<{ id: string }>(
       "UPDATE proposals SET state = ?, decided_at = ?, decided_by = ? WHERE id = ? AND state = 'pending' AND expires_at > ? RETURNING id",
       decision,
@@ -6485,6 +6569,29 @@ export class Kitshn extends DurableObject<Env> {
     });
     this.broadcast();
     return outcome.outcome === "refused" ? { ok: false, error: outcome.reason } : { ok: true, result };
+  }
+
+  /** K-1712: why an approved ask may no longer run, or null. */
+  private proposalGone(proposal: Proposal, now: number): string | null {
+    const mode = machineRightMode(this.state, proposal.machineId, proposal.right, now);
+    if (mode?.mode !== "ask" || mode.circleId !== proposal.circleId)
+      return `the right "${MACHINE_RIGHT_NAMES[proposal.right]}" no longer asks this circle.`;
+    const circle = this.state.circles.get(proposal.circleId);
+    if (!circle || (circle.endsAt !== null && circle.endsAt <= now)) return "the approver circle ended.";
+    if (!this.state.machines.has(proposal.machineId)) return "the machine that asked is gone.";
+    if (
+      (proposal.action === "deploy" || proposal.action === "publish") &&
+      !this.state.resources.has(proposal.target)
+    )
+      return `the card ${proposal.target} is gone.`;
+    if (proposal.action === "job" && !this.state.machines.has(proposal.target))
+      return `the machine ${proposal.target} is gone.`;
+    if (
+      proposal.action === "allow" &&
+      this.sql("SELECT 1 AS one FROM repos WHERE repo_id = ?", proposal.target).length === 0
+    )
+      return `kitshn no longer knows the repo ${proposal.target}.`;
+    return null;
   }
 
   /** K-1722 to K-1724: the answer goes to the machine's open connection; an offline machine misses it. */
@@ -6546,6 +6653,9 @@ export class Kitshn extends DurableObject<Env> {
           ? outcome.proposalId
           : "",
     );
+    // K-1717: at most 5,000 events, trimmed on insert by id, so a burst of asks cannot grow the table within a day.
+    const [last] = this.sql<{ id: number }>("SELECT last_insert_rowid() AS id");
+    if (last) this.sql("DELETE FROM ask_events WHERE id <= ?", last.id - ASK_EVENT_COUNT);
   }
 
   /** K-1717: the newest 50 ask events, for History; a snapshot reads at most 50 rows for them. */
@@ -8554,6 +8664,8 @@ interface ProposalRow extends Record<string, SqlStorageValue> {
   readonly labels: string;
   readonly right_name: string;
   readonly circle_id: string;
+  readonly shown: string;
+  readonly shown_hash: string;
   readonly state: string;
   readonly created_at: number;
   readonly expires_at: number;
@@ -8569,6 +8681,8 @@ const proposalOf = (row: ProposalRow): Proposal => ({
   labels: JSON.parse(row.labels) as Record<string, string>,
   right: row.right_name as MachineRight,
   circleId: row.circle_id,
+  shown: row.shown,
+  shownHash: row.shown_hash,
   state: row.state as Proposal["state"],
   createdAt: row.created_at,
   expiresAt: row.expires_at,

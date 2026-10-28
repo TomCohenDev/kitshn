@@ -9,6 +9,7 @@ import {
   agentRefusal,
   agentUploadPlace,
   cardsControlledBy,
+  circlesOf,
   isAgentKey,
   machineRightMode,
   mayDeployOn,
@@ -424,6 +425,15 @@ describe("rights of machines with a mode (K-1720, K-1730)", () => {
     expect(agentHas(asking, as("vps-token"), "addsApps", 0, "addsApps")).toBe(true);
     // An approval of one right gives no other right.
     expect(agentHas(asking, as("vps-token"), "publishes", 0, "addsApps")).toBe(false);
+  });
+
+  it("gives an agent key no new control from a machine in its circle (K-1730)", () => {
+    // "agents" now holds the key and a machine: it stays an agent circle of the machine, and is none of the key,
+    // as before machines could be agents.
+    const state = withMachine(undefined);
+    expect(circlesOf(state, as("vps-token"), 0).has("agents")).toBe(true);
+    expect(circlesOf(state, as("agent-1"), 0).has("agents")).toBe(false);
+    expect(circlesOf(start(), as("agent-1"), 0).has("agents")).toBe(true);
   });
 
   it("takes automatic from any agent circle over ask from another", () => {

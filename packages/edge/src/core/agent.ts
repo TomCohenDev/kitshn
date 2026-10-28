@@ -28,25 +28,30 @@ const namesAgent = (state: State, member: Member, visitor: Visitor) =>
     state.machines.get(member.machineId)?.clientId === visitor.clientId);
 
 /**
- * K-718, K-1730: the agent circles of a device or a machine: circles of devices and machines only that name it,
- * have not ended, and that it matches. A circle with people, networks, domains or Everyone is never an agent
+ * K-718: the agent circles of a device: circles of devices only that name it, have not ended, and that it matches.
+ * K-1730: a machine's agent circles may also hold machines; an agent key keeps exactly its old circles, so a machine
+ * in a circle gives a key no new control. A circle with people, networks, domains or Everyone is never an agent
  * circle, so an agent cannot move a card to anyone but other devices and machines, except a site that it added
  * into Everyone (agentRefusal).
  */
-export const circlesOf = (state: State, visitor: Visitor, now: number) =>
-  new Set(
+export const circlesOf = (state: State, visitor: Visitor, now: number) => {
+  const machine = machineOf(state, visitor) !== undefined;
+  return new Set(
     visitor.clientId === null
       ? []
       : [...state.circles.values()]
           .filter(
             (circle) =>
-              circle.members.every((member) => member._tag === "device" || member._tag === "machine") &&
+              circle.members.every(
+                (member) => member._tag === "device" || (machine && member._tag === "machine"),
+              ) &&
               circle.members.some((member) => namesAgent(state, member, visitor)) &&
               (circle.endsAt === null || circle.endsAt > now) &&
               circleMatches(circle, visitor, state.machines),
           )
           .map((circle) => circle.id),
   );
+};
 
 /**
  * K-1720, K-1730: the mode of one right of a machine through its agent circles: "automatic" from any circle wins,

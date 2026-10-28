@@ -215,6 +215,8 @@ with_old() {
   old=""
   [ -n "$KITSHN_OLD_HOST" ] && old=$(printf '%s' "$APPS" | jq -r --arg d "$KITSHN_OLD_HOST$2" \
     'map(select(.domain == $d and (.name | startswith("kitshn")))) | .[0].aud // empty')
+  [ -n "$KITSHN_OLD_HOST" ] && [ -z "$old" ] &&
+    printf 'warning: no kitshn application covers %s%s, so only the new host takes this path (K-1209).\n' "$KITSHN_OLD_HOST" "$2" >&2
   if [ -n "$old" ] && [ "$old" != "$1" ]; then printf '%s,%s' "$1" "$old"; else printf '%s' "$1"; fi
 }
 ADMIN_AUD=$(with_old "$(app "$KITSHN_HOST" "kitshn admin" 24h "$owner_policy")" "")

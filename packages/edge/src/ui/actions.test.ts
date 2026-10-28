@@ -11,6 +11,11 @@ import {
 import type { MachineView } from "../core/protocol.ts";
 import { seed } from "../core/seed.ts";
 import {
+  CHECKING_TIP,
+  type MenuTarget,
+  type UndoCheck,
+  settleUndoCheck,
+  slowUndoCheck,
   type Action,
   type ActionContext,
   type ActionGroups,
@@ -90,7 +95,13 @@ function context(version = "0123456789ab"): ActionContext {
     keyFailure: null,
     orphanVolumes: [],
   };
-  return { state, deployed: new Set(["riffle"]), machines: new Map([["vps", machine]]), version };
+  return {
+    state,
+    deployed: new Set(["riffle"]),
+    machines: new Map([["vps", machine]]),
+    version,
+    undoCheck: null,
+  };
 }
 
 /** Handlers that record each call by name. */
@@ -118,7 +129,17 @@ describe("card actions", () => {
   it("offers a deployed app its address, shares, tray and Remove app, and nothing of a machine", () => {
     const { handlers, calls } = recorder();
     const groups = actionsFor(context(), handlers, { _tag: "card", id: "riffle" });
-    expect(ids(groups)).toEqual(["details", "open", "copy", "share", "unshare", "select-kind", "add-to-stack", "tray", "remove-app"]);
+    expect(ids(groups)).toEqual([
+      "details",
+      "open",
+      "copy",
+      "share",
+      "unshare",
+      "select-kind",
+      "add-to-stack",
+      "tray",
+      "remove-app",
+    ]);
     expect(find(groups, "remove-app").danger).toBe(true);
     // The card sits in the Owner circle only, so it can join Everyone and Her.
     expect(items(find(groups, "share")).map((item) => item.id)).toEqual([`share:${EVERYONE_CIRCLE_ID}`, "share:her"]);
@@ -301,5 +322,42 @@ describe("levelEdit (K-205)", () => {
     const ending: State = { ...ctx.state, shareSettings: new Map([[shareKey("vps", OWNER_CIRCLE_ID), { level: "use", endsAt: 9 }]]) };
     expect(levelEdit(ending, vps, owner, null).after).toEqual({ level: null, endsAt: 9 });
     expect(levelEdit(ending, vps, owner, "view").after).toEqual({ level: "view", endsAt: 9 });
+  });
+});
+
+describe("per-item undo (K-1507)", () => {
+  const withCheck = (check: UndoCheck | null) => ({ ...context(), undoCheck: check });
+  const undoOf = (check: UndoCheck | null, target: MenuTarget) => {
+    const { handlers, calls } = recorder();
+    const action = (actionsFor(withCheck(check), handlers, target) ?? []).flat().find((entry) => entry.id === "undo-item");
+    return { action, calls };
+  };
+
+  it("shows the entry only for the item that the server was asked about", () => {
+    expect(undoOf(null, { _tag: "card", id: "riffle" }).action).toBeUndefined();
+    const check = { key: "card:vps", answer: null, slow: false };
+    expect(undoOf(check, { _tag: "card", id: "riffle" }).action).toBeUndefined();
+  });
+
+  it("checks, then runs when allowed, or shows the reason when refused", () => {
+    const card = { _tag: "card", id: "riffle" } as const;
+    const quick = undoOf({ key: "card:riffle", answer: null, slow: false }, card).action;
+    expect(quick).toMatchObject({ label: "Undo last change to this card", refused: CHECKING_TIP });
+    const slow = slowUndoCheck({ key: "card:riffle", answer: null, slow: false }, "card:riffle");
+    expect(undoOf(slow, card).action).toMatchObject({ label: "Undo last change to this card (checking…)" });
+    const allowed = undoOf(settleUndoCheck(slow, "card:riffle", { allowed: true }), card);
+    expect(allowed.action?.refused).toBeUndefined();
+    run(allowed.action!);
+    expect(allowed.calls).toEqual([["undoItem", { kind: "card", id: "riffle" }]]);
+    const refused = settleUndoCheck(slow, "card:riffle", { allowed: false, reason: "#9 changed it later." });
+    expect(undoOf(refused, card).action?.refused).toBe("#9 changed it later.");
+  });
+
+  it("drops an answer for another item, and keeps a settled answer out of the checking state", () => {
+    const check = { key: "circle:her", answer: null, slow: false };
+    expect(settleUndoCheck(check, "card:riffle", { allowed: true })).toBe(check);
+    expect(settleUndoCheck(null, "card:riffle", { allowed: true })).toBeNull();
+    const settled = settleUndoCheck(check, "circle:her", { allowed: true });
+    expect(slowUndoCheck(settled, "circle:her")).toBe(settled);
   });
 });

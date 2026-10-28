@@ -82,6 +82,11 @@ export const ClientMessage = Schema.Union([
     edits: Schema.Array(Edit_).check(Schema.isMinLength(1), Schema.isMaxLength(500)),
   }),
   Schema.Struct({ type: Schema.Literal("undo"), requestId: Schema.String, revision: Schema.Int }),
+  Schema.Struct({
+    type: Schema.Literal("undoItem"),
+    requestId: Schema.String,
+    item: Schema.Struct({ kind: Schema.Literals(["card", "circle"]), id: Schema.String }),
+  }),
 ]);
 export type ClientMessage = typeof ClientMessage.Type;
 

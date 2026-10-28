@@ -13,6 +13,7 @@ import {
   type Stack,
   type State,
   circlesHolding,
+  insideCircle,
   isPublicCircle,
   levelRank,
   shareKey,
@@ -80,6 +81,15 @@ export type Change =
       readonly before: AppCard | null;
       readonly after: AppCard | null;
     };
+
+/**
+ * K-1506: a card that kitshn deleted outside an edit (a live site that stopped, a closed preview, a removed
+ * machine, a deleted page or file). It only marks the card for the undo rules; nothing applies or reverses it.
+ */
+export type Forget = { readonly _tag: "forget"; readonly id: string; readonly before: null; readonly after: null };
+
+/** K-1506: a revision with only forgets records an action, which has nothing to undo. */
+export const isAction = (changes: ReadonlyArray<Change | Forget>) => changes.every((change) => change._tag === "forget");
 
 export type Actor =
   | { readonly _tag: "person"; readonly email: string }
@@ -221,6 +231,255 @@ export function removeAppChanges(state: State, id: string): Array<Change> {
 
 export const invert = (changes: ReadonlyArray<Change>): Array<Change> =>
   changes.map((change) => ({ ...change, before: change.after, after: change.before }) as Change);
+
+/**
+ * K-1505: moves of the same cards or circles by the same actor join the revision of the move or drop that
+ * started them, while each comes within this time of the one before. Two minutes covers the nudges after a
+ * drop, and a later rearrangement gets its own History entry.
+ */
+export const MOVE_MERGE_MS = 2 * 60 * 1000;
+
+const onlyMoved = (before: Circle, after: Circle) => deepEqual({ ...before, x: 0, y: 0 }, { ...after, x: 0, y: 0 });
+
+/** K-1505: a card or circle that lands somewhere: a drop from the tray, a new circle, or a move. */
+const lands = (change: Change) =>
+  (change._tag === "place" && change.after !== null) ||
+  (change._tag === "circle" &&
+    change.after !== null &&
+    (change.before === null || onlyMoved(change.before, change.after)));
+
+const isMove = (change: Change) => change.before !== null && lands(change);
+
+/**
+ * K-1505: the changes of `previous` with the moves of `changes` merged in (first `before`, last `after`), or
+ * null when the moves start a revision of their own. `previous` must be the newest revision.
+ */
+export function mergeMoves(
+  previous: Pick<Revision, "actor" | "at" | "changes" | "undoes">,
+  actor: Actor,
+  now: number,
+  changes: ReadonlyArray<Change>,
+): Array<Change> | null {
+  if (previous.undoes !== null || !deepEqual(previous.actor, actor) || now - previous.at > MOVE_MERGE_MS) return null;
+  if (previous.changes.length === 0 || !previous.changes.every(lands) || !changes.every(isMove)) return null;
+  const key = (change: Change) => `${change._tag}:${change.id}`;
+  const merged = new Map(previous.changes.map((change) => [key(change), change]));
+  for (const change of changes) {
+    const first = merged.get(key(change));
+    if (!first) return null;
+    merged.set(key(change), { ...first, after: change.after } as Change);
+  }
+  return [...merged.values()];
+}
+
+/**
+ * K-1505: the summary of a revision that moves joined. A move that changes a share gives the net summary
+ * from `start` (History is the audit trail); a pure move keeps the first summary and says that it moved.
+ */
+export function mergedSummary(
+  first: string,
+  start: State,
+  before: State,
+  after: State,
+  merged: ReadonlyArray<Change>,
+): string {
+  if (shareDiff(before, after).length > 0) return summarize(start, after, merged);
+  if (first.startsWith("Moved ") || first.endsWith(" and moved it") || first.endsWith(" and moved them")) return first;
+  return `${first}${merged.length === 1 ? " and moved it" : " and moved them"}`;
+}
+
+/** K-1507: a card or a circle that a per-item undo names. */
+export interface Item {
+  readonly kind: "card" | "circle";
+  readonly id: string;
+}
+
+/** K-1507: whether a change is part of an item: a card's place, shares, app and stack membership; a circle and its shares. */
+export function touches(change: Change, item: Item): boolean {
+  if (item.kind === "circle")
+    return (
+      (change._tag === "circle" && change.id === item.id) ||
+      (change._tag === "shareSetting" && change.id.endsWith(`/${item.id}`))
+    );
+  switch (change._tag) {
+    case "place":
+    case "app":
+      return change.id === item.id;
+    case "shareSetting":
+      return change.id.startsWith(`${item.id}/`);
+    case "stack":
+      return (change.before?.members.includes(item.id) ?? false) !== (change.after?.members.includes(item.id) ?? false);
+    case "circle":
+    case "pause":
+      return false;
+  }
+}
+
+/**
+ * K-1507: the part of a revision for one item. A circle that the revision dragged by its head (K-504) takes
+ * the cards that moved with it.
+ */
+export function itemParts(changes: ReadonlyArray<Change>, item: Item): Array<Change> {
+  const dragged =
+    item.kind === "circle" &&
+    changes.some(
+      (change) =>
+        change._tag === "circle" &&
+        change.id === item.id &&
+        change.before !== null &&
+        change.after !== null &&
+        (change.before.x !== change.after.x || change.before.y !== change.after.y),
+    );
+  // K-504: the cards that moved with the circle are the ones that sat inside it before the drag.
+  const circleBefore = changes.flatMap((change) =>
+    change._tag === "circle" && change.id === item.id && change.before ? [change.before] : [],
+  )[0];
+  const inside = (change: Change) =>
+    change._tag === "place" && change.before !== null && circleBefore !== undefined && insideCircle(change.before, circleBefore);
+  return changes.filter((change) => touches(change, item) || (dragged && inside(change)));
+}
+
+/**
+ * K-1506: what changes touch. `changed` holds the circles that they change, also through a share setting;
+ * `all` adds every circle that holds or held one of their cards, at any point that the changes or `state`
+ * give it. `pool` holds every circle shape to test, also shapes that no longer exist.
+ */
+function footprint(changes: ReadonlyArray<Change | Forget>, state: State, pool: ReadonlyArray<Circle>) {
+  const cards = new Set<string>();
+  const changed = new Set<string>();
+  const points: Array<Point> = [];
+  for (const change of changes) {
+    if (change._tag === "place" || change._tag === "app" || change._tag === "forget") cards.add(change.id);
+    if (change._tag === "place") points.push(...[change.before, change.after].filter((point) => point !== null));
+    if (change._tag === "circle") changed.add(change.id);
+    if (change._tag === "stack")
+      for (const id of [...(change.before?.members ?? []), ...(change.after?.members ?? [])]) cards.add(id);
+    if (change._tag === "shareSetting") {
+      const [card = "", circle = ""] = change.id.split("/");
+      cards.add(card);
+      changed.add(circle);
+    }
+  }
+  for (const card of cards) {
+    const place = state.places.get(card);
+    if (place) points.push(place);
+  }
+  const all = new Set(changed);
+  for (const circle of pool) if (points.some((point) => insideCircle(point, circle))) all.add(circle.id);
+  return { cards, changed, all };
+}
+
+const circleShapes = (changes: ReadonlyArray<Change | Forget>) =>
+  changes.flatMap((change) => (change._tag === "circle" ? [change.before, change.after].filter((c) => c !== null) : []));
+
+/**
+ * K-1506: whether two sets of changes depend on each other: they touch the same card, or one changes a
+ * circle that a card of the other is or was in.
+ */
+export function overlaps(
+  a: ReadonlyArray<Change | Forget>,
+  b: ReadonlyArray<Change | Forget>,
+  state: State,
+): boolean {
+  const pool = [...state.circles.values(), ...circleShapes(a), ...circleShapes(b)];
+  const one = footprint(a, state, pool);
+  const two = footprint(b, state, pool);
+  const meets = (x: ReadonlySet<string>, y: ReadonlySet<string>) => [...x].some((id) => y.has(id));
+  return meets(one.cards, two.cards) || meets(one.changed, two.all) || meets(two.changed, one.all);
+}
+
+/** A revision as the undo rules read it. */
+export interface StoredRevision {
+  readonly id: number;
+  readonly actor: Actor;
+  readonly summary: string;
+  readonly changes: ReadonlyArray<Change | Forget>;
+  readonly undoes: number | null;
+}
+
+const isChange = (change: Change | Forget): change is Change => change._tag !== "forget";
+
+/**
+ * K-1506, K-1507: what an undo by `actor` reverses: its own newest revision that is in effect (or, with an
+ * item, its own newest one that touched the item), and the changes to invert. Refuses when a later revision
+ * by anyone touched the same cards or circles. An undo and the revision that it undid cancel out.
+ */
+export function undoTarget(
+  state: State,
+  revisions: ReadonlyArray<StoredRevision>,
+  actor: Actor,
+  target: { readonly revision: number } | { readonly item: Item },
+): { readonly revision: number; readonly changes: ReadonlyArray<Change> } {
+  const undone = new Set(revisions.flatMap((revision) => (revision.undoes === null ? [] : [revision.undoes])));
+  const own = revisions
+    .filter(
+      (revision) =>
+        !isAction(revision.changes) &&
+        revision.undoes === null &&
+        !undone.has(revision.id) &&
+        deepEqual(revision.actor, actor),
+    )
+    .sort((a, b) => b.id - a.id);
+  let found: StoredRevision | undefined;
+  let changes: ReadonlyArray<Change>;
+  if ("revision" in target) {
+    const asked = revisions.find((revision) => revision.id === target.revision);
+    if (!asked) throw new RuleError(`Revision #${target.revision} does not exist, or it is older than the history keeps.`);
+    if (isAction(asked.changes))
+      throw new RuleError(`Revision #${asked.id} records an action, not a change, so it has nothing to undo.`);
+    if (asked.undoes !== null) throw new RuleError(`Revision #${asked.id} is an undo. Make the change again instead.`);
+    if (undone.has(asked.id)) throw new RuleError(`Revision #${asked.id} is undone already.`);
+    found = own[0];
+    if (found?.id !== asked.id)
+      throw new RuleError(
+        found
+          ? `Only your newest change can be undone: #${found.id} "${found.summary}".`
+          : `Revision #${asked.id} is not yours, and only your own newest change can be undone.`,
+      );
+    changes = found.changes.filter(isChange);
+  } else {
+    const item = target.item;
+    found = own.find((revision) => itemParts(revision.changes.filter(isChange), item).length > 0);
+    if (!found) throw new RuleError("You have no change to this item left to undo.");
+    const all = found.changes.filter(isChange);
+    changes = itemParts(all, item);
+    // The rest of the revision can depend on this part, such as a circle that opened while the card left it.
+    const rest = all.filter((change) => !changes.includes(change));
+    if (rest.length > 0 && overlaps(changes, rest, state))
+      throw new RuleError(`#${found.id} "${found.summary}" changed more that depends on this item: undo the whole change instead.`);
+  }
+  const start = found.id;
+  const later = revisions
+    .filter(
+      (revision) =>
+        revision.id > start &&
+        revision.changes.length > 0 &&
+        !undone.has(revision.id) &&
+        !(revision.undoes !== null && revision.undoes > start),
+    )
+    .sort((a, b) => a.id - b.id)
+    .find((revision) => overlaps(changes, revision.changes, state));
+  if (later)
+    throw new RuleError(
+      `#${later.id} "${later.summary}" changed the same cards or circles later, so this undo no longer fits. Change it by hand.`,
+    );
+  // A card that is gone gets nothing back, also when a later card has its id; an app removal restores its card.
+  const restored = new Set(changes.flatMap((change) => (change._tag === "app" && change.before ? [change.id] : [])));
+  const missing = changes
+    .flatMap((change) =>
+      change._tag === "place" && change.before
+        ? [change.id]
+        : change._tag === "shareSetting" && change.before
+          ? [change.id.split("/")[0] ?? ""]
+          : change._tag === "stack"
+            ? (change.before?.members ?? [])
+            : [],
+    )
+    .find((id) => !state.resources.has(id) && !restored.has(id));
+  if (missing !== undefined) throw new RuleError(`The card "${missing}" no longer exists, so this undo no longer fits.`);
+  return { revision: start, changes };
+}
+
 
 /** The first change whose current value is not its `before`, or null. */
 export function conflictOf(state: State, changes: ReadonlyArray<Change>): Change | null {
@@ -454,5 +713,55 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
       levelRank(circle.level) > levelRank(old.level)
     )
       throw new RuleError(`While paused, access only goes down: the circle ${circle.name} would let in more.`);
+  }
+}
+
+/**
+ * K-1502: the changes that an undo of `original` commits, after every check that a write runs: the values are
+ * still the ones the revision set, no card becomes public without the question of K-210 (which an undo does
+ * not ask), the rules of K-105 and K-521, and the pause (K-1504). The Compose stop of K-909 depends on live
+ * jobs, so the worker checks it when it commits.
+ */
+export function prepareUndo(state: State, original: ReadonlyArray<Change>): Array<Change> {
+  const inverted = invert(original);
+  const conflict = conflictOf(state, inverted);
+  if (conflict?._tag === "app")
+    throw new RuleError(`A later deploy or removal changed the app "${conflict.id}", so this undo no longer fits (K-909).`);
+  if (conflict) throw new RuleError(`${conflict._tag} "${conflict.id}" changed since, so this undo no longer fits.`);
+  // A card that joined a stack since then takes its stack along (K-521).
+  const changes = refuseResume(withStackMates(state, inverted));
+  const after = applyChanges(state, changes);
+  const own = new Set(inverted.flatMap((change) => (change._tag === "place" ? [change.id] : [])));
+  const goingPublic = shareDiff(state, after).find(
+    (diff) => !own.has(diff.resource.id) && diff.to && !diff.from && isPublicCircle(diff.circle),
+  );
+  if (goingPublic) {
+    const { resource, circle } = goingPublic;
+    const stacked = [...state.stacks.values()].some((stack) => stack.members.includes(resource.id));
+    throw new RuleError(
+      stacked
+        ? `This undo would make ${resource.name} public in ${circle.name} through its stack. Move the stack by hand.`
+        : `This undo would make ${resource.name} public in ${circle.name}. An undo never does that without asking; share it by hand.`,
+    );
+  }
+  const violation = ruleViolation(after);
+  if (violation) throw new RuleError(violation);
+  refuseRaiseWhilePaused(state, after);
+  return changes;
+}
+
+/** K-523, K-1507: whether the per-item undo of `actor` works now, or why kitshn refuses it. */
+export function undoItemAnswer(
+  state: State,
+  revisions: ReadonlyArray<StoredRevision>,
+  actor: Actor,
+  item: Item,
+): { readonly allowed: true } | { readonly allowed: false; readonly reason: string } {
+  try {
+    prepareUndo(state, undoTarget(state, revisions, actor, { item }).changes);
+    return { allowed: true };
+  } catch (error) {
+    if (!(error instanceof RuleError)) throw error;
+    return { allowed: false, reason: error.message };
   }
 }

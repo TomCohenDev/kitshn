@@ -2,8 +2,10 @@ import { useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 import {
   type Actor,
   type Edit,
+  type Item,
   type ShareDiff,
   applyChanges,
+  deepEqual,
   isAppCard,
   resolveEdits,
   shareDiff,
@@ -45,7 +47,12 @@ import {
   type ActionHandlers,
   type MenuTarget,
   type PaletteEntry,
+  type UndoAnswer,
+  type UndoCheck,
   actionsFor,
+  itemKey,
+  settleUndoCheck,
+  slowUndoCheck,
   REMOVE_APP_TIP,
   levelEdit,
   type PaletteCursor,
@@ -177,6 +184,48 @@ export function App() {
     [store.snapshot],
   );
   const deployed = useMemo(() => new Set(store.snapshot?.deployedCards ?? []), [store.snapshot]);
+
+  /**
+   * K-523, K-1507: the item whose per-item undo the open menu shows, or for the palette the selected card or
+   * circle. Other items get no undo entry, so the palette sends one request, not one per item.
+   */
+  const undoItemOf: Item | null =
+    menu?.target._tag === "card" || menu?.target._tag === "circle"
+      ? { kind: menu.target._tag, id: menu.target.id }
+      : palette !== null && selection.circle !== null
+        ? { kind: "circle", id: selection.circle }
+        : palette !== null && selection.cards.size === 1
+          ? { kind: "card", id: [...selection.cards][0] ?? "" }
+          : null;
+  const undoKey = undoItemOf ? itemKey(undoItemOf) : null;
+  const [undoCheck, setUndoCheck] = useState<UndoCheck | null>(null);
+  // Asks the server when a menu or the palette opens, and again when a new revision arrives while it is open;
+  // an answer for a closed menu or another item is dropped.
+  const newestRevision = store.snapshot?.revision ?? 0;
+  useEffect(() => {
+    if (undoItemOf === null || undoKey === null) {
+      setUndoCheck(null);
+      return;
+    }
+    setUndoCheck((check) => (check?.key === undoKey ? check : { key: undoKey, answer: null, slow: false }));
+    // Each request is live until this effect ends, so an answer from an earlier opening is dropped.
+    let live = true;
+    const slow = setTimeout(() => setUndoCheck((check) => slowUndoCheck(check, undoKey)), 150);
+    void callApi<UndoAnswer>(
+      "GET",
+      `/api/undo-item?kind=${undoItemOf.kind}&id=${encodeURIComponent(undoItemOf.id)}`,
+    ).then((answer) => {
+      clearTimeout(slow);
+      if (!live) return;
+      setUndoCheck((check) =>
+        settleUndoCheck(check, undoKey, "error" in answer ? { allowed: false, reason: answer.error } : answer),
+      );
+    });
+    return () => {
+      live = false;
+      clearTimeout(slow);
+    };
+  }, [undoKey, newestRevision]);
 
   useEffect(() => {
     const onHash = () => {
@@ -459,6 +508,18 @@ export function App() {
     );
   };
 
+  /** K-1507: undoes the caller's own newest change to one card or circle. */
+  const undoItem = async (item: Item) => {
+    const result = await callApi<{ revision: number | null; notes: ReadonlyArray<string> }>("POST", "/api/undo-item", {
+      item,
+    });
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: ["Undone.", ...result.notes].join(" "), error: false, undo: null },
+    );
+  };
+
   /** K-909: no confirm; the toast and History undo it. */
   const removeApp = async (resource: Resource) => {
     const result = await callApi<{ revision: number | null; notes: ReadonlyArray<string> }>(
@@ -673,8 +734,15 @@ export function App() {
     addSite: () => setAddingSite(true),
     addMachine: () => setAddingMachine(true),
     fit,
+    undoItem: (item) => void undoItem(item),
   };
-  const actionContext: ActionContext = { state, deployed, machines, version: store.snapshot.version };
+  const actionContext: ActionContext = {
+    state,
+    deployed,
+    machines,
+    version: store.snapshot.version,
+    undoCheck,
+  };
 
   const waitingRepos = store.snapshot?.repos.filter((repo) => repo.state === "waiting").length ?? 0;
   return (
@@ -716,7 +784,7 @@ export function App() {
       ) : route.tab === "machines" ? (
         <MachinesView machines={store.snapshot.machines} onAdd={() => setAddingMachine(true)} />
       ) : (
-        <History revisions={store.snapshot.revisions} onUndo={(id) => void undo(id)} />
+        <History revisions={store.snapshot.revisions} me={store.snapshot.me} onUndo={(id) => void undo(id)} />
       )}
       {addingMachine ? <AddMachine onClose={() => setAddingMachine(false)} /> : null}
       {addingSite ? (
@@ -1079,7 +1147,12 @@ export function App() {
   );
 }
 
-function History(props: { revisions: ReadonlyArray<RevisionView>; onUndo: (id: number) => void }) {
+function History(props: { revisions: ReadonlyArray<RevisionView>; me: Actor; onUndo: (id: number) => void }) {
+  // K-1506: Undo reverses only the caller's own newest change that is still in effect.
+  const newest = props.revisions.find(
+    (revision) =>
+      revision.undoable && revision.undoes === null && revision.undoneBy === null && deepEqual(revision.actor, props.me),
+  )?.id;
   return (
     <section class="history">
       <h2>History</h2>
@@ -1106,7 +1179,7 @@ function History(props: { revisions: ReadonlyArray<RevisionView>; onUndo: (id: n
                   <span class="stamp" data-tip={`Undone: revision #${revision.undoneBy} reverses this one.`}>
                     ✓ undone
                   </span>
-                ) : revision.undoes === null && revision.undoable ? (
+                ) : revision.id === newest ? (
                   <button
                     class="btn"
                     data-tip="Undo: a new revision that reverses this one."

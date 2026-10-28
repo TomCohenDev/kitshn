@@ -7,26 +7,31 @@ import {
   type AppCard,
   type Change,
   type Edit,
+  type Forget,
   RuleError,
   applyChanges,
   conflictOf,
   deepEqual,
   invert,
+  type Item,
+  mergeMoves,
+  mergedSummary,
+  type StoredRevision,
+  undoItemAnswer,
+  prepareUndo,
+  undoTarget,
   refuseRaiseWhilePaused,
   refuseResume,
   removeAppChanges,
   resolveEdits,
   restoredResource,
   ruleViolation,
-  shareDiff,
   stacksWithout,
   summarize,
-  withStackMates,
 } from "../core/changes.ts";
 import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
-  isPublicCircle,
   type Circle,
   type Member,
   type Point,
@@ -210,6 +215,19 @@ const nextUtcMidnight = (now: number) => Math.floor(now / DAY) * DAY + DAY;
 
 const decodeClientMessage = Schema.decodeUnknownSync(ClientMessage);
 
+/** K-1502, K-1507: the revision that an undo reverses; `item` names the card or circle of a per-item undo. */
+interface UndoOf {
+  readonly revision: number;
+  readonly item: string | null;
+}
+
+/** The POST paths that take a client message as their body. */
+const API_MESSAGES: Readonly<Record<string, ClientMessage["type"]>> = {
+  "/api/apply": "apply",
+  "/api/undo": "undo",
+  "/api/undo-item": "undoItem",
+};
+
 /** K-003: the one Durable Object. It holds all state in SQLite and a copy in memory. */
 export class Kitshn extends DurableObject<Env> {
   private state!: State;
@@ -334,7 +352,9 @@ export class Kitshn extends DurableObject<Env> {
       undoes: number | null;
       empty: number;
     }>(
-      "SELECT id, at, actor, summary, undoes, changes = '[]' AS empty FROM revisions ORDER BY id DESC LIMIT ?",
+      `SELECT id, at, actor, summary, undoes,
+         NOT EXISTS (SELECT 1 FROM json_each(changes) WHERE json_extract(value, '$._tag') != 'forget') AS empty
+       FROM revisions ORDER BY id DESC LIMIT ?`,
       RECENT_REVISIONS,
     );
     const undone = new Map(
@@ -467,16 +487,18 @@ export class Kitshn extends DurableObject<Env> {
   private insertRevision(
     actor: Actor,
     summary: string,
-    changes: ReadonlyArray<Change>,
+    changes: ReadonlyArray<Change | Forget>,
     undoes: number | null,
+    itemUndo: number | null = null,
   ) {
     const [row] = this.sql<{ id: number }>(
-      "INSERT INTO revisions (at, actor, summary, changes, undoes) VALUES (?, ?, ?, ?, ?) RETURNING id",
+      "INSERT INTO revisions (at, actor, summary, changes, undoes, item_undo) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
       Date.now(),
       JSON.stringify(actor),
       summary,
       JSON.stringify(changes),
       undoes,
+      itemUndo,
     );
     if (!row) throw new Error("The revision insert returned no id.");
     return row.id;
@@ -499,15 +521,23 @@ export class Kitshn extends DurableObject<Env> {
     return after;
   }
 
-  /** One write: checks the rules (K-105), stores the changes and one revision (K-1501), then tells everyone. */
-  private commit(actor: Actor, changes: ReadonlyArray<Change>, undoes: number | null): number | null {
+  /**
+   * One write: checks the rules (K-105), stores the changes and one revision (K-1501), then tells everyone.
+   * Moves that follow a move or drop of the same actor join its revision (K-1505).
+   */
+  private commit(actor: Actor, changes: ReadonlyArray<Change>, undo: UndoOf | null): number | null {
     if (changes.length === 0) return null;
     const before = this.state;
     const after = this.checked(changes);
-    const summary =
-      undoes === null
-        ? summarize(before, after, changes)
-        : `Undo #${undoes}: ${summarize(before, after, changes)}`;
+    const now = Date.now();
+    const merge = undo === null ? this.movesToMerge(actor, now, changes) : null;
+    const label =
+      undo === null ? "" : undo.item === null ? `Undo #${undo.revision}: ` : `Undo #${undo.revision} for ${undo.item}: `;
+    const summary = merge
+      ? mergedSummary(merge.summary, applyChanges(before, invert(merge.previous)), before, after, merge.changes)
+      : label + summarize(before, after, changes);
+    // A per-item undo is a change of its own (K-1507); only a whole undo marks its revision as undone.
+    const undoes = undo?.item === null ? undo.revision : null;
     const id = this.ctx.storage.transactionSync(() => {
       this.persist(changes);
       // A switch to a lockdown keeps who paused first and when.
@@ -520,7 +550,17 @@ export class Kitshn extends DurableObject<Env> {
            WHERE state = 'queued' AND json_extract(visitor, '$.email') IS NULL AND json_extract(visitor, '$.clientId') IS NOT NULL`,
         );
       }
-      return this.insertRevision(actor, summary, changes, undoes);
+      if (merge) {
+        this.sql(
+          "UPDATE revisions SET at = ?, summary = ?, changes = ? WHERE id = ?",
+          now,
+          summary,
+          JSON.stringify(merge.changes),
+          merge.id,
+        );
+        return merge.id;
+      }
+      return this.insertRevision(actor, summary, changes, undoes, undo?.item ? undo.revision : null);
     });
     this.state = after;
     for (const change of changes) {
@@ -528,9 +568,35 @@ export class Kitshn extends DurableObject<Env> {
       if (change._tag === "place")
         for (const id of this.stuckShares) if (id.startsWith(`${change.id}/`)) this.stuckShares.delete(id);
     }
-    this.showRevision({ id, at: Date.now(), actor, summary, undoes, undoneBy: null, undoable: changes.length > 0 });
+    if (merge) {
+      this.revisions = this.revisions.map((revision) => (revision.id === id ? { ...revision, at: now, summary } : revision));
+      this.broadcast();
+    } else this.showRevision({ id, at: now, actor, summary, undoes, undoneBy: null, undoable: true });
     void this.scheduleAlarm();
     return id;
+  }
+
+  /** K-1505: the newest revision with these moves merged in, when they join it. */
+  private movesToMerge(actor: Actor, now: number, changes: ReadonlyArray<Change>) {
+    const [row] = this.sql<{
+      id: number;
+      at: number;
+      actor: string;
+      summary: string;
+      changes: string;
+      undoes: number | null;
+      item_undo: number | null;
+    }>("SELECT id, at, actor, summary, changes, undoes, item_undo FROM revisions ORDER BY id DESC LIMIT 1");
+    // A per-item undo keeps `undoes` null (K-1507), and moves never join an undo.
+    if (!row || row.item_undo !== null) return null;
+    const previous = JSON.parse(row.changes) as Array<Change>;
+    const merged = mergeMoves(
+      { actor: JSON.parse(row.actor) as Actor, at: row.at, changes: previous, undoes: row.undoes },
+      actor,
+      now,
+      changes,
+    );
+    return merged && { id: row.id, summary: row.summary, previous, changes: merged };
   }
 
   private apply(actor: Actor, edits: ReadonlyArray<Edit>) {
@@ -552,34 +618,37 @@ export class Kitshn extends DurableObject<Env> {
     }
   }
 
-  /** K-1502: Undo makes a new revision that reverses the old one, and runs the same rules. */
+  /** K-1502, K-1506: Undo reverses the caller's own newest revision, and runs the same rules as an edit. */
   private undo(actor: Actor, revisionId: number) {
-    const [row] = this.sql<{ changes: string }>("SELECT changes FROM revisions WHERE id = ?", revisionId);
-    if (!row)
-      throw new RuleError(`Revision #${revisionId} does not exist, or it is older than the history keeps.`);
-    const inverted = invert(JSON.parse(row.changes) as Array<Change>);
-    if (inverted.length === 0)
-      throw new RuleError(
-        `Revision #${revisionId} records an action, not a change, so it has nothing to undo.`,
-      );
-    // This also refuses a second undo of the same revision: its changes are no longer current.
-    const conflict = conflictOf(this.state, inverted);
-    if (conflict?._tag === "app")
-      throw new RuleError(`A later deploy or removal changed the app "${conflict.id}", so this undo no longer fits (K-909).`);
-    if (conflict)
-      throw new RuleError(`A later revision changed ${conflict._tag} "${conflict.id}". Undo that revision first.`);
-    // A card that joined a stack since then takes its stack along (K-521), but never into a public circle
-    // without the question of K-210, which an undo does not ask.
-    const changes = withStackMates(this.state, inverted);
-    const own = new Set(inverted.flatMap((change) => (change._tag === "place" ? [change.id] : [])));
-    const goingPublic = shareDiff(this.state, applyChanges(this.state, changes)).find(
-      (diff) => !own.has(diff.resource.id) && diff.to && !diff.from && isPublicCircle(diff.circle),
-    );
-    if (goingPublic)
-      throw new RuleError(
-        `This undo would make ${goingPublic.resource.name} public through its stack. Move the stack by hand.`,
-      );
-    return this.commitApps(actor, refuseResume(changes), revisionId);
+    const target = undoTarget(this.state, this.storedRevisions(), actor, { revision: revisionId });
+    return this.commitUndo(actor, target.changes, { revision: target.revision, item: null });
+  }
+
+  /** K-1507: undoes the caller's own newest change to one card or circle, and only that item's part of it. */
+  private undoItem(actor: Actor, item: Item) {
+    const target = undoTarget(this.state, this.storedRevisions(), actor, { item });
+    const name =
+      item.kind === "card"
+        ? (this.state.resources.get(item.id)?.name ?? item.id)
+        : `the circle ${this.state.circles.get(item.id)?.name ?? item.id}`;
+    return this.commitUndo(actor, target.changes, { revision: target.revision, item: name });
+  }
+
+  /** Every revision that History keeps (K-1503: at most 5,000). */
+  private storedRevisions(): Array<StoredRevision> {
+    return this.sql<{ id: number; actor: string; summary: string; changes: string; undoes: number | null }>(
+      "SELECT id, actor, summary, changes, undoes FROM revisions",
+    ).map((row) => ({
+      id: row.id,
+      actor: JSON.parse(row.actor) as Actor,
+      summary: row.summary,
+      changes: JSON.parse(row.changes) as Array<Change>,
+      undoes: row.undoes,
+    }));
+  }
+
+  private commitUndo(actor: Actor, original: ReadonlyArray<Change>, undo: UndoOf) {
+    return this.commitApps(actor, prepareUndo(this.state, original), undo);
   }
 
   /** K-909: removes a deployed app; the card panel, the palette and `DELETE /api/apps/<card>` all come here. */
@@ -604,7 +673,7 @@ export class Kitshn extends DurableObject<Env> {
   private async commitApps(
     actor: Actor,
     changes: ReadonlyArray<Change>,
-    undoes: number | null,
+    undo: UndoOf | null,
   ): Promise<{ revision: number | null; notes: Array<string> }> {
     const apps = changes.flatMap((change) => (change._tag === "app" ? [change] : []));
     // Check first, so that a refused change tears nothing down.
@@ -628,7 +697,7 @@ export class Kitshn extends DurableObject<Env> {
     for (const card of restored)
       if (composeUndo(removalDown(this.query, card.id)) === "refuse")
         throw new RuleError(`The machine is stopping ${card.name} now; undo after it finishes (K-909).`);
-    const revision = this.commit(actor, changes, undoes);
+    const revision = this.commit(actor, changes, undo);
     // A stop that still waits goes, and the app starts again (a short restart where it never stopped).
     for (const card of restored) {
       failQueuedDowns(this.query, card.id, "The undo of the removal replaced this job (K-909).");
@@ -840,7 +909,9 @@ export class Kitshn extends DurableObject<Env> {
       const { revision, notes } =
         message.type === "apply"
           ? { revision: this.apply(caller.actor, message.edits), notes: [] }
-          : await this.undo(caller.actor, message.revision);
+          : message.type === "undo"
+            ? await this.undo(caller.actor, message.revision)
+            : await this.undoItem(caller.actor, message.item);
       return { type: "result", requestId: message.requestId, ok: true, revision, notes };
     } catch (error) {
       if (!(error instanceof RuleError)) throw error;
@@ -927,13 +998,23 @@ export class Kitshn extends DurableObject<Env> {
       return this.deleteItem(caller, path.slice("/api/library/".length));
     if (path === "/api/devices" && request.method === "POST")
       return this.addDevice(await request.json().catch(() => null));
-    if (path === "/api/apply" || path === "/api/undo") {
+    if (path === "/api/undo-item" && request.method === "GET") {
+      // K-1507: the menu asks before it offers the per-item undo; the same rule over the whole History.
+      const query = new URL(request.url).searchParams;
+      const kind = query.get("kind");
+      const id = query.get("id");
+      if ((kind !== "card" && kind !== "circle") || !id)
+        return Response.json({ error: "Name the item with kind=card or kind=circle and an id." }, { status: 400 });
+      return Response.json(undoItemAnswer(this.state, this.storedRevisions(), caller.actor, { kind, id }));
+    }
+    const type = API_MESSAGES[path];
+    if (type !== undefined) {
       if (request.method !== "POST") return new Response("Use POST.", { status: 405 });
       let message: ClientMessage;
       try {
         message = decodeClientMessage({
           ...((await request.json()) as object),
-          type: path.slice(5),
+          type,
           requestId: "http",
         });
       } catch (error) {
@@ -1540,17 +1621,17 @@ export class Kitshn extends DurableObject<Env> {
     }
     this.ctx.storage.transactionSync(() => {
       for (const table of ["machines", "presence"]) this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
-      this.forgetCard(id);
+      const forgotten = [this.forgetCard(id)];
       this.sql("DELETE FROM jobs WHERE machine_id = ? AND state IN ('queued', 'sent')", id);
       this.sql("DELETE FROM join_codes WHERE machine_id = ?", id);
       this.sql("DELETE FROM rekey_codes WHERE machine_id = ?", id);
       this.sql("DELETE FROM tunnel_objects WHERE machine_id = ?", id);
       for (const site of this.sitesOf(id)) {
         this.sql("DELETE FROM live_sites WHERE id = ?", site.id);
-        this.forgetCard(site.id);
+        forgotten.push(this.forgetCard(site.id));
       }
       const key = machine.key?.kind === "public" ? ` and its key ${machine.key.fingerprint}` : "";
-      this.insertRevision(caller.actor, `Removed machine ${machine.name}${key}`, [], null);
+      this.insertRevision(caller.actor, `Removed machine ${machine.name}${key}`, forgotten, null);
     });
     this.presence.delete(id);
     this.keyFailures.delete(id);
@@ -1911,8 +1992,11 @@ export class Kitshn extends DurableObject<Env> {
     return stale || checking || this.dnsWork().length > 0 || this.routeWork().length > 0;
   }
 
-  /** Deletes a card's rows and takes it out of its stack, inside the caller's transaction (K-522). */
-  private forgetCard(id: string) {
+  /**
+   * Deletes a card's rows and takes it out of its stack, inside the caller's transaction (K-522). Returns the
+   * mark that the revision of the deletion stores, so an older undo never touches a new card of the same id (K-1506).
+   */
+  private forgetCard(id: string): Forget {
     for (const table of ["resources", "places"]) this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
     this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);
     const stacks = this.sql<{ id: string; body: string }>("SELECT id, body FROM stacks").map(
@@ -1922,8 +2006,8 @@ export class Kitshn extends DurableObject<Env> {
       if (change.after) this.sql("UPDATE stacks SET body = ? WHERE id = ?", JSON.stringify(change.after), change.id);
       else this.sql("DELETE FROM stacks WHERE id = ?", change.id);
     }
+    return { _tag: "forget", id, before: null, after: null };
   }
-
 
   private sitesOf(machineId: string) {
     return [...this.liveSites.values()].filter((site) => site.machineId === machineId);
@@ -2006,15 +2090,14 @@ export class Kitshn extends DurableObject<Env> {
         this.sql("DELETE FROM live_sites WHERE id = ?", site.id);
         // A removed app has its History entry already (K-909).
         const hadCard = this.state.resources.has(site.id);
-        this.forgetCard(site.id);
-        if (site.state === "ok" && hadCard) {
+        const forgotten = this.forgetCard(site.id);
+        if (hadCard)
           this.insertRevision(
             { _tag: "kitshn", reason: `live site on ${machine.name}` },
             `${machine.name} stopped exposing ${site.address}`,
-            [],
+            [forgotten],
             null,
           );
-        }
       }
     });
     for (const reason of refused) console.warn(`kitshn refused a live site of ${machine.name}: ${reason}`);
@@ -3231,7 +3314,12 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
       // A preview that never came up has no live site to take its card away.
       if (resource && ![...this.liveSites.values()].some((site) => site.id === row.resource_id))
-        this.forgetCard(row.resource_id);
+        this.insertRevision(
+          { _tag: "kitshn", reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}` },
+          `Removed ${resource.name}, its preview closed (K-904)`,
+          [this.forgetCard(row.resource_id)],
+          null,
+        );
     });
     this.load();
     this.deliverJobs();
@@ -3327,13 +3415,13 @@ export class Kitshn extends DurableObject<Env> {
     await this.removeWorker(api, row.address, row.script);
     const resource = this.state.resources.get(row.resource_id);
     this.ctx.storage.transactionSync(() => {
-      this.forgetCard(row.resource_id);
+      const forgotten = this.forgetCard(row.resource_id);
       this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
       if (resource)
         this.insertRevision(
           { _tag: "kitshn", reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}` },
           `Removed ${resource?.name ?? row.environment}, its preview closed (K-904)`,
-          [],
+          [forgotten],
           null,
         );
     });
@@ -3798,8 +3886,7 @@ export class Kitshn extends DurableObject<Env> {
         id,
       );
       this.sql("DELETE FROM library WHERE id = ?", id);
-      this.forgetCard(id);
-      this.insertRevision(caller.actor, `Deleted the ${item.kind} ${item.title}`, [], null);
+      this.insertRevision(caller.actor, `Deleted the ${item.kind} ${item.title}`, [this.forgetCard(id)], null);
     });
     this.load();
     this.broadcast();

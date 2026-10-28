@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { extname, join, relative, resolve, sep } from "node:path";
-import { headersWarnings } from "./headers.ts";
+import { headersWarnings, redirectsWarnings } from "./headers.ts";
 import { pickSiteIcon } from "./icon.ts";
 import { RecipeError, readRecipe } from "./parse.ts";
 import { type DeployEvent, decodeRecipe } from "./recipe.ts";
@@ -132,6 +132,17 @@ async function deploy(server: string, dir: string) {
     execFileSync("sh", ["-c", recipe.static.build], { cwd: dir, stdio: "inherit" });
   }
   const output = resolve(dir, recipe.static.output);
+  // K-805: a site that its own job built arrives at artifact-path, which must be the output folder of the recipe.
+  const artifactPath = process.env["KITSHN_ARTIFACT_PATH"];
+  if (artifactPath && resolve(dir, artifactPath) !== output) {
+    fail(
+      `the artifact went to ${artifactPath}, but the output folder of the recipe is ${recipe.static.output}. Make artifact-path and output the same folder.`,
+    );
+  }
+  if (artifactPath && recipe.static.build)
+    console.log(
+      "kitshn: warning: the recipe builds too, over the artifact; a site with its own build job names no build.",
+    );
   // realpath follows a symlinked output folder, so a link cannot point outside the repo.
   const real = existsSync(output) ? realpathSync(output) : output;
   const root = realpathSync(dir);
@@ -142,12 +153,19 @@ async function deploy(server: string, dir: string) {
   const manifest: Record<string, { hash: string; size: number }> = {};
   const byHash = new Map<string, { path: string; type: string }>();
   const byPath = new Map<string, string>();
-  // K-805: `_headers` sets response headers of the site; Cloudflare reads it as config, not as a file to serve.
+  // K-805: `_headers` sets response headers and `_redirects` redirects of the site; Cloudflare reads them as config,
+  // not as files to serve.
   let headers: string | null = null;
+  let redirects: string | null = null;
   for (const path of files(output)) {
     if (relative(output, path) === "_headers") {
       headers = readFileSync(path, "utf8");
       for (const warning of headersWarnings(headers)) console.log(`kitshn: warning: ${warning}`);
+      continue;
+    }
+    if (relative(output, path) === "_redirects") {
+      redirects = readFileSync(path, "utf8");
+      for (const warning of redirectsWarnings(redirects)) console.log(`kitshn: warning: ${warning}`);
       continue;
     }
     const bytes = readFileSync(path);
@@ -203,8 +221,10 @@ async function deploy(server: string, dir: string) {
     jwt: completion,
     icon: icon ? Buffer.from(icon.bytes).toString("base64") : null,
     headers,
+    redirects,
   });
   if (headers !== null) console.log("kitshn: the site sets its own headers with _headers.");
+  if (redirects !== null) console.log("kitshn: the site sets its own redirects with _redirects.");
   console.log(
     `kitshn: deployed ${Object.keys(manifest).length} files to https://${done.address} (route check: ${done.status}).`,
   );

@@ -3,7 +3,7 @@ import {
   environmentNames,
   eventOf,
   legacyRepos,
-  parseHeadersFile,
+  parseConfigFile,
   parseManifest,
   parseSiteIcon,
   repoIdOf,
@@ -124,12 +124,16 @@ describe("site icon of a deploy (K-1113)", () => {
   });
 
   it("passes a _headers file on as text, and refuses one that is not text or too large (K-805)", () => {
-    expect(parseHeadersFile("/*.gpx\n  Content-Type: application/gpx+xml\n")).toMatch("gpx");
-    expect(parseHeadersFile(undefined)).toBeNull();
-    expect(parseHeadersFile(null)).toBeNull();
-    expect(parseHeadersFile(42)).toEqual({ error: expect.stringContaining("text") });
-    expect(parseHeadersFile("x".repeat(100_001))).toEqual({ error: expect.stringContaining("larger") });
+    expect(parseConfigFile("_headers", "/*.gpx\n  Content-Type: application/gpx+xml\n")).toMatch("gpx");
+    expect(parseConfigFile("_headers", undefined)).toBeNull();
+    expect(parseConfigFile("_headers", null)).toBeNull();
+    expect(parseConfigFile("_redirects", 42)).toEqual({ error: expect.stringContaining("text") });
+    expect(parseConfigFile("_headers", "x".repeat(100_001))).toEqual({
+      error: expect.stringContaining("larger"),
+    });
     // Bytes, not characters: 40,000 three-byte characters are 120 KB.
-    expect(parseHeadersFile("€".repeat(40_000))).toEqual({ error: expect.stringContaining("larger") });
+    expect(parseConfigFile("_redirects", "€".repeat(40_000))).toEqual({
+      error: expect.stringContaining("larger"),
+    });
   });
 });

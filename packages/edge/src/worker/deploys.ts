@@ -148,18 +148,21 @@ export function parseSiteIcon(
   return { bytes, type };
 }
 
-/** K-805: the most text of a `_headers` file that kitshn passes on; Cloudflare allows 100 rules. */
-export const HEADERS_LIMIT = 100_000;
+/** K-805: the most text of a `_headers` or `_redirects` file that kitshn passes on. */
+export const CONFIG_FILE_LIMIT = 100_000;
 
 /**
- * K-805: the `_headers` file of a static site, which Cloudflare applies to its responses. Null or a missing field (a
- * CLI from before `_headers`) means none.
+ * K-805: the `_headers` or `_redirects` file of a static site, which Cloudflare applies to its responses. Null or a
+ * missing field (a CLI from before the file) means none.
  */
-export function parseHeadersFile(value: unknown): string | null | { readonly error: string } {
+export function parseConfigFile(
+  name: "_headers" | "_redirects",
+  value: unknown,
+): string | null | { readonly error: string } {
   if (value === undefined || value === null || value === "") return null;
-  if (typeof value !== "string") return { error: "The _headers file must be text or null." };
-  if (new TextEncoder().encode(value).length > HEADERS_LIMIT)
-    return { error: `The _headers file is larger than ${HEADERS_LIMIT / 1000} KB.` };
+  if (typeof value !== "string") return { error: `The ${name} file must be text or null.` };
+  if (new TextEncoder().encode(value).length > CONFIG_FILE_LIMIT)
+    return { error: `The ${name} file is larger than ${CONFIG_FILE_LIMIT / 1000} KB.` };
   return value;
 }
 

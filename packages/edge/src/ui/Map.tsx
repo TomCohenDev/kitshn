@@ -6,7 +6,7 @@ import {
   type Resource,
   type ResourceKind,
   type State,
-  CIRCLE_ALONE_KEY,
+  circleAloneKey,
   circlesHolding,
   insideCircle,
   memberLabel,
@@ -15,7 +15,7 @@ import {
 } from "../core/model.ts";
 import type { AccessState, MachineView } from "../core/protocol.ts";
 import { isAgentKey } from "../core/agent.ts";
-import { RightStickers } from "./Circle.tsx";
+import { AGENT_TIP, LEVEL_TIPS, MATCH_TIPS, MEMBER_HELP, PASSKEY_TIP, RightStickers } from "./Circle.tsx";
 import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { KeySticker, PresenceSticker } from "./Machines.tsx";
 
@@ -74,6 +74,12 @@ export function stacksOf(state: State): Map<string, Array<string>> {
 /** The key prefix of a stack that the owner made, as opposed to a stack by group (K-508). */
 export const USER_STACK = "stack:";
 
+/** K-407 */
+export const ACCESS_TIPS = {
+  applying: "Applying: Cloudflare does not have this change yet.",
+  applied: "Applied: Cloudflare has this change.",
+} as const;
+
 interface Props {
   /** K-1101: files dropped from the computer, with the map point under the pointer. */
   onDropFiles: (files: Array<File>, at: Point) => void;
@@ -95,6 +101,9 @@ interface Props {
   /** K-522: cards dropped on another card become one stack with it. */
   readonly onStackOnto: (ids: Array<string>, target: string) => void;
 }
+
+/** K-504: the circle-alone key of this device. */
+export const ALONE_KEY = circleAloneKey(navigator.platform);
 
 const LONG_PRESS_MS = 350;
 /** Preact 11 does not add a unit to numeric style values. */
@@ -183,7 +192,7 @@ export function MapView(props: Props) {
       props.onSelect({ cards: new Set(), circle: origin.id });
       // K-504: the head carries the cards inside the circle; the modifier moves the circle alone.
       const carry = new Map<string, Point>();
-      if (!event[CIRCLE_ALONE_KEY.property]) {
+      if (!event[ALONE_KEY.property]) {
         for (const [id, place] of state.places) if (insideCircle(place, origin)) carry.set(id, place);
       }
       setDrag({ type: "circle", start: world, origin, carry, moved: false });
@@ -449,7 +458,10 @@ export function MapView(props: Props) {
                 data-card={resource.id}
                 class={`mini${selected ? " sel" : ""}${stackTarget === resource.id ? " stack-target" : ""}`}
                 style={{ left: px(at.x), top: px(at.y), background: KINDS[resource.kind].color }}
-                title={resource.name}
+                tabIndex={0}
+                role="img"
+                aria-label={resource.name}
+                data-tip={`${resource.name}: ${KINDS[resource.kind].help} Zoom in to see its card.`}
               />
             );
           }
@@ -566,21 +578,37 @@ function CircleView(props: {
         "--c": circle.color,
       }}
     >
-      <div class="head" data-head={circle.id}>
+      <div
+        class="head"
+        data-head={circle.id}
+        tabIndex={0}
+        role="group"
+        aria-label={`Circle ${circle.name}`}
+        data-tip={`${circle.name}: a click edits the circle. A drag moves it with its cards; ${ALONE_KEY.label} and a drag moves the circle alone.`}
+      >
         <span>{circle.name}</span>
         <span
           class="sticker"
+          data-tip={LEVEL_TIPS[circle.level]}
           style={{ "--tilt": LEVEL_TILTS[circle.level], background: LEVEL_COLORS[circle.level] }}
         >
           {circle.level}
         </span>
-        {circle.needsPasskey ? <span title="Needs a passkey">🔑</span> : null}
-        {circle.match === "all" ? <span title="Every member must match">∧</span> : null}
+        {circle.needsPasskey ? (
+          <span role="img" aria-label="Needs a passkey" data-tip={PASSKEY_TIP}>
+            🔑
+          </span>
+        ) : null}
+        {circle.match === "all" ? (
+          <span role="img" aria-label="All must match" data-tip={MATCH_TIPS.all}>
+            ∧
+          </span>
+        ) : null}
       </div>
       {props.zoomedOut ? (
         <div class="counts">
           {[...counts].map(([kind, count]) => (
-            <span key={kind}>
+            <span key={kind} data-tip={`${count} ${KINDS[kind].label.toLowerCase()} in ${circle.name}. Zoom in to see the cards.`}>
               {KINDS[kind].icon} {count}
             </span>
           ))}
@@ -588,11 +616,13 @@ function CircleView(props: {
       ) : (
         <div class="members">
           {shown.map((member, index) => (
-            <span class="chip" key={index}>
+            <span class="chip" key={index} data-tip={MEMBER_HELP[member._tag]}>
               {MEMBER_ICONS[member._tag]} {memberLabel(member)}
               {member._tag === "device" && isAgentKey(props.state, member, Date.now()) ? (
                 <>
-                  <span class="sticker agent">agent</span>
+                  <span class="sticker agent" data-tip={AGENT_TIP}>
+                    agent
+                  </span>
                   {agentCircle ? <RightStickers member={member} /> : null}
                 </>
               ) : null}
@@ -602,14 +632,18 @@ function CircleView(props: {
             <span
               class="chip"
               data-head={circle.id}
-              title={circle.members.slice(4).map(memberLabel).join(", ")}
+              data-tip={`Also ${circle.members.slice(4).map(memberLabel).join(", ")}. A click opens the full list.`}
             >
               +{extra}
             </span>
           ) : null}
         </div>
       )}
-      <div class="grip" data-grip={circle.id} title="Resize" />
+      <div
+        class="grip"
+        data-grip={circle.id}
+        data-tip="Drag to resize the circle. The preview names every card that gains or loses it."
+      />
     </div>
   );
 }
@@ -637,14 +671,21 @@ function CardView(props: {
       style={{ left: px(props.at.x), top: px(props.at.y) }}
     >
       {props.count !== null ? (
-        <span class="sticker count">
+        <span
+          class="sticker count"
+          data-tip={`${props.count} cards of one group. A click ${props.open ? "closes" : "spreads"} them; a drag moves them all.`}
+        >
           {props.count}
           {props.open ? " ▾" : ""}
         </span>
       ) : null}
-      {props.access?.state === "applying" ? <span class="sticker wait state">applying</span> : null}
+      {props.access?.state === "applying" ? (
+        <span class="sticker wait state" data-tip={ACCESS_TIPS.applying}>
+          applying
+        </span>
+      ) : null}
       {props.access?.state === "failed" ? (
-        <span class="sticker state" title={props.access.error}>
+        <span class="sticker state" data-tip={`Failed: Cloudflare refused the change. ${props.access.error}`}>
           failed
         </span>
       ) : null}
@@ -653,7 +694,11 @@ function CardView(props: {
       </div>
       <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
       <div class="foot">
-        <span class="sticker" style={{ "--tilt": kind.tilt, background: kind.color, color: kind.ink }}>
+        <span
+          class="sticker"
+          data-tip={kind.help}
+          style={{ "--tilt": kind.tilt, background: kind.color, color: kind.ink }}
+        >
           {resource.kind}
         </span>
         {props.machine ? <PresenceSticker view={props.machine} /> : null}
@@ -664,7 +709,10 @@ function CardView(props: {
             <span
               key={circle.id}
               class="dot"
-              title={`${circle.name} · ${level ?? "none"}`}
+              tabIndex={0}
+              role="img"
+              aria-label={`${circle.name} · ${level ?? "none"}`}
+              data-tip={`${circle.name} · ${level ?? "none"}: shared with this circle at ${level ?? "no level"}.`}
               style={{ background: circle.color }}
             />
           );
@@ -672,7 +720,11 @@ function CardView(props: {
         {holding
           .filter((circle) => state.shareSettings.get(shareKey(resource.id, circle.id))?.level)
           .map((circle) => (
-            <span key={`o-${circle.id}`} class="chip" title="Level override">
+            <span
+              key={`o-${circle.id}`}
+              class="chip"
+              data-tip={`Level override: this card has its own level in ${circle.name}, not the circle's default.`}
+            >
               {circle.name}: {shareLevel(state, resource, circle) ?? "none"}
             </span>
           ))}
@@ -693,16 +745,27 @@ function CardPreview(props: { address: string }) {
     <div class="preview-frame">
       <iframe
         src={url}
-        title={`Preview of ${props.address}`}
+        aria-label={`Preview of ${props.address}`}
         loading="lazy"
         sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
         style={{ pointerEvents: interact ? "auto" : "none" }}
       />
       <div class="row" onPointerDown={(event) => event.stopPropagation()}>
-        <button type="button" class="btn" onClick={() => setInteract(!interact)}>
+        <button
+          type="button"
+          class="btn"
+          data-tip={interact ? "Done: the preview takes no clicks again." : "Interact: the preview takes clicks and keys."}
+          onClick={() => setInteract(!interact)}
+        >
           {interact ? "Done" : "Interact"}
         </button>
-        <a class="btn" href={url} target="_blank" rel="noreferrer">
+        <a
+          class="btn"
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          data-tip="Open the site in a new tab, and log in there if it asks."
+        >
           Open site
         </a>
       </div>
@@ -729,7 +792,9 @@ function StackCard(props: {
       data-card={props.id}
       style={{ left: px(props.at.x), top: px(props.at.y) }}
     >
-      <span class="sticker count">{props.members.length} ▸</span>
+      <span class="sticker count" data-tip={`${props.members.length} cards in this stack. A click opens it as a column.`}>
+        {props.members.length} ▸
+      </span>
       <div class="name">🗃 {props.name}</div>
       <ul>
         {props.members.slice(0, 6).map((member) => (
@@ -741,7 +806,15 @@ function StackCard(props: {
       </ul>
       <div class="foot">
         {holding.map((circle) => (
-          <span key={circle.id} class="dot" title={circle.name} style={{ background: circle.color }} />
+          <span
+            key={circle.id}
+            class="dot"
+            tabIndex={0}
+            role="img"
+            aria-label={circle.name}
+            data-tip={`${circle.name}: every card of this stack is shared with this circle.`}
+            style={{ background: circle.color }}
+          />
         ))}
       </div>
     </div>

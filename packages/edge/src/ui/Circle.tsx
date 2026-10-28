@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useId, useRef, useState } from "preact/hooks";
 import { type Edit, deepEqual } from "../core/changes.ts";
 import {
   AGENT_RIGHTS,
@@ -20,6 +20,7 @@ import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from ".
 import { TYPED_KINDS, type TypedKind, memberFrom } from "./members.ts";
 import { isAgentKey } from "../core/agent.ts";
 import { callApi } from "./store.ts";
+import { Check, Switch } from "./controls.tsx";
 
 /** The sticker of each member kind: its name and a light sticker colour with black text. */
 const MEMBER_STICKERS: Record<Member["_tag"], { readonly label: string; readonly color: string }> = {
@@ -40,13 +41,26 @@ const COLOR_NAMES: Record<string, string> = {
   "#14B8A6": "teal",
 };
 
-const KIND_LABELS: Record<TypedKind | "device", string> = {
-  auto: "auto",
-  email: "person",
-  domain: "domain",
-  ip: "network",
-  everyone: "everyone",
-  device: "device",
+/** What each member kind matches, with an example (K-106, K-107, K-202). */
+export const MEMBER_HELP: Record<Member["_tag"], string> = {
+  email: "Person: one email that logs in, for example name@example.com.",
+  domain: "Domain: every email of an email domain that logs in, for example example.com.",
+  ip: "Network: a visitor from an IP range, with no login, for example 10.0.0.0/8 or 203.0.113.9.",
+  device: "Device: a device that proves itself with an Access service token, for example Yarden's phone.",
+  machine: "Machine: a machine with a daemon, so a share can give one machine access to another resource.",
+  everyone: "Everyone: anyone who can reach the address, with no login.",
+};
+
+const KIND_OPTIONS: Record<TypedKind | "device", { readonly label: string; readonly tip: string }> = {
+  auto: {
+    label: "auto",
+    tip: "Auto: the text decides the kind, for example name@example.com is a person, example.com a domain and 10.0.0.0/8 a network.",
+  },
+  email: { label: "person", tip: MEMBER_HELP.email },
+  domain: { label: "domain", tip: MEMBER_HELP.domain },
+  ip: { label: "network", tip: MEMBER_HELP.ip },
+  everyone: { label: "everyone", tip: MEMBER_HELP.everyone },
+  device: { label: "device", tip: `${MEMBER_HELP.device} Pick one or make a new token.` },
 };
 
 const LEVEL_HELP: Record<Level, string> = {
@@ -54,6 +68,23 @@ const LEVEL_HELP: Record<Level, string> = {
   use: "Members can also use machines: terminals and files.",
   control: "Members can also run commands and change settings.",
 };
+
+/** What each level allows on each resource kind (K-206, K-301). */
+export const LEVEL_TIPS: Record<Level, string> = {
+  view: "View: members open what the circle holds. Sites, pages, files and repos have only this level.",
+  use: "Use: on a machine, members also use terminals and files. A kind without use, such as a site, gets view.",
+  control:
+    "Control: on a machine, members also run commands and change settings; on the kitshn admin, they change kitshn. A site gets view.",
+};
+
+/** K-203 */
+export const MATCH_TIPS = {
+  any: "Any: the visitor matches at least one member.",
+  all: "All must match: the visitor matches every member, for example a domain and an IP range.",
+} as const;
+
+/** K-103 */
+export const PASSKEY_TIP = "Needs a passkey: after the login, a visitor also confirms with a passkey or a security key.";
 
 const DAY = 24 * 60 * 60 * 1000;
 const END_PRESETS = [
@@ -63,29 +94,34 @@ const END_PRESETS = [
   { label: "1 month", after: 30 * DAY },
 ] as const;
 
-export function Toggle(props: { checked: boolean; label: string; onChange: (checked: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      class="switch"
-      role="switch"
-      aria-checked={props.checked}
-      onClick={() => props.onChange(!props.checked)}
-    >
-      <span class="knob" />
-      {props.label}
-    </button>
-  );
-}
-
-/** K-209, K-201: an end date from presets; Custom picks a day. */
-const localDay = (time: number) => {
-  const date = new Date(time);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+/**
+ * The end of the day that is `days` days from now (0 is today), in local time. Null for text that is no
+ * such day, or for an end that has passed already.
+ */
+const endOfDayIn = (days: string): number | null => {
+  const count = Number(days);
+  if (days === "" || !Number.isInteger(count) || count < 0) return null;
+  const date = new Date();
+  date.setDate(date.getDate() + count);
+  date.setHours(23, 59, 0, 0);
+  const time = date.getTime();
+  return Number.isFinite(time) && time > Date.now() ? time : null;
 };
 
-export function EndsPicker(props: { endsAt: number | null; onChange: (endsAt: number | null) => void }) {
+/**
+ * K-209, K-201: an end date from presets; Custom takes a number of days, so no native date picker shows.
+ * `ends` says what happens at the end, for the tooltips.
+ */
+export function EndsPicker(props: {
+  endsAt: number | null;
+  ends: string;
+  onChange: (endsAt: number | null) => void;
+}) {
   const [custom, setCustom] = useState(false);
+  const [days, setDays] = useState("");
+  const customEnd = endOfDayIn(days);
+  const invalid = days !== "" && customEnd === null;
+  const errorId = useId();
   return (
     <div>
       <div class="pills">
@@ -94,7 +130,11 @@ export function EndsPicker(props: { endsAt: number | null; onChange: (endsAt: nu
             key={preset.label}
             type="button"
             aria-pressed={!custom && preset.after === null && props.endsAt === null}
-            title={preset.after === null ? "No end date" : `Ends ${preset.label} from now`}
+            data-tip={
+              preset.after === null
+                ? "Never: no end date."
+                : `${preset.label}: ${props.ends} ${preset.label} from now.`
+            }
             onClick={() => {
               setCustom(false);
               props.onChange(preset.after === null ? null : Date.now() + preset.after);
@@ -103,25 +143,49 @@ export function EndsPicker(props: { endsAt: number | null; onChange: (endsAt: nu
             {preset.label}
           </button>
         ))}
-        <button type="button" aria-pressed={custom || props.endsAt !== null} onClick={() => setCustom(true)}>
+        <button
+          type="button"
+          aria-pressed={custom || props.endsAt !== null}
+          data-tip={`Custom: pick the number of days; ${props.ends} at the end of that day.`}
+          onClick={() => setCustom(true)}
+        >
           Custom…
         </button>
       </div>
       {custom ? (
-        <input
-          type="date"
-          class="field"
-          min={localDay(Date.now())}
-          value={props.endsAt === null ? "" : localDay(props.endsAt)}
-          onChange={(event) => {
-            const value = (event.target as HTMLInputElement).value;
-            if (value) props.onChange(new Date(`${value}T23:59`).getTime());
+        <form
+          class="row"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (customEnd !== null) props.onChange(customEnd);
           }}
-        />
+        >
+          <input
+            class="grow"
+            inputMode="numeric"
+            aria-label="Days from now"
+            placeholder="Days from now, for example 3"
+            data-tip={`The number of days from today, 0 for today; ${props.ends} at the end of that day.`}
+            aria-invalid={invalid}
+            aria-describedby={invalid ? errorId : undefined}
+            value={days}
+            onInput={(event) => setDays(event.currentTarget.value.trim())}
+          />
+          <button class="btn" disabled={customEnd === null} data-tip="Set this end date.">
+            Set
+          </button>
+        </form>
+      ) : null}
+      {custom && invalid ? (
+        <p class="error" id={errorId}>
+          Type a whole number of days: 0 for today, 1 for tomorrow.
+        </p>
       ) : null}
       {props.endsAt !== null ? (
         <p class="help">
-          <span class="sticker wait">ends</span> {new Date(props.endsAt).toLocaleString()}
+          <span class="sticker wait" data-tip={`Ends: ${props.ends} at this time.`}>
+            ends
+          </span> {new Date(props.endsAt).toLocaleString()}
         </p>
       ) : null}
     </div>
@@ -152,7 +216,12 @@ export function LevelOverride(props: {
     ]);
   return (
     <div class="seg small">
-      <button type="button" aria-pressed={!setting?.level} onClick={() => void put(null)}>
+      <button
+        type="button"
+        aria-pressed={!setting?.level}
+        data-tip={`Default: this card follows the level of ${circle.name}, now ${circle.level}.`}
+        onClick={() => void put(null)}
+      >
         default
       </button>
       {levels.map((level) => (
@@ -160,6 +229,7 @@ export function LevelOverride(props: {
           key={level}
           type="button"
           aria-pressed={setting?.level === level}
+          data-tip={`${level}: this card gets ${level} in ${circle.name}, whatever the default. The card shows the override as a chip.`}
           onClick={() => void put(level)}
         >
           {level}
@@ -181,15 +251,11 @@ function MemberSticker(props: {
   const kind = MEMBER_STICKERS[member._tag];
   return (
     <li class="member">
-      <span class="sticker" style={{ background: kind.color }}>
+      <span class="sticker" style={{ background: kind.color }} data-tip={MEMBER_HELP[member._tag]}>
         {kind.label}
       </span>
       {props.agent ? (
-        <span
-          class="sticker"
-          style={{ background: "var(--yellow)" }}
-          title="A device without the admin card: it manages only the cards of its circles (K-718)"
-        >
+        <span class="sticker" style={{ background: "var(--yellow)" }} data-tip={AGENT_TIP}>
           agent
         </span>
       ) : null}
@@ -200,7 +266,8 @@ function MemberSticker(props: {
       <button
         type="button"
         class="remove"
-        title={`Remove ${memberLabel(props.member)}`}
+        aria-label={`Remove ${memberLabel(props.member)}`}
+        data-tip={`Remove ${memberLabel(props.member)} from this circle.`}
         onClick={props.onRemove}
       >
         ×
@@ -208,13 +275,13 @@ function MemberSticker(props: {
       {member._tag === "device" && onRight ? (
         <div class="rights">
           {AGENT_RIGHTS.map((right) => (
-            <span key={right} title={RIGHT_HELP[right]}>
-              <Toggle
-                checked={member[right] === true}
-                label={AGENT_RIGHT_NAMES[right]}
-                onChange={(on) => onRight(right, on)}
-              />
-            </span>
+            <Check
+              key={right}
+              checked={member[right] === true}
+              label={AGENT_RIGHT_NAMES[right]}
+              tip={RIGHT_HELP[right]}
+              onChange={(on) => onRight(right, on)}
+            />
           ))}
           <span class="help">A right counts from any agent circle of this key.</span>
         </div>
@@ -227,16 +294,19 @@ type DeviceMember = Extract<Member, { _tag: "device" }>;
 
 const RIGHT_STICKERS: Record<AgentRight, string> = { addsApps: "adds apps", publishes: "publishes" };
 const RIGHT_HELP: Record<AgentRight, string> = {
-  addsApps: "The key allows waiting repos. Their new cards start in its first agent circle at control (K-819).",
-  publishes: "The key puts the apps that it added into the overlap of an agent circle and Everyone (K-718).",
+  addsApps: "Adds apps: the key allows a waiting repo. Its new cards start in the key's first agent circle at control.",
+  publishes: "Publishes: the key publishes a card of a repo that it allowed, into the overlap of an agent circle and Everyone.",
 };
+
+export const AGENT_TIP =
+  "Agent: a device member without the admin card. It manages only the cards that its agent circles hold at control.";
 
 /** K-718: a sticker for each right of an agent key, on its chip in the circle editor and on the map. */
 export function RightStickers(props: { member: DeviceMember }) {
   return (
     <>
       {AGENT_RIGHTS.filter((right) => props.member[right]).map((right) => (
-        <span key={right} class="sticker right" title={RIGHT_HELP[right]}>
+        <span key={right} class="sticker right" data-tip={RIGHT_HELP[right]}>
           {RIGHT_STICKERS[right]}
         </span>
       ))}
@@ -266,7 +336,9 @@ export function SecretDialog(props: { secret: DeviceSecret; onClose: () => void 
     <div class="scrim">
       <div class="dialog secret" role="dialog" aria-label={`Secret of ${secret.name}`}>
         <div class="row">
-          <span class="sticker">shown once</span>
+          <span class="sticker" data-tip="kitshn shows this secret only now and cannot show it again.">
+            shown once
+          </span>
           <b>{secret.name}</b>
         </div>
         <p class="help">Put these on the device now. kitshn cannot show the secret again.</p>
@@ -278,12 +350,22 @@ export function SecretDialog(props: { secret: DeviceSecret; onClose: () => void 
             <code>
               {header}: {value}
             </code>
-            <button type="button" class="btn" onClick={() => void navigator.clipboard.writeText(value ?? "")}>
+            <button
+              type="button"
+              class="btn"
+              data-tip={`Copy the ${header} header to the clipboard.`}
+              onClick={() => void navigator.clipboard.writeText(value ?? "")}
+            >
               Copy
             </button>
           </div>
         ))}
-        <button type="button" class="btn primary" onClick={props.onClose}>
+        <button
+          type="button"
+          class="btn primary"
+          data-tip="Close this dialog. The secret is gone after this."
+          onClick={props.onClose}
+        >
           I saved it
         </button>
       </div>
@@ -325,6 +407,7 @@ function DeviceList(props: {
             <button
               type="button"
               class="btn"
+              data-tip="Load the device list again."
               onClick={() => {
                 setError(null);
                 setAttempt(attempt + 1);
@@ -345,6 +428,7 @@ function DeviceList(props: {
               <button
                 type="button"
                 disabled={busy}
+                data-tip={`Add the device ${device.name} to this circle.`}
                 onClick={() =>
                   void run(async () => setError(await props.onAdd({ _tag: "device", ...device })))
                 }
@@ -392,10 +476,12 @@ function DeviceList(props: {
             <input
               class="field grow"
               value={name}
+              aria-label="New device name"
+              data-tip="The name of a new device token. kitshn makes the token and adds the device to this circle."
               placeholder="+ New device, for example Her phone"
               onInput={(event) => setName((event.target as HTMLInputElement).value)}
             />
-            <button class="btn" disabled={busy}>
+            <button class="btn" disabled={busy} data-tip="Make a service token for the new device and show its secret once.">
               Make
             </button>
           </form>
@@ -436,12 +522,13 @@ function AddMember(props: {
             key={option}
             type="button"
             aria-pressed={kind === option}
+            data-tip={KIND_OPTIONS[option].tip}
             onClick={() => {
               setKind(option);
               setError(null);
             }}
           >
-            {KIND_LABELS[option]}
+            {KIND_OPTIONS[option].label}
           </button>
         ))}
       </div>
@@ -468,6 +555,7 @@ function AddMember(props: {
               class="field grow"
               value={value}
               aria-label="Member"
+              data-tip="An email, an email domain or a network. The kind above decides how kitshn reads it."
               placeholder="name@example.com, example.com or 10.0.0.0/8"
               onInput={(event) => {
                 setValue((event.target as HTMLInputElement).value);
@@ -477,7 +565,7 @@ function AddMember(props: {
           ) : (
             <span class="help grow">Anyone who can reach the address, with no login.</span>
           )}
-          <button class="btn primary" disabled={busy}>
+          <button class="btn primary" disabled={busy} data-tip={`Add this member to ${props.circle.name}.`}>
             Add
           </button>
         </form>
@@ -527,6 +615,7 @@ export function CircleEditor(props: {
       <input
         class="title"
         aria-label="Circle name"
+        data-tip="The name of the circle. Enter saves it; Escape cancels."
         value={draft ?? circle.name}
         onFocus={() => setDraft(circle.name)}
         onInput={(event) => setDraft((event.target as HTMLInputElement).value)}
@@ -551,13 +640,16 @@ export function CircleEditor(props: {
             role="radio"
             aria-checked={circle.color.toUpperCase() === color}
             aria-label={COLOR_NAMES[color] ?? color}
+            data-tip={`${COLOR_NAMES[color] ?? color}: the colour of the ring on the map. It changes no access.`}
             style={{ background: color }}
             onClick={() => void put({ color })}
           />
         ))}
       </div>
 
-      <h3 class="label">Who</h3>
+      <h3 class="label" data-tip="Who: the members of the circle. A circle with no members matches nobody.">
+        Who
+      </h3>
       <ul class="members">
         {circle.members.map((member, index) => (
           <MemberSticker
@@ -583,7 +675,9 @@ export function CircleEditor(props: {
 
       <h3 class="label">Access</h3>
       <div class="field-row">
-        <span class="label">Level</span>
+        <span class="label" data-tip="Level: what a share allows. Each resource kind names its own levels.">
+          Level
+        </span>
         <div>
           <div class="seg">
             {LEVELS.map((level) => (
@@ -591,6 +685,7 @@ export function CircleEditor(props: {
                 key={level}
                 type="button"
                 aria-pressed={circle.level === level}
+                data-tip={LEVEL_TIPS[level]}
                 onClick={() => void put({ level })}
               >
                 {level}
@@ -601,12 +696,15 @@ export function CircleEditor(props: {
         </div>
       </div>
       <div class="field-row">
-        <span class="label">Match</span>
+        <span class="label" data-tip="Match: how a visitor matches the members of this circle.">
+          Match
+        </span>
         <div>
           <div class="seg">
             <button
               type="button"
               aria-pressed={circle.match === "any"}
+              data-tip={MATCH_TIPS.any}
               onClick={() => void put({ match: "any" })}
             >
               any
@@ -614,6 +712,7 @@ export function CircleEditor(props: {
             <button
               type="button"
               aria-pressed={circle.match === "all"}
+              data-tip={MATCH_TIPS.all}
               onClick={() => void put({ match: "all" })}
             >
               all must match
@@ -627,11 +726,14 @@ export function CircleEditor(props: {
         </div>
       </div>
       <div class="field-row">
-        <span class="label">Passkey</span>
+        <span class="label" data-tip={PASSKEY_TIP}>
+          Passkey
+        </span>
         <div>
-          <Toggle
+          <Switch
             checked={circle.needsPasskey}
             label="Needs a passkey"
+            tip={PASSKEY_TIP}
             onChange={(needsPasskey) => void put({ needsPasskey })}
           />
           <p class="help">People also confirm with Touch ID, Windows Hello or a security key.</p>
@@ -646,22 +748,36 @@ export function CircleEditor(props: {
         </div>
       </div>
       <div class="field-row">
-        <span class="label">Ends</span>
-        <EndsPicker endsAt={circle.endsAt} onChange={(endsAt) => void put({ endsAt })} />
+        <span class="label" data-tip="Ends: after this date the circle stops giving access.">
+          Ends
+        </span>
+        <EndsPicker
+          endsAt={circle.endsAt}
+          ends="the circle stops giving access"
+          onChange={(endsAt) => void put({ endsAt })}
+        />
       </div>
 
-      <h3 class="label">What it opens ({inside.length})</h3>
+      <h3 class="label" data-tip="What it opens: every card inside the circle, with the level that it gets.">
+        What it opens ({inside.length})
+      </h3>
       <ul class="opens">
         {inside.map((resource) => {
           const level = shareLevel(state, resource, circle);
           return (
             <li key={resource.id}>
-              <button type="button" class="open-card" onClick={() => props.onSelectCard(resource.id)}>
+              <button
+                type="button"
+                class="open-card"
+                data-tip={`Select ${resource.name} and show its panel.`}
+                onClick={() => props.onSelectCard(resource.id)}
+              >
                 <span class="name">
                   {KINDS[resource.kind].icon} {resource.name}
                 </span>
                 <span
                   class="sticker"
+                  data-tip={level ? LEVEL_TIPS[level] : "None: this kind has no level at or below the circle's level."}
                   style={{
                     "--tilt": level ? LEVEL_TILTS[level] : "0deg",
                     background: level ? LEVEL_COLORS[level] : undefined,
@@ -682,7 +798,12 @@ export function CircleEditor(props: {
       <div class="danger-zone">
         <h3 class="label">Danger</h3>
         <p class="help">Its cards stay where they are and lose this share.</p>
-        <button type="button" class="btn danger" onClick={() => props.onDelete(circle)}>
+        <button
+          type="button"
+          class="btn danger"
+          data-tip={`Delete ${circle.name}. Its cards stay where they are and lose this share; Undo brings it back.`}
+          onClick={() => props.onDelete(circle)}
+        >
           Delete {circle.name}
         </button>
       </div>

@@ -135,11 +135,21 @@ export function levelForKind(kind: ResourceKind, wanted: Level): Level | null {
   return best;
 }
 
-/** K-504: the modifier key that drags a circle head without the cards inside. */
-export const CIRCLE_ALONE_KEY = { property: "altKey", label: "Alt" } as const satisfies {
-  readonly property: "altKey" | "ctrlKey" | "metaKey" | "shiftKey";
-  readonly label: string;
-};
+/**
+ * K-504: the modifier key that drags a circle head without the cards inside: ⌘ on macOS and iOS (on macOS,
+ * Ctrl and a click opens the context menu), and Ctrl elsewhere.
+ */
+export const CIRCLE_ALONE_KEY = {
+  mac: { property: "metaKey", label: "⌘" },
+  other: { property: "ctrlKey", label: "Ctrl" },
+} as const satisfies Record<
+  "mac" | "other",
+  { readonly property: "altKey" | "ctrlKey" | "metaKey" | "shiftKey"; readonly label: string }
+>;
+
+/** The circle-alone key of a platform, from `navigator.platform` ("MacIntel", "iPad", "Win32", …). */
+export const circleAloneKey = (platform: string) =>
+  CIRCLE_ALONE_KEY[platform.startsWith("Mac") || platform.startsWith("iP") ? "mac" : "other"];
 
 export const insideCircle = (point: Point, circle: Circle) =>
   Math.hypot(point.x - circle.x, point.y - circle.y) < circle.r;

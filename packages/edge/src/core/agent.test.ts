@@ -10,6 +10,7 @@ import {
   agentUploadPlace,
   cardsControlledBy,
   isAgentKey,
+  machineRightMode,
   mayDeployOn,
 } from "./agent.ts";
 import { type Edit, applyChanges, resolveEdits } from "./changes.ts";
@@ -384,4 +385,59 @@ function overlapping(rights: Partial<Record<AgentRight, true>>): State {
 const moved = (state: State, place: Point): State => ({
   ...state,
   places: new Map(state.places).set("site", place),
+});
+
+describe("rights of machines with a mode (K-1720, K-1730)", () => {
+  const vps = {
+    id: "vps",
+    name: "vps",
+    labels: [],
+    order: 0,
+    serviceTokenId: "s",
+    clientId: "vps-token",
+    tunnelId: "t",
+  };
+  const withMachine = (rights: Extract<Circle["members"][number], { _tag: "machine" }>["rights"]) => {
+    const base = start();
+    const circle = base.circles.get("agents")!;
+    return {
+      ...base,
+      machines: new Map([["vps", vps]]),
+      circles: new Map(base.circles).set("agents", {
+        ...circle,
+        members: [...circle.members, { _tag: "machine", machineId: "vps", ...(rights ? { rights } : {}) }],
+      }),
+    };
+  };
+
+  it("is off by default, and a circle of devices and machines is its agent circle", () => {
+    expect(machineRightMode(withMachine(undefined), "vps", "addsApps", 0)).toBeNull();
+    expect(agentHas(withMachine(undefined), as("vps-token"), "addsApps", 0)).toBe(false);
+  });
+
+  it("runs an automatic right at once, and an ask right only with its approval", () => {
+    const automatic = withMachine({ addsApps: { mode: "automatic" } });
+    expect(agentHas(automatic, as("vps-token"), "addsApps", 0)).toBe(true);
+    const asking = withMachine({ addsApps: { mode: "ask", circleId: "owner" } });
+    expect(machineRightMode(asking, "vps", "addsApps", 0)).toEqual({ mode: "ask", circleId: "owner" });
+    expect(agentHas(asking, as("vps-token"), "addsApps", 0)).toBe(false);
+    expect(agentHas(asking, as("vps-token"), "addsApps", 0, "addsApps")).toBe(true);
+    // An approval of one right gives no other right.
+    expect(agentHas(asking, as("vps-token"), "publishes", 0, "addsApps")).toBe(false);
+  });
+
+  it("takes automatic from any agent circle over ask from another", () => {
+    const state = withMachine({ deploys: { mode: "ask", circleId: "owner" } });
+    const staging = state.circles.get("staging")!;
+    const both = {
+      ...state,
+      circles: new Map(state.circles).set("staging", {
+        ...staging,
+        members: [
+          { _tag: "machine" as const, machineId: "vps", rights: { deploys: { mode: "automatic" as const } } },
+        ],
+      }),
+    };
+    expect(machineRightMode(both, "vps", "deploys", 0)).toEqual({ mode: "automatic" });
+  });
 });

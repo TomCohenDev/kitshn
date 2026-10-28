@@ -20,8 +20,8 @@ export interface LocalOptions {
   readonly platform: Platform;
   /** Called for each connection with the peer user id. A peer whose user id the kernel does not give never passes. */
   readonly decide: (peer: number) => PeerDecision;
-  /** Answers with the id of the request. */
-  readonly handle: (request: Request, caller: Caller) => Promise<Answer>;
+  /** Answers with the id of the request. `emit` sends a later event on the same connection (K-703, K-1722). */
+  readonly handle: (request: Request, caller: Caller, emit: (event: Answer) => void) => Promise<Answer>;
   readonly log: (text: string) => void;
   /**
    * K-701: "private" is a folder of 0700 and a socket of 0600. "shared" is a folder of 0711 and a socket of 0666, for
@@ -110,7 +110,7 @@ export async function listenLocal(
     send(
       socket,
       await Promise.resolve()
-        .then(() => options.handle(request, { uid }))
+        .then(() => options.handle(request, { uid }, (event) => send(socket, event)))
         .catch((error: unknown): Answer => ({
           id: request.id,
           type: "error",
@@ -176,6 +176,9 @@ export function askLocal(
   request: Request,
   timeoutMs: number,
   peer: { readonly platform: Platform; readonly daemonUid: number },
+  /** K-1722: true keeps the connection for a later line, with no time limit; `onLine` sees each line before. */
+  follow: (answer: Answer) => boolean = () => false,
+  onLine: (answer: Answer) => void = () => {},
 ): Promise<LocalOutcome> {
   return new Promise((resolve, reject) => {
     let done = false;
@@ -212,17 +215,24 @@ export function askLocal(
         },
         data(socket, chunk) {
           buffer += decoder.decode(chunk, { stream: true });
-          const end = buffer.indexOf("\n");
-          if (end < 0) return;
-          try {
-            const answer = readAnswer(buffer.slice(0, end));
-            if (answer.id !== request.id && answer.id !== null)
-              throw new Error(`the daemon answered the id ${answer.id}, not ${request.id}.`);
-            finish(() => resolve({ kind: "answer", answer }));
-          } catch (error) {
-            finish(() => reject(error));
+          for (let end = buffer.indexOf("\n"); end >= 0 && !done; end = buffer.indexOf("\n")) {
+            const text = buffer.slice(0, end);
+            buffer = buffer.slice(end + 1);
+            try {
+              const answer = readAnswer(text);
+              if ("id" in answer && answer.id !== request.id && answer.id !== null)
+                throw new Error(`the daemon answered the id ${answer.id}, not ${request.id}.`);
+              onLine(answer);
+              if (follow(answer)) {
+                clearTimeout(timer);
+                continue;
+              }
+              finish(() => resolve({ kind: "answer", answer }));
+            } catch (error) {
+              finish(() => reject(error));
+            }
+            socket.end();
           }
-          socket.end();
         },
         close: () =>
           finish(() =>

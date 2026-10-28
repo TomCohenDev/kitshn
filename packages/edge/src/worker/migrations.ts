@@ -175,6 +175,20 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "CREATE UNIQUE INDEX notifications_open ON notifications (source, key) WHERE closed_at IS NULL",
     "CREATE TABLE notification_mutes (card_id TEXT NOT NULL, source TEXT NOT NULL, until INTEGER, PRIMARY KEY (card_id, source))",
   ],
+  // 27: section 17. A proposal is an ask that waits for its approver circle (K-1722); `body` and `labels` are JSON,
+  // and one conditional update moves `state` from pending (K-1723). Ask events are the History of asks (K-1717): not
+  // revisions, with their own cap.
+  [
+    `CREATE TABLE proposals (id TEXT PRIMARY KEY, machine_id TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL,
+      body TEXT NOT NULL, reason TEXT, labels TEXT NOT NULL, right_name TEXT NOT NULL, circle_id TEXT NOT NULL,
+      state TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, decided_at INTEGER,
+      decided_by TEXT, result TEXT)`,
+    "CREATE INDEX proposals_state ON proposals (state, expires_at)",
+    `CREATE TABLE ask_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, machine_id TEXT NOT NULL,
+      action TEXT NOT NULL, target TEXT NOT NULL, reason TEXT, labels TEXT NOT NULL, outcome TEXT NOT NULL,
+      detail TEXT NOT NULL)`,
+    "CREATE INDEX ask_events_machine ON ask_events (machine_id, id)",
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

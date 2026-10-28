@@ -394,8 +394,15 @@ export default {
         return Response.json({ error: "Send JSON with Content-Type: application/json." }, { status: 415 });
       }
       // K-1504: "Resume" passes the passkey check of `/api/fresh` first; Access sends the owner back here.
-      if (url.pathname === "/api/fresh/start" && request.method === "GET")
-        return Response.redirect(`${url.origin}/#resume`, 302);
+      if (url.pathname === "/api/fresh/start" && request.method === "GET") {
+        // K-1723: an approve comes back to its proposal; only an id of letters, digits and dashes passes.
+        const approve = url.searchParams.get("approve") ?? "";
+        const safe =
+          approve !== "" &&
+          approve.length <= 64 &&
+          [...approve].every((char) => "0123456789abcdef-".includes(char));
+        return Response.redirect(`${url.origin}/${safe ? `#approve/${approve}` : "#resume"}`, 302);
+      }
       if (url.pathname === "/api/fresh/resume" && request.method === "POST") {
         const fresh = await freshCallerOf(request, env, Date.now());
         if (typeof fresh === "string") return Response.json({ error: fresh }, { status: 401 });
@@ -403,6 +410,20 @@ export default {
         headers.set("x-kitshn-caller", JSON.stringify(fresh));
         return env.KITSHN.getByName("kitshn").fetch(
           new Request(`${url.origin}/fresh/resume`, { method: "POST", headers }),
+        );
+      }
+      // K-1723: an approve needs the same fresh passkey check; the Durable Object checks the approver circle.
+      if (url.pathname.startsWith("/api/fresh/approve/") && request.method === "POST") {
+        const fresh = await freshCallerOf(request, env, Date.now());
+        if (typeof fresh === "string") return Response.json({ error: fresh }, { status: 401 });
+        const headers = new Headers(request.headers);
+        headers.set("x-kitshn-caller", JSON.stringify(fresh));
+        return env.KITSHN.getByName("kitshn").fetch(
+          new Request(`${url.origin}${url.pathname.slice("/api".length)}`, {
+            method: "POST",
+            headers,
+            body: await request.text(),
+          }),
         );
       }
       if (url.pathname.startsWith("/api/fresh/"))

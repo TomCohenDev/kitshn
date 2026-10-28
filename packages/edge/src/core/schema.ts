@@ -10,6 +10,25 @@ const Time = Schema.Finite;
 
 export const Level = Schema.Literals(Model.LEVELS);
 
+/** K-1720: the mode of one right that is on. */
+const RightMode = Schema.Union([
+  Schema.Struct({ mode: Schema.Literal("automatic") }),
+  Schema.Struct({ mode: Schema.Literal("ask"), circleId: Id }),
+]);
+/** K-1730: each right of a machine in an agent circle; a missing right is off. */
+const MachineRights = Schema.Struct({
+  addsApps: Schema.optionalKey(RightMode),
+  publishes: Schema.optionalKey(RightMode),
+  deploys: Schema.optionalKey(RightMode),
+  runsCommands: Schema.optionalKey(RightMode),
+  readsCode: Schema.optionalKey(RightMode),
+  writesCode: Schema.optionalKey(RightMode),
+  addsAudiences: Schema.optionalKey(RightMode),
+  getsPasses: Schema.optionalKey(RightMode),
+});
+// A new right of MACHINE_RIGHTS fails here until the schema decodes it.
+const _everyRight: Record<Model.MachineRight, unknown> = MachineRights.fields;
+
 export const Member = Schema.Union([
   Schema.TaggedStruct("email", {
     email: Schema.String.check(Schema.isPattern(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)),
@@ -25,7 +44,10 @@ export const Member = Schema.Union([
     addsApps: Schema.optionalKey(Schema.Literal(true)),
     publishes: Schema.optionalKey(Schema.Literal(true)),
   }),
-  Schema.TaggedStruct("machine", { machineId: Id }),
+  Schema.TaggedStruct("machine", {
+    machineId: Id,
+    rights: Schema.optionalKey(MachineRights),
+  }),
   Schema.TaggedStruct("everyone", {}),
 ]);
 
@@ -71,6 +93,7 @@ export const Edit_ = Schema.Union([
 export const Actor_ = Schema.Union([
   Schema.TaggedStruct("person", { email: Schema.String }),
   Schema.TaggedStruct("device", { clientId: Schema.String, name: Schema.String }),
+  Schema.TaggedStruct("machine", { machineId: Schema.String, name: Schema.String }),
   Schema.TaggedStruct("kitshn", { reason: Schema.String }),
 ]);
 

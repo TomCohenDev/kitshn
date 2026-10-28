@@ -1,0 +1,190 @@
+// Section 17: what an ask of an agent on a machine needs, and how kitshn runs it. Pure, for tests.
+import {
+  type Circle,
+  HIGH_RISK_RIGHTS,
+  MACHINE_RIGHT_NAMES,
+  type MachineRight,
+  type RightMode,
+} from "./model.ts";
+
+/** K-1711: the actions of an ask. The daemon checks the same list (`@kitshn/local`). */
+export const ASK_ACTIONS = [
+  "state",
+  "apply",
+  "publish",
+  "allow",
+  "deploy",
+  "job",
+  "job-read",
+  "github-token",
+  "audience-add",
+  "audience-remove",
+  "pass",
+  "approve",
+  "deny",
+  "history",
+] as const;
+export type AskAction = (typeof ASK_ACTIONS)[number];
+
+export const isAskAction = (value: unknown): value is AskAction =>
+  typeof value === "string" && (ASK_ACTIONS as ReadonlyArray<string>).includes(value);
+
+/**
+ * K-1711: the right that an action needs. `none` needs no right; `member` needs membership of the approver circle
+ * (K-1723); `apply` needs "publishes" only for a move into Everyone, which agentRefusal decides.
+ */
+export const ASK_RIGHT: Record<AskAction, MachineRight | "none" | "member" | "apply"> = {
+  state: "none",
+  apply: "apply",
+  publish: "apply",
+  allow: "addsApps",
+  deploy: "deploys",
+  job: "runsCommands",
+  "job-read": "none",
+  "github-token": "readsCode",
+  "audience-add": "addsAudiences",
+  "audience-remove": "none",
+  pass: "getsPasses",
+  approve: "member",
+  deny: "member",
+  history: "none",
+};
+
+/** K-1750: at most 10 labels, each key with a prefix, of `a-z`, `0-9`, `.` and `-`, at most 64 characters. */
+export const MAX_LABELS = 10;
+const LABEL_KEY_CHARS = new Set("abcdefghijklmnopqrstuvwxyz0123456789.-");
+
+/** K-1750: why these labels are not allowed, or null. */
+export function labelProblem(labels: unknown): string | null {
+  if (labels === undefined) return null;
+  if (typeof labels !== "object" || labels === null || Array.isArray(labels)) return "Labels are an object.";
+  const entries = Object.entries(labels);
+  if (entries.length > MAX_LABELS) return `An ask has at most ${MAX_LABELS} labels (K-1750).`;
+  for (const [key, value] of entries) {
+    const keyOk =
+      key.length <= 64 &&
+      key.includes(".") &&
+      !key.startsWith(".") &&
+      !key.endsWith(".") &&
+      [...key].every((char) => LABEL_KEY_CHARS.has(char));
+    if (!keyOk)
+      return `The label key "${key.slice(0, 64)}" is not a prefix and a name of a-z, 0-9, . and - (K-1750).`;
+    if (typeof value !== "string" || value.length > 256)
+      return `The label ${key} has no text value of at most 256 characters (K-1750).`;
+  }
+  return null;
+}
+
+/** K-1711: the agent path, method and body that one ask maps to; the agent keys use the same paths (K-1714). */
+export function askRequest(
+  action: AskAction,
+  target: string,
+  body: unknown,
+): { readonly method: "GET" | "POST"; readonly path: string; readonly body: unknown } | string {
+  const object = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+  switch (action) {
+    case "state":
+      return { method: "GET", path: "/agent/state", body: null };
+    case "apply":
+      return { method: "POST", path: "/agent/apply", body: { edits: object["edits"] } };
+    case "allow":
+      return {
+        method: "POST",
+        path: `/agent/repos/${encodeURIComponent(target)}`,
+        body: { state: "allowed" },
+      };
+    case "deploy":
+      return {
+        method: "POST",
+        path: "/agent/deploy",
+        body: { card: target, mode: object["mode"] === "build" ? "build" : "redeploy" },
+      };
+    case "job":
+      return { method: "POST", path: "/agent/jobs", body };
+    case "job-read":
+      return { method: "GET", path: `/agent/jobs/${encodeURIComponent(target)}`, body: null };
+    case "publish":
+    case "github-token":
+    case "audience-add":
+    case "audience-remove":
+    case "pass":
+    case "approve":
+    case "deny":
+    case "history":
+      return `kitshn runs ${action} itself, not through an agent path.`;
+  }
+}
+
+/** K-1722: a proposal of an ask that waits for its approver circle. */
+export interface Proposal {
+  readonly id: string;
+  readonly machineId: string;
+  readonly action: AskAction;
+  readonly target: string;
+  readonly body: unknown;
+  readonly reason: string | null;
+  readonly labels: Readonly<Record<string, string>>;
+  readonly right: MachineRight;
+  readonly circleId: string;
+  readonly state: "pending" | "approved" | "denied" | "expired";
+  readonly createdAt: number;
+  readonly expiresAt: number;
+}
+
+/** K-1724: a proposal expires 24 hours after the ask (K-1607). */
+export const PROPOSAL_MS = 24 * 60 * 60_000;
+
+/** K-1723: after an approval for an offline machine, the same ask runs at once for this long. */
+export const APPROVED_WINDOW_MS = 60 * 60_000;
+
+/**
+ * K-1727: kitshn takes an approve or a deny from the machine that asked; K-1725 warns about it. Pending owner decision:
+ * set this to false to refuse it always.
+ */
+export const SELF_APPROVAL_ALLOWED = true;
+
+/** K-1717: ask events stay 30 days, at most 5,000, as K-1610. */
+export const ASK_EVENT_DAYS = 30;
+export const ASK_EVENT_COUNT = 5000;
+
+/**
+ * K-1725: the warnings of the rights of one machine. The map shows them and refuses nothing: all configurations are
+ * allowed.
+ */
+export function rightWarnings(
+  circles: ReadonlyMap<string, Circle>,
+  machineId: string,
+  rights: Readonly<Partial<Record<MachineRight, RightMode>>>,
+): Array<string> {
+  const warnings: Array<string> = [];
+  for (const [right, mode] of Object.entries(rights) as Array<[MachineRight, RightMode | undefined]>) {
+    if (!mode) continue;
+    const name = MACHINE_RIGHT_NAMES[right];
+    if (mode.mode === "automatic") {
+      if (right === "writesCode")
+        warnings.push(
+          `"${name}" runs at once with no thread condition, so any process of the machine writes code.`,
+        );
+      continue;
+    }
+    const circle = circles.get(mode.circleId);
+    if (!circle) {
+      warnings.push(`"${name}" asks a circle that is gone, so no one can approve it.`);
+      continue;
+    }
+    if (circle.members.some((member) => member._tag === "machine" && member.machineId === machineId))
+      warnings.push(`"${name}" asks ${circle.name}, which holds this machine, so it can approve itself.`);
+    if (
+      HIGH_RISK_RIGHTS.has(right) &&
+      !circle.members.some((member) => member._tag === "email" || member._tag === "domain")
+    )
+      warnings.push(
+        `"${name}" asks ${circle.name}, which has no person, so no person sees it before it runs.`,
+      );
+    if (circle.members.some((member) => member._tag === "machine"))
+      warnings.push(
+        `${circle.name} has machines: their agents read the reason and the labels, which the asking agent writes.`,
+      );
+  }
+  return [...new Set(warnings)];
+}

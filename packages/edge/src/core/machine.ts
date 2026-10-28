@@ -153,6 +153,29 @@ export interface LiveSiteReport {
 }
 
 /** Messages from a daemon to kitshn over `/connect`. The text "ping" is answered by the auto response. */
+/** K-1710: one ask of an agent, as the daemon sends it over its signed connection. */
+export interface AskWire {
+  readonly action: string;
+  readonly target: string;
+  readonly body?: unknown;
+  readonly reason?: string;
+  readonly labels?: Readonly<Record<string, string>>;
+}
+
+/** K-1710, K-1722: kitshn's answer to one ask. */
+export type AskOutcome =
+  | { readonly outcome: "done"; readonly result: unknown }
+  | { readonly outcome: "waiting"; readonly proposalId: string }
+  | { readonly outcome: "refused"; readonly reason: string };
+
+/** K-1722 to K-1724: the answer to a proposal, sent to the machine that asked. */
+export interface AskResult {
+  readonly proposalId: string;
+  readonly outcome: "approved" | "denied" | "expired";
+  readonly result?: unknown;
+  readonly reason?: string;
+}
+
 export type DaemonMessage =
   /** K-1704: the signature of `connectText` with the key that the challenge names. */
   | { readonly type: "answer"; readonly signature: string }
@@ -177,7 +200,9 @@ export type DaemonMessage =
       readonly skipped: number;
     }
   /** K-1805: a tail stopped on the daemon, with why. */
-  | { readonly type: "tailEnd"; readonly id: string; readonly reason: string };
+  | { readonly type: "tailEnd"; readonly id: string; readonly reason: string }
+  /** K-1710: an ask of a local agent; kitshn answers with `askAnswer` and the same `requestId`. */
+  | { readonly type: "ask"; readonly requestId: string; readonly ask: AskWire };
 
 /** Messages from kitshn to a daemon. */
 export type ServerToDaemon =
@@ -196,7 +221,9 @@ export type ServerToDaemon =
   | { readonly type: "logs"; readonly id: string; readonly project: string; readonly search: LogSearch }
   /** K-1805: follow the logs of the Compose app `project` until `tailStop`. */
   | { readonly type: "tail"; readonly id: string; readonly project: string }
-  | { readonly type: "tailStop"; readonly id: string };
+  | { readonly type: "tailStop"; readonly id: string }
+  | ({ readonly type: "askAnswer"; readonly requestId: string } & AskOutcome)
+  | ({ readonly type: "askResult" } & AskResult);
 
 const ED25519 = { name: "Ed25519" } as const;
 

@@ -44,6 +44,8 @@ import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
   OWNER_CIRCLE_ID,
+  MACHINE_RIGHT_NAMES,
+  type MachineRight,
   type Circle,
   type Member,
   type Point,
@@ -63,6 +65,8 @@ import {
   type ProjectVolume,
   type Sample,
   type ServerToDaemon,
+  type AskOutcome,
+  type AskResult,
   allowedFor,
   connectText,
   fingerprintOf,
@@ -89,6 +93,7 @@ import type {
   DeployNote,
   MachineView,
   OrphanWorker,
+  ProposalView,
   RepoView,
   RevisionView,
   ServerMessage,
@@ -117,6 +122,7 @@ import {
   isPreview,
   mayDeployOn,
   agentUploadPlace,
+  machineRightMode,
 } from "../core/agent.ts";
 import { DEMO_MACHINES, DEMO_ICONS, demo, demoUsage } from "../core/demo.ts";
 import type { Usage } from "../core/usage.ts";
@@ -135,6 +141,18 @@ import {
   probeUp,
   stored,
 } from "../core/uptime.ts";
+import {
+  ASK_EVENT_COUNT,
+  ASK_EVENT_DAYS,
+  ASK_RIGHT,
+  type AskAction,
+  PROPOSAL_MS,
+  type Proposal,
+  SELF_APPROVAL_ALLOWED,
+  askRequest,
+  isAskAction,
+  labelProblem,
+} from "../core/asks.ts";
 import { type MachineOs, machineOs } from "../core/icons.ts";
 import {
   contentSecurityPolicy,
@@ -1080,6 +1098,8 @@ export class Kitshn extends DurableObject<Env> {
           `UPDATE jobs SET state = 'failed', output = 'The emergency pause ended this job.'
            WHERE state = 'queued' AND json_extract(visitor, '$.email') IS NULL AND json_extract(visitor, '$.clientId') IS NOT NULL`,
         );
+        // K-1716: the pause denies every open ask.
+        this.denyOpenProposals(null, "the emergency pause");
       }
       if (merge) {
         this.sql(
@@ -2222,6 +2242,7 @@ export class Kitshn extends DurableObject<Env> {
       ).map((row) => row.id),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
+      proposals: this.openProposals(),
       jobs: this.recentJobs(10, 2000),
       version: this.env.KITSHN_VERSION,
       accessTeam: this.env.ACCESS_TEAM_DOMAIN,
@@ -2324,6 +2345,26 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/connect") return this.connectMachine(request, caller);
     // Only the Worker's fresh passkey route sends this path (K-1504).
     if (path === "/fresh/resume" && request.method === "POST") return this.resume(caller);
+    // K-1723: a person of the approver circle approves after a fresh passkey check, and denies without one.
+    const proposalAnswer = path.startsWith("/fresh/approve/")
+      ? { id: path.slice("/fresh/approve/".length), decision: "approved" as const }
+      : path.startsWith("/api/proposals/") && path.endsWith("/deny")
+        ? { id: path.slice("/api/proposals/".length, -"/deny".length), decision: "denied" as const }
+        : null;
+    if (proposalAnswer && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      const reason =
+        isRecord(body) && typeof body["reason"] === "string" ? body["reason"].slice(0, 500) : null;
+      const decided = await this.decide(decodeURIComponent(proposalAnswer.id), proposalAnswer.decision, {
+        actor: caller.actor,
+        visitor: caller.visitor,
+        machineId: null,
+        reason,
+      });
+      return decided.ok
+        ? Response.json({ result: decided.result ?? null })
+        : Response.json({ error: decided.error }, { status: 409 });
+    }
     if (path.startsWith("/agent/")) return this.agentRequest(path, request, caller);
     if (path.startsWith("/connect/deploys/")) return this.deploySource(path, caller);
     if (!this.authorized(caller)) {
@@ -2737,6 +2778,7 @@ export class Kitshn extends DurableObject<Env> {
       `Rotated the key of ${machine.name} from ${machine.key.fingerprint} to ${key.fingerprint}`,
     );
     for (const old of this.ctx.getWebSockets(machine.id)) old.close(ROTATED, "key rotated");
+    this.denyOpenProposals(machine.id, "the key of the machine rotated");
   }
 
   private async publicKey(publicKey: string): Promise<Extract<MachineKey, { kind: "public" }>> {
@@ -2784,6 +2826,9 @@ export class Kitshn extends DurableObject<Env> {
     // K-1708: a connection on the token alone only reports; it changes no site, volume or job.
     if (attachment.check === "token" && message.type !== "status" && message.type !== "sample") return;
     if (message.type === "rotate") return this.rotateKey(socket, attachment, machine, message);
+    // K-1710: an ask of a local agent, only on a signed connection.
+    if (message.type === "ask" && attachment.check === "signed")
+      return this.answerAsk(socket, machine, message);
     if (message.type === "status" && isRecord(message.status)) {
       const status: MachineStatus = {
         version: String(message.status.version).slice(0, 40),
@@ -3161,6 +3206,7 @@ export class Kitshn extends DurableObject<Env> {
     );
     for (const socket of this.ctx.getWebSockets(id))
       socket.close(KEY_RESET, "The owner reset the key of this machine.");
+    this.denyOpenProposals(machine.id, "the owner reset the key of the machine");
     return answer;
   }
 
@@ -3172,6 +3218,7 @@ export class Kitshn extends DurableObject<Env> {
     if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
     const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
     for (const socket of this.ctx.getWebSockets(id)) socket.close(4002, "The owner removed this machine.");
+    this.denyOpenProposals(id, "the owner removed the machine");
     const notFound = (error: unknown) =>
       error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error);
     try {
@@ -4012,6 +4059,11 @@ export class Kitshn extends DurableObject<Env> {
       "SELECT MIN(expires_at) AS expires_at FROM jobs WHERE state IN ('queued', 'sent')",
     );
     if (job?.expires_at) next = Math.min(next, Math.max(job.expires_at, now));
+    // K-1724: the next proposal that expires.
+    const [proposal] = this.sql<{ expires_at: number | null }>(
+      "SELECT MIN(expires_at) AS expires_at FROM proposals WHERE state = 'pending'",
+    );
+    if (proposal?.expires_at) next = Math.min(next, Math.max(proposal.expires_at, now));
     const desired = this.desired(now);
     if (
       this.env.CLOUDFLARE_API_TOKEN &&
@@ -4123,6 +4175,16 @@ export class Kitshn extends DurableObject<Env> {
         "DELETE FROM jobs WHERE state NOT IN ('queued', 'sent') AND id <= (SELECT id FROM jobs ORDER BY id DESC LIMIT 1 OFFSET 1000)",
       );
       this.sql("DELETE FROM join_codes WHERE expires_at < ?", now);
+      // K-1717: ask events stay 30 days, at most 5,000; a decided proposal stays as long.
+      this.sql(
+        "DELETE FROM ask_events WHERE at < ? OR id <= (SELECT id FROM ask_events ORDER BY id DESC LIMIT 1 OFFSET ?)",
+        now - ASK_EVENT_DAYS * DAY,
+        ASK_EVENT_COUNT,
+      );
+      this.sql(
+        "DELETE FROM proposals WHERE state != 'pending' AND decided_at < ?",
+        now - ASK_EVENT_DAYS * DAY,
+      );
       this.sql("DELETE FROM rekey_codes WHERE expires_at < ?", now);
       // K-1901, K-1905: closed notifications stay 30 days and 500 at most; an ended mute goes.
       this.sql(
@@ -5909,7 +5971,16 @@ export class Kitshn extends DurableObject<Env> {
    * K-718: an agent key sees the cards that it manages and the circles that it is in (no members), moves
    * those cards between those circles, and runs jobs on the machines that it controls (K-614).
    */
-  private async agentRequest(path: string, request: Request, caller: Caller) {
+  /**
+   * K-718: the agent paths. K-1710: a machine runs them too, through its asks; `approved` is the right that its
+   * approver circle gave for this one ask (K-1723).
+   */
+  private async agentRequest(
+    path: string,
+    request: Request,
+    caller: Caller,
+    approved: MachineRight | null = null,
+  ) {
     const now = Date.now();
     const own = circlesOf(this.state, caller.visitor, now);
     if (own.size === 0)
@@ -5922,11 +5993,14 @@ export class Kitshn extends DurableObject<Env> {
     const device = [...own]
       .flatMap((id) => this.state.circles.get(id)?.members ?? [])
       .find((member) => member._tag === "device" && member.clientId === caller.visitor.clientId);
+    // K-1730: a machine acts under its own name.
+    const agentName =
+      device?._tag === "device" ? device.name : caller.actor._tag === "machine" ? caller.actor.name : null;
     const agent: Caller =
       caller.actor._tag === "device" && device?._tag === "device"
         ? { ...caller, actor: { ...caller.actor, name: device.name } }
         : caller;
-    const rights = AGENT_RIGHTS.filter((right) => agentHas(this.state, caller.visitor, right, now));
+    const rights = AGENT_RIGHTS.filter((right) => agentHas(this.state, caller.visitor, right, now, approved));
     // A key that publishes also sees the Everyone circle, where its published cards sit.
     const visible = (id: string) => {
       const circle = this.state.circles.get(id);
@@ -5954,6 +6028,7 @@ export class Kitshn extends DurableObject<Env> {
           changes,
           now,
           added,
+          approved,
         );
         if (refusal) return Response.json({ error: refusal }, { status: 403 });
         return Response.json({ revision: this.commit(agent.actor, changes, null) });
@@ -6076,18 +6151,18 @@ export class Kitshn extends DurableObject<Env> {
       const refusal = agentAllowRefusal(
         row ? repoGateOf(row) : undefined,
         isRecord(body) ? body["state"] : null,
-        agentHas(this.state, caller.visitor, "addsApps", Date.now()),
+        agentHas(this.state, caller.visitor, "addsApps", Date.now(), approved),
         row?.gone_at !== null && row?.gone_at !== undefined,
       );
       if (refusal) return Response.json({ error: refusal.error }, { status: refusal.status });
-      // An agent circle names this key, so its device member exists.
-      if (device?._tag !== "device")
-        throw new Error("An agent key without its device member allowed a repo.");
+      // An agent circle names this key or machine, so its member exists.
+      if (agentName === null || caller.visitor.clientId === null)
+        throw new Error("An agent without its member in an agent circle allowed a repo.");
       return this.setRepoState(
         agent,
         repoId,
         { state: "allowed" },
-        { clientId: device.clientId, name: device.name },
+        { clientId: caller.visitor.clientId, name: agentName },
       );
     }
     if (path === "/agent/deploy" && request.method === "POST") {
@@ -6118,6 +6193,367 @@ export class Kitshn extends DurableObject<Env> {
       return this.agentRedeploy(agent, machine.id, plan.command);
     }
     return Response.json({ error: `The agent path has no ${request.method} ${path}.` }, { status: 404 });
+  }
+
+  /** K-1710: answers one ask of a machine on its own connection. */
+  private async answerAsk(socket: WebSocket, machine: Machine, message: Record<string, unknown>) {
+    const requestId = typeof message["requestId"] === "string" ? message["requestId"].slice(0, 64) : null;
+    if (requestId === null) return;
+    const outcome = await this.ask(machine, isRecord(message["ask"]) ? message["ask"] : {});
+    send(socket, { type: "askAnswer", requestId, ...outcome });
+  }
+
+  /** K-1710 to K-1722: checks one ask, runs it, makes a proposal, or refuses it with the reason. */
+  private async ask(machine: Machine, raw: Record<string, unknown>): Promise<AskOutcome> {
+    const now = Date.now();
+    const action = raw["action"];
+    const target = typeof raw["target"] === "string" ? raw["target"].slice(0, 512) : "";
+    const reason = typeof raw["reason"] === "string" ? raw["reason"].slice(0, 500) : null;
+    const problem = labelProblem(raw["labels"]);
+    const labels =
+      problem === null && isRecord(raw["labels"]) ? (raw["labels"] as Record<string, string>) : {};
+    const event = (outcome: AskOutcome) => {
+      if (isAskAction(action)) this.askEvent(now, machine, action, target, reason, labels, outcome);
+      return outcome;
+    };
+    if (!isAskAction(action))
+      return { outcome: "refused", reason: `kitshn does not know the action ${String(action)}.` };
+    if (problem !== null) return event({ outcome: "refused", reason: problem });
+    if (this.state.paused)
+      return event({
+        outcome: "refused",
+        reason: "kitshn is paused (Emergency pause). Asks wait until Resume (K-1504).",
+      });
+    if (action === "approve" || action === "deny") {
+      const visitor = { email: null, clientId: machine.clientId, ip: null };
+      const decided = await this.decide(target, action === "approve" ? "approved" : "denied", {
+        actor: { _tag: "machine", machineId: machine.id, name: machine.name },
+        visitor,
+        machineId: machine.id,
+        reason,
+      });
+      return event(
+        decided.ok
+          ? { outcome: "done", result: decided.result ?? null }
+          : { outcome: "refused", reason: decided.error },
+      );
+    }
+    const needs = ASK_RIGHT[action];
+    if (needs === "member")
+      throw new Error(`The action ${action} needs membership, and only approve and deny do.`);
+    if (needs !== "none" && needs !== "apply") {
+      const mode = machineRightMode(this.state, machine.id, needs, now);
+      if (mode === null)
+        return event({
+          outcome: "refused",
+          reason: `The right "${MACHINE_RIGHT_NAMES[needs]}" is off for this machine. The owner turns it on in its agent circle (K-1720).`,
+        });
+      if (mode.mode === "ask")
+        return event(
+          this.propose(machine, action, target, raw["body"], reason, labels, needs, mode.circleId, now),
+        );
+    }
+    if (needs === "apply") {
+      const edits = this.askEdits(machine, action, target, raw["body"], now, null);
+      if (typeof edits === "string") {
+        // K-1720: a move into Everyone needs "publishes"; with "ask <circle>" it waits for an approval.
+        const mode = machineRightMode(this.state, machine.id, "publishes", now);
+        const withApproval = this.askEdits(machine, action, target, raw["body"], now, "publishes");
+        if (mode?.mode === "ask" && typeof withApproval !== "string")
+          return event(
+            this.propose(
+              machine,
+              action,
+              target,
+              raw["body"],
+              reason,
+              labels,
+              "publishes",
+              mode.circleId,
+              now,
+            ),
+          );
+        return event({ outcome: "refused", reason: edits });
+      }
+    }
+    return event(await this.runAsk(machine, action, target, raw["body"], null));
+  }
+
+  /**
+   * K-1711: the edits of `apply`, or of `publish` (a move into or out of Everyone), checked by the rules of K-718 as
+   * the machine; a string names why not.
+   */
+  private askEdits(
+    machine: Machine,
+    action: AskAction,
+    target: string,
+    body: unknown,
+    now: number,
+    approved: MachineRight | null,
+  ): ReadonlyArray<Edit> | string {
+    const visitor = { email: null, clientId: machine.clientId, ip: null };
+    let edits: ReadonlyArray<Edit>;
+    if (action === "publish") {
+      const wantsPublic = !(isRecord(body) && body["public"] === false);
+      const to = agentUploadPlace(this.state, visitor, null, wantsPublic, now, approved);
+      if (to === null || typeof to === "string")
+        return to ?? "This machine has no agent circle with control (K-718).";
+      edits = [{ _tag: "place", id: target, after: to }];
+    } else {
+      try {
+        const message = decodeClientMessage({
+          edits: isRecord(body) ? body["edits"] : undefined,
+          type: "apply",
+          requestId: "ask",
+        });
+        if (message.type !== "apply") return "Send edits.";
+        edits = message.edits;
+      } catch (error) {
+        return `The edits do not decode: ${String(error)}`;
+      }
+    }
+    try {
+      const changes = resolveEdits(this.state, edits);
+      const refusal = agentRefusal(
+        this.state,
+        applyChanges(this.state, changes),
+        visitor,
+        changes,
+        now,
+        this.agentAdded(machine.clientId),
+        approved,
+      );
+      return refusal ?? edits;
+    } catch (error) {
+      if (error instanceof RuleError) return error.message;
+      throw error;
+    }
+  }
+
+  /** K-718: the cards of repos that this agent allowed (K-819), and the pages and files that it published. */
+  private agentAdded(clientId: string | null) {
+    return new Set(
+      this.sql<{ resource_id: string }>(
+        `SELECT DISTINCT deploys.resource_id FROM deploys JOIN repos ON repos.repo_id = deploys.repo_id AND deploys.kind = 'deploy'
+         WHERE repos.allowed_by_client = ?
+         UNION SELECT id FROM library WHERE added_by = ?`,
+        clientId,
+        clientId,
+      ).map((row) => row.resource_id),
+    );
+  }
+
+  /** K-1710: runs an ask through the agent path of its action, as the machine. */
+  private async runAsk(
+    machine: Machine,
+    action: AskAction,
+    target: string,
+    body: unknown,
+    approved: MachineRight | null,
+  ): Promise<AskOutcome> {
+    let mapped = askRequest(action, target, body);
+    if (action === "publish") {
+      const edits = this.askEdits(machine, action, target, body, Date.now(), approved);
+      if (typeof edits === "string") return { outcome: "refused", reason: edits };
+      mapped = { method: "POST", path: "/agent/apply", body: { edits } };
+    }
+    if (typeof mapped === "string")
+      return { outcome: "refused", reason: `${action} comes with a later part of section 17.` };
+    const caller: Caller = {
+      visitor: { email: null, clientId: machine.clientId, ip: null },
+      actor: { _tag: "machine", machineId: machine.id, name: machine.name },
+    };
+    const request = new Request(`https://kitshn.internal${mapped.path}`, {
+      method: mapped.method,
+      headers: { "content-type": "application/json" },
+      ...(mapped.method === "POST" ? { body: JSON.stringify(mapped.body) } : {}),
+    });
+    const response = await this.agentRequest(mapped.path, request, caller, approved);
+    const json: unknown = await response.json().catch(() => null);
+    if (response.ok) return { outcome: "done", result: json };
+    return {
+      outcome: "refused",
+      reason:
+        isRecord(json) && typeof json["error"] === "string"
+          ? json["error"]
+          : `kitshn answered ${response.status}.`,
+    };
+  }
+
+  /** K-1722: an ask that waits for one member of its approver circle. */
+  private propose(
+    machine: Machine,
+    action: AskAction,
+    target: string,
+    body: unknown,
+    reason: string | null,
+    labels: Readonly<Record<string, string>>,
+    right: MachineRight,
+    circleId: string,
+    now: number,
+  ): AskOutcome {
+    const id = crypto.randomUUID();
+    this.sql(
+      `INSERT INTO proposals (id, machine_id, action, target, body, reason, labels, right_name, circle_id, state, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      id,
+      machine.id,
+      action,
+      target,
+      JSON.stringify(body ?? null),
+      reason,
+      JSON.stringify(labels),
+      right,
+      circleId,
+      now,
+      now + PROPOSAL_MS,
+    );
+    this.broadcast();
+    void this.scheduleAlarm();
+    return { outcome: "waiting", proposalId: id };
+  }
+
+  /**
+   * K-1723: one answer to a proposal. Only a member of its approver circle answers; one conditional write decides,
+   * and every later answer gets "already decided". An approval runs the ask at once, with every check of K-1712.
+   */
+  private async decide(
+    proposalId: string,
+    decision: "approved" | "denied",
+    by: {
+      readonly actor: Actor;
+      readonly visitor: Visitor;
+      readonly machineId: string | null;
+      readonly reason: string | null;
+    },
+  ): Promise<
+    { readonly ok: true; readonly result?: unknown } | { readonly ok: false; readonly error: string }
+  > {
+    const [row] = this.sql<ProposalRow>("SELECT * FROM proposals WHERE id = ?", proposalId);
+    if (!row) return { ok: false, error: `kitshn has no proposal ${proposalId}.` };
+    const proposal = proposalOf(row);
+    const circle = this.state.circles.get(proposal.circleId);
+    if (!circle || !circleMatches(circle, by.visitor, this.state.machines))
+      return {
+        ok: false,
+        error: `Only a member of the approver circle ${circle?.name ?? proposal.circleId} answers this ask (K-1723).`,
+      };
+    if (!SELF_APPROVAL_ALLOWED && by.machineId === proposal.machineId)
+      return { ok: false, error: "The machine that asked does not answer its own ask (K-1727)." };
+    const now = Date.now();
+    const [won] = this.sql<{ id: string }>(
+      "UPDATE proposals SET state = ?, decided_at = ?, decided_by = ? WHERE id = ? AND state = 'pending' AND expires_at > ? RETURNING id",
+      decision,
+      now,
+      JSON.stringify({ actor: by.actor, reason: by.reason }),
+      proposalId,
+      now,
+    );
+    if (!won) return { ok: false, error: `This ask is already decided (${proposal.state}).` };
+    const machine = this.state.machines.get(proposal.machineId);
+    const what = `${proposal.action} ${proposal.target}`.trim();
+    this.insertRevision(
+      by.actor,
+      `${decision === "approved" ? "Approved" : "Denied"} the ask of ${machine?.name ?? proposal.machineId}: ${what}${by.reason ? ` (${by.reason})` : ""}`,
+      [],
+      null,
+    );
+    if (decision === "denied") {
+      this.sendAskResult(proposal.machineId, {
+        proposalId,
+        outcome: "denied",
+        ...(by.reason ? { reason: by.reason } : {}),
+      });
+      this.broadcast();
+      return { ok: true };
+    }
+    const outcome = machine
+      ? await this.runAsk(machine, proposal.action, proposal.target, proposal.body, proposal.right)
+      : ({ outcome: "refused", reason: "The machine that asked is gone." } as const);
+    const result = outcome.outcome === "done" ? outcome.result : null;
+    this.sql("UPDATE proposals SET result = ? WHERE id = ?", JSON.stringify(outcome), proposalId);
+    this.sendAskResult(proposal.machineId, {
+      proposalId,
+      outcome: outcome.outcome === "refused" ? "denied" : "approved",
+      ...(outcome.outcome === "done" ? { result } : {}),
+      ...(outcome.outcome === "refused" ? { reason: outcome.reason } : {}),
+    });
+    this.broadcast();
+    return outcome.outcome === "refused" ? { ok: false, error: outcome.reason } : { ok: true, result };
+  }
+
+  /** K-1722 to K-1724: the answer goes to the machine's open connection; an offline machine misses it. */
+  private sendAskResult(machineId: string, result: AskResult) {
+    const socket = this.openSocket(machineId);
+    if (socket) send(socket, { type: "askResult", ...result });
+  }
+
+  /**
+   * K-1716: "Rotate key", "Reset key" and "Remove machine" deny the open proposals of one machine; the pause denies
+   * every open proposal.
+   */
+  private denyOpenProposals(machineId: string | null, why: string) {
+    const rows = this.sql<{ id: string; machine_id: string }>(
+      machineId === null
+        ? "UPDATE proposals SET state = 'denied', decided_at = ?, decided_by = ? WHERE state = 'pending' RETURNING id, machine_id"
+        : "UPDATE proposals SET state = 'denied', decided_at = ?, decided_by = ? WHERE state = 'pending' AND machine_id = ? RETURNING id, machine_id",
+      Date.now(),
+      JSON.stringify({ actor: { _tag: "kitshn", reason: why }, reason: why }),
+      ...(machineId === null ? [] : [machineId]),
+    );
+    for (const row of rows)
+      this.sendAskResult(row.machine_id, { proposalId: row.id, outcome: "denied", reason: why });
+  }
+
+  /** K-1724: a proposal expires 24 hours after its ask, and its agent hears so. */
+  private expireProposals(now: number) {
+    const rows = this.sql<{ id: string; machine_id: string }>(
+      "UPDATE proposals SET state = 'expired', decided_at = ? WHERE state = 'pending' AND expires_at <= ? RETURNING id, machine_id",
+      now,
+      now,
+    );
+    for (const row of rows) this.sendAskResult(row.machine_id, { proposalId: row.id, outcome: "expired" });
+    if (rows.length > 0) this.broadcast();
+  }
+
+  /** K-1717: one event for each ask, not a revision; the daily run keeps 30 days and at most 5,000. */
+  private askEvent(
+    at: number,
+    machine: Machine,
+    action: AskAction,
+    target: string,
+    reason: string | null,
+    labels: Readonly<Record<string, string>>,
+    outcome: AskOutcome,
+  ) {
+    this.sql(
+      `INSERT INTO ask_events (at, machine_id, action, target, reason, labels, outcome, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      at,
+      machine.id,
+      action,
+      target,
+      reason,
+      JSON.stringify(labels),
+      outcome.outcome,
+      outcome.outcome === "refused"
+        ? outcome.reason
+        : outcome.outcome === "waiting"
+          ? outcome.proposalId
+          : "",
+    );
+  }
+
+  /** K-1722: the open proposals, for the Asks list of the map. */
+  private openProposals(): Array<ProposalView> {
+    return this.sql<ProposalRow>("SELECT * FROM proposals WHERE state = 'pending' ORDER BY created_at").map(
+      (row) => {
+        const proposal = proposalOf(row);
+        return {
+          ...proposal,
+          machineName: this.state.machines.get(proposal.machineId)?.name ?? proposal.machineId,
+        };
+      },
+    );
   }
 
   /** K-718: why a machine may not start the last good build of a card now, or null. */
@@ -7660,6 +8096,7 @@ export class Kitshn extends DurableObject<Env> {
     // The alarm runs every 2 minutes while a daemon is connected, so it tells the maps only about real changes.
     let changed = this.expireJobs(now) > 0;
     if (this.settleRollbacks() > 0) changed = true;
+    this.expireProposals(now);
     const before = JSON.stringify(accessStates(this.desired(now), this.access));
     this.endShares(now);
     const daily = this.dailyAt() <= now;
@@ -8035,3 +8472,34 @@ async function readStart(stream: ReadableStream<Uint8Array>, limit: number): Pro
   }
   return bytes.subarray(0, limit);
 }
+
+/** K-1722: a row of the proposals table. */
+interface ProposalRow extends Record<string, SqlStorageValue> {
+  readonly id: string;
+  readonly machine_id: string;
+  readonly action: string;
+  readonly target: string;
+  readonly body: string;
+  readonly reason: string | null;
+  readonly labels: string;
+  readonly right_name: string;
+  readonly circle_id: string;
+  readonly state: string;
+  readonly created_at: number;
+  readonly expires_at: number;
+}
+
+const proposalOf = (row: ProposalRow): Proposal => ({
+  id: row.id,
+  machineId: row.machine_id,
+  action: row.action as AskAction,
+  target: row.target,
+  body: JSON.parse(row.body) as unknown,
+  reason: row.reason,
+  labels: JSON.parse(row.labels) as Record<string, string>,
+  right: row.right_name as MachineRight,
+  circleId: row.circle_id,
+  state: row.state as Proposal["state"],
+  createdAt: row.created_at,
+  expiresAt: row.expires_at,
+});

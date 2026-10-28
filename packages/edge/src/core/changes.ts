@@ -2,6 +2,8 @@ import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
   AGENT_RIGHT_NAMES,
+  MACHINE_RIGHTS,
+  MACHINE_RIGHT_NAMES,
   type Circle,
   type Level,
   type Member,
@@ -113,6 +115,8 @@ export const isAction = (changes: ReadonlyArray<Change | Forget>) =>
 export type Actor =
   | { readonly _tag: "person"; readonly email: string }
   | { readonly _tag: "device"; readonly clientId: string; readonly name: string }
+  /** K-1717: a machine that acted for one of its agents. */
+  | { readonly _tag: "machine"; readonly machineId: string; readonly name: string }
   | { readonly _tag: "kitshn"; readonly reason: string };
 
 export interface Revision {
@@ -784,6 +788,20 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
 function rightChanges(before: Circle | null, after: Circle | null): Array<string> {
   if (!before || !after) return [];
   return after.members.flatMap((member) => {
+    // K-1720: "Set runs commands of vps to ask Owner in Agents".
+    if (member._tag === "machine") {
+      const old = before.members.find(
+        (other) => other._tag === "machine" && other.machineId === member.machineId,
+      );
+      if (old?._tag !== "machine") return [];
+      return MACHINE_RIGHTS.filter((right) => !deepEqual(old.rights?.[right], member.rights?.[right])).map(
+        (right) => {
+          const mode = member.rights?.[right];
+          const text = !mode ? "off" : mode.mode === "automatic" ? "automatic" : `ask ${mode.circleId}`;
+          return `Set ${MACHINE_RIGHT_NAMES[right]} of ${member.machineId} to ${text} in ${after.name}`;
+        },
+      );
+    }
     if (member._tag !== "device") return [];
     const old = before.members.find((other) => other._tag === "device" && other.tokenId === member.tokenId);
     if (old?._tag !== "device") return [];

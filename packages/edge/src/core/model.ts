@@ -40,8 +40,46 @@ export type Member =
       readonly addsApps?: true;
       readonly publishes?: true;
     }
-  | { readonly _tag: "machine"; readonly machineId: string }
+  /** K-1730: a machine; in an agent circle it may also have agent rights, each with its mode (K-1720). */
+  | {
+      readonly _tag: "machine";
+      readonly machineId: string;
+      readonly rights?: Readonly<Partial<Record<MachineRight, RightMode>>>;
+    }
   | { readonly _tag: "everyone" };
+
+/** K-1730: the agent rights of a machine. Every right starts off. */
+export const MACHINE_RIGHTS = [
+  "addsApps",
+  "publishes",
+  "deploys",
+  "runsCommands",
+  "readsCode",
+  "writesCode",
+  "addsAudiences",
+  "getsPasses",
+] as const;
+export type MachineRight = (typeof MACHINE_RIGHTS)[number];
+export const MACHINE_RIGHT_NAMES: Record<MachineRight, string> = {
+  addsApps: "adds apps",
+  publishes: "publishes",
+  deploys: "deploys",
+  runsCommands: "runs commands",
+  readsCode: "reads code",
+  writesCode: "writes code",
+  addsAudiences: "adds audiences",
+  getsPasses: "gets passes",
+};
+/** K-1725: the rights that the map warns about when no person approves them. */
+export const HIGH_RISK_RIGHTS: ReadonlySet<MachineRight> = new Set([
+  "runsCommands",
+  "deploys",
+  "writesCode",
+  "addsApps",
+]);
+
+/** K-1720: a right that is on runs at once, or asks one circle. A right that is off has no mode. */
+export type RightMode = { readonly mode: "automatic" } | { readonly mode: "ask"; readonly circleId: string };
 
 /** K-718: the rights that the owner can give an agent key on its device member. */
 export const AGENT_RIGHTS = ["addsApps", "publishes"] as const;

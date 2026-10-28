@@ -4,6 +4,10 @@ import type { MachineOs } from "./icons.ts";
 import type { LogLine, TailAnswer } from "./logs.ts";
 import type { Circle, PauseMode, Point, Resource, ShareSetting, Stack } from "./model.ts";
 import type { RepoGate } from "./repos.ts";
+import type { Proposal } from "./asks.ts";
+
+/** K-1722: an open proposal, with the name of the machine that asked, for the Asks list. */
+export type ProposalView = Proposal & { readonly machineName: string };
 
 /** K-819: `resourceIds` are the cards that this repo deployed, which the card panel matches. */
 export type RepoView = RepoGate & {
@@ -83,6 +87,8 @@ export interface Snapshot {
   /** K-1504: who paused and when, while paused. */
   readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;
+  /** K-1722: the asks that wait for an approver circle, oldest first. */
+  readonly proposals: ReadonlyArray<ProposalView>;
   /** The newest jobs, with their output cut to 4,000 characters. */
   readonly jobs: ReadonlyArray<JobView>;
   /** K-617: the release of this kitshn; "Update daemon" installs the daemon of this release. */

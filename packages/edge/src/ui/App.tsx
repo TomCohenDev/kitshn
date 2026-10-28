@@ -43,6 +43,7 @@ import type {
   MachineView,
   OrphanWorker,
   RepoView,
+  ProposalView,
   RevisionView,
   Snapshot,
 } from "../core/protocol.ts";
@@ -108,6 +109,7 @@ import {
 } from "./Pause.tsx";
 import { playResumeSound, pressSound, showPanic, unlockAudio } from "./panic.ts";
 import { GONE_STICKER, REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
+import { AskList, approveFromHash } from "./Asks.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
@@ -398,6 +400,9 @@ export function App() {
     };
     // K-1504: Access sends the owner back here after the fresh passkey check of "Resume".
     if (location.hash === "#resume") void finishResume();
+    // K-1723: Access sends an approver back here after the fresh passkey check of an approve.
+    const approving = approveFromHash(location.hash);
+    if (approving !== null) void finishApprove(approving);
     addEventListener("hashchange", onHash);
     addEventListener("keydown", onKey);
     addEventListener("dragover", keepFiles);
@@ -643,6 +648,21 @@ export function App() {
       "error" in result
         ? { text: result.error, error: true, undo: null }
         : { text: "Resumed. Every share is back.", error: false, undo: null },
+    );
+  };
+
+  const finishApprove = async (id: string) => {
+    history.replaceState(null, "", location.pathname + location.search);
+    if (!(await ask("Your passkey check passed. Approve this ask now? kitshn runs it at once."))) return;
+    const result = await callApi<{ result: unknown }>(
+      "POST",
+      `/api/fresh/approve/${encodeURIComponent(id)}`,
+      {},
+    );
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: "Approved. kitshn ran the ask.", error: false, undo: null },
     );
   };
 
@@ -1314,6 +1334,7 @@ export function App() {
               zone={store.snapshot.zone}
               peek={!wide}
               repos={store.snapshot.repos}
+              proposals={store.snapshot.proposals}
               selection={selection}
               access={store.snapshot.access}
               me={store.snapshot.me}
@@ -1828,6 +1849,8 @@ function Panel(props: {
   peek: boolean;
   /** K-819: the repos that deploy or wait to deploy. */
   repos: ReadonlyArray<RepoView>;
+  /** K-1722: the asks that wait for an approver circle. */
+  proposals: ReadonlyArray<ProposalView>;
   selection: Selection;
   access: Readonly<Record<string, import("../core/protocol.ts").AccessState>>;
   me: Actor;
@@ -2010,6 +2033,11 @@ function Panel(props: {
             </li>
           ))}
         </ul>
+        <AskList
+          proposals={props.proposals}
+          circleName={(id) => props.state.circles.get(id)?.name ?? id}
+          onToast={props.onToast}
+        />
         <RepoList repos={props.repos} onToast={props.onToast} />
         <p class="muted">You are {actorLabel(props.me)}.</p>
         {props.warnings.length > 0 || props.signOutWarning ? (

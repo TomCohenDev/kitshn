@@ -3,20 +3,32 @@ import type { RevisionView } from "../core/protocol.ts";
 
 /** K-1508: History as plain sentences, grouped by day and by actor, with filters. Pure, for tests. */
 
-export const actorLabel = (actor: Actor) =>
-  actor._tag === "person"
-    ? actor.email
-    : actor._tag === "device"
-      ? `📱 ${actor.name}`
-      : `kitshn (${actor.reason})`;
+export function actorLabel(actor: Actor): string {
+  switch (actor._tag) {
+    case "person":
+      return actor.email;
+    case "device":
+      return `📱 ${actor.name}`;
+    case "machine":
+      return `🖥️ ${actor.name}`;
+    case "kitshn":
+      return `kitshn (${actor.reason})`;
+  }
+}
 
 /** One filter value per actor; every kitshn reason (an expiry, a deploy) is the same actor "kitshn". */
-export const actorKey = (actor: Actor) =>
-  actor._tag === "person"
-    ? `person:${actor.email}`
-    : actor._tag === "device"
-      ? `device:${actor.clientId}`
-      : "kitshn";
+export function actorKey(actor: Actor): string {
+  switch (actor._tag) {
+    case "person":
+      return `person:${actor.email}`;
+    case "device":
+      return `device:${actor.clientId}`;
+    case "machine":
+      return `machine:${actor.machineId}`;
+    case "kitshn":
+      return "kitshn";
+  }
+}
 
 /** The first words of summaries that are a verb, so a row under its actor reads "<verb> …". */
 const VERBS = new Set([

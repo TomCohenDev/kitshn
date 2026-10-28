@@ -14,11 +14,12 @@ import {
   type MachinePrivateKey,
   type ProjectVolume,
   type ServerToDaemon,
+  type AskOutcome,
 } from "@kitshn/edge/machine";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import type { Answer, Request } from "@kitshn/local";
+import { ASK_ACTIONS, type Answer, type AskAction, type Request } from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { keyPlan } from "./keys.ts";
 import { composeLogs, followLogs, rangeArgs, searchLogs, withLogLimits } from "./logs.ts";
@@ -253,6 +254,74 @@ async function ask(request: Request): Promise<Exclude<Answer, { type: "error" }>
   if (outcome.kind === "not-running") return null;
   if (outcome.answer.type === "error") fail(outcome.answer.error);
   return outcome.answer;
+}
+
+/**
+ * K-1710: `kitshn agent <action> [target] [--reason <text>] [--label <key>=<value>]... [--body <json>]` asks kitshn
+ * through the daemon and prints the result as JSON. A waiting ask follows its proposal to the end (K-1722).
+ */
+async function agentCommand(argv: ReadonlyArray<string>) {
+  const [action, ...rest] = argv;
+  if (!(ASK_ACTIONS as ReadonlyArray<string>).includes(action ?? ""))
+    fail(`kitshn agent <action>: the action is one of ${ASK_ACTIONS.join(", ")}.`);
+  let target = "";
+  let reason: string | undefined;
+  let body: unknown;
+  const labels: Record<string, string> = {};
+  for (let index = 0; index < rest.length; index++) {
+    const word = rest[index] ?? "";
+    const value = () => rest[++index] ?? fail(`${word} needs a value.`);
+    if (word === "--reason") reason = value();
+    else if (word === "--body") {
+      const text = value();
+      try {
+        body = JSON.parse(text);
+      } catch {
+        fail("--body is not JSON.");
+      }
+    } else if (word === "--label") {
+      const pair = value();
+      const equals = pair.indexOf("=");
+      if (equals <= 0) fail(`--label ${pair}: write <key>=<value>.`);
+      labels[pair.slice(0, equals)] = pair.slice(equals + 1);
+    } else if (word.startsWith("--")) fail(`kitshn agent does not know ${word}.`);
+    else if (target === "") target = word;
+    else fail(`kitshn agent takes one target, not also ${word}.`);
+  }
+  if (typeof daemonUid === "string") fail(daemonUid);
+  const request: Request = {
+    id: "1",
+    type: "ask",
+    action: action as AskAction,
+    target,
+    ...(body === undefined ? {} : { body }),
+    ...(reason === undefined ? {} : { reason }),
+    ...(Object.keys(labels).length === 0 ? {} : { labels }),
+  };
+  const outcome = await askLocal(
+    socketPath,
+    request,
+    90_000,
+    { platform, daemonUid: daemonUid as number },
+    (answer) => answer.type === "ask" && answer.outcome === "waiting",
+    (answer) => {
+      if (answer.type === "ask" && answer.outcome === "waiting")
+        console.error(`waiting: proposal ${answer.proposalId} asks its approver circle (K-1722).`);
+    },
+  ).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+  if (outcome.kind === "not-running") fail(notRunning());
+  const answer = outcome.answer;
+  if (answer.type === "error") fail(answer.error);
+  if (answer.type === "ask" && answer.outcome === "refused") fail(answer.reason);
+  if (answer.type === "ask-result" && answer.outcome !== "approved")
+    fail(`${answer.outcome}: proposal ${answer.proposalId}${answer.reason ? ` (${answer.reason})` : ""}.`);
+  const result =
+    answer.type === "ask" && answer.outcome === "done"
+      ? answer.result
+      : answer.type === "ask-result"
+        ? answer.result
+        : null;
+  console.log(JSON.stringify(result ?? null, null, 2));
 }
 
 /**
@@ -1309,6 +1378,38 @@ async function answerChallenge(
 type RotationOutcome = { readonly fingerprint: string } | { readonly error: string };
 /** K-1705: the `rotate-key` requests of the local socket that wait for kitshn to store the new key. */
 const rotationWaiters: Array<(outcome: RotationOutcome) => void> = [];
+/** K-1710: the asks that wait for kitshn's answer, by request id. */
+const askWaiters = new Map<string, (outcome: AskOutcome) => void>();
+/** K-1722: the local connections that wait for the answer to a proposal, by proposal id. */
+const proposalWaiters = new Map<string, Array<(event: Answer) => void>>();
+
+/** K-1710: sends an ask of a local agent over the signed connection, and gives the answer back on the socket. */
+async function askKitshn(
+  request: Extract<Request, { type: "ask" }>,
+  emit: (event: Answer) => void,
+): Promise<Answer> {
+  const ws = socket;
+  if (ws === null || challenge === null)
+    throw new Error(
+      "the daemon has no signed connection to kitshn, so it cannot ask (K-1710). See kitshn status.",
+    );
+  const requestId = crypto.randomUUID();
+  const { id, type: _type, ...ask } = request;
+  const outcome = await new Promise<AskOutcome>((resolve) => {
+    const timer = setTimeout(() => {
+      askWaiters.delete(requestId);
+      resolve({ outcome: "refused", reason: "kitshn did not answer within 60 seconds." });
+    }, 60_000);
+    askWaiters.set(requestId, (value) => {
+      clearTimeout(timer);
+      resolve(value);
+    });
+    ws.send(JSON.stringify({ type: "ask", requestId, ask } satisfies DaemonMessage));
+  });
+  if (outcome.outcome === "waiting")
+    proposalWaiters.set(outcome.proposalId, [...(proposalWaiters.get(outcome.proposalId) ?? []), emit]);
+  return { id, type: "ask", ...outcome };
+}
 const settleRotation = (outcome: RotationOutcome) => {
   for (const waiter of rotationWaiters.splice(0)) waiter(outcome);
 };
@@ -1454,6 +1555,15 @@ function connect(config: JoinSecrets) {
       } else if (message.type === "tailStop") {
         tails.get(message.id)?.();
         tails.delete(message.id);
+      } else if (message.type === "askAnswer") {
+        const { type: _type, requestId, ...outcome } = message;
+        askWaiters.get(requestId)?.(outcome);
+        askWaiters.delete(requestId);
+      } else if (message.type === "askResult") {
+        const { type: _type, ...result } = message;
+        for (const emit of proposalWaiters.get(result.proposalId) ?? [])
+          emit({ type: "ask-result", ...result });
+        proposalWaiters.delete(result.proposalId);
       } else if (message.type === "job") {
         log(`job ${message.id}: ${message.command.kind}`);
         // A job that throws (for example a file it cannot delete) still sends a result, and never ends the daemon.
@@ -1478,6 +1588,14 @@ function connect(config: JoinSecrets) {
       // K-1805: kitshn forgets the tails of a closed connection.
       if (socket === ws) stopTails();
       if (socket === ws) socket = null;
+      // K-1716: an ask in flight gets no result from a closed connection; its proposal stays.
+      for (const [requestId, settle] of askWaiters) {
+        settle({
+          outcome: "refused",
+          reason: `the connection to kitshn closed (${event.code}) before its answer.`,
+        });
+        askWaiters.delete(requestId);
+      }
       // K-1705: kitshn stored the new key; the next connection signs with it.
       if (event.code === 4004 && existsSync(nextKeyFile)) renameSync(nextKeyFile, keyFile);
       settleRotation(
@@ -1670,8 +1788,13 @@ function readMachineFile(): unknown {
 }
 
 /** K-701, K-702: the requests of the local socket. */
-async function answerLocal(request: Request): Promise<Answer> {
+async function answerLocal(
+  request: Request,
+  _caller: unknown,
+  emit: (event: Answer) => void,
+): Promise<Answer> {
   const { id } = request;
+  if (request.type === "ask") return askKitshn(request, emit);
   if (request.type === "status") {
     if (!joined) throw new Error("the daemon has not read machine.json yet.");
     const key = readKey(keyFile);
@@ -1730,6 +1853,9 @@ switch (command) {
   case "status":
     await statusCommand();
     break;
+  case "agent":
+    await agentCommand(args);
+    break;
   case "local-users":
     localUsersCommand(args[0], args[1]);
     break;
@@ -1756,6 +1882,7 @@ kitshn rotate-key                       replace the machine key over the live co
 kitshn rekey <code>                     make a new machine key with the key code of its panel (K-1706, K-1708)
 kitshn status                           the machine, its key, its connection to kitshn and its tunnel
 kitshn local-users list|add|remove <u>  who else may use the local socket, as the daemon user (K-701)
+kitshn agent <action> [target]          ask kitshn as this machine (K-1710): --reason, --label k=v, --body json
 kitshn expose <port|socket> --name <n>  share a local server at <n>.<zone> (K-1104); --dev sets Host localhost
 kitshn unexpose <name>                  stop sharing it
 kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>

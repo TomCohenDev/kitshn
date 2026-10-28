@@ -107,7 +107,8 @@ const owner = {
 };
 
 it("refuses a right that is off, and names it (K-1720)", async () => {
-  const stub = await setup({});
+  // One right makes the circle an agent circle of the machine (K-1730); "adds apps" stays off.
+  const stub = await setup({ deploys: { mode: "automatic" } });
   expect(await ask(stub, "allow", "123")).toEqual({
     outcome: "refused",
     reason: expect.stringContaining('"adds apps" is off'),
@@ -248,4 +249,50 @@ it("refuses a new ask past 20 open asks of one machine (K-1722)", async () => {
     outcome: "refused",
     reason: expect.stringContaining("20 open asks"),
   });
+});
+
+it("lets only an owner email resume, also when an approver policy let another person in (K-1504)", async () => {
+  const stub = await setup({});
+  await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('paused', 'keep-public')"),
+  );
+  await evictDurableObject(stub);
+  const resume = (email: string) =>
+    runInDurableObject(stub, async (instance) => {
+      const response = (instance as unknown as { resume(caller: object): Response }).resume({
+        actor: { _tag: "person", email },
+        visitor: { email, clientId: null, ip: null },
+      });
+      return response.status;
+    });
+  expect(await resume("approver@example.com")).toBe(403);
+  expect(await resume("owner@example.com")).toBe(200);
+});
+
+it("refuses an approve of a passkey circle that came through the login path, and an ask too long to read (K-1723, K-1722)", async () => {
+  const stub = await setup({ deploys: { mode: "ask", circleId: "owner" } });
+  const waiting = await ask(stub, "deploy", "card");
+  const id = waiting.outcome === "waiting" ? waiting.proposalId : "";
+  const viaLogin = await runInDurableObject(stub, (instance) =>
+    (
+      instance as unknown as {
+        decide(
+          id: string,
+          d: string,
+          by: object,
+          seen: string | null,
+          via: string,
+        ): Promise<{ ok: boolean; error?: string }>;
+      }
+    ).decide(id, "approved", owner, null, "login"),
+  );
+  // The seeded Owner circle needs a passkey.
+  expect(viaLogin).toMatchObject({ ok: false, error: expect.stringContaining("needs a passkey") });
+});
+
+it("refuses an ask whose text is too long for an approver to read (K-1722)", async () => {
+  const stub = await setup({ runsCommands: { mode: "ask", circleId: "owner" } });
+  expect(
+    await ask(stub, "job", "vps", { body: { command: { kind: "shell", script: "x".repeat(5000) } } }),
+  ).toEqual({ outcome: "refused", reason: expect.stringContaining("too long") });
 });

@@ -15,7 +15,7 @@ export interface AskEventView {
   readonly target: string;
   readonly reason: string | null;
   readonly labels: Readonly<Record<string, string>>;
-  readonly outcome: "done" | "waiting" | "refused";
+  readonly outcome: "done" | "waiting" | "refused" | "not-kitshn";
   /** The reason of a refusal, or the proposal id of a waiting ask. */
   readonly detail: string;
 }

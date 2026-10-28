@@ -282,3 +282,31 @@ export async function deployerOf(request: Request, env: Env): Promise<Deployer |
     return `The GitHub token is not valid: ${error instanceof Error ? error.message : String(error)}`;
   }
 }
+
+/**
+ * K-1723: a person on an approve path, from the Access token of that path's own application (`audience`). On the passkey
+ * path, the login must be at most ten minutes old, because that application only has policies with the passkey check.
+ */
+export async function approverOf(
+  request: Request,
+  env: Env,
+  audience: string | null,
+  fresh: boolean,
+  now: number,
+): Promise<Caller | string> {
+  if (env.DEV_IDENTITY && isLocal(new URL(request.url))) return callerOf(request, env, "");
+  if (!audience)
+    return "kitshn makes the approve application with its next Access sync. Try again in a minute.";
+  const token = request.headers.get("cf-access-jwt-assertion");
+  if (!token) return "The request has no Cloudflare Access token.";
+  const identity = await accessIdentity(token, env, [audience]);
+  if (typeof identity === "string") return identity;
+  if (!identity.email) return "An approve needs a person, not a service token.";
+  if (fresh && (identity.issuedAt === null || now / 1000 - identity.issuedAt > FRESH_SECONDS))
+    return "The passkey check is older than 10 minutes. Approve again.";
+  const ip = request.headers.get("cf-connecting-ip");
+  return {
+    visitor: { email: identity.email, clientId: null, ip },
+    actor: { _tag: "person", email: identity.email },
+  };
+}

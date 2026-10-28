@@ -10,6 +10,8 @@ import { callApi } from "./store.ts";
 export function AskList(props: {
   readonly proposals: ReadonlyArray<ProposalView>;
   readonly circleName: (id: string) => string;
+  /** K-1723: an approver circle that needs a passkey approves through the passkey path. */
+  readonly needsPasskey: (id: string) => boolean;
   readonly onToast: (text: string, error: boolean) => void;
 }) {
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
@@ -65,10 +67,10 @@ export function AskList(props: {
             <button
               type="button"
               disabled={busy.has(proposal.id)}
-              data-tip="Approve: a fresh passkey check, then kitshn runs the ask."
+              data-tip="Approve: the login of the approver circle (a fresh passkey when it needs one), then you read the ask once more, then kitshn runs it."
               onClick={() =>
                 location.assign(
-                  `/api/fresh/start?approve=${encodeURIComponent(proposal.id)}&hash=${proposal.shownHash}`,
+                  `/api/approve/${props.needsPasskey(proposal.circleId) ? "passkey" : "login"}/start?approve=${encodeURIComponent(proposal.id)}&hash=${proposal.shownHash}`,
                 )
               }
             >
@@ -103,6 +105,7 @@ const OUTCOME_TEXT: Record<AskEventView["outcome"], string> = {
   done: "ran",
   waiting: "waits",
   refused: "refused",
+  "not-kitshn": "not kitshn",
 };
 
 /** K-1717: the asks of agents as History events, newest first; they have no Undo. */
@@ -128,9 +131,13 @@ export function AskEvents(props: { readonly events: ReadonlyArray<AskEventView> 
               {event.outcome === "refused" ? <span class="muted"> · {event.detail}</span> : null}
               {event.reason ? <span class="muted"> · {event.reason}</span> : null}
               {Object.entries(event.labels).map(([key, value]) => (
-                <span key={key} class="muted">
+                <span
+                  key={key}
+                  class="muted"
+                  data-tip="A label that the agent wrote; no attester checked it (K-1750)."
+                >
                   {" "}
-                  · {key}={value}
+                  · {key}={value} (claimed)
                 </span>
               ))}
             </span>

@@ -144,6 +144,9 @@ export async function shownHash(shown: string): Promise<string> {
   return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+/** K-1722: the longest shown text of a proposal; a longer ask is refused, so each snapshot stays small. */
+export const MAX_SHOWN = 4096;
+
 /** K-1722: at most 20 open proposals for each machine; a new ask past it is refused. */
 export const MAX_OPEN_PROPOSALS = 20;
 

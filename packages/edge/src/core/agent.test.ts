@@ -431,8 +431,10 @@ describe("rights of machines with a mode (K-1720, K-1730)", () => {
   it("gives an agent key no new control from a machine in its circle (K-1730)", () => {
     // "agents" now holds the key and a machine: it stays an agent circle of the machine, and is none of the key,
     // as before machines could be agents.
-    const state = withMachine(undefined);
+    const state = withMachine({ deploys: { mode: "automatic" } });
     expect(circlesOf(state, as("vps-token"), 0).has("agents")).toBe(true);
+    // A machine with no right set there gets nothing new from an older circle (K-1730).
+    expect(circlesOf(withMachine(undefined), as("vps-token"), 0).has("agents")).toBe(false);
     expect(circlesOf(state, as("agent-1"), 0).has("agents")).toBe(false);
     expect(circlesOf(start(), as("agent-1"), 0).has("agents")).toBe(true);
   });

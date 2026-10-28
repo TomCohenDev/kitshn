@@ -157,6 +157,7 @@ import {
   SELF_APPROVAL_ALLOWED,
   APPROVED_WINDOW_MS,
   MAX_OPEN_PROPOSALS,
+  MAX_SHOWN,
   askRequest,
   isAskAction,
   labelProblem,
@@ -186,6 +187,7 @@ import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
 import { seed } from "../core/seed.ts";
 import { type Visitor, circleMatches, visitorLevel } from "../core/visitor.ts";
+import { APPROVE_APPS } from "../core/access.ts";
 import {
   type Mute,
   NOTIFICATIONS_KEEP_MS,
@@ -217,7 +219,6 @@ import {
   signOutWarning,
   syncAccess,
   syncLauncher,
-  syncApprovers,
   LOGIN_CALLS,
   loginHeld,
   loginHeldAfter,
@@ -228,6 +229,7 @@ import {
   verifyAccess,
   verifyPasskeys,
 } from "./access-sync.ts";
+import { approverOf } from "./auth.ts";
 import type { Caller, Deployer } from "./auth.ts";
 import { CloudflareError, cloudflare } from "./cloudflare.ts";
 import {
@@ -1203,6 +1205,13 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-1504: "Resume", after the Worker checked a passkey login of at most ten minutes. */
   private resume(caller: Caller) {
+    // K-1504: only the owner emails of the bootstrap resume, also when an approver policy let another person pass Access.
+    const owners = this.env.OWNER_EMAILS.split(",").map((email) => email.trim().toLowerCase());
+    if (caller.actor._tag !== "person" || !owners.includes(caller.actor.email.toLowerCase()))
+      return Response.json(
+        { error: "Only an owner email of the bootstrap resumes (K-1504)." },
+        { status: 403 },
+      );
     if (!this.authorized(caller))
       return Response.json(
         { error: "You have no control level on the kitshn admin (K-104)." },
@@ -2378,35 +2387,43 @@ export class Kitshn extends DurableObject<Env> {
         return this.deployFile(path, JSON.parse(header) as Deployer, request);
       return this.deployStep(path, JSON.parse(header) as Deployer, await request.json().catch(() => null));
     }
+    // K-1723: an approve or a deny on the approve path of one kind; the token must come from its own application.
+    if (path.startsWith("/approve/passkey/") || path.startsWith("/approve/login/")) {
+      const via = path.startsWith("/approve/passkey/") ? "passkey" : "login";
+      const rest = path.slice(`/approve/${via}/`.length);
+      const deny = rest.endsWith("/deny");
+      const id = decodeURIComponent(deny ? rest.slice(0, -"/deny".length) : rest);
+      const approver = await approverOf(
+        request,
+        this.env,
+        this.access.get(APPROVE_APPS[via])?.aud ?? null,
+        via === "passkey",
+        Date.now(),
+      );
+      if (typeof approver === "string") return Response.json({ error: approver }, { status: 401 });
+      return this.answerProposal(
+        id,
+        deny ? "denied" : "approved",
+        approver,
+        via,
+        await request.json().catch(() => null),
+      );
+    }
     const header = request.headers.get("x-kitshn-caller");
     if (!header) return new Response("The Worker sent no caller.", { status: 500 });
     const caller = JSON.parse(header) as Caller;
     if (path === "/connect") return this.connectMachine(request, caller);
     // Only the Worker's fresh passkey route sends this path (K-1504).
     if (path === "/fresh/resume" && request.method === "POST") return this.resume(caller);
-    // K-1723: a person of the approver circle approves after a fresh passkey check, and denies without one.
-    const proposalAnswer = path.startsWith("/fresh/approve/")
-      ? { id: path.slice("/fresh/approve/".length), decision: "approved" as const }
-      : path.startsWith("/api/proposals/") && path.endsWith("/deny")
-        ? { id: path.slice("/api/proposals/".length, -"/deny".length), decision: "denied" as const }
-        : null;
-    if (proposalAnswer && request.method === "POST") {
-      const body: unknown = await request.json().catch(() => null);
-      const reason =
-        isRecord(body) && typeof body["reason"] === "string" ? body["reason"].slice(0, 500) : null;
-      const seen = isRecord(body) && typeof body["hash"] === "string" ? body["hash"] : null;
-      if (proposalAnswer.decision === "approved" && seen === null)
-        return Response.json({ error: "Send the hash of the ask that you read (K-1722)." }, { status: 400 });
-      const decided = await this.decide(
-        decodeURIComponent(proposalAnswer.id),
-        proposalAnswer.decision,
-        { actor: caller.actor, visitor: caller.visitor, machineId: null, reason },
-        seen,
+    // K-1723: the owner denies an ask from the map.
+    if (path.startsWith("/api/proposals/") && path.endsWith("/deny") && request.method === "POST")
+      return this.answerProposal(
+        decodeURIComponent(path.slice("/api/proposals/".length, -"/deny".length)),
+        "denied",
+        caller,
+        null,
+        await request.json().catch(() => null),
       );
-      return decided.ok
-        ? Response.json({ result: decided.result ?? null })
-        : Response.json({ error: decided.error }, { status: 409 });
-    }
     if (path.startsWith("/agent/")) return this.agentRequest(path, request, caller);
     if (path.startsWith("/connect/deploys/")) return this.deploySource(path, caller);
     if (!this.authorized(caller)) {
@@ -4143,7 +4160,6 @@ export class Kitshn extends DurableObject<Env> {
         loginHeld(this.meta("login_held") ?? ""),
       ) ||
         this.launcherWork() ||
-        this.approversWork() ||
         this.loginWork() ||
         this.redirectWork())
     )
@@ -4236,7 +4252,6 @@ export class Kitshn extends DurableObject<Env> {
       // K-408: retry what failed once a day.
       this.sql("UPDATE access_objects SET error = NULL WHERE error IS NOT NULL");
       this.sql("DELETE FROM meta WHERE key = 'launcher_failed'");
-      this.sql("DELETE FROM meta WHERE key = 'approvers_failed'");
       this.sql("DELETE FROM meta WHERE key = 'login_failed'");
       this.sql("INSERT OR REPLACE INTO meta (key, value) VALUES ('login_check', 'due')");
       // A refused address may be free now, for example after the other machine let it go.
@@ -6782,8 +6797,13 @@ export class Kitshn extends DurableObject<Env> {
         outcome: "refused",
         reason: `This machine has ${MAX_OPEN_PROPOSALS} open asks already. Wait for their answers (K-1722).`,
       };
-    const id = crypto.randomUUID();
     const shown = shownAsk(action, target, body);
+    if (shown.length > MAX_SHOWN)
+      return {
+        outcome: "refused",
+        reason: `This ask is too long for an approver to read (${shown.length} characters, at most ${MAX_SHOWN}). Split it (K-1722).`,
+      };
+    const id = crypto.randomUUID();
     this.sql(
       `INSERT INTO proposals (id, machine_id, action, target, body, reason, labels, right_name, circle_id, shown, shown_hash, state, created_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
@@ -6821,6 +6841,8 @@ export class Kitshn extends DurableObject<Env> {
     },
     /** K-1722: the hash of the text that the approver read; a different one refuses, so nothing else runs. */
     seenHash: string | null = null,
+    /** K-1723: the approve path that the person came through; null for a machine. */
+    via: "passkey" | "login" | null = null,
   ): Promise<
     { readonly ok: true; readonly result?: unknown } | { readonly ok: false; readonly error: string }
   > {
@@ -6832,6 +6854,12 @@ export class Kitshn extends DurableObject<Env> {
       return {
         ok: false,
         error: `Only a member of the approver circle ${circle?.name ?? proposal.circleId} answers this ask (K-1723).`,
+      };
+    // K-1723: a passkey circle approves only through the passkey application, whose token proves a fresh passkey.
+    if (decision === "approved" && via === "login" && circle.needsPasskey)
+      return {
+        ok: false,
+        error: `${circle.name} needs a passkey: approve through the passkey check (K-1723).`,
       };
     if (proposal.state !== "pending")
       return { ok: false, error: `This ask is already decided (${proposal.state}).` };
@@ -6902,6 +6930,30 @@ export class Kitshn extends DurableObject<Env> {
     });
     this.broadcast();
     return outcome.outcome === "refused" ? { ok: false, error: outcome.reason } : { ok: true, result };
+  }
+
+  /** K-1723: an answer of a person to a proposal; an approve carries the hash of the text that its approver read. */
+  private async answerProposal(
+    id: string,
+    decision: "approved" | "denied",
+    caller: Caller,
+    via: "passkey" | "login" | null,
+    body: unknown,
+  ) {
+    const reason = isRecord(body) && typeof body["reason"] === "string" ? body["reason"].slice(0, 500) : null;
+    const seen = isRecord(body) && typeof body["hash"] === "string" ? body["hash"] : null;
+    if (decision === "approved" && seen === null)
+      return Response.json({ error: "Send the hash of the ask that you read (K-1722)." }, { status: 400 });
+    const decided = await this.decide(
+      id,
+      decision,
+      { actor: caller.actor, visitor: caller.visitor, machineId: null, reason },
+      seen,
+      via,
+    );
+    return decided.ok
+      ? Response.json({ result: decided.result ?? null })
+      : Response.json({ error: decided.error }, { status: 409 });
   }
 
   /** K-1712: why an approved ask may no longer run, or null. */
@@ -8087,42 +8139,6 @@ export class Kitshn extends DurableObject<Env> {
     }
   }
 
-  /** K-1723: puts the approver policies on the fresh passkey application; a failure waits for the next change. */
-  private async syncApprovers(api: Api) {
-    const attached = JSON.parse(this.meta("approver_policies") ?? "[]") as Array<string>;
-    if (this.meta("approvers_failed") === JSON.stringify(this.approversWant())) return 0;
-    try {
-      const result = await syncApprovers(
-        this.desired(Date.now()),
-        this.accessStore(),
-        api,
-        this.env.CLOUDFLARE_ACCOUNT_ID,
-        attached,
-      );
-      this.setMeta("approver_policies", JSON.stringify(result.attached));
-      this.sql("DELETE FROM meta WHERE key = 'approvers_failed'");
-      return result.calls;
-    } catch (error) {
-      console.warn(`kitshn could not update the fresh passkey application: ${String(error)}`);
-      this.setMeta("approvers_failed", JSON.stringify(this.approversWant()));
-      return 3;
-    }
-  }
-
-  /** K-1723: the fresh passkey application lacks the wanted approver policies, and that did not fail. */
-  private approversWork() {
-    const want = JSON.stringify([...this.approversWant()].sort());
-    const attached = JSON.stringify(
-      [...(JSON.parse(this.meta("approver_policies") ?? "[]") as Array<string>)].sort(),
-    );
-    return want !== attached && this.meta("approvers_failed") !== JSON.stringify(this.approversWant());
-  }
-
-  /** K-1723: the approver policy ids that the fresh passkey application should have. */
-  private approversWant() {
-    return this.desired(Date.now()).approvers.flatMap((key) => this.access.get(key)?.cfId || []);
-  }
-
   /** K-113: the enrollment policy id that the App Launcher should have, or "" for none. */
   private launcherWant() {
     return this.desired(Date.now()).policies.has(ENROLLMENT_KEY)
@@ -8660,17 +8676,13 @@ export class Kitshn extends DurableObject<Env> {
         }
       // K-113: take an unwanted enrollment policy off the App Launcher before the sync deletes it.
       spent += await this.syncLauncher(api, daily);
-      // K-1723: the same for an approver policy on the fresh passkey application.
-      spent += await this.syncApprovers(api);
       // K-406: at most 40 calls. `spent` counts the daily compare (12), the site checks (6), the redirect step (5)
       // and the launcher step (3); the tunnels, DNS records and offline routes above made at most 6 + 5 + 5, and the launcher
       // step after the sync needs 3. The login step and the sync share what is left. A policy that the sync
       // makes goes on the login applications in the next alarm, which runs at once (loginWork).
-      await this.syncAccessLocked(api, CALLS_PER_RUN - spent - 16 - 3 - 3);
+      await this.syncAccessLocked(api, CALLS_PER_RUN - spent - 16 - 3);
       // A policy that the sync just made goes on the App Launcher in the same run.
       await this.syncLauncher(api, false);
-      // K-1723: approver policies on the fresh passkey application; 0 calls while nothing changed.
-      await this.syncApprovers(api);
 
       changed ||= daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
     }

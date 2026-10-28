@@ -403,9 +403,6 @@ export function App() {
     };
     // K-1504: Access sends the owner back here after the fresh passkey check of "Resume".
     if (location.hash === "#resume") void finishResume();
-    // K-1723: Access sends an approver back here after the fresh passkey check of an approve.
-    const approving = approveFromHash(location.hash);
-    if (approving !== null) void finishApprove(approving);
     addEventListener("hashchange", onHash);
     addEventListener("keydown", onKey);
     addEventListener("dragover", keepFiles);
@@ -654,12 +651,40 @@ export function App() {
     );
   };
 
+  /**
+   * K-1722, K-1723: Access sends an approver back here with the proposal and the hash of the text that the button
+   * showed. A link alone never approves: the approver reads the full text of the map's own snapshot once more, and a
+   * text that differs from the hash stops it.
+   */
+  const pendingApprove = useRef(approveFromHash(location.hash));
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- runs once the first snapshot arrives
+  useEffect(() => {
+    const pending = pendingApprove.current;
+    if (pending === null || !store.snapshot || !state) return;
+    pendingApprove.current = null;
+    void finishApprove(pending);
+  }, [store.snapshot]);
+
   const finishApprove = async ({ id, seen }: { readonly id: string; readonly seen: string }) => {
     history.replaceState(null, "", location.pathname + location.search);
-    if (!(await ask("Your passkey check passed. Approve this ask now? kitshn runs it at once."))) return;
+    const proposal = store.snapshot?.proposals.find((each) => each.id === id);
+    if (!proposal) return showToast({ text: "This ask is no longer open.", error: true, undo: null });
+    if (proposal.shownHash !== seen)
+      return showToast({
+        text: "This ask changed since you opened it. Read it again in Asks.",
+        error: true,
+        undo: null,
+      });
+    const kind = state?.circles.get(proposal.circleId)?.needsPasskey ? "passkey" : "login";
+    if (
+      !(await ask(
+        `Approve this ask of ${proposal.machineName}? kitshn runs it at once:\n\n${proposal.shown}`,
+      ))
+    )
+      return;
     const result = await callApi<{ result: unknown }>(
       "POST",
-      `/api/fresh/approve/${encodeURIComponent(id)}`,
+      `/api/approve/${kind}/${encodeURIComponent(id)}`,
       { hash: seen },
     );
     showToast(
@@ -2061,6 +2086,7 @@ function Panel(props: {
         <AskList
           proposals={props.proposals}
           circleName={(id) => props.state.circles.get(id)?.name ?? id}
+          needsPasskey={(id) => props.state.circles.get(id)?.needsPasskey === true}
           onToast={props.onToast}
         />
         <RepoList repos={props.repos} onToast={props.onToast} />

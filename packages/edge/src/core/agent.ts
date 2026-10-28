@@ -22,11 +22,16 @@ import { coveringCards } from "./repoGroups.ts";
 import { type Visitor, circleMatches, visitorLevel } from "./visitor.ts";
 
 /** K-718, K-1730: true when the member is the agent that the visitor is: an agent key, or a machine by its token. */
+/**
+ * K-718, K-1730: true when the member is the agent that the visitor is: an agent key, or a machine by its token. A machine
+ * counts only where the owner set one of its rights, so an older circle of machines gives them nothing new.
+ */
 const namesAgent = (state: State, member: Member, visitor: Visitor) =>
   (member._tag === "device" && member.clientId === visitor.clientId) ||
   (member._tag === "machine" &&
     visitor.clientId !== null &&
-    state.machines.get(member.machineId)?.clientId === visitor.clientId);
+    state.machines.get(member.machineId)?.clientId === visitor.clientId &&
+    Object.values(member.rights ?? {}).some((mode) => mode !== undefined));
 
 /**
  * K-718: the agent circles of a device: circles of devices only that name it, have not ended, and that it matches.

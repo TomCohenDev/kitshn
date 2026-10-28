@@ -29,8 +29,9 @@
   --shadow: 4px 4px 0 0 var(--shadow-ink);
   --sans: "Bricolage Grotesque", system-ui, sans-serif;
   --mono: "JetBrainsMono Nerd Font Mono", "JetBrains Mono", monospace;
-  /* The overlay panel; App.tsx `panelLeft` uses the same 26rem. */
+  /* The overlay panel and the shelf; App.tsx sets both from the widths this device keeps (K-525). */
   --panel-width: min(26rem, calc(100vw - 24px));
+  --tray-width: 210px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -587,7 +588,7 @@ input[type="search"]::-webkit-search-cancel-button {
   /* Below the toolbar; App.tsx measures its height into `--bar-bottom`. */
   top: calc(var(--bar-bottom, 102px) + 10px);
   max-height: calc(100dvh - var(--bar-bottom, 102px) - 78px);
-  width: 210px;
+  width: var(--tray-width);
   z-index: 9;
   display: flex;
   flex-direction: column;
@@ -1160,8 +1161,8 @@ input[type="search"]::-webkit-search-cancel-button {
 .paused-place {
   position: fixed;
   top: calc(var(--bar-bottom, 100px) + 12px);
-  /* Right of the tray (210px at 10px). */
-  left: 240px;
+  /* Right of the tray, which the owner can resize (K-525). */
+  left: calc(var(--tray-width) + 30px);
   right: 20px;
   z-index: 31;
   display: flex;
@@ -1904,4 +1905,63 @@ a > code {
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+/* K-525: the drag edges of the side panel and the shelf. A thin strip that shows a bar on hover and focus. */
+.resize-edge {
+  position: fixed;
+  z-index: 31;
+  width: 12px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.resize-edge::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 4px;
+  width: 4px;
+  height: 48px;
+  transform: translateY(-50%);
+  background: var(--border);
+  border-radius: 2px;
+  /* A thin grip always shows, so people find the edge; hover and focus make it full. */
+  opacity: 0.35;
+  transition: opacity 120ms;
+}
+.resize-edge:hover::after,
+.resize-edge:focus-visible::after {
+  opacity: 1;
+}
+.resize-edge:focus-visible {
+  outline-offset: -2px;
+}
+/* The panel: on its left edge, as tall as the panel. */
+.resize-edge.at-left {
+  top: 12px;
+  bottom: 12px;
+  right: calc(var(--panel-width) + 12px - 6px);
+}
+/* The shelf: inside it, on its right edge, as tall as the shelf. */
+.tray .resize-edge.at-right {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -8px;
+}
+/* A finger needs a bigger target and has no hover. */
+@media (pointer: coarse) {
+  .resize-edge {
+    width: 24px;
+  }
+  .resize-edge::after {
+    left: 10px;
+    opacity: 1;
+  }
+  .resize-edge.at-left {
+    right: calc(var(--panel-width) + 12px - 12px);
+  }
+  .tray .resize-edge.at-right {
+    right: -14px;
+  }
 }

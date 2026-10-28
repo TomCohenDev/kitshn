@@ -1,6 +1,21 @@
 import { describe, expect, it } from "vitest";
 import type { Circle } from "../core/model.ts";
-import { type Box, cardBox, circleBox, fitMap, fitView, headAngle, headBox, mapBox, openArea, panInto } from "./layout.ts";
+import {
+  type Box,
+  cardBox,
+  circleBox,
+  fitMap,
+  fitView,
+  headAngle,
+  headBox,
+  MAP_MIN_WIDTH,
+  keyWidth,
+  mapBox,
+  openArea,
+  panInto,
+  shownWidths,
+  storedWidth,
+} from "./layout.ts";
 
 const circle = (x: number, y: number, r: number, name = "Agents"): Circle => ({
   id: name,
@@ -108,5 +123,46 @@ describe("a circle head slides along its edge off the cards", () => {
       [-240, -200, -160, -120].map((y) => cardBox({ x, y })),
     );
     expect(headAngle(her, cards)).toBe(0);
+  });
+});
+
+describe("resizable widths (K-525)", () => {
+  const limits = { panel: { min: 324, max: 828, initial: 468 }, tray: { min: 160, max: 420, initial: 210 } };
+  const mapWidth = (screen: number, widths: { panel: number; tray: number }) =>
+    screen - 12 - widths.panel - (10 + widths.tray);
+
+  it("keeps the wanted widths when the screen has room", () => {
+    expect(shownWidths(1512, { panel: 500, tray: 300 }, limits)).toEqual({ panel: 500, tray: 300 });
+  });
+  it("never lets the panel and the shelf cover the map's minimum width", () => {
+    const widths = shownWidths(1200, { panel: 828, tray: 420 }, limits);
+    expect(mapWidth(1200, widths)).toBeGreaterThanOrEqual(MAP_MIN_WIDTH);
+    expect(widths.panel + widths.tray).toBeLessThan(828 + 420);
+    // The panel keeps room for the shelf's minimum.
+    expect(widths.tray).toBeGreaterThanOrEqual(160);
+  });
+  it("gives a hidden element no room, so the other can grow", () => {
+    expect(shownWidths(1200, { panel: 828, tray: null }, limits)).toEqual({ panel: 818, tray: 0 });
+    expect(shownWidths(1200, { panel: null, tray: 420 }, limits)).toEqual({ panel: 0, tray: 420 });
+  });
+  it("shrinks both below their minimums on a cramped screen, never below the floor", () => {
+    const widths = shownWidths(800, { panel: 600, tray: 400 }, limits);
+    expect(widths.panel).toBeGreaterThanOrEqual(120);
+    expect(widths.tray).toBeGreaterThanOrEqual(120);
+    expect(widths.panel).toBeLessThan(324);
+  });
+  it("falls back to the initial width for a missing, empty or broken stored value", () => {
+    expect(storedWidth(null, limits.tray)).toBe(210);
+    expect(storedWidth("", limits.tray)).toBe(210);
+    expect(storedWidth("wide", limits.tray)).toBe(210);
+    expect(storedWidth("9999", limits.tray)).toBe(420);
+    expect(storedWidth("300", limits.tray)).toBe(300);
+  });
+  it("moves the edge with the arrow keys towards the side the element grows to", () => {
+    expect(keyWidth("ArrowLeft", 300, limits.tray, "left")).toBe(324);
+    expect(keyWidth("ArrowLeft", 300, limits.tray, "right")).toBe(276);
+    expect(keyWidth("Home", 300, limits.tray, "left")).toBe(160);
+    expect(keyWidth("End", 300, limits.tray, "right")).toBe(420);
+    expect(keyWidth("a", 300, limits.tray, "left")).toBeNull();
   });
 });

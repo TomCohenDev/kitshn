@@ -1905,3 +1905,10 @@ a > code {
   align-items: center;
   flex-wrap: wrap;
 }
+
+/* K-526: the one add button of the toolbar; a big "+" so it reads as add, not as a dot. */
+.bar .btn.add {
+  font-size: 1.35rem;
+  line-height: 1;
+  padding: 2px 14px 4px;
+}

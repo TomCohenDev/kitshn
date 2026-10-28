@@ -1170,7 +1170,7 @@ export function App() {
             ) : null}
             <span class="sep" />
             <button
-              class="btn primary"
+              class="btn primary add"
               aria-haspopup="menu"
               aria-label="Add"
               data-tip="Add a circle, a page or a file, a site, a machine or a member (K-526)."

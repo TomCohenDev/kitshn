@@ -179,6 +179,7 @@ describe("card actions", () => {
     expect(items(find(groups, "share")).map((item) => item.id)).toEqual([
       `share:${EVERYONE_CIRCLE_ID}`,
       "share:her",
+      "share:new-circle",
     ]);
     run(find(groups, "remove-app"));
     run(items(find(groups, "share"))[1] as Action);
@@ -335,13 +336,19 @@ describe("New circle for these (K-529)", () => {
     const { handlers, calls } = recorder();
     const ctx = { ...context(), selected: new Set(["riffle", "vps"]) };
     run(find(actionsFor(ctx, handlers, { _tag: "card", id: "riffle" }), "new-circle-for"));
-    expect(calls[0]).toEqual(["newCircleFor"]);
+    expect(calls[0]).toEqual(["newCircleFor", ["riffle", "vps"]]);
     expect(ids(actionsFor(ctx, handlers, { _tag: "card", id: "a" }))).not.toContain("new-circle-for");
     expect(
       paletteEntries(ctx, handlers).filter((entry) => entry.label.startsWith("New circle for these")),
     ).toHaveLength(1);
     const one = { ...context(), selected: new Set(["riffle"]) };
     expect(ids(actionsFor(one, handlers, { _tag: "card", id: "riffle" }))).not.toContain("new-circle-for");
+    // One card makes its own new circle from "Share with".
+    const share = find(actionsFor(one, handlers, { _tag: "card", id: "riffle" }), "share");
+    const fresh = items(share).find((item) => item.id === "share:new-circle");
+    if (!fresh) throw new Error("No New circle in Share with");
+    run(fresh);
+    expect(calls.at(-1)).toEqual(["newCircleFor", ["riffle"]]);
   });
 });
 

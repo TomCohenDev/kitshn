@@ -9,6 +9,7 @@ import {
   parseManifest,
   parseSiteIcon,
   parseWorkerSecrets,
+  pullRequestNumber,
   repoIdOf,
   workerMetadata,
 } from "./deploys.ts";
@@ -52,6 +53,12 @@ describe("deploys (K-811, K-903)", () => {
     ).toMatchObject({
       pr: null,
     });
+  });
+
+  it("reads the pull request of a pr-<n> environment only (K-303)", () => {
+    expect(
+      ["pr-41", "pr-1234", "prod", "pr-", "pr-4a", "pr-0", "pr-07", "staging-pr-3"].map(pullRequestNumber),
+    ).toEqual([41, 1234, null, null, null, null, null, null]);
   });
 
   it("keeps repos with similar names apart", () => {

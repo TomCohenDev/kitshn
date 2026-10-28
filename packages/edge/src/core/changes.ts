@@ -18,6 +18,7 @@ import {
   levelRank,
   shareKey,
   shareLevel,
+  stackTitle,
 } from "./model.ts";
 
 /** One edit that a client asks for. `after: null` deletes. */
@@ -643,12 +644,13 @@ export function ruleViolation(state: State): string | null {
   const stacked = new Set<string>();
   for (const stack of state.stacks.values()) {
     for (const id of stack.members) {
-      if (!state.resources.has(id)) return `The stack "${stack.name}" holds a card that no longer exists.`;
+      if (!state.resources.has(id))
+        return `The stack "${stackTitle(state, stack)}" holds a card that no longer exists.`;
       if (stacked.has(id)) return `The card "${state.resources.get(id)?.name ?? id}" is in two stacks.`;
       stacked.add(id);
     }
     const points = new Set(stack.members.map((id) => JSON.stringify(state.places.get(id) ?? null)));
-    if (points.size > 1) return `The cards of the stack "${stack.name}" must share one place.`;
+    if (points.size > 1) return `The cards of the stack "${stackTitle(state, stack)}" must share one place.`;
   }
   const admin = state.resources.get(ADMIN_RESOURCE_ID);
   if (!admin) return "The kitshn admin card is missing.";
@@ -758,16 +760,18 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
     const name = (id: string) => after.resources.get(id)?.name ?? before.resources.get(id)?.name ?? id;
     const names = (ids: ReadonlyArray<string>) => ids.map(name).join(", ");
     return stacks
-      .map(({ before: was, after: is, id }) => {
+      .map(({ before: was, after: is }) => {
         if (!was) return `Stacked ${names(is?.members ?? [])}`;
-        if (!is) return `Unstacked ${was.name}`;
+        if (!is) return `Unstacked ${was.name || names(was.members)}`;
         const added = is.members.filter((member) => !was.members.includes(member));
         const removed = was.members.filter((member) => !is.members.includes(member));
-        if (added.length > 0) return `Added ${names(added)} to ${is.name}`;
-        if (removed.length > 0) return `Took ${names(removed)} out of ${is.name}`;
-        return was.name === is.name
-          ? `Changed the stack ${is.name || id}`
-          : `Renamed ${was.name} to ${is.name}`;
+        // A stack without a name goes by its cards, as before the change.
+        const title = (stack: Stack) => stack.name || `the stack of ${names(stack.members)}`;
+        if (added.length > 0) return `Added ${names(added)} to ${title(was)}`;
+        if (removed.length > 0) return `Took ${names(removed)} out of ${title(was)}`;
+        if (was.name === is.name) return `Changed ${title(is)}`;
+        if (!is.name) return `Took the name ${was.name} off ${title(is)}`;
+        return `Renamed ${title(was)} to ${is.name}`;
       })
       .join("; ");
   }

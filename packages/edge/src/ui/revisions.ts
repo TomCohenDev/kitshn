@@ -96,6 +96,15 @@ function phrase(summary: string): string | null {
  */
 export const rowText = (summary: string): string => phrase(summary) ?? summary;
 
+/**
+ * K-1502: the toast of an undo says what came back in the words of its History row. The server sends the summary
+ * of the change without the "Undo #n" label, so a card name with ": " never cuts it.
+ */
+export function undoneText(summary: string): string {
+  const text = rowText(summary);
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 export type Day = "Today" | "Yesterday" | "Older";
 
 export interface HistoryGroup {

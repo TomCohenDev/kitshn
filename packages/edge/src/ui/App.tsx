@@ -28,6 +28,7 @@ import {
   pauseReach,
   shareKey,
   shareLevel,
+  stackTitle,
 } from "../core/model.ts";
 import { MAX_UPLOAD_BYTES, isLibraryId } from "../core/library.ts";
 import { circleForCards, placeInside } from "../core/place.ts";
@@ -125,7 +126,7 @@ import {
   type WidthLimits,
   shownWidths,
 } from "./layout.ts";
-import { actorLabel } from "./revisions.ts";
+import { actorLabel, undoneText } from "./revisions.ts";
 import {
   type Connection,
   applyEdits,
@@ -140,6 +141,8 @@ import {
 } from "./store.ts";
 
 const PREVIEWS_KEY = "kitshn.previews";
+/** The shelf folded or not, as the owner left it on this device; unset, it is open on a wide screen only. */
+const SHELF_KEY = "kitshn.shelf";
 /**
  * On a wide screen a saved view stays at least this close, so card names stay readable on a laptop. A fit
  * zooms out further when the map needs it (layout.ts fitMap).
@@ -270,8 +273,8 @@ export function App() {
   const [showMenu, setShowMenu] = useState<Rect | null>(null);
   /** K-528: the phone's "☰" menu, which holds the tabs and the map tools that the toolbar has on a wide screen. */
   const [moreMenu, setMoreMenu] = useState<Rect | null>(null);
-  /** K-528: on a phone the shelf is a sheet that the owner opens; closed, it shows only its count. */
-  const [trayOpen, setTrayOpen] = useState(false);
+  /** K-509, K-528: folded, the shelf shows only its count; on a phone it is a sheet. */
+  const [shelfChoice, setShelfChoice] = useState(() => localStorage.getItem(SHELF_KEY));
   const [refusal, setRefusal] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
@@ -304,6 +307,7 @@ export function App() {
   );
   const deployed = useMemo(() => new Set(store.snapshot?.deployedCards ?? []), [store.snapshot]);
   const previewCards = useMemo(() => new Set(store.snapshot?.previewCards ?? []), [store.snapshot]);
+  const pullRequests = store.snapshot?.pullRequests ?? {};
   const previousVersions = useMemo(() => new Set(store.snapshot?.previousVersions ?? []), [store.snapshot]);
 
   /**
@@ -506,7 +510,7 @@ export function App() {
       await commit(
         edits,
         shareDiff(state, applyChanges(state, resolveEdits(state, edits))),
-        `Pulled ${state.resources.get(id)?.name ?? "the card"} out of ${stack.name}.`,
+        `Pulled ${state.resources.get(id)?.name ?? "the card"} out of ${stackTitle(state, stack)}.`,
       );
     },
     unstack: async (stackId) => {
@@ -526,16 +530,17 @@ export function App() {
       await commit(
         edits,
         shareDiff(state, applyChanges(state, resolveEdits(state, edits))),
-        `Unstacked ${stack.name}.`,
+        `Unstacked ${stackTitle(state, stack)}.`,
       );
     },
     rename: async (stackId, name) => {
       const stack = state?.stacks.get(stackId);
-      if (!stack || !name.trim() || name.trim() === stack.name) return;
+      const next = name.trim().slice(0, 80);
+      if (!stack || next === stack.name) return;
       await commit(
-        [{ _tag: "stack", id: stackId, after: { ...stack, name: name.trim().slice(0, 80) } }],
+        [{ _tag: "stack", id: stackId, after: { ...stack, name: next } }],
         [],
-        `Renamed the stack to ${name.trim().slice(0, 80)}.`,
+        next ? `Renamed the stack to ${next}.` : "The stack has no name now.",
       );
     },
   };
@@ -671,24 +676,32 @@ export function App() {
     const result = await undoRevision(revision);
     showToast(
       result.ok
-        ? { text: [`Undid #${revision}.`, ...result.notes].join(" "), error: false, undo: null }
+        ? {
+            text: [`${result.summary ? undoneText(result.summary) : "Undone"}.`, ...result.notes].join(" "),
+            error: false,
+            undo: result.revision,
+          }
         : { text: result.error, error: true, undo: null },
     );
   };
 
   /** K-1507: undoes the caller's own newest change to one card or circle. */
   const undoItem = async (item: Item) => {
-    const result = await callApi<{ revision: number | null; notes: ReadonlyArray<string> }>(
-      "POST",
-      "/api/undo-item",
-      {
-        item,
-      },
-    );
+    const result = await callApi<{
+      revision: number | null;
+      notes: ReadonlyArray<string>;
+      summary: string | null;
+    }>("POST", "/api/undo-item", {
+      item,
+    });
     showToast(
       "error" in result
         ? { text: result.error, error: true, undo: null }
-        : { text: ["Undone.", ...result.notes].join(" "), error: false, undo: null },
+        : {
+            text: [`${result.summary ? undoneText(result.summary) : "Undone"}.`, ...result.notes].join(" "),
+            error: false,
+            undo: result.revision,
+          },
     );
   };
 
@@ -829,9 +842,19 @@ export function App() {
   const tray = [...state.resources.values()].filter((resource) => !state.places.has(resource.id));
   const trayShown = tray.length > 0 && route.tab === "map";
   const wide = screenWidth > 720;
+  const trayOpen = shelfChoice === null ? wide : shelfChoice === "open";
+  const toggleTray = () => {
+    const next = trayOpen ? "closed" : "open";
+    localStorage.setItem(SHELF_KEY, next);
+    setShelfChoice(next);
+  };
   /** K-525: the widths that show leave room for each other and for the map; a phone keeps its own layout. */
   const widthsFor = (panel: number, shelf: number) =>
-    shownWidths(screenWidth, { panel: floating ? panel : null, tray: trayShown ? shelf : null }, LIMITS);
+    shownWidths(
+      screenWidth,
+      { panel: floating ? panel : null, tray: trayShown && trayOpen ? shelf : null },
+      LIMITS,
+    );
   const widths = widthsFor(wantedPanel, wantedTray);
   // The page's CSS reads these, also outside this tree's elements; a drag sets them alone until it ends.
   if (wide) {
@@ -854,7 +877,7 @@ export function App() {
 
   /** The right edge of the shelf where it covers the map, or 0: a closed shelf on a phone covers none of it. */
   const shelfRight = () => {
-    if (!trayShown || (!wide && !trayOpen)) return 0;
+    if (!trayShown || !trayOpen) return 0;
     return (
       document.querySelector(".tray")?.getBoundingClientRect().right ??
       10 + (wide ? widths.tray : Math.min(16 * REM, screenWidth - 20))
@@ -980,11 +1003,11 @@ export function App() {
    * K-529: one new circle around the selected cards, as one edit, so one undo takes it back. Its editor opens
    * next, because it has no members until the owner adds some.
    */
-  const newCircleFor = async () => {
+  const newCircleFor = async (wanted: ReadonlyArray<string>) => {
     const id = `c-${crypto.randomUUID().slice(0, 8)}`;
     const color = CIRCLE_COLORS[state.circles.size % CIRCLE_COLORS.length] ?? "#6C5CE7";
-    // A card that another device removed while it was selected drops out, as in `selectionActions`.
-    const ids = [...selection.cards].filter((card) => state.resources.has(card));
+    // A card that another device removed meanwhile drops out, as in `selectionActions`.
+    const ids = wanted.filter((card) => state.resources.has(card));
     const plan = circleForCards(state, ids, { ...NEW_CIRCLE, id, color });
     if ("refused" in plan) {
       showToast({ text: plan.refused, error: true, undo: null });
@@ -998,7 +1021,7 @@ export function App() {
     const { moved, cards } = plan;
     selectAndFocus({ cards: new Set(), circle: id }, ".add-member input");
     showToast({
-      text: `Made a circle for ${cards} cards${moved > 0 ? `; ${plural(moved, "card")} moved to keep their circles` : ""}. Add members next.`,
+      text: `Made a circle for ${plural(cards, "card")}${moved > 0 ? `; ${plural(moved, "card")} moved to keep their circles` : ""}. Add members next.`,
       error: false,
       undo: result.revision,
     });
@@ -1155,7 +1178,7 @@ export function App() {
     upload: uploadTo,
     addSite: () => setAddingSite(true),
     addMachine: () => setAddingMachine(true),
-    newCircleFor: () => void newCircleFor(),
+    newCircleFor: (ids) => void newCircleFor(ids),
     fit,
     undoItem: (item) => void undoItem(item),
   };
@@ -1195,6 +1218,7 @@ export function App() {
           trayRight={shelfRight()}
           flash={flash}
           openStacks={openStacks}
+          pullRequests={pullRequests}
           onToggleStack={(key) => {
             const next = new Set(openStacks);
             if (next.has(key)) next.delete(key);
@@ -1280,6 +1304,7 @@ export function App() {
               onDeleteCircle={handlers.deleteCircle}
               onPlace={placeInView}
               onReshare={(resource, circle, share, part) => void reshare(resource, circle, share, part)}
+              onNewCircle={(ids) => void newCircleFor(ids)}
               onRemoveApp={(resource) => void removeApp(resource)}
               onRollback={(resource, mode) => setRollback({ card: resource, mode })}
               previousVersions={previousVersions}
@@ -1290,6 +1315,7 @@ export function App() {
               onDeleteOrphanWorker={(orphan) => void deleteOrphanWorker(orphan)}
               deployed={deployed}
               previewCards={previewCards}
+              pullRequests={pullRequests}
               deployNotes={store.snapshot.deployNotes}
               pause={pauseView}
               machines={machines}
@@ -1546,8 +1572,8 @@ export function App() {
         ) : null}
       </header>
       {tray.length > 0 && route.tab === "map" ? (
-        <aside class={`tray${!wide && !trayOpen ? " closed" : ""}`}>
-          {wide ? (
+        <aside class={`tray${trayOpen ? "" : " closed"}`}>
+          {wide && trayOpen ? (
             <ResizeEdge
               label="Shelf width"
               width={widths.tray}
@@ -1559,24 +1585,15 @@ export function App() {
             />
           ) : null}
           <div class="tray-head">
-            {wide ? (
-              <span
-                class="label"
-                data-tip="New cards arrive here, outside every circle, so they start private."
-              >
-                New · private ({tray.length})
-              </span>
-            ) : (
-              <button
-                type="button"
-                class="label tray-toggle"
-                aria-expanded={trayOpen}
-                data-tip="New cards arrive here, outside every circle, so they start private. Tap to open or close."
-                onClick={() => setTrayOpen(!trayOpen)}
-              >
-                New · private ({tray.length}) {trayOpen ? "▴" : "▾"}
-              </button>
-            )}
+            <button
+              type="button"
+              class="label tray-toggle"
+              aria-expanded={trayOpen}
+              data-tip={`New cards arrive here, outside every circle, so they start private. A click ${trayOpen ? "folds" : "opens"} the shelf.`}
+              onClick={toggleTray}
+            >
+              New · private ({tray.length}) {trayOpen ? "▴" : "▾"}
+            </button>
             <input
               type="search"
               placeholder="Filter"
@@ -1778,6 +1795,7 @@ function Panel(props: {
   onDeleteCircle: (circle: Circle) => void;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
+  onNewCircle: (ids: ReadonlyArray<string>) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
   /** K-1117: the pages and files that have a previous version. */
@@ -1790,6 +1808,7 @@ function Panel(props: {
   /** K-909 */
   deployed: ReadonlySet<string>;
   previewCards: ReadonlySet<string>;
+  pullRequests: Readonly<Record<string, number>>;
   deployNotes: Readonly<Record<string, DeployNote>>;
   pause: PauseView | null;
   warnings: ReadonlyArray<string>;
@@ -1845,6 +1864,7 @@ function Panel(props: {
         onEdit={props.onEdit}
         onPlace={props.onPlace}
         onReshare={props.onReshare}
+        onNewCircle={props.onNewCircle}
         onRemoveApp={props.onRemoveApp}
         onRollback={props.onRollback}
         onRestorePrevious={props.previousVersions.has(cards[0].id) ? props.onRestorePrevious : null}
@@ -1854,6 +1874,7 @@ function Panel(props: {
         onDeleteOrphanWorker={props.onDeleteOrphanWorker}
         deployed={props.deployed.has(cards[0].id)}
         preview={props.previewCards.has(cards[0].id)}
+        pullRequest={props.pullRequests[cards[0].id] ?? null}
         deployNote={props.deployNotes[cards[0].id] ?? null}
         machine={props.machines.get(cards[0].id) ?? null}
         version={props.version}
@@ -2035,7 +2056,8 @@ function StackPanel(props: {
       <input
         class="title"
         aria-label="Stack name"
-        data-tip="The name of the stack. Enter saves it."
+        placeholder="No name"
+        data-tip="The name of the stack. Enter saves it; an empty name shows only its cards."
         key={stack.name}
         defaultValue={stack.name}
         onKeyDown={(event) => event.key === "Enter" && (event.target as HTMLInputElement).blur()}
@@ -2141,6 +2163,8 @@ function AddressName(props: { address: string; onSave: (name: string) => Promise
 
 function CardPanel(props: {
   resource: Resource;
+  /** K-303: the pull request of a preview card, from its deploy environment. */
+  pullRequest: number | null;
   state: State;
   zone: string;
   peek: boolean;
@@ -2150,6 +2174,7 @@ function CardPanel(props: {
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
+  onNewCircle: (ids: ReadonlyArray<string>) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
   /** K-1117: swaps a page or a file with its previous version, or null when it has none. */
@@ -2188,7 +2213,7 @@ function CardPanel(props: {
           anchor={removing.anchor}
           onClose={() => setRemoving(null)}
         >
-          {stackChoice(stack).map(({ part, label, tip }) => (
+          {stackChoice(state, stack).map(({ part, label, tip }) => (
             <MenuItem
               key={part}
               tip={`${tip} out of ${removing.circle.name}.`}
@@ -2236,6 +2261,19 @@ function CardPanel(props: {
       ) : null}
       {address && props.repo ? (
         <p class="help">Its repo sets this address: change it in kitshn.config.ts.</p>
+      ) : null}
+      {props.pullRequest !== null && props.repo ? (
+        <div class="row">
+          <a
+            class="btn"
+            href={`https://github.com/${props.repo.name}/pull/${props.pullRequest}`}
+            target="_blank"
+            rel="noreferrer"
+            data-tip={`Open pull request #${props.pullRequest} of ${props.repo.name} on GitHub. This preview goes when it closes.`}
+          >
+            Pull request #{props.pullRequest} ↗
+          </a>
+        </div>
       ) : null}
       {props.repo ? (
         <div class="row">
@@ -2456,7 +2494,7 @@ function CardPanel(props: {
                     aria-expanded={stack ? removing?.circle.id === circle.id : undefined}
                     data-tip={
                       stack
-                        ? `Remove ${resource.name} or all of ${stack.name} from ${circle.name}, without a drag.`
+                        ? `Remove ${resource.name} or all of ${stackTitle(state, stack)} from ${circle.name}, without a drag.`
                         : `Remove ${resource.name} from ${circle.name}, without a drag.`
                     }
                     onClick={(event) => {
@@ -2518,6 +2556,13 @@ function CardPanel(props: {
                   <span class="swatch" style={{ background: circle.color }} /> {circle.name}
                 </button>
               ))}
+            <button
+              class="btn"
+              data-tip={`Make a new circle with no members around ${resource.name}; add its members next.`}
+              onClick={() => props.onNewCircle([resource.id])}
+            >
+              New circle…
+            </button>
           </div>
         </>
       ) : null}
@@ -2536,11 +2581,12 @@ function ContextMenu(props: {
   const groups = actionsFor(props.context, props.handlers, target);
   if (!groups) return null;
   const { state } = props.context;
+  const stackOfTarget = target._tag === "stack" ? state.stacks.get(target.id) : undefined;
   const name =
     target._tag === "card"
       ? state.resources.get(target.id)?.name
       : target._tag === "stack"
-        ? state.stacks.get(target.id)?.name
+        ? stackOfTarget && stackTitle(state, stackOfTarget)
         : target._tag === "circle"
           ? state.circles.get(target.id)?.name
           : "the map";

@@ -67,6 +67,16 @@ describe("owner route /api/state", () => {
   it("refuses a request without an Access token", async () => {
     expect((await call("/api/state", null)).status).toBe(401);
   });
+
+  it("refuses a stack name with spaces around it, so no stack shows a blank name (K-521)", async () => {
+    stubAccessCerts();
+    const owner = await accessToken("admin-aud", { email: "owner@example.com" });
+    const stack = (name: string): ReadonlyArray<Edit> => [
+      { _tag: "stack", id: "s-blank", after: { id: "s-blank", name, members: [] } },
+    ];
+    expect((await call("/api/apply", owner, { edits: stack("   ") })).status).toBe(400);
+    expect((await call("/api/apply", owner, { edits: stack(" Sites") })).status).toBe(400);
+  });
 });
 
 describe("agent route /agent/state (K-718)", () => {

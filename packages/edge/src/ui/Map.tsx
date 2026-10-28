@@ -12,6 +12,7 @@ import {
   memberLabel,
   shareKey,
   shareLevel,
+  stackTitle,
 } from "../core/model.ts";
 import type { AccessState, MachineView } from "../core/protocol.ts";
 import { isAgentKey } from "../core/agent.ts";
@@ -111,6 +112,8 @@ interface Props {
   /** K-1508: `itemKey`s of the cards and circles that a History row highlights now. */
   readonly flash: ReadonlySet<string>;
   readonly openStacks: ReadonlySet<string>;
+  /** K-303: the pull request number of each preview card. */
+  readonly pullRequests: Readonly<Record<string, number>>;
   readonly onToggleStack: (key: string) => void;
   readonly onCommit: (edits: Array<Edit>, diffs: Array<ShareDiff>) => void;
   /** K-522: cards dropped on another card become one stack with it. */
@@ -124,10 +127,8 @@ export const ALONE_KEY = circleAloneKey(navigator.platform);
 
 /** Preact 11 does not add a unit to numeric style values. */
 const px = (value: number) => `${value}px`;
-/** An open stack spaces its cards by this much: the card width (styles.css) plus a gap. */
-const STACK_GAP = 205;
-/** The row step of an open owner's stack. */
-const STACK_ROW = 100;
+/** The row step of an open stack: a card with a row of stickers, such as a machine, plus a gap. */
+const STACK_ROW = 124;
 
 /** Live previews: at most this many frames, for these kinds, from this zoom on. */
 const MAX_PREVIEWS = 4;
@@ -147,7 +148,11 @@ export function MapView(props: Props) {
     return a && b ? { a, b } : null;
   };
   /** A touch on a card that selects it on release, unless it moved, held or became a pinch. */
-  const tap = useRef<{ readonly choose: () => void; readonly stack: string | null } | null>(null);
+  const tap = useRef<{
+    readonly choose: () => void;
+    readonly stack: string | null;
+    readonly world: Point;
+  } | null>(null);
   const [stackTarget, setStackTarget] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ state: State; diffs: Array<ShareDiff>; pointer: Point } | null>(null);
   /** K-523: a right press or a touch that may open the context menu. */
@@ -323,8 +328,14 @@ export function MapView(props: Props) {
       }
       // A closed stack of the owner is selected whole, so its panel shows (K-521).
       const whole = stack && !props.openStacks.has(stack[0]) && stack[0].startsWith(USER_STACK);
+      // In an open stack a click picks the one card, also when the whole stack was selected (K-521).
+      const wholeOpenStack =
+        stack !== undefined &&
+        props.openStacks.has(stack[0]) &&
+        props.selection.cards.size > 1 &&
+        [...props.selection.cards].every((card) => stack[1].includes(card));
       const choose = () => {
-        if (!props.selection.cards.has(id))
+        if (!props.selection.cards.has(id) || wholeOpenStack)
           props.onSelect({ cards: whole ? new Set(ids) : new Set([id]), circle: null });
       };
       const origins = new Map<string, Point>();
@@ -338,7 +349,8 @@ export function MapView(props: Props) {
       // selects on release, so a pinch that starts on a card does not select it.
       if (event.pointerType === "touch") {
         setDrag({ type: "pan", sx: event.clientX, sy: event.clientY, view });
-        tap.current = { choose, stack: stack?.[0] ?? null };
+        // K-521: a tap opens a closed stack; in an open one it only selects the card, so the stack stays open.
+        tap.current = { choose, stack: stack && !props.openStacks.has(stack[0]) ? stack[0] : null, world };
         beginPress(event, start);
       } else start();
       return;
@@ -447,8 +459,11 @@ export function MapView(props: Props) {
     tap.current = null;
     const press = endPress();
     // A touch on a card that neither moved nor held is a tap: it selects, and opens a stack as a click does.
+    // Zoomed out, a card is a dot too small to read, so the tap first zooms to it under the finger.
     if (pending && press?.press.phase === "waiting") {
-      pending.choose();
+      if (view.s < ZOOMED_OUT)
+        props.onView({ x: event.clientX - pending.world.x, y: event.clientY - pending.world.y, s: 1 });
+      else pending.choose();
       if (pending.stack) props.onToggleStack(pending.stack);
     }
     // No `contextmenu` came during the press, so it follows the release; a press that opened the menu is done.
@@ -471,7 +486,7 @@ export function MapView(props: Props) {
     }
     if (drag?.type === "cards" && !drag.moved && !held) {
       const stack = stackOf(drag.clicked);
-      if (stack) props.onToggleStack(stack[0]);
+      if (stack && !props.openStacks.has(stack[0])) props.onToggleStack(stack[0]);
     }
     if (draft) {
       const edits = editsOf(state, draft.state);
@@ -490,6 +505,9 @@ export function MapView(props: Props) {
     } else props.onView({ ...view, x: view.x - event.deltaX, y: view.y - event.deltaY });
   };
 
+  const targetStack = stackTarget
+    ? [...state.stacks.values()].find((stack) => stack.members.includes(stackTarget))
+    : undefined;
   const previewCircles = new Set(draft?.diffs.map((diff) => diff.circle.id));
   // A few frames at most, for the site cards nearest the centre of the view, and only when they are readable.
   // Candidates: drawn site and page cards whose centre is in the open part of the map (not under the tray
@@ -628,13 +646,8 @@ export function MapView(props: Props) {
             : stack?.[1][0];
           if (stack && !open && resource.id !== face) return null;
           const head = stack ? shown.places.get(stack[1][0] ?? "") : undefined;
-          // An owner's stack opens downwards, as a list; a stack by group opens in a row (K-508, K-521).
-          const at =
-            stack && open && head
-              ? own
-                ? { x: head.x, y: head.y + index * STACK_ROW }
-                : { x: head.x + index * STACK_GAP, y: head.y }
-              : place;
+          // A stack opens downwards as a column, so its cards stay near the circles that hold them (K-508, K-521).
+          const at = stack && open && head ? { x: head.x, y: head.y + index * STACK_ROW } : place;
           const selected = props.selection.cards.has(resource.id);
           // A closed stack shows the highlight of any of its cards.
           const flash = (stack && !open ? stack[1] : [resource.id]).some((id) =>
@@ -660,7 +673,7 @@ export function MapView(props: Props) {
               <StackCard
                 key={resource.id}
                 id={resource.id}
-                name={userStack?.name ?? "Stack"}
+                name={userStack?.name ?? ""}
                 members={stack[1].flatMap((id) => shown.resources.get(id) ?? [])}
                 state={shown}
                 at={at}
@@ -688,10 +701,12 @@ export function MapView(props: Props) {
               open={open}
               access={props.access[resource.id] ?? null}
               machine={props.machines.get(resource.id) ?? null}
+              pullRequest={props.pullRequests[resource.id] ?? null}
               preview={previewIds.has(resource.id)}
               peek={props.peek && props.selection.cards.size === 1}
               zone={props.zone}
               onMenu={(anchor) => props.onMenu({ target: { _tag: "card", id: resource.id }, anchor })}
+              onClose={() => stack && props.onToggleStack(stack[0])}
             />
           );
         })}
@@ -711,9 +726,9 @@ export function MapView(props: Props) {
         <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
           <span>
             Stack with{" "}
-            {[...state.stacks.values()].find((stack) => stack.members.includes(stackTarget))?.name ??
-              state.resources.get(stackTarget)?.name ??
-              "this card"}
+            {targetStack
+              ? stackTitle(state, targetStack)
+              : (state.resources.get(stackTarget)?.name ?? "this card")}
           </span>
         </div>
       ) : draft && draft.diffs.length > 0 ? (
@@ -869,11 +884,13 @@ function CardView(props: {
   open: boolean;
   access: AccessState | null;
   machine: MachineView | null;
+  pullRequest: number | null;
   preview: boolean;
   /** K-520: the selected card offers the preview arrow; a phone has it in the card sheet instead. */
   peek: boolean;
   zone: string;
   onMenu: (anchor: Rect) => void;
+  onClose: () => void;
 }) {
   const { resource, state } = props;
   const kind = KINDS[resource.kind];
@@ -884,13 +901,23 @@ function CardView(props: {
       data-card={resource.id}
       style={{ left: px(props.at.x), top: px(props.at.y) }}
     >
-      {props.count !== null ? (
+      {props.count !== null && props.open ? (
+        <button
+          type="button"
+          class="sticker count"
+          aria-label={`Close the stack of ${props.count} cards`}
+          data-tip={`${props.count} cards. Close them into one card again.`}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={props.onClose}
+        >
+          {props.count} ▴
+        </button>
+      ) : props.count !== null ? (
         <span
           class="sticker count"
-          data-tip={`${props.count} cards of one group. A click ${props.open ? "closes" : "spreads"} them; a drag moves them all.`}
+          data-tip={`${props.count} cards of one group. A click spreads them; a drag moves them all.`}
         >
           {props.count}
-          {props.open ? " ▾" : ""}
         </span>
       ) : null}
       {props.access?.state === "applying" ? (
@@ -916,6 +943,14 @@ function CardView(props: {
         >
           {resource.kind}
         </span>
+        {props.pullRequest !== null ? (
+          <span
+            class="sticker info"
+            data-tip={`A preview of pull request #${props.pullRequest}. It goes when the pull request closes; its panel links the pull request.`}
+          >
+            PR #{props.pullRequest}
+          </span>
+        ) : null}
         {props.machine ? <PresenceSticker view={props.machine} /> : null}
         {props.machine ? <KeySticker view={props.machine} /> : null}
         {holding.map((circle) => {
@@ -980,7 +1015,7 @@ function StackCard(props: {
       >
         {props.members.length} ▸
       </span>
-      <div class="name">{props.name}</div>
+      {props.name ? <div class="name">{props.name}</div> : null}
       <ul>
         {props.members.slice(0, 6).map((member) => (
           <li key={member.id}>

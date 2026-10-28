@@ -66,6 +66,8 @@ export interface Snapshot {
   readonly deployedCards: ReadonlyArray<string>;
   /** K-821: the deployed cards of pull request previews, which have no rollback. */
   readonly previewCards: ReadonlyArray<string>;
+  /** K-303: the pull request number of each preview card, by card id. */
+  readonly pullRequests: Readonly<Record<string, number>>;
   /** K-909: what removed Worker apps left in Cloudflare: a kept script and KV namespaces, by the removed card. */
   readonly orphanWorkers: ReadonlyArray<OrphanWorker>;
   /** K-820: the cards whose newest deploy failed or did not run, with why. */
@@ -101,6 +103,8 @@ export type ServerMessage =
       readonly revision: number | null;
       /** K-909: what an undo of an app removal started again, or why it did not. */
       readonly notes: ReadonlyArray<string>;
+      /** K-1502: what an undo changed, in History words without its "Undo #n" label; null for an edit. */
+      readonly summary: string | null;
     }
   | { readonly type: "result"; readonly requestId: string; readonly ok: false; readonly error: string }
   /** K-1805, K-1807: the answer to a `tail` message. */

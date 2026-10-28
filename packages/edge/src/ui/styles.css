@@ -92,6 +92,10 @@ code {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+/* A tap shows the control's own pressed or selected state, not the browser's blue box. */
+:root {
+  -webkit-tap-highlight-color: transparent;
+}
 .label {
   text-transform: uppercase;
   font-weight: 800;
@@ -510,6 +514,10 @@ input[type="search"]::-webkit-search-cancel-button {
   --tilt: 4deg;
   background: var(--yellow);
 }
+button.count {
+  font-family: inherit;
+  cursor: pointer;
+}
 /* K-523: the "⋯" button opens the context menu of a card, a stack or a circle head. */
 .more {
   display: inline-grid;
@@ -619,6 +627,26 @@ input[type="search"]::-webkit-search-cancel-button {
   overflow: auto;
   overscroll-behavior: contain;
   padding: 8px;
+}
+/* Folded, the shelf shows only its count (K-509, K-528). */
+.tray.closed {
+  width: auto;
+}
+.tray.closed .tray-head {
+  border-bottom: 0;
+}
+.tray.closed .tray-head > :not(.tray-toggle),
+.tray.closed .tray-list {
+  display: none;
+}
+.tray-toggle {
+  font: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
 }
 
 .tray .card {
@@ -924,21 +952,6 @@ pre.output.log-lines {
   .tray {
     width: min(16rem, calc(100vw - 20px));
     max-height: 40dvh;
-  }
-  .tray.closed {
-    width: auto;
-  }
-  .tray.closed .tray-head > :not(.tray-toggle),
-  .tray.closed .tray-list {
-    display: none;
-  }
-  .tray-toggle {
-    font: inherit;
-    background: none;
-    border: 0;
-    padding: 0;
-    color: inherit;
-    cursor: pointer;
   }
   .hint {
     display: none;

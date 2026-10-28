@@ -293,6 +293,28 @@ describe("app removal and its undo (K-909, K-1502)", () => {
     expect(summarize(removed, back, undo)).toBe("Restored the app riffle (K-909)");
   });
 
+  it("names a stack without a name by its cards in History (K-521)", () => {
+    const point = { x: 0, y: 40 };
+    const named = { id: "s1", name: "Sites", members: ["kitshn-admin", "riffle"] };
+    const { after: state } = edit(start(), [
+      { _tag: "place", id: "riffle", after: point },
+      { _tag: "place", id: "kitshn-admin", after: point },
+      { _tag: "stack", id: "s1", after: named },
+    ]);
+    const cleared = edit(state, [{ _tag: "stack", id: "s1", after: { ...named, name: "" } }]);
+    expect(summarize(state, cleared.after, cleared.changes)).toBe(
+      "Took the name Sites off the stack of kitshn admin, riffle",
+    );
+    const reordered = edit(cleared.after, [
+      { _tag: "stack", id: "s1", after: { ...named, name: "", members: ["riffle", "kitshn-admin"] } },
+    ]);
+    expect(summarize(cleared.after, reordered.after, reordered.changes)).toBe(
+      "Changed the stack of riffle, kitshn admin",
+    );
+    const gone = edit(cleared.after, [{ _tag: "stack", id: "s1", after: null }]);
+    expect(summarize(cleared.after, gone.after, gone.changes)).toBe("Unstacked kitshn admin, riffle");
+  });
+
   it("takes a card out of its stack and undo puts it back", () => {
     const point = { x: 0, y: 40 };
     const { after: state } = edit(start(), [

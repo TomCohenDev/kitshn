@@ -18,6 +18,14 @@ const id = (text: string) =>
  * similar names apart (my.site and my-site). K-804: the app `app` keeps the ids of a repo with one app; every other
  * app has its key after the repo id. The script name `kitshn-<card id>` stays within the 63 characters of Cloudflare.
  */
+/** K-303, K-807: the pull request number of a `pr-<n>` environment, or null for any other environment. */
+export function pullRequestNumber(environment: string): number | null {
+  if (!environment.startsWith("pr-")) return null;
+  const digits = environment.slice(3);
+  const number = Number(digits);
+  return digits !== "" && String(number) === digits && number > 0 ? number : null;
+}
+
 export function environmentNames(
   repoId: string,
   repo: string,

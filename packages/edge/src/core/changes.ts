@@ -381,6 +381,31 @@ export function undoPlan(state: State, changes: ReadonlyArray<Change>): UndoPlan
   return { changes: out, kept };
 }
 
+/**
+ * K-1502: each revision that a whole undo in effect reverses, with that undo. An undo is in effect while no
+ * undo in effect reverses it, so an undo of an undo puts the first revision back in effect.
+ */
+export function undoneRevisions(
+  undos: ReadonlyArray<{ readonly id: number; readonly undoes: number }>,
+): Map<number, number> {
+  const byTarget = new Map<number, Array<number>>();
+  for (const { id, undoes } of undos) byTarget.set(undoes, [...(byTarget.get(undoes) ?? []), id]);
+  const effect = new Map<number, boolean>();
+  const inEffect = (id: number): boolean => {
+    const known = effect.get(id);
+    if (known !== undefined) return known;
+    const result = !(byTarget.get(id) ?? []).some(inEffect);
+    effect.set(id, result);
+    return result;
+  };
+  const undone = new Map<number, number>();
+  for (const [target, ids] of byTarget) {
+    const active = ids.filter(inEffect).sort((a, b) => b - a)[0];
+    if (active !== undefined) undone.set(target, active);
+  }
+  return undone;
+}
+
 /** K-1507: a card or a circle that a per-item undo names. */
 export interface Item {
   readonly kind: "card" | "circle";

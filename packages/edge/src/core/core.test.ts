@@ -17,6 +17,7 @@ import {
   stacksWithout,
   summarize,
   undoPlan,
+  undoneRevisions,
   withStackMates,
 } from "./changes.ts";
 import {
@@ -865,5 +866,13 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     expect(second?.revision).toBe(1);
     expect(applyChanges(once, second!.plan.changes).places.has("notes")).toBe(false);
     expect(itemUndo(both.after, history, { kind: "circle", id: "her" })).toBeNull();
+  });
+
+  it("finds the undo in effect along a chain of undos of undos", () => {
+    const chain = (length: number) => Array.from({ length }, (_, index) => ({ id: index + 2, undoes: index + 1 }));
+    expect(undoneRevisions(chain(1))).toEqual(new Map([[1, 2]]));
+    expect(undoneRevisions(chain(2))).toEqual(new Map([[2, 3]]));
+    expect(undoneRevisions(chain(3))).toEqual(new Map([[1, 2], [3, 4]]));
+    expect(undoneRevisions([...chain(2), { id: 5, undoes: 1 }])).toEqual(new Map([[1, 5], [2, 3]]));
   });
 });

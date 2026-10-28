@@ -25,6 +25,7 @@ import {
   summarize,
   itemUndo,
   type UndoPlan,
+  undoneRevisions,
   undoPlan,
   withStackMates,
 } from "../core/changes.ts";
@@ -346,12 +347,7 @@ export class Kitshn extends DurableObject<Env> {
       "SELECT id, at, actor, summary, undoes, changes = '[]' AS empty FROM revisions ORDER BY id DESC LIMIT ?",
       RECENT_REVISIONS,
     );
-    const undone = new Map(
-      this.sql<{ id: number; undoes: number }>(
-        "SELECT id, undoes FROM revisions WHERE undoes IS NOT NULL AND item IS NULL ORDER BY id DESC LIMIT ?",
-        RECENT_REVISIONS,
-      ).map((row) => [row.undoes, row.id]),
-    );
+    const undone = this.undone();
     this.revisions = rows.map((row) => ({
       id: row.id,
       at: row.at,
@@ -558,12 +554,14 @@ export class Kitshn extends DurableObject<Env> {
     }
     this.revisions = merge
       ? this.revisions.map((revision) => (revision.id === id ? { ...revision, at: now, summary } : revision))
-      : [
-          { id, at: now, actor, summary, undoes, undoneBy: null, undoable: true },
-          ...this.revisions.map((revision) =>
-            revision.id === undoes && undo?.item === null ? { ...revision, undoneBy: id } : revision,
-          ),
-        ].slice(0, RECENT_REVISIONS);
+      : [{ id, at: now, actor, summary, undoes, undoneBy: null, undoable: true }, ...this.revisions].slice(
+          0,
+          RECENT_REVISIONS,
+        );
+    if (undo?.item === null) {
+      const undone = this.undone();
+      this.revisions = this.revisions.map((revision) => ({ ...revision, undoneBy: undone.get(revision.id) ?? null }));
+    }
     this.broadcast();
     void this.scheduleAlarm();
     return id;
@@ -614,19 +612,18 @@ export class Kitshn extends DurableObject<Env> {
       throw new RuleError(
         `Revision #${revisionId} records an action, not a change, so it has nothing to undo.`,
       );
-    const undone = this.undoneBy(revisionId);
-    if (undone !== null) throw new RuleError(`Revision #${revisionId} is undone already, by #${undone}.`);
+    const undone = this.undone().get(revisionId);
+    if (undone !== undefined) throw new RuleError(`Revision #${revisionId} is undone already, by #${undone}.`);
     return this.commitUndo(actor, undoPlan(this.state, changes), { revision: revisionId, item: null });
   }
 
-  /** K-1506: the whole undo of a revision that is still in effect: it is not undone, or its undo is undone. */
-  private undoneBy(revisionId: number): number | null {
-    const [row] = this.sql<{ id: number }>(
-      `SELECT id FROM revisions WHERE undoes = ? AND item IS NULL
-       AND id NOT IN (SELECT undoes FROM revisions WHERE undoes IS NOT NULL AND item IS NULL) ORDER BY id DESC LIMIT 1`,
-      revisionId,
+  /** K-1502: each revision that a whole undo in effect reverses, with that undo. */
+  private undone() {
+    return undoneRevisions(
+      this.sql<{ id: number; undoes: number }>(
+        "SELECT id, undoes FROM revisions WHERE undoes IS NOT NULL AND item IS NULL",
+      ),
     );
-    return row?.id ?? null;
   }
 
   /** K-1507: undoes the newest change to one card or circle, by anyone, and only that item's part of it. */
@@ -638,15 +635,19 @@ export class Kitshn extends DurableObject<Env> {
     const key = `${item.kind}:${item.id}`;
     // Skips revisions that an undo in effect reverses: a whole undo, or one of this item. `instr` only
     // narrows the rows; `touches` decides.
+    const undone = this.undone();
+    const skipped = new Set([
+      ...undone.keys(),
+      ...this.sql<{ id: number; undoes: number }>("SELECT id, undoes FROM revisions WHERE item = ?", key)
+        .filter((row) => !undone.has(row.id))
+        .map((row) => row.undoes),
+    ]);
     const rows = this.sql<{ id: number; changes: string }>(
-      `WITH active AS (SELECT undoes, item FROM revisions AS u WHERE undoes IS NOT NULL
-         AND NOT EXISTS (SELECT 1 FROM revisions AS v WHERE v.undoes = u.id AND v.item IS NULL))
-       SELECT id, changes FROM revisions AS r WHERE undoes IS NULL AND instr(changes, ?) > 0
-       AND NOT EXISTS (SELECT 1 FROM active WHERE active.undoes = r.id AND (active.item IS NULL OR active.item = ?))
-       ORDER BY id DESC`,
+      "SELECT id, changes FROM revisions WHERE undoes IS NULL AND instr(changes, ?) > 0 ORDER BY id DESC",
       item.id,
-      key,
-    ).map((row) => ({ id: row.id, changes: JSON.parse(row.changes) as Array<Change> }));
+    )
+      .filter((row) => !skipped.has(row.id))
+      .map((row) => ({ id: row.id, changes: JSON.parse(row.changes) as Array<Change> }));
     const found = itemUndo(this.state, rows, item);
     if (!found) throw new RuleError(`History has no change to ${name} left to undo.`);
     return this.commitUndo(actor, found.plan, { revision: found.revision, item: key, name });

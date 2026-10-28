@@ -71,13 +71,13 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
       return Promise.resolve().then(() => answers(program));
     };
     await daemonUser("kitshn", fake);
-    const volumes = await preflight(plan, user, fake);
+    const { volumes } = await preflight(plan, user, fake);
     const steps = takeoverSteps(plan, user, volumes);
     const all = steps.flatMap((step): Array<Step> => [step, ...(step.undo ?? [])]);
     const programs = [...recorded, ...all.flatMap((step) => [step.run, ...(step.pipeTo ? [step.pipeTo] : [])])];
     expect(programs.some((program) => program[0] === "du")).toBe(true);
     for (const program of programs) {
-      const asUser = program[0] === "setsid" && program[2] === "runuser" && program[4] === "kitshn";
+      const asUser = program[0] === "/usr/bin/setsid" && program[2] === "/usr/sbin/runuser" && program[4] === "kitshn";
       if (asUser) {
         // A new session without a terminal, a clean environment, and no Docker CLI hooks of the user.
         expect(program[1]).toBe("--wait");
@@ -90,12 +90,32 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
       // Root reads /persistent and system Docker volumes, looks up the user, and talks to system Docker.
       const reads = program[0] === "tar" && program.includes("-cf") && program[2] === plan.oldData;
       const system = program[0] === "docker" && program[2] === "unix:///var/run/docker.sock";
-      const sizes = program[0] === "du";
+      const sizes = program[0] === "du" || program[0] === "find";
       const lookup = program[0] === "getent";
       expect(reads || system || sizes || lookup, program.join(" ")).toBe(true);
     }
     // The code of the takeover has no file system calls of its own.
     expect(readFileSync(new URL("./takeover.ts", import.meta.url), "utf8")).not.toContain('from "node:fs"');
+  });
+
+  it("refuses a device node or a FIFO before anything stops, and leaves sockets out by name", async () => {
+    const answers = (found: string, sockets: string) => (program: Program) => {
+      const text = program.join(" ");
+      if (text.includes("volume ls")) return "";
+      if (text.startsWith("du")) return "100\t/x\n";
+      if (text.startsWith("find") && text.includes("-type s")) return sockets;
+      if (text.startsWith("find")) return found;
+      if (text.includes(" df ")) return "Mounted on Avail\n/ 1000000\n/ 1000000\n";
+      return "";
+    };
+    const capture = (found: string, sockets: string) => (program: Program) => Promise.resolve(answers(found, sockets)(program));
+    await expect(preflight(plan, user, capture(`${plan.oldData}/fifo\n`, ""))).rejects.toThrow("Remove or move it");
+    const checked = await preflight(plan, user, capture("", `${plan.oldData}/run/app.sock\n`));
+    expect(checked.skipped).toEqual([`${plan.oldData}/run/app.sock`]);
+    // A linked data folder is scanned through the link, as tar -C copies it.
+    const programs: Array<Program> = [];
+    await preflight(plan, user, (program) => (programs.push(program), capture("", "")(program)));
+    for (const find of programs.filter((program) => program[0] === "find")) expect(find[1]).toBe("-H");
   });
 
   it("gives no program of the takeover a terminal", async () => {

@@ -26,6 +26,8 @@ import {
   resolveEdits,
   restoredResource,
   revisionTargets,
+  type RevisionTarget,
+  targetOf,
   ruleViolation,
   stacksWithout,
   summarize,
@@ -354,10 +356,11 @@ export class Kitshn extends DurableObject<Env> {
       empty: number;
       targets: string;
     }>(
-      // K-1508: only the tag and id of each change, so the load never parses whole circles of old revisions.
+      // K-1508: only the tag, id and stack members of each change, so the load never parses whole circles.
       `SELECT id, at, actor, summary, undoes,
          NOT EXISTS (SELECT 1 FROM json_each(changes) WHERE json_extract(value, '$._tag') != 'forget') AS empty,
-         (SELECT json_group_array(json_object('_tag', json_extract(value, '$._tag'), 'id', json_extract(value, '$.id')))
+         (SELECT json_group_array(json_object('_tag', json_extract(value, '$._tag'), 'id', json_extract(value, '$.id'),
+             'members', json_array(json_extract(value, '$.before.members'), json_extract(value, '$.after.members'))))
            FROM json_each(changes)) AS targets
        FROM revisions ORDER BY id DESC LIMIT ?`,
       RECENT_REVISIONS,
@@ -376,7 +379,7 @@ export class Kitshn extends DurableObject<Env> {
       undoes: row.undoes,
       undoneBy: undone.get(row.id) ?? null,
       undoable: row.empty === 0,
-      ...revisionTargets(JSON.parse(row.targets) as Array<Pick<Change | Forget, "_tag" | "id">>),
+      ...revisionTargets(JSON.parse(row.targets) as Array<RevisionTarget>),
     }));
   }
 
@@ -575,7 +578,7 @@ export class Kitshn extends DurableObject<Env> {
         for (const id of this.stuckShares) if (id.startsWith(`${change.id}/`)) this.stuckShares.delete(id);
     }
     if (merge) {
-      const targets = revisionTargets(merge.changes);
+      const targets = revisionTargets(merge.changes.map(targetOf));
       this.revisions = this.revisions.map((revision) =>
         revision.id === id ? { ...revision, at: now, summary, ...targets } : revision,
       );
@@ -589,7 +592,7 @@ export class Kitshn extends DurableObject<Env> {
         undoes,
         undoneBy: null,
         undoable: true,
-        ...revisionTargets(changes),
+        ...revisionTargets(changes.map(targetOf)),
       });
     void this.scheduleAlarm();
     return id;

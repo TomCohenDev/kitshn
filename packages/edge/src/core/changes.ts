@@ -297,6 +297,16 @@ export interface Item {
 /** K-1508: what a History entry is about, for its kind filter. "action" changes nothing that Undo reverses. */
 export type RevisionKind = "card" | "circle" | "stack" | "app" | "pause" | "action";
 
+/** K-1508: the tag and id of a change, and for a stack the members before and after. */
+export type RevisionTarget = Pick<Change | Forget, "_tag" | "id"> & {
+  readonly members?: ReadonlyArray<ReadonlyArray<string> | null>;
+};
+
+export const targetOf = (change: Change | Forget): RevisionTarget =>
+  change._tag === "stack"
+    ? { _tag: "stack", id: change.id, members: [change.before?.members ?? null, change.after?.members ?? null] }
+    : { _tag: change._tag, id: change.id };
+
 /** A big revision (the setup) sends at most this many items, so the snapshot stays small. */
 const MAX_REVISION_ITEMS = 30;
 
@@ -304,7 +314,7 @@ const MAX_REVISION_ITEMS = 30;
  * K-1508: the kind of a revision and the cards and circles that it changes, from the tag and id of each change.
  * The first kind in the order app, pause, circle, stack, card wins.
  */
-export function revisionTargets(changes: ReadonlyArray<Pick<Change | Forget, "_tag" | "id">>): {
+export function revisionTargets(changes: ReadonlyArray<RevisionTarget>): {
   readonly kind: RevisionKind;
   readonly items: ReadonlyArray<Item>;
 } {
@@ -326,6 +336,8 @@ export function revisionTargets(changes: ReadonlyArray<Pick<Change | Forget, "_t
     if (change._tag === "circle") add({ kind: "circle", id: change.id });
     else if (change._tag === "place" || change._tag === "app" || change._tag === "forget")
       add({ kind: "card", id: change.id });
+    else if (change._tag === "stack")
+      for (const id of (change.members ?? []).flatMap((members) => members ?? [])) add({ kind: "card", id });
     else if (change._tag === "shareSetting") {
       // A share setting id is `card/circle` (shareKey). Circle ids have no slash, so the last one splits it.
       const cut = change.id.lastIndexOf("/");

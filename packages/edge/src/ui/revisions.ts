@@ -91,11 +91,13 @@ export interface HistoryGroup {
   readonly revisions: ReadonlyArray<RevisionView>;
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
+/** By local calendar dates, so a day of 23 or 25 hours (a DST change) still splits at midnight. */
 export function dayOf(at: number, now: number): Day {
-  const today = new Date(now).setHours(0, 0, 0, 0);
-  return at >= today ? "Today" : at >= today - DAY_MS ? "Yesterday" : "Older";
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  return at >= today.getTime() ? "Today" : at >= yesterday.getTime() ? "Yesterday" : "Older";
 }
 
 /** Newest first: the revisions of one day and one actor in a row make one group. */

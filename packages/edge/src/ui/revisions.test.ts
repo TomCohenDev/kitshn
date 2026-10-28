@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Actor } from "../core/changes.ts";
 import type { RevisionView } from "../core/protocol.ts";
-import { filterHistory, groupHistory, sentence, undoStates } from "./revisions.ts";
+import { dayOf, filterHistory, groupHistory, sentence, undoStates } from "./revisions.ts";
 
 const me: Actor = { _tag: "person", email: "me@example.com" };
 const bot: Actor = { _tag: "device", clientId: "c1", name: "Bot" };
@@ -63,6 +63,15 @@ describe("History groups (K-1508)", () => {
       ["Yesterday", bot, [2]],
       ["Older", me, [1]],
     ]);
+  });
+
+  it("splits days at local midnight", () => {
+    const midnight = new Date(2026, 9, 28).getTime();
+    const yesterday = new Date(2026, 9, 27).getTime();
+    expect(dayOf(midnight, NOW)).toBe("Today");
+    expect(dayOf(midnight - 1, NOW)).toBe("Yesterday");
+    expect(dayOf(yesterday, NOW)).toBe("Yesterday");
+    expect(dayOf(yesterday - 1, NOW)).toBe("Older");
   });
 
   it("filters by kind, actor and the name of a changed item", () => {

@@ -1001,6 +1001,14 @@ describe("History targets (K-1508)", () => {
     });
   });
 
+  it("names the cards of a stack before and after the change", () => {
+    expect(revisionTargets([{ _tag: "stack", id: "s-1", members: [["a", "b"], ["b", "c"]] }]).items).toEqual([
+      { kind: "card", id: "a" },
+      { kind: "card", id: "b" },
+      { kind: "card", id: "c" },
+    ]);
+  });
+
   it("calls a revision without changes an action", () => {
     expect(revisionTargets([{ _tag: "forget", id: "page-1" }])).toEqual({
       kind: "action",

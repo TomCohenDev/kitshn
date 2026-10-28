@@ -56,11 +56,11 @@ export function headAngle(circle: Circle, cards: ReadonlyArray<Box>): number {
   return HEAD_ANGLES.find((angle) => !cards.some((card) => overlaps(headBox(circle, angle), card))) ?? 0;
 }
 
-/** A circle with its head at the top. */
+/** A circle with its head at every spot that the head can slide to (`headAngle`). */
 export const circleBox = (circle: Circle): Box =>
   union([
     { left: circle.x - circle.r, top: circle.y - circle.r, right: circle.x + circle.r, bottom: circle.y + circle.r },
-    headBox(circle, 0),
+    ...HEAD_ANGLES.map((angle) => headBox(circle, angle)),
   ]);
 
 /** Everything on the map: circles with their heads, and placed cards. Null for an empty map. */

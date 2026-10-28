@@ -18,6 +18,7 @@ import {
   shareKey,
 } from "./model.ts";
 import { placeInside } from "./place.ts";
+import { coveringCards } from "./repoGroups.ts";
 import { type Visitor, circleMatches, visitorLevel } from "./visitor.ts";
 
 /** K-718, K-1730: true when the member is the agent that the visitor is: an agent key, or a machine by its token. */
@@ -366,4 +367,41 @@ export function agentDeployPlan(
       file: last.composeFile,
     },
   };
+}
+
+/**
+ * K-1733, K-1761: the mode of a code right of a machine for one repo. A right counts only in an agent circle that holds a
+ * card covering the repo (a repo group or its repo card) at `control`. "writes code" includes "reads code". Automatic
+ * from any such circle wins, else the first "ask <circle>"; null is off.
+ */
+export function codeRightMode(
+  state: State,
+  machineId: string,
+  right: "readsCode" | "writesCode",
+  fullName: string,
+  now: number,
+): RightMode | null {
+  const machine = state.machines.get(machineId);
+  if (!machine) return null;
+  const covering = coveringCards(state, fullName);
+  const rights: ReadonlyArray<MachineRight> =
+    right === "readsCode" ? ["readsCode", "writesCode"] : ["writesCode"];
+  const modes = [...circlesOf(state, { email: null, clientId: machine.clientId, ip: null }, now)].flatMap(
+    (id) => {
+      const circle = state.circles.get(id);
+      if (!circle) return [];
+      const holds = covering.some(
+        (card) =>
+          circlesHolding(state, card.id).some((held) => held.id === id) &&
+          levelIn(state, card.id, circle) === "control",
+      );
+      if (!holds) return [];
+      return circle.members.flatMap((member) =>
+        member._tag === "machine" && member.machineId === machineId
+          ? rights.flatMap((each) => (member.rights?.[each] ? [member.rights[each]] : []))
+          : [],
+      );
+    },
+  );
+  return modes.find((mode) => mode.mode === "automatic") ?? modes[0] ?? null;
 }

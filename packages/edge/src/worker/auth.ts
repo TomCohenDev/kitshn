@@ -218,6 +218,8 @@ export interface Deployer {
   readonly runAttempt: string;
   /** K-1121: the file in `.github/workflows` of the run, from `workflow_ref`; null when the claim names none. */
   readonly workflow: string | null;
+  /** K-1767: the login that started the run, for example `kitshn[bot]` for a push of the App. */
+  readonly actor: string;
 }
 
 /** K-1121: `owner/repo/.github/workflows/<file>@<ref>` names the workflow file of the caller, also for a reusable one. */
@@ -274,6 +276,7 @@ export async function deployerOf(request: Request, env: Env): Promise<Deployer |
       runId: text("run_id"),
       runAttempt: text("run_attempt"),
       workflow: workflowFile(text("workflow_ref"), repo),
+      actor: text("actor"),
     };
   } catch (error) {
     return `The GitHub token is not valid: ${error instanceof Error ? error.message : String(error)}`;

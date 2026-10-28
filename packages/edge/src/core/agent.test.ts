@@ -10,6 +10,7 @@ import {
   agentUploadPlace,
   cardsControlledBy,
   circlesOf,
+  codeRightMode,
   isAgentKey,
   machineRightMode,
   mayDeployOn,
@@ -434,6 +435,33 @@ describe("rights of machines with a mode (K-1720, K-1730)", () => {
     expect(circlesOf(state, as("vps-token"), 0).has("agents")).toBe(true);
     expect(circlesOf(state, as("agent-1"), 0).has("agents")).toBe(false);
     expect(circlesOf(start(), as("agent-1"), 0).has("agents")).toBe(true);
+  });
+
+  it("gives a code right only for a repo that a card in the same agent circle covers (K-1733, K-1761)", () => {
+    const base = withMachine({ writesCode: { mode: "automatic" } });
+    const group = {
+      id: "repo-group-yarden-zamir",
+      kind: "repo.group" as const,
+      name: "Yarden-zamir",
+      addresses: [],
+      status: "unknown" as const,
+      group: null,
+      machine: null,
+      match: "Yarden-zamir",
+    };
+    const state = {
+      ...base,
+      resources: new Map(base.resources).set(group.id, group),
+      places: new Map(base.places).set(group.id, { x: 0, y: 1000 }),
+    };
+    expect(codeRightMode(state, "vps", "writesCode", "Yarden-zamir/riffle", 0)).toEqual({
+      mode: "automatic",
+    });
+    // "writes code" includes "reads code".
+    expect(codeRightMode(state, "vps", "readsCode", "Yarden-zamir/riffle", 0)).toEqual({ mode: "automatic" });
+    expect(codeRightMode(state, "vps", "writesCode", "qlik-trial/app", 0)).toBeNull();
+    // Without the group in the circle, no repo is covered.
+    expect(codeRightMode(base, "vps", "writesCode", "Yarden-zamir/riffle", 0)).toBeNull();
   });
 
   it("takes automatic from any agent circle over ask from another", () => {

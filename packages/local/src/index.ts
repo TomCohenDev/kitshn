@@ -96,6 +96,13 @@ export const Answer = Schema.Union([
     outcome: Schema.Literal("refused"),
     reason: Schema.String,
   }),
+  /** K-1760: the repo's owner is "not kitshn", so the machine uses its own login. */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("ask"),
+    outcome: Schema.Literal("not-kitshn"),
+    reason: Schema.String,
+  }),
   /** K-1722 to K-1724: the answer to a waiting ask. An event: it has no id. */
   Schema.Struct({
     type: Schema.Literal("ask-result"),

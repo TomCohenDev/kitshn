@@ -215,3 +215,65 @@ export async function reposOnGitHub(
   }
   return found;
 }
+
+/** K-1761: the permissions of a repo token; read is Contents and Metadata, write adds Pull requests. */
+const TOKEN_PERMISSIONS = {
+  read: { contents: "read", metadata: "read" },
+  write: { contents: "write", pull_requests: "write", metadata: "read" },
+} as const;
+
+/** K-1766: the App has no installation that holds the repo. */
+export class NotInstalled extends Error {}
+
+/**
+ * K-1762: an installation token for one repo with the permissions of one right. `installationId` is the one that kitshn
+ * keeps for the owner, or null to look it up (one call). GitHub fixes the life of the token at one hour.
+ */
+export async function repoToken(
+  app: GitHubApp,
+  fullName: string,
+  permission: "read" | "write",
+  installationId: number | null,
+): Promise<{ readonly token: string; readonly expiresAt: string; readonly installationId: number }> {
+  const [owner, name] = fullName.split("/");
+  if (!owner || !name) throw new Error(`${fullName} is not owner/name.`);
+  const jwt = await appJwt(app);
+  let id = installationId;
+  if (id === null) {
+    try {
+      const found = record(await call(jwt, "GET", `/repos/${owner}/${name}/installation`))["id"];
+      if (typeof found !== "number") throw new Error("GitHub sent an installation without an id.");
+      id = found;
+    } catch (error) {
+      if (error instanceof GitHubError && error.status === 404)
+        throw new NotInstalled(`The kitshn App is not installed on ${owner} (K-1766).`);
+      throw error;
+    }
+  }
+  const access = record(
+    await call(jwt, "POST", `/app/installations/${id}/access_tokens`, {
+      repositories: [name],
+      permissions: TOKEN_PERMISSIONS[permission],
+    }),
+  );
+  if (typeof access["token"] !== "string" || typeof access["expires_at"] !== "string")
+    throw new Error("GitHub sent no installation token.");
+  return { token: access["token"], expiresAt: access["expires_at"], installationId: id };
+}
+
+/** K-1716: ends an installation token before its hour; a token that is gone already counts as ended. */
+export async function revokeToken(token: string): Promise<void> {
+  try {
+    await call(token, "DELETE", "/installation/token");
+  } catch (error) {
+    if (error instanceof GitHubError && error.status === 401) return;
+    throw error;
+  }
+}
+
+/** K-1767: the bot login of the App (`<slug>[bot]`), which GitHub writes as the `actor` of its pushes. */
+export async function appBotLogin(app: GitHubApp): Promise<string> {
+  const slug = record(await call(await appJwt(app), "GET", "/app"))["slug"];
+  if (typeof slug !== "string") throw new Error("GitHub sent no App slug.");
+  return `${slug}[bot]`;
+}

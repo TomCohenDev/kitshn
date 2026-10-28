@@ -23,6 +23,7 @@ import { ASK_ACTIONS, type Answer, type AskAction, type Request } from "@kitshn/
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { keyPlan } from "./keys.ts";
 import { attesterPrefixes, dropAttested } from "./attest.ts";
+import { credentialAnswer, readCredentialInput, repoOfCredential, repoOfRemote } from "./gitCredential.ts";
 import { composeLogs, followLogs, rangeArgs, searchLogs, withLogLimits } from "./logs.ts";
 import { type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from "./local.ts";
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
@@ -255,6 +256,103 @@ async function ask(request: Request): Promise<Exclude<Answer, { type: "error" }>
   if (outcome.kind === "not-running") return null;
   if (outcome.answer.type === "error") fail(outcome.answer.error);
   return outcome.answer;
+}
+
+/** K-1763, K-1764: one `github-token` ask for a repo; the answer, or null when the daemon does not run. */
+async function askToken(repo: string): Promise<Answer | null> {
+  if (typeof daemonUid === "string") return null;
+  const outcome = await askLocal(
+    socketPath,
+    { id: "1", type: "ask", action: "github-token", target: repo, body: { permission: "auto" } },
+    90_000,
+    { platform, daemonUid: daemonUid as number },
+  ).catch(() => null);
+  return outcome?.kind === "answer" ? outcome.answer : null;
+}
+
+/**
+ * K-1763: `kitshn git-credential get` gives git a token for a repo of an owner with the kitshn App way. For a "not kitshn"
+ * owner, a daemon that does not run, or another host, it prints nothing, so git tries the next helper. A refusal or
+ * a waiting ask of a kitshn owner prints `quit=1`, so git never falls back to the machine's own login.
+ */
+async function gitCredentialCommand(operation: string | undefined) {
+  if (operation !== "get") return;
+  const repo = repoOfCredential(readCredentialInput(await Bun.stdin.text()));
+  if (repo === null) return;
+  const answer = await askToken(repo);
+  if (answer === null || answer.type !== "ask" || answer.outcome === "not-kitshn") return;
+  if (answer.outcome === "done" && typeof answer.result === "object" && answer.result !== null) {
+    const { token, expiresAt } = answer.result as { token?: unknown; expiresAt?: unknown };
+    if (typeof token === "string" && typeof expiresAt === "string") {
+      process.stdout.write(credentialAnswer(token, expiresAt));
+      return;
+    }
+  }
+  const why =
+    answer.outcome === "refused"
+      ? answer.reason
+      : answer.outcome === "waiting"
+        ? `the token waits for an approval (proposal ${answer.proposalId}); push again after it`
+        : "kitshn gave no token";
+  console.error(`kitshn: ${why}`);
+  process.stdout.write("quit=1\n");
+}
+
+/**
+ * K-1763: `kitshn setup-git` puts `kitshn git-credential` first for https://github.com, with useHttpPath, and keeps the
+ * helpers that the user had after it.
+ */
+function setupGitCommand() {
+  const scope = "credential.https://github.com.helper";
+  const read = (key: string) =>
+    spawnSync("git", ["config", "--global", "--get-all", key], { encoding: "utf8" })
+      .stdout.split("\n")
+      .filter((line) => line !== "");
+  const ours = `!${process.execPath} git-credential`;
+  const previous = [...new Set([...read(scope), ...read("credential.helper")])].filter(
+    (helper) => helper !== ours && !helper.endsWith(" git-credential"),
+  );
+  const git = (...args: Array<string>) => {
+    const result = spawnSync("git", ["config", "--global", ...args], { encoding: "utf8" });
+    if (result.status !== 0 && args[0] !== "--unset-all")
+      fail(`git config ${args.join(" ")} failed: ${result.stderr}`);
+  };
+  git("--unset-all", scope);
+  // An empty helper clears the list that git collected so far, so kitshn goes first.
+  git("--add", scope, "");
+  git("--add", scope, ours);
+  for (const helper of previous) git("--add", scope, helper);
+  git("credential.https://github.com.useHttpPath", "true");
+  console.log(
+    `git asks kitshn first for github.com, then: ${previous.length > 0 ? previous.join(", ") : "nothing else"}.`,
+  );
+}
+
+/** K-1764: `kitshn gh <args>` runs gh with a token for the repo of --repo or of the remote origin. */
+async function ghCommand(argv: ReadonlyArray<string>) {
+  const at = argv.indexOf("--repo");
+  const remote = spawnSync("git", ["remote", "get-url", "origin"], { encoding: "utf8" }).stdout ?? "";
+  const repo = at >= 0 ? (argv[at + 1] ?? null) : repoOfRemote(remote);
+  const env = { ...process.env };
+  if (repo !== null) {
+    const answer = await askToken(repo);
+    if (
+      answer?.type === "ask" &&
+      answer.outcome === "done" &&
+      typeof answer.result === "object" &&
+      answer.result !== null
+    ) {
+      const token = (answer.result as { token?: unknown }).token;
+      if (typeof token === "string") env["GH_TOKEN"] = token;
+    } else if (answer?.type === "ask" && (answer.outcome === "refused" || answer.outcome === "waiting"))
+      fail(
+        answer.outcome === "refused"
+          ? answer.reason
+          : `the token waits for an approval (proposal ${answer.proposalId}).`,
+      );
+  }
+  const run = spawnSync("gh", [...argv], { stdio: "inherit", env });
+  process.exit(run.status ?? 1);
 }
 
 /**
@@ -1379,6 +1477,11 @@ async function answerChallenge(
 type RotationOutcome = { readonly fingerprint: string } | { readonly error: string };
 /** K-1705: the `rotate-key` requests of the local socket that wait for kitshn to store the new key. */
 const rotationWaiters: Array<(outcome: RotationOutcome) => void> = [];
+/** K-1760: the GitHub way of each owner group, and the default, as kitshn sent them; "not kitshn" until then. */
+let githubWays: { fallback: string; owners: Readonly<Record<string, string>> } = {
+  fallback: "not-kitshn",
+  owners: {},
+};
 /** K-1710: the asks that wait for kitshn's answer, by request id. */
 const askWaiters = new Map<string, (outcome: AskOutcome) => void>();
 /** K-1722: the local connections that wait for the answer to a proposal, by proposal id. */
@@ -1389,6 +1492,17 @@ async function askKitshn(
   request: Extract<Request, { type: "ask" }>,
   emit: (event: Answer) => void,
 ): Promise<Answer> {
+  // K-1760: a "not kitshn" owner never reaches kitshn, so kitshn sees no repo name of it.
+  if (request.action === "github-token") {
+    const owner = (request.target.split("/")[0] ?? "").toLowerCase();
+    if ((githubWays.owners[owner] ?? githubWays.fallback) !== "app")
+      return {
+        id: request.id,
+        type: "ask",
+        outcome: "not-kitshn",
+        reason: `${owner} is "not kitshn" (K-1760).`,
+      };
+  }
   const ws = socket;
   if (ws === null || challenge === null)
     throw new Error(
@@ -1561,6 +1675,8 @@ function connect(config: JoinSecrets) {
       } else if (message.type === "tailStop") {
         tails.get(message.id)?.();
         tails.delete(message.id);
+      } else if (message.type === "githubWays") {
+        githubWays = { fallback: message.fallback, owners: message.owners };
       } else if (message.type === "askAnswer") {
         const { type: _type, requestId, ...outcome } = message;
         askWaiters.get(requestId)?.(outcome);
@@ -1859,6 +1975,15 @@ switch (command) {
   case "status":
     await statusCommand();
     break;
+  case "git-credential":
+    await gitCredentialCommand(args[0]);
+    break;
+  case "setup-git":
+    setupGitCommand();
+    break;
+  case "gh":
+    await ghCommand(args);
+    break;
   case "agent":
     await agentCommand(args);
     break;
@@ -1889,6 +2014,8 @@ kitshn rekey <code>                     make a new machine key with the key code
 kitshn status                           the machine, its key, its connection to kitshn and its tunnel
 kitshn local-users list|add|remove <u>  who else may use the local socket, as the daemon user (K-701)
 kitshn agent <action> [target]          ask kitshn as this machine (K-1710): --reason, --label k=v, --body json
+kitshn setup-git                        git asks kitshn first for github.com tokens (K-1763)
+kitshn gh <args>                        gh with a kitshn token for this repo (K-1764)
 kitshn expose <port|socket> --name <n>  share a local server at <n>.<zone> (K-1104); --dev sets Host localhost
 kitshn unexpose <name>                  stop sharing it
 kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>

@@ -2,7 +2,7 @@ import type { Actor, Item, RevisionKind } from "./changes.ts";
 import type { Command, Machine, MachineStatus, ProjectVolume, Sample } from "./machine.ts";
 import type { MachineOs } from "./icons.ts";
 import type { LogLine, TailAnswer } from "./logs.ts";
-import type { Circle, PauseMode, Point, Resource, ShareSetting, Stack } from "./model.ts";
+import type { Circle, GitHubWay, PauseMode, Point, Resource, ShareSetting, Stack } from "./model.ts";
 import type { RepoGate } from "./repos.ts";
 import type { Proposal } from "./asks.ts";
 
@@ -103,6 +103,8 @@ export interface Snapshot {
   readonly machines: ReadonlyArray<MachineView>;
   /** K-1722: the asks that wait for an approver circle, oldest first. */
   readonly proposals: ReadonlyArray<ProposalView>;
+  /** K-1760: the GitHub way of an owner with no owner group. */
+  readonly githubDefaultWay: GitHubWay;
   /** K-1717: the newest 50 ask events. */
   readonly askEvents: ReadonlyArray<AskEventView>;
   /** The newest jobs, with their output cut to 4,000 characters. */

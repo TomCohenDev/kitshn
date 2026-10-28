@@ -11,6 +11,7 @@ import {
 } from "../core/changes.ts";
 import {
   type Circle,
+  type GitHubWay,
   type Level,
   RESOURCE_KINDS,
   type Resource,
@@ -97,6 +98,7 @@ import {
 } from "./actions.ts";
 import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
+import { AddRepoGroup, GitHubDefaultWay, RepoGroupPanel, matchedCards } from "./RepoGroups.tsx";
 import { Palette } from "./Palette.tsx";
 import {
   LOCKDOWN_TIP,
@@ -273,6 +275,7 @@ export function App() {
   const [wantedTray, setTrayWidth] = useStoredWidth("kitshn.trayWidth", TRAY_WIDTH);
   const screenWidth = useScreenWidth();
   const [addingSite, setAddingSite] = useState(false);
+  const [addingRepoGroup, setAddingRepoGroup] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
   /** Where the next upload of the file chooser lands: a map point, or null for the tray. */
   const uploadAt = useRef<Point | null>(null);
@@ -1011,6 +1014,15 @@ export function App() {
     )?.focus();
   };
 
+  // K-1734: a selected repo group lights up the cards of the repos that it matches, until the selection changes.
+  const selectedId = selection.cards.size === 1 ? [...selection.cards][0] : undefined;
+  const selectedGroup = selectedId ? state?.resources.get(selectedId) : undefined;
+  const groupFlash = new Set(
+    selectedGroup?.kind === "repo.group" && store.snapshot
+      ? matchedCards(selectedGroup, store.snapshot.repos).map((id) => itemKey({ kind: "card", id }))
+      : [],
+  );
+
   historyShow.current = showOnMap;
   historyUndo.current = (id) => void undo(id);
 
@@ -1216,6 +1228,7 @@ export function App() {
     newCircle: (at) => void newCircle(at),
     upload: uploadTo,
     addSite: () => setAddingSite(true),
+    addRepoGroup: () => setAddingRepoGroup(true),
     addMachine: () => setAddingMachine(true),
     newCircleFor: (ids) => void newCircleFor(ids),
     fit,
@@ -1256,7 +1269,7 @@ export function App() {
           }}
           panelLeft={floating && wideScreen() ? panelLeft() : null}
           trayRight={shelfRight()}
-          flash={flash}
+          flash={groupFlash.size > 0 ? new Set([...flash, ...groupFlash]) : flash}
           openStacks={openStacks}
           pullRequests={pullRequests}
           onToggleStack={(key) => {
@@ -1336,6 +1349,7 @@ export function App() {
               peek={!wide}
               repos={store.snapshot.repos}
               proposals={store.snapshot.proposals}
+              githubDefaultWay={store.snapshot.githubDefaultWay}
               selection={selection}
               access={store.snapshot.access}
               me={store.snapshot.me}
@@ -1385,6 +1399,12 @@ export function App() {
         </OverlayPanel>
       ) : null}
       {addingMachine ? <AddMachine onClose={() => setAddingMachine(false)} /> : null}
+      {addingRepoGroup ? (
+        <AddRepoGroup
+          onClose={() => setAddingRepoGroup(false)}
+          onDone={(text) => showToast({ text, error: false, undo: null })}
+        />
+      ) : null}
       {addingSite ? (
         <AddSite
           zone={store.snapshot.zone}
@@ -1852,6 +1872,8 @@ function Panel(props: {
   repos: ReadonlyArray<RepoView>;
   /** K-1722: the asks that wait for an approver circle. */
   proposals: ReadonlyArray<ProposalView>;
+  /** K-1760: the GitHub way of owners with no owner group. */
+  githubDefaultWay: GitHubWay;
   selection: Selection;
   access: Readonly<Record<string, import("../core/protocol.ts").AccessState>>;
   me: Actor;
@@ -1925,6 +1947,7 @@ function Panel(props: {
         zone={props.zone}
         peek={props.peek}
         repo={props.repos.find((repo) => repo.resourceIds.includes(cards[0]?.id ?? "")) ?? null}
+        repos={props.repos}
         access={props.access[cards[0].id] ?? null}
         onEdit={props.onEdit}
         onPlace={props.onPlace}
@@ -2034,6 +2057,7 @@ function Panel(props: {
             </li>
           ))}
         </ul>
+        <GitHubDefaultWay way={props.githubDefaultWay} onToast={props.onToast} />
         <AskList
           proposals={props.proposals}
           circleName={(id) => props.state.circles.get(id)?.name ?? id}
@@ -2234,6 +2258,8 @@ function AddressName(props: { address: string; onSave: (name: string) => Promise
 
 function CardPanel(props: {
   resource: Resource;
+  /** K-1733: every repo that kitshn knows, for the matches of a repo group. */
+  repos: ReadonlyArray<RepoView>;
   /** K-303: the pull request of a preview card, from its deploy environment. */
   pullRequest: number | null;
   state: State;
@@ -2331,6 +2357,9 @@ function CardPanel(props: {
       {address &&
       (resource.kind === "page" || resource.kind === "file" || resource.id.startsWith(FOLDER_SITE_PREFIX)) ? (
         <AddressName address={address} onSave={(name) => props.onSetAddress(resource, name)} />
+      ) : null}
+      {resource.kind === "repo.group" ? (
+        <RepoGroupPanel group={resource} repos={props.repos} onToast={props.onToast} />
       ) : null}
       {address && props.repo ? (
         <p class="help">Its repo sets this address: change it in kitshn.config.ts.</p>

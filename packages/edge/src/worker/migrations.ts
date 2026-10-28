@@ -189,6 +189,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       action TEXT NOT NULL, target TEXT NOT NULL, reason TEXT, labels TEXT NOT NULL, outcome TEXT NOT NULL,
       detail TEXT NOT NULL)`,
     "CREATE INDEX ask_events_machine ON ask_events (machine_id, id)",
+    // K-1762: the App installation of each GitHub owner, so a token costs one GitHub call.
+    "CREATE TABLE github_installations (owner TEXT PRIMARY KEY, installation_id INTEGER NOT NULL)",
   ],
 ];
 

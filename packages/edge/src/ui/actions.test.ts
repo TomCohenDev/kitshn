@@ -273,7 +273,14 @@ describe("stack, circle and map actions", () => {
     const add = actionsFor(context(), handlers, { _tag: "add" });
     const spot = actionsFor(context(), handlers, { _tag: "map", at: { x: 5, y: 6 } });
     expect(ids(add)).toEqual(spot?.[0]?.map((action) => action.id));
-    expect(ids(add)).toEqual(["new-circle", "upload", "add-site", "add-machine", "add-member"]);
+    expect(ids(add)).toEqual([
+      "new-circle",
+      "upload",
+      "add-site",
+      "add-repo-group",
+      "add-machine",
+      "add-member",
+    ]);
     run(find(add, "new-circle"));
     expect(calls[0]).toEqual(["newCircle", null]);
     expect(items(find(add, "add-member")).map((item) => item.id)).toContain(`add-member:${OWNER_CIRCLE_ID}`);

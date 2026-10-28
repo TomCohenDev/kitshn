@@ -175,6 +175,9 @@ export const PROPOSAL_MS = 24 * 60 * 60_000;
  */
 export const SELF_APPROVAL_ALLOWED = true;
 
+/** K-1723: after an approval of a token, the same ask of that machine runs at once for this long. */
+export const APPROVED_WINDOW_MS = 60 * 60_000;
+
 /** K-1717: ask events stay 30 days, at most 5,000, as K-1610. */
 export const ASK_EVENT_DAYS = 30;
 export const ASK_EVENT_COUNT = 5000;

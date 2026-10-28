@@ -188,7 +188,7 @@ function fakeCloudflare(others: Record<string, number> = {}) {
 function repo(id: string, name: string) {
   const card = environmentNames(id, `owner/${name}`, "prod").resourceId;
   /** The workflow run and the commit that the next token names. */
-  const run = { id: "100", sha: "0123456789abcdef" };
+  const run = { id: "100", sha: "0123456789abcdef", actor: "owner" };
   const token = () =>
     new SignJWT({
       repository: `owner/${name}`,
@@ -199,6 +199,7 @@ function repo(id: string, name: string) {
       run_attempt: "1",
       event_name: "push",
       ref: "refs/heads/main",
+      actor: run.actor,
     })
       .setProtectedHeader({ alg: "RS256", kid: "gh" })
       .setIssuer("https://token.actions.githubusercontent.com")
@@ -417,6 +418,24 @@ describe("several apps per repo (K-804, K-820)", () => {
     expect(clash.status).toBe(409);
     expect(String(clash.body["error"])).toMatch(/belongs to another app \(app\)/);
     expect((await plan(app, { key: "Bad-Key" })).status).toBe(400);
+  });
+
+  it("makes a push of the kitshn App wait for a deploy ask (K-1767)", async () => {
+    fakeCloudflare();
+    const app = repo("1767", "bot-push");
+    await allow(app);
+    await runInDurableObject(env.KITSHN.getByName("kitshn"), (_instance, durable) =>
+      durable.storage.sql.exec(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('github_app_bot', 'kitshn-test[bot]')",
+      ),
+    );
+    app.run.actor = "kitshn-test[bot]";
+    const waits = await step(app, "/deploy/plan", { recipe: recipe(), event: {} });
+    expect(waits.status).toBe(409);
+    expect(String(waits.body["error"])).toMatch(/waits for a deploy ask/);
+    // Another bot, such as Dependabot, deploys as before.
+    app.run.actor = "dependabot[bot]";
+    expect((await step(app, "/deploy/plan", { recipe: recipe(), event: {} })).status).toBe(200);
   });
 
   it("refuses an admin host as the main or an extra address, also the old host during the move (K-817, K-1209)", async () => {

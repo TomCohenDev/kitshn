@@ -74,6 +74,13 @@ export const KINDS: Record<
     color: "var(--pink)",
     tilt: "2.5deg",
   },
+  "repo.group": {
+    label: "Repo groups",
+    help: "The repos of an owner, or of a name pattern with one *. A right on it covers each repo that it matches.",
+    icon: "🗃️",
+    color: "var(--pink)",
+    tilt: "-2.5deg",
+  },
 };
 
 export const MEMBER_ICONS: Record<Member["_tag"], string> = {

@@ -14,6 +14,8 @@ export const RESOURCE_KINDS = {
   page: ["view"],
   file: ["view"],
   repo: ["view"],
+  /** K-1733: the repos of one owner, or of a name pattern with one `*`. */
+  "repo.group": ["view"],
 } as const satisfies Record<string, ReadonlyArray<Level>>;
 export type ResourceKind = keyof typeof RESOURCE_KINDS;
 
@@ -114,7 +116,15 @@ export interface Resource {
   /** Cards with the same group stack together (K-508). */
   readonly group: string | null;
   readonly machine: string | null;
+  /** K-1733: what a `repo.group` card matches: an owner (`Yarden-zamir`) or a pattern with one `*`. */
+  readonly match?: string;
+  /** K-1760: the GitHub way of an owner group (a match with no `/`). */
+  readonly githubWay?: GitHubWay;
 }
+
+/** K-1760: kitshn makes App tokens for the repos of an owner, or the machine uses its own login. */
+export type GitHubWay = "app" | "not-kitshn";
+export const GITHUB_WAYS: ReadonlyArray<GitHubWay> = ["app", "not-kitshn"];
 
 export interface Point {
   readonly x: number;

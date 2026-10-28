@@ -386,7 +386,7 @@ export const NEW_CIRCLE = {
 /** The ids of `selectionActions`, which the palette lists once and not under each selected card. */
 const SELECTION_IDS = new Set(["stack-these", "new-circle-for"]);
 
-const circlePlans = new WeakMap<State, Map<string, ReturnType<typeof circleForCards>>>();
+const circlePlans = new WeakMap<State, Map<string, { readonly refused: string | null }>>();
 const stackPlans = new WeakMap<State, Map<string, ReturnType<typeof stackOntoEdits>>>();
 /** A plan per state and key, so an open menu or palette does not plan the same action again on each render. */
 function cached<T>(plans: WeakMap<State, Map<string, T>>, state: State, key: string, make: () => T): T {
@@ -405,10 +405,11 @@ export function selectionActions(ctx: ActionContext, h: ActionHandlers): Array<A
   // A card that another device removed while it was selected drops out, as it does from the panel.
   const ids = [...ctx.selected].filter((id) => ctx.state.resources.has(id));
   if (ids.length < 2) return [];
-  const plan = cached(circlePlans, ctx.state, [...ids].sort().join(","), () =>
-    circleForCards(ctx.state, ids, { ...NEW_CIRCLE, id: "preview", color: "#6C5CE7" }),
-  );
-  const refused = "refused" in plan ? plan.refused : refusal(ctx.state, plan.edits);
+  // Only the refusal of the circle plan is kept: the handler plans again with the real id and colour.
+  const { refused } = cached(circlePlans, ctx.state, [...ids].sort().join(","), () => {
+    const plan = circleForCards(ctx.state, ids, { ...NEW_CIRCLE, id: "preview", color: "#6C5CE7" });
+    return { refused: "refused" in plan ? plan.refused : refusal(ctx.state, plan.edits) };
+  });
   // K-521: the first selected card on the map is the one the others stack onto, as a drop onto it would. The
   // target depends on the order of the selection, so its cache key keeps that order.
   const target = ids.find((id) => ctx.state.places.has(id)) ?? ids[0] ?? "";

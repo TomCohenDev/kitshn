@@ -210,24 +210,29 @@ function onOtherZone(host: string, env: Env) {
   }
 }
 
-/** K-1116: public in Access. Any site may read it, and the Worker asks the Durable Object at most every 5 minutes. */
+/**
+ * K-1118: public in Access. Any site may read it. The Worker asks the Durable Object at most every 5 minutes, and
+ * after a fault at most every 30 seconds.
+ */
 async function publicCards(request: Request, env: Env, ctx: ExecutionContext) {
   const cache = caches.default;
   // The query string does not split the cache.
   const key = new Request(`${new URL(request.url).origin}/public/cards.json`);
   const cached = await cache.match(key);
   if (cached) return cached;
-  const answer = await env.KITSHN.getByName("kitshn").fetch("https://kitshn.internal/internal/public-cards");
+  const answer = await env.KITSHN.getByName("kitshn")
+    .fetch("https://kitshn.internal/internal/public-cards")
+    .catch(() => Response.json({ error: "kitshn could not read its cards." }, { status: 503 }));
   const response = new Response(answer.body, {
     status: answer.status,
     headers: {
       "content-type": "application/json",
-      "cache-control": "public, max-age=300",
+      "cache-control": `public, max-age=${answer.ok ? 300 : 30}`,
       "access-control-allow-origin": "*",
       "x-content-type-options": "nosniff",
     },
   });
-  if (response.ok) ctx.waitUntil(cache.put(key, response.clone()));
+  ctx.waitUntil(cache.put(key, response.clone()));
   return response;
 }
 

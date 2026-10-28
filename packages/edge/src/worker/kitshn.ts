@@ -2766,14 +2766,10 @@ export class Kitshn extends DurableObject<Env> {
     });
   }
 
-  /** K-1116: the public app cards with their main address and icon. The Worker caches the answer. */
+  /** K-1118: the public app cards with their main address and icon. The Worker caches the answer. */
   private publicCards() {
-    const environments = new Map(
-      this.sql<{ resource_id: string; environment: string }>(
-        "SELECT DISTINCT resource_id, environment FROM deploys WHERE kind = 'deploy' AND state = 'done'",
-      ).map((row) => [row.resource_id, row.environment]),
-    );
-    const cards = listedApps(this.state, environments, Date.now()).map((resource) => {
+    const environmentOf = (id: string) => this.lastDone(id)?.environment ?? null;
+    const cards = listedApps(this.state, environmentOf, Date.now()).map((resource) => {
       const [icon] = this.sql<{ type: string; bytes: ArrayBuffer }>(
         "SELECT type, bytes FROM icons WHERE id = ?",
         resource.id,

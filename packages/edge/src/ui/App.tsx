@@ -684,7 +684,10 @@ export function App() {
       // The hint line at the bottom shows only on a wide screen; the map stays above it.
       height: wideScreen() ? (document.querySelector(".hint")?.getBoundingClientRect().top ?? innerHeight) : innerHeight,
       top: document.querySelector("header.bar")?.getBoundingClientRect().bottom ?? 70,
-      left: document.querySelector(".tray")?.getBoundingClientRect().right ?? 0,
+      // The tray is not drawn yet when a full view switches to the map, so its width then comes from the tray cards.
+      left:
+        document.querySelector(".tray")?.getBoundingClientRect().right ??
+        (tray.length > 0 ? (wideScreen() ? 220 : 160) : 0),
       panelLeft: withPanel ? panelLeft() : null,
       narrow: !wideScreen(),
     });

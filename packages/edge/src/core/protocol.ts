@@ -9,6 +9,8 @@ export type RepoView = RepoGate & {
   readonly resourceIds: ReadonlyArray<string>;
   /** K-819: the agent key that allowed the repo is gone, so the repo waits; `state` then reads "waiting". */
   readonly keyRemoved: boolean;
+  /** K-819: GitHub answered that the repo id no longer exists; the owner can only forget the repo. */
+  readonly goneOnGitHub: boolean;
 };
 
 export interface RevisionView {

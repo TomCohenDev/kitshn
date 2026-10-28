@@ -30,6 +30,7 @@ import {
 } from "../core/model.ts";
 import { MAX_UPLOAD_BYTES } from "../core/library.ts";
 import { placeInside } from "../core/place.ts";
+import { awaitsAllow } from "../core/repos.ts";
 import type { Command } from "../core/machine.ts";
 import type { JobView, MachineView, RepoView, RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
@@ -81,7 +82,7 @@ import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
 import { LOCKDOWN_TIP, PAUSE_TIP, PanicOpener, PausedBanner, type PauseView, RESUME_TIP, SafetyView } from "./Pause.tsx";
 import { playResumeSound, pressSound, showPanic, unlockAudio } from "./panic.ts";
-import { REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
+import { GONE_STICKER, REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
@@ -1018,7 +1019,7 @@ export function App() {
     undoCheck,
   };
 
-  const waitingRepos = store.snapshot?.repos.filter((repo) => repo.state === "waiting").length ?? 0;
+  const waitingRepos = store.snapshot?.repos.filter(awaitsAllow).length ?? 0;
   return (
     <>
       {route.tab === "map" ? (
@@ -1843,29 +1844,38 @@ function CardPanel(props: {
           <span class="label" data-tip="Deploys: whether pushes of the repo of this card deploy.">
             Deploys
           </span>
-          <span
-            class={`sticker ${REPO_STICKERS[props.repo.state].style}`}
-            data-tip={REPO_STICKERS[props.repo.state].tip}
-          >
-            {props.repo.state}
-          </span>
-          <button
-            type="button"
-            class={props.repo.state === "blocked" ? "btn" : "btn danger"}
-            data-tip={
-              props.repo.state === "blocked"
-                ? `Allow deploys of ${props.repo.name} again.`
-                : `Block deploys of ${props.repo.name}: kitshn refuses them until you allow it again.`
-            }
-            onClick={async () => {
-              if (!props.repo) return;
-              const next = props.repo.state === "blocked" ? "allowed" : "blocked";
-              const { text, error } = await setRepoState(props.repo, next);
-              props.onToast(text, error);
-            }}
-          >
-            {props.repo.state === "blocked" ? "Allow deploys" : "Block deploys"}
-          </button>
+          {props.repo.goneOnGitHub ? (
+            <span class={`sticker ${GONE_STICKER.style}`} data-tip={GONE_STICKER.tip}>
+              deleted on GitHub
+            </span>
+          ) : (
+            <span
+              class={`sticker ${REPO_STICKERS[props.repo.state].style}`}
+              data-tip={REPO_STICKERS[props.repo.state].tip}
+            >
+              {props.repo.state}
+            </span>
+          )}
+          {/* A repo marked deleted keeps Block, so a wrong mark stays recoverable; it never offers Allow. */}
+          {props.repo.goneOnGitHub && props.repo.state === "blocked" ? null : (
+            <button
+              type="button"
+              class={props.repo.state === "blocked" ? "btn" : "btn danger"}
+              data-tip={
+                props.repo.state === "blocked"
+                  ? `Allow deploys of ${props.repo.name} again.`
+                  : `Block deploys of ${props.repo.name}: kitshn refuses them until you allow it again.`
+              }
+              onClick={async () => {
+                if (!props.repo) return;
+                const next = props.repo.state === "blocked" ? "allowed" : "blocked";
+                const { text, error } = await setRepoState(props.repo, next);
+                props.onToast(text, error);
+              }}
+            >
+              {props.repo.state === "blocked" ? "Allow deploys" : "Block deploys"}
+            </button>
+          )}
         </div>
       ) : null}
       {props.access ? (

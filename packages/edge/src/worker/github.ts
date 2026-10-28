@@ -55,6 +55,22 @@ async function call(token: string, method: string, path: string, body?: object):
   return response.status === 204 ? null : await response.json();
 }
 
+const repositoryId = (repoId: string) => {
+  const id = Number(repoId);
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error(`${repoId} is not a GitHub repository id.`);
+  return id;
+};
+
+async function appJwt(app: GitHubApp) {
+  const now = Math.floor(Date.now() / 1000);
+  return await new SignJWT({})
+    .setProtectedHeader({ alg: "RS256" })
+    .setIssuer(app.id)
+    .setIssuedAt(now - 60)
+    .setExpirationTime(now + 540)
+    .sign(await importPKCS8(pkcs8Pem(app.key), "RS256"));
+}
+
 const record = (value: unknown): Record<string, unknown> => {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw new Error("GitHub sent an answer that kitshn does not know.");
@@ -67,15 +83,8 @@ const record = (value: unknown): Record<string, unknown> => {
  * that repo id and only Actions, and the current name comes from that token. Returns the current full name.
  */
 export async function dispatchDeploy(app: GitHubApp, repoId: string, branch: string, workflow: string) {
-  const id = Number(repoId);
-  if (!Number.isSafeInteger(id) || id <= 0) throw new Error(`${repoId} is not a GitHub repository id.`);
-  const now = Math.floor(Date.now() / 1000);
-  const jwt = await new SignJWT({})
-    .setProtectedHeader({ alg: "RS256" })
-    .setIssuer(app.id)
-    .setIssuedAt(now - 60)
-    .setExpirationTime(now + 540)
-    .sign(await importPKCS8(pkcs8Pem(app.key), "RS256"));
+  const id = repositoryId(repoId);
+  const jwt = await appJwt(app);
   // GitHub looks up an installation only by a repo name, so kitshn asks each installation for a token of
   // this id. Only the first 100 installations count; the App has one per owner account (K-811).
   const installations = await call(jwt, "GET", "/app/installations?per_page=100");
@@ -114,4 +123,87 @@ export async function dispatchDeploy(app: GitHubApp, repoId: string, branch: str
     ref: `refs/heads/${branch}`,
   });
   return name;
+}
+
+/** K-819: what GitHub says about one repo id. "unknown" never changes what kitshn shows. */
+export type RepoOnGitHub = "exists" | "gone" | "unknown";
+
+/**
+ * K-819: asks GitHub with each installation of the App whether these repo ids still exist
+ * (`GET /repositories/<id>`). A repo is gone only when every installation answers 404 and one of them holds
+ * all repos of the repo's owner. Any other answer, a failed token or a network fault leaves it unknown.
+ * Returns only the repos that it asked about within `maxCalls`, so the rest wait for the next check.
+ * Known limit: a private repo that moved to an account without the App also reads as gone. Revisit this
+ * when kitshn stores the owner id of each repo.
+ */
+export async function reposOnGitHub(
+  app: GitHubApp,
+  repos: ReadonlyArray<{ readonly repoId: string; readonly name: string }>,
+  maxCalls: number,
+): Promise<Map<string, RepoOnGitHub>> {
+  const found = new Map<string, RepoOnGitHub>();
+  let calls = 0;
+  const installations: Array<{
+    readonly owner: string;
+    readonly all: boolean;
+    readonly token: string | null;
+  }> = [];
+  try {
+    const jwt = await appJwt(app);
+    calls++;
+    const list = await call(jwt, "GET", "/app/installations?per_page=100");
+    if (!Array.isArray(list)) return found;
+    for (const item of list.map(record)) {
+      if (item["suspended_at"]) continue;
+      if (calls >= maxCalls) return found;
+      const account = item["account"];
+      const owner =
+        typeof account === "object" && account !== null
+          ? (account as Record<string, unknown>)["login"]
+          : null;
+      calls++;
+      const token = await call(jwt, "POST", `/app/installations/${String(item["id"])}/access_tokens`, {
+        permissions: { metadata: "read" },
+      })
+        .then((access) => record(access)["token"])
+        .catch(() => null);
+      installations.push({
+        owner: typeof owner === "string" ? owner.toLowerCase() : "",
+        all: item["repository_selection"] === "all",
+        token: typeof token === "string" ? token : null,
+      });
+    }
+  } catch {
+    return found;
+  }
+  for (const repo of repos) {
+    if (calls + installations.length > maxCalls) break;
+    // A stored id that is not a GitHub repository id is unknown, so one bad row never stops the check.
+    const id = Number(repo.repoId);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      found.set(repo.repoId, "unknown");
+      continue;
+    }
+    const owner = repo.name.split("/")[0]?.toLowerCase() ?? "";
+    let answer: RepoOnGitHub = installations.some((each) => each.all && each.owner === owner)
+      ? "gone"
+      : "unknown";
+    for (const { token } of installations) {
+      if (token === null) {
+        answer = "unknown";
+        continue;
+      }
+      calls++;
+      const status = await call(token, "GET", `/repositories/${id}`)
+        .then(() => 200)
+        .catch((error: unknown) => (error instanceof GitHubError ? error.status : null));
+      if (status === 200) {
+        answer = "exists";
+        break;
+      }
+      if (status !== 404) answer = "unknown";
+    }
+    found.set(repo.repoId, answer);
+  }
+  return found;
 }

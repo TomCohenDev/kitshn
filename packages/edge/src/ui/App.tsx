@@ -199,13 +199,15 @@ export function App() {
           : null;
   const undoKey = undoItemOf ? itemKey(undoItemOf) : null;
   const [undoCheck, setUndoCheck] = useState<UndoCheck | null>(null);
-  // Asks the server once per opened menu or palette; an answer for a closed menu or another item is dropped.
+  // Asks the server when a menu or the palette opens, and again when a new revision arrives while it is open;
+  // an answer for a closed menu or another item is dropped.
+  const newestRevision = store.snapshot?.revision ?? 0;
   useEffect(() => {
     if (undoItemOf === null || undoKey === null) {
       setUndoCheck(null);
       return;
     }
-    setUndoCheck({ key: undoKey, answer: null, slow: false });
+    setUndoCheck((check) => (check?.key === undoKey ? check : { key: undoKey, answer: null, slow: false }));
     const slow = setTimeout(() => setUndoCheck((check) => slowUndoCheck(check, undoKey)), 150);
     void callApi<UndoAnswer>(
       "GET",
@@ -217,7 +219,7 @@ export function App() {
       );
     });
     return () => clearTimeout(slow);
-  }, [undoKey]);
+  }, [undoKey, newestRevision]);
 
   useEffect(() => {
     const onHash = () => {

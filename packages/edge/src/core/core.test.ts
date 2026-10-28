@@ -10,6 +10,7 @@ import {
   MOVE_MERGE_MS,
   mergeMoves,
   type StoredRevision,
+  prepareUndo,
   undoItemAnswer,
   undoTarget,
   mergedSummary,
@@ -965,6 +966,19 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     expect(undoItemAnswer(state, revisions, B, { kind: "card", id: "box" })).toEqual({
       allowed: false,
       reason: "You have no change to this item left to undo.",
+    });
+  });
+
+  it("runs every check of the undo itself when it answers the menu, and names what would become public", () => {
+    const everyone = circle(start(), EVERYONE_CIRCLE_ID);
+    const { state, revisions } = history(move(withTray(), "riffle", 560, 0).after, [
+      [A, [{ _tag: "circle", id: EVERYONE_CIRCLE_ID, after: { ...everyone, r: 100 } }]],
+    ]);
+    const reason = "This undo would make riffle public in Everyone. An undo never does that without asking; share it by hand.";
+    expect(() => prepareUndo(state, revisions[0]!.changes)).toThrow(reason);
+    expect(undoItemAnswer(state, revisions, A, { kind: "circle", id: EVERYONE_CIRCLE_ID })).toEqual({
+      allowed: false,
+      reason,
     });
   });
 });

@@ -18,6 +18,7 @@ import {
   mergedSummary,
   type StoredRevision,
   undoItemAnswer,
+  prepareUndo,
   undoTarget,
   refuseRaiseWhilePaused,
   refuseResume,
@@ -25,15 +26,12 @@ import {
   resolveEdits,
   restoredResource,
   ruleViolation,
-  shareDiff,
   stacksWithout,
   summarize,
-  withStackMates,
 } from "../core/changes.ts";
 import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
-  isPublicCircle,
   type Circle,
   type Member,
   type Point,
@@ -491,14 +489,16 @@ export class Kitshn extends DurableObject<Env> {
     summary: string,
     changes: ReadonlyArray<Change | Forget>,
     undoes: number | null,
+    itemUndo: number | null = null,
   ) {
     const [row] = this.sql<{ id: number }>(
-      "INSERT INTO revisions (at, actor, summary, changes, undoes) VALUES (?, ?, ?, ?, ?) RETURNING id",
+      "INSERT INTO revisions (at, actor, summary, changes, undoes, item_undo) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
       Date.now(),
       JSON.stringify(actor),
       summary,
       JSON.stringify(changes),
       undoes,
+      itemUndo,
     );
     if (!row) throw new Error("The revision insert returned no id.");
     return row.id;
@@ -560,7 +560,7 @@ export class Kitshn extends DurableObject<Env> {
         );
         return merge.id;
       }
-      return this.insertRevision(actor, summary, changes, undoes);
+      return this.insertRevision(actor, summary, changes, undoes, undo?.item ? undo.revision : null);
     });
     this.state = after;
     for (const change of changes) {
@@ -585,9 +585,10 @@ export class Kitshn extends DurableObject<Env> {
       summary: string;
       changes: string;
       undoes: number | null;
-    }>("SELECT id, at, actor, summary, changes, undoes FROM revisions ORDER BY id DESC LIMIT 1");
-    // A per-item undo keeps `undoes` null (K-1507); its label is what marks it, and moves never join an undo.
-    if (!row || row.summary.startsWith("Undo #")) return null;
+      item_undo: number | null;
+    }>("SELECT id, at, actor, summary, changes, undoes, item_undo FROM revisions ORDER BY id DESC LIMIT 1");
+    // A per-item undo keeps `undoes` null (K-1507), and moves never join an undo.
+    if (!row || row.item_undo !== null) return null;
     const previous = JSON.parse(row.changes) as Array<Change>;
     const merged = mergeMoves(
       { actor: JSON.parse(row.actor) as Actor, at: row.at, changes: previous, undoes: row.undoes },
@@ -647,23 +648,7 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private commitUndo(actor: Actor, original: ReadonlyArray<Change>, undo: UndoOf) {
-    const inverted = invert(original);
-    const conflict = conflictOf(this.state, inverted);
-    if (conflict?._tag === "app")
-      throw new RuleError(`A later deploy or removal changed the app "${conflict.id}", so this undo no longer fits (K-909).`);
-    if (conflict) throw new RuleError(`${conflict._tag} "${conflict.id}" changed since, so this undo no longer fits.`);
-    // A card that joined a stack since then takes its stack along (K-521), but never into a public circle
-    // without the question of K-210, which an undo does not ask.
-    const changes = withStackMates(this.state, inverted);
-    const own = new Set(inverted.flatMap((change) => (change._tag === "place" ? [change.id] : [])));
-    const goingPublic = shareDiff(this.state, applyChanges(this.state, changes)).find(
-      (diff) => !own.has(diff.resource.id) && diff.to && !diff.from && isPublicCircle(diff.circle),
-    );
-    if (goingPublic)
-      throw new RuleError(
-        `This undo would make ${goingPublic.resource.name} public through its stack. Move the stack by hand.`,
-      );
-    return this.commitApps(actor, refuseResume(changes), undo);
+    return this.commitApps(actor, prepareUndo(this.state, original), undo);
   }
 
   /** K-909: removes a deployed app; the card panel, the palette and `DELETE /api/apps/<card>` all come here. */

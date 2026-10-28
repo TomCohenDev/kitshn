@@ -716,6 +716,40 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
   }
 }
 
+/**
+ * K-1502: the changes that an undo of `original` commits, after every check that a write runs: the values are
+ * still the ones the revision set, no card becomes public without the question of K-210 (which an undo does
+ * not ask), the rules of K-105 and K-521, and the pause (K-1504). The Compose stop of K-909 depends on live
+ * jobs, so the worker checks it when it commits.
+ */
+export function prepareUndo(state: State, original: ReadonlyArray<Change>): Array<Change> {
+  const inverted = invert(original);
+  const conflict = conflictOf(state, inverted);
+  if (conflict?._tag === "app")
+    throw new RuleError(`A later deploy or removal changed the app "${conflict.id}", so this undo no longer fits (K-909).`);
+  if (conflict) throw new RuleError(`${conflict._tag} "${conflict.id}" changed since, so this undo no longer fits.`);
+  // A card that joined a stack since then takes its stack along (K-521).
+  const changes = refuseResume(withStackMates(state, inverted));
+  const after = applyChanges(state, changes);
+  const own = new Set(inverted.flatMap((change) => (change._tag === "place" ? [change.id] : [])));
+  const goingPublic = shareDiff(state, after).find(
+    (diff) => !own.has(diff.resource.id) && diff.to && !diff.from && isPublicCircle(diff.circle),
+  );
+  if (goingPublic) {
+    const { resource, circle } = goingPublic;
+    const stacked = [...state.stacks.values()].some((stack) => stack.members.includes(resource.id));
+    throw new RuleError(
+      stacked
+        ? `This undo would make ${resource.name} public in ${circle.name} through its stack. Move the stack by hand.`
+        : `This undo would make ${resource.name} public in ${circle.name}. An undo never does that without asking; share it by hand.`,
+    );
+  }
+  const violation = ruleViolation(after);
+  if (violation) throw new RuleError(violation);
+  refuseRaiseWhilePaused(state, after);
+  return changes;
+}
+
 /** K-523, K-1507: whether the per-item undo of `actor` works now, or why kitshn refuses it. */
 export function undoItemAnswer(
   state: State,
@@ -724,7 +758,7 @@ export function undoItemAnswer(
   item: Item,
 ): { readonly allowed: true } | { readonly allowed: false; readonly reason: string } {
   try {
-    undoTarget(state, revisions, actor, { item });
+    prepareUndo(state, undoTarget(state, revisions, actor, { item }).changes);
     return { allowed: true };
   } catch (error) {
     if (!(error instanceof RuleError)) throw error;

@@ -73,6 +73,8 @@ import {
   paletteEnter,
   paletteEntries,
   reshareEdits,
+  type StackPart,
+  stackChoice,
   stackOntoEdits,
 } from "./actions.ts";
 import type { Rect } from "./popover.ts";
@@ -867,8 +869,8 @@ export function App() {
   };
 
   /** K-511: share or unshare without a drag, by placing the card where exactly the wanted circles hold it. */
-  const reshare = async (resource: Resource, circle: Circle, share: boolean) => {
-    const plan = reshareEdits(state, resource, circle, share);
+  const reshare = async (resource: Resource, circle: Circle, share: boolean, part: StackPart) => {
+    const plan = reshareEdits(state, resource, circle, share, part);
     if ("refused" in plan) {
       showToast({ text: plan.refused, error: true, undo: null });
       return;
@@ -968,7 +970,7 @@ export function App() {
     },
     openAddress: (address) => void open(`https://${address}`, "_blank", "noreferrer"),
     copyAddress: (address) => void navigator.clipboard.writeText(`https://${address}`),
-    reshare: (resource, circle, share) => void reshare(resource, circle, share),
+    reshare: (resource, circle, share, part) => void reshare(resource, circle, share, part),
     setLevel: (resource, circle, level) =>
       void applyEdits([levelEdit(state, resource, circle, level)]).then(
         (result) => result.ok || showToast({ text: result.error, error: true, undo: null }),
@@ -1121,7 +1123,7 @@ export function App() {
               }}
               onDeleteCircle={handlers.deleteCircle}
               onPlace={placeInView}
-              onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
+              onReshare={(resource, circle, share, part) => void reshare(resource, circle, share, part)}
               onRemoveApp={(resource) => void removeApp(resource)}
               deployed={deployed}
               pause={pauseView}
@@ -1491,7 +1493,7 @@ function Panel(props: {
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onDeleteCircle: (circle: Circle) => void;
   onPlace: (resource: Resource) => void;
-  onReshare: (resource: Resource, circle: Circle, share: boolean) => void;
+  onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   onRemoveApp: (resource: Resource) => void;
   /** K-909 */
   deployed: ReadonlySet<string>;
@@ -1777,7 +1779,7 @@ function CardPanel(props: {
   access: import("../core/protocol.ts").AccessState | null;
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onPlace: (resource: Resource) => void;
-  onReshare: (resource: Resource, circle: Circle, share: boolean) => void;
+  onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   onRemoveApp: (resource: Resource) => void;
   /** K-909: a deploy made this card, so "Remove app" applies. */
   deployed: boolean;
@@ -1791,8 +1793,23 @@ function CardPanel(props: {
   const { resource, state, machine } = props;
   const holding = circlesHolding(state, resource.id);
   const address = resource.addresses[0];
+  const stack = [...state.stacks.values()].find((each) => each.members.includes(resource.id));
+  const [removing, setRemoving] = useState<{ readonly circle: Circle; readonly anchor: Rect } | null>(null);
   return (
     <section>
+      {removing && stack ? (
+        <Menu label={`Remove from ${removing.circle.name}`} anchor={removing.anchor} onClose={() => setRemoving(null)}>
+          {stackChoice(stack).map(({ part, label, tip }) => (
+            <MenuItem
+              key={part}
+              tip={`${tip} out of ${removing.circle.name}.`}
+              onSelect={() => props.onReshare(resource, removing.circle, false, part)}
+            >
+              {label}
+            </MenuItem>
+          ))}
+        </Menu>
+      ) : null}
       <div class="label" data-tip={KINDS[resource.kind].help}>
         {KINDS[resource.kind].label}
       </div>
@@ -1939,8 +1956,17 @@ function CardPanel(props: {
                   </span>
                   <button
                     class="btn"
-                    data-tip={`Remove ${resource.name} from ${circle.name}, without a drag.`}
-                    onClick={() => props.onReshare(resource, circle, false)}
+                    aria-haspopup={stack ? "menu" : undefined}
+                    data-tip={
+                      stack
+                        ? `Remove ${resource.name} or all of ${stack.name} from ${circle.name}, without a drag.`
+                        : `Remove ${resource.name} from ${circle.name}, without a drag.`
+                    }
+                    onClick={(event) => {
+                      // K-527: a stacked card asks which part leaves; Escape or a click outside does nothing.
+                      if (stack) setRemoving({ circle, anchor: event.currentTarget.getBoundingClientRect() });
+                      else props.onReshare(resource, circle, false, "stack");
+                    }}
                   >
                     Remove
                   </button>
@@ -1987,7 +2013,7 @@ function CardPanel(props: {
                   key={circle.id}
                   class="btn"
                   data-tip={`Share ${resource.name} with ${circle.name} at ${circle.level}, without a drag.`}
-                  onClick={() => props.onReshare(resource, circle, true)}
+                  onClick={() => props.onReshare(resource, circle, true, "stack")}
                 >
                   <span class="swatch" style={{ background: circle.color }} /> {circle.name}
                 </button>

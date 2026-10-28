@@ -27,7 +27,9 @@ import {
   paletteArrow,
   paletteEnter,
   paletteEntries,
+  reshareEdits,
 } from "./actions.ts";
+import { applyChanges, resolveEdits } from "../core/changes.ts";
 
 /** K-523: the action list per item kind. The menu and the palette both read these lists. */
 
@@ -147,7 +149,7 @@ describe("card actions", () => {
     run(find(groups, "remove-app"));
     run(items(find(groups, "share"))[1] as Action);
     expect(calls.map(([name]) => name)).toEqual(["removeApp", "reshare"]);
-    expect(calls[1]).toMatchObject(["reshare", { id: "riffle" }, { id: "her" }, true]);
+    expect(calls[1]).toMatchObject(["reshare", { id: "riffle" }, { id: "her" }, true, "stack"]);
   });
 
   it("gives a machine its level per circle and its daemon commands, and Update only with a release", () => {
@@ -240,6 +242,42 @@ describe("stack, circle and map actions", () => {
 
   it("has no menu for an item that is gone", () => {
     expect(actionsFor(context(), recorder().handlers, { _tag: "card", id: "gone" })).toBeNull();
+  });
+});
+
+describe("a stacked card leaves a circle (K-527)", () => {
+  it("asks whether the card or its stack leaves, and a card that is not stacked does not ask", () => {
+    const { handlers, calls } = recorder();
+    const unshare = find(actionsFor(context(), handlers, { _tag: "card", id: "a" }), "unshare");
+    const her = items(unshare).find((item) => item.id === "unshare:her");
+    if (!her) throw new Error("no Her item");
+    expect(items(her).map((item) => item.label)).toEqual(["This card", "Docs (2)"]);
+    run(items(her)[0] as Action);
+    expect(calls[0]).toMatchObject(["reshare", { id: "a" }, { id: "her" }, false, "card"]);
+    const loose = find(actionsFor(context(), handlers, { _tag: "card", id: "riffle" }), "unshare");
+    expect(items(loose).every((item) => "run" in item)).toBe(true);
+  });
+
+  it("moves only the card out of its stack, or the whole stack", () => {
+    const { state } = context();
+    const a = state.resources.get("a");
+    const her = state.circles.get("her");
+    if (!a || !her) throw new Error("fixture");
+    const moved = (part: "card" | "stack") => {
+      const plan = reshareEdits(state, a, her, false, part);
+      if ("refused" in plan) throw new Error(plan.refused);
+      const after = applyChanges(state, resolveEdits(state, plan.edits));
+      return { stack: after.stacks.get("s1") ?? null, b: after.places.get("b"), a: after.places.get("a") };
+    };
+    // The card leaves alone: a stack left with one card goes, and the other card stays where it was.
+    const card = moved("card");
+    expect(card.stack).toBeNull();
+    expect(card.b).toEqual({ x: -500, y: 0 });
+    expect(card.a).not.toEqual({ x: -500, y: 0 });
+    // The stack leaves together, as before.
+    const stack = moved("stack");
+    expect(stack.stack?.members).toEqual(["a", "b"]);
+    expect(stack.b).toEqual(stack.a);
   });
 });
 

@@ -263,6 +263,13 @@ const firstOf = (stack: Stack): string => {
 const ownStack = (state: State, id: string): Stack | undefined =>
   [...state.stacks.values()].find((stack) => stack.members.includes(id));
 
+/** K-527: the two answers when a stacked card leaves a circle, worded for the menu and the panel's Remove. */
+export const stackChoice = (stack: Stack) =>
+  [
+    { part: "card", label: "This card", tip: "Take only this card out of its stack and" },
+    { part: "stack", label: `${stack.name} (${stack.members.length})`, tip: `Move all ${stack.members.length} cards of ${stack.name}` },
+  ] as const satisfies ReadonlyArray<{ part: StackPart; label: string; tip: string }>;
+
 const plans = new WeakMap<State, Map<string, ReturnType<typeof reshareEdits>>>();
 /** `reshareEdits`, cached per state like `refusedBy`. */
 const cachedReshare = (state: State, resource: Resource, circle: Circle, share: boolean, part: StackPart = "stack") => {
@@ -295,7 +302,7 @@ function shareActions(state: State, h: ActionHandlers, resource: Resource): Arra
                 label: circle.name,
                 tip: `Share ${resource.name} with ${circle.name} at ${circle.level}. Its other circles stay.`,
                 ...("refused" in plan ? { refused: plan.refused } : {}),
-                run: () => h.reshare(resource, circle, true),
+                run: () => h.reshare(resource, circle, true, "stack"),
               };
             }),
           },
@@ -307,14 +314,26 @@ function shareActions(state: State, h: ActionHandlers, resource: Resource): Arra
             id: "unshare",
             label: "Unshare from",
             tip: `Move ${resource.name} out of one circle, without a drag. Its other circles stay.`,
-            items: held.map((circle) => {
-              const plan = cachedReshare(state, resource, circle, false);
+            items: held.map((circle): Action => {
+              const stack = ownStack(state, resource.id);
+              const option = (part: StackPart, label: string, tip: string): Action => {
+                const plan = cachedReshare(state, resource, circle, false, part);
+                return {
+                  id: stack ? `unshare:${circle.id}:${part}` : `unshare:${circle.id}`,
+                  label,
+                  tip,
+                  ...("refused" in plan ? { refused: plan.refused } : {}),
+                  run: () => h.reshare(resource, circle, false, part),
+                };
+              };
+              if (!stack)
+                return option("stack", circle.name, `Move ${resource.name} out of ${circle.name}. Its other circles stay.`);
+              // K-527: a stacked card asks which part leaves; it is a choice, not a confirm.
               return {
                 id: `unshare:${circle.id}`,
                 label: circle.name,
-                tip: `Move ${resource.name} out of ${circle.name}. Its other circles stay.`,
-                ...("refused" in plan ? { refused: plan.refused } : {}),
-                run: () => h.reshare(resource, circle, false),
+                tip: `Move ${resource.name} or its whole stack out of ${circle.name}.`,
+                items: stackChoice(stack).map(({ part, label, tip }) => option(part, label, `${tip} out of ${circle.name}.`)),
               };
             }),
           },

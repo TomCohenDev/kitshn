@@ -82,6 +82,15 @@ export type Change =
       readonly after: AppCard | null;
     };
 
+/**
+ * K-1506: a card that kitshn deleted outside an edit (a live site that stopped, a closed preview, a removed
+ * machine, a deleted page or file). It only marks the card for the undo rules; nothing applies or reverses it.
+ */
+export type Forget = { readonly _tag: "forget"; readonly id: string; readonly before: null; readonly after: null };
+
+/** K-1506: a revision with only forgets records an action, which has nothing to undo. */
+export const isAction = (changes: ReadonlyArray<Change | Forget>) => changes.every((change) => change._tag === "forget");
+
 export type Actor =
   | { readonly _tag: "person"; readonly email: string }
   | { readonly _tag: "device"; readonly clientId: string; readonly name: string }
@@ -335,12 +344,12 @@ export function itemParts(changes: ReadonlyArray<Change>, item: Item): Array<Cha
  * `all` adds every circle that holds or held one of their cards, at any point that the changes or `state`
  * give it. `pool` holds every circle shape to test, also shapes that no longer exist.
  */
-function footprint(changes: ReadonlyArray<Change>, state: State, pool: ReadonlyArray<Circle>) {
+function footprint(changes: ReadonlyArray<Change | Forget>, state: State, pool: ReadonlyArray<Circle>) {
   const cards = new Set<string>();
   const changed = new Set<string>();
   const points: Array<Point> = [];
   for (const change of changes) {
-    if (change._tag === "place" || change._tag === "app") cards.add(change.id);
+    if (change._tag === "place" || change._tag === "app" || change._tag === "forget") cards.add(change.id);
     if (change._tag === "place") points.push(...[change.before, change.after].filter((point) => point !== null));
     if (change._tag === "circle") changed.add(change.id);
     if (change._tag === "stack")
@@ -360,14 +369,18 @@ function footprint(changes: ReadonlyArray<Change>, state: State, pool: ReadonlyA
   return { cards, changed, all };
 }
 
-const circleShapes = (changes: ReadonlyArray<Change>) =>
+const circleShapes = (changes: ReadonlyArray<Change | Forget>) =>
   changes.flatMap((change) => (change._tag === "circle" ? [change.before, change.after].filter((c) => c !== null) : []));
 
 /**
  * K-1506: whether two sets of changes depend on each other: they touch the same card, or one changes a
  * circle that a card of the other is or was in.
  */
-export function overlaps(a: ReadonlyArray<Change>, b: ReadonlyArray<Change>, state: State): boolean {
+export function overlaps(
+  a: ReadonlyArray<Change | Forget>,
+  b: ReadonlyArray<Change | Forget>,
+  state: State,
+): boolean {
   const pool = [...state.circles.values(), ...circleShapes(a), ...circleShapes(b)];
   const one = footprint(a, state, pool);
   const two = footprint(b, state, pool);
@@ -380,9 +393,11 @@ export interface StoredRevision {
   readonly id: number;
   readonly actor: Actor;
   readonly summary: string;
-  readonly changes: ReadonlyArray<Change>;
+  readonly changes: ReadonlyArray<Change | Forget>;
   readonly undoes: number | null;
 }
+
+const isChange = (change: Change | Forget): change is Change => change._tag !== "forget";
 
 /**
  * K-1506, K-1507: what an undo by `actor` reverses: its own newest revision that is in effect (or, with an
@@ -399,7 +414,7 @@ export function undoTarget(
   const own = revisions
     .filter(
       (revision) =>
-        revision.changes.length > 0 &&
+        !isAction(revision.changes) &&
         revision.undoes === null &&
         !undone.has(revision.id) &&
         deepEqual(revision.actor, actor),
@@ -410,7 +425,7 @@ export function undoTarget(
   if ("revision" in target) {
     const asked = revisions.find((revision) => revision.id === target.revision);
     if (!asked) throw new RuleError(`Revision #${target.revision} does not exist, or it is older than the history keeps.`);
-    if (asked.changes.length === 0)
+    if (isAction(asked.changes))
       throw new RuleError(`Revision #${asked.id} records an action, not a change, so it has nothing to undo.`);
     if (asked.undoes !== null) throw new RuleError(`Revision #${asked.id} is an undo. Make the change again instead.`);
     if (undone.has(asked.id)) throw new RuleError(`Revision #${asked.id} is undone already.`);
@@ -421,14 +436,15 @@ export function undoTarget(
           ? `Only your newest change can be undone: #${found.id} "${found.summary}".`
           : `Revision #${asked.id} is not yours, and only your own newest change can be undone.`,
       );
-    changes = found.changes;
+    changes = found.changes.filter(isChange);
   } else {
     const item = target.item;
-    found = own.find((revision) => itemParts(revision.changes, item).length > 0);
+    found = own.find((revision) => itemParts(revision.changes.filter(isChange), item).length > 0);
     if (!found) throw new RuleError("You have no change to this item left to undo.");
-    changes = itemParts(found.changes, item);
+    const all = found.changes.filter(isChange);
+    changes = itemParts(all, item);
     // The rest of the revision can depend on this part, such as a circle that opened while the card left it.
-    const rest = found.changes.filter((change) => !changes.includes(change));
+    const rest = all.filter((change) => !changes.includes(change));
     if (rest.length > 0 && overlaps(changes, rest, state))
       throw new RuleError(`#${found.id} "${found.summary}" changed more that depends on this item: undo the whole change instead.`);
   }

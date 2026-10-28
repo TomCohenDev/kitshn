@@ -3,6 +3,7 @@ import { circlePolicies, desiredAccess } from "./access.ts";
 import {
   type Actor,
   applyChanges,
+  type Change,
   conflictOf,
   type Edit,
   invert,
@@ -775,7 +776,7 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
 
   /** A small History: each step is an actor and edits; returns the state and the stored revisions. */
   const history = (state: State, steps: ReadonlyArray<readonly [Actor, Array<Edit>]>) => {
-    const revisions: Array<StoredRevision> = [];
+    const revisions: Array<StoredRevision & { readonly changes: ReadonlyArray<Change> }> = [];
     for (const [actor, edits] of steps) {
       const step = edit(state, edits);
       revisions.push({ id: revisions.length + 1, actor, summary: `step ${revisions.length + 1}`, changes: step.changes, undoes: null });
@@ -918,17 +919,20 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     expect(undoTarget(state, revisions, A, { revision: 1 }).revision).toBe(1);
   });
 
-  it("refuses an undo for a card whose id was forgotten and made again", () => {
-    const { state, revisions } = history(withTray(), [[A, [place("box", 400, 0)]]]);
-    // The live site stopped: kitshn forgot the card with its place (forgetCard), then the site came back.
-    const forgotten: StoredRevision = {
-      id: 2,
+  it("refuses an undo for a card whose id was forgotten and made again, also from the tray", () => {
+    const forget = (id: number): StoredRevision => ({
+      id,
       actor: KITSHN,
       summary: "stopped exposing box",
-      changes: [{ _tag: "place", id: "box", before: { x: 400, y: 0 }, after: null }],
+      changes: [{ _tag: "forget", id: "box", before: null, after: null }],
       undoes: null,
-    };
-    const again = applyChanges(state, forgotten.changes);
-    expect(() => undoTarget(again, [...revisions, forgotten], A, { revision: 1 })).toThrow(/#2 "stopped exposing box"/);
+    });
+    const placed = history(withTray(), [[A, [place("box", 400, 0)]]]);
+    // forgetCard deleted the card; the live site then came back with the same id, in the tray.
+    const again = applyChanges(placed.state, [{ _tag: "place", id: "box", before: { x: 400, y: 0 }, after: null }]);
+    expect(() => undoTarget(again, [...placed.revisions, forget(2)], A, { revision: 1 })).toThrow(/#2 "stopped exposing box"/);
+    const trayed = history(move(withTray(), "box", 400, 0).after, [[A, [{ _tag: "place", id: "box", after: null }]]]);
+    expect(() => undoTarget(trayed.state, [...trayed.revisions, forget(2)], A, { revision: 1 })).toThrow(/#2/);
+    expect(() => undoTarget(trayed.state, [forget(1)], KITSHN, { revision: 1 })).toThrow(/records an action/);
   });
 });

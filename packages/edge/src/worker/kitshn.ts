@@ -7,6 +7,7 @@ import {
   type AppCard,
   type Change,
   type Edit,
+  type Forget,
   RuleError,
   applyChanges,
   conflictOf,
@@ -344,7 +345,9 @@ export class Kitshn extends DurableObject<Env> {
       undoes: number | null;
       empty: number;
     }>(
-      "SELECT id, at, actor, summary, undoes, changes = '[]' AS empty FROM revisions ORDER BY id DESC LIMIT ?",
+      `SELECT id, at, actor, summary, undoes,
+         NOT EXISTS (SELECT 1 FROM json_each(changes) WHERE json_extract(value, '$._tag') != 'forget') AS empty
+       FROM revisions ORDER BY id DESC LIMIT ?`,
       RECENT_REVISIONS,
     );
     const undone = new Map(
@@ -477,7 +480,7 @@ export class Kitshn extends DurableObject<Env> {
   private insertRevision(
     actor: Actor,
     summary: string,
-    changes: ReadonlyArray<Change>,
+    changes: ReadonlyArray<Change | Forget>,
     undoes: number | null,
   ) {
     const [row] = this.sql<{ id: number }>(
@@ -1618,17 +1621,17 @@ export class Kitshn extends DurableObject<Env> {
     }
     this.ctx.storage.transactionSync(() => {
       for (const table of ["machines", "presence"]) this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
-      this.forgetCard(id);
+      const forgotten = [this.forgetCard(id)];
       this.sql("DELETE FROM jobs WHERE machine_id = ? AND state IN ('queued', 'sent')", id);
       this.sql("DELETE FROM join_codes WHERE machine_id = ?", id);
       this.sql("DELETE FROM rekey_codes WHERE machine_id = ?", id);
       this.sql("DELETE FROM tunnel_objects WHERE machine_id = ?", id);
       for (const site of this.sitesOf(id)) {
         this.sql("DELETE FROM live_sites WHERE id = ?", site.id);
-        this.forgetCard(site.id);
+        forgotten.push(this.forgetCard(site.id));
       }
       const key = machine.key?.kind === "public" ? ` and its key ${machine.key.fingerprint}` : "";
-      this.insertRevision(caller.actor, `Removed machine ${machine.name}${key}`, [], null);
+      this.insertRevision(caller.actor, `Removed machine ${machine.name}${key}`, forgotten, null);
     });
     this.presence.delete(id);
     this.keyFailures.delete(id);
@@ -1989,30 +1992,22 @@ export class Kitshn extends DurableObject<Env> {
     return stale || checking || this.dnsWork().length > 0 || this.routeWork().length > 0;
   }
 
-  /** Deletes a card's rows and takes it out of its stack, inside the caller's transaction (K-522). */
   /**
-   * Deletes a card with its place, share settings and stack entry. Returns those as changes, so the revision
-   * that records it touches the card, and an older undo cannot give a new card of the same id its shares (K-1506).
+   * Deletes a card's rows and takes it out of its stack, inside the caller's transaction (K-522). Returns the
+   * mark that the revision of the deletion stores, so an older undo never touches a new card of the same id (K-1506).
    */
-  private forgetCard(id: string): Array<Change> {
-    const changes: Array<Change> = [];
-    const [place] = this.sql<{ x: number; y: number }>("SELECT x, y FROM places WHERE id = ?", id);
-    if (place) changes.push({ _tag: "place", id, before: { x: place.x, y: place.y }, after: null });
-    for (const row of this.sql<{ id: string; body: string }>("SELECT id, body FROM share_settings WHERE id LIKE ?", `${id}/%`))
-      changes.push({ _tag: "shareSetting", id: row.id, before: JSON.parse(row.body) as ShareSetting, after: null });
+  private forgetCard(id: string): Forget {
     for (const table of ["resources", "places"]) this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
     this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);
     const stacks = this.sql<{ id: string; body: string }>("SELECT id, body FROM stacks").map(
       (row) => JSON.parse(row.body) as Stack,
     );
     for (const change of stacksWithout(stacks, id)) {
-      changes.push({ _tag: "stack", id: change.id, before: stacks.find((stack) => stack.id === change.id) ?? null, after: change.after });
       if (change.after) this.sql("UPDATE stacks SET body = ? WHERE id = ?", JSON.stringify(change.after), change.id);
       else this.sql("DELETE FROM stacks WHERE id = ?", change.id);
     }
-    return changes;
+    return { _tag: "forget", id, before: null, after: null };
   }
-
 
   private sitesOf(machineId: string) {
     return [...this.liveSites.values()].filter((site) => site.machineId === machineId);
@@ -2096,14 +2091,13 @@ export class Kitshn extends DurableObject<Env> {
         // A removed app has its History entry already (K-909).
         const hadCard = this.state.resources.has(site.id);
         const forgotten = this.forgetCard(site.id);
-        if (hadCard && (site.state === "ok" || forgotten.length > 0)) {
+        if (hadCard)
           this.insertRevision(
             { _tag: "kitshn", reason: `live site on ${machine.name}` },
             `${machine.name} stopped exposing ${site.address}`,
-            forgotten,
+            [forgotten],
             null,
           );
-        }
       }
     });
     for (const reason of refused) console.warn(`kitshn refused a live site of ${machine.name}: ${reason}`);
@@ -3247,7 +3241,12 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
       // A preview that never came up has no live site to take its card away.
       if (resource && ![...this.liveSites.values()].some((site) => site.id === row.resource_id))
-        this.forgetCard(row.resource_id);
+        this.insertRevision(
+          { _tag: "kitshn", reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}` },
+          `Removed ${resource.name}, its preview closed (K-904)`,
+          [this.forgetCard(row.resource_id)],
+          null,
+        );
     });
     this.load();
     this.deliverJobs();
@@ -3349,7 +3348,7 @@ export class Kitshn extends DurableObject<Env> {
         this.insertRevision(
           { _tag: "kitshn", reason: `pull request closed in ${row.repo}, ${deployer.sha.slice(0, 7)}` },
           `Removed ${resource?.name ?? row.environment}, its preview closed (K-904)`,
-          forgotten,
+          [forgotten],
           null,
         );
     });
@@ -3814,8 +3813,7 @@ export class Kitshn extends DurableObject<Env> {
         id,
       );
       this.sql("DELETE FROM library WHERE id = ?", id);
-      this.forgetCard(id);
-      this.insertRevision(caller.actor, `Deleted the ${item.kind} ${item.title}`, [], null);
+      this.insertRevision(caller.actor, `Deleted the ${item.kind} ${item.title}`, [this.forgetCard(id)], null);
     });
     this.load();
     this.broadcast();

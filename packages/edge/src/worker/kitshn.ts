@@ -2865,7 +2865,12 @@ export class Kitshn extends DurableObject<Env> {
     const forgetError =
       state === "forget"
         ? forgetRefusal(
-            { name: row.name, state: row.state, goneOnGitHub: row.gone_at !== null },
+            {
+              name: row.name,
+              state: row.state,
+              goneOnGitHub: row.gone_at !== null,
+              keyRemoved: this.keyRemoved(repoGateOf(row)),
+            },
             (this.repoCards().get(repoId) ?? []).length,
           )
         : null;
@@ -2982,8 +2987,10 @@ export class Kitshn extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       for (const row of due) {
         const answer = found.get(row.repo_id);
-        if (answer === undefined || answer === "unknown") continue;
-        const goneAt = answer === "gone" ? (row.gone_at ?? now) : null;
+        // A skipped repo (the call budget ran out) waits for the next check; every answer counts as a check,
+        // so an unknown repo never sorts first again and starves the others.
+        if (answer === undefined) continue;
+        const goneAt = answer === "gone" ? (row.gone_at ?? now) : answer === "unknown" ? row.gone_at : null;
         // A deploy step or Forget can change the row while GitHub answers; it then keeps what they wrote.
         const [updated] = this.sql<{ repo_id: string }>(
           "UPDATE repos SET checked_at = ?, gone_at = ? WHERE repo_id = ? AND gone_at IS ? RETURNING repo_id",
@@ -3842,6 +3849,7 @@ export class Kitshn extends DurableObject<Env> {
         row ? repoGateOf(row) : undefined,
         isRecord(body) ? body["state"] : null,
         agentHas(this.state, caller.visitor, "addsApps", Date.now()),
+        row?.gone_at !== null && row?.gone_at !== undefined,
       );
       if (refusal) return Response.json({ error: refusal.error }, { status: refusal.status });
       // An agent circle names this key, so its device member exists.

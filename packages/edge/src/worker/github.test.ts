@@ -83,6 +83,12 @@ describe("deleted repos on GitHub (K-819)", () => {
     );
     expect((await reposOnGitHub(app, repos, 40)).get("1002")).toBe("unknown");
   });
+  it("reads a stored id that is not a GitHub id as unknown and checks the rest", async () => {
+    using _fetch = github([all], () => Response.json({}, { status: 404 }));
+    const found = await reposOnGitHub(app, [{ repoId: "demo-1", name: "owner/odd" }, ...repos], 40);
+    expect(found.get("demo-1")).toBe("unknown");
+    expect(found.get("1002")).toBe("gone");
+  });
   it("finds a repo that another installation still sees", async () => {
     const other = { id: 7, account: { login: "someone" }, repository_selection: "selected" };
     using _fetch = github([all, other], (_path, token) =>

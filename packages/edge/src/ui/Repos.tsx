@@ -47,7 +47,10 @@ export const GONE_STICKER = {
   tip: "Deleted on GitHub: GitHub has no repo with this id anymore. Forget takes it off this list.",
 } as const;
 
-/** K-819: the tooltip of Forget, which every repo row offers. */
+/** K-819: a row hides Forget when only another action (Allow, Take over, Block) can make it work. */
+const forgetHidden = (repo: RepoView) => !repo.goneOnGitHub && (repo.state === "blocked" || repo.keyRemoved);
+
+/** K-819: the tooltip of Forget. A repo with apps keeps the button, and its tooltip says why it waits. */
 function forgetTip(repo: RepoView) {
   const refused = forgetRefusal(repo, repo.resourceIds.length);
   if (refused) return refused;
@@ -151,7 +154,7 @@ export function RepoList(props: {
                   Start {repo.branch}
                 </button>
               ) : null}
-              {repo.state !== "blocked" && !repo.goneOnGitHub ? (
+              {repo.state !== "blocked" ? (
                 <button
                   type="button"
                   class="btn danger"
@@ -162,15 +165,18 @@ export function RepoList(props: {
                   Block
                 </button>
               ) : null}
-              <button
-                type="button"
-                class="btn"
-                disabled={busy.has(repo.repoId)}
-                data-tip={forgetTip(repo)}
-                onClick={() => void decide(repo, "forget")}
-              >
-                Forget
-              </button>
+              {/* A blocked repo, or one of a removed key, is forgotten only after GitHub deleted it (K-819). */}
+              {forgetHidden(repo) ? null : (
+                <button
+                  type="button"
+                  class="btn"
+                  disabled={busy.has(repo.repoId)}
+                  data-tip={forgetTip(repo)}
+                  onClick={() => void decide(repo, "forget")}
+                >
+                  Forget
+                </button>
+              )}
             </li>
           ))}
       </ul>

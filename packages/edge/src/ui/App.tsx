@@ -1839,7 +1839,8 @@ function CardPanel(props: {
               {props.repo.state}
             </span>
           )}
-          {props.repo.goneOnGitHub ? null : (
+          {/* A repo marked deleted keeps Block, so a wrong mark stays recoverable; it never offers Allow. */}
+          {props.repo.goneOnGitHub && props.repo.state === "blocked" ? null : (
             <button
               type="button"
               class={props.repo.state === "blocked" ? "btn" : "btn danger"}

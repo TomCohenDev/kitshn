@@ -178,6 +178,12 @@ export async function reposOnGitHub(
   }
   for (const repo of repos) {
     if (calls + installations.length > maxCalls) break;
+    // A stored id that is not a GitHub repository id is unknown, so one bad row never stops the check.
+    const id = Number(repo.repoId);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      found.set(repo.repoId, "unknown");
+      continue;
+    }
     const owner = repo.name.split("/")[0]?.toLowerCase() ?? "";
     let answer: RepoOnGitHub = installations.some((each) => each.all && each.owner === owner)
       ? "gone"
@@ -188,7 +194,7 @@ export async function reposOnGitHub(
         continue;
       }
       calls++;
-      const status = await call(token, "GET", `/repositories/${repositoryId(repo.repoId)}`)
+      const status = await call(token, "GET", `/repositories/${id}`)
         .then(() => 200)
         .catch((error: unknown) => (error instanceof GitHubError ? error.status : null));
       if (status === 200) {

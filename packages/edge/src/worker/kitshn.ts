@@ -2404,17 +2404,17 @@ export class Kitshn extends DurableObject<Env> {
   private async signOut(caller: Caller) {
     // K-110: the Worker checks pages and files itself, so it refuses every login from before this second.
     this.setMeta("signed_out_at", String(Math.floor(Date.now() / 1000) * 1000));
-    // K-110: no confirm in the map, so History records each sign-out, also one that only the Worker did.
-    const record = (summary: string) => {
-      this.insertRevision(caller.actor, `Signed out everywhere: ${summary}`, [], null);
-      this.load();
-      this.broadcast();
-    };
+    // K-110: no confirm in the map, so History records each sign-out before any Cloudflare call; the toast
+    // says how many Access applications ended their sessions.
+    const at = Date.now();
+    const id = this.insertRevision(caller.actor, "Signed out everywhere", [], null);
+    this.revisions = [
+      { id, at, actor: caller.actor, summary: "Signed out everywhere", undoes: null, undoneBy: null, undoable: false },
+      ...this.revisions,
+    ].slice(0, RECENT_REVISIONS);
+    this.broadcast();
     const api = this.api();
-    if (!api) {
-      record("page and file logins only, as kitshn has no Cloudflare API token");
-      return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
-    }
+    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
     try {
       const account = this.env.CLOUDFLARE_ACCOUNT_ID;
       const logins = new Set(
@@ -2430,12 +2430,8 @@ export class Kitshn extends DurableObject<Env> {
       const loginApps = all
         .filter((app) => logins.has(app.domain) && app.name.startsWith(ACCESS_NAME_PREFIX))
         .map((app) => ({ key: app.domain, cfId: app.id }));
-      const result = await signOutEverywhere(this.accessStore(), api, account, loginApps);
-      const failed = result.failed.length > 0 ? `; ${result.failed.length} failed` : "";
-      record(`ended the sessions of ${result.ended} applications${failed}`);
-      return Response.json(result);
+      return Response.json(await signOutEverywhere(this.accessStore(), api, account, loginApps));
     } catch (error) {
-      record("page and file logins only, as Cloudflare refused the list of applications");
       return Response.json({ error: String(error) }, { status: 502 });
     }
   }

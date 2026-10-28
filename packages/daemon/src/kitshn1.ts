@@ -39,6 +39,14 @@ export function takeoverPlan(input: {
   if (input.hasData || input.taken) return { kind: "skip", note: null };
   const old = kitshn1Deployment(input.repo, input.environment, input.persistentRoot);
   if (!old) return { kind: "skip", note: null };
+  // Preview data is throwaway: a pull request preview starts fresh, and its KitSHn 1 folder waits for its deletion.
+  if (/^pr-\d+$/.test(input.environment))
+    return {
+      kind: "skip",
+      note: input.exists(old.dataDir)
+        ? `A preview takes no KitSHn 1 data; ${old.dataDir} stays for its deletion, and the app starts empty (K-1404).`
+        : null,
+    };
   // The note is for a renamed repo: KitSHn 1 knew the owner and app, but not this environment's folder.
   if (!input.exists(old.dataDir))
     return {

@@ -2,6 +2,7 @@ import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { expect, it } from "vitest";
 import type { Circle, Resource } from "../src/core/model.ts";
+import { BADGE_DEPLOY_QUERY } from "../src/worker/deploys.ts";
 import { send } from "./access.ts";
 
 const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1]);
@@ -159,9 +160,7 @@ it("draws the newest deploy of a card that anyone may open, and unknown for ever
     state.storage.sql.exec("UPDATE deploys SET resource_id = 'tick3d' WHERE id = 'deploy-down-2'");
     // Anyone can ask for any name, so the lookup must use the index of migration 20.
     const plan = state.storage.sql
-      .exec<{ detail: string }>(
-        "EXPLAIN QUERY PLAN SELECT state FROM deploys WHERE lower(repo) = lower('x') AND app_key = 'app' AND environment = 'prod'",
-      )
+      .exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${BADGE_DEPLOY_QUERY}`, "o/x", "app", "prod")
       .toArray();
     expect(plan.map((step) => step.detail).join(" ")).toContain("deploys_badge");
   });

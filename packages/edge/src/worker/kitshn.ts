@@ -151,6 +151,7 @@ import { type RepoOnGitHub, dispatchDeploy, reposOnGitHub } from "./github.ts";
 import { REPLACED, dropLiveSite, failQueuedDowns, removalDown, requeueDowns } from "./downs.ts";
 import { REPO_GATE_MIGRATION, migrate } from "./migrations.ts";
 import {
+  BADGE_DEPLOY_QUERY,
   DEPLOY_MS,
   SCRIPT_LIMIT,
   STATIC_WORKER,
@@ -3212,10 +3213,8 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-1119: the badge state of the newest deploy of one repo, app and environment. Skipped deploys do not count. */
   private badge(query: URLSearchParams) {
-    // The index deploys_badge (migration 20) serves this lookup.
     const [row] = this.sql<{ resource_id: string; state: string; expires_at: number }>(
-      `SELECT resource_id, state, expires_at FROM deploys WHERE lower(repo) = lower(?) AND app_key = ? AND environment = ?
-       AND kind = 'deploy' AND state != 'skipped' ORDER BY rowid DESC LIMIT 1`,
+      BADGE_DEPLOY_QUERY,
       query.get("repo") ?? "",
       query.get("app") ?? "app",
       query.get("env") ?? "prod",

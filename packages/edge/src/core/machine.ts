@@ -267,6 +267,17 @@ export async function signText(key: MachinePrivateKey, text: string): Promise<st
   return base64url(new Uint8Array(await crypto.subtle.sign(ED25519, privateKey, bytes(text))));
 }
 
+/** K-1209: true when the signature fits the text of one of the hosts; during the host move, the daemon signs either. */
+export async function verifyForHosts(
+  publicKey: string,
+  hosts: ReadonlyArray<string>,
+  textFor: (host: string) => string,
+  signature: unknown,
+): Promise<boolean> {
+  for (const host of hosts) if (await verifyText(publicKey, textFor(host), signature)) return true;
+  return false;
+}
+
 /** False for a wrong signature and for a key or a signature that is not one. */
 export async function verifyText(publicKey: string, text: string, signature: unknown): Promise<boolean> {
   if (parsePublicKey(publicKey) === null || typeof signature !== "string") return false;

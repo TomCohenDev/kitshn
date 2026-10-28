@@ -73,7 +73,7 @@ import {
   newJoinCode,
   rotateText,
   sealJoin,
-  verifyText,
+  verifyForHosts,
 } from "../core/machine.ts";
 import { placeInside } from "../core/place.ts";
 import {
@@ -259,7 +259,7 @@ import {
   rekeyDecision,
   socketStart,
 } from "./machines.ts";
-import type { Env } from "./env.ts";
+import { adminHosts, type Env } from "./env.ts";
 
 /** What a WebSocket of this Durable Object belongs to. */
 type Attachment =
@@ -2679,9 +2679,10 @@ export class Kitshn extends DurableObject<Env> {
     const plan = answerCheck(machine.key, attachment);
     if (plan.kind === "refuse") return this.refuseSocket(socket, machine, plan.reason);
     socket.serializeAttachment({ ...attachment, answered: true } satisfies Attachment);
-    const valid = await verifyText(
+    const valid = await verifyForHosts(
       plan.publicKey,
-      connectText(this.env.KITSHN_HOST, machine.id, attachment.challenge),
+      adminHosts(this.env),
+      (host) => connectText(host, machine.id, attachment.challenge),
       message["signature"],
     );
     // The socket can close and the key can change during the check: a rotation, a reset or a removal.
@@ -2714,9 +2715,10 @@ export class Kitshn extends DurableObject<Env> {
     if (publicKey === null)
       return this.refuseSocket(socket, machine, "The rotation has no valid public key.");
     const key = await this.publicKey(publicKey);
-    const valid = await verifyText(
+    const valid = await verifyForHosts(
       machine.key.publicKey,
-      rotateText(this.env.KITSHN_HOST, machine.id, attachment.challenge, publicKey),
+      adminHosts(this.env),
+      (host) => rotateText(host, machine.id, attachment.challenge, publicKey),
       message["signature"],
     );
     const now = this.state.machines.get(machine.id);
@@ -5001,12 +5003,10 @@ export class Kitshn extends DurableObject<Env> {
         { status: 409 },
       );
     }
-    // K-817: the plan refuses kitshn's own names; the admin host can have another name.
-    if (result.addresses.slice(1).includes(this.env.KITSHN_HOST))
-      return Response.json(
-        { error: `${this.env.KITSHN_HOST} is the kitshn admin host (K-817).` },
-        { status: 409 },
-      );
+    // K-817, K-1209: the plan refuses kitshn's own names; the admin hosts can have other names, the main address too.
+    const adminHost = result.addresses.find((address) => adminHosts(this.env).includes(address));
+    if (adminHost)
+      return Response.json({ error: `${adminHost} is the kitshn admin host (K-817).` }, { status: 409 });
     const addressRefused = await this.addressRefusal(
       api,
       result.addresses,
@@ -7114,7 +7114,7 @@ export class Kitshn extends DurableObject<Env> {
     return new Response(object.body, {
       headers: {
         "content-type": row.kind === "page" ? "text/html; charset=utf-8" : row.content_type,
-        "content-security-policy": contentSecurityPolicy(this.env.KITSHN_HOST),
+        "content-security-policy": contentSecurityPolicy(adminHosts(this.env)),
         "x-content-type-options": "nosniff",
         "cache-control": "private, no-store",
       },

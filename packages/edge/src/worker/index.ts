@@ -21,7 +21,7 @@ import {
 import { type BadgeState, badgeSvg } from "../core/badge.ts";
 import type { Usage } from "../core/usage.ts";
 import { escapeHtml, originDown, seenText } from "./live.ts";
-import type { Env } from "./env.ts";
+import { adminHosts, type Env } from "./env.ts";
 import { readUsage } from "./usage.ts";
 import { zoneFor, zonesOf, zonesOrMain } from "./zones.ts";
 
@@ -193,7 +193,7 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
   const headers = new Headers({
     "content-type": kind === "page" ? "text/html; charset=utf-8" : item.contentType,
     "content-length": String(item.size),
-    "content-security-policy": contentSecurityPolicy(env.KITSHN_HOST),
+    "content-security-policy": contentSecurityPolicy(adminHosts(env)),
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
     "cache-control": "private, no-store",
@@ -358,7 +358,7 @@ export default {
     if (url.hostname === `files.${env.KITSHN_ZONE}`) return content(request, env, "file");
     // K-1108, K-817: only an offline route brings a live site's request here, on any zone that kitshn publishes on.
     if (
-      url.hostname !== env.KITSHN_HOST &&
+      !adminHosts(env).includes(url.hostname) &&
       (url.hostname.endsWith(`.${env.KITSHN_ZONE}`) || onOtherZone(url.hostname, env))
     ) {
       return offline(request, env, ctx);

@@ -10,6 +10,7 @@ import {
   rotateText,
   signText,
   signedHost,
+  verifyForHosts,
   verifyText,
 } from "./machine.ts";
 
@@ -55,6 +56,17 @@ describe("machine keys (K-1701 to K-1705)", () => {
     expect(await verifyText(old.x, rotateText(host, "m1", challenge, next.x), answer)).toBe(false);
     const handover = await signText(old, rotateText(host, "m1", challenge, next.x));
     expect(await verifyText(old.x, rotateText(host, "m1", challenge, next.x), handover)).toBe(true);
+  });
+
+  it("takes a signature for the old host only while that host is listed (K-1209)", async () => {
+    const key = await newMachineKey();
+    const challenge = newChallenge();
+    const signature = await signText(key, connectText("kit.example.com", "m1", challenge));
+    const textFor = (signedFor: string) => connectText(signedFor, "m1", challenge);
+    expect(await verifyForHosts(key.x, ["kitshn.example.com", "kit.example.com"], textFor, signature)).toBe(
+      true,
+    );
+    expect(await verifyForHosts(key.x, ["kitshn.example.com"], textFor, signature)).toBe(false);
   });
 
   it("signs the hostname without its port, from an address or a host", async () => {

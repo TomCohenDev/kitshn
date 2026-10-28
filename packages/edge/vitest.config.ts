@@ -36,7 +36,32 @@ export default defineConfig({
             },
           }),
         ],
-        test: { name: "workers", include: ["test/**/*.test.ts"] },
+        test: { name: "workers", include: ["test/**/*.test.ts"], exclude: ["test/deploy-worker.test.ts"] },
+      },
+      {
+        // K-806: Worker deploys through the deploy steps, against a fake of the Cloudflare API, so this project
+        // has an API token and a trusted GitHub owner, which the other tests must not have.
+        plugins: [
+          cloudflareTest({
+            wrangler: { configPath: "./wrangler.jsonc" },
+            miniflare: {
+              bindings: {
+                KITSHN_HOST: "kit.example.com",
+                KITSHN_ZONE: "example.com",
+                ACCESS_TEAM_DOMAIN: "team.example.com",
+                ACCESS_ADMIN_AUD: "admin-aud",
+                ACCESS_AGENT_AUD: "agent-aud",
+                DEV_IDENTITY: "",
+                DEV_DEMO: "",
+                CLOUDFLARE_API_TOKEN: "test-token",
+                CLOUDFLARE_ACCOUNT_ID: "acct",
+                CLOUDFLARE_ZONE_ID: "zone",
+                DEPLOY_OWNER_IDS: "1",
+              },
+            },
+          }),
+        ],
+        test: { name: "deploys", include: ["test/deploy-worker.test.ts"] },
       },
     ],
   },

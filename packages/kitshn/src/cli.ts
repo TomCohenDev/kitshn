@@ -157,9 +157,20 @@ async function deploy(server: string, dir: string) {
   console.log(`kitshn: ${done.card}`);
 }
 
+/**
+ * The environment of the build command and of npx: without the two variables that mint GitHub OIDC tokens, so code
+ * of the repo and of npm packages cannot ask for a token of this run.
+ */
+function childEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env["ACTIONS_ID_TOKEN_REQUEST_URL"];
+  delete env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"];
+  return env;
+}
+
 function runBuild(dir: string, command: string) {
   console.log(`kitshn: building with: ${command}`);
-  execFileSync("sh", ["-c", command], { cwd: dir, stdio: "inherit" });
+  execFileSync("sh", ["-c", command], { cwd: dir, stdio: "inherit", env: childEnv() });
 }
 
 /** A path of the recipe after symlinks, or a failure when it leaves the repo. */
@@ -281,10 +292,13 @@ async function deployWorker(
     const outfile = join(work, "worker.js");
     const metafile = join(work, "meta.json");
     console.log(`kitshn: bundling ${app.main} with ${ESBUILD}`);
+    // From the temporary folder and the public registry, so the .npmrc and node_modules of the repo do not choose
+    // the esbuild that runs.
     execFileSync(
       "npx",
       [
         "--yes",
+        "--registry=https://registry.npmjs.org",
         ESBUILD,
         main,
         "--bundle",
@@ -298,7 +312,7 @@ async function deployWorker(
         `--metafile=${metafile}`,
         "--log-level=warning",
       ],
-      { cwd: dir, stdio: "inherit" },
+      { cwd: work, stdio: "inherit", env: childEnv() },
     );
     const module = readFileSync(outfile, "utf8");
     const size = gzipSync(module).length;

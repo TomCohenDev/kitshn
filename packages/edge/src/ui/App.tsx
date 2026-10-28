@@ -20,6 +20,7 @@ import {
   type PauseMode,
   type PauseReach,
   type Point,
+  ADMIN_RESOURCE_ID,
   circlesHolding,
   insideCircle,
   isPublicCircle,
@@ -32,7 +33,7 @@ import { MAX_UPLOAD_BYTES } from "../core/library.ts";
 import { circleForCards, placeInside } from "../core/place.ts";
 import { awaitsAllow } from "../core/repos.ts";
 import type { Command } from "../core/machine.ts";
-import type { JobView, MachineView, RepoView, RevisionView } from "../core/protocol.ts";
+import type { JobView, MachineView, OrphanWorker, RepoView, RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
 import {
   CircleEditor,
@@ -67,7 +68,7 @@ import {
   itemKey,
   settleUndoCheck,
   slowUndoCheck,
-  REMOVE_APP_TIP,
+  removeAppTip,
   levelEdit,
   paletteEntries,
   NEW_CIRCLE,
@@ -673,6 +674,19 @@ export function App() {
     );
   };
 
+  /** K-909: deletes what a removed Worker app left; the label names it, and Undo cannot bring it back. */
+  const deleteOrphanWorker = async (orphan: OrphanWorker) => {
+    const result = await callApi<{ deleted: ReadonlyArray<string> }>(
+      "DELETE",
+      `/api/worker-storage/${encodeURIComponent(orphan.card)}`,
+    );
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: `Deleted ${result.deleted.join(", ")}.`, error: false, undo: null },
+    );
+  };
+
   /** K-909: no confirm; the toast and History undo it. */
   const removeApp = async (resource: Resource) => {
     const result = await callApi<{ revision: number | null; notes: ReadonlyArray<string> }>(
@@ -1209,6 +1223,8 @@ export function App() {
               onPlace={placeInView}
               onReshare={(resource, circle, share, part) => void reshare(resource, circle, share, part)}
               onRemoveApp={(resource) => void removeApp(resource)}
+              orphanWorkers={store.snapshot.orphanWorkers}
+              onDeleteOrphanWorker={(orphan) => void deleteOrphanWorker(orphan)}
               deployed={deployed}
               pause={pauseView}
               machines={machines}
@@ -1686,6 +1702,8 @@ function Panel(props: {
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   onRemoveApp: (resource: Resource) => void;
+  orphanWorkers: ReadonlyArray<OrphanWorker>;
+  onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
   /** K-909 */
   deployed: ReadonlySet<string>;
   pause: PauseView | null;
@@ -1741,6 +1759,8 @@ function Panel(props: {
         onPlace={props.onPlace}
         onReshare={props.onReshare}
         onRemoveApp={props.onRemoveApp}
+        orphanWorkers={cards[0].id === ADMIN_RESOURCE_ID ? props.orphanWorkers : []}
+        onDeleteOrphanWorker={props.onDeleteOrphanWorker}
         deployed={props.deployed.has(cards[0].id)}
         machine={props.machines.get(cards[0].id) ?? null}
         version={props.version}
@@ -1990,6 +2010,9 @@ function CardPanel(props: {
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   onRemoveApp: (resource: Resource) => void;
+  /** K-909: on the admin card, what removed Worker apps left in Cloudflare. */
+  orphanWorkers: ReadonlyArray<OrphanWorker>;
+  onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
   /** K-909: a deploy made this card, so "Remove app" applies. */
   deployed: boolean;
   machine: MachineView | null;
@@ -2126,9 +2149,48 @@ function CardPanel(props: {
         </button>
       ) : null}
       {isAppCard(resource) && props.deployed ? (
-        <button class="btn danger" data-tip={REMOVE_APP_TIP} onClick={() => props.onRemoveApp(resource)}>
+        <button
+          class="btn danger"
+          data-tip={removeAppTip(resource.kind)}
+          onClick={() => props.onRemoveApp(resource)}
+        >
           Remove app
         </button>
+      ) : null}
+      {props.orphanWorkers.length > 0 ? (
+        <>
+          <div
+            class="label"
+            data-tip="Orphaned Worker storage: Workers and KV namespaces of removed apps that still hold their data in Cloudflare."
+          >
+            Orphaned Worker storage
+          </div>
+          <p class="help">
+            What removed Worker apps left. Undo of a removal does not bring back deleted data.
+          </p>
+          <ul>
+            {props.orphanWorkers.map((orphan) => {
+              const parts = [
+                ...(orphan.script ? [`the Worker ${orphan.script} with its Durable Objects`] : []),
+                ...orphan.kv.map((name) => `the KV ${name}`),
+              ];
+              return (
+                <li key={orphan.card}>
+                  <div class="row">
+                    <code>{orphan.card}</code>
+                    <button
+                      class="btn danger"
+                      data-tip={`Delete ${parts.join(", ")} and their data. Undo cannot bring them back.`}
+                      onClick={() => props.onDeleteOrphanWorker(orphan)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </>
       ) : null}
       {machine ? (
         <MachinePanel

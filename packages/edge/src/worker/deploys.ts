@@ -205,53 +205,18 @@ export function parseWorkerSecrets(
   return { secrets };
 }
 
-/** K-806: one step of Durable Object migrations, as the Workers upload metadata takes it. */
-export interface ClassMigration {
-  readonly old_tag?: string;
-  readonly new_tag: string;
-  readonly new_sqlite_classes: ReadonlyArray<string>;
-}
-
-/**
- * K-806: kitshn derives the Durable Object migration from the classes of the recipe, so the recipe keeps no
- * history. A new class gets SQLite storage. A class that leaves the recipe fails the deploy, because its deletion
- * removes its data. `known` is null for a script that does not exist (yet, or again after a removal).
- */
-export function classMigration(
-  wanted: ReadonlyArray<string>,
-  known: ReadonlyArray<string> | null,
-  oldTag: string | null,
-): { readonly migration: ClassMigration | null } | { readonly error: string } {
-  const classes = [...new Set(wanted)].sort();
-  if (known !== null) {
-    const removed = known.filter((name) => !classes.includes(name));
-    if (removed.length > 0)
-      return {
-        error: `The recipe no longer names the Durable Object class ${removed.join(", ")}. kitshn does not delete a class, because that deletes its data; keep it, or remove the app on the map (K-806).`,
-      };
-  }
-  const added = known === null ? classes : classes.filter((name) => !known.includes(name));
-  if (added.length === 0) return { migration: null };
-  const last = known === null ? 0 : Number(/^kitshn-(\d+)$/.exec(oldTag ?? "")?.[1] ?? 0);
-  return {
-    migration: {
-      ...(known !== null && oldTag !== null ? { old_tag: oldTag } : {}),
-      new_tag: `kitshn-${last + 1}`,
-      new_sqlite_classes: added,
-    },
-  };
-}
-
 /**
  * K-806: the upload metadata of a Worker app. kitshn sets everything that names a place: the KV namespace ids of
- * this environment and the script itself; the recipe gives only names.
+ * this environment and the script itself; the recipe gives only names. The Durable Object classes go in the
+ * declarative `exports`, which Cloudflare reconciles with the classes that the script has on each deploy, so the
+ * metadata depends only on the recipe and never on an earlier deploy. A class that leaves the recipe still has its
+ * namespace, and Cloudflare refuses the upload; kitshn never sends a `deleted` entry.
  */
 export function workerMetadata(
   app: WorkerApp,
   input: {
     readonly kv: ReadonlyMap<string, string>;
     readonly secrets: Readonly<Record<string, string>>;
-    readonly migration: ClassMigration | null;
     readonly assets: {
       readonly jwt: string;
       readonly headers: string | null;
@@ -279,13 +244,20 @@ export function workerMetadata(
   for (const [name, text] of Object.entries(input.secrets))
     bindings.push({ type: "secret_text", name, text });
   const runWorkerFirst = app.assets?.runWorkerFirst;
+  const classes = [...new Set(Object.values(app.durableObjects ?? {}))].sort();
   const metadata = {
     main_module: "worker.js",
     compatibility_date: app.compatibilityDate,
     compatibility_flags: [...(app.compatibilityFlags ?? [])],
     bindings,
     observability: { enabled: true },
-    ...(input.migration ? { migrations: input.migration } : {}),
+    ...(classes.length > 0
+      ? {
+          exports: Object.fromEntries(
+            classes.map((name) => [name, { type: "durable-object", storage: "sqlite" }]),
+          ),
+        }
+      : {}),
     ...(app.assets !== undefined && input.assets !== null
       ? {
           assets: {

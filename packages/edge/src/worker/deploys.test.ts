@@ -6,7 +6,6 @@ import {
   parseConfigFile,
   parseManifest,
   parseSiteIcon,
-  classMigration,
   parseWorkerSecrets,
   repoIdOf,
   workerMetadata,
@@ -142,19 +141,18 @@ describe("site icon of a deploy (K-1113)", () => {
 });
 
 describe("Worker apps (K-806)", () => {
-  it("adds a new Durable Object class with SQLite storage after the script's tag", () => {
-    // A new script, also one that a removal deleted, gets every class again.
-    expect(classMigration(["Room"], null, null)).toEqual({
-      migration: { new_tag: "kitshn-1", new_sqlite_classes: ["Room"] },
-    });
-    expect(classMigration(["Room", "Lobby"], ["Room"], "kitshn-1")).toEqual({
-      migration: { old_tag: "kitshn-1", new_tag: "kitshn-2", new_sqlite_classes: ["Lobby"] },
-    });
-    expect(classMigration(["Room"], ["Room"], "kitshn-1")).toEqual({ migration: null });
-  });
-
-  it("refuses a class that leaves the recipe, because its deletion deletes its data", () => {
-    expect(classMigration([], ["Room"], "kitshn-1")).toEqual({ error: expect.stringMatching(/Room/) });
+  it("declares the Durable Object classes as exports, from the recipe only, so a retry sends the same", () => {
+    const result = workerMetadata(
+      {
+        main: "worker.js",
+        compatibilityDate: "2026-10-01",
+        durableObjects: { ROOMS: "Room", LOBBY: "Room" },
+      },
+      { kv: new Map(), secrets: {}, assets: null },
+    );
+    if ("error" in result) throw new Error(result.error);
+    expect(result.metadata["exports"]).toEqual({ Room: { type: "durable-object", storage: "sqlite" } });
+    expect(result.metadata).not.toHaveProperty("migrations");
   });
 
   it("sets the KV ids of the environment and passes the values of the run as secrets", () => {
@@ -170,7 +168,6 @@ describe("Worker apps (K-806)", () => {
       {
         kv: new Map([["STATS", "ns-1"]]),
         secrets: { GITHUB_TOKEN: "t" },
-        migration: null,
         assets: { jwt: "j", headers: null, redirects: null },
       },
     );
@@ -190,7 +187,7 @@ describe("Worker apps (K-806)", () => {
 
   it("refuses a secret with the name of a binding, and a KV binding without its namespace", () => {
     const app = { main: "worker.js", compatibilityDate: "2026-10-01", kv: ["STATS"] };
-    const base = { kv: new Map([["STATS", "ns-1"]]), secrets: {}, migration: null, assets: null };
+    const base = { kv: new Map([["STATS", "ns-1"]]), secrets: {}, assets: null };
     expect(workerMetadata(app, { ...base, secrets: { STATS: "x" } })).toEqual({
       error: expect.stringMatching(/STATS/),
     });

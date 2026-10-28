@@ -13,6 +13,13 @@ export type RepoView = RepoGate & {
   readonly goneOnGitHub: boolean;
 };
 
+/** K-909: the Worker storage of one removed card. `script` is the kept Worker with its Durable Objects. */
+export interface OrphanWorker {
+  readonly card: string;
+  readonly script: string | null;
+  readonly kv: ReadonlyArray<string>;
+}
+
 export interface RevisionView {
   readonly id: number;
   readonly at: number;
@@ -50,6 +57,8 @@ export interface Snapshot {
   readonly repos: ReadonlyArray<RepoView>;
   /** K-909: the cards that a deploy made; only these show "Remove app". */
   readonly deployedCards: ReadonlyArray<string>;
+  /** K-909: what removed Worker apps left in Cloudflare: a kept script and KV namespaces, by the removed card. */
+  readonly orphanWorkers: ReadonlyArray<OrphanWorker>;
   /** K-1113: the cards with a stored icon, each with the hash of its bytes, which versions its address. */
   readonly icons: Readonly<Record<string, string>>;
   /** K-1504: who paused and when, while paused. */

@@ -43,6 +43,14 @@ describe("app removal (K-909)", () => {
     });
   });
 
+  it("takes only the addresses of a Worker app off, so its Durable Objects and KV keep their data", () => {
+    expect(appTeardown({ ...compose, kind: "site.worker", machine: null }, "example.com")).toEqual({
+      kind: "domains",
+      addresses: ["riffle.example.com"],
+      script: `kitshn-${compose.id}`,
+    });
+  });
+
   it("starts a Compose app from its last good build and builds a site again on its branch", () => {
     expect(appRestart(last, null, false, ready)).toMatchObject({
       kind: "redeploy",

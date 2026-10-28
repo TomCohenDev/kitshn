@@ -10,6 +10,7 @@ import {
   offlineReason,
   parseSites,
   reachableAddresses,
+  addressRecords,
   dnsRecordRefusal,
   nextCardAddresses,
   protectedLiveSites,
@@ -262,5 +263,14 @@ describe("DNS records of an address that moves between cards (K-817, K-1404)", (
     expect(dnsRecordRefusal("x.example.com", 1, undefined, "app-b")).toBe(
       "x.example.com already has a DNS record.",
     );
+  });
+});
+
+describe("records that block an address (K-817, K-1111)", () => {
+  it("counts A, AAAA and CNAME, and lets the MX and TXT of a zone apex stay", () => {
+    const apex = [{ type: "A" }, { type: "MX" }, { type: "MX" }, { type: "TXT" }];
+    expect(addressRecords(apex)).toBe(1);
+    expect(addressRecords(apex.filter((record) => record.type !== "A"))).toBe(0);
+    expect(addressRecords([{ type: "CNAME" }, { type: "AAAA" }])).toBe(2);
   });
 });

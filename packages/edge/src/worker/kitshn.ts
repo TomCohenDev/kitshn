@@ -172,6 +172,7 @@ import {
   reachableAddresses,
   offlineReason,
   parseSites,
+  addressRecords,
   dnsRecordRefusal,
   nextCardAddresses,
   protectedLiveSites,
@@ -3687,11 +3688,11 @@ export class Kitshn extends DurableObject<Env> {
             { error: `kitshn does not publish on the zone of ${address} (K-1111).` },
             { status: 409 },
           );
-        const records = await api<Array<unknown>>(
+        const records = await api<Array<{ type: string }>>(
           "GET",
           `/zones/${zone.id}/dns_records?name=${encodeURIComponent(address)}`,
         );
-        const refusal = dnsRecordRefusal(address, records.length, kitshnRow, resourceId);
+        const refusal = dnsRecordRefusal(address, addressRecords(records), kitshnRow, resourceId);
         if (refusal) return Response.json({ error: refusal }, { status: 409 });
       }
     }

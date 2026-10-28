@@ -217,6 +217,13 @@ export function reachableAddresses(input: {
  * same card does not block; one that kitshn made for another card, also one that waits for removal, does until it
  * is gone, and so does a record of anything else.
  */
+/**
+ * K-817, K-1111: the records of an address that a kitshn record conflicts with. Cloudflare refuses a CNAME next to
+ * an A, AAAA or CNAME of the same name; MX and TXT of a zone apex (email) can stay, as CNAME flattening serves it.
+ */
+export const addressRecords = (records: ReadonlyArray<{ readonly type: string }>) =>
+  records.filter((record) => record.type === "A" || record.type === "AAAA" || record.type === "CNAME").length;
+
 export function dnsRecordRefusal(
   address: string,
   records: number,

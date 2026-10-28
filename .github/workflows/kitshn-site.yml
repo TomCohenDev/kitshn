@@ -1,0 +1,21 @@
+name: kitshn site
+
+# Deploys the kitshn site (site/, kitshn.config.ts) with kitshn 2 itself (K-805). Only changes to the site deploy it,
+# so a pull request on the Worker gets no site preview.
+on:
+  push:
+    branches: [main]
+    paths: [site/**, kitshn.config.ts, .github/workflows/kitshn-site.yml]
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    paths: [site/**, kitshn.config.ts, .github/workflows/kitshn-site.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/kitshn2-deploy.yml
+    secrets: inherit

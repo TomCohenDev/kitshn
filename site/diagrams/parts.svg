@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 460" width="1000" height="460" role="img" aria-label="The parts of kitshn: Access in front, the Worker and Durable Object, apps on Cloudflare, and a tunnel to the daemon and apps on your machine">
+<title>The parts of kitshn: Access in front, the Worker and Durable Object, apps on Cloudflare, and a tunnel to the daemon and apps on your machine</title>
+<style>
+  text { font-family: "Bricolage Grotesque", system-ui, sans-serif; font-size: 15px; fill: #000; }
+  .t { font-weight: 800; font-size: 16px; }
+  .s { font-size: 13px; fill: #3d3d5c; }
+  .m { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; fill: #3d3d5c; }
+  .box { fill: #fff; stroke: #000; stroke-width: 2; }
+  .shadow { fill: #000; }
+  .frame { fill: #f1f2ff; stroke: #000; stroke-width: 2; stroke-dasharray: 6 5; }
+  .yellow { fill: #ffe14d; } .green { fill: #7cff8a; } .pink { fill: #ff9eb0; } .blue { fill: #00b3ff; } .lilac { fill: #e4e7ff; }
+  .line { stroke: #000; stroke-width: 2.5; fill: none; }
+  .dash { stroke-dasharray: 7 5; }
+  .head { fill: #000; }
+  .on-color { fill: #000; }
+  @media (prefers-color-scheme: dark) {
+    text { fill: #f3f0ff; } .s, .m { fill: #bdb6e6; }
+    .box { fill: #262147; stroke: #f3f0ff; } .shadow { fill: #b9a8ff; }
+    .frame { fill: #1d1938; stroke: #f3f0ff; }
+    .line { stroke: #f3f0ff; } .head { fill: #f3f0ff; }
+    .on-color, .yellow + text, text.on-color { fill: #000; }
+    .lilac { fill: #15122b; }
+    .box.yellow { fill: #ffe14d; } .box.green { fill: #7cff8a; } .box.pink { fill: #ff9eb0; } .box.blue { fill: #00b3ff; }
+  }
+</style>
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path class="head" d="M0 0 L10 5 L0 10 z" />
+  </marker>
+</defs>
+
+<rect class="shadow" x="24" y="174" width="170" height="84" rx="4"/>
+<rect class="box box" x="20" y="170" width="170" height="84" rx="4" style="stroke-width:2"/>
+<text class="t" x="32" y="194">People, devices</text>
+<text class="s" x="32" y="214">browsers, phones,</text>
+<text class="s" x="32" y="232">service tokens</text>
+<rect class="frame" x="240" y="20" width="400" height="420" rx="6"/><text class="t" x="254" y="46">Cloudflare</text>
+<rect class="shadow" x="274" y="64" width="340" height="70" rx="4"/>
+<rect class="box yellow" x="270" y="60" width="340" height="70" rx="4" style="stroke-width:2"/>
+<text class="t on-color" x="282" y="84">Access</text>
+<text class="s on-color" x="282" y="104">checks each circle at the edge</text>
+<rect class="shadow" x="274" y="164" width="340" height="88" rx="4"/>
+<rect class="box box" x="270" y="160" width="340" height="88" rx="4" style="stroke-width:2"/>
+<text class="t" x="282" y="184">kitshn Worker + Durable Object</text>
+<text class="s" x="282" y="204">the map, shares, deploys, the queue</text>
+<text class="s" x="282" y="222">all state in one SQLite</text>
+<rect class="shadow" x="274" y="282" width="160" height="70" rx="4"/>
+<rect class="box box" x="270" y="278" width="160" height="70" rx="4" style="stroke-width:2"/>
+<text class="t" x="282" y="302">Static, Worker</text>
+<text class="s" x="282" y="322">apps as Workers</text>
+<rect class="shadow" x="454" y="282" width="160" height="70" rx="4"/>
+<rect class="box box" x="450" y="278" width="160" height="70" rx="4" style="stroke-width:2"/>
+<text class="t" x="462" y="302">Tunnel</text>
+<text class="s" x="462" y="322">one per machine</text>
+<rect class="shadow" x="274" y="372" width="340" height="50" rx="4"/>
+<rect class="box box" x="270" y="368" width="340" height="50" rx="4" style="stroke-width:2"/>
+<text class="t" x="282" y="392">R2: pages, files, deploy archives</text>
+<rect class="frame" x="690" y="20" width="290" height="420" rx="6"/><text class="t" x="704" y="46">Your machine</text>
+<rect class="shadow" x="719" y="64" width="240" height="88" rx="4"/>
+<rect class="box green" x="715" y="60" width="240" height="88" rx="4" style="stroke-width:2"/>
+<text class="t on-color" x="727" y="84">kitshn daemon</text>
+<text class="s on-color" x="727" y="104">runs jobs and cloudflared</text>
+<text class="s on-color" x="727" y="122">reports status</text>
+<rect class="shadow" x="719" y="204" width="240" height="88" rx="4"/>
+<rect class="box box" x="715" y="200" width="240" height="88" rx="4" style="stroke-width:2"/>
+<text class="t" x="727" y="224">Compose apps</text>
+<text class="s" x="727" y="244">rootless Docker,</text>
+<text class="s" x="727" y="262">Unix sockets, no ports</text>
+<rect class="shadow" x="719" y="334" width="240" height="70" rx="4"/>
+<rect class="box box" x="715" y="330" width="240" height="70" rx="4" style="stroke-width:2"/>
+<text class="t" x="727" y="354">Live sites</text>
+<text class="s" x="727" y="374">dev servers, local tools</text>
+<polyline class="line" points="194,212 262,110" marker-end="url(#arrow)"/>
+<polyline class="line" points="440,134 440,154" marker-end="url(#arrow)"/>
+<polyline class="line" points="350,134 350,272" marker-end="url(#arrow)"/>
+<polyline class="line" points="560,134 560,272" marker-end="url(#arrow)"/>
+<polyline class="line" points="614,313 708,245" marker-end="url(#arrow)"/>
+<polyline class="line" points="614,323 708,365" marker-end="url(#arrow)"/>
+<polyline class="line dash" points="614,200 708,104" marker-end="url(#arrow)" marker-start="url(#arrow)"/><text class="s" x="636" y="140">WebSocket</text>
+</svg>

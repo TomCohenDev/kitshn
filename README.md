@@ -2,12 +2,12 @@
 
 # KitSHn
 
-> KitSHn 1 moved to [Yarden-zamir/kitshn-1](https://github.com/Yarden-zamir/kitshn-1). Apps that call `deploy.yml` here keep working through it. This repo becomes KitSHn 2: see [SPEC.md](SPEC.md) and [docs/architecture.md](docs/architecture.md). The text below describes KitSHn 1.
+> KitSHn 1 moved to [Yarden-zamir/kitshn-1](https://github.com/Yarden-zamir/kitshn-1). Apps that call `deploy.yml` here keep working through it. This repo becomes KitSHn 2: see [kitshn.com](https://kitshn.com), [SPEC.md](SPEC.md) and [docs/architecture.md](docs/architecture.md). The text below describes KitSHn 1.
 
 [![release](https://img.shields.io/github/v/release/Yarden-zamir/kitshn?labelColor=2F3532&color=3E6B55)](https://github.com/Yarden-zamir/kitshn/releases)
 [![license](https://img.shields.io/github/license/Yarden-zamir/kitshn?labelColor=2F3532&color=3E6B55)](LICENSE)
 
-Website: [kitshn.yarden-zamir.com](https://kitshn.yarden-zamir.com), with live deployments
+Website: [kitshn-legacy.yarden-zamir.com](https://kitshn-legacy.yarden-zamir.com), with live deployments
 and a badge builder.
 
 KitSHn deploys GitHub repos onto a VPS you own. Push to `main`, and GitHub Actions SSHes into

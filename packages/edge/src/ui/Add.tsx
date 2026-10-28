@@ -144,7 +144,9 @@ export function AddSite(props: {
               A local server of a machine, through its tunnel. It is live only while the machine is on.
             </p>
             <div class="field-row">
-              <span class="label">Machine</span>
+              <span class="label" data-tip="Machine: the online machine that runs the local server.">
+                Machine
+              </span>
               {online.length === 0 ? (
                 <span class="help">No machine is online. Start a daemon first.</span>
               ) : (
@@ -163,7 +165,9 @@ export function AddSite(props: {
               )}
             </div>
             <div class="field-row">
-              <span class="label">Server</span>
+              <span class="label" data-tip="Server: the port or the Unix socket of the local server.">
+                Server
+              </span>
               <input
                 value={target}
                 aria-label="Server"
@@ -173,7 +177,9 @@ export function AddSite(props: {
               />
             </div>
             <div class="field-row">
-              <span class="label">Name</span>
+              <span class="label" data-tip="Name: the first part of the address of the site.">
+                Name
+              </span>
               <div>
                 <input
                   value={name}

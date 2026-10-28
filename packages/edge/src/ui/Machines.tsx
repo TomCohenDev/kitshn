@@ -317,7 +317,9 @@ export function MachinePanel(props: {
           );
         }}
       >
-        <span class="label">Allowed Compose settings</span>
+        <span class="label" data-tip="Allowed Compose settings: the risky settings that deploys on this machine may use.">
+          Allowed Compose settings
+        </span>
         <p class="help">
           One line per repo and setting, for example <code>Yarden-zamir/dozzle bind:/var/run/docker.sock</code>. A
           deploy names the setting it needs when it stops.
@@ -335,7 +337,11 @@ export function MachinePanel(props: {
           Save
         </button>
       </form>
-      <div class="label" style={{ marginTop: "10px" }}>
+      <div
+        class="label"
+        style={{ marginTop: "10px" }}
+        data-tip="Commands: jobs that the daemon runs. They need control on the machine card."
+      >
         Commands
       </div>
       <form
@@ -387,7 +393,11 @@ export function MachinePanel(props: {
       </div>
       {view.orphanVolumes.length > 0 ? (
         <>
-          <div class="label" style={{ marginTop: "10px" }}>
+          <div
+            class="label"
+            style={{ marginTop: "10px" }}
+            data-tip="Orphaned volumes: volumes of removed apps that still hold their data on this machine."
+          >
             Orphaned volumes
           </div>
           <p class="help">

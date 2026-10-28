@@ -109,6 +109,10 @@ const TABS = {
   history: "History: every change as one revision, with Undo.",
 } as const;
 
+/** K-1504 */
+const PAUSE_TIP =
+  "Emergency pause: close every share except the Owner circle's admin, and stop agent keys and new deploys. Public sites, apps and pages stay up unless you choose a lockdown.";
+
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
 const routeFromHash = () => {
@@ -623,7 +627,10 @@ export function App() {
       {secret ? <SecretDialog secret={secret} onClose={() => setSecret(null)} /> : null}
       {progress ? (
         <div class="progress" role="status">
-          <span class="sticker wait">upload</span> {progress}
+          <span class="sticker wait" data-tip="Upload: kitshn sends the files one after the other.">
+            upload
+          </span>{" "}
+          {progress}
         </div>
       ) : null}
       <TooltipLayer />
@@ -692,23 +699,24 @@ export function App() {
             >
               + Site
             </button>
-            <label
+            <button
               class="btn"
               data-tip="Upload files: an HTML file becomes a page, any other file stays a file (at most 100 MB). They wait in the tray, private. You can also drop files on the map."
+              onClick={() => uploadInput.current?.click()}
             >
               Upload
-              <input
-                ref={uploadInput}
-                type="file"
-                multiple
-                hidden
-                onChange={(event) => {
-                  const files = [...(event.currentTarget.files ?? [])];
-                  event.currentTarget.value = "";
-                  void uploadFiles(files, null);
-                }}
-              />
-            </label>
+            </button>
+            <input
+              ref={uploadInput}
+              type="file"
+              multiple
+              hidden
+              onChange={(event) => {
+                const files = [...(event.currentTarget.files ?? [])];
+                event.currentTarget.value = "";
+                void uploadFiles(files, null);
+              }}
+            />
             <button class="btn" data-tip="Fit every circle and card in the view." onClick={fit}>
               Fit
             </button>
@@ -750,7 +758,7 @@ export function App() {
           <button
             class="btn big-red"
             onClick={() => setPausing(true)}
-            data-tip="Emergency pause: stop shares, agents and deploys at once. A dialog first lists what stops."
+            data-tip={PAUSE_TIP}
             aria-label="Emergency pause"
           >
             ■ Pause
@@ -1117,7 +1125,9 @@ function Panel(props: {
     );
     body = (
       <section>
-        <div class="label">Selection</div>
+        <div class="label" data-tip="Selection: the cards that you picked. They move as one.">
+          Selection
+        </div>
         <h2>{cards.length} cards</h2>
         <p>Drag them together into or out of a circle, or stack them to keep them together.</p>
         <ul>
@@ -1157,7 +1167,9 @@ function Panel(props: {
           A card counts for every circle it sits in. Select a card to see who can open it, or a circle head to
           edit it.
         </p>
-        <div class="label">Circles</div>
+        <div class="label" data-tip="Circles: every circle on the map. A click edits one.">
+          Circles
+        </div>
         <ul class="opens">
           {[...state.circles.values()].map((item) => (
             <li key={item.id}>
@@ -1186,7 +1198,9 @@ function Panel(props: {
         <p class="muted">You are {actorLabel(props.me)}.</p>
         {props.warnings.length > 0 ? (
           <>
-            <div class="label">Access warnings</div>
+            <div class="label" data-tip="Access warnings: Access applications that kitshn did not make and that cover a kitshn address.">
+              Access warnings
+            </div>
             <ul>
               {props.warnings.map((warning) => (
                 <li key={warning}>{warning}</li>
@@ -1194,14 +1208,16 @@ function Panel(props: {
             </ul>
           </>
         ) : null}
-        <div class="label">Safety</div>
+        <div class="label" data-tip="Safety: stop everything at once, or end every session.">
+          Safety
+        </div>
         <div class="row">
           <button
             class="btn danger"
             data-tip={
               props.paused
                 ? "Resume: confirm with your passkey again, and every share comes back."
-                : "Emergency pause: stop shares, agents and deploys at once. A dialog first lists what stops."
+                : PAUSE_TIP
             }
             onClick={() => props.onPause(!props.paused)}
           >
@@ -1434,7 +1450,11 @@ function CardPanel(props: {
           onToast={props.onToast}
         />
       ) : null}
-      <div class="label" style={{ marginTop: "12px" }}>
+      <div
+        class="label"
+        style={{ marginTop: "12px" }}
+        data-tip="Who can open it: each circle that holds the card, its members and the level."
+      >
         Who can open it
       </div>
       {holding.length === 0 ? (
@@ -1492,6 +1512,7 @@ function CardPanel(props: {
                     Ends
                   </span>
                   <EndsPicker
+                    key={`${resource.id}/${circle.id}`}
                     endsAt={setting?.endsAt ?? null}
                     ends="kitshn moves the card out of this circle"
                     onChange={(endsAt) => void put({ level: setting?.level ?? null, endsAt })}
@@ -1555,22 +1576,32 @@ function Palette(props: {
   const [active, setActive] = useState(0);
   const { state, actions } = props;
   const entries = useMemo(() => {
-    const all: Array<{ label: string; run: () => void }> = [
+    // A tip only where the label does not say what happens.
+    const all: Array<{ label: string; tip?: string; run: () => void }> = [
       { label: "New circle", run: actions.newCircle },
-      { label: "Add a machine (join code)", run: actions.addMachine },
+      {
+        label: "Add a machine (join code)",
+        tip: "Make a join command for a new machine. Its card starts in the tray, private.",
+        run: actions.addMachine,
+      },
       { label: "Add a site, live from a machine or static from a repo", run: actions.addSite },
       { label: "Upload a page or a file", run: actions.upload },
       { label: "Fit the map", run: actions.fit },
       { label: "Open History", run: actions.history },
-      { label: "Emergency pause, or Resume", run: actions.pause },
+      { label: "Emergency pause, or Resume", tip: PAUSE_TIP, run: actions.pause },
     ];
     for (const resource of state.resources.values()) {
       all.push({
         label: `${KINDS[resource.kind].icon} ${resource.name}`,
+        tip: `${KINDS[resource.kind].help} Select it and show its panel.`,
         run: () => actions.select({ cards: new Set([resource.id]), circle: null }),
       });
       if (isAppCard(resource) && props.deployed.has(resource.id))
-        all.push({ label: `Remove the app ${resource.name}`, run: () => actions.removeApp(resource) });
+        all.push({
+          label: `Remove the app ${resource.name}`,
+          tip: "Take down what the deploy made and keep the volumes. Undo starts it again.",
+          run: () => actions.removeApp(resource),
+        });
       if (!state.places.has(resource.id)) continue;
       const holding = new Set(circlesHolding(state, resource.id).map((circle) => circle.id));
       for (const circle of state.circles.values()) {
@@ -1578,10 +1609,12 @@ function Palette(props: {
           holding.has(circle.id)
             ? {
                 label: `Unshare ${resource.name} from ${circle.name}`,
+                tip: `Move the card out of ${circle.name}, without a drag. Its other circles stay.`,
                 run: () => actions.reshare(resource, circle, false),
               }
             : {
                 label: `Share ${resource.name} with ${circle.name}`,
+                tip: `Put the card where ${circle.name} also holds it, at ${circle.level}, without a drag.`,
                 run: () => actions.reshare(resource, circle, true),
               },
         );
@@ -1594,6 +1627,7 @@ function Palette(props: {
       });
       all.push({
         label: `⭕ ${circle.name}`,
+        tip: `Edit the circle ${circle.name}: its members, level, match and end.`,
         run: () => actions.select({ cards: new Set(), circle: circle.id }),
       });
     }
@@ -1629,10 +1663,12 @@ function Palette(props: {
             event.preventDefault();
           }}
         />
-        <ul>
+        <ul role="listbox" aria-label="Matches">
           {matches.map((entry, index) => (
             <li
               key={entry.label}
+              role="option"
+              data-tip={entry.tip}
               aria-selected={index === active}
               onClick={() => run(index)}
               onMouseEnter={() => setActive(index)}
@@ -1640,7 +1676,11 @@ function Palette(props: {
               {entry.label}
             </li>
           ))}
-          {matches.length === 0 ? <li>Nothing matches.</li> : null}
+          {matches.length === 0 ? (
+            <li role="option" aria-disabled="true" aria-selected="false">
+              Nothing matches.
+            </li>
+          ) : null}
         </ul>
       </div>
     </div>

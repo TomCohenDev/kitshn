@@ -1,6 +1,6 @@
 import { type ComponentChildren, createPortal } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
-import { type Rect, menuMove, placeFloating, tipTimer } from "./popover.ts";
+import { type Rect, type Side, menuMove, placeFloating, tipTimer } from "./popover.ts";
 
 /**
  * The tick3d standard components (the neo-brutalism skill). An element gets a tooltip with a `data-tip`
@@ -16,19 +16,27 @@ const describedOf = (anchor: HTMLElement) => (anchor instanceof HTMLLabelElement
 const anchorOf = (target: EventTarget | null) =>
   target instanceof Element ? target.closest<HTMLElement>("[data-tip]") : null;
 
+/** Below for the toolbar, so a tooltip never covers its own row; beside for menu and list items; above elsewhere. */
+const sideOf = (anchor: HTMLElement): Side =>
+  anchor.closest("header") ? "bottom" : anchor.closest('[role="menu"], [role="listbox"]') ? "right" : "top";
+
 /** Shows the `data-tip` of the hovered or focused element in a portal, so no parent `overflow` clips it. */
 export function TooltipLayer() {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  // Bumps when the open anchor's `data-tip` changes, so the text and its place follow.
+  const [, setRevision] = useState(0);
   const tip = useRef<HTMLDivElement>(null);
   const timer = useMemo(() => tipTimer<HTMLElement>(setAnchor), []);
 
   useEffect(() => {
+    // Focus after a press or a tap is not keyboard focus: a clicked text field shows no tooltip.
+    let viaPointer = false;
     const over = (event: PointerEvent) => {
       // Touch has no hover; needed information never lives only in a tooltip.
       if (event.pointerType === "touch") return;
       const next = anchorOf(event.target);
       if (next) timer.hover(next);
-      else timer.hide();
+      else timer.leave(null);
     };
     const out = (event: PointerEvent) => {
       const from = anchorOf(event.target);
@@ -36,7 +44,7 @@ export function TooltipLayer() {
     };
     const focus = (event: FocusEvent) => {
       const next = anchorOf(event.target);
-      if (next && event.target instanceof Element && event.target.matches(":focus-visible")) timer.focus(next);
+      if (next && !viaPointer) timer.focus(next);
       else timer.hide();
     };
     const blur = (event: FocusEvent) => {
@@ -44,7 +52,12 @@ export function TooltipLayer() {
       if (from) timer.leave(from);
     };
     const key = (event: KeyboardEvent) => {
+      viaPointer = false;
       if (event.key === "Escape") timer.hide();
+    };
+    const press = () => {
+      viaPointer = true;
+      timer.hide();
     };
     const events = [
       ["pointerover", over],
@@ -52,15 +65,26 @@ export function TooltipLayer() {
       ["focusin", focus],
       ["focusout", blur],
       ["keydown", key],
-      ["pointerdown", timer.hide],
+      ["pointerdown", press],
+      ["input", timer.hide],
+      ["wheel", timer.hide],
       ["scroll", timer.hide],
       ["resize", timer.hide],
     ] as const;
-    for (const [name, handler] of events) addEventListener(name, handler as EventListener, true);
+    for (const [name, handler] of events) addEventListener(name, handler as EventListener, { capture: true, passive: true });
     return () => {
       for (const [name, handler] of events) removeEventListener(name, handler as EventListener, true);
     };
   }, []);
+
+  useEffect(() => {
+    if (!anchor) return;
+    const watch = new MutationObserver(() => setRevision((revision) => revision + 1));
+    watch.observe(anchor, { attributes: true, attributeFilter: ["data-tip"] });
+    return () => watch.disconnect();
+  }, [anchor]);
+
+  const text = anchor?.isConnected ? anchor.dataset["tip"] : undefined;
 
   useLayoutEffect(() => {
     const element = tip.current;
@@ -72,7 +96,7 @@ export function TooltipLayer() {
     element.style.left = "0px";
     element.style.top = "0px";
     const place = placeFloating(anchor.getBoundingClientRect(), element.getBoundingClientRect(), viewport(), {
-      side: "top",
+      side: sideOf(anchor),
       align: "center",
     });
     element.style.left = `${place.left}px`;
@@ -82,9 +106,8 @@ export function TooltipLayer() {
       if (before === null) described.removeAttribute("aria-describedby");
       else described.setAttribute("aria-describedby", before);
     };
-  }, [anchor]);
+  }, [anchor, text]);
 
-  const text = anchor?.isConnected ? anchor.dataset["tip"] : undefined;
   if (!text) return null;
   return createPortal(
     <div id={TIP_ID} ref={tip} role="tooltip" class="tooltip" style={{ visibility: "hidden" }}>
@@ -166,6 +189,8 @@ export function Menu(props: {
   readonly children: ComponentChildren;
 }) {
   const menu = useRef<HTMLDivElement>(null);
+  const onClose = useRef(props.onClose);
+  onClose.current = props.onClose;
   const items = () => [...(menu.current?.querySelectorAll<HTMLElement>(ITEMS) ?? [])];
 
   useLayoutEffect(() => {
@@ -184,7 +209,7 @@ export function Menu(props: {
     const before = document.activeElement;
     items()[0]?.focus();
     const outside = (event: PointerEvent) => {
-      if (!menu.current?.contains(event.target as Node | null)) props.onClose();
+      if (!menu.current?.contains(event.target as Node | null)) onClose.current();
     };
     addEventListener("pointerdown", outside, true);
     return () => {
@@ -204,7 +229,7 @@ export function Menu(props: {
         if (event.key === "Escape" || event.key === "Tab") {
           event.preventDefault();
           event.stopPropagation();
-          props.onClose();
+          onClose.current();
           return;
         }
         const list = items();
@@ -218,7 +243,7 @@ export function Menu(props: {
         list[next]?.focus();
       }}
       onClick={(event) => {
-        if ((event.target as Element).closest(ITEMS)) props.onClose();
+        if ((event.target as Element).closest(ITEMS)) onClose.current();
       }}
     >
       {props.children}
@@ -257,21 +282,21 @@ export function MenuSep() {
   return <div class="menu-sep" role="separator" />;
 }
 
-/** A panel that floats over the map, with its title, "Enlarge" to the full view, and Close. */
+/** A panel that floats over the map, with its heading, "Enlarge" to the full view, and Close. */
 export function OverlayPanel(props: {
-  readonly title: string;
+  readonly heading: string;
   readonly onEnlarge: () => void;
   readonly onClose: () => void;
   readonly children: ComponentChildren;
 }) {
   return (
-    <section class="overlay-panel" aria-label={props.title}>
+    <section class="overlay-panel" aria-label={props.heading}>
       <header class="overlay-head">
-        <h2>{props.title}</h2>
-        <button type="button" class="btn" data-tip={`Open the full view of ${props.title}.`} onClick={props.onEnlarge}>
+        <h2>{props.heading}</h2>
+        <button type="button" class="btn" data-tip={`Open the full view of ${props.heading}.`} onClick={props.onEnlarge}>
           Enlarge
         </button>
-        <button type="button" class="btn" aria-label="Close" data-tip={`Close ${props.title}.`} onClick={props.onClose}>
+        <button type="button" class="btn" aria-label="Close" data-tip={`Close ${props.heading}.`} onClick={props.onClose}>
           ×
         </button>
       </header>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useId, useRef, useState } from "preact/hooks";
 import { type Edit, deepEqual } from "../core/changes.ts";
 import {
   AGENT_RIGHTS,
@@ -94,15 +94,18 @@ const END_PRESETS = [
   { label: "1 month", after: 30 * DAY },
 ] as const;
 
-/** The end of the day that is `days` days from now, in local time, or null for text that is no such day. */
+/**
+ * The end of the day that is `days` days from now (0 is today), in local time. Null for text that is no
+ * such day, or for an end that has passed already.
+ */
 const endOfDayIn = (days: string): number | null => {
   const count = Number(days);
-  if (!Number.isInteger(count) || count <= 0) return null;
+  if (days === "" || !Number.isInteger(count) || count < 0) return null;
   const date = new Date();
   date.setDate(date.getDate() + count);
   date.setHours(23, 59, 0, 0);
   const time = date.getTime();
-  return Number.isFinite(time) ? time : null;
+  return Number.isFinite(time) && time > Date.now() ? time : null;
 };
 
 /**
@@ -117,6 +120,8 @@ export function EndsPicker(props: {
   const [custom, setCustom] = useState(false);
   const [days, setDays] = useState("");
   const customEnd = endOfDayIn(days);
+  const invalid = days !== "" && customEnd === null;
+  const errorId = useId();
   return (
     <div>
       <div class="pills">
@@ -160,7 +165,9 @@ export function EndsPicker(props: {
             inputMode="numeric"
             aria-label="Days from now"
             placeholder="Days from now, for example 3"
-            data-tip={`The number of days from today; ${props.ends} at the end of that day.`}
+            data-tip={`The number of days from today, 0 for today; ${props.ends} at the end of that day.`}
+            aria-invalid={invalid}
+            aria-describedby={invalid ? errorId : undefined}
             value={days}
             onInput={(event) => setDays(event.currentTarget.value.trim())}
           />
@@ -169,9 +176,16 @@ export function EndsPicker(props: {
           </button>
         </form>
       ) : null}
+      {custom && invalid ? (
+        <p class="error" id={errorId}>
+          Type a whole number of days: 0 for today, 1 for tomorrow.
+        </p>
+      ) : null}
       {props.endsAt !== null ? (
         <p class="help">
-          <span class="sticker wait">ends</span> {new Date(props.endsAt).toLocaleString()}
+          <span class="sticker wait" data-tip={`Ends: ${props.ends} at this time.`}>
+            ends
+          </span> {new Date(props.endsAt).toLocaleString()}
         </p>
       ) : null}
     </div>

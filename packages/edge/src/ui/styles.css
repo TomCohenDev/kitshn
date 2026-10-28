@@ -201,8 +201,7 @@ code {
   padding: 1px 10px;
 }
 
-input,
-select {
+input {
   font: inherit;
   font-size: 1rem;
   padding: 4px 8px;
@@ -211,6 +210,12 @@ select {
   border: var(--bw) solid var(--border);
   border-radius: var(--radius);
   min-width: 0;
+}
+
+/* The browser's own clear button of a search field is native UI; Escape clears the field. */
+input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .chip {
@@ -454,10 +459,11 @@ select {
   --tilt: 4deg;
   background: var(--yellow);
 }
+/* A status sticker sits on the top edge, above the title line, so it never covers the name. */
 .card .state {
   position: absolute;
-  left: -8px;
-  top: -12px;
+  left: 6px;
+  bottom: calc(100% - 4px);
 }
 .mini {
   position: absolute;
@@ -862,8 +868,7 @@ pre.output {
 }
 
 /* Forms (tick3d): ink borders, help lines in muted text, errors in the error colours. */
-input:focus-visible,
-select:focus-visible {
+input:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 0;
   box-shadow: 3px 3px 0 0 var(--shadow-ink);

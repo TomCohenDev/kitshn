@@ -25,13 +25,13 @@ export function PauseDialog(props: { onCancel: () => void; onPause: (mode: Pause
         <Switch
           checked={lockdown}
           label="Also close public sites"
-          tip="Lockdown: public sites, apps and pages of the Everyone circle close too."
+          tip="Also close public sites: a lockdown, which also closes the public shares of sites, apps, pages and files."
           onChange={setLockdown}
         />
         <p class="help">
           {lockdown
-            ? "Lockdown: public sites, apps and pages close too."
-            : "Public sites, apps and pages of the Everyone circle stay open."}{" "}
+            ? "Lockdown: public sites, apps, pages and files close too."
+            : "Public sites, apps, pages and files of public circles stay open."}{" "}
           Machines stay connected and their apps keep running behind closed doors. You keep the admin. Resume needs
           your passkey again.
         </p>
@@ -42,7 +42,11 @@ export function PauseDialog(props: { onCancel: () => void; onPause: (mode: Pause
           <button
             type="button"
             class="btn big-red"
-            data-tip="Stop all of the above at once."
+            data-tip={
+              lockdown
+                ? "Lock down: stop all of the above, and close public sites, apps, pages and files too. Pages and files close at once; Access closes over a few alarm runs."
+                : "Pause: stop all of the above. Public sites, apps and pages stay up. Pages and files close at once; Access closes over a few alarm runs."
+            }
             autoFocus onClick={() => props.onPause(lockdown ? "lockdown" : "keep-public")}>
             {lockdown ? "Lock down everything" : "Pause"}
           </button>
@@ -75,7 +79,7 @@ export function PausedBanner(props: {
           <button
             type="button"
             class="btn danger"
-            data-tip="Lockdown: public sites, apps and pages of the Everyone circle close too."
+            data-tip="Make the pause a lockdown: public sites, apps, pages and files close too. Only Resume opens them again."
             onClick={props.onLockdown}
           >
             Close public sites too

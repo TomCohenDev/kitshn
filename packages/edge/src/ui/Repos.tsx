@@ -64,7 +64,9 @@ export function RepoList(props: {
   };
   return (
     <>
-      <div class="label">Repos that deploy</div>
+      <div class="label" data-tip="Repos that deploy: repos with a recipe. The first deploy of each waits for one click.">
+        Repos that deploy
+      </div>
       <ul class="repo-list">
         {[...props.repos]
           .sort((a, b) => Number(b.state === "waiting") - Number(a.state === "waiting"))

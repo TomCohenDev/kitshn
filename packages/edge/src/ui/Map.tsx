@@ -458,6 +458,9 @@ export function MapView(props: Props) {
                 data-card={resource.id}
                 class={`mini${selected ? " sel" : ""}${stackTarget === resource.id ? " stack-target" : ""}`}
                 style={{ left: px(at.x), top: px(at.y), background: KINDS[resource.kind].color }}
+                tabIndex={0}
+                role="img"
+                aria-label={resource.name}
                 data-tip={`${resource.name}: ${KINDS[resource.kind].help} Zoom in to see its card.`}
               />
             );
@@ -578,6 +581,9 @@ function CircleView(props: {
       <div
         class="head"
         data-head={circle.id}
+        tabIndex={0}
+        role="group"
+        aria-label={`Circle ${circle.name}`}
         data-tip={`${circle.name}: a click edits the circle. A drag moves it with its cards; ${ALONE_KEY.label} and a drag moves the circle alone.`}
       >
         <span>{circle.name}</span>
@@ -703,6 +709,9 @@ function CardView(props: {
             <span
               key={circle.id}
               class="dot"
+              tabIndex={0}
+              role="img"
+              aria-label={`${circle.name} · ${level ?? "none"}`}
               data-tip={`${circle.name} · ${level ?? "none"}: shared with this circle at ${level ?? "no level"}.`}
               style={{ background: circle.color }}
             />
@@ -800,6 +809,9 @@ function StackCard(props: {
           <span
             key={circle.id}
             class="dot"
+            tabIndex={0}
+            role="img"
+            aria-label={circle.name}
             data-tip={`${circle.name}: every card of this stack is shared with this circle.`}
             style={{ background: circle.color }}
           />

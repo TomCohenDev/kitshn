@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TIP_DELAY_MS, menuMove, placeFloating, tipTimer } from "./popover.ts";
+import { TIP_DELAY_MS, TIP_GRACE_MS, menuMove, placeFloating, tipTimer } from "./popover.ts";
 
 describe("tooltip timing", () => {
   beforeEach(() => vi.useFakeTimers());
@@ -53,11 +53,33 @@ describe("tooltip timing", () => {
     expect(seen).toEqual(["a"]);
   });
 
-  it("switches at once from an open tooltip to the next anchor", () => {
+  it("switches at once to a neighbour, in the real event order of out, then over", () => {
+    const { seen, timer } = track();
+    timer.hover("a");
+    vi.advanceTimersByTime(TIP_DELAY_MS);
+    timer.leave("a");
+    timer.leave(null);
+    timer.hover("b");
+    expect(seen).toEqual(["a", null, "b"]);
+  });
+
+  it("waits the full delay again after the grace period", () => {
     const { seen, timer } = track();
     timer.focus("a");
+    timer.leave("a");
+    vi.advanceTimersByTime(TIP_GRACE_MS);
     timer.hover("b");
-    expect(seen).toEqual(["a", "b"]);
+    expect(seen).toEqual(["a", null]);
+    vi.advanceTimersByTime(TIP_DELAY_MS);
+    expect(seen).toEqual(["a", null, "b"]);
+  });
+
+  it("gives no grace after Escape or a press", () => {
+    const { seen, timer } = track();
+    timer.focus("a");
+    timer.hide();
+    timer.hover("b");
+    expect(seen).toEqual(["a", null]);
   });
 });
 
@@ -81,6 +103,24 @@ describe("floating placement", () => {
     expect(place.side).toBe("bottom");
     expect(place.top).toBe(38);
     expect(place.left + size.width).toBeLessThanOrEqual(viewport.width);
+  });
+
+  it("puts a tooltip below a toolbar anchor and above when the bottom has no room", () => {
+    const anchor = { left: 300, top: 20, width: 100, height: 30 };
+    expect(placeFloating(anchor, size, viewport, { side: "bottom", align: "center" }).top).toBe(58);
+    const low = { ...anchor, top: 570 };
+    expect(placeFloating(low, size, viewport, { side: "bottom", align: "center" }).side).toBe("top");
+  });
+
+  it("puts a menu item tooltip beside the item, and on the left at the right edge", () => {
+    const item = { left: 100, top: 200, width: 150, height: 30 };
+    expect(placeFloating(item, size, viewport, { side: "right", align: "center" })).toEqual({
+      side: "right",
+      left: 258,
+      top: 195,
+    });
+    const edge = { ...item, left: 600 };
+    expect(placeFloating(edge, size, viewport, { side: "right", align: "center" }).left).toBe(392);
   });
 
   it("flips a menu above at the bottom edge", () => {

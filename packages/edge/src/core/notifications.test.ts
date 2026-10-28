@@ -5,6 +5,7 @@ const open: Notification = {
   id: 1,
   source: "deploy",
   key: "shop",
+  episode: "d1",
   card: "shop",
   recipients: { _tag: "owner" },
   level: "error",

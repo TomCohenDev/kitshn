@@ -166,6 +166,7 @@ import {
   type NotificationInput,
   TEXT_MAX,
   TITLE_MAX,
+  NOTIFICATION_SOURCES,
   changed,
   clip,
   onBell,
@@ -342,6 +343,7 @@ interface NotificationRow extends Record<string, SqlStorageValue> {
   opened_at: number;
   closed_at: number | null;
   snoozed_until: number | null;
+  episode: string;
 }
 
 /** A stored value outside its set is a bug, so it fails loudly (K-006). */
@@ -362,6 +364,7 @@ const notificationOf = (row: NotificationRow): Notification => ({
   title: row.title,
   text: row.text,
   actions: JSON.parse(row.actions) as Notification["actions"],
+  episode: row.episode,
   state: row.state,
   openedAt: row.opened_at,
   closedAt: row.closed_at,
@@ -374,7 +377,8 @@ interface DeployFacts {
   readonly previews: ReadonlyArray<string>;
   /** K-303: the pull request number of each preview card, from its `pr-<n>` environment. */
   readonly pullRequests: ReadonlyArray<readonly [string, number]>;
-  readonly notes: ReadonlyArray<{ resource_id: string; state: string; reason: string | null }>;
+  /** `id` is the newest deploy of the card, the episode of its deploy notification (K-1905). */
+  readonly notes: ReadonlyArray<{ resource_id: string; id: string; state: string; reason: string | null }>;
   readonly repoCards: ReadonlyArray<{ repo_id: string; resource_id: string }>;
 }
 
@@ -424,6 +428,18 @@ export class Kitshn extends DurableObject<Env> {
     ).map((row) => ({ card: row.card_id, source: row.source, until: row.until }));
     return this.muteCache;
   }
+  /** K-1905: the dismissed episode of each source and key, read on first use; the newest row wins. */
+  private dismissedCache: Map<string, string> | null = null;
+  private get dismissed(): Map<string, string> {
+    this.dismissedCache ??= new Map(
+      this.sql<{ source: string; key: string; episode: string }>(
+        "SELECT source, key, episode FROM notifications WHERE state = 'dismissed' ORDER BY id",
+      ).map((row) => [`${row.source}\u0000${row.key}`, row.episode]),
+    );
+    return this.dismissedCache;
+  }
+  /** K-1905: the last time the alarm looked for ended mutes and snoozes, so the bell count follows them. */
+  private bellCheckedAt = 0;
   /** K-1903: the handler of "run" actions, per source. */
   private readonly actionHandlers = new Map<
     string,
@@ -610,6 +626,7 @@ export class Kitshn extends DurableObject<Env> {
     this.uptimeCache = null;
     this.openCache = null;
     this.muteCache = null;
+    this.dismissedCache = null;
   }
 
   private loadRevisions(): Array<RevisionView> {
@@ -2005,15 +2022,16 @@ export class Kitshn extends DurableObject<Env> {
     const previews = new Set<string>();
     const pullRequests = new Map<string, number>();
     const repoCards = new Map<string, Set<string>>();
-    const newest = new Map<string, { state: string; reason: string | null }>();
+    const newest = new Map<string, { id: string; state: string; reason: string | null }>();
     for (const row of this.sql<{
+      id: string;
       resource_id: string;
       repo_id: string | null;
       environment: string;
       state: string;
       reason: string | null;
     }>(
-      "SELECT resource_id, repo_id, environment, state, reason FROM deploys WHERE kind = 'deploy' ORDER BY rowid",
+      "SELECT id, resource_id, repo_id, environment, state, reason FROM deploys WHERE kind = 'deploy' ORDER BY rowid",
     )) {
       if (row.repo_id !== null || row.state === "done") {
         deployed.add(row.resource_id);
@@ -2027,7 +2045,7 @@ export class Kitshn extends DurableObject<Env> {
       }
       if (row.repo_id !== null)
         repoCards.set(row.repo_id, (repoCards.get(row.repo_id) ?? new Set()).add(row.resource_id));
-      newest.set(row.resource_id, { state: row.state, reason: row.reason });
+      newest.set(row.resource_id, { id: row.id, state: row.state, reason: row.reason });
     }
     this.deployFacts = {
       deployed: [...deployed],
@@ -4028,6 +4046,8 @@ export class Kitshn extends DurableObject<Env> {
     if (ends.some((end) => end !== null && end <= now) && this.expiredShares(now).length > 0) next = now;
     // K-1126: a connected daemon keeps the 2-minute alarm going; without one, uptime wakes at most every 10 minutes.
     if (this.uptimeTargets().length > 0) next = Math.min(next, now + UPTIME_IDLE_MS);
+    const bellEnd = this.nextBellEnd(now);
+    if (bellEnd !== null) next = Math.min(next, bellEnd);
     // Never move a pending alarm later: frequent wake-ups would otherwise push it away for good.
     const current = await this.ctx.storage.getAlarm();
     if (current === null || current <= now || next < current) await this.ctx.storage.setAlarm(next);
@@ -7398,6 +7418,8 @@ export class Kitshn extends DurableObject<Env> {
     const before = this.openNotifications.get(id);
     const value = { ...input, title: clip(input.title, TITLE_MAX), text: clip(input.text, TEXT_MAX) };
     if (before && !changed(before, value)) return;
+    // K-1905: a dismissed episode stays closed; only a new one opens a notification again.
+    if (!before && this.dismissed.get(id) === value.episode) return;
     const columns = [
       value.card,
       JSON.stringify(value.recipients),
@@ -7410,20 +7432,22 @@ export class Kitshn extends DurableObject<Env> {
     if (before) {
       this.sql(
         `UPDATE notifications SET card_id = ?, recipients = ?, level = ?, priority = ?, title = ?, text = ?, actions = ?,
-         state = 'open' WHERE id = ?`,
+         state = 'open', episode = ? WHERE id = ?`,
         ...columns,
+        value.episode,
         before.id,
       );
       this.openNotifications.set(id, { ...before, ...value, state: "open" });
       return;
     }
     const [row] = this.sql<{ id: number }>(
-      `INSERT INTO notifications (source, key, card_id, recipients, level, priority, title, text, actions, state, opened_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?) RETURNING id`,
+      `INSERT INTO notifications (source, key, card_id, recipients, level, priority, title, text, actions, state, opened_at,
+       episode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?) RETURNING id`,
       value.source,
       value.key,
       ...columns,
       now,
+      value.episode,
     );
     if (!row) throw new Error("kitshn wrote a notification and got no id back.");
     this.openNotifications.set(id, {
@@ -7444,17 +7468,23 @@ export class Kitshn extends DurableObject<Env> {
     if (state === "open") throw new Error("A notification opens through notify, not through its state.");
     this.sql("UPDATE notifications SET state = ?, closed_at = ? WHERE id = ?", state, now, before.id);
     this.openNotifications.delete(id);
+    if (state === "dismissed") this.dismissed.set(id, before.episode);
   }
 
   /** K-1904: the sources that kitshn derives from its own state. */
   private reconcileNotifications() {
-    const notes = this.deployNotes();
-    for (const [card, note] of Object.entries(notes)) {
+    const notes = new Map(
+      this.deploys()
+        .notes.filter((note) => this.state.resources.has(note.resource_id))
+        .map((note) => [note.resource_id, note]),
+    );
+    for (const [card, note] of notes) {
       const resource = this.state.resources.get(card);
       if (!resource) continue;
       this.notify({
         source: "deploy",
         key: card,
+        episode: note.id,
         card,
         recipients: { _tag: "owner" },
         level: note.state === "failed" ? "error" : "warn",
@@ -7463,12 +7493,12 @@ export class Kitshn extends DurableObject<Env> {
           note.state === "failed"
             ? `Deploy of ${resource.name} failed`
             : `Deploy of ${resource.name} did not run`,
-        text: note.reason,
+        text: note.reason ?? "The deploy failed; its workflow run has the log.",
         actions: [{ id: "show", label: "Show card", kind: "link", path: `#map/${card}` }],
       });
     }
     for (const notification of this.openNotifications.values())
-      if (notification.source === "deploy" && !(notification.key in notes))
+      if (notification.source === "deploy" && !notes.has(notification.key))
         this.setNotificationState("deploy", notification.key, "closed");
     // K-1904: a card that is down (K-1125); the uptime rows exist only for cards that are down or failing.
     const down = new Set<string>();
@@ -7479,6 +7509,7 @@ export class Kitshn extends DurableObject<Env> {
       this.notify({
         source: "uptime",
         key: card.id,
+        episode: String(uptime.since),
         card: card.id,
         recipients: { _tag: "owner" },
         level: "error",
@@ -7510,9 +7541,20 @@ export class Kitshn extends DurableObject<Env> {
     );
   }
 
-  /** K-1905: the Notifications view and its ways out. */
+  /** K-1902: a member of the Owner circle. */
+  private isOwner(visitor: Visitor) {
+    const owner = this.state.circles.get(OWNER_CIRCLE_ID);
+    return owner !== undefined && circleMatches(owner, visitor, this.state.machines);
+  }
+
+  /** K-1905: the Notifications view and its ways out, for the owner only in this version (K-1902). */
   private async notificationRequest(path: string, request: Request, caller: Caller): Promise<Response> {
     const now = Date.now();
+    if (!this.isOwner(caller.visitor))
+      return Response.json(
+        { error: "Notifications are for the Owner circle in this version (K-1902)." },
+        { status: 403 },
+      );
     const body = request.method === "POST" ? ((await request.json().catch(() => null)) as unknown) : null;
     if (path === "/api/notifications" && request.method === "GET") {
       const rows = this.sql<NotificationRow>(
@@ -7526,32 +7568,37 @@ export class Kitshn extends DurableObject<Env> {
         mutes: this.mutes.filter((mute) => mute.until === null || mute.until > now),
       });
     }
-    if (path === "/api/notifications/mute" && request.method === "POST") {
+    if (
+      (path === "/api/notifications/mute" || path === "/api/notifications/unmute") &&
+      request.method === "POST"
+    ) {
       if (!isRecord(body) || typeof body["card"] !== "string" || typeof body["source"] !== "string")
         return Response.json({ error: "Name the card and the source." }, { status: 400 });
-      const until = body["until"];
-      if (until !== null && (typeof until !== "number" || until <= now))
-        return Response.json({ error: "A mute ends at a future time, or never (null)." }, { status: 400 });
-      this.sql(
-        "INSERT OR REPLACE INTO notification_mutes (card_id, source, until) VALUES (?, ?, ?)",
-        body["card"],
-        body["source"],
-        until,
-      );
+      const card = body["card"];
+      const source = NOTIFICATION_SOURCES.find((each) => each === body["source"]);
+      if (path === "/api/notifications/unmute") {
+        this.sql("DELETE FROM notification_mutes WHERE card_id = ? AND source = ?", card, body["source"]);
+      } else {
+        if (!this.state.resources.has(card))
+          return Response.json({ error: `kitshn has no card ${card}.` }, { status: 400 });
+        if (source === undefined)
+          return Response.json(
+            { error: `A mute names one of the sources ${NOTIFICATION_SOURCES.join(", ")}.` },
+            { status: 400 },
+          );
+        const until = body["until"];
+        if (until !== null && (typeof until !== "number" || until <= now))
+          return Response.json({ error: "A mute ends at a future time, or never (null)." }, { status: 400 });
+        this.sql(
+          "INSERT OR REPLACE INTO notification_mutes (card_id, source, until) VALUES (?, ?, ?)",
+          card,
+          source,
+          until,
+        );
+      }
       this.muteCache = null;
       this.broadcast();
-      return Response.json({ ok: true });
-    }
-    if (path === "/api/notifications/unmute" && request.method === "POST") {
-      if (!isRecord(body) || typeof body["card"] !== "string" || typeof body["source"] !== "string")
-        return Response.json({ error: "Name the card and the source." }, { status: 400 });
-      this.sql(
-        "DELETE FROM notification_mutes WHERE card_id = ? AND source = ?",
-        body["card"],
-        body["source"],
-      );
-      this.muteCache = null;
-      this.broadcast();
+      void this.scheduleAlarm();
       return Response.json({ ok: true });
     }
     const [id = "", verb = "", action = ""] = path.slice("/api/notifications/".length).split("/");
@@ -7568,6 +7615,12 @@ export class Kitshn extends DurableObject<Env> {
         snoozedUntil: until,
       });
       this.broadcast();
+      void this.scheduleAlarm();
+      return Response.json({ ok: true });
+    }
+    if (verb === "dismiss" && request.method === "POST") {
+      this.setNotificationState(notification.source, notification.key, "dismissed", now);
+      this.broadcast();
       return Response.json({ ok: true });
     }
     if (verb === "actions" && request.method === "POST") {
@@ -7580,6 +7633,25 @@ export class Kitshn extends DurableObject<Env> {
       return Response.json({ ok: true });
     }
     return Response.json({ error: "Not found." }, { status: 404 });
+  }
+
+  /** K-1905: the next end of a mute or a snooze, so the alarm can bring the bell count up to date then. */
+  private nextBellEnd(now: number): number | null {
+    const ends = [
+      ...this.mutes.map((mute) => mute.until),
+      ...[...this.openNotifications.values()].map((notification) => notification.snoozedUntil),
+    ].filter((end): end is number => end !== null && end > now);
+    return ends.length === 0 ? null : Math.min(...ends);
+  }
+
+  /** K-1905: true when a mute or a snooze ended since the last look, so the bell count changed. */
+  private bellEnded(now: number): boolean {
+    const since = this.bellCheckedAt;
+    this.bellCheckedAt = now;
+    return [
+      ...this.mutes.map((mute) => mute.until),
+      ...[...this.openNotifications.values()].map((notification) => notification.snoozedUntil),
+    ].some((end) => end !== null && end > since && end <= now);
   }
 
   override async alarm() {
@@ -7596,6 +7668,7 @@ export class Kitshn extends DurableObject<Env> {
     // so it fetches nothing and keeps 10 subrequests spare.
     const uptime = await this.checkUptime(now, daily ? 0 : UPTIME_FETCHES_PER_RUN);
     if (uptime.changed) changed = true;
+    if (this.bellEnded(now)) changed = true;
     const api = this.api();
     if (api) {
       const desired = this.desired(now);

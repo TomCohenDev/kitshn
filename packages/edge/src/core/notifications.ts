@@ -2,6 +2,9 @@
 
 export type NotificationLevel = "info" | "warn" | "error";
 
+/** K-1904: the sources of this version; a mute names one of them. */
+export const NOTIFICATION_SOURCES = ["deploy", "uptime"] as const;
+
 /** K-1903: "run" calls the handler of the source at once; "link" opens a path of the map. */
 export type NotificationAction =
   | { readonly id: string; readonly label: string; readonly kind: "run" }
@@ -13,6 +16,11 @@ export type Recipients = { readonly _tag: "owner" } | { readonly _tag: "circle";
 export interface NotificationInput {
   readonly source: string;
   readonly key: string;
+  /**
+   * K-1905: what this notification is about, for example the id of the failed deploy or the time a card went down.
+   * A dismissed notification opens again only for a new episode.
+   */
+  readonly episode: string;
   readonly card: string | null;
   readonly recipients: Recipients;
   readonly level: NotificationLevel;
@@ -24,7 +32,7 @@ export interface NotificationInput {
 
 export interface Notification extends NotificationInput {
   readonly id: number;
-  /** "open", "closed", or a state of the source (K-1909); only "open" counts on the bell. */
+  /** "open", "closed", "dismissed", or a state of the source (K-1909); only "open" counts on the bell. */
   readonly state: string;
   readonly openedAt: number;
   readonly closedAt: number | null;
@@ -62,6 +70,7 @@ export function onBell(notification: Notification, mutes: ReadonlyArray<Mute>, n
 /** True when the notification differs from what a source sends now, so it needs a write (K-1302). */
 export const changed = (before: Notification, input: NotificationInput) =>
   before.state !== "open" ||
+  before.episode !== input.episode ||
   before.title !== input.title ||
   before.text !== input.text ||
   before.level !== input.level ||

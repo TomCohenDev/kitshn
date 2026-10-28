@@ -171,7 +171,7 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, key TEXT NOT NULL,
      card_id TEXT, recipients TEXT NOT NULL, level TEXT NOT NULL, priority TEXT NOT NULL, title TEXT NOT NULL,
      text TEXT NOT NULL, actions TEXT NOT NULL, state TEXT NOT NULL, opened_at INTEGER NOT NULL, closed_at INTEGER,
-     snoozed_until INTEGER)`,
+     snoozed_until INTEGER, episode TEXT NOT NULL)`,
     "CREATE UNIQUE INDEX notifications_open ON notifications (source, key) WHERE closed_at IS NULL",
     "CREATE TABLE notification_mutes (card_id TEXT NOT NULL, source TEXT NOT NULL, until INTEGER, PRIMARY KEY (card_id, source))",
   ],

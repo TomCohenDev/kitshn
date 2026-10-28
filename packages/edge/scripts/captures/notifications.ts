@@ -5,6 +5,7 @@ import { DESKTOP, PHONE, type Scenario } from "../capture-views.ts";
 const now = Date.now();
 const hour = 3_600_000;
 const notification = {
+  episode: "d1",
   recipients: { _tag: "owner" },
   priority: "normal",
   snoozedUntil: null,
@@ -33,6 +34,7 @@ const list = {
       card: "tick3d",
       level: "warn",
       title: "Deploy of tick3d did not run",
+      snoozedUntil: now + hour,
       text: "The repo waits for Allow on the map (K-819).",
       actions: [{ id: "show", label: "Show card", kind: "link", path: "#map/tick3d" }],
       state: "open",

@@ -47,7 +47,12 @@ import {
   type ActionHandlers,
   type MenuTarget,
   type PaletteEntry,
+  type UndoAnswer,
+  type UndoCheck,
   actionsFor,
+  itemKey,
+  settleUndoCheck,
+  slowUndoCheck,
   REMOVE_APP_TIP,
   levelEdit,
   type PaletteCursor,
@@ -179,6 +184,40 @@ export function App() {
     [store.snapshot],
   );
   const deployed = useMemo(() => new Set(store.snapshot?.deployedCards ?? []), [store.snapshot]);
+
+  /**
+   * K-523, K-1507: the item whose per-item undo the open menu shows, or for the palette the selected card or
+   * circle. Other items get no undo entry, so the palette sends one request, not one per item.
+   */
+  const undoItemOf: Item | null =
+    menu?.target._tag === "card" || menu?.target._tag === "circle"
+      ? { kind: menu.target._tag, id: menu.target.id }
+      : palette !== null && selection.circle !== null
+        ? { kind: "circle", id: selection.circle }
+        : palette !== null && selection.cards.size === 1
+          ? { kind: "card", id: [...selection.cards][0] ?? "" }
+          : null;
+  const undoKey = undoItemOf ? itemKey(undoItemOf) : null;
+  const [undoCheck, setUndoCheck] = useState<UndoCheck | null>(null);
+  // Asks the server once per opened menu or palette; an answer for a closed menu or another item is dropped.
+  useEffect(() => {
+    if (undoItemOf === null || undoKey === null) {
+      setUndoCheck(null);
+      return;
+    }
+    setUndoCheck({ key: undoKey, answer: null, slow: false });
+    const slow = setTimeout(() => setUndoCheck((check) => slowUndoCheck(check, undoKey)), 150);
+    void callApi<UndoAnswer>(
+      "GET",
+      `/api/undo-item?kind=${undoItemOf.kind}&id=${encodeURIComponent(undoItemOf.id)}`,
+    ).then((answer) => {
+      clearTimeout(slow);
+      setUndoCheck((check) =>
+        settleUndoCheck(check, undoKey, "error" in answer ? { allowed: false, reason: answer.error } : answer),
+      );
+    });
+    return () => clearTimeout(slow);
+  }, [undoKey]);
 
   useEffect(() => {
     const onHash = () => {
@@ -694,7 +733,7 @@ export function App() {
     deployed,
     machines,
     version: store.snapshot.version,
-    undoItems: store.snapshot.undoItems,
+    undoCheck,
   };
 
   const waitingRepos = store.snapshot?.repos.filter((repo) => repo.state === "waiting").length ?? 0;

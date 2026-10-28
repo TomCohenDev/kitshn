@@ -4,7 +4,6 @@ import {
   RuleError,
   applyChanges,
   isAppCard,
-  itemKey,
   refuseRaiseWhilePaused,
   resolveEdits,
   ruleViolation,
@@ -63,8 +62,8 @@ export interface ActionContext {
   readonly machines: ReadonlyMap<string, MachineView>;
   /** K-617: the release of this kitshn, or a local build. */
   readonly version: string;
-  /** K-1507: per item, null when its per-item undo works, or why not. */
-  readonly undoItems: Readonly<Record<string, string | null>>;
+  /** K-1507: the per-item undo that the open menu or palette asked the server about, or null. */
+  readonly undoCheck: UndoCheck | null;
 }
 
 export interface ActionHandlers {
@@ -94,17 +93,46 @@ export interface ActionHandlers {
   readonly undoItem: (item: Item) => void;
 }
 
-/** K-523, K-1507: "Undo last change to this card" or "… circle", disabled with the reason when kitshn refuses it. */
-function undoItemAction(ctx: ActionContext, h: ActionHandlers, item: Item): Action {
-  const status = ctx.undoItems[itemKey(item)];
-  const reason = status === undefined ? `You have no recent change to this ${item.kind} to undo.` : status;
-  return {
+/** K-1507: the answer of `GET /api/undo-item`. */
+export type UndoAnswer = { readonly allowed: true } | { readonly allowed: false; readonly reason: string };
+
+/**
+ * K-523, K-1507: the per-item undo that a menu or the palette asked about. `answer` is null while the request
+ * runs; `slow` turns on after 150 ms, so a quick answer never shows the checking state.
+ */
+export interface UndoCheck {
+  readonly key: string;
+  readonly answer: UndoAnswer | null;
+  readonly slow: boolean;
+}
+
+export const itemKey = (item: Item) => `${item.kind}:${item.id}`;
+
+export const CHECKING_TIP = "Checking whether this can be undone";
+
+/** K-1507: the check with its answer, or unchanged when the answer is for another item or a closed menu. */
+export const settleUndoCheck = (check: UndoCheck | null, key: string, answer: UndoAnswer) =>
+  check?.key === key ? { ...check, answer } : check;
+
+/** K-1507: the check in its visible checking state, unless it has its answer or is for another item. */
+export const slowUndoCheck = (check: UndoCheck | null, key: string) =>
+  check?.key === key && check.answer === null ? { ...check, slow: true } : check;
+
+/**
+ * K-523, K-1507: "Undo last change to this card" or "… circle", only for the item that the server was asked
+ * about: disabled while it checks, then enabled, or disabled with the reason when kitshn refuses it.
+ */
+function undoItemAction(ctx: ActionContext, h: ActionHandlers, item: Item): Array<Action> {
+  const check = ctx.undoCheck;
+  if (check?.key !== itemKey(item)) return [];
+  const label = `Undo last change to this ${item.kind}`;
+  const base = {
     id: "undo-item",
-    label: `Undo last change to this ${item.kind}`,
     tip: `Undo your newest change to this ${item.kind}, and only its part of that change.`,
-    ...(reason === null ? {} : { refused: reason }),
     run: () => h.undoItem(item),
   };
+  if (check.answer === null) return [{ ...base, label: check.slow ? `${label} (checking…)` : label, refused: CHECKING_TIP }];
+  return [{ ...base, label, ...(check.answer.allowed ? {} : { refused: check.answer.reason }) }];
 }
 
 /** K-617: a local build names no release, so there is nothing to update a daemon to. */
@@ -427,7 +455,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
             : []),
         ]
       : [],
-    [undoItemAction(ctx, h, { kind: "card", id: resource.id })],
+    undoItemAction(ctx, h, { kind: "card", id: resource.id }),
     [
       ...(isAppCard(resource) && ctx.deployed.has(resource.id)
         ? [{ id: "remove-app", label: "Remove app", tip: REMOVE_APP_TIP, danger: true as const, run: () => h.removeApp(resource) }]
@@ -507,7 +535,7 @@ export function circleActions(ctx: ActionContext, h: ActionHandlers, circle: Cir
         run: () => h.addMember(circle.id),
       },
     ],
-    [undoItemAction(ctx, h, { kind: "circle", id: circle.id })],
+    undoItemAction(ctx, h, { kind: "circle", id: circle.id }),
     // K-211: the Owner circle cannot be deleted.
     circle.id === OWNER_CIRCLE_ID
       ? []

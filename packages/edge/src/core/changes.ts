@@ -716,44 +716,18 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
   }
 }
 
-/** K-523, K-1507: how the snapshot names an item: `card:<id>` or `circle:<id>`. */
-export const itemKey = (item: Item) => `${item.kind}:${item.id}`;
-
-/**
- * K-523, K-1507: for each item that a revision of `actor` touched, null when its per-item undo works now, or
- * why kitshn refuses it. An item that is missing has no change of `actor` to undo.
- */
-export function undoStatus(
+/** K-523, K-1507: whether the per-item undo of `actor` works now, or why kitshn refuses it. */
+export function undoItemAnswer(
   state: State,
   revisions: ReadonlyArray<StoredRevision>,
   actor: Actor,
-): Record<string, string | null> {
-  const items = new Map<string, Item>();
-  for (const revision of revisions) {
-    if (revision.undoes !== null || !deepEqual(revision.actor, actor)) continue;
-    for (const change of revision.changes) {
-      const found: Array<Item> =
-        change._tag === "circle"
-          ? [{ kind: "circle", id: change.id }]
-          : change._tag === "shareSetting"
-            ? [
-                { kind: "card", id: change.id.split("/")[0] ?? "" },
-                { kind: "circle", id: change.id.split("/")[1] ?? "" },
-              ]
-            : change._tag === "place" || change._tag === "app"
-              ? [{ kind: "card", id: change.id }]
-              : [];
-      for (const item of found) items.set(itemKey(item), item);
-    }
+  item: Item,
+): { readonly allowed: true } | { readonly allowed: false; readonly reason: string } {
+  try {
+    undoTarget(state, revisions, actor, { item });
+    return { allowed: true };
+  } catch (error) {
+    if (!(error instanceof RuleError)) throw error;
+    return { allowed: false, reason: error.message };
   }
-  const status: Record<string, string | null> = {};
-  for (const [key, item] of items)
-    try {
-      undoTarget(state, revisions, actor, { item });
-      status[key] = null;
-    } catch (error) {
-      if (!(error instanceof RuleError)) throw error;
-      status[key] = error.message;
-    }
-  return status;
 }

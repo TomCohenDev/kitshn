@@ -10,7 +10,7 @@ import {
   MOVE_MERGE_MS,
   mergeMoves,
   type StoredRevision,
-  undoStatus,
+  undoItemAnswer,
   undoTarget,
   mergedSummary,
   refuseRaiseWhilePaused,
@@ -951,16 +951,20 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     expect(() => undoTarget(trayed.state, [forget(1)], KITSHN, { revision: 1 })).toThrow(/records an action/);
   });
 
-  it("tells the menus which items of the caller undo now, and why the others do not", () => {
+  it("answers the menu's question with the same rule as the undo", () => {
     const { state, revisions } = history(withTray(), [
       [A, [place("box", 1500, 1500)]],
       [A, [herAs({ level: "view" })]],
       [B, [place("riffle", 400, 0)]],
     ]);
-    expect(undoStatus(state, revisions, A)).toEqual({
-      "card:box": null,
-      "circle:her": '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
+    expect(undoItemAnswer(state, revisions, A, { kind: "card", id: "box" })).toEqual({ allowed: true });
+    expect(undoItemAnswer(state, revisions, A, { kind: "circle", id: "her" })).toEqual({
+      allowed: false,
+      reason: '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
     });
-    expect(undoStatus(state, revisions, B)).toEqual({ "card:riffle": null });
+    expect(undoItemAnswer(state, revisions, B, { kind: "card", id: "box" })).toEqual({
+      allowed: false,
+      reason: "You have no change to this item left to undo.",
+    });
   });
 });

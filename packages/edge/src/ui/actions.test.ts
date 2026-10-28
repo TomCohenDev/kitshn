@@ -11,6 +11,11 @@ import {
 import type { MachineView } from "../core/protocol.ts";
 import { seed } from "../core/seed.ts";
 import {
+  CHECKING_TIP,
+  type MenuTarget,
+  type UndoCheck,
+  settleUndoCheck,
+  slowUndoCheck,
   type Action,
   type ActionContext,
   type ActionGroups,
@@ -95,7 +100,7 @@ function context(version = "0123456789ab"): ActionContext {
     deployed: new Set(["riffle"]),
     machines: new Map([["vps", machine]]),
     version,
-    undoItems: { "card:riffle": null, "circle:her": "#9 \"Moved b\" changed the same cards or circles later." },
+    undoCheck: null,
   };
 }
 
@@ -133,7 +138,6 @@ describe("card actions", () => {
       "select-kind",
       "add-to-stack",
       "tray",
-      "undo-item",
       "remove-app",
     ]);
     expect(find(groups, "remove-app").danger).toBe(true);
@@ -322,15 +326,38 @@ describe("levelEdit (K-205)", () => {
 });
 
 describe("per-item undo (K-1507)", () => {
-  it("runs when kitshn allows it, and shows the reason when it refuses or no change of the caller exists", () => {
+  const withCheck = (check: UndoCheck | null) => ({ ...context(), undoCheck: check });
+  const undoOf = (check: UndoCheck | null, target: MenuTarget) => {
     const { handlers, calls } = recorder();
-    const card = find(actionsFor(context(), handlers, { _tag: "card", id: "riffle" }), "undo-item");
-    expect(card.refused).toBeUndefined();
-    run(card);
-    expect(calls).toEqual([["undoItem", { kind: "card", id: "riffle" }]]);
-    const circle = find(actionsFor(context(), handlers, { _tag: "circle", id: "her" }), "undo-item");
-    expect(circle.refused).toMatch(/changed the same cards or circles later/);
-    const none = find(actionsFor(context(), handlers, { _tag: "card", id: "vps" }), "undo-item");
-    expect(none.refused).toBe("You have no recent change to this card to undo.");
+    const action = (actionsFor(withCheck(check), handlers, target) ?? []).flat().find((entry) => entry.id === "undo-item");
+    return { action, calls };
+  };
+
+  it("shows the entry only for the item that the server was asked about", () => {
+    expect(undoOf(null, { _tag: "card", id: "riffle" }).action).toBeUndefined();
+    const check = { key: "card:vps", answer: null, slow: false };
+    expect(undoOf(check, { _tag: "card", id: "riffle" }).action).toBeUndefined();
+  });
+
+  it("checks, then runs when allowed, or shows the reason when refused", () => {
+    const card = { _tag: "card", id: "riffle" } as const;
+    const quick = undoOf({ key: "card:riffle", answer: null, slow: false }, card).action;
+    expect(quick).toMatchObject({ label: "Undo last change to this card", refused: CHECKING_TIP });
+    const slow = slowUndoCheck({ key: "card:riffle", answer: null, slow: false }, "card:riffle");
+    expect(undoOf(slow, card).action).toMatchObject({ label: "Undo last change to this card (checking…)" });
+    const allowed = undoOf(settleUndoCheck(slow, "card:riffle", { allowed: true }), card);
+    expect(allowed.action?.refused).toBeUndefined();
+    run(allowed.action!);
+    expect(allowed.calls).toEqual([["undoItem", { kind: "card", id: "riffle" }]]);
+    const refused = settleUndoCheck(slow, "card:riffle", { allowed: false, reason: "#9 changed it later." });
+    expect(undoOf(refused, card).action?.refused).toBe("#9 changed it later.");
+  });
+
+  it("drops an answer for another item, and keeps a settled answer out of the checking state", () => {
+    const check = { key: "circle:her", answer: null, slow: false };
+    expect(settleUndoCheck(check, "card:riffle", { allowed: true })).toBe(check);
+    expect(settleUndoCheck(null, "card:riffle", { allowed: true })).toBeNull();
+    const settled = settleUndoCheck(check, "circle:her", { allowed: true });
+    expect(slowUndoCheck(settled, "circle:her")).toBe(settled);
   });
 });

@@ -17,7 +17,7 @@ import {
   mergeMoves,
   mergedSummary,
   type StoredRevision,
-  undoStatus,
+  undoItemAnswer,
   undoTarget,
   refuseRaiseWhilePaused,
   refuseResume,
@@ -633,11 +633,10 @@ export class Kitshn extends DurableObject<Env> {
     return this.commitUndo(actor, target.changes, { revision: target.revision, item: name });
   }
 
-  /** The newest `limit` revisions; by default every one that History keeps (K-1503: at most 5,000). */
-  private storedRevisions(limit = -1): Array<StoredRevision> {
+  /** Every revision that History keeps (K-1503: at most 5,000). */
+  private storedRevisions(): Array<StoredRevision> {
     return this.sql<{ id: number; actor: string; summary: string; changes: string; undoes: number | null }>(
-      "SELECT id, actor, summary, changes, undoes FROM revisions ORDER BY id DESC LIMIT ?",
-      limit,
+      "SELECT id, actor, summary, changes, undoes FROM revisions",
     ).map((row) => ({
       id: row.id,
       actor: JSON.parse(row.actor) as Actor,
@@ -860,8 +859,6 @@ export class Kitshn extends DurableObject<Env> {
       paused: this.state.paused,
       repos,
       deployedCards: this.deployedCards(),
-      // The menus read the recent History only; the server checks all of it when the undo runs.
-      undoItems: undoStatus(this.state, this.storedRevisions(RECENT_REVISIONS), me),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
@@ -1016,6 +1013,15 @@ export class Kitshn extends DurableObject<Env> {
       return this.deleteItem(caller, path.slice("/api/library/".length));
     if (path === "/api/devices" && request.method === "POST")
       return this.addDevice(await request.json().catch(() => null));
+    if (path === "/api/undo-item" && request.method === "GET") {
+      // K-1507: the menu asks before it offers the per-item undo; the same rule over the whole History.
+      const query = new URL(request.url).searchParams;
+      const kind = query.get("kind");
+      const id = query.get("id");
+      if ((kind !== "card" && kind !== "circle") || !id)
+        return Response.json({ error: "Name the item with kind=card or kind=circle and an id." }, { status: 400 });
+      return Response.json(undoItemAnswer(this.state, this.storedRevisions(), caller.actor, { kind, id }));
+    }
     const type = API_MESSAGES[path];
     if (type !== undefined) {
       if (request.method !== "POST") return new Response("Use POST.", { status: 405 });

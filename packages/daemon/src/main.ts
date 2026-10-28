@@ -25,7 +25,7 @@ import { type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from ".
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
 import { localUsersOf, peerDecision } from "./peer.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
-import { HELPER_IMAGE, isRootlessInfo, rootTakeover, rootTakeoverPlan } from "./takeover.ts";
+import { HELPER_IMAGE, daemonUser, dockerKind, rootTakeover, rootTakeoverPlan } from "./takeover.ts";
 import {
   chmodSync,
   copyFileSync,
@@ -278,16 +278,13 @@ async function kitshn1TakeoverCommand(repo?: string, environment?: string, proje
   if (!repo || !environment || !project || !user)
     fail("usage: kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>");
   if (process.getuid!() !== 0) fail("kitshn1-takeover runs as root: it stops KitSHn 1 and reads /persistent.");
-  const entry = spawnSync("getent", ["passwd", user], { encoding: "utf8" });
-  const [, , uid = "", , , home = ""] = entry.stdout.trim().split(":");
-  if (entry.status !== 0 || !isDigits(uid) || !home) fail(`there is no user ${user}.`);
+  const failWith = (error: unknown) => fail(error instanceof Error ? error.message : String(error));
+  const daemon = await daemonUser(user).catch(failWith);
   const plan = rootTakeoverPlan({
-    repo, environment, project, home, uid: Number(uid), persistentRoot: KITSHN1_PERSISTENT, exists: existsSync,
+    repo, environment, project, user: daemon, persistentRoot: KITSHN1_PERSISTENT, exists: existsSync,
   });
   if (typeof plan === "string") fail(plan);
-  await rootTakeover(plan, { name: user, uid: Number(uid) }).catch((error: unknown) =>
-    fail(error instanceof Error ? error.message : String(error)),
-  );
+  await rootTakeover(plan, daemon).catch(failWith);
 }
 
 /** A user id, from a number or a user name. */
@@ -670,8 +667,11 @@ async function composeUp(
     refuse(composeRisks(config, command.project, roots, real));
     if (takeover.kind === "take") {
       // K-1404: rootless Docker sees neither the KitSHn 1 project nor its root-owned files; root takes the data over.
-      const info = await runProgram("docker", ["info", "--format", "{{json .SecurityOptions}}"]);
-      if (info.ok && isRootlessInfo(info.output)) {
+      // A Docker that kitshn cannot name stops the deploy too, so it never copies on the wrong Docker.
+      const kind = dockerKind(await runProgram("docker", ["info", "--format", "{{json .SecurityOptions}}"]));
+      if (kind === "unknown")
+        throw new Error(`KitSHn 1 data waits at ${takeover.dataDir}, and docker info failed, so kitshn copies nothing (K-1404).`);
+      if (kind === "rootless") {
         const self = userInfo();
         throw new Error(
           `KitSHn 1 data waits at ${takeover.dataDir}, and this daemon uses rootless Docker. As root, run: ` +

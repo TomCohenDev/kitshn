@@ -1,3 +1,4 @@
+import { backupPassword, serveRestic } from "./restic.ts";
 import {
   contentSecurityPolicy,
   type LibraryItem,
@@ -394,8 +395,12 @@ export default {
         return Response.json({ error: "Send JSON with Content-Type: application/json." }, { status: 415 });
       }
       // K-1504: "Resume" passes the passkey check of `/api/fresh` first; Access sends the owner back here.
+      // K-1822: a restore to a time comes back to its own mark.
       if (url.pathname === "/api/fresh/start" && request.method === "GET")
-        return Response.redirect(`${url.origin}/#resume`, 302);
+        return Response.redirect(
+          `${url.origin}/#${url.searchParams.get("then") === "restore" ? "restore-time" : "resume"}`,
+          302,
+        );
       if (url.pathname === "/api/fresh/resume" && request.method === "POST") {
         const fresh = await freshCallerOf(request, env, Date.now());
         if (typeof fresh === "string") return Response.json({ error: fresh }, { status: 401 });
@@ -404,6 +409,33 @@ export default {
         return env.KITSHN.getByName("kitshn").fetch(
           new Request(`${url.origin}/fresh/resume`, { method: "POST", headers }),
         );
+      }
+      // K-1822: a restore to a time also needs a fresh passkey. The restart takes a moment, so the Worker asks
+      // the restored Durable Object until it answers, and then it records the restore in History.
+      if (url.pathname === "/api/fresh/restore-time" && request.method === "POST") {
+        const fresh = await freshCallerOf(request, env, Date.now());
+        if (typeof fresh === "string") return Response.json({ error: fresh }, { status: 401 });
+        const body: unknown = await request.json().catch(() => null);
+        const stub = () => env.KITSHN.getByName("kitshn");
+        const call = (path: string, payload: unknown) =>
+          stub().fetch(`${url.origin}${path}`, {
+            method: "POST",
+            headers: { "x-kitshn-caller": JSON.stringify(fresh), "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+        const started = await call("/fresh/restore-time", body);
+        if (!started.ok) return started;
+        // The finish comes from the object: its time label, the undo bookmark and the job ids.
+        const finish = (await started.json()) as { undo: string };
+        for (let attempt = 0; attempt < 40; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          const recorded = await call("/fresh/restored", finish).catch(() => null);
+          if (recorded?.ok) return Response.json({ undo: finish.undo });
+        }
+        return Response.json({
+          undo: finish.undo,
+          warning: "The restore ran. History records it at the next run of kitshn, within a few minutes.",
+        });
       }
       if (url.pathname.startsWith("/api/fresh/"))
         return Response.json({ error: "Not found." }, { status: 404 });
@@ -414,6 +446,37 @@ export default {
       const headers = new Headers(request.headers);
       headers.set("x-kitshn-caller", JSON.stringify(caller));
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
+    }
+    // K-1813, K-1814: restic of a machine reaches the repository of a card only while it runs a job of that card.
+    if (url.pathname.startsWith("/connect/backups/")) {
+      const caller = await callerOf(request, env, env.ACCESS_CONNECT_AUD);
+      if (typeof caller === "string") return Response.json({ error: caller }, { status: 401 });
+      const clientId = caller.visitor.clientId;
+      if (clientId === null)
+        return Response.json({ error: "Only a machine's service token reaches backups." }, { status: 403 });
+      const [first = "", ...rest] = url.pathname.slice("/connect/backups/".length).split("/");
+      let card: string;
+      try {
+        card = decodeURIComponent(first);
+      } catch {
+        return Response.json({ error: "The card name is no valid path part." }, { status: 400 });
+      }
+      const allowed = await env.KITSHN.getByName("kitshn").fetch(
+        "https://kitshn.internal/internal/backup-access",
+        {
+          method: "POST",
+          body: JSON.stringify({ card, clientId }),
+        },
+      );
+      if (!allowed.ok) return allowed;
+      const path = `/${rest.join("/")}`;
+      if (path === "/key") {
+        if (!env.KITSHN_BACKUP_KEY)
+          return Response.json({ error: "kitshn has no KITSHN_BACKUP_KEY (K-1815)." }, { status: 503 });
+        return Response.json({ password: await backupPassword(env.KITSHN_BACKUP_KEY, card) });
+      }
+      if (!env.BUCKET) return Response.json({ error: "R2 is off on this account." }, { status: 503 });
+      return serveRestic(env.BUCKET, card, path, request);
     }
     // K-604, K-812: the daemon connection, and the files of a deploy that the daemon runs.
     if (url.pathname === "/connect" || url.pathname.startsWith("/connect/deploys/")) {

@@ -15,11 +15,13 @@ import {
   type ProjectVolume,
   type ServerToDaemon,
 } from "@kitshn/edge/machine";
+import type { BackupReport } from "@kitshn/edge/backups";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import type { Answer, Request } from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
+import { backup, finishRestores, restore, unpauseMarked } from "./backup.ts";
 import { keyPlan } from "./keys.ts";
 import { composeLogs, followLogs, rangeArgs, searchLogs, withLogLimits } from "./logs.ts";
 import { type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from "./local.ts";
@@ -488,6 +490,8 @@ type JobOutcome = {
   output: string;
   /** K-821: the image id of each service of a Compose build that came up. */
   images?: Record<string, string>;
+  /** K-1817 */
+  backup?: BackupReport;
 };
 
 /** Runs a program with a time limit; it gets its own process group, so the limit also ends its children. */
@@ -1174,6 +1178,26 @@ function runJob(command: Command): Promise<JobOutcome> {
     return Promise.resolve({ ok: true, exitCode: 0, output: text });
   }
   if (command.kind === "update") return updateDaemon(command.version);
+  if (command.kind === "backup" || command.kind === "backup-restore") {
+    if (!joined)
+      return Promise.resolve({ ok: false, exitCode: null, output: "The daemon has no machine token." });
+    const machine = { ...joined, data: paths.data };
+    // K-1816: one Compose job of an app at a time, so a backup never pauses an app in the middle of a deploy.
+    return oneAtATime(command.card, async () => {
+      const outcome =
+        command.kind === "backup"
+          ? await backup(machine, command.card, command.run, command.prune, command.pauseLimitMs)
+          : await restore(
+              machine,
+              command.card,
+              command.run,
+              command.before,
+              command.sources,
+              command.pauseLimitMs,
+            );
+      return { ...outcome, exitCode: outcome.ok ? 0 : 1 };
+    });
+  }
   if (command.kind === "restart") {
     // The service manager starts the daemon again after this exit.
     setTimeout(() => process.exit(0), 500);
@@ -1201,6 +1225,8 @@ function report() {
         "compose-guard",
         "compose-rollback",
         "logs",
+        "backup",
+        "backup-restore",
       ],
       ...(keptBytes === undefined ? {} : { keptBytes }),
       version: VERSION,
@@ -1620,6 +1646,12 @@ async function runCommand() {
   log(`kitshn ${VERSION} starts as machine ${config.machineId}`);
   // Before the socket opens, so `status` answers from the first request.
   joined = config;
+  // K-1816: an app that a stopped daemon left paused in the middle of a backup runs again.
+  void unpauseMarked(paths.data, log)
+    .then(() => finishRestores(paths.data, log))
+    .catch((error: unknown) =>
+      log(`the clean-up after a stopped backup or restore failed: ${String(error)}`),
+    );
   // First, so a second daemon stops before it touches the tunnel or the connection of the running one.
   const own = process.getuid!();
   const socketOptions = {

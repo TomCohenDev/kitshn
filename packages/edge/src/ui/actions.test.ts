@@ -159,11 +159,15 @@ describe("card actions", () => {
       "logs",
       "rollback",
       "rollback-run",
+      "backups",
       "remove-app",
     ]);
     // K-1801: Logs opens the logs of this card.
     run(find(groups, "logs"));
     expect(calls.at(-1)).toMatchObject(["logs", { id: "riffle" }]);
+    // K-1819: Backups opens the backups of this Compose card.
+    run(find(groups, "backups"));
+    expect(calls.at(-1)).toMatchObject(["backups", { id: "riffle" }]);
     expect(find(groups, "remove-app").danger).toBe(true);
     // K-821: a preview has no rollback, but it can still go.
     const preview = actionsFor({ ...context(), previews: new Set(["riffle"]) }, handlers, {

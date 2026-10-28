@@ -96,6 +96,17 @@ function phrase(summary: string): string | null {
  */
 export const rowText = (summary: string): string => phrase(summary) ?? summary;
 
+/**
+ * K-1502: the toast of an undo says what came back, in the words of its History row without the revision number:
+ * "Undo #12: tick3d: − Her" is "Removed tick3d from Her".
+ */
+export function undoneText(summary: string): string {
+  const colon = summary.startsWith("Undo #") ? summary.indexOf(": ") : -1;
+  const rest = colon > 0 ? summary.slice(colon + 2) : summary;
+  const text = rowText(rest);
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 export type Day = "Today" | "Yesterday" | "Older";
 
 export interface HistoryGroup {

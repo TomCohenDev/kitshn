@@ -16,7 +16,12 @@ interface StoreState {
 }
 
 type Result =
-  | { readonly ok: true; readonly revision: number | null; readonly notes: ReadonlyArray<string> }
+  | {
+      readonly ok: true;
+      readonly revision: number | null;
+      readonly notes: ReadonlyArray<string>;
+      readonly summary: string | null;
+    }
   | { readonly ok: false; readonly error: string; readonly lost?: true };
 
 let current: StoreState = { snapshot: null, connection: "connecting", reason: null, held: [] };
@@ -84,7 +89,9 @@ export function connect() {
       tailListeners.delete(message.tail);
     } else {
       waiting.get(message.requestId)?.(
-        message.ok ? { ok: true, revision: message.revision, notes: message.notes } : message,
+        message.ok
+          ? { ok: true, revision: message.revision, notes: message.notes, summary: message.summary }
+          : message,
       );
       waiting.delete(message.requestId);
     }

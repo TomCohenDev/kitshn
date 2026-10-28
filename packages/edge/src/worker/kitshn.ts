@@ -2132,7 +2132,18 @@ export class Kitshn extends DurableObject<Env> {
           : message.type === "undo"
             ? await this.undo(caller.actor, message.revision)
             : await this.undoItem(caller.actor, message.item);
-      return { type: "result", requestId: message.requestId, ok: true, revision, notes };
+      const [row] =
+        message.type !== "apply" && revision !== null
+          ? this.sql<{ summary: string }>("SELECT summary FROM revisions WHERE id = ?", revision)
+          : [];
+      return {
+        type: "result",
+        requestId: message.requestId,
+        ok: true,
+        revision,
+        notes,
+        summary: row?.summary ?? null,
+      };
     } catch (error) {
       if (!(error instanceof RuleError)) throw error;
       return { type: "result", requestId: message.requestId, ok: false, error: error.message };

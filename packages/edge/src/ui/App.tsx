@@ -126,7 +126,7 @@ import {
   type WidthLimits,
   shownWidths,
 } from "./layout.ts";
-import { actorLabel } from "./revisions.ts";
+import { actorLabel, undoneText } from "./revisions.ts";
 import {
   type Connection,
   applyEdits,
@@ -675,24 +675,32 @@ export function App() {
     const result = await undoRevision(revision);
     showToast(
       result.ok
-        ? { text: [`Undid #${revision}.`, ...result.notes].join(" "), error: false, undo: result.revision }
+        ? {
+            text: [`${result.summary ? undoneText(result.summary) : "Undone"}.`, ...result.notes].join(" "),
+            error: false,
+            undo: result.revision,
+          }
         : { text: result.error, error: true, undo: null },
     );
   };
 
   /** K-1507: undoes the caller's own newest change to one card or circle. */
   const undoItem = async (item: Item) => {
-    const result = await callApi<{ revision: number | null; notes: ReadonlyArray<string> }>(
-      "POST",
-      "/api/undo-item",
-      {
-        item,
-      },
-    );
+    const result = await callApi<{
+      revision: number | null;
+      notes: ReadonlyArray<string>;
+      summary: string | null;
+    }>("POST", "/api/undo-item", {
+      item,
+    });
     showToast(
       "error" in result
         ? { text: result.error, error: true, undo: null }
-        : { text: ["Undone.", ...result.notes].join(" "), error: false, undo: null },
+        : {
+            text: [`${result.summary ? undoneText(result.summary) : "Undone"}.`, ...result.notes].join(" "),
+            error: false,
+            undo: result.revision,
+          },
     );
   };
 

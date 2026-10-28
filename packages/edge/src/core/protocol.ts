@@ -101,6 +101,8 @@ export type ServerMessage =
       readonly revision: number | null;
       /** K-909: what an undo of an app removal started again, or why it did not. */
       readonly notes: ReadonlyArray<string>;
+      /** K-1502: the History summary of an undo, so its toast says what came back; null for other requests. */
+      readonly summary: string | null;
     }
   | { readonly type: "result"; readonly requestId: string; readonly ok: false; readonly error: string }
   /** K-1805, K-1807: the answer to a `tail` message. */

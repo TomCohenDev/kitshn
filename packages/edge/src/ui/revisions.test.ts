@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Actor } from "../core/changes.ts";
 import type { RevisionView } from "../core/protocol.ts";
-import { dayOf, filterHistory, groupHistory, rowText, undoableRow } from "./revisions.ts";
+import { dayOf, filterHistory, groupHistory, rowText, undoableRow, undoneText } from "./revisions.ts";
 
 const me: Actor = { _tag: "person", email: "me@example.com" };
 const bot: Actor = { _tag: "device", clientId: "c1", name: "Bot" };
@@ -37,6 +37,14 @@ describe("History rows start with the verb, under their actor (K-1508)", () => {
     ["Undo #12 for tick3d: Moved a card", "undid #12 for tick3d and so moved a card"],
   ])("says %s as %s", (summary, said) => {
     expect(rowText(summary)).toBe(said);
+  });
+
+  it("says in an undo toast what came back, without the revision number (K-1502)", () => {
+    expect(
+      ["Undo #12: tick3d: − Her", "Undo #12 for tick3d: Moved a card", "Undo #3: Sign out everywhere"].map(
+        undoneText,
+      ),
+    ).toEqual(["Removed tick3d from Her", "Moved a card", "Sign out everywhere"]);
   });
 
   it("keeps a summary of an unknown shape as it is, so it adds no fact", () => {

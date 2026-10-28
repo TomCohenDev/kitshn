@@ -6384,7 +6384,12 @@ export class Kitshn extends DurableObject<Env> {
       const refusal = this.agentSiteMayChange(agent, known.card_id, now);
       if (refusal) return fail(403, refusal);
       const address = this.state.resources.get(known.card_id)?.addresses[0] ?? known.address;
-      return Response.json({ deployId: planned(known, address), address, updated: true });
+      return Response.json({
+        deployId: planned(known, address),
+        card: known.card_id,
+        address,
+        updated: true,
+      });
     }
     if (!agentHas(this.state, agent.visitor, "addsApps", now))
       return fail(403, 'A folder site needs the right "may add apps" (K-718, K-1123).');
@@ -6450,7 +6455,7 @@ export class Kitshn extends DurableObject<Env> {
       );
     const refused = await this.addressRefusal(api, [address], cardId, `kitshn-${cardId}`, undefined, true);
     if (refused) return release(refused);
-    return Response.json({ deployId, address, updated: false });
+    return Response.json({ deployId, card: cardId, address, updated: false });
   }
 
   /**
@@ -6467,7 +6472,8 @@ export class Kitshn extends DurableObject<Env> {
     const zone = current.slice(current.indexOf(".") + 1);
     const after = `${name}.${zone}`;
     const script = `kitshn-${resource.id}`;
-    if (after === current) return Response.json({ address: after, revision: null });
+    if (after === current)
+      return Response.json({ card: resource.id, kind: "folder", address: after, revision: null });
     const free = this.folderSiteName(name, zone);
     if (typeof free !== "string") return fail(free.status, free.error);
     const refused = await this.addressRefusal(api, [after], resource.id, script, resource, true);
@@ -6546,7 +6552,7 @@ export class Kitshn extends DurableObject<Env> {
     this.load();
     this.broadcast();
     void this.scheduleAlarm();
-    return Response.json({ address: after, revision });
+    return Response.json({ card: resource.id, kind: "folder", address: after, revision });
   }
 
   /**
@@ -6767,10 +6773,10 @@ export class Kitshn extends DurableObject<Env> {
       return Response.json({ error: `The address name "${name}" is taken (K-1120).` }, { status: 409 });
     const before = resource.addresses[0] ?? "";
     const after = libraryAddress(this.env.KITSHN_ZONE, item, name);
-    if (after === before) return Response.json({ address: after, revision: null });
+    if (after === before) return Response.json({ card, kind: item.kind, address: after, revision: null });
     try {
       const revision = this.commit(caller.actor, [{ _tag: "address", id: card, before, after }], null);
-      return Response.json({ address: after, revision });
+      return Response.json({ card, kind: item.kind, address: after, revision });
     } catch (error) {
       if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
       throw error;

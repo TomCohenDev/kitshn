@@ -294,6 +294,8 @@ describe("agent publish (K-1116, K-1117)", () => {
 
     // The current name changes nothing; the name of another item is taken.
     expect(await (await ownerPost(`/api/cards/${id}/address`, { address: "my-design" })).json()).toEqual({
+      card: id,
+      kind: "page",
       address: "pages.example.com/my-design",
       revision: null,
     });

@@ -19,6 +19,7 @@ import { gzipSync } from "node:zlib";
 import { headersWarnings, redirectsWarnings } from "./headers.ts";
 import { pickSiteIcon } from "./icon.ts";
 import { contentType } from "./media.ts";
+import { cardOutput, errorOutput } from "./output.ts";
 import { type Artifact, artifactsByApp } from "./artifacts.ts";
 import { RecipeError, readApps } from "./parse.ts";
 import {
@@ -584,10 +585,22 @@ async function publish(server: string, file: string, options: PublishOptions) {
   const response = await fetch(new URL("/agent/library", server), { method: "POST", headers, body });
   const data = (await response.json().catch(() => null)) as {
     error?: string;
+    id?: string;
     address?: string | null;
     updated?: boolean;
+    revision?: number | null;
   } | null;
   if (!response.ok) fail(data?.error ?? `/agent/library answered ${response.status}.`);
+  if (json)
+    return void process.stdout.write(
+      cardOutput({
+        address: data?.address ?? "",
+        card: data?.id ?? "",
+        kind: fileName.toLowerCase().endsWith(".html") ? "page" : "file",
+        updated: data?.updated === true,
+        revision: data?.revision ?? null,
+      }),
+    );
   console.log(
     `kitshn: ${data?.updated ? "updated" : "published"} ${fileName}${data?.address ? ` at https://${data.address}` : ""}`,
   );
@@ -599,7 +612,7 @@ async function publish(server: string, file: string, options: PublishOptions) {
  */
 async function publishFolder(server: string, folder: string, options: PublishOptions) {
   const name = options.name || resolve(folder).slice(resolve(folder).lastIndexOf(sep) + 1);
-  const plan = await agentCall<{ deployId: string; address: string; updated: boolean }>(
+  const plan = await agentCall<{ deployId: string; card: string; address: string; updated: boolean }>(
     server,
     "/agent/sites/plan",
     {
@@ -620,6 +633,10 @@ async function publishFolder(server: string, folder: string, options: PublishOpt
     headers: assets.headers,
     redirects: assets.redirects,
   });
+  if (json)
+    return void process.stdout.write(
+      cardOutput({ address: done.address, card: plan.card, kind: "folder", updated: plan.updated }),
+    );
   console.log(
     `kitshn: ${plan.updated ? "updated" : "published"} ${name} (${assets.count} files) at https://${done.address} (answered ${done.status})`,
   );
@@ -627,17 +644,31 @@ async function publishFolder(server: string, folder: string, options: PublishOpt
 
 /** K-1120: gives a page or a file card, by its id or its address name, a new address name. */
 async function setAddress(server: string, card: string, name: string) {
-  const data = await agentCall<{ address: string }>(
-    server,
-    `/agent/cards/${encodeURIComponent(card)}/address`,
-    {
-      address: name,
-    },
-  );
+  const data = await agentCall<{
+    address: string;
+    card: string;
+    kind: "page" | "file" | "folder";
+    revision: number | null;
+  }>(server, `/agent/cards/${encodeURIComponent(card)}/address`, {
+    address: name,
+  });
+  if (json)
+    return void process.stdout.write(
+      cardOutput({
+        address: data.address,
+        card: data.card,
+        kind: data.kind,
+        updated: true,
+        revision: data.revision,
+      }),
+    );
   console.log(`kitshn: ${card} is now at https://${data.address}`);
 }
 
 const [command, ...args] = process.argv.slice(2);
+/** K-1116: with `--json`, stdout holds only the result object; progress and notes go to stderr. */
+const json = args.includes("--json");
+if (json) console.log = console.error.bind(console);
 const flag = (name: string, fallback: string) => {
   const index = args.indexOf(name);
   return index >= 0 ? (args[index + 1] ?? fallback) : fallback;
@@ -666,6 +697,10 @@ try {
     await setAddress(flag("--server", process.env["KITSHN_SERVER"] ?? ""), card ?? "", name ?? "");
   }
 } catch (error) {
+  if (json) {
+    process.stdout.write(errorOutput(error instanceof Error ? error.message : String(error)));
+    process.exit(1);
+  }
   if (!(error instanceof CliError)) throw error;
   console.error(`kitshn: ${error.message}`);
   process.exit(1);
@@ -673,7 +708,8 @@ try {
 if (command !== "check" && command !== "deploy" && command !== "publish" && command !== "address") {
   console.log(`kitshn check [--dir <app>]                  check kitshn.config.ts and print it as JSON (K-802)
 kitshn deploy --server <address> [--dir <app>]   deploy from GitHub Actions (K-803)
-kitshn publish <file|folder> [--name <name>] [--address <name>] [--zone <zone>] [--circle <circle>] [--public]
+kitshn publish <file|folder> [--name <name>] [--address <name>] [--zone <zone>] [--circle <circle>] [--public] [--json]
                                              publish a page, a file (K-1116) or a folder site (K-1123) with an agent key
-kitshn address <card> <name>                 give a page, a file (K-1120) or a folder site (K-1124) a new address name`);
+kitshn address <card> <name> [--json]        give a page, a file (K-1120) or a folder site (K-1124) a new address name
+                                             --json prints one JSON object on stdout: the card, or {"error"}`);
 }

@@ -1925,12 +1925,29 @@ a > code {
   transform: translateY(-50%);
   background: var(--border);
   border-radius: 2px;
-  opacity: 0;
+  /* A thin grip always shows, so people find the edge; hover and focus make it full. */
+  opacity: 0.35;
   transition: opacity 120ms;
 }
 .resize-edge:hover::after,
 .resize-edge:focus-visible::after {
   opacity: 1;
+}
+/* A finger needs a bigger target and has no hover. */
+@media (pointer: coarse) {
+  .resize-edge {
+    width: 24px;
+  }
+  .resize-edge::after {
+    left: 10px;
+    opacity: 1;
+  }
+  .resize-edge.at-left {
+    right: calc(var(--panel-width) + 12px - 12px);
+  }
+  .tray .resize-edge.at-right {
+    right: -14px;
+  }
 }
 .resize-edge:focus-visible {
   outline-offset: -2px;

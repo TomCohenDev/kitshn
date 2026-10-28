@@ -161,14 +161,42 @@ export interface WidthLimits {
   readonly initial: number;
 }
 
-/** A width inside its limits, and never wider than the screen leaves room for (`room`). */
-export const clampWidth = (width: number, limits: WidthLimits, room: number) =>
-  Math.round(Math.max(limits.min, Math.min(width, limits.max, room)));
+/** K-525: the map keeps at least this much width between the shelf and the panel. */
+export const MAP_MIN_WIDTH = 360;
+/** The shelf sits 10 px from the left, the panel 12 px from the right. */
+const SIDE_GAPS = 22;
+/** On a screen too narrow for both minimums, neither gets narrower than this. */
+const FLOOR = 120;
+
+const clamp = (value: number, low: number, high: number) => Math.round(Math.max(low, Math.min(value, high)));
+
+/**
+ * K-525: the widths that show. The owner's wanted widths stay stored; the screen, the other element and
+ * `MAP_MIN_WIDTH` of map cut them down. A hidden element (null) takes no room. The panel goes first, and the
+ * shelf takes what is left; on a cramped screen both may go below their minimums, down to `FLOOR`.
+ */
+export function shownWidths(
+  screen: number,
+  wanted: { readonly panel: number | null; readonly tray: number | null },
+  limits: { readonly panel: WidthLimits; readonly tray: WidthLimits },
+): { readonly panel: number; readonly tray: number } {
+  const room = screen - SIDE_GAPS - MAP_MIN_WIDTH;
+  const trayFloor = wanted.tray === null ? 0 : limits.tray.min;
+  const panelRoom = Math.max(FLOOR, room - trayFloor);
+  const panel =
+    wanted.panel === null
+      ? 0
+      : clamp(wanted.panel, Math.min(limits.panel.min, panelRoom), Math.min(limits.panel.max, panelRoom));
+  const trayRoom = Math.max(FLOOR, room - panel);
+  const tray =
+    wanted.tray === null ? 0 : clamp(wanted.tray, Math.min(limits.tray.min, trayRoom), Math.min(limits.tray.max, trayRoom));
+  return { panel, tray };
+}
 
 /** A stored width, or the initial one when the device stored none or something broken. */
 export function storedWidth(raw: string | null, limits: WidthLimits): number {
-  const width = raw === null ? Number.NaN : Number(raw);
-  return Number.isFinite(width) ? Math.max(limits.min, Math.min(width, limits.max)) : limits.initial;
+  const width = raw === null || raw.trim() === "" ? Number.NaN : Number(raw);
+  return Number.isFinite(width) ? clamp(width, limits.min, limits.max) : limits.initial;
 }
 
 /** The width after a key on a resize edge, or null for a key that does not resize. */

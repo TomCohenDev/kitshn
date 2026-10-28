@@ -1,7 +1,7 @@
 import { type ComponentChildren, Fragment, createPortal } from "preact";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { Action, ActionGroups } from "./actions.ts";
-import { type WidthLimits, clampWidth, keyWidth, storedWidth } from "./layout.ts";
+import { type WidthLimits, keyWidth, storedWidth } from "./layout.ts";
 import { type Rect, type Side, menuMove, placeFloating, tipTimer } from "./popover.ts";
 
 /**
@@ -449,39 +449,60 @@ export function OverlayPanel(props: {
   );
 }
 
-/**
- * K-525: a width that this device remembers, inside its limits. It also sets `cssVar` on the page, so every
- * rule that places things beside the panel or the shelf follows the drag. A narrow screen still caps it.
- */
-export function useStoredWidth(key: string, cssVar: string, limits: WidthLimits) {
-  const show = (width: number) =>
-    document.documentElement.style.setProperty(cssVar, `min(${width}px, calc(100vw - 24px))`);
-  const [width, setWidth] = useState(() => {
-    const stored = storedWidth(localStorage.getItem(key), limits);
-    show(stored);
-    return stored;
-  });
-  const change = (next: number) => {
-    const clamped = clampWidth(next, limits, innerWidth - 24);
-    setWidth(clamped);
-    show(clamped);
-    localStorage.setItem(key, String(clamped));
+/** K-525: the width that the owner wants, which this device remembers inside its limits. */
+export function useStoredWidth(key: string, limits: WidthLimits) {
+  const [width, setWidth] = useState(() => storedWidth(localStorage.getItem(key), limits));
+  const commit = (next: number) => {
+    const kept = storedWidth(String(next), limits);
+    setWidth(kept);
+    localStorage.setItem(key, String(kept));
   };
-  return [width, change] as const;
+  return [width, commit] as const;
+}
+
+/** K-525: the screen width, so the widths that show follow a window resize and the 720 px phone break. */
+export function useScreenWidth() {
+  const [width, setWidth] = useState(innerWidth);
+  useEffect(() => {
+    const update = () => setWidth(innerWidth);
+    addEventListener("resize", update);
+    return () => removeEventListener("resize", update);
+  }, []);
+  return width;
 }
 
 /**
  * K-525: the drag edge of the side panel or the shelf. A pointer drags it, and as a focusable separator the
  * arrow keys, Home and End move it. `grows` is the side the element grows to when the edge moves that way.
+ * A drag changes only `cssVar`, so nothing renders until the drag ends; `fit` gives the width that may show
+ * for a wanted one. Escape during a drag puts the start width back.
  */
 export function ResizeEdge(props: {
   readonly label: string;
   readonly width: number;
   readonly limits: WidthLimits;
   readonly grows: "left" | "right";
-  readonly onChange: (width: number) => void;
+  readonly cssVar: string;
+  readonly fit: (wanted: number) => number;
+  readonly onCommit: (width: number) => void;
 }) {
-  const drag = useRef<{ readonly x: number; readonly width: number } | null>(null);
+  const drag = useRef<{ readonly x: number; readonly start: number; shown: number } | null>(null);
+  const show = (width: number) => document.documentElement.style.setProperty(props.cssVar, `${width}px`);
+  const end = (keep: boolean) => {
+    const now = drag.current;
+    if (!now) return;
+    drag.current = null;
+    removeEventListener("keydown", escape, true);
+    if (keep && now.shown !== now.start) props.onCommit(now.shown);
+    else show(now.start);
+  };
+  const escape = (event: KeyboardEvent) => {
+    if (event.key !== "Escape") return;
+    // The drag eats this Escape, so it never also closes the panel.
+    event.stopPropagation();
+    event.preventDefault();
+    end(false);
+  };
   return (
     <div
       class={`resize-edge ${props.grows === "left" ? "at-left" : "at-right"}`}
@@ -497,25 +518,26 @@ export function ResizeEdge(props: {
         if (event.button !== 0) return;
         event.preventDefault();
         event.currentTarget.setPointerCapture(event.pointerId);
-        drag.current = { x: event.clientX, width: props.width };
+        drag.current = { x: event.clientX, start: props.width, shown: props.width };
+        addEventListener("keydown", escape, true);
       }}
       onPointerMove={(event) => {
-        const start = drag.current;
-        if (!start) return;
-        const moved = event.clientX - start.x;
-        props.onChange(start.width + (props.grows === "left" ? -moved : moved));
+        const now = drag.current;
+        if (!now) return;
+        // A release that the page missed (outside the window) ends the drag.
+        if (event.buttons === 0) return end(true);
+        const moved = event.clientX - now.x;
+        now.shown = props.fit(now.start + (props.grows === "left" ? -moved : moved));
+        show(now.shown);
       }}
-      onPointerUp={() => {
-        drag.current = null;
-      }}
-      onPointerCancel={() => {
-        drag.current = null;
-      }}
+      onPointerUp={() => end(true)}
+      onPointerCancel={() => end(false)}
+      onLostPointerCapture={() => end(true)}
       onKeyDown={(event) => {
         const next = keyWidth(event.key, props.width, props.limits, props.grows);
         if (next === null) return;
         event.preventDefault();
-        props.onChange(next);
+        props.onCommit(props.fit(next));
       }}
     />
   );

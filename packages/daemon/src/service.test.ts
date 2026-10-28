@@ -19,6 +19,9 @@ describe("daemon service (K-601)", () => {
     expect(pathsFor("darwin", {}, "/Users/u").service).toBe(
       "/Users/u/Library/LaunchAgents/com.kitshn.daemon.plist",
     );
+    expect(pathsFor("linux", { XDG_RUNTIME_DIR: "/x" }, "/home/u", 7).socket).toBe("/x/kitshn/kitshn.sock");
+    expect(pathsFor("linux", {}, "/home/u", 7).socket).toBe("/run/user/7/kitshn/kitshn.sock");
+    expect(pathsFor("darwin", {}, "/Users/u").socket).toBe("/Users/u/Library/Application Support/kitshn/kitshn.sock");
   });
 
   it("restarts the daemon after every exit", () => {

@@ -4068,7 +4068,10 @@ export class Kitshn extends DurableObject<Env> {
     // K-1115: a page may hold a data: icon, and a small file may be an image; read their start beside R2.
     const [body, sniffed] =
       kind === "page" || size <= ICON_LIMIT ? request.body.tee() : ([request.body, null] as const);
-    const start = sniffed ? readStart(sniffed, kind === "page" ? PAGE_ICON_SCAN : ICON_LIMIT) : null;
+    // The icon comes first, before any R2 write, so a CPU limit while it decodes leaves no object behind.
+    const head = sniffed ? await readStart(sniffed, kind === "page" ? PAGE_ICON_SCAN : ICON_LIMIT) : null;
+    const iconBytes = head === null ? null : kind === "page" ? pageDataIcon(new TextDecoder().decode(head)) : head;
+    const iconKind = iconBytes !== null && iconBytes.length <= ICON_LIMIT ? iconType(iconBytes) : null;
     // The stream fails when the body is not exactly Content-Length bytes, so the limit holds.
     const { readable, writable } = new FixedLengthStream(size);
     const piped = body.pipeTo(writable);
@@ -4079,9 +4082,6 @@ export class Kitshn extends DurableObject<Env> {
       await piped.catch(() => undefined);
       return refuse(`The upload did not reach R2: ${String(error)}`, 502);
     }
-    const head = await start;
-    const iconBytes = head === null ? null : kind === "page" ? pageDataIcon(new TextDecoder().decode(head)) : head;
-    const iconKind = iconBytes !== null && iconBytes.length <= ICON_LIMIT ? iconType(iconBytes) : null;
     const resource: Resource = {
       id: item.id,
       kind,
@@ -4095,7 +4095,7 @@ export class Kitshn extends DurableObject<Env> {
       group: null,
       machine: null,
     };
-    const revision = this.ctx.storage.transactionSync(() => {
+    const record = () => this.ctx.storage.transactionSync(() => {
       this.sql(
         `INSERT INTO library (id, kind, title, file_name, thread, machine, size, content_type, created_at, source)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -4118,6 +4118,14 @@ export class Kitshn extends DurableObject<Env> {
       this.persist(changes);
       return this.insertRevision(caller.actor, `Added the ${kind} ${title} on the map`, changes, null);
     });
+    let revision: number;
+    try {
+      revision = record();
+    } catch (error) {
+      // No card names the object, so it goes too (K-1115).
+      await bucket.delete(objectKey(item)).catch(() => undefined);
+      throw error;
+    }
     if (iconBytes !== null && iconKind !== null) await this.setIcon(item.id, { bytes: iconBytes, type: iconKind });
     this.load();
     this.broadcast();

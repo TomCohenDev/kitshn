@@ -70,6 +70,23 @@ describe("site icon (K-1112, K-1113)", () => {
     expect(iconType(new Uint8Array())).toBeNull();
   });
 
+  it("reads the emoji favicon, whose quoted href holds > characters (K-1115)", () => {
+    const html =
+      '<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🍳</text></svg>">';
+    const icon = pageDataIcon(html);
+    expect(icon && iconType(icon)).toBe("image/svg+xml");
+    expect(new TextDecoder().decode(icon!)).toContain("🍳</text></svg>");
+  });
+
+  it("skips links in comments, decodes entities, and takes only the first data: link (K-1115)", () => {
+    const b64 = btoa(String.fromCharCode(...PNG));
+    expect(pageDataIcon(`<!-- <link rel="icon" href="data:image/png;base64,${b64}"> -->`)).toBeNull();
+    expect(pageDataIcon(`<!-- old --><link rel="icon" href="data:image/png;base64,${b64}">`)).toEqual(PNG);
+    const quoted = pageDataIcon('<link rel="icon" href="data:image/svg+xml,<svg xmlns=&quot;http://www.w3.org/2000/svg&quot;></svg>">');
+    expect(new TextDecoder().decode(quoted!)).toBe('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+    expect(pageDataIcon(`<link rel="icon" href="data:image/png;base64,%%%"><link rel="icon" href="data:image/png;base64,${b64}">`)).toBeNull();
+  });
+
   it("reads a data: icon of a page, as base64 or as text, and ignores a link to a path (K-1115)", () => {
     const b64 = btoa(String.fromCharCode(...PNG));
     expect(pageDataIcon(`<link rel="icon" href="/a.png"><link rel="icon" href="data:image/png;base64,${b64}">`)).toEqual(PNG);

@@ -55,6 +55,8 @@ This page says what the parts are, where each piece of state lives, how requests
 | Page and file bytes | R2 | |
 | Compose data, logs | Machine disk | Same layout ideas as KitSHn 1. Docker keeps at most 30 MB of logs per container (K-1803). |
 | Worker app logs | Workers Logs in Cloudflare | Cloudflare keeps them for its retention; kitshn stores none (K-1806). |
+| Backups of Compose apps | R2, one restic repository per card at `backups/<card>/` | Encrypted with a key from the Worker secret `KITSHN_BACKUP_KEY` (K-1815). |
+| Daily copy of the Durable Object state | R2 `state/<date>.json.gz`, 30 kept; point-in-time recovery keeps 30 days | K-1821, K-1831. |
 | Device view (zoom, pan) | Browser local storage | |
 
 ## Request paths

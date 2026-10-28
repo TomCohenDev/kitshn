@@ -38,6 +38,15 @@ import type { Command } from "../core/machine.ts";
 import { ROLLBACK_DATA, RollbackDialog } from "./Rollback.tsx";
 import { LogsDialog } from "./Logs.tsx";
 import { hasLogs } from "../core/logs.ts";
+import {
+  BackupState,
+  BackupsDialog,
+  RESTORE_KEY,
+  type RestoreWish,
+  RestoreTimeDialog,
+  backupLabel,
+} from "./Backups.tsx";
+import { type BackupRun, BACKUP_LIMIT_BYTES, type BucketSize, gigabytes } from "../core/backups.ts";
 import type {
   DeployNote,
   JobView,
@@ -158,6 +167,8 @@ const SHELF_KEY = "kitshn.shelf";
 const FIT_MIN_SCALE = 0.85;
 const wideScreen = () => innerWidth > 720;
 const UNDO_MS = 10_000;
+/** A press on a toast button this soon after it shows is the second press of the button that made it; it does nothing. */
+const TOAST_GUARD_MS = 500;
 
 interface Toast {
   readonly text: string;
@@ -268,6 +279,8 @@ export function App() {
   const [secret, setSecret] = useState<DeviceSecret | null>(null);
   const [rollback, setRollback] = useState<{ card: Resource; mode: "card" | "run" } | null>(null);
   const [logs, setLogs] = useState<Resource | null>(null);
+  const [backupsCard, setBackupsCard] = useState<Resource | null>(null);
+  const [restoringTime, setRestoringTime] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
   const [trayFilter, setTrayFilter] = useState("");
   const [previews, setPreviews] = useState(() => localStorage.getItem(PREVIEWS_KEY) === "on");
@@ -300,6 +313,7 @@ export function App() {
   const [shelfChoice, setShelfChoice] = useState(() => localStorage.getItem(SHELF_KEY));
   const [refusal, setRefusal] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
+  const toastShownAt = useRef(0);
   const fitRef = useRef<(() => void) | null>(null);
 
   // The map shows held edits on top of the server state, so a drop never jumps back (see held.ts).
@@ -403,6 +417,7 @@ export function App() {
     };
     // K-1504: Access sends the owner back here after the fresh passkey check of "Resume".
     if (location.hash === "#resume") void finishResume();
+    if (location.hash === "#restore-time") void finishRestoreTime();
     addEventListener("hashchange", onHash);
     addEventListener("keydown", onKey);
     addEventListener("dragover", keepFiles);
@@ -694,7 +709,45 @@ export function App() {
     );
   };
 
+  /** K-1822: Access sends the owner back to `#restore-time` after the passkey check; the confirm names the time. */
+  const finishRestoreTime = async () => {
+    history.replaceState(null, "", location.pathname + location.search);
+    const stored = sessionStorage.getItem(RESTORE_KEY);
+    sessionStorage.removeItem(RESTORE_KEY);
+    if (stored === null) return;
+    const wish = JSON.parse(stored) as RestoreWish;
+    const sure = await ask(
+      `Restore kitshn to ${wish.label}? Cards, circles, shares, History, rollbacks, jobs and repos go back to then. What changed outside kitshn since then stays: a machine that joined later loses its card, a removed machine comes back, and deploy files that R2 already deleted stay gone. A second restore undoes it.`,
+    );
+    if (!sure) return;
+    // The object names the time in History itself; the label here is for the confirm only.
+    const result = await callApi<{ undo: string; warning?: string }>(
+      "POST",
+      "/api/fresh/restore-time",
+      "at" in wish ? { at: wish.at } : { bookmark: wish.bookmark },
+    );
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: result.warning ?? `kitshn is back at ${wish.label}.`, error: false, undo: null },
+    );
+  };
+
+  /** K-1817: "Back up now". */
+  const backUpNow = async (resource: Resource) => {
+    const result = await callApi<{ run: string }>(
+      "POST",
+      `/api/apps/${encodeURIComponent(resource.id)}/backups`,
+    );
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: `The backup of ${resource.name} is queued.`, error: false, undo: null },
+    );
+  };
+
   const showToast = (next: Toast) => {
+    toastShownAt.current = Date.now();
     setToast(next);
     if (toastTimer.current !== null) clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(null), UNDO_MS);
@@ -1240,6 +1293,7 @@ export function App() {
     editAddress: (resource) =>
       selectAndFocus({ cards: new Set([resource.id]), circle: null }, 'input[aria-label="Address name"]'),
     logs: setLogs,
+    backups: setBackupsCard,
     runJob: (machine, command) => void runJob(machine, command),
     removeMachine: (machine) => void removeMachine(machine),
     editCircle: (circleId) => {
@@ -1342,12 +1396,22 @@ export function App() {
           onClose={closePanel}
         >
           {shownPanel === "safety" ? (
-            <SafetyView
-              reach={reachNow}
-              pause={pauseView}
-              onPress={() => void pauseNow("keep-public")}
-              onLockdown={() => void pauseNow("lockdown")}
-            />
+            <>
+              <SafetyView
+                reach={reachNow}
+                pause={pauseView}
+                onPress={() => void pauseNow("keep-public")}
+                onLockdown={() => void pauseNow("lockdown")}
+              />
+              <button
+                type="button"
+                class="btn"
+                data-tip="Rewind everything that kitshn keeps to a time of the past 30 days. It needs a fresh passkey."
+                onClick={() => setRestoringTime(true)}
+              >
+                Restore kitshn to a time…
+              </button>
+            </>
           ) : shownPanel === "history" ? (
             historyView
           ) : shownPanel === "library" ? (
@@ -1399,6 +1463,10 @@ export function App() {
               onRestorePrevious={(resource) => void restorePrevious(resource)}
               onSetAddress={setAddress}
               onLogs={setLogs}
+              backups={store.snapshot.backups}
+              r2Bucket={store.snapshot.r2Bucket}
+              onBackUpNow={(resource) => void backUpNow(resource)}
+              onBackups={setBackupsCard}
               orphanWorkers={store.snapshot.orphanWorkers}
               onDeleteOrphanWorker={(orphan) => void deleteOrphanWorker(orphan)}
               deployed={deployed}
@@ -1448,6 +1516,17 @@ export function App() {
         />
       ) : null}
       {logs ? <LogsDialog card={logs} onClose={() => setLogs(null)} /> : null}
+      {backupsCard ? (
+        <BackupsDialog
+          card={backupsCard}
+          ask={ask}
+          onClose={() => setBackupsCard(null)}
+          onDone={(text, error) => showToast({ text, error, undo: null })}
+        />
+      ) : null}
+      {restoringTime ? (
+        <RestoreTimeDialog restoreUndo={store.snapshot.restoreUndo} onClose={() => setRestoringTime(false)} />
+      ) : null}
       {progress ? (
         <div class="progress" role="status">
           <span class="sticker wait" data-tip="Upload: kitshn sends the files one after the other.">
@@ -1844,6 +1923,7 @@ export function App() {
               class="btn primary"
               data-tip="Undo: take this change back."
               onClick={() => {
+                if (Date.now() - toastShownAt.current < TOAST_GUARD_MS) return;
                 const revisions = [...(toast.undo === null ? [] : [toast.undo]), ...(toast.alsoUndo ?? [])];
                 setToast(null);
                 void (async () => {
@@ -1859,6 +1939,7 @@ export function App() {
               class="btn resume"
               data-tip={toast.action.tip}
               onClick={() => {
+                if (Date.now() - toastShownAt.current < TOAST_GUARD_MS) return;
                 setToast(null);
                 toast.action?.run();
               }}
@@ -1914,6 +1995,10 @@ function Panel(props: {
   onRestorePrevious: (resource: Resource) => void;
   onSetAddress: (resource: Resource, name: string) => Promise<boolean>;
   onLogs: (resource: Resource) => void;
+  backups: Readonly<Record<string, BackupRun>>;
+  r2Bucket: BucketSize | null;
+  onBackUpNow: (resource: Resource) => void;
+  onBackups: (resource: Resource) => void;
   orphanWorkers: ReadonlyArray<OrphanWorker>;
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
   /** K-909 */
@@ -1983,6 +2068,10 @@ function Panel(props: {
         onRestorePrevious={props.previousVersions.has(cards[0].id) ? props.onRestorePrevious : null}
         onSetAddress={props.onSetAddress}
         onLogs={props.onLogs}
+        backup={props.backups[cards[0].id] ?? null}
+        r2Bucket={props.r2Bucket}
+        onBackUpNow={props.onBackUpNow}
+        onBackups={props.onBackups}
         orphanWorkers={cards[0].id === ADMIN_RESOURCE_ID ? props.orphanWorkers : []}
         onDeleteOrphanWorker={props.onDeleteOrphanWorker}
         deployed={props.deployed.has(cards[0].id)}
@@ -2305,6 +2394,11 @@ function CardPanel(props: {
   /** K-1120: a page or a file gets a new address name. */
   onSetAddress: (resource: Resource, name: string) => Promise<boolean>;
   onLogs: (resource: Resource) => void;
+  /** K-1819: the newest backup run of this card, or null. */
+  backup: BackupRun | null;
+  r2Bucket: BucketSize | null;
+  onBackUpNow: (resource: Resource) => void;
+  onBackups: (resource: Resource) => void;
   /** K-909: on the admin card, what removed Worker apps left in Cloudflare. */
   orphanWorkers: ReadonlyArray<OrphanWorker>;
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
@@ -2492,6 +2586,44 @@ function CardPanel(props: {
         <button class="btn" data-tip={LOGS_TIP} onClick={() => props.onLogs(resource)}>
           Logs…
         </button>
+      ) : null}
+      {resource.kind === "site.compose" && props.deployed && !props.preview ? (
+        <section aria-label="Backups">
+          <div class="label" data-tip="Backups: daily copies of the volumes and the data folder (K-1811).">
+            Backups
+          </div>
+          {props.r2Bucket && props.r2Bucket.bytes >= BACKUP_LIMIT_BYTES ? (
+            <p class="error">
+              Backups wait: the R2 bucket holds {gigabytes(props.r2Bucket.bytes)} of the 10 GB of the free
+              plan.
+            </p>
+          ) : null}
+          <div class="row">
+            {props.backup ? (
+              <>
+                <span>{backupLabel(props.backup)}</span> <BackupState run={props.backup} />
+              </>
+            ) : (
+              <span class="muted">No backup yet; the first runs tonight.</span>
+            )}
+          </div>
+          <div class="row">
+            <button
+              class="btn"
+              data-tip="Back up the volumes and the data folder of this app now."
+              onClick={() => props.onBackUpNow(resource)}
+            >
+              Back up now
+            </button>
+            <button
+              class="btn"
+              data-tip="List the backups of this app, and restore one."
+              onClick={() => props.onBackups(resource)}
+            >
+              Backups…
+            </button>
+          </div>
+        </section>
       ) : null}
       {isAppCard(resource) && props.deployed && !props.preview ? (
         <div class="row">

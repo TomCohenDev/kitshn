@@ -414,6 +414,17 @@ elif [ "$has_app" = true ]; then
 else
   say "  note:    no GitHub App; agent keys cannot start builds until KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY are set"
 fi
+# K-1815: the key of the backup passwords, made once. Cloudflare never shows a secret again, so the owner keeps
+# this copy outside Cloudflare; without it nobody can read the backups.
+if printf '%s' "$secrets" | jq -e 'any(.[]; .name == "KITSHN_BACKUP_KEY")' >/dev/null; then
+  kept "Worker secret KITSHN_BACKUP_KEY (K-1815)"
+else
+  backup_key=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+  api PUT "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/secrets" \
+    "$(jq -nc --arg key "$backup_key" '{name:"KITSHN_BACKUP_KEY",text:$key,type:"secret_text"}')" >/dev/null
+  changed "made the backup key (K-1815). Keep it in your password manager; kitshn shows it only now:"
+  say "           $backup_key"
+fi
 # The workers.dev address would skip Access. The Worker refuses requests without an Access token
 # anyway, but kitshn keeps that address off.
 api POST "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/subdomain" '{"enabled":false,"previews_enabled":false}' >/dev/null

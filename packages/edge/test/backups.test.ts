@@ -1,0 +1,420 @@
+import { runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Command, Machine } from "../src/core/machine.ts";
+import type { Resource } from "../src/core/model.ts";
+import { SECRET_ROWS, stateExport } from "../src/worker/backups.ts";
+import { OFFLINE_OUTPUT } from "../src/worker/kitshn.ts";
+import { accessToken, send, stubAccessCerts } from "./access.ts";
+
+/** K-1813, K-1814, K-1831: restic reaches a card's repository through the Worker, and the export of the state. */
+
+const stub = () => env.KITSHN.getByName("kitshn");
+const ID = "a".repeat(64);
+
+const machine = (id: string): Machine => ({
+  id,
+  name: id,
+  labels: ["deploy"],
+  order: 0,
+  serviceTokenId: `token-${id}`,
+  clientId: `${id}.access`,
+  tunnelId: `tunnel-${id}`,
+});
+
+async function setup(card: string, machines: Array<string>, on: string) {
+  await runInDurableObject(stub(), (instance, durable) => {
+    const sql = durable.storage.sql;
+    for (const id of machines)
+      sql.exec("INSERT INTO machines (id, body) VALUES (?, ?)", id, JSON.stringify(machine(id)));
+    const resource: Resource = {
+      id: card,
+      kind: "site.compose",
+      name: card,
+      addresses: [`${card}.example.com`],
+      status: "running",
+      group: null,
+      machine: on,
+    };
+    sql.exec("INSERT INTO resources (id, body) VALUES (?, ?)", card, JSON.stringify(resource));
+    const command: Command = { kind: "backup", card, run: "r1", prune: false, pauseLimitMs: 90_000 };
+    sql.exec(
+      `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
+       VALUES (?, '[]', ?, 'sent', 0, ?, '{}', '{}', NULL, '')`,
+      on,
+      JSON.stringify(command),
+      Date.now() + 60_000,
+    );
+    reload(instance);
+  });
+}
+
+/** The machines and cards in memory follow the tables, as after any change. */
+const reload = (instance: unknown) => (instance as { load(): void }).load();
+
+/** One restic request of machine `machineId`, as its proxy sends it; the body is read, so no request stays open. */
+async function restic(machineId: string, path: string, init: RequestInit<IncomingRequestCfProperties> = {}) {
+  const response = await send(path, {
+    ...init,
+    headers: {
+      ...(init.headers as Record<string, string> | undefined),
+      "cf-access-jwt-assertion": await accessToken("connect-aud", { common_name: `${machineId}.access` }),
+    },
+  });
+  return { status: response.status, text: new TextDecoder().decode(await response.arrayBuffer()) };
+}
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("restic through the Worker (K-1813, K-1814)", () => {
+  it("serves the repository of a card to the machine that runs its job, with ranges and v2 lists", async () => {
+    stubAccessCerts();
+    await setup("app-store", ["m-a"], "m-a");
+    const base = "/connect/backups/app-store";
+    expect((await restic("m-a", `${base}/config`, { method: "HEAD" })).status).toBe(404);
+    const saved = await restic("m-a", `${base}/data/${ID}`, {
+      method: "POST",
+      body: "0123456789",
+      headers: { "content-length": "10" },
+    });
+    expect(saved.status).toBe(200);
+    const part = await restic("m-a", `${base}/data/${ID}`, { headers: { range: "bytes=2-5" } });
+    expect([part.status, part.text]).toEqual([206, "2345"]);
+    const listed = await restic("m-a", `${base}/data/`, {
+      headers: { accept: "application/vnd.x.restic.rest.v2" },
+    });
+    expect(JSON.parse(listed.text)).toEqual([{ name: ID, size: 10 }]);
+    const key = await restic("m-a", `${base}/key`);
+    expect(JSON.parse(key.text)).toEqual({ password: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect((await restic("m-a", `${base}/data/..%2Fother`)).status).toBe(404);
+  });
+
+  it("refuses another machine, a machine with no job of the card, and the old machine after a move", async () => {
+    stubAccessCerts();
+    await setup("app-moved", ["m-old", "m-new"], "m-old");
+    const path = "/connect/backups/app-moved/key";
+    expect((await restic("m-old", path)).status).toBe(200);
+    expect((await restic("m-new", path)).status).toBe(403);
+    // K-1814: the card moves; its job stays with the old machine, which loses the repository at once.
+    await runInDurableObject(stub(), (instance, durable) => {
+      const [row] = durable.storage.sql
+        .exec<{ body: string }>("SELECT body FROM resources WHERE id = 'app-moved'")
+        .toArray();
+      const moved = { ...(JSON.parse(row!.body) as Resource), machine: "m-new" };
+      durable.storage.sql.exec("UPDATE resources SET body = ? WHERE id = 'app-moved'", JSON.stringify(moved));
+      reload(instance);
+    });
+    expect((await restic("m-old", path)).status).toBe(403);
+    // The new machine needs its own job of the card.
+    expect((await restic("m-new", path)).status).toBe(403);
+  });
+});
+
+describe("a dropped daemon socket (K-1814)", () => {
+  it("keeps the access of a running job until the job expires", async () => {
+    stubAccessCerts();
+    await setup("app-drop", ["m-drop"], "m-drop");
+    const path = "/connect/backups/app-drop/key";
+    const mark = (expiresAt: number) =>
+      runInDurableObject(stub(), (_instance, durable) => {
+        durable.storage.sql.exec(
+          "UPDATE jobs SET state = 'failed', output = ?, expires_at = ? WHERE machine_id = 'm-drop'",
+          OFFLINE_OUTPUT,
+          expiresAt,
+        );
+      });
+    await mark(Date.now() + 60_000);
+    expect((await restic("m-drop", path)).status).toBe(200);
+    await mark(Date.now() - 1);
+    expect((await restic("m-drop", path)).status).toBe(403);
+  });
+});
+
+describe("state export (K-1831)", () => {
+  it("holds every table but the one-time codes and the jobs, with a BLOB as base64", async () => {
+    await runInDurableObject(stub(), (_instance, durable) => {
+      durable.storage.sql.exec(
+        "INSERT INTO icons (id, type, hash, bytes) VALUES ('c', 'image/png', 'h', ?)",
+        new Uint8Array([1, 2, 3]),
+      );
+      // K-1831: each named secret holds a value that must not reach the export.
+      for (const row of SECRET_ROWS)
+        if ("table" in row) {
+          durable.storage.sql.exec(
+            `CREATE TABLE IF NOT EXISTS "${row.table}" (id TEXT PRIMARY KEY, value TEXT)`,
+          );
+          durable.storage.sql.exec(`INSERT OR REPLACE INTO "${row.table}" VALUES ('k', 'secret')`);
+        } else
+          durable.storage.sql.exec(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, 'secret')",
+            `${row.metaPrefix}_test`,
+          );
+      const exported = stateExport(durable.storage.sql, 21, 5);
+      expect(exported).toMatchObject({
+        format: "kitshn-state",
+        version: 1,
+        schemaVersion: 21,
+        exportedAt: 5,
+      });
+      expect(Object.keys(exported.tables)).toEqual(
+        expect.arrayContaining(["circles", "resources", "revisions", "backups"]),
+      );
+      for (const left of ["jobs", "join_codes", "rekey_codes"])
+        expect(exported.tables).not.toHaveProperty(left);
+      expect(JSON.stringify(exported)).not.toContain("secret");
+      expect(exported.tables["icons"]).toContainEqual(
+        expect.objectContaining({ id: "c", bytes: { base64: "AQID" } }),
+      );
+    });
+  });
+});
+
+/** A daemon socket of a machine that passed its key check (K-1704). */
+const daemonSocket = (machineId: string) =>
+  ({
+    deserializeAttachment: () => ({
+      kind: "machine",
+      machineId,
+      since: 0,
+      challenge: "",
+      check: "signed",
+      answered: true,
+      rotateBy: null,
+      status: null,
+      sample: null,
+    }),
+    serializeAttachment() {},
+    send() {},
+    close() {},
+  }) as unknown as WebSocket;
+
+const admin = async (path: string, method: "GET" | "POST") => {
+  const response = await send(path, {
+    method,
+    headers: {
+      "cf-access-jwt-assertion": await accessToken("admin-aud", { email: "owner@example.com" }),
+      "content-type": "application/json",
+    },
+    ...(method === "POST" ? { body: "{}" } : {}),
+  });
+  return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+};
+
+describe("backup runs (K-1817 to K-1819)", () => {
+  it("queues Back up now, records what the daemon reports, and waits when the bucket is near full", async () => {
+    stubAccessCerts();
+    await setup("app-runs", ["m-runs"], "m-runs");
+    const started = await admin("/api/apps/app-runs/backups", "POST");
+    const run = started.body["run"];
+    expect(run).toEqual(expect.any(String));
+    const job = await runInDurableObject(
+      stub(),
+      (_instance, durable) =>
+        durable.storage.sql
+          .exec<{ id: number; command: string }>(
+            "SELECT id, command FROM jobs WHERE json_extract(command, '$.run') = ?",
+            String(run),
+          )
+          .toArray()[0],
+    );
+    expect(JSON.parse(job!.command)).toEqual({
+      kind: "backup",
+      card: "app-runs",
+      run,
+      prune: false,
+      pauseLimitMs: 90_000,
+    });
+    await runInDurableObject(stub(), async (instance, durable) => {
+      // The job went to the machine; the daemon answers.
+      durable.storage.sql.exec("UPDATE jobs SET state = 'sent', machine_id = 'm-runs' WHERE id = ?", job!.id);
+      await instance.webSocketMessage(
+        daemonSocket("m-runs"),
+        JSON.stringify({
+          type: "jobResult",
+          id: job!.id,
+          result: {
+            ok: true,
+            exitCode: 0,
+            output: "",
+            backup: { run, bytes: 2000, added: 300, sources: ["data"], kept: [run], pauseMs: 50_000 },
+          },
+        }),
+      );
+    });
+    const listed = await admin("/api/apps/app-runs/backups", "GET");
+    expect(listed.body["runs"]).toContainEqual(
+      expect.objectContaining({ run, state: "done", bytes: 2000, added: 300, error: null, pauseMs: 50_000 }),
+    );
+    // K-1818: at 8 GB the bucket takes no more backups.
+    await runInDurableObject(stub(), (_instance, durable) => {
+      durable.storage.sql.exec(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('r2_bucket', ?)",
+        JSON.stringify({ bytes: 8.2e9, at: 0 }),
+      );
+    });
+    const refused = await admin("/api/apps/app-runs/backups", "POST");
+    expect([refused.status, refused.body["error"]]).toEqual([
+      409,
+      expect.stringMatching(/8\.2 GB of the 10\.0 GB/),
+    ]);
+    // K-1818, K-1820: a restore passes the size guard, and it names the sources of the run for the daemon.
+    const restoring = await admin(`/api/apps/app-runs/backups/${String(run)}/restore`, "POST");
+    const before = restoring.body["before"];
+    expect(restoring.status).toBe(200);
+    const restoreJob = await runInDurableObject(stub(), (_instance, durable) =>
+      durable.storage.sql
+        .exec<{ id: number; command: string }>(
+          "SELECT id, command FROM jobs WHERE json_extract(command, '$.before') = ?",
+          String(before),
+        )
+        .one(),
+    );
+    expect(JSON.parse(restoreJob.command)).toEqual({
+      kind: "backup-restore",
+      card: "app-runs",
+      run,
+      before,
+      sources: ["data"],
+      // K-1816: 3 times the last pause of 50 s, at most 90 s.
+      pauseLimitMs: 90_000,
+    });
+    // K-1820: the write-back fails after the backup of before; that backup stays the way back.
+    await runInDurableObject(stub(), async (instance, durable) => {
+      durable.storage.sql.exec(
+        "UPDATE jobs SET state = 'sent', machine_id = 'm-runs' WHERE id = ?",
+        restoreJob.id,
+      );
+      await instance.webSocketMessage(
+        daemonSocket("m-runs"),
+        JSON.stringify({
+          type: "jobResult",
+          id: restoreJob.id,
+          result: {
+            ok: false,
+            exitCode: 1,
+            output: "The restore failed, and the data of before stays",
+            backup: { run: before, bytes: 2100, added: 10, sources: ["data"] },
+          },
+        }),
+      );
+    });
+    const after = (await admin("/api/apps/app-runs/backups", "GET")).body["runs"];
+    expect(after).toContainEqual(expect.objectContaining({ run: before, state: "done", error: null }));
+  });
+
+  it("deletes the repository of a removed card 7 days after the daily run first saw it gone", async () => {
+    const day = 24 * 3_600_000;
+    await env.BUCKET!.put(`backups/app-gone/data/${"b".repeat(64)}`, "pack");
+    const drop = (now: number) =>
+      runInDurableObject(stub(), async (instance, durable) => {
+        durable.storage.sql.exec(
+          "INSERT OR IGNORE INTO backups (run, card, machine_id, at, state) VALUES ('g1', 'app-gone', 'm', 1, 'done')",
+        );
+        await (
+          instance as unknown as { dropRemovedRepositories(bucket: R2Bucket, now: number): Promise<void> }
+        ).dropRemovedRepositories(env.BUCKET!, now);
+      });
+    const start = Date.parse("2026-11-01T03:00:00Z");
+    await drop(start);
+    await drop(start + 6 * day);
+    expect((await env.BUCKET!.list({ prefix: "backups/app-gone/" })).objects).toHaveLength(1);
+    await drop(start + 8 * day);
+    expect((await env.BUCKET!.list({ prefix: "backups/app-gone/" })).objects).toHaveLength(0);
+  });
+
+  it("drops the rows of runs that the retention removed", async () => {
+    await setup("app-trim", ["m-trim"], "m-trim");
+    await runInDurableObject(stub(), async (instance, durable) => {
+      const sql = durable.storage.sql;
+      for (const old of ["old-1", "old-2"])
+        sql.exec(
+          "INSERT INTO backups (run, card, machine_id, at, state, sources) VALUES (?, 'app-trim', 'm-trim', 1, 'done', '[]')",
+          old,
+        );
+      const command: Command = {
+        kind: "backup",
+        card: "app-trim",
+        run: "new",
+        prune: false,
+        pauseLimitMs: 120_000,
+      };
+      const [job] = sql
+        .exec<{ id: number }>("SELECT id FROM jobs WHERE json_extract(command, '$.card') = 'app-trim'")
+        .toArray();
+      sql.exec("UPDATE jobs SET command = ? WHERE id = ?", JSON.stringify(command), job!.id);
+      sql.exec(
+        "INSERT INTO backups (run, card, machine_id, at, state, job_id) VALUES ('new', 'app-trim', 'm-trim', 2, 'running', ?)",
+        job!.id,
+      );
+      await instance.webSocketMessage(
+        daemonSocket("m-trim"),
+        JSON.stringify({
+          type: "jobResult",
+          id: job!.id,
+          result: {
+            ok: true,
+            exitCode: 0,
+            output: "",
+            backup: { run: "new", bytes: 1, added: 1, sources: [], kept: ["old-2", "new"] },
+          },
+        }),
+      );
+      expect(
+        sql.exec<{ run: string }>("SELECT run FROM backups WHERE card = 'app-trim' ORDER BY run").toArray(),
+      ).toEqual([{ run: "new" }, { run: "old-2" }]);
+    });
+  });
+});
+
+describe("restore to a time (K-1822, K-1771)", () => {
+  const actor = { _tag: "person", email: "owner@example.com" };
+  const finish = { undo: "bookmark-before", label: "2026-10-28T12:00:00.000Z", jobsAfter: 500, actor };
+
+  it("finishes after the restart: History, job ids after the old highest, and the pass key last", async () => {
+    const caller = { visitor: { email: "owner@example.com", clientId: null, ip: null }, actor };
+    await env.BUCKET!.put("state/restore-pending.json", JSON.stringify(finish));
+    const rotated = await runInDurableObject(stub(), async (instance) => {
+      const spy = vi.spyOn(
+        instance as unknown as { rotatePassKey(actor: unknown): Promise<void> },
+        "rotatePassKey",
+      );
+      const response = await instance.fetch(
+        new Request("https://kitshn.internal/fresh/restored", {
+          method: "POST",
+          headers: { "x-kitshn-caller": JSON.stringify(caller), "content-type": "application/json" },
+          body: JSON.stringify(finish),
+        }),
+      );
+      expect(response.status).toBe(200);
+      return spy.mock.calls;
+    });
+    expect(rotated).toEqual([[actor]]);
+    const after = await runInDurableObject(stub(), (_instance, durable) => ({
+      summary: durable.storage.sql
+        .exec<{ summary: string }>("SELECT summary FROM revisions ORDER BY id DESC LIMIT 1")
+        .one().summary,
+      seq: durable.storage.sql
+        .exec<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'jobs'")
+        .toArray()[0]?.seq,
+    }));
+    expect(after.summary).toMatch(/Restored kitshn to 2026-10-28T12:00:00.000Z.*bookmark-before/);
+    expect(after.seq).toBeGreaterThanOrEqual(500);
+    expect(await env.BUCKET!.head("state/restore-pending.json")).toBeNull();
+  });
+
+  it("finishes at the next alarm when the poll timed out, and only once", async () => {
+    await env.BUCKET!.put("state/restore-pending.json", JSON.stringify({ ...finish, undo: "bookmark-late" }));
+    const calls = await runInDurableObject(stub(), async (instance) => {
+      const hooks = instance as unknown as {
+        rotatePassKey(actor: unknown): Promise<void>;
+        finishPendingRestore(): Promise<void>;
+      };
+      const spy = vi.spyOn(hooks, "rotatePassKey");
+      // The poll and the alarm at the same time: one finish only.
+      await Promise.all([hooks.finishPendingRestore(), hooks.finishPendingRestore()]);
+      return spy.mock.calls.length;
+    });
+    expect(calls).toBe(1);
+    expect(await env.BUCKET!.head("state/restore-pending.json")).toBeNull();
+  });
+});

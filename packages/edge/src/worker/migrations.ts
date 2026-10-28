@@ -175,7 +175,16 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "CREATE UNIQUE INDEX notifications_open ON notifications (source, key) WHERE closed_at IS NULL",
     "CREATE TABLE notification_mutes (card_id TEXT NOT NULL, source TEXT NOT NULL, until INTEGER, PRIMARY KEY (card_id, source))",
   ],
-  // 27: section 17. A proposal is an ask that waits for its approver circle (K-1722); `body` and `labels` are JSON,
+  // 27: one row per backup run of a Compose card (K-1819); the card panel reads the newest of each card.
+  [
+    `CREATE TABLE backups (run TEXT PRIMARY KEY, card TEXT NOT NULL, machine_id TEXT NOT NULL, at INTEGER NOT NULL,
+      state TEXT NOT NULL, bytes INTEGER, added INTEGER, error TEXT, job_id INTEGER, sources TEXT,
+      pause_ms INTEGER)`,
+    "CREATE INDEX backups_card ON backups (card, at)",
+    // K-1819: when the daily run first saw that a card with backups was gone; its repository goes 7 days later.
+    "CREATE TABLE backup_gone (card TEXT PRIMARY KEY, since INTEGER NOT NULL)",
+  ],
+  // 28: section 17. A proposal is an ask that waits for its approver circle (K-1722); `body` and `labels` are JSON,
   // and one conditional update moves `state` from pending (K-1723). Ask events are the History of asks (K-1717): not
   // revisions, with their own cap.
   [

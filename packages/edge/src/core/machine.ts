@@ -1,5 +1,6 @@
 import type { GitHubWay } from "./model.ts";
 import type { LogAnswer, LogLine, LogSearch } from "./logs.ts";
+import type { BackupReport } from "./backups.ts";
 /** A joined machine (K-602). Its resource card has the same id and the kind `machine`. */
 export interface Machine {
   readonly id: string;
@@ -129,6 +130,28 @@ export type Command =
       readonly file: string | null;
       /** K-821: the run rollback that this job is one step of, if any. */
       readonly group: string | null;
+    }
+  /**
+   * K-1816, K-1817: back up the volumes and the data folder of the Compose app `card` as the run `run`, then
+   * forget old runs, and prune when `prune` is true. Only kitshn makes this job.
+   */
+  | {
+      readonly kind: "backup";
+      readonly card: string;
+      readonly run: string;
+      readonly prune: boolean;
+      /** K-1816: the hard limit of the paused pass, from the pause of the last run. */
+      readonly pauseLimitMs: number;
+    }
+  /** K-1820: back up as the run `before` first, then write the run `run` back. Only kitshn makes this job. */
+  | {
+      readonly kind: "backup-restore";
+      readonly card: string;
+      readonly run: string;
+      readonly before: string;
+      /** The sources of the run; the daemon checks that each exists before the app stops. */
+      readonly sources: ReadonlyArray<string>;
+      readonly pauseLimitMs: number;
     };
 
 /** K-909: a Docker volume with the Compose project label of a kitshn app that runs no container. */
@@ -143,6 +166,8 @@ export interface JobResult {
   readonly output: string;
   /** K-821: after a Compose build came up, the image id of each service, which the daemon tagged to keep. */
   readonly images?: Readonly<Record<string, string>>;
+  /** K-1817: what a backup job, or the first step of a restore, wrote. */
+  readonly backup?: BackupReport;
 }
 
 /** K-1104, K-1107: a live site that a machine exposes, and whether its local server answers. */

@@ -682,8 +682,12 @@ button.count {
   left: calc((100vw - var(--panel-width) - 24px) / 2);
   max-width: min(640px, calc(100vw - var(--panel-width) - 44px));
 }
+/* A phone's card sheet fills the bottom, so a toast there would sit on the button that made it: it goes on top. */
 @media (max-width: 720px) {
+  .toast,
   .toast.beside-panel {
+    top: calc(var(--bar-bottom, 102px) + 10px);
+    bottom: auto;
     left: 50%;
     max-width: calc(100vw - 20px);
   }

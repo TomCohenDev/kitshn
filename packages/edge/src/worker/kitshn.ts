@@ -110,7 +110,13 @@ import {
   fillAudiences,
   hasAccessWork,
   rowsWithoutAud,
-  signOutEverywhere,
+  type SignOutOutcome,
+  readSignOutLeft,
+  retryApps,
+  revokeSessions,
+  sessionApps,
+  signOutSummary,
+  signOutWarning,
   syncAccess,
   syncLauncher,
   LOGIN_CALLS,
@@ -197,6 +203,8 @@ const ROTATED = 4004;
 /** K-1706 */
 const KEY_RESET = 4005;
 
+/** K-110: a sign-out or retry that started longer ago than this no longer blocks a new one (a lost run). */
+const SIGN_OUT_RUN_MS = 3 * 60_000;
 /** The map keeps this many recent revisions in memory; History reads them (K-519). */
 const RECENT_REVISIONS = 200;
 /** K-1503 */
@@ -559,15 +567,10 @@ export class Kitshn extends DurableObject<Env> {
       if (change._tag === "place")
         for (const id of this.stuckShares) if (id.startsWith(`${change.id}/`)) this.stuckShares.delete(id);
     }
-    this.revisions = merge
-      ? this.revisions.map((revision) => (revision.id === id ? { ...revision, at: now, summary } : revision))
-      : [
-          { id, at: now, actor, summary, undoes, undoneBy: null, undoable: true },
-          ...this.revisions.map((revision) =>
-            revision.id === undoes ? { ...revision, undoneBy: id } : revision,
-          ),
-        ].slice(0, RECENT_REVISIONS);
-    this.broadcast();
+    if (merge) {
+      this.revisions = this.revisions.map((revision) => (revision.id === id ? { ...revision, at: now, summary } : revision));
+      this.broadcast();
+    } else this.showRevision({ id, at: now, actor, summary, undoes, undoneBy: null, undoable: true });
     void this.scheduleAlarm();
     return id;
   }
@@ -851,6 +854,7 @@ export class Kitshn extends DurableObject<Env> {
         ...(loginError ? [loginError] : []),
         ...loginWarnings(desired, this.access),
       ],
+      signOutWarning: signOutWarning(this.signOutLeft()),
       paused: this.state.paused,
       repos,
       deployedCards: this.deployedCards(),
@@ -968,7 +972,8 @@ export class Kitshn extends DurableObject<Env> {
       return new Response(null, { status: 101, webSocket: client });
     }
     if (path === "/api/state" && request.method === "GET") return Response.json(this.snapshot(caller.actor));
-    if (path === "/api/sign-out" && request.method === "POST") return this.signOut();
+    if (path === "/api/sign-out" && request.method === "POST") return this.signOut(caller);
+    if (path === "/api/sign-out/retry" && request.method === "POST") return this.retrySignOut(caller);
     if (path === "/api/machines" && request.method === "POST")
       return this.addMachine(caller, await request.json().catch(() => null), new URL(request.url).origin);
     if (path.startsWith("/api/machines/") && path.endsWith("/rotate-key") && request.method === "POST")
@@ -2488,31 +2493,104 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-110: ends every session of every application that kitshn made. */
-  private async signOut() {
+  private async signOut(caller: Caller) {
+    const busy = this.signOutBusy();
+    if (busy) return busy;
     // K-110: the Worker checks pages and files itself, so it refuses every login from before this second.
     this.setMeta("signed_out_at", String(Math.floor(Date.now() / 1000) * 1000));
-    const api = this.api();
-    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    // K-110: no confirm in the map, so History records the start before any Cloudflare call, and the outcome.
+    this.recordRevision(caller.actor, "Sign out everywhere: kitshn refuses older page and file logins");
+    return this.finishSignOut(caller, false, async (api) => {
+      const apps = await this.listSessionApps(api);
+      return "listFailed" in apps ? apps : revokeSessions(api, this.env.CLOUDFLARE_ACCOUNT_ID, apps);
+    });
+  }
+
+  /** K-110: revokes the sessions that the last sign-out left, or starts over when it could not list them. */
+  private async retrySignOut(caller: Caller) {
+    const busy = this.signOutBusy();
+    if (busy) return busy;
+    const left = this.signOutLeft();
+    if (!left) return Response.json({ error: "Every session of the last sign-out ended already." }, { status: 409 });
+    return this.finishSignOut(caller, true, async (api) => {
+      const apps = await this.listSessionApps(api);
+      if ("listFailed" in apps) return apps;
+      return revokeSessions(api, this.env.CLOUDFLARE_ACCOUNT_ID, "listFailed" in left ? apps : retryApps(left.left, apps));
+    });
+  }
+
+  /** K-110: one sign-out or retry at a time, so a slow run never overwrites the outcome of a newer one. */
+  private signOutBusy(): Response | null {
+    const since = Number(this.meta("sign_out_running") || 0);
+    if (Date.now() - since < SIGN_OUT_RUN_MS)
+      return Response.json({ error: "A sign-out everywhere runs already. Try again in a minute." }, { status: 409 });
+    return null;
+  }
+
+  /** K-110: the applications whose sessions a sign-out ends, or why kitshn could not list them. */
+  private async listSessionApps(
+    api: Api,
+  ): Promise<Array<{ readonly key: string; readonly cfId: string }> | { readonly ended: 0; readonly listFailed: string }> {
+    const logins = new Set(
+      ["pages", "files"].flatMap((host) => [
+        `${host}.${this.env.KITSHN_ZONE}/login`,
+        `${host}.${this.env.KITSHN_ZONE}/login/passkey`,
+      ]),
+    );
     try {
-      const account = this.env.CLOUDFLARE_ACCOUNT_ID;
-      const logins = new Set(
-        ["pages", "files"].flatMap((host) => [
-          `${host}.${this.env.KITSHN_ZONE}/login`,
-          `${host}.${this.env.KITSHN_ZONE}/login/passkey`,
-        ]),
-      );
       const all = await api<Array<{ id: string; name: string; domain: string }>>(
         "GET",
-        `/accounts/${account}/access/apps?per_page=1000`,
+        `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/apps?per_page=1000`,
       );
       const loginApps = all
         .filter((app) => logins.has(app.domain) && app.name.startsWith(ACCESS_NAME_PREFIX))
         .map((app) => ({ key: app.domain, cfId: app.id }));
-      return Response.json(await signOutEverywhere(this.accessStore(), api, account, loginApps));
+      return sessionApps(this.accessStore(), loginApps);
     } catch (error) {
-      return Response.json({ error: String(error) }, { status: 502 });
+      return { ended: 0, listFailed: String(error) };
     }
   }
+
+  /** K-110: stores what is left (the warning with Retry) and records the outcome in History. */
+  private async finishSignOut(caller: Caller, retry: boolean, run: (api: Api) => Promise<SignOutOutcome>) {
+    const api = this.api();
+    this.setMeta("sign_out_running", String(Date.now()));
+    let outcome: SignOutOutcome;
+    try {
+      outcome = api ? await run(api) : { ended: 0, listFailed: "kitshn has no Cloudflare API token here" };
+    } finally {
+      this.setMeta("sign_out_running", "");
+    }
+    this.setMeta("sign_out_left", signOutWarning(outcome) ? JSON.stringify(outcome) : "");
+    this.recordRevision(caller.actor, signOutSummary(outcome, retry));
+    return "listFailed" in outcome
+      ? Response.json({ error: signOutWarning(outcome) }, { status: 502 })
+      : Response.json({ ended: outcome.ended, failed: outcome.left.map((app) => `${app.key}: ${app.reason}`) });
+  }
+
+  /** K-110: what the last sign-out left to do, or null when every session ended. */
+  private signOutLeft(): SignOutOutcome | null {
+    return readSignOutLeft(this.meta("sign_out_left"));
+  }
+
+  /**
+   * A revision without changes, also into the in-memory History list. It never calls `load()`, which would
+   * swap the Access map under a sync that awaits Cloudflare.
+   */
+  private recordRevision(actor: Actor, summary: string) {
+    const id = this.insertRevision(actor, summary, [], null);
+    this.showRevision({ id, at: Date.now(), actor, summary, undoes: null, undoneBy: null, undoable: false });
+  }
+
+  /** Puts a new revision at the top of the in-memory History (K-519), marks what it undoes, and tells everyone. */
+  private showRevision(revision: RevisionView) {
+    this.revisions = [
+      revision,
+      ...this.revisions.map((old) => (old.id === revision.undoes ? { ...old, undoneBy: revision.id } : old)),
+    ].slice(0, RECENT_REVISIONS);
+    this.broadcast();
+  }
+
 
   /** K-106: the Access service tokens of the account, to pick a device member. */
   private async listDevices() {

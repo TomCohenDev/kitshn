@@ -21,6 +21,7 @@ import { TYPED_KINDS, type TypedKind, memberFrom } from "./members.ts";
 import { isAgentKey } from "../core/agent.ts";
 import { callApi } from "./store.ts";
 import { Check, Switch } from "./controls.tsx";
+import { levelEdit } from "./actions.ts";
 
 /** The sticker of each member kind: its name and a light sticker colour with black text. */
 const MEMBER_STICKERS: Record<Member["_tag"], { readonly label: string; readonly color: string }> = {
@@ -202,18 +203,7 @@ export function LevelOverride(props: {
   const { resource, circle, state } = props;
   const setting = state.shareSettings.get(shareKey(resource.id, circle.id));
   const levels: ReadonlyArray<Level> = RESOURCE_KINDS[resource.kind];
-  const put = (level: Level | null) =>
-    props.onEdit([
-      {
-        _tag: "shareSetting",
-        resourceId: resource.id,
-        circleId: circle.id,
-        after:
-          level === null && (setting?.endsAt ?? null) === null
-            ? null
-            : { level, endsAt: setting?.endsAt ?? null },
-      },
-    ]);
+  const put = (level: Level | null) => props.onEdit([levelEdit(state, resource, circle, level)]);
   return (
     <div class="seg small">
       <button

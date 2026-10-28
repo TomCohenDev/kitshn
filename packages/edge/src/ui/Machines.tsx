@@ -1,6 +1,7 @@
 import { useState } from "preact/hooks";
 import type { Command } from "../core/machine.ts";
 import type { JobView, MachineView } from "../core/protocol.ts";
+import { MACHINE_TIPS, isRelease } from "./actions.ts";
 import { callApi } from "./store.ts";
 
 /** "5 min", "3 h", "2 d": how long ago a time was (K-515). */
@@ -208,6 +209,12 @@ const describe = (command: Command) =>
         ? `delete volume ${command.volume}`
         : command.kind;
 
+/** K-612: queues one command on a machine, and says what happened. */
+export async function queueJob(machineId: string, command: Command): Promise<{ text: string; error: boolean }> {
+  const result = await callApi<{ id: number }>("POST", "/api/jobs", { machineId, command });
+  return "error" in result ? { text: result.error, error: true } : { text: `Job #${result.id} is queued.`, error: false };
+}
+
 /** The machine part of the card panel: status, sample, commands (K-612) and removal (K-615). */
 export function MachinePanel(props: {
   view: MachineView;
@@ -215,18 +222,12 @@ export function MachinePanel(props: {
   version: string;
   jobs: ReadonlyArray<JobView>;
   onRemove: () => void;
+  onRun: (command: Command) => Promise<void>;
   onToast: (text: string, error: boolean) => void;
 }) {
   const { view } = props;
   const [script, setScript] = useState("");
-  const run = async (command: Command) => {
-    const result = await callApi<{ id: number }>("POST", "/api/jobs", {
-      machineId: view.machine.id,
-      command,
-    });
-    if ("error" in result) props.onToast(result.error, true);
-    else props.onToast(`Job #${result.id} is queued.`, false);
-  };
+  const run = props.onRun;
   const jobs = props.jobs.filter((job) => job.machineId === view.machine.id);
   return (
     <>
@@ -373,16 +374,16 @@ export function MachinePanel(props: {
         </button>
         <button
           class="btn"
-          data-tip="Restart the daemon. The tunnel keeps running, so apps and sites keep serving."
+          data-tip={MACHINE_TIPS.restart}
           onClick={() => void run({ kind: "restart" })}
         >
           Restart daemon
         </button>
         {/* A local build names no release, so there is nothing to update to (K-617). */}
-        {/^[0-9a-f]{12}$/.test(props.version) ? (
+        {isRelease(props.version) ? (
           <button
             class={`btn${view.status && view.status.version !== props.version ? " primary" : ""}`}
-            data-tip={`Update daemon: install the daemon of release ${props.version}.`}
+            data-tip={MACHINE_TIPS.update(props.version)}
             onClick={() => void run({ kind: "update", version: props.version })}
           >
             {view.status && view.status.version !== props.version
@@ -439,10 +440,10 @@ export function MachinePanel(props: {
       </ul>
       <button
         class="btn danger"
-        data-tip="Remove the machine: kitshn deletes its service token, its tunnel and its queue."
+        data-tip={MACHINE_TIPS.remove}
         onClick={props.onRemove}
       >
-        Remove machine
+        Remove machine: deletes its token and tunnel
       </button>
     </>
   );

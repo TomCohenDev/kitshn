@@ -7,10 +7,16 @@ import {
   type AccessRow,
   type Api,
   accessStates,
+  CALLS_PER_RUN,
   fillAudiences,
   hasAccessWork,
   rowsWithoutAud,
+  revokeSessions,
+  readSignOutLeft,
+  retryApps,
   signOutEverywhere,
+  signOutSummary,
+  signOutWarning,
   syncAccess,
   syncLauncher,
   loginHeld,
@@ -296,7 +302,7 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
       `POST /apps/${cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId}/revoke_tokens`,
     );
     cf.calls.length = 0;
-    expect(await signOutEverywhere(cf.store, cf.api, "a")).toEqual({ ended: 1, failed: [] });
+    expect(await signOutEverywhere(cf.store, cf.api, "a")).toEqual({ ended: 1, left: [] });
     expect(cf.calls).toEqual([
       `POST /apps/${cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId}/revoke_tokens`,
     ]);
@@ -727,5 +733,64 @@ describe("page and file logins (K-1004)", () => {
     expect(JSON.parse(loginHeldAfter(before, want, false))).toEqual({ login: ["a", "b"], passkey: ["p"] });
     expect(loginHeldAfter(before, want, true)).toBe(want);
     expect(loginHeldAfter("", want, false)).toBe(want);
+  });
+});
+
+describe("sign out everywhere (K-110)", () => {
+  const apps = (count: number) => Array.from({ length: count }, (_, index) => ({ key: `app${index}`, cfId: `id${index}` }));
+  const failing = (bad: string): Api => async <T>(_method: string, path: string) => {
+    if (path.includes(`/${bad}/`)) throw new Error("Cloudflare said no");
+    return {} as T;
+  };
+
+  it("keeps each failed application and each one past the call limit for a retry", async () => {
+    const outcome = await revokeSessions(failing("id1"), "a", apps(CALLS_PER_RUN + 2));
+    expect(outcome).toEqual({
+      ended: CALLS_PER_RUN - 1,
+      left: [
+        { key: "app1", cfId: "id1", reason: "Cloudflare said no" },
+        { key: `app${CALLS_PER_RUN}`, cfId: `id${CALLS_PER_RUN}`, reason: "the call limit of one request" },
+        { key: `app${CALLS_PER_RUN + 1}`, cfId: `id${CALLS_PER_RUN + 1}`, reason: "the call limit of one request" },
+      ],
+    });
+    expect(signOutSummary(outcome, false)).toContain(`failed for: app1, app${CALLS_PER_RUN}`);
+    expect(signOutWarning(outcome)).toContain("app1 (Cloudflare said no)");
+  });
+
+  it("clears the warning once a retry ends every session left", async () => {
+    const first = await revokeSessions(failing("id1"), "a", apps(2));
+    expect(signOutWarning(first)).not.toBeNull();
+    const retry = await revokeSessions(failing("none"), "a", "left" in first ? first.left : []);
+    expect(retry).toEqual({ ended: 1, left: [] });
+    expect(signOutWarning(retry)).toBeNull();
+    expect(signOutSummary(retry, true)).toBe("Retry of sign-out everywhere ended the sessions of 1 application");
+  });
+
+  it("counts an application that Cloudflare no longer has as ended", async () => {
+    const gone: Api = async () => {
+      throw Object.assign(new Error("not found"), { status: 404 });
+    };
+    expect(await revokeSessions(gone, "a", apps(1))).toEqual({ ended: 1, left: [] });
+  });
+
+  it("retries only applications that kitshn still has, with their current id", () => {
+    const left = [
+      { key: "app0", cfId: "old0", reason: "x" },
+      { key: "removed", cfId: "old1", reason: "x" },
+    ];
+    expect(retryApps(left, [{ key: "app0", cfId: "new0" }, { key: "other", cfId: "o" }])).toEqual([{ key: "app0", cfId: "new0" }]);
+  });
+
+  it("reads a broken stored outcome as nothing left", () => {
+    expect(readSignOutLeft('{"ended":"x"}')).toBeNull();
+    expect(readSignOutLeft("")).toBeNull();
+    expect(readSignOutLeft('{"ended":0,"listFailed":"HTTP 500"}')).toEqual({ ended: 0, listFailed: "HTTP 500" });
+  });
+
+  it("warns with Retry when the list of applications failed, as no session ended", () => {
+    const outcome = { ended: 0, listFailed: "HTTP 500" } as const;
+    expect(signOutWarning(outcome)).toContain("ended no Access session");
+    expect(signOutSummary(outcome, false)).toContain("could not list");
+    expect(signOutWarning(null)).toBeNull();
   });
 });

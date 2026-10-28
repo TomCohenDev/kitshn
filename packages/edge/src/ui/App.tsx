@@ -28,6 +28,7 @@ import {
 } from "../core/model.ts";
 import { MAX_UPLOAD_BYTES } from "../core/library.ts";
 import { placeInside } from "../core/place.ts";
+import type { Command } from "../core/machine.ts";
 import type { JobView, MachineView, RepoView, RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
 import {
@@ -39,12 +40,29 @@ import {
   MEMBER_HELP,
   SecretDialog,
 } from "./Circle.tsx";
-import { TooltipLayer } from "./controls.tsx";
+import { ActionMenu, MoreButton, TooltipLayer } from "./controls.tsx";
+import {
+  type ActionContext,
+  type ActionHandlers,
+  type MenuTarget,
+  type PaletteEntry,
+  actionsFor,
+  REMOVE_APP_TIP,
+  levelEdit,
+  type PaletteCursor,
+  paletteActive,
+  paletteArrow,
+  paletteEnter,
+  paletteEntries,
+  reshareEdits,
+  stackOntoEdits,
+} from "./actions.ts";
+import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
 import { PauseDialog, PausedBanner } from "./Pause.tsx";
 import { REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
 import { LibraryView } from "./Library.tsx";
-import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
+import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
 import { overlay } from "./held.ts";
 import {
@@ -137,6 +155,11 @@ export function App() {
   const [previews, setPreviews] = useState(() => localStorage.getItem(PREVIEWS_KEY) === "on");
   const [addingSite, setAddingSite] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
+  /** Where the next upload of the file chooser lands: a map point, or null for the tray. */
+  const uploadAt = useRef<Point | null>(null);
+  /** K-110: a sign-out or its retry waits for Cloudflare; the server also runs one at a time. */
+  const [signingOut, setSigningOut] = useState(false);
+  const [menu, setMenu] = useState<{ readonly target: MenuTarget; readonly anchor: Rect } | null>(null);
   const [pausing, setPausing] = useState(false);
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
   const [route, setRoute] = useState(routeFromHash);
@@ -157,7 +180,10 @@ export function App() {
   const deployed = useMemo(() => new Set(store.snapshot?.deployedCards ?? []), [store.snapshot]);
 
   useEffect(() => {
-    const onHash = () => setRoute(routeFromHash());
+    const onHash = () => {
+      setRoute(routeFromHash());
+      setMenu(null);
+    };
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -258,37 +284,13 @@ export function App() {
   const stacks: StackActions = {
     stackOnto: async (ids, target) => {
       if (!state) return;
-      const place = state.places.get(target);
-      if (!place) {
-        showToast({ text: "Put one of the cards on the map first.", error: true, undo: null });
+      const plan = stackOntoEdits(state, ids, target, `s-${crypto.randomUUID().slice(0, 8)}`);
+      if (!plan) return;
+      if ("refused" in plan) {
+        showToast({ text: plan.refused, error: true, undo: null });
         return;
       }
-      const into = [...state.stacks.values()].find((stack) => stack.members.includes(target));
-      const moving = ids.filter((id) => id !== target && !into?.members.includes(id));
-      if (moving.length === 0) return;
-      const edits: Array<Edit> = moving.map((id) => ({ _tag: "place", id, after: place }));
-      // A card leaves its old stack; a stack left with one card goes.
-      for (const stack of state.stacks.values()) {
-        if (stack === into || !stack.members.some((id) => moving.includes(id))) continue;
-        const rest = stack.members.filter((id) => !moving.includes(id));
-        edits.push({
-          _tag: "stack",
-          id: stack.id,
-          after: rest.length > 1 ? { ...stack, members: rest } : null,
-        });
-      }
-      const id = into?.id ?? `s-${crypto.randomUUID().slice(0, 8)}`;
-      edits.push({
-        _tag: "stack",
-        id,
-        after: { id, name: into?.name ?? state.resources.get(target)?.name ?? "Stack", members: [...(into?.members ?? [target]), ...moving] },
-      });
-      const names = moving.flatMap((card) => state.resources.get(card)?.name ?? []).join(", ");
-      await commit(
-        edits,
-        shareDiff(state, applyChanges(state, resolveEdits(state, edits))),
-        `Stacked ${names} with ${into?.name ?? state.resources.get(target)?.name ?? "the card"}.`,
-      );
+      await commit(plan.edits, shareDiff(state, applyChanges(state, resolveEdits(state, plan.edits))), plan.done);
     },
     pullOut: async (stackId, id) => {
       const stack = state?.stacks.get(stackId);
@@ -360,14 +362,16 @@ export function App() {
     setSelection({ cards: new Set(edits.map((edit) => edit.id)), circle: null });
   };
 
-  /** Opens the circle editor with its Add member input ready. */
-  const addMemberTo = (circleId: string) => {
-    setSelection({ cards: new Set(), circle: circleId });
+  /** Selects an item and puts the focus into an input of its panel, after the panel renders. */
+  const selectAndFocus = (next: Selection, selector: string) => {
+    setSelection(next);
     location.hash = "map";
-    queueMicrotask(() =>
-      setTimeout(() => document.querySelector<HTMLInputElement>(".add-member input")?.focus()),
-    );
+    queueMicrotask(() => setTimeout(() => document.querySelector<HTMLInputElement>(selector)?.focus()));
   };
+
+  /** Opens the circle editor with its Add member input ready. */
+  const addMemberTo = (circleId: string) =>
+    selectAndFocus({ cards: new Set(), circle: circleId }, ".add-member input");
 
   /** K-1504: one press after the confirm pauses everything at once. */
   const pauseNow = async (mode: PauseMode) => {
@@ -533,9 +537,10 @@ export function App() {
 
   fitRef.current = fit;
 
-  const newCircle = async () => {
+  /** A new circle at `at`, or in the middle of the view. */
+  const newCircle = async (at: Point | null) => {
     const id = `c-${crypto.randomUUID().slice(0, 8)}`;
-    const center = { x: (innerWidth / 2 - view.x) / view.s, y: (innerHeight / 2 - view.y) / view.s };
+    const center = at ?? { x: (innerWidth / 2 - view.x) / view.s, y: (innerHeight / 2 - view.y) / view.s };
     const circle: Circle = {
       id,
       name: "New circle",
@@ -556,23 +561,121 @@ export function App() {
 
   /** K-511: share or unshare without a drag, by placing the card where exactly the wanted circles hold it. */
   const reshare = async (resource: Resource, circle: Circle, share: boolean) => {
-    const current = new Set(circlesHolding(state, resource.id).map((held) => held.id));
-    if (share) current.add(circle.id);
-    else current.delete(circle.id);
-    const from = state.places.get(resource.id) ?? { x: circle.x, y: circle.y };
-    const to = placeInside(state, from, current);
-    if (!to) {
-      showToast({
-        text: `No spot on the map is inside exactly those circles. Move "${circle.name}" so it overlaps the others, or drag the card.`,
-        error: true,
-        undo: null,
-      });
+    const plan = reshareEdits(state, resource, circle, share);
+    if ("refused" in plan) {
+      showToast({ text: plan.refused, error: true, undo: null });
       return;
     }
     // A stacked card takes its stack along (K-521), so the diff comes from the resolved changes.
-    const edits: Array<Edit> = [{ _tag: "place", id: resource.id, after: to }];
-    await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
+    await commit(plan.edits, shareDiff(state, applyChanges(state, resolveEdits(state, plan.edits))));
   };
+
+  /** No confirm: Undo in the toast and in History brings the circle back. */
+  const deleteCircle = async (circle: Circle) => {
+    const result = await applyEdits([{ _tag: "circle", id: circle.id, after: null }]);
+    if (result.ok) {
+      setSelection({ cards: new Set(), circle: null });
+      showToast({ text: `Deleted circle ${circle.name}.`, error: false, undo: result.revision });
+    } else showToast({ text: result.error, error: true, undo: null });
+  };
+
+  /** K-615: no confirm, and no undo; History records it. */
+  const removeMachine = async (machine: MachineView) => {
+    const result = await callApi<{ removed: string }>("DELETE", `/api/machines/${encodeURIComponent(machine.machine.id)}`);
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: `Removed ${machine.machine.name}: its token and tunnel are gone. History records it.`, error: false, undo: null },
+    );
+  };
+
+  /**
+   * K-110: no confirm; History records the start and the outcome. Sessions left show as a warning with
+   * Retry, which calls the same endpoint family.
+   */
+  const signOut = async (retry: boolean) => {
+    setSigningOut(true);
+    const result = await callApi<{ ended: number; failed: Array<string> }>(
+      "POST",
+      retry ? "/api/sign-out/retry" : "/api/sign-out",
+      {},
+    ).finally(() => setSigningOut(false));
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : {
+            text:
+              `Ended the sessions of ${plural(result.ended, "application")}. Everyone logs in again.` +
+              (result.failed.length > 0 ? ` Failed: ${result.failed.join("; ")}` : ""),
+            error: result.failed.length > 0,
+            undo: null,
+          },
+    );
+  };
+
+  const runJob = (machine: MachineView, command: Command) =>
+    queueJob(machine.machine.id, command).then(({ text, error }) => showToast({ text, error, undo: null }));
+
+  const placeInView = (resource: Resource) => {
+    const center = { x: (innerWidth / 2 - view.x) / view.s, y: (innerHeight / 2 - view.y) / view.s };
+    const to = placeInside(state, center, new Set());
+    if (to) void commit([{ _tag: "place", id: resource.id, after: to }], []);
+  };
+
+  const uploadTo = (at: Point | null) => {
+    uploadAt.current = at;
+    location.hash = "map";
+    setTimeout(() => uploadInput.current?.click());
+  };
+
+  /** K-523: the menu and the palette run these, the same as the toolbar and the panel. */
+  const handlers: ActionHandlers = {
+    select: (selected) => {
+      setSelection(selected);
+      location.hash = "map";
+    },
+    openAddress: (address) => void open(`https://${address}`, "_blank", "noreferrer"),
+    copyAddress: (address) => void navigator.clipboard.writeText(`https://${address}`),
+    reshare: (resource, circle, share) => void reshare(resource, circle, share),
+    setLevel: (resource, circle, level) =>
+      void applyEdits([levelEdit(state, resource, circle, level)]).then(
+        (result) => result.ok || showToast({ text: result.error, error: true, undo: null }),
+      ),
+    place: placeInView,
+    toTray: (resource) => {
+      const edits: Array<Edit> = [{ _tag: "place", id: resource.id, after: null }];
+      void commit(
+        edits,
+        shareDiff(state, applyChanges(state, resolveEdits(state, edits))),
+        `Moved ${resource.name} to the tray.`,
+      );
+    },
+    stackOnto: (ids, target) => void stacks.stackOnto(ids, target),
+    pullOut: (stackId, id) => void stacks.pullOut(stackId, id),
+    unstack: (stackId) => void stacks.unstack(stackId),
+    renameStack: (stackId) =>
+      selectAndFocus(
+        { cards: new Set(state.stacks.get(stackId)?.members ?? []), circle: null },
+        'input[aria-label="Stack name"]',
+      ),
+    removeApp: (resource) => void removeApp(resource),
+    runJob: (machine, command) => void runJob(machine, command),
+    removeMachine: (machine) => void removeMachine(machine),
+    editCircle: (circleId) => {
+      setSelection({ cards: new Set(), circle: circleId });
+      location.hash = "map";
+    },
+    renameCircle: (circleId) =>
+      selectAndFocus({ cards: new Set(), circle: circleId }, 'input[aria-label="Circle name"]'),
+    addMember: addMemberTo,
+    deleteCircle: (circle) => void deleteCircle(circle),
+    newCircle: (at) => void newCircle(at),
+    upload: uploadTo,
+    addSite: () => setAddingSite(true),
+    addMachine: () => setAddingMachine(true),
+    fit,
+  };
+  const actionContext: ActionContext = { state, deployed, machines, version: store.snapshot.version };
 
   const waitingRepos = store.snapshot?.repos.filter((repo) => repo.state === "waiting").length ?? 0;
   return (
@@ -599,13 +702,13 @@ export function App() {
           }}
           onCommit={(edits, diffs) => void commit(edits, diffs)}
           machines={machines}
+          onMenu={setMenu}
         />
       ) : route.tab === "library" ? (
         <LibraryView
           state={state}
           revision={store.snapshot.revision}
           onToast={(text, error) => showToast({ text, error, undo: null })}
-          ask={ask}
           onShowCard={(id) => {
             setSelection({ cards: new Set([id]), circle: null });
             location.hash = "map";
@@ -635,6 +738,20 @@ export function App() {
         </div>
       ) : null}
       <TooltipLayer />
+      {/* Outside the map toolbar, so an upload from the palette on another tab finds it. */}
+      <input
+        ref={uploadInput}
+        type="file"
+        multiple
+        hidden
+        onChange={(event) => {
+          const files = [...(event.currentTarget.files ?? [])];
+          event.currentTarget.value = "";
+          const at = uploadAt.current;
+          uploadAt.current = null;
+          void uploadFiles(files, at);
+        }}
+      />
       <header class="bar">
         <h1>kitshn</h1>
         <div class="seg">
@@ -675,7 +792,7 @@ export function App() {
             <button
               class="btn primary"
               data-tip="Make a new circle in the middle of the view. It matches nobody until you add members."
-              onClick={() => void newCircle()}
+              onClick={() => void newCircle(null)}
             >
               + Circle
             </button>
@@ -703,21 +820,10 @@ export function App() {
             <button
               class="btn"
               data-tip="Upload files: an HTML file becomes a page, any other file stays a file (at most 100 MB). They wait in the tray, private. You can also drop files on the map."
-              onClick={() => uploadInput.current?.click()}
+              onClick={() => uploadTo(null)}
             >
               Upload
             </button>
-            <input
-              ref={uploadInput}
-              type="file"
-              multiple
-              hidden
-              onChange={(event) => {
-                const files = [...(event.currentTarget.files ?? [])];
-                event.currentTarget.value = "";
-                void uploadFiles(files, null);
-              }}
-            />
             <button class="btn" data-tip="Fit every circle and card in the view." onClick={fit}>
               Fit
             </button>
@@ -816,6 +922,14 @@ export function App() {
                   event.dataTransfer?.setData(TRAY_CARDS_TYPE, JSON.stringify(ids));
                   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
                 }}
+                onContextMenu={(event) => {
+                  // K-523: a tray card has the same menu as on the map, with Place on the map.
+                  event.preventDefault();
+                  setMenu({
+                    target: { _tag: "card", id: resource.id },
+                    anchor: { left: event.clientX, top: event.clientY, width: 0, height: 0 },
+                  });
+                }}
                 onClick={(event) => {
                   const cards = new Set(event.shiftKey ? selection.cards : []);
                   if (event.shiftKey && cards.has(resource.id)) cards.delete(resource.id);
@@ -827,6 +941,12 @@ export function App() {
                   {KINDS[resource.kind].icon} {resource.name}
                 </div>
                 <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
+                <div class="foot">
+                  <MoreButton
+                    name={resource.name}
+                    onOpen={(anchor) => setMenu({ target: { _tag: "card", id: resource.id }, anchor })}
+                  />
+                </div>
               </div>
             ))}
           </div>
@@ -849,24 +969,8 @@ export function App() {
           showToast({ text: result.error, error: true, undo: null });
           return result.error;
         }}
-        onDeleteCircle={async (circle) => {
-          if (
-            !(await ask(
-              `Delete the circle "${circle.name}"? Its cards stay where they are and lose its share.`,
-            ))
-          )
-            return;
-          const result = await applyEdits([{ _tag: "circle", id: circle.id, after: null }]);
-          if (result.ok) {
-            setSelection({ cards: new Set(), circle: null });
-            showToast({ text: `Deleted circle ${circle.name}.`, error: false, undo: result.revision });
-          } else showToast({ text: result.error, error: true, undo: null });
-        }}
-        onPlace={(resource) => {
-          const center = { x: (innerWidth / 2 - view.x) / view.s, y: (innerHeight / 2 - view.y) / view.s };
-          const to = placeInside(state, center, new Set());
-          if (to) void commit([{ _tag: "place", id: resource.id, after: to }], []);
-        }}
+        onDeleteCircle={handlers.deleteCircle}
+        onPlace={placeInView}
         onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
         onRemoveApp={(resource) => void removeApp(resource)}
         deployed={deployed}
@@ -875,41 +979,13 @@ export function App() {
         version={store.snapshot.version}
         jobs={store.snapshot.jobs}
         onToast={(text, error) => showToast({ text, error, undo: null })}
-        onRemoveMachine={async (view) => {
-          if (
-            !(await ask(
-              `Remove ${view.machine.name}? kitshn deletes its service token, its tunnel and its queue.`,
-            ))
-          )
-            return;
-          const result = await callApi<{ removed: string }>(
-            "DELETE",
-            `/api/machines/${encodeURIComponent(view.machine.id)}`,
-          );
-          showToast(
-            "error" in result
-              ? { text: result.error, error: true, undo: null }
-              : { text: `Removed ${view.machine.name}.`, error: false, undo: null },
-          );
-        }}
+        onRemoveMachine={handlers.removeMachine}
+        onRunJob={runJob}
         warnings={store.snapshot.accessWarnings}
         onPause={(pause) => (pause ? setPausing(true) : startResume())}
-        onSignOut={async () => {
-          if (!(await ask("End every session of every kitshn application? Everyone logs in again, you too.")))
-            return;
-          const result = await callApi<{ ended: number; failed: Array<string> }>("POST", "/api/sign-out", {});
-          showToast(
-            "error" in result
-              ? { text: result.error, error: true, undo: null }
-              : {
-                  text:
-                    `Ended the sessions of ${plural(result.ended, "application")}.` +
-                    (result.failed.length > 0 ? ` Failed: ${result.failed.join("; ")}` : ""),
-                  error: result.failed.length > 0,
-                  undo: null,
-                },
-          );
-        }}
+        onSignOut={(retry) => void signOut(retry)}
+        signOutWarning={store.snapshot.signOutWarning}
+        signingOut={signingOut}
       />
       {store.snapshot.paused ? (
         <PausedBanner
@@ -923,31 +999,30 @@ export function App() {
       {pausing ? <PauseDialog onCancel={() => setPausing(false)} onPause={(mode) => void pauseNow(mode)} /> : null}
       {palette !== null ? (
         <Palette
-          state={state}
-          deployed={deployed}
           initialQuery={palette}
           onClose={() => setPalette(null)}
-          actions={{
-            select: (selected) => {
-              setSelection(selected);
-              location.hash = "map";
+          entries={[
+            { label: "Open History", tip: TABS.history, run: () => (location.hash = "history") },
+            {
+              label: "Emergency pause, or Resume",
+              tip: PAUSE_TIP,
+              run: () => (store.snapshot?.paused ? startResume() : setPausing(true)),
             },
-            reshare: (resource, circle, share) => void reshare(resource, circle, share),
-            removeApp: (resource) => void removeApp(resource),
-            newCircle: () => void newCircle(),
-            fit,
-            history: () => (location.hash = "history"),
-            pause: () => (store.snapshot?.paused ? startResume() : setPausing(true)),
-            addMachine: () => setAddingMachine(true),
-            addSite: () => setAddingSite(true),
-            upload: () => {
-              location.hash = "map";
-              setTimeout(() => uploadInput.current?.click());
-            },
-            addMember: addMemberTo,
-          }}
+            ...(store.snapshot.signOutWarning
+              ? [
+                  {
+                    label: "Retry sign-out everywhere",
+                    danger: true as const,
+                    tip: store.snapshot.signOutWarning,
+                    run: () => void signOut(true),
+                  },
+                ]
+              : []),
+            ...paletteEntries(actionContext, handlers),
+          ]}
         />
       ) : null}
+      {menu && route.tab === "map" ? <ContextMenu menu={menu} context={actionContext} handlers={handlers} onClose={() => setMenu(null)} /> : null}
       {confirm ? (
         <div class="scrim">
           <div class="dialog" role="alertdialog">
@@ -997,7 +1072,7 @@ export function App() {
       ) : null}
       {route.tab === "map" ? (
         <div class="hint">
-          Drag a card into a circle to share it · Shift-click or drag empty space to select many · {ALONE_KEY.label}-drag a
+          Drag a card into a circle to share it · Right-click, a long press or ⋯ shows its actions · Shift-click or drag empty space to select many · {ALONE_KEY.label}-drag a
           circle head to move it alone · Ctrl or ⌘ + wheel zooms
         </div>
       ) : null}
@@ -1074,10 +1149,13 @@ function Panel(props: {
   machines: ReadonlyMap<string, MachineView>;
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
+  onRunJob: (view: MachineView, command: Command) => Promise<void>;
   version: string;
   onToast: (text: string, error: boolean) => void;
   onPause: (pause: boolean) => void;
-  onSignOut: () => void;
+  onSignOut: (retry: boolean) => void;
+  signOutWarning: string | null;
+  signingOut: boolean;
   accessTeam: string;
   onSelectCard: (id: string) => void;
   onSelectCircle: (id: string) => void;
@@ -1121,6 +1199,7 @@ function Panel(props: {
         version={props.version}
         jobs={props.jobs}
         onRemoveMachine={props.onRemoveMachine}
+        onRunJob={props.onRunJob}
         onToast={props.onToast}
       />
     );
@@ -1202,7 +1281,7 @@ function Panel(props: {
         </ul>
         <RepoList repos={props.repos} onToast={props.onToast} />
         <p class="muted">You are {actorLabel(props.me)}.</p>
-        {props.warnings.length > 0 ? (
+        {props.warnings.length > 0 || props.signOutWarning ? (
           <>
             <div class="label" data-tip="Access warnings: Access applications that kitshn did not make and that cover a kitshn address.">
               Access warnings
@@ -1211,6 +1290,20 @@ function Panel(props: {
               {props.warnings.map((warning) => (
                 <li key={warning}>{warning}</li>
               ))}
+              {props.signOutWarning ? (
+                <li>
+                  {props.signOutWarning}{" "}
+                  <button
+                    type="button"
+                    class="btn"
+                    disabled={props.signingOut}
+                    data-tip="Retry sign-out: revoke the sessions of the applications above again. The warning goes once every session ended."
+                    onClick={() => props.onSignOut(true)}
+                  >
+                    Retry sign-out
+                  </button>
+                </li>
+              ) : null}
             </ul>
           </>
         ) : null}
@@ -1230,11 +1323,12 @@ function Panel(props: {
             {props.paused ? "Resume" : "Emergency pause"}
           </button>
           <button
-            class="btn"
-            data-tip="End every session of every application that kitshn made. Everyone logs in again, you too."
-            onClick={props.onSignOut}
+            class="btn danger"
+            data-tip="Sign out everywhere: ends every Access session of kitshn's apps at once. Everyone logs in again, you too. History records it."
+            disabled={props.signingOut}
+            onClick={() => props.onSignOut(false)}
           >
-            Sign out everywhere
+            Sign out everywhere: ends every session
           </button>
         </div>
       </section>
@@ -1342,10 +1436,11 @@ function CardPanel(props: {
   machine: MachineView | null;
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
+  onRunJob: (view: MachineView, command: Command) => Promise<void>;
   version: string;
   onToast: (text: string, error: boolean) => void;
 }) {
-  const { resource, state } = props;
+  const { resource, state, machine } = props;
   const holding = circlesHolding(state, resource.id);
   const address = resource.addresses[0];
   return (
@@ -1441,18 +1536,19 @@ function CardPanel(props: {
       {isAppCard(resource) && props.deployed ? (
         <button
           class="btn danger"
-          data-tip="Remove app: take down what the deploy made and keep the volumes. Undo starts it again."
+          data-tip={REMOVE_APP_TIP}
           onClick={() => props.onRemoveApp(resource)}
         >
           Remove app
         </button>
       ) : null}
-      {props.machine ? (
+      {machine ? (
         <MachinePanel
-          view={props.machine}
+          view={machine}
           version={props.version}
           jobs={props.jobs}
-          onRemove={() => props.machine && props.onRemoveMachine(props.machine)}
+          onRemove={() => props.onRemoveMachine(machine)}
+          onRun={(command) => props.onRunJob(machine, command)}
           onToast={props.onToast}
         />
       ) : null}
@@ -1554,95 +1650,44 @@ function CardPanel(props: {
   );
 }
 
-interface PaletteActions {
-  select: (selection: Selection) => void;
-  reshare: (resource: Resource, circle: Circle, share: boolean) => void;
-  /** K-909 */
-  removeApp: (resource: Resource) => void;
-  newCircle: () => void;
-  fit: () => void;
-  history: () => void;
-  /** K-1504: opens the big red button, or Resume while paused. */
-  pause: () => void;
-  addMachine: () => void;
-  addSite: () => void;
-  upload: () => void;
-  addMember: (circleId: string) => void;
+/** K-523: a menu of the actions of one card, stack, circle or spot; the palette has the same ones. */
+function ContextMenu(props: {
+  menu: { readonly target: MenuTarget; readonly anchor: Rect };
+  context: ActionContext;
+  handlers: ActionHandlers;
+  onClose: () => void;
+}) {
+  const { target } = props.menu;
+  const groups = actionsFor(props.context, props.handlers, target);
+  if (!groups) return null;
+  const { state } = props.context;
+  const name =
+    target._tag === "card"
+      ? state.resources.get(target.id)?.name
+      : target._tag === "stack"
+        ? state.stacks.get(target.id)?.name
+        : target._tag === "circle"
+          ? state.circles.get(target.id)?.name
+          : "the map";
+  return <ActionMenu label={`Actions for ${name ?? "the map"}`} anchor={props.menu.anchor} groups={groups} onClose={props.onClose} />;
 }
 
 function Palette(props: {
-  state: State;
-  /** K-909: the cards that a deploy made, which a repo lists (K-819). */
-  deployed: ReadonlySet<string>;
   initialQuery: string;
   onClose: () => void;
-  actions: PaletteActions;
+  entries: ReadonlyArray<PaletteEntry>;
 }) {
   const [query, setQuery] = useState(props.initialQuery);
-  const [active, setActive] = useState(0);
-  const { state, actions } = props;
-  const entries = useMemo(() => {
-    // A tip only where the label does not say what happens.
-    const all: Array<{ label: string; tip?: string; run: () => void }> = [
-      { label: "New circle", run: actions.newCircle },
-      {
-        label: "Add a machine (join code)",
-        tip: "Make a join command for a new machine. Its card starts in the tray, private.",
-        run: actions.addMachine,
-      },
-      { label: "Add a site, live from a machine or static from a repo", run: actions.addSite },
-      { label: "Upload a page or a file", run: actions.upload },
-      { label: "Fit the map", run: actions.fit },
-      { label: "Open History", run: actions.history },
-      { label: "Emergency pause, or Resume", tip: PAUSE_TIP, run: actions.pause },
-    ];
-    for (const resource of state.resources.values()) {
-      all.push({
-        label: `${KINDS[resource.kind].icon} ${resource.name}`,
-        tip: `${KINDS[resource.kind].help} Select it and show its panel.`,
-        run: () => actions.select({ cards: new Set([resource.id]), circle: null }),
-      });
-      if (isAppCard(resource) && props.deployed.has(resource.id))
-        all.push({
-          label: `Remove the app ${resource.name}`,
-          tip: "Take down what the deploy made and keep the volumes. Undo starts it again.",
-          run: () => actions.removeApp(resource),
-        });
-      if (!state.places.has(resource.id)) continue;
-      const holding = new Set(circlesHolding(state, resource.id).map((circle) => circle.id));
-      for (const circle of state.circles.values()) {
-        all.push(
-          holding.has(circle.id)
-            ? {
-                label: `Unshare ${resource.name} from ${circle.name}`,
-                tip: `Move the card out of ${circle.name}, without a drag. Its other circles stay.`,
-                run: () => actions.reshare(resource, circle, false),
-              }
-            : {
-                label: `Share ${resource.name} with ${circle.name}`,
-                tip: `Put the card where ${circle.name} also holds it, at ${circle.level}, without a drag.`,
-                run: () => actions.reshare(resource, circle, true),
-              },
-        );
-      }
-    }
-    for (const circle of state.circles.values()) {
-      all.push({
-        label: `Add a member to ${circle.name}: a person, a domain, a device or a network`,
-        run: () => actions.addMember(circle.id),
-      });
-      all.push({
-        label: `⭕ ${circle.name}`,
-        tip: `Edit the circle ${circle.name}: its members, level, match and end.`,
-        run: () => actions.select({ cards: new Set(), circle: circle.id }),
-      });
-    }
-    return all;
-  }, [state, actions, props.deployed]);
+  const [cursor, setCursor] = useState<PaletteCursor>({ label: null, picked: false });
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const matches = entries
-    .filter((entry) => words.every((word) => entry.label.toLowerCase().includes(word)))
+  const matches = props.entries
+    .filter((entry) => {
+      const text = `${entry.label} ${entry.keywords ?? ""}`.toLowerCase();
+      return words.every((word) => text.includes(word));
+    })
     .slice(0, 50);
+  const labels = matches.map((entry) => entry.label);
+  const { index: active, picked } = paletteActive(labels, cursor);
   const listId = useId();
   const run = (index: number) => {
     const entry = matches[index];
@@ -1664,13 +1709,14 @@ function Palette(props: {
           value={query}
           onInput={(event) => {
             setQuery((event.target as HTMLInputElement).value);
-            setActive(0);
+            setCursor({ label: null, picked: false });
           }}
           onKeyDown={(event) => {
-            if (event.key === "ArrowDown") setActive(Math.min(active + 1, matches.length - 1));
-            else if (event.key === "ArrowUp") setActive(Math.max(active - 1, 0));
-            else if (event.key === "Enter") run(active);
-            else return;
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") setCursor(paletteArrow(event.key, labels, cursor));
+            else if (event.key === "Enter") {
+              const index = paletteEnter(matches, active, picked);
+              if (index !== null) run(index);
+            } else return;
             event.preventDefault();
           }}
         />
@@ -1680,10 +1726,11 @@ function Palette(props: {
               key={entry.label}
               id={`${listId}-${index}`}
               role="option"
-              data-tip={entry.tip}
+              data-tip={entry.danger && matches.length > 1 ? `${entry.tip} Pick it with the arrows or a click; Enter alone does not run it.` : entry.tip}
+              data-danger={entry.danger || undefined}
               aria-selected={index === active}
               onClick={() => run(index)}
-              onMouseEnter={() => setActive(index)}
+              onMouseEnter={() => setCursor({ label: entry.label, picked: false })}
             >
               {entry.label}
             </li>

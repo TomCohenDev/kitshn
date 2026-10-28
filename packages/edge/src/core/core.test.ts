@@ -204,6 +204,20 @@ describe("changes and undo (K-1501, K-1502)", () => {
     expect(conflictOf(second.after, undo)).toMatchObject({ _tag: "place", id: "riffle" });
   });
 
+  it("brings a deleted circle back with its shares and overrides, since the delete has no confirm (K-211)", () => {
+    const state: State = {
+      ...start(),
+      places: new Map([...start().places, ["riffle", { x: 400, y: 0 }]]),
+      shareSettings: new Map([[shareKey("riffle", "her"), { level: "view", endsAt: 5 }]]),
+    };
+    const deleted = edit(state, [{ _tag: "circle", id: "her", after: null }]);
+    expect(deleted.after.circles.has("her")).toBe(false);
+    const back = applyChanges(deleted.after, invert(deleted.changes));
+    expect(back.circles.get("her")).toEqual(state.circles.get("her"));
+    expect(back.shareSettings.get(shareKey("riffle", "her"))).toEqual({ level: "view", endsAt: 5 });
+    expect(shareDiff(state, back)).toEqual([]);
+  });
+
   it("names share changes in the summary (K-502, K-503)", () => {
     const state = start();
     const { changes, after } = edit(state, [{ _tag: "place", id: "riffle", after: { x: 400, y: 0 } }]);

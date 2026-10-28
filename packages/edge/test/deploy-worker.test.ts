@@ -734,3 +734,158 @@ describe("rollback (K-821)", () => {
     await close();
   });
 });
+
+/** An agent key's call, with the Access token of its service token. */
+const agentStep = async (clientId: string, path: string, body: unknown) =>
+  call(
+    path,
+    "POST",
+    {
+      "cf-access-jwt-assertion": await new SignJWT({ common_name: clientId })
+        .setProtectedHeader({ alg: "RS256", kid: "team" })
+        .setIssuer("https://team.example.com")
+        .setAudience("agent-aud")
+        .setIssuedAt()
+        .setExpirationTime("5m")
+        .sign(team.privateKey),
+    },
+    body,
+  );
+
+const agentCircle = (id: string, clientId: string, addsApps: boolean) => ({
+  id,
+  name: id,
+  color: "#7c3aed",
+  level: "control",
+  members: [{ _tag: "device", tokenId: `t-${id}`, clientId, name: id, ...(addsApps ? { addsApps } : {}) }],
+  match: "any",
+  needsPasskey: false,
+  endsAt: null,
+  x: id === "folders" ? 4000 : 5000,
+  y: 4000,
+  r: 300,
+});
+
+describe("folder sites (K-1123)", () => {
+  it("publishes a folder with may add apps, keeps its script on Remove app, and Undo brings it back", async () => {
+    const cloudflare = fakeCloudflare();
+    const edits = [
+      { _tag: "circle", id: "folders", after: agentCircle("folders", "folder-key.access", true) },
+      { _tag: "circle", id: "plain", after: agentCircle("plain", "plain-key.access", false) },
+    ];
+    expect((await admin("/api/apply", "POST", { edits })).status).toBe(200);
+    expect((await agentStep("plain-key.access", "/agent/sites/plan", { folder: "demo" })).status).toBe(403);
+
+    const plan = await agentStep("folder-key.access", "/agent/sites/plan", {
+      folder: "demo",
+      address: "demo-site",
+    });
+    expect(plan.body, JSON.stringify(plan.body)).toMatchObject({
+      address: "demo-site.example.com",
+      updated: false,
+    });
+    const deployId = plan.body["deployId"];
+    // While the plan waits for its files, the same folder and the same address are held.
+    expect((await agentStep("folder-key.access", "/agent/sites/plan", { folder: "demo" })).status).toBe(409);
+    expect(
+      (await agentStep("folder-key.access", "/agent/sites/plan", { folder: "other", address: "demo-site" }))
+        .status,
+    ).toBe(409);
+    const manifest = { "/index.html": { hash: "0".repeat(32), size: 5 } };
+    expect((await agentStep("folder-key.access", "/agent/sites/assets", { deployId, manifest })).status).toBe(
+      200,
+    );
+    let finish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && finish.status === 503; attempt++)
+      finish = await agentStep("folder-key.access", "/agent/sites/finish", { deployId, jwt: "done" });
+    expect(finish.status, JSON.stringify(finish.body)).toBe(200);
+    const state = await admin("/api/state", "GET");
+    const card = (state.body["resources"] as Array<{ id: string; name: string }>).find(
+      (resource) => resource.name === "demo",
+    );
+    if (!card) throw new Error("The folder site has no card.");
+    const script = `kitshn-${card.id}`;
+    expect(cloudflare.served("demo-site.example.com")).toEqual([script]);
+    // The same folder again deploys the same card.
+    expect(
+      (await agentStep("folder-key.access", "/agent/sites/plan", { folder: "demo" })).body,
+    ).toMatchObject({
+      address: "demo-site.example.com",
+      updated: true,
+    });
+
+    const removed = await admin(`/api/apps/${card.id}`, "DELETE");
+    expect(removed.status, JSON.stringify(removed.body)).toBe(200);
+    expect(cloudflare.served("demo-site.example.com")).toEqual([]);
+    expect(cloudflare.scripts.has(script)).toBe(true);
+    const undone = await admin("/api/undo", "POST", { revision: removed.body["revision"] });
+    expect(undone.status, JSON.stringify(undone.body)).toBe(200);
+    expect(cloudflare.served("demo-site.example.com")).toEqual([script]);
+
+    // Removed again, the site counts for nothing: a new publish of the folder is a first publish, with the right.
+    const again = await admin(`/api/apps/${card.id}`, "DELETE");
+    expect(again.status, JSON.stringify(again.body)).toBe(200);
+    // Another site takes the free address; the Undo of the removal then no longer fits, and that site stays.
+    const other = await agentStep("folder-key.access", "/agent/sites/plan", {
+      folder: "other",
+      address: "demo-site",
+    });
+    expect(other.status, JSON.stringify(other.body)).toBe(200);
+    const otherId = other.body["deployId"];
+    expect(
+      (await agentStep("folder-key.access", "/agent/sites/assets", { deployId: otherId, manifest })).status,
+    ).toBe(200);
+    let otherFinish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && otherFinish.status === 503; attempt++)
+      otherFinish = await agentStep("folder-key.access", "/agent/sites/finish", {
+        deployId: otherId,
+        jwt: "done",
+      });
+    expect(otherFinish.status, JSON.stringify(otherFinish.body)).toBe(200);
+    const served = cloudflare.served("demo-site.example.com");
+    const refused = await admin("/api/undo", "POST", { revision: again.body["revision"] });
+    expect(refused.status).toBe(409);
+    expect(String(refused.body["error"])).toContain("is taken");
+    expect(cloudflare.served("demo-site.example.com")).toEqual(served);
+    const noRight = [
+      { _tag: "circle", id: "folders", after: agentCircle("folders", "folder-key.access", false) },
+    ];
+    expect((await admin("/api/apply", "POST", { edits: noRight })).status).toBe(200);
+    expect((await agentStep("folder-key.access", "/agent/sites/plan", { folder: "demo" })).status).toBe(403);
+    const right = [
+      { _tag: "circle", id: "folders", after: agentCircle("folders", "folder-key.access", true) },
+    ];
+    expect((await admin("/api/apply", "POST", { edits: right })).status).toBe(200);
+    expect(
+      (await agentStep("folder-key.access", "/agent/sites/plan", { folder: "demo" })).body,
+    ).toMatchObject({
+      updated: false,
+    });
+
+    // A key has at most 10 folder sites: the new plan holds 1, and 9 live plans fill it. Rows without a card or a
+    // live plan count for nothing.
+    await runInDurableObject(env.KITSHN.getByName("kitshn"), (_instance, durable) => {
+      for (let index = 0; index < 12; index++) {
+        durable.storage.sql.exec(
+          `INSERT INTO agent_sites (card_id, client_id, folder, address, created_at)
+           VALUES (?, 'folder-key.access', ?, ?, 0)`,
+          `folder-fill${index}`,
+          `fill${index}`,
+          `fill${index}.example.com`,
+        );
+        if (index < 9)
+          durable.storage.sql.exec(
+            `INSERT INTO deploys (id, repo, environment, resource_id, address, script, kind, sha, state, expires_at)
+             VALUES (?, 'folder fill', 'folder', ?, ?, 'kitshn-fill', 'deploy', 'folder', 'planned', ?)`,
+            `fill-plan-${index}`,
+            `folder-fill${index}`,
+            `fill${index}.example.com`,
+            Date.now() + 60_000,
+          );
+      }
+    });
+    expect((await agentStep("folder-key.access", "/agent/sites/plan", { folder: "one-more" })).status).toBe(
+      409,
+    );
+  });
+});

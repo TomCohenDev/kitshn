@@ -15,7 +15,6 @@ export function LibraryView(props: {
   /** The newest revision; the list loads again when it changes, for example after an upload. */
   revision: number;
   onToast: (text: string, error: boolean) => void;
-  ask: (text: string) => Promise<boolean>;
   onShowCard: (id: string) => void;
 }) {
   const [items, setItems] = useState<ReadonlyArray<LibraryItem> | null>(null);
@@ -37,11 +36,14 @@ export function LibraryView(props: {
     return words.every((word) => text.includes(word));
   });
 
+  /** K-1006: no confirm and no undo, so the label names what goes; History records it. */
   const remove = async (item: LibraryItem) => {
-    if (!(await props.ask(`Delete ${item.title}? Its address stops working for everyone.`))) return;
     const result = await callApi<{ deleted: string }>("DELETE", `/api/library/${item.id}`);
     if ("error" in result) props.onToast(result.error, true);
-    else if (preview === item.id) setPreview(null);
+    else {
+      if (preview === item.id) setPreview(null);
+      props.onToast(`Deleted ${item.title}. Its address no longer works.`, false);
+    }
   };
 
   return (
@@ -124,10 +126,10 @@ export function LibraryView(props: {
                   </button>
                   <button
                     class="btn danger"
-                    data-tip={`Delete ${item.title}. Its address stops working for everyone.`}
+                    data-tip={`Delete ${item.title} at once: its stored ${item.kind} and its card go, and its address stops working for everyone. Undo cannot bring it back.`}
                     onClick={() => void remove(item)}
                   >
-                    Delete
+                    Delete {item.kind} for good
                   </button>
                 </td>
               </tr>

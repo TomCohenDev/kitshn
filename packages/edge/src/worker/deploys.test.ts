@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { environmentNames, eventOf, legacyRepos, parseManifest, parseSiteIcon, repoIdOf } from "./deploys.ts";
+import { environmentNames, eventOf, legacyRepos, parseHeadersFile, parseManifest, parseSiteIcon, repoIdOf } from "./deploys.ts";
 
 describe("deploys (K-811, K-903)", () => {
   it("takes the event, branch and pull request from the token, not from the request", () => {
@@ -113,5 +113,13 @@ describe("site icon of a deploy (K-1113)", () => {
     expect(parseSiteIcon("A".repeat(200_000))).toMatch(/larger than 100 KB/);
     expect(parseSiteIcon("%%%")).toMatch(/base64/);
     expect(parseSiteIcon(42)).toMatch(/base64 text or null/);
+  });
+
+  it("passes a _headers file on as text, and refuses one that is not text or too large (K-805)", () => {
+    expect(parseHeadersFile("/*.gpx\n  Content-Type: application/gpx+xml\n")).toMatch("gpx");
+    expect(parseHeadersFile(undefined)).toBeNull();
+    expect(parseHeadersFile(null)).toBeNull();
+    expect(parseHeadersFile(42)).toEqual({ error: expect.stringContaining("text") });
+    expect(parseHeadersFile("x".repeat(100_001))).toEqual({ error: expect.stringContaining("larger") });
   });
 });

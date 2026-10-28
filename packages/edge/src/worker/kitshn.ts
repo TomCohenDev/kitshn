@@ -147,6 +147,7 @@ import {
   eventOf,
   legacyRepos,
   parseManifest,
+  parseHeadersFile,
   parseSiteIcon,
 } from "./deploys.ts";
 import { type Recipe, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
@@ -3050,7 +3051,7 @@ export class Kitshn extends DurableObject<Env> {
       if (path === "/deploy/assets" && row.kind === "deploy")
         return await this.deployAssets(api, row, input["manifest"]);
       if (path === "/deploy/finish" && row.kind === "deploy")
-        return await this.finishDeploy(api, row, deployer, input["jwt"], input["icon"]);
+        return await this.finishDeploy(api, row, deployer, input["jwt"], input["icon"], input["headers"]);
       if (row.app === "compose") {
         if (path === "/deploy/start" && row.kind === "deploy")
           return await this.startCompose(api, row, deployer);
@@ -3521,9 +3522,18 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ removed: row.address });
   }
 
-  private async finishDeploy(api: Api, row: DeployRow, deployer: Deployer, jwt: unknown, iconValue: unknown) {
+  private async finishDeploy(
+    api: Api,
+    row: DeployRow,
+    deployer: Deployer,
+    jwt: unknown,
+    iconValue: unknown,
+    headersValue: unknown,
+  ) {
     if (typeof jwt !== "string" || !jwt)
       return Response.json({ error: "The deploy needs the upload completion token." }, { status: 400 });
+    const headers = parseHeadersFile(headersValue);
+    if (typeof headers === "object" && headers !== null) return Response.json({ error: headers.error }, { status: 400 });
     const icon = parseSiteIcon(iconValue);
     if (typeof icon === "string") return Response.json({ error: icon }, { status: 400 });
     const card = this.ensureCard(row, deployer, "site.static", null);
@@ -3542,7 +3552,14 @@ export class Kitshn extends DurableObject<Env> {
     const metadata = {
       main_module: "worker.js",
       compatibility_date: "2026-10-20",
-      assets: { jwt, config: { not_found_handling: "404-page", html_handling: "auto-trailing-slash" } },
+      assets: {
+        jwt,
+        config: {
+          not_found_handling: "404-page",
+          html_handling: "auto-trailing-slash",
+          ...(headers ? { _headers: headers } : {}),
+        },
+      },
       bindings: [{ type: "assets", name: "ASSETS" }],
     };
     const form = new FormData();

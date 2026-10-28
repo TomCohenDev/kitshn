@@ -156,7 +156,7 @@ export const HEADERS_LIMIT = 100_000;
 export function parseHeadersFile(value: unknown): string | null | { readonly error: string } {
   if (value === undefined || value === null || value === "") return null;
   if (typeof value !== "string") return { error: "The _headers file must be text or null." };
-  if (value.length > HEADERS_LIMIT) return { error: `The _headers file is larger than ${HEADERS_LIMIT / 1000} KB.` };
+  if (new TextEncoder().encode(value).length > HEADERS_LIMIT) return { error: `The _headers file is larger than ${HEADERS_LIMIT / 1000} KB.` };
   return value;
 }
 

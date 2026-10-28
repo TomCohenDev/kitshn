@@ -121,5 +121,7 @@ describe("site icon of a deploy (K-1113)", () => {
     expect(parseHeadersFile(null)).toBeNull();
     expect(parseHeadersFile(42)).toEqual({ error: expect.stringContaining("text") });
     expect(parseHeadersFile("x".repeat(100_001))).toEqual({ error: expect.stringContaining("larger") });
+    // Bytes, not characters: 40,000 three-byte characters are 120 KB.
+    expect(parseHeadersFile("€".repeat(40_000))).toEqual({ error: expect.stringContaining("larger") });
   });
 });

@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { extname, join, relative, resolve, sep } from "node:path";
+import { headersWarnings } from "./headers.ts";
 import { pickSiteIcon } from "./icon.ts";
 import { RecipeError, readRecipe } from "./parse.ts";
 import { type DeployEvent, decodeRecipe } from "./recipe.ts";
@@ -146,6 +147,7 @@ async function deploy(server: string, dir: string) {
   for (const path of files(output)) {
     if (relative(output, path) === "_headers") {
       headers = readFileSync(path, "utf8");
+      for (const warning of headersWarnings(headers)) console.log(`kitshn: warning: ${warning}`);
       continue;
     }
     const bytes = readFileSync(path);

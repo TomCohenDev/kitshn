@@ -146,6 +146,20 @@ export function parseSiteIcon(
   return { bytes, type };
 }
 
+/** K-805: the most text of a `_headers` file that kitshn passes on; Cloudflare allows 100 rules. */
+export const HEADERS_LIMIT = 100_000;
+
+/**
+ * K-805: the `_headers` file of a static site, which Cloudflare applies to its responses. Null or a missing field (a
+ * CLI from before `_headers`) means none.
+ */
+export function parseHeadersFile(value: unknown): string | null | { readonly error: string } {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") return { error: "The _headers file must be text or null." };
+  if (new TextEncoder().encode(value).length > HEADERS_LIMIT) return { error: `The _headers file is larger than ${HEADERS_LIMIT / 1000} KB.` };
+  return value;
+}
+
 /**
  * K-805: the Worker of a static site. Static assets answer every request first, so this code runs only
  * for a path that is not a file, and the free plan does not count asset requests.

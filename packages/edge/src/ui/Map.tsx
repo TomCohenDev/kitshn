@@ -140,6 +140,11 @@ export function MapView(props: Props) {
   const [draft, setDraft] = useState<{ state: State; diffs: Array<ShareDiff>; pointer: Point } | null>(null);
   /** K-523: a right press or a touch that may open the context menu. */
   const hold = useRef<{ press: Press; readonly target: MenuTarget; timer: number | null } | null>(null);
+  /**
+   * A right release that the browser's `contextmenu` follows (Windows, Linux): that event opens the menu,
+   * unless the press panned. On macOS `contextmenu` comes before the release instead, while `hold` is set.
+   */
+  const rightRelease = useRef<{ readonly panned: boolean } | null>(null);
   const viewport = useRef<HTMLDivElement>(null);
   /** The cards that had a frame in the last render (live previews keep them, see below). */
   const previewed = useRef<ReadonlySet<string>>(new Set());
@@ -215,6 +220,12 @@ export function MapView(props: Props) {
   const onPointerDown = (event: PointerEvent) => {
     const target = event.target as HTMLElement;
     const world = toWorld(event.clientX, event.clientY);
+    rightRelease.current = null;
+    try {
+      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    } catch {
+      // A pointer that is gone cannot be captured; the drag still works inside the viewport.
+    }
     if (event.button === 1 || event.button === 2) {
       if (event.button === 2) beginPress(event);
       setDrag({ type: "pan", sx: event.clientX, sy: event.clientY, view });
@@ -224,11 +235,6 @@ export function MapView(props: Props) {
     const grip = target.closest<HTMLElement>("[data-grip]");
     const head = target.closest<HTMLElement>("[data-head]");
     const cardElement = target.closest<HTMLElement>("[data-card]");
-    try {
-      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-    } catch {
-      // A pointer that is gone cannot be captured; the drag still works inside the viewport.
-    }
     if (grip) {
       const origin = state.circles.get(grip.dataset["grip"] ?? "");
       if (origin) setDrag({ type: "resize", origin });
@@ -367,7 +373,9 @@ export function MapView(props: Props) {
 
   const onPointerUp = (event: PointerEvent) => {
     const press = endPress();
-    if (event.button === 2 && press?.press.phase === "waiting") openMenu(press.target, press.press.start);
+    // No `contextmenu` came during the press, so it follows the release; a press that opened the menu is done.
+    if (event.button === 2 && press && press.press.phase !== "held")
+      rightRelease.current = { panned: press.press.phase === "moved" };
     // A touch that opened the menu does not also open a stack.
     const held = press?.press.phase === "held";
     // K-522: cards let go over another card stack with it instead of moving.
@@ -446,6 +454,7 @@ export function MapView(props: Props) {
       onPointerCancel={() => {
         // A cancelled pointer drops nothing; the cards go back.
         endPress();
+        rightRelease.current = null;
         setStackTarget(null);
         setDrag(null);
         setDraft(null);
@@ -453,9 +462,20 @@ export function MapView(props: Props) {
       onWheel={onWheel}
       onContextMenu={(event) => {
         event.preventDefault();
-        // A right press or a touch opens its menu itself (see beginPress).
-        if (hold.current) return;
-        // Ctrl and a click on macOS, the menu key or Shift+F10: the focused or clicked item.
+        const press = hold.current;
+        if (press) {
+          // A touch opens its menu after HOLD_MS. A right press on macOS opens it now, unless it panned;
+          // a move after this closes it, as after a long press.
+          if (press.timer === null && press.press.phase === "waiting") {
+            press.press = stepPress(press.press, { type: "elapsed" });
+            openMenu(press.target, press.press.start);
+          }
+          return;
+        }
+        const release = rightRelease.current;
+        rightRelease.current = null;
+        if (release?.panned) return;
+        // A right release, Ctrl and a click on macOS, the menu key or Shift+F10: the clicked or focused item.
         const element = event.target as HTMLElement;
         const box = element.getBoundingClientRect();
         const at = event.clientX || event.clientY ? { x: event.clientX, y: event.clientY } : { x: box.left, y: box.bottom };

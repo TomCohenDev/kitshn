@@ -754,6 +754,20 @@ export function App() {
         </div>
       ) : null}
       <TooltipLayer />
+      {/* Outside the map toolbar, so an upload from the palette on another tab finds it. */}
+      <input
+        ref={uploadInput}
+        type="file"
+        multiple
+        hidden
+        onChange={(event) => {
+          const files = [...(event.currentTarget.files ?? [])];
+          event.currentTarget.value = "";
+          const at = uploadAt.current;
+          uploadAt.current = null;
+          void uploadFiles(files, at);
+        }}
+      />
       <header class="bar">
         <h1>kitshn</h1>
         <div class="seg">
@@ -826,19 +840,6 @@ export function App() {
             >
               Upload
             </button>
-            <input
-              ref={uploadInput}
-              type="file"
-              multiple
-              hidden
-              onChange={(event) => {
-                const files = [...(event.currentTarget.files ?? [])];
-                event.currentTarget.value = "";
-                const at = uploadAt.current;
-                uploadAt.current = null;
-                void uploadFiles(files, at);
-              }}
-            />
             <button class="btn" data-tip="Fit every circle and card in the view." onClick={fit}>
               Fit
             </button>

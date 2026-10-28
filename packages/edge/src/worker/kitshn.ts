@@ -2425,6 +2425,7 @@ export class Kitshn extends DurableObject<Env> {
       // K-110: no confirm in the map, so History records each sign-out.
       const failed = result.failed.length > 0 ? `; ${result.failed.length} failed` : "";
       this.insertRevision(caller.actor, `Signed out everywhere: ended the sessions of ${result.ended} applications${failed}`, [], null);
+      this.load();
       this.broadcast();
       return Response.json(result);
     } catch (error) {

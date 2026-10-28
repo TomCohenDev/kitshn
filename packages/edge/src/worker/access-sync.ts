@@ -5,6 +5,7 @@ import {
   ENROLLMENT_KEY,
   type PolicyBody,
 } from "../core/access.ts";
+import { Schema } from "effect";
 import { deepEqual } from "../core/changes.ts";
 import type { AccessState } from "../core/protocol.ts";
 
@@ -294,6 +295,25 @@ export type SignOutOutcome =
   | { readonly ended: number; readonly left: ReadonlyArray<LeftApp> }
   | { readonly ended: 0; readonly listFailed: string };
 
+const LeftAppSchema = Schema.Struct({ key: Schema.String, cfId: Schema.String, reason: Schema.String });
+const SignOutOutcomeSchema = Schema.Union([
+  Schema.Struct({ ended: Schema.Number, left: Schema.Array(LeftAppSchema) }),
+  Schema.Struct({ ended: Schema.Literal(0), listFailed: Schema.String }),
+]);
+const decodeOutcome = Schema.decodeUnknownSync(SignOutOutcomeSchema);
+
+/** K-110: the stored outcome of the last sign-out, or null when none is left or the row is broken. */
+export function readSignOutLeft(saved: string | null): SignOutOutcome | null {
+  if (!saved) return null;
+  try {
+    return decodeOutcome(JSON.parse(saved));
+  } catch (error) {
+    // A broken row must not break every snapshot; the next sign-out writes a new one.
+    console.warn(`kitshn ignores a broken sign_out_left row: ${String(error)}`);
+    return null;
+  }
+}
+
 /** K-110: ends the sessions of every application that kitshn made. It never touches other applications. */
 export async function signOutEverywhere(
   store: AccessStore,
@@ -302,11 +322,18 @@ export async function signOutEverywhere(
   /** Applications that the bootstrap made, such as the page and file logins (K-1004). */
   loginApps: ReadonlyArray<{ readonly key: string; readonly cfId: string }> = [],
 ): Promise<SignOutOutcome> {
-  const apps = [
-    ...[...store.rows.values()].filter((row) => row.key.startsWith("app:") && row.cfId),
+  return revokeSessions(api, accountId, sessionApps(store, loginApps));
+}
+
+/** K-110: every application that kitshn made, with the login applications of the bootstrap. */
+export function sessionApps(
+  store: AccessStore,
+  loginApps: ReadonlyArray<{ readonly key: string; readonly cfId: string }>,
+): Array<{ readonly key: string; readonly cfId: string }> {
+  return [
+    ...[...store.rows.values()].filter((row) => row.key.startsWith("app:") && row.cfId).map(({ key, cfId }) => ({ key, cfId })),
     ...loginApps,
   ];
-  return revokeSessions(api, accountId, apps);
 }
 
 /** K-110: `revoke_tokens` for each application, at most one run of calls; the rest stay in `left`. */
@@ -326,16 +353,33 @@ export async function revokeSessions(
       await api("POST", `/accounts/${accountId}/access/apps/${app.cfId}/revoke_tokens`);
       ended++;
     } catch (error) {
-      left.push({ key: app.key, cfId: app.cfId, reason: message(error) });
+      // An application that is gone has no sessions left.
+      if (isNotFound(error)) ended++;
+      else left.push({ key: app.key, cfId: app.cfId, reason: message(error) });
     }
   }
   return { ended, left };
 }
 
+const applications = (count: number) => `${count} application${count === 1 ? "" : "s"}`;
+
+/**
+ * K-110: the applications that a retry revokes: those still left that kitshn still has, with their current
+ * id, so a removed application drops out and a re-created one gets its new id.
+ */
+export function retryApps(
+  left: ReadonlyArray<LeftApp>,
+  current: ReadonlyArray<{ readonly key: string; readonly cfId: string }>,
+): Array<{ readonly key: string; readonly cfId: string }> {
+  const keys = new Set(left.map((app) => app.key));
+  return current.filter((app) => keys.has(app.key));
+}
+
 /** K-110: the History entry of one sign-out or retry. */
-export function signOutSummary(outcome: SignOutOutcome): string {
-  if ("listFailed" in outcome) return `Sign-out everywhere failed: kitshn could not list the Access applications (${outcome.listFailed})`;
-  const ended = `Sign-out everywhere ended the sessions of ${outcome.ended} applications`;
+export function signOutSummary(outcome: SignOutOutcome, retry: boolean): string {
+  const what = retry ? "Retry of sign-out everywhere" : "Sign-out everywhere";
+  if ("listFailed" in outcome) return `${what} failed: kitshn could not list the Access applications (${outcome.listFailed})`;
+  const ended = `${what} ended the sessions of ${applications(outcome.ended)}`;
   return outcome.left.length === 0 ? ended : `${ended} and failed for: ${outcome.left.map((app) => app.key).join(", ")}`;
 }
 
@@ -346,7 +390,7 @@ export function signOutWarning(outcome: SignOutOutcome | null): string | null {
     return `Sign out everywhere ended no Access session: kitshn could not list the applications (${outcome.listFailed}). Retry starts it again.`;
   if (outcome.left.length === 0) return null;
   const apps = outcome.left.map((app) => `${app.key} (${app.reason})`).join("; ");
-  return `Sign out everywhere did not end the sessions of ${outcome.left.length} applications: ${apps}. Retry revokes them again.`;
+  return `Sign out everywhere did not end the sessions of ${applications(outcome.left.length)}: ${apps}. Retry revokes them again.`;
 }
 
 /**

@@ -105,8 +105,10 @@ import {
   hasAccessWork,
   rowsWithoutAud,
   type SignOutOutcome,
+  readSignOutLeft,
+  retryApps,
   revokeSessions,
-  signOutEverywhere,
+  sessionApps,
   signOutSummary,
   signOutWarning,
   syncAccess,
@@ -195,6 +197,8 @@ const ROTATED = 4004;
 /** K-1706 */
 const KEY_RESET = 4005;
 
+/** K-110: a sign-out or retry that started longer ago than this no longer blocks a new one (a lost run). */
+const SIGN_OUT_RUN_MS = 3 * 60_000;
 /** The map keeps this many recent revisions in memory; History reads them (K-519). */
 const RECENT_REVISIONS = 200;
 /** K-1503 */
@@ -2402,24 +2406,43 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-110: ends every session of every application that kitshn made. */
   private async signOut(caller: Caller) {
+    const busy = this.signOutBusy();
+    if (busy) return busy;
     // K-110: the Worker checks pages and files itself, so it refuses every login from before this second.
     this.setMeta("signed_out_at", String(Math.floor(Date.now() / 1000) * 1000));
     // K-110: no confirm in the map, so History records the start before any Cloudflare call, and the outcome.
     this.recordRevision(caller.actor, "Sign out everywhere: kitshn refuses older page and file logins");
-    return this.finishSignOut(caller, (api) => this.revokeEverything(api));
+    return this.finishSignOut(caller, false, async (api) => {
+      const apps = await this.listSessionApps(api);
+      return "listFailed" in apps ? apps : revokeSessions(api, this.env.CLOUDFLARE_ACCOUNT_ID, apps);
+    });
   }
 
   /** K-110: revokes the sessions that the last sign-out left, or starts over when it could not list them. */
-  private retrySignOut(caller: Caller) {
+  private async retrySignOut(caller: Caller) {
+    const busy = this.signOutBusy();
+    if (busy) return busy;
     const left = this.signOutLeft();
     if (!left) return Response.json({ error: "Every session of the last sign-out ended already." }, { status: 409 });
-    return this.finishSignOut(caller, (api) =>
-      "listFailed" in left ? this.revokeEverything(api) : revokeSessions(api, this.env.CLOUDFLARE_ACCOUNT_ID, left.left),
-    );
+    return this.finishSignOut(caller, true, async (api) => {
+      const apps = await this.listSessionApps(api);
+      if ("listFailed" in apps) return apps;
+      return revokeSessions(api, this.env.CLOUDFLARE_ACCOUNT_ID, "listFailed" in left ? apps : retryApps(left.left, apps));
+    });
   }
 
-  private async revokeEverything(api: Api): Promise<SignOutOutcome> {
-    const account = this.env.CLOUDFLARE_ACCOUNT_ID;
+  /** K-110: one sign-out or retry at a time, so a slow run never overwrites the outcome of a newer one. */
+  private signOutBusy(): Response | null {
+    const since = Number(this.meta("sign_out_running") || 0);
+    if (Date.now() - since < SIGN_OUT_RUN_MS)
+      return Response.json({ error: "A sign-out everywhere runs already. Try again in a minute." }, { status: 409 });
+    return null;
+  }
+
+  /** K-110: the applications whose sessions a sign-out ends, or why kitshn could not list them. */
+  private async listSessionApps(
+    api: Api,
+  ): Promise<Array<{ readonly key: string; readonly cfId: string }> | { readonly ended: 0; readonly listFailed: string }> {
     const logins = new Set(
       ["pages", "files"].flatMap((host) => [
         `${host}.${this.env.KITSHN_ZONE}/login`,
@@ -2429,25 +2452,29 @@ export class Kitshn extends DurableObject<Env> {
     try {
       const all = await api<Array<{ id: string; name: string; domain: string }>>(
         "GET",
-        `/accounts/${account}/access/apps?per_page=1000`,
+        `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/apps?per_page=1000`,
       );
       const loginApps = all
         .filter((app) => logins.has(app.domain) && app.name.startsWith(ACCESS_NAME_PREFIX))
         .map((app) => ({ key: app.domain, cfId: app.id }));
-      return await signOutEverywhere(this.accessStore(), api, account, loginApps);
+      return sessionApps(this.accessStore(), loginApps);
     } catch (error) {
       return { ended: 0, listFailed: String(error) };
     }
   }
 
   /** K-110: stores what is left (the warning with Retry) and records the outcome in History. */
-  private async finishSignOut(caller: Caller, run: (api: Api) => Promise<SignOutOutcome>) {
+  private async finishSignOut(caller: Caller, retry: boolean, run: (api: Api) => Promise<SignOutOutcome>) {
     const api = this.api();
-    const outcome: SignOutOutcome = api
-      ? await run(api)
-      : { ended: 0, listFailed: "kitshn has no Cloudflare API token here" };
+    this.setMeta("sign_out_running", String(Date.now()));
+    let outcome: SignOutOutcome;
+    try {
+      outcome = api ? await run(api) : { ended: 0, listFailed: "kitshn has no Cloudflare API token here" };
+    } finally {
+      this.setMeta("sign_out_running", "");
+    }
     this.setMeta("sign_out_left", signOutWarning(outcome) ? JSON.stringify(outcome) : "");
-    this.recordRevision(caller.actor, signOutSummary(outcome));
+    this.recordRevision(caller.actor, signOutSummary(outcome, retry));
     return "listFailed" in outcome
       ? Response.json({ error: signOutWarning(outcome) }, { status: 502 })
       : Response.json({ ended: outcome.ended, failed: outcome.left.map((app) => `${app.key}: ${app.reason}`) });
@@ -2455,8 +2482,7 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-110: what the last sign-out left to do, or null when every session ended. */
   private signOutLeft(): SignOutOutcome | null {
-    const saved = this.meta("sign_out_left");
-    return saved ? (JSON.parse(saved) as SignOutOutcome) : null;
+    return readSignOutLeft(this.meta("sign_out_left"));
   }
 
   /**

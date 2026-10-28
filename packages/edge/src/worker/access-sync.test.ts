@@ -12,6 +12,8 @@ import {
   hasAccessWork,
   rowsWithoutAud,
   revokeSessions,
+  readSignOutLeft,
+  retryApps,
   signOutEverywhere,
   signOutSummary,
   signOutWarning,
@@ -751,7 +753,7 @@ describe("sign out everywhere (K-110)", () => {
         { key: `app${CALLS_PER_RUN + 1}`, cfId: `id${CALLS_PER_RUN + 1}`, reason: "the call limit of one request" },
       ],
     });
-    expect(signOutSummary(outcome)).toContain(`failed for: app1, app${CALLS_PER_RUN}`);
+    expect(signOutSummary(outcome, false)).toContain(`failed for: app1, app${CALLS_PER_RUN}`);
     expect(signOutWarning(outcome)).toContain("app1 (Cloudflare said no)");
   });
 
@@ -761,13 +763,34 @@ describe("sign out everywhere (K-110)", () => {
     const retry = await revokeSessions(failing("none"), "a", "left" in first ? first.left : []);
     expect(retry).toEqual({ ended: 1, left: [] });
     expect(signOutWarning(retry)).toBeNull();
-    expect(signOutSummary(retry)).toBe("Sign-out everywhere ended the sessions of 1 applications");
+    expect(signOutSummary(retry, true)).toBe("Retry of sign-out everywhere ended the sessions of 1 application");
+  });
+
+  it("counts an application that Cloudflare no longer has as ended", async () => {
+    const gone: Api = async () => {
+      throw Object.assign(new Error("not found"), { status: 404 });
+    };
+    expect(await revokeSessions(gone, "a", apps(1))).toEqual({ ended: 1, left: [] });
+  });
+
+  it("retries only applications that kitshn still has, with their current id", () => {
+    const left = [
+      { key: "app0", cfId: "old0", reason: "x" },
+      { key: "removed", cfId: "old1", reason: "x" },
+    ];
+    expect(retryApps(left, [{ key: "app0", cfId: "new0" }, { key: "other", cfId: "o" }])).toEqual([{ key: "app0", cfId: "new0" }]);
+  });
+
+  it("reads a broken stored outcome as nothing left", () => {
+    expect(readSignOutLeft('{"ended":"x"}')).toBeNull();
+    expect(readSignOutLeft("")).toBeNull();
+    expect(readSignOutLeft('{"ended":0,"listFailed":"HTTP 500"}')).toEqual({ ended: 0, listFailed: "HTTP 500" });
   });
 
   it("warns with Retry when the list of applications failed, as no session ended", () => {
     const outcome = { ended: 0, listFailed: "HTTP 500" } as const;
     expect(signOutWarning(outcome)).toContain("ended no Access session");
-    expect(signOutSummary(outcome)).toContain("could not list");
+    expect(signOutSummary(outcome, false)).toContain("could not list");
     expect(signOutWarning(null)).toBeNull();
   });
 });

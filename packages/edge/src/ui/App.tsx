@@ -48,9 +48,13 @@ import {
   actionsFor,
   REMOVE_APP_TIP,
   levelEdit,
+  type PaletteCursor,
+  paletteActive,
+  paletteArrow,
   paletteEnter,
   paletteEntries,
   reshareEdits,
+  stackOntoEdits,
 } from "./actions.ts";
 import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
@@ -152,6 +156,8 @@ export function App() {
   const uploadInput = useRef<HTMLInputElement>(null);
   /** Where the next upload of the file chooser lands: a map point, or null for the tray. */
   const uploadAt = useRef<Point | null>(null);
+  /** K-110: a sign-out or its retry waits for Cloudflare; the server also runs one at a time. */
+  const [signingOut, setSigningOut] = useState(false);
   const [menu, setMenu] = useState<{ readonly target: MenuTarget; readonly anchor: Rect } | null>(null);
   const [pausing, setPausing] = useState(false);
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
@@ -277,37 +283,13 @@ export function App() {
   const stacks: StackActions = {
     stackOnto: async (ids, target) => {
       if (!state) return;
-      const place = state.places.get(target);
-      if (!place) {
-        showToast({ text: "Put one of the cards on the map first.", error: true, undo: null });
+      const plan = stackOntoEdits(state, ids, target, `s-${crypto.randomUUID().slice(0, 8)}`);
+      if (!plan) return;
+      if ("refused" in plan) {
+        showToast({ text: plan.refused, error: true, undo: null });
         return;
       }
-      const into = [...state.stacks.values()].find((stack) => stack.members.includes(target));
-      const moving = ids.filter((id) => id !== target && !into?.members.includes(id));
-      if (moving.length === 0) return;
-      const edits: Array<Edit> = moving.map((id) => ({ _tag: "place", id, after: place }));
-      // A card leaves its old stack; a stack left with one card goes.
-      for (const stack of state.stacks.values()) {
-        if (stack === into || !stack.members.some((id) => moving.includes(id))) continue;
-        const rest = stack.members.filter((id) => !moving.includes(id));
-        edits.push({
-          _tag: "stack",
-          id: stack.id,
-          after: rest.length > 1 ? { ...stack, members: rest } : null,
-        });
-      }
-      const id = into?.id ?? `s-${crypto.randomUUID().slice(0, 8)}`;
-      edits.push({
-        _tag: "stack",
-        id,
-        after: { id, name: into?.name ?? state.resources.get(target)?.name ?? "Stack", members: [...(into?.members ?? [target]), ...moving] },
-      });
-      const names = moving.flatMap((card) => state.resources.get(card)?.name ?? []).join(", ");
-      await commit(
-        edits,
-        shareDiff(state, applyChanges(state, resolveEdits(state, edits))),
-        `Stacked ${names} with ${into?.name ?? state.resources.get(target)?.name ?? "the card"}.`,
-      );
+      await commit(plan.edits, shareDiff(state, applyChanges(state, resolveEdits(state, plan.edits))), plan.done);
     },
     pullOut: async (stackId, id) => {
       const stack = state?.stacks.get(stackId);
@@ -611,11 +593,12 @@ export function App() {
    * Retry, which calls the same endpoint family.
    */
   const signOut = async (retry: boolean) => {
+    setSigningOut(true);
     const result = await callApi<{ ended: number; failed: Array<string> }>(
       "POST",
       retry ? "/api/sign-out/retry" : "/api/sign-out",
       {},
-    );
+    ).finally(() => setSigningOut(false));
     showToast(
       "error" in result
         ? { text: result.error, error: true, undo: null }
@@ -1001,6 +984,7 @@ export function App() {
         onPause={(pause) => (pause ? setPausing(true) : startResume())}
         onSignOut={(retry) => void signOut(retry)}
         signOutWarning={store.snapshot.signOutWarning}
+        signingOut={signingOut}
       />
       {store.snapshot.paused ? (
         <PausedBanner
@@ -1027,6 +1011,7 @@ export function App() {
               ? [
                   {
                     label: "Retry sign-out everywhere",
+                    danger: true as const,
                     tip: store.snapshot.signOutWarning,
                     run: () => void signOut(true),
                   },
@@ -1164,6 +1149,7 @@ function Panel(props: {
   onPause: (pause: boolean) => void;
   onSignOut: (retry: boolean) => void;
   signOutWarning: string | null;
+  signingOut: boolean;
   accessTeam: string;
   onSelectCard: (id: string) => void;
   onSelectCircle: (id: string) => void;
@@ -1304,6 +1290,7 @@ function Panel(props: {
                   <button
                     type="button"
                     class="btn"
+                    disabled={props.signingOut}
                     data-tip="Retry sign-out: revoke the sessions of the applications above again. The warning goes once every session ended."
                     onClick={() => props.onSignOut(true)}
                   >
@@ -1332,6 +1319,7 @@ function Panel(props: {
           <button
             class="btn danger"
             data-tip="Sign out everywhere: ends every Access session of kitshn's apps at once. Everyone logs in again, you too. History records it."
+            disabled={props.signingOut}
             onClick={() => props.onSignOut(false)}
           >
             Sign out everywhere: ends every session
@@ -1684,9 +1672,7 @@ function Palette(props: {
   entries: ReadonlyArray<PaletteEntry>;
 }) {
   const [query, setQuery] = useState(props.initialQuery);
-  const [active, setActive] = useState(0);
-  /** The owner moved to the active entry with the arrows, so Enter may run a dangerous one (paletteEnter). */
-  const [picked, setPicked] = useState(false);
+  const [cursor, setCursor] = useState<PaletteCursor>({ label: null, picked: false });
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const matches = props.entries
     .filter((entry) => {
@@ -1694,6 +1680,8 @@ function Palette(props: {
       return words.every((word) => text.includes(word));
     })
     .slice(0, 50);
+  const labels = matches.map((entry) => entry.label);
+  const { index: active, picked } = paletteActive(labels, cursor);
   const listId = useId();
   const run = (index: number) => {
     const entry = matches[index];
@@ -1715,17 +1703,14 @@ function Palette(props: {
           value={query}
           onInput={(event) => {
             setQuery((event.target as HTMLInputElement).value);
-            setActive(0);
-            setPicked(false);
+            setCursor({ label: null, picked: false });
           }}
           onKeyDown={(event) => {
-            if (event.key === "ArrowDown") setActive(Math.min(active + 1, matches.length - 1));
-            else if (event.key === "ArrowUp") setActive(Math.max(active - 1, 0));
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") setCursor(paletteArrow(event.key, labels, cursor));
             else if (event.key === "Enter") {
               const index = paletteEnter(matches, active, picked);
               if (index !== null) run(index);
             } else return;
-            if (event.key !== "Enter") setPicked(true);
             event.preventDefault();
           }}
         />
@@ -1739,7 +1724,7 @@ function Palette(props: {
               data-danger={entry.danger || undefined}
               aria-selected={index === active}
               onClick={() => run(index)}
-              onMouseEnter={() => setActive(index)}
+              onMouseEnter={() => setCursor({ label: entry.label, picked: false })}
             >
               {entry.label}
             </li>

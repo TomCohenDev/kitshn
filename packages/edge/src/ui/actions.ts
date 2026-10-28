@@ -144,8 +144,50 @@ export function reshareEdits(
   return refused ? { refused } : { edits };
 }
 
-const refusedBy = (state: State, edits: ReadonlyArray<Edit>) => {
+/**
+ * K-522: the edits that put cards onto `target` (into its stack, or a new stack `newId`), with the toast text,
+ * or null when no card moves. A card leaves its old stack; a stack left with one card goes.
+ */
+export function stackOntoEdits(
+  state: State,
+  ids: ReadonlyArray<string>,
+  target: string,
+  newId: string,
+): { readonly edits: Array<Edit>; readonly done: string } | { readonly refused: string } | null {
+  const place = state.places.get(target);
+  if (!place) return { refused: "Put one of the cards on the map first." };
+  const into = [...state.stacks.values()].find((stack) => stack.members.includes(target));
+  const moving = ids.filter((id) => id !== target && !into?.members.includes(id));
+  if (moving.length === 0) return null;
+  const edits: Array<Edit> = moving.map((id) => ({ _tag: "place", id, after: place }));
+  for (const stack of state.stacks.values()) {
+    if (stack === into || !stack.members.some((id) => moving.includes(id))) continue;
+    const rest = stack.members.filter((id) => !moving.includes(id));
+    edits.push({ _tag: "stack", id: stack.id, after: rest.length > 1 ? { ...stack, members: rest } : null });
+  }
+  const targetName = state.resources.get(target)?.name;
+  const id = into?.id ?? newId;
+  edits.push({
+    _tag: "stack",
+    id,
+    after: { id, name: into?.name ?? targetName ?? "Stack", members: [...(into?.members ?? [target]), ...moving] },
+  });
+  const names = moving.flatMap((card) => state.resources.get(card)?.name ?? []).join(", ");
   const refused = refusal(state, edits);
+  return refused ? { refused } : { edits, done: `Stacked ${names} with ${into?.name ?? targetName ?? "the card"}.` };
+}
+
+/**
+ * The refusal of these edits as an action field. Cached per state, so an open palette does not check every
+ * card again on each render; a new state (a broadcast) is a new cache.
+ */
+const refusals = new WeakMap<State, Map<string, string | null>>();
+const refusedBy = (state: State, edits: ReadonlyArray<Edit>) => {
+  const cache = refusals.get(state) ?? new Map<string, string | null>();
+  refusals.set(state, cache);
+  const key = JSON.stringify(edits);
+  const refused = cache.has(key) ? (cache.get(key) ?? null) : refusal(state, edits);
+  cache.set(key, refused);
   return refused ? { refused } : {};
 };
 
@@ -158,6 +200,17 @@ const firstOf = (stack: Stack): string => {
 
 const ownStack = (state: State, id: string): Stack | undefined =>
   [...state.stacks.values()].find((stack) => stack.members.includes(id));
+
+const plans = new WeakMap<State, Map<string, ReturnType<typeof reshareEdits>>>();
+/** `reshareEdits`, cached per state like `refusedBy`. */
+const cachedReshare = (state: State, resource: Resource, circle: Circle, share: boolean) => {
+  const cache = plans.get(state) ?? new Map<string, ReturnType<typeof reshareEdits>>();
+  plans.set(state, cache);
+  const key = `${resource.id}/${circle.id}/${share}`;
+  const plan = cache.get(key) ?? reshareEdits(state, resource, circle, share);
+  cache.set(key, plan);
+  return plan;
+};
 
 /** Share with or unshare from circles, without a drag (K-511). A stacked card takes its stack along. */
 function shareActions(state: State, h: ActionHandlers, resource: Resource): Array<Action> {
@@ -174,7 +227,7 @@ function shareActions(state: State, h: ActionHandlers, resource: Resource): Arra
             label: "Share with",
             tip: `Put ${resource.name} where one more circle holds it, without a drag.`,
             items: others.map((circle) => {
-              const plan = reshareEdits(state, resource, circle, true);
+              const plan = cachedReshare(state, resource, circle, true);
               return {
                 id: `share:${circle.id}`,
                 label: circle.name,
@@ -193,7 +246,7 @@ function shareActions(state: State, h: ActionHandlers, resource: Resource): Arra
             label: "Unshare from",
             tip: `Move ${resource.name} out of one circle, without a drag. Its other circles stay.`,
             items: held.map((circle) => {
-              const plan = reshareEdits(state, resource, circle, false);
+              const plan = cachedReshare(state, resource, circle, false);
               return {
                 id: `unshare:${circle.id}`,
                 label: circle.name,
@@ -311,12 +364,16 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
               id: "add-to-stack",
               label: "Add to stack",
               tip: `Put ${resource.name} into a stack: it moves to the stack and gets its circles.`,
-              items: stacks.map((other) => ({
-                id: `add-to-stack:${other.id}`,
-                label: other.name,
-                tip: `Put ${resource.name} into ${other.name}. It gets the circles of ${other.name}.`,
-                run: () => h.stackOnto([resource.id], firstOf(other)),
-              })),
+              items: stacks.map((other) => {
+                const plan = stackOntoEdits(state, [resource.id], firstOf(other), other.id);
+                return {
+                  id: `add-to-stack:${other.id}`,
+                  label: other.name,
+                  tip: `Put ${resource.name} into ${other.name}. It gets the circles of ${other.name}.`,
+                  ...(plan && "refused" in plan ? { refused: plan.refused } : {}),
+                  run: () => h.stackOnto([resource.id], firstOf(other)),
+                };
+              }),
             },
           ]
         : []),
@@ -548,6 +605,29 @@ export function paletteEnter(
   const entry = matches[active];
   if (!entry) return null;
   return entry.danger && matches.length > 1 && !picked ? null : active;
+}
+
+/**
+ * The palette's active entry, kept by label so a broadcast that reorders the matches never changes what Enter
+ * runs. `picked` is true only after the arrows moved to it; a hover or a new query clears it.
+ */
+export interface PaletteCursor {
+  readonly label: string | null;
+  readonly picked: boolean;
+}
+
+/** The index of the active entry: the one with the cursor's label, else the first match. */
+export function paletteActive(labels: ReadonlyArray<string>, cursor: PaletteCursor): { index: number; picked: boolean } {
+  const index = cursor.label === null ? -1 : labels.indexOf(cursor.label);
+  return index === -1 ? { index: 0, picked: false } : { index, picked: cursor.picked };
+}
+
+/** ArrowDown and ArrowUp move the cursor; a key that does not move it changes nothing. */
+export function paletteArrow(key: "ArrowDown" | "ArrowUp", labels: ReadonlyArray<string>, cursor: PaletteCursor): PaletteCursor {
+  const { index } = paletteActive(labels, cursor);
+  const next = key === "ArrowDown" ? Math.min(index + 1, labels.length - 1) : Math.max(index - 1, 0);
+  const label = labels[next];
+  return next === index || label === undefined ? cursor : { label, picked: true };
 }
 
 /** K-511: every card, stack and circle action, after the actions of the whole map. */

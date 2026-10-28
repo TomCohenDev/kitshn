@@ -18,6 +18,8 @@ import {
   actionsFor,
   flatten,
   levelEdit,
+  paletteActive,
+  paletteArrow,
   paletteEnter,
   paletteEntries,
 } from "./actions.ts";
@@ -236,6 +238,17 @@ describe("refused actions", () => {
     expect(calls).toEqual([]);
   });
 
+  it("shows Add to stack refused when the stack's circles break a rule (K-105)", () => {
+    const ctx = context();
+    // The stack lies outside every circle, so the admin card that joins it would leave the Owner circle.
+    const state: State = {
+      ...ctx.state,
+      places: new Map([...ctx.state.places, ["a", { x: 5000, y: 0 }], ["b", { x: 5000, y: 0 }]]),
+    };
+    const groups = actionsFor({ ...ctx, state }, recorder().handlers, { _tag: "card", id: ADMIN_RESOURCE_ID });
+    expect(items(find(groups, "add-to-stack")).find((item) => item.id === "add-to-stack:s1")?.refused).toMatch(/admin/);
+  });
+
   it("marks the current level as the checked radio item", () => {
     const groups = actionsFor(context(), recorder().handlers, { _tag: "card", id: "vps" });
     const levels = items(find(groups, `level:${OWNER_CIRCLE_ID}`));
@@ -252,6 +265,24 @@ describe("Enter in the palette", () => {
     expect(paletteEnter([danger], 0, false)).toBe(0);
     expect(paletteEnter([safe, danger], 0, false)).toBe(0);
     expect(paletteEnter([], 0, false)).toBeNull();
+  });
+
+  it("keeps the active entry by label, so a reorder never changes what Enter runs", () => {
+    const moved = paletteArrow("ArrowDown", ["a", "Remove b"], { label: null, picked: false });
+    expect(moved).toEqual({ label: "Remove b", picked: true });
+    // A broadcast puts another entry first: the cursor stays on "Remove b".
+    expect(paletteActive(["c", "a", "Remove b"], moved)).toEqual({ index: 2, picked: true });
+    // The entry is gone: the first match is active and not picked.
+    expect(paletteActive(["c", "a"], moved)).toEqual({ index: 0, picked: false });
+  });
+
+  it("does not pick on an arrow that does not move, nor on a hover", () => {
+    const top = { label: "Remove a", picked: false };
+    expect(paletteArrow("ArrowUp", ["Remove a", "b"], top)).toBe(top);
+    expect(paletteArrow("ArrowDown", ["Remove a"], top)).toBe(top);
+    // A hover sets the label with picked false, so Enter alone still refuses a dangerous entry.
+    const hovered = paletteActive(["b", "Remove a"], { label: "Remove a", picked: false });
+    expect(paletteEnter([{}, { danger: true }], hovered.index, hovered.picked)).toBeNull();
   });
 
   it("finds an action by the words of its older label", () => {

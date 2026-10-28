@@ -5725,7 +5725,7 @@ interface RepoRow extends Record<string, SqlStorageValue> {
   state: RepoState;
   first_seen: number;
   branch: string | null;
-  /** K-1120: the workflow file of the run that waits on `branch`. */
+  /** K-1121: the workflow file of the run that waits on `branch`. */
   workflow: string | null;
   allowed_by_client: string | null;
   allowed_by_name: string | null;

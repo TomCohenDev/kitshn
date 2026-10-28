@@ -11,7 +11,7 @@ describe("Access cookies of a content host (K-1004)", () => {
   });
 });
 
-describe("workflowFile (K-1120)", () => {
+describe("workflowFile (K-1121)", () => {
   it("reads the workflow file of the run from workflow_ref, and nothing else", () => {
     expect(workflowFile("o/r/.github/workflows/kitshn-site.yml@refs/heads/main", "o/r")).toBe(
       "kitshn-site.yml",

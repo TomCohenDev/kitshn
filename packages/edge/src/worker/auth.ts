@@ -212,11 +212,11 @@ export interface Deployer {
   /** The workflow run and its attempt; the deploys of one run are one group for a later rollback (K-820). */
   readonly runId: string;
   readonly runAttempt: string;
-  /** K-1120: the file in `.github/workflows` of the run, from `workflow_ref`; null when the claim names none. */
+  /** K-1121: the file in `.github/workflows` of the run, from `workflow_ref`; null when the claim names none. */
   readonly workflow: string | null;
 }
 
-/** K-1120: `owner/repo/.github/workflows/<file>@<ref>` names the workflow file of the caller, also for a reusable one. */
+/** K-1121: `owner/repo/.github/workflows/<file>@<ref>` names the workflow file of the caller, also for a reusable one. */
 export function workflowFile(workflowRef: string, repo: string): string | null {
   const path = workflowRef.split("@")[0] ?? "";
   const prefix = `${repo}/.github/workflows/`;

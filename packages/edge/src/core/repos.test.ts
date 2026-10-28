@@ -15,7 +15,7 @@ describe("the repo gate (K-819)", () => {
       allow: false,
       record: null,
     });
-    // A pull request run records no branch; the next push does, with its own workflow (K-1120).
+    // A pull request run records no branch; the next push does, with its own workflow (K-1121).
     const noBranch = { ...waiting, branch: null, workflow: null };
     expect(gateDecision(noBranch, { ...repo, branch: null }, 9).record).toBeNull();
     expect(

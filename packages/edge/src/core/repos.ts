@@ -9,7 +9,7 @@ export interface RepoGate {
   readonly firstSeen: number;
   /** The first pushed branch that waits; Allow starts the workflow there. Null without a waiting push. */
   readonly branch: string | null;
-  /** K-1120: the workflow file of the run that waits on `branch`; null starts `kitshn.yml`. */
+  /** K-1121: the workflow file of the run that waits on `branch`; null starts `kitshn.yml`. */
   readonly workflow: string | null;
   /** The agent key that allowed the repo (K-718), or null when the owner allowed it or nobody did yet. */
   readonly allowedBy: AllowingAgent | null;

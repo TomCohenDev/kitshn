@@ -192,6 +192,7 @@ import {
   parseManifest,
   parseConfigFile,
   parseSiteIcon,
+  pullRequestNumber,
 } from "./deploys.ts";
 import { DEFAULT_APP } from "kitshn/names";
 import { AppKey, type Recipe, WorkerApp, decodeRecipe, deployOrder, plan, repoSlug } from "kitshn/recipe";
@@ -299,6 +300,8 @@ interface DeployFacts {
   readonly deployed: ReadonlyArray<string>;
   /** The deployed cards with a deploy of a pull request environment (K-821). */
   readonly previews: ReadonlyArray<string>;
+  /** K-303: the pull request number of each preview card, from its `pr-<n>` environment. */
+  readonly pullRequests: ReadonlyArray<readonly [string, number]>;
   readonly notes: ReadonlyArray<{ resource_id: string; state: string; reason: string | null }>;
   readonly repoCards: ReadonlyArray<{ repo_id: string; resource_id: string }>;
 }
@@ -1785,7 +1788,7 @@ export class Kitshn extends DurableObject<Env> {
     actor: Actor,
     changes: ReadonlyArray<Change>,
     undo: UndoOf | null,
-  ): Promise<{ revision: number | null; notes: Array<string> }> {
+  ): Promise<{ revision: number | null; notes: Array<string>; summary: string }> {
     const apps = changes.flatMap((change) => (change._tag === "app" ? [change] : []));
     // Check first, so that a refused change tears nothing down.
     this.checked(changes);
@@ -1836,6 +1839,8 @@ export class Kitshn extends DurableObject<Env> {
     for (const card of restored)
       if (composeUndo(removalDown(this.query, card.id)) === "refuse")
         throw new RuleError(`The machine is stopping ${card.name} now; undo after it finishes (K-909).`);
+    // K-1502: what the change does, without the "Undo #n: " label of its History row, for the toast.
+    const summary = summarize(this.state, applyChanges(this.state, changes), changes);
     const revision = this.commit(actor, changes, undo);
     // K-1123: a removed folder site ends the plans that wait for its files, so it counts for nothing and its next
     // publish is a first publish.
@@ -1861,7 +1866,7 @@ export class Kitshn extends DurableObject<Env> {
       this.deliverJobs();
       this.broadcast();
     }
-    return { revision, notes };
+    return { revision, notes, summary };
   }
 
   /**
@@ -1884,6 +1889,7 @@ export class Kitshn extends DurableObject<Env> {
     if (this.deployFacts) return this.deployFacts;
     const deployed = new Set<string>();
     const previews = new Set<string>();
+    const pullRequests = new Map<string, number>();
     const repoCards = new Map<string, Set<string>>();
     const newest = new Map<string, { state: string; reason: string | null }>();
     for (const row of this.sql<{
@@ -1899,7 +1905,11 @@ export class Kitshn extends DurableObject<Env> {
         deployed.add(row.resource_id);
         // As the GLOB 'pr-[0-9]*' of K-821: "pr-" and a digit.
         const digit = row.environment.charAt(3);
-        if (row.environment.startsWith("pr-") && digit >= "0" && digit <= "9") previews.add(row.resource_id);
+        if (row.environment.startsWith("pr-") && digit >= "0" && digit <= "9") {
+          previews.add(row.resource_id);
+          const number = pullRequestNumber(row.environment);
+          if (number !== null) pullRequests.set(row.resource_id, number);
+        }
       }
       if (row.repo_id !== null)
         repoCards.set(row.repo_id, (repoCards.get(row.repo_id) ?? new Set()).add(row.resource_id));
@@ -1908,6 +1918,7 @@ export class Kitshn extends DurableObject<Env> {
     this.deployFacts = {
       deployed: [...deployed],
       previews: [...previews],
+      pullRequests: [...pullRequests],
       notes: [...newest]
         .filter(([, row]) => row.state === "failed" || row.state === "skipped")
         .map(([resource_id, row]) => ({ resource_id, ...row })),
@@ -1921,7 +1932,12 @@ export class Kitshn extends DurableObject<Env> {
   /** K-909, K-821: the deployed cards on the map and, of them, the preview cards. */
   private deployedAndPreviewCards() {
     const onMap = (cards: ReadonlyArray<string>) => cards.filter((card) => this.state.resources.has(card));
-    return { deployedCards: onMap(this.deploys().deployed), previewCards: onMap(this.deploys().previews) };
+    const { deployed, previews, pullRequests } = this.deploys();
+    return {
+      deployedCards: onMap(deployed),
+      previewCards: onMap(previews),
+      pullRequests: Object.fromEntries(pullRequests.filter(([card]) => this.state.resources.has(card))),
+    };
   }
 
   /** K-820: the cards on the map whose newest deploy failed or was skipped. */
@@ -2126,24 +2142,13 @@ export class Kitshn extends DurableObject<Env> {
     message: ClientMessage,
   ): Promise<Extract<ServerMessage, { type: "result" }>> {
     try {
-      const { revision, notes } =
+      const { revision, notes, summary } =
         message.type === "apply"
-          ? { revision: this.apply(caller.actor, message.edits), notes: [] }
+          ? { revision: this.apply(caller.actor, message.edits), notes: [], summary: null }
           : message.type === "undo"
             ? await this.undo(caller.actor, message.revision)
             : await this.undoItem(caller.actor, message.item);
-      const [row] =
-        message.type !== "apply" && revision !== null
-          ? this.sql<{ summary: string }>("SELECT summary FROM revisions WHERE id = ?", revision)
-          : [];
-      return {
-        type: "result",
-        requestId: message.requestId,
-        ok: true,
-        revision,
-        notes,
-        summary: row?.summary ?? null,
-      };
+      return { type: "result", requestId: message.requestId, ok: true, revision, notes, summary };
     } catch (error) {
       if (!(error instanceof RuleError)) throw error;
       return { type: "result", requestId: message.requestId, ok: false, error: error.message };

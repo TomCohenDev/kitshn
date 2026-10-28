@@ -61,7 +61,7 @@ export const Edit_ = Schema.Union([
     after: Schema.NullOr(
       Schema.Struct({
         id: Schema.String,
-        name: Schema.String.check(Schema.isMaxLength(80)),
+        name: Schema.String.check(Schema.isTrimmed(), Schema.isMaxLength(80)),
         members: Schema.Array(Schema.String).check(Schema.isMaxLength(200)),
       }),
     ),

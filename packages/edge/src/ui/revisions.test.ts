@@ -39,12 +39,12 @@ describe("History rows start with the verb, under their actor (K-1508)", () => {
     expect(rowText(summary)).toBe(said);
   });
 
-  it("says in an undo toast what came back, without the revision number (K-1502)", () => {
-    expect(
-      ["Undo #12: tick3d: − Her", "Undo #12 for tick3d: Moved a card", "Undo #3: Sign out everywhere"].map(
-        undoneText,
-      ),
-    ).toEqual(["Removed tick3d from Her", "Moved a card", "Sign out everywhere"]);
+  it("says in an undo toast what came back, also for a name with a colon (K-1502)", () => {
+    expect(["tick3d: − Her", "a: b: + Qlik · use", "Stacked riffle, tick3d"].map(undoneText)).toEqual([
+      "Removed tick3d from Her",
+      "Shared a: b with Qlik at use",
+      "Stacked riffle, tick3d",
+    ]);
   });
 
   it("keeps a summary of an unknown shape as it is, so it adds no fact", () => {

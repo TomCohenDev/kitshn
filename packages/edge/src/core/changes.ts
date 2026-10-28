@@ -760,17 +760,18 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
     const name = (id: string) => after.resources.get(id)?.name ?? before.resources.get(id)?.name ?? id;
     const names = (ids: ReadonlyArray<string>) => ids.map(name).join(", ");
     return stacks
-      .map(({ before: was, after: is, id }) => {
+      .map(({ before: was, after: is }) => {
         if (!was) return `Stacked ${names(is?.members ?? [])}`;
         if (!is) return `Unstacked ${was.name || names(was.members)}`;
         const added = is.members.filter((member) => !was.members.includes(member));
         const removed = was.members.filter((member) => !is.members.includes(member));
-        const title = is.name || "a stack";
-        if (added.length > 0) return `Added ${names(added)} to ${title}`;
-        if (removed.length > 0) return `Took ${names(removed)} out of ${title}`;
-        if (was.name === is.name) return `Changed the stack ${is.name || id}`;
-        if (!is.name) return `Took the name ${was.name} off a stack`;
-        return `Renamed ${was.name || "a stack"} to ${is.name}`;
+        // A stack without a name goes by its cards, as before the change.
+        const title = (stack: Stack) => stack.name || `the stack of ${names(stack.members)}`;
+        if (added.length > 0) return `Added ${names(added)} to ${title(was)}`;
+        if (removed.length > 0) return `Took ${names(removed)} out of ${title(was)}`;
+        if (was.name === is.name) return `Changed ${title(is)}`;
+        if (!is.name) return `Took the name ${was.name} off ${title(is)}`;
+        return `Renamed ${title(was)} to ${is.name}`;
       })
       .join("; ");
   }

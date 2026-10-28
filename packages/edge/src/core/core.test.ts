@@ -302,7 +302,15 @@ describe("app removal and its undo (K-909, K-1502)", () => {
       { _tag: "stack", id: "s1", after: named },
     ]);
     const cleared = edit(state, [{ _tag: "stack", id: "s1", after: { ...named, name: "" } }]);
-    expect(summarize(state, cleared.after, cleared.changes)).toBe("Took the name Sites off a stack");
+    expect(summarize(state, cleared.after, cleared.changes)).toBe(
+      "Took the name Sites off the stack of kitshn admin, riffle",
+    );
+    const reordered = edit(cleared.after, [
+      { _tag: "stack", id: "s1", after: { ...named, name: "", members: ["riffle", "kitshn-admin"] } },
+    ]);
+    expect(summarize(cleared.after, reordered.after, reordered.changes)).toBe(
+      "Changed the stack of riffle, kitshn admin",
+    );
     const gone = edit(cleared.after, [{ _tag: "stack", id: "s1", after: null }]);
     expect(summarize(cleared.after, gone.after, gone.changes)).toBe("Unstacked kitshn admin, riffle");
   });

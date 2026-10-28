@@ -17,7 +17,7 @@ import {
 import type { AccessState, MachineView } from "../core/protocol.ts";
 import { isAgentKey } from "../core/agent.ts";
 import { AGENT_TIP, LEVEL_TIPS, MATCH_TIPS, MEMBER_HELP, PASSKEY_TIP, RightStickers } from "./Circle.tsx";
-import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS, pullRequestOf } from "./kinds.ts";
+import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { KeySticker, PresenceSticker } from "./Machines.tsx";
 import type { MenuTarget } from "./actions.ts";
 import { MoreButton } from "./controls.tsx";
@@ -112,6 +112,8 @@ interface Props {
   /** K-1508: `itemKey`s of the cards and circles that a History row highlights now. */
   readonly flash: ReadonlySet<string>;
   readonly openStacks: ReadonlySet<string>;
+  /** K-303: the pull request number of each preview card. */
+  readonly pullRequests: Readonly<Record<string, number>>;
   readonly onToggleStack: (key: string) => void;
   readonly onCommit: (edits: Array<Edit>, diffs: Array<ShareDiff>) => void;
   /** K-522: cards dropped on another card become one stack with it. */
@@ -699,6 +701,7 @@ export function MapView(props: Props) {
               open={open}
               access={props.access[resource.id] ?? null}
               machine={props.machines.get(resource.id) ?? null}
+              pullRequest={props.pullRequests[resource.id] ?? null}
               preview={previewIds.has(resource.id)}
               peek={props.peek && props.selection.cards.size === 1}
               zone={props.zone}
@@ -881,6 +884,7 @@ function CardView(props: {
   open: boolean;
   access: AccessState | null;
   machine: MachineView | null;
+  pullRequest: number | null;
   preview: boolean;
   /** K-520: the selected card offers the preview arrow; a phone has it in the card sheet instead. */
   peek: boolean;
@@ -891,7 +895,6 @@ function CardView(props: {
   const { resource, state } = props;
   const kind = KINDS[resource.kind];
   const holding = circlesHolding(state, resource.id);
-  const pullRequest = pullRequestOf(resource);
   return (
     <div
       class={`card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}${props.flash ? " flash" : ""}`}
@@ -940,12 +943,12 @@ function CardView(props: {
         >
           {resource.kind}
         </span>
-        {pullRequest !== null ? (
+        {props.pullRequest !== null ? (
           <span
             class="sticker info"
-            data-tip={`A preview of pull request #${pullRequest}. It goes when the pull request closes; its panel links the pull request.`}
+            data-tip={`A preview of pull request #${props.pullRequest}. It goes when the pull request closes; its panel links the pull request.`}
           >
-            PR #{pullRequest}
+            PR #{props.pullRequest}
           </span>
         ) : null}
         {props.machine ? <PresenceSticker view={props.machine} /> : null}

@@ -45,7 +45,7 @@ import type {
   RepoView,
   RevisionView,
 } from "../core/protocol.ts";
-import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS, pullRequestOf } from "./kinds.ts";
+import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
 import {
   CircleEditor,
   type DeviceSecret,
@@ -307,6 +307,7 @@ export function App() {
   );
   const deployed = useMemo(() => new Set(store.snapshot?.deployedCards ?? []), [store.snapshot]);
   const previewCards = useMemo(() => new Set(store.snapshot?.previewCards ?? []), [store.snapshot]);
+  const pullRequests = store.snapshot?.pullRequests ?? {};
   const previousVersions = useMemo(() => new Set(store.snapshot?.previousVersions ?? []), [store.snapshot]);
 
   /**
@@ -1217,6 +1218,7 @@ export function App() {
           trayRight={shelfRight()}
           flash={flash}
           openStacks={openStacks}
+          pullRequests={pullRequests}
           onToggleStack={(key) => {
             const next = new Set(openStacks);
             if (next.has(key)) next.delete(key);
@@ -1313,6 +1315,7 @@ export function App() {
               onDeleteOrphanWorker={(orphan) => void deleteOrphanWorker(orphan)}
               deployed={deployed}
               previewCards={previewCards}
+              pullRequests={pullRequests}
               deployNotes={store.snapshot.deployNotes}
               pause={pauseView}
               machines={machines}
@@ -1805,6 +1808,7 @@ function Panel(props: {
   /** K-909 */
   deployed: ReadonlySet<string>;
   previewCards: ReadonlySet<string>;
+  pullRequests: Readonly<Record<string, number>>;
   deployNotes: Readonly<Record<string, DeployNote>>;
   pause: PauseView | null;
   warnings: ReadonlyArray<string>;
@@ -1870,6 +1874,7 @@ function Panel(props: {
         onDeleteOrphanWorker={props.onDeleteOrphanWorker}
         deployed={props.deployed.has(cards[0].id)}
         preview={props.previewCards.has(cards[0].id)}
+        pullRequest={props.pullRequests[cards[0].id] ?? null}
         deployNote={props.deployNotes[cards[0].id] ?? null}
         machine={props.machines.get(cards[0].id) ?? null}
         version={props.version}
@@ -2158,6 +2163,8 @@ function AddressName(props: { address: string; onSave: (name: string) => Promise
 
 function CardPanel(props: {
   resource: Resource;
+  /** K-303: the pull request of a preview card, from its deploy environment. */
+  pullRequest: number | null;
   state: State;
   zone: string;
   peek: boolean;
@@ -2194,7 +2201,6 @@ function CardPanel(props: {
   const { resource, state, machine } = props;
   const holding = circlesHolding(state, resource.id);
   const address = resource.addresses[0];
-  const pullRequest = pullRequestOf(resource);
   const stack = [...state.stacks.values()].find((each) => each.members.includes(resource.id));
   const [removing, setRemoving] = useState<{ readonly circle: Circle; readonly anchor: Rect } | null>(null);
   // The stack went while the choice was open (another device, or undo): the choice ends with it.
@@ -2256,16 +2262,16 @@ function CardPanel(props: {
       {address && props.repo ? (
         <p class="help">Its repo sets this address: change it in kitshn.config.ts.</p>
       ) : null}
-      {pullRequest !== null && props.repo ? (
+      {props.pullRequest !== null && props.repo ? (
         <div class="row">
           <a
             class="btn"
-            href={`https://github.com/${props.repo.name}/pull/${pullRequest}`}
+            href={`https://github.com/${props.repo.name}/pull/${props.pullRequest}`}
             target="_blank"
             rel="noreferrer"
-            data-tip={`Open pull request #${pullRequest} of ${props.repo.name} on GitHub. This preview goes when it closes.`}
+            data-tip={`Open pull request #${props.pullRequest} of ${props.repo.name} on GitHub. This preview goes when it closes.`}
           >
-            Pull request #{pullRequest} ↗
+            Pull request #{props.pullRequest} ↗
           </a>
         </div>
       ) : null}

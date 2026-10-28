@@ -91,7 +91,7 @@ import {
   publishPlace,
 } from "../core/agent.ts";
 import { DEMO_MACHINES, DEMO_SITE_ICON, demo } from "../core/demo.ts";
-import { type MachineOs, iconAccess, machineOs } from "../core/icons.ts";
+import { type MachineOs, machineOs } from "../core/icons.ts";
 import {
   contentSecurityPolicy,
   type ContentVisitor,
@@ -991,14 +991,13 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/fresh/resume" && request.method === "POST") return this.resume(caller);
     if (path.startsWith("/agent/")) return this.agentRequest(path, request, caller);
     if (path.startsWith("/connect/deploys/")) return this.deploySource(path, caller);
-    if (path.startsWith("/api/icons/") && request.method === "GET")
-      return this.icon(caller, decodeURIComponent(path.slice("/api/icons/".length)));
     if (!this.authorized(caller)) {
       return Response.json(
         { error: "You have no control level on the kitshn admin (K-104)." },
         { status: 403 },
       );
     }
+    if (path.startsWith("/api/icons/") && request.method === "GET") return this.icon(path.slice("/api/icons/".length));
     if (path === "/api/ws") {
       if (request.headers.get("upgrade") !== "websocket")
         return new Response("Expected a WebSocket.", { status: 426 });
@@ -2068,7 +2067,7 @@ export class Kitshn extends DurableObject<Env> {
    * mark that the revision of the deletion stores, so an older undo never touches a new card of the same id (K-1506).
    */
   private forgetCard(id: string): Forget {
-    for (const table of ["resources", "places", "icons"]) this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
+    for (const table of ["resources", "places"]) this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
     this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);
     const stacks = this.sql<{ id: string; body: string }>("SELECT id, body FROM stacks").map(
       (row) => JSON.parse(row.body) as Stack,
@@ -3514,21 +3513,15 @@ export class Kitshn extends DurableObject<Env> {
     this.iconHashes.set(id, hash);
   }
 
-  /** K-1113: the stored icon of a card, behind the same check as the map that shows the card. */
-  private icon(caller: Caller, id: string) {
-    const decision = iconAccess(
-      this.state,
-      caller.visitor,
-      this.state.resources.get(id),
-      this.iconHashes.has(id),
-      Date.now(),
-    );
-    if (decision === "deny")
-      return Response.json({ error: "You have no control level on the kitshn admin (K-104)." }, { status: 403 });
-    const [row] =
-      decision === "allow"
-        ? this.sql<{ type: string; bytes: ArrayBuffer }>("SELECT type, bytes FROM icons WHERE id = ?", id)
-        : [];
+  /** K-1113: the stored icon of a card. Its route sits behind the map's own check (K-104, K-208). */
+  private icon(encodedId: string) {
+    let id: string;
+    try {
+      id = decodeURIComponent(encodedId);
+    } catch {
+      return Response.json({ error: "The icon address is not valid." }, { status: 404 });
+    }
+    const [row] = this.sql<{ type: string; bytes: ArrayBuffer }>("SELECT type, bytes FROM icons WHERE id = ?", id);
     if (!row) return Response.json({ error: `kitshn has no icon for ${id}.` }, { status: 404 });
     return new Response(row.bytes, {
       headers: {

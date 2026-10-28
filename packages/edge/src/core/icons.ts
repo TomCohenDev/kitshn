@@ -1,5 +1,4 @@
-import { ADMIN_RESOURCE_ID, type Resource, type State } from "./model.ts";
-import { type Visitor, visitorLevel } from "./visitor.ts";
+import type { Resource } from "./model.ts";
 
 /** K-524: the systems that a machine card shows an icon for. */
 export const MACHINE_OS = ["macos", "linux", "windows"] as const;
@@ -35,22 +34,6 @@ export function repoOwner(name: string): string | null {
 
 /** K-524: the avatar of a GitHub owner. GitHub serves it to anyone, so no App is needed. */
 export const avatarUrl = (owner: string) => `https://github.com/${encodeURIComponent(owner)}.png?size=64`;
-
-/**
- * K-1113: who gets the stored icon of a card. Only the map shows cards, and only a visitor with control on the
- * admin card opens the map (K-104, K-208), so the icon follows the same check. A card without an icon is missing.
- */
-export function iconAccess(
-  state: State,
-  visitor: Visitor,
-  resource: Resource | undefined,
-  hasIcon: boolean,
-  now: number,
-): "allow" | "deny" | "missing" {
-  const admin = state.resources.get(ADMIN_RESOURCE_ID);
-  if (!admin || visitorLevel(state, admin, visitor, now) !== "control") return "deny";
-  return resource && hasIcon ? "allow" : "missing";
-}
 
 /** K-524: what the icon tile of a card shows. `kind` is the icon of its kind, the fallback of every card. */
 export type CardIcon =

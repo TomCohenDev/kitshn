@@ -13,12 +13,13 @@ Passkeys survive the move, because they belong to the Access team domain (K-113)
 ## Move
 
 1. Run the bootstrap with `KITSHN_HOST=kitshn.<zone>` and `KITSHN_OLD_HOST=kit.<zone>`. It makes the Access applications of the new host and the Worker binding `KITSHN_OLD_HOST`, and each `ACCESS_*_AUD` lists the tags of both hosts. Later bootstrap runs keep the old host until step 1 of "After".
-2. Worker: add the custom domain `kitshn.<zone>`.
-3. Daemons: on each joined machine, change the server address in `machine.json` and restart the daemon. Check that each card shows a signed connection.
-4. GitHub App: change the homepage, callback and webhook addresses.
-5. Text and config in this repo: `.github/workflows/kitshn2-deploy.yml` (its default `server`, which app repos call with `@main`), `packages/edge/public/install`, `site/apps.js`, `site/index.html`, `site/install/index.html`, `packages/kitshn/skill/SKILL.md`, `AGENTS.md`, `docs/`, and every `kit.<zone>` in `SPEC.md`.
-6. App repos: run `gh search code "kit.yarden-zamir.com" --owner Yarden-zamir` and change each hit, also README badges. The search sees only default branches, so open branches that name `kit.` break after the move.
-7. T3 fork docs: run the same search on `Yarden-zamir/t3code`.
+2. Check: open `https://kitshn.<zone>` once, decode its Access token (`CF_Authorization`), and check that its `aud` is in the new `ACCESS_ADMIN_AUD` list. The Worker takes both lists during the move, so a mismatch is a bug to fix, not a reason to stop.
+3. Worker: add the custom domain `kitshn.<zone>`.
+4. Daemons: on each joined machine, change the server address in `machine.json` and restart the daemon. Check that each card shows a signed connection.
+5. GitHub App: change the homepage, callback and webhook addresses.
+6. Text and config in this repo: `.github/workflows/kitshn2-deploy.yml` (its default `server`, which app repos call with `@main`), `packages/edge/public/install`, `site/apps.js`, `site/index.html`, `site/install/index.html`, `packages/kitshn/skill/SKILL.md`, `AGENTS.md`, `docs/`, and every `kit.<zone>` in `SPEC.md`.
+7. App repos: run `gh search code "kit.yarden-zamir.com" --owner Yarden-zamir` and change each hit, also README badges. The search sees only default branches, so open branches that name `kit.` break after the move.
+8. T3 fork docs: run the same search on `Yarden-zamir/t3code`.
 
 ## Checks
 
@@ -32,5 +33,5 @@ Passkeys survive the move, because they belong to the Access team domain (K-113)
 
 1. Run the bootstrap with `KITSHN_OLD_HOST=none`. The Worker then takes only the new host and its audience tags.
 2. Remove the `kit.` Access applications, the `kit.` custom domain and its DNS record.
-3. Run the search of step 6 of the move again. It finds nothing.
+3. Run the search of step 7 of the move again. It finds nothing.
 4. Turn on "Passes" in Settings (17.7). Check that `/.well-known/openid-configuration` names `https://kitshn.<zone>` as its issuer.

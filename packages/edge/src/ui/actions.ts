@@ -26,6 +26,10 @@ import { circleForCards, placeInside } from "../core/place.ts";
 import type { MachineView } from "../core/protocol.ts";
 import { KINDS } from "./kinds.ts";
 import { ROLLBACK_DATA } from "./Rollback.tsx";
+import { hasLogs } from "../core/logs.ts";
+
+/** K-1801 */
+export const LOGS_TIP = "Logs: search what the app writes and its deploy runs, or follow new lines live.";
 import type { Selection } from "./Map.tsx";
 
 /**
@@ -97,6 +101,8 @@ export interface ActionHandlers {
   readonly restorePrevious: (resource: Resource) => void;
   /** K-1120: shows the address name field of a page or a file card. */
   readonly editAddress: (resource: Resource) => void;
+  /** K-1801: opens the logs of a Compose or Worker card. */
+  readonly logs: (resource: Resource) => void;
   readonly runJob: (view: MachineView, command: Command) => void;
   readonly removeMachine: (view: MachineView) => void;
   readonly editCircle: (circleId: string) => void;
@@ -628,6 +634,9 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
       : [],
     undoItemAction(ctx, h, { kind: "card", id: resource.id }),
     [
+      ...(hasLogs(resource.kind) && ctx.deployed.has(resource.id)
+        ? [{ id: "logs", label: "Logs…", tip: LOGS_TIP, run: () => h.logs(resource) }]
+        : []),
       ...(isAppCard(resource) && ctx.deployed.has(resource.id) && !ctx.previews.has(resource.id)
         ? [
             {

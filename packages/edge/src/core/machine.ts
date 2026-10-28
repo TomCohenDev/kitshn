@@ -1,3 +1,4 @@
+import type { LogAnswer, LogLine, LogSearch } from "./logs.ts";
 /** A joined machine (K-602). Its resource card has the same id and the kind `machine`. */
 export interface Machine {
   readonly id: string;
@@ -165,7 +166,18 @@ export type DaemonMessage =
   /** K-1114: the icon of one site of this machine, base64, read from the app; null when it has none. */
   | { readonly type: "icon"; readonly site: string; readonly icon: string | null }
   /** K-909: the idle volumes of kitshn apps, sent on connect and after each Compose job. */
-  | { readonly type: "volumes"; readonly volumes: ReadonlyArray<ProjectVolume> };
+  | { readonly type: "volumes"; readonly volumes: ReadonlyArray<ProjectVolume> }
+  /** K-1804: the answer to a `logs` request. */
+  | { readonly type: "logs"; readonly id: string; readonly answer: LogAnswer }
+  /** K-1805: new lines of a tail, and the count of lines that did not fit in this batch. */
+  | {
+      readonly type: "tailLines";
+      readonly id: string;
+      readonly lines: ReadonlyArray<LogLine>;
+      readonly skipped: number;
+    }
+  /** K-1805: a tail stopped on the daemon, with why. */
+  | { readonly type: "tailEnd"; readonly id: string; readonly reason: string };
 
 /** Messages from kitshn to a daemon. */
 export type ServerToDaemon =
@@ -179,7 +191,12 @@ export type ServerToDaemon =
   | { readonly type: "accepted"; readonly fingerprint: string }
   /** K-1705: "Rotate key" in the machine panel. */
   | { readonly type: "rotateKey" }
-  | { readonly type: "job"; readonly id: number; readonly command: Command };
+  | { readonly type: "job"; readonly id: number; readonly command: Command }
+  /** K-1804: search the logs of the Compose app `project`. */
+  | { readonly type: "logs"; readonly id: string; readonly project: string; readonly search: LogSearch }
+  /** K-1805: follow the logs of the Compose app `project` until `tailStop`. */
+  | { readonly type: "tail"; readonly id: string; readonly project: string }
+  | { readonly type: "tailStop"; readonly id: string };
 
 const ED25519 = { name: "Ed25519" } as const;
 

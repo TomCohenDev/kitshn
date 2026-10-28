@@ -22,7 +22,7 @@ SCRIPT=kitshn
 BUNDLE=${KITSHN_BUNDLE:-https://github.com/Yarden-zamir/kitshn/releases/download/edge/kitshn-edge.tar.gz}
 COMPATIBILITY_DATE=2026-10-20
 MFA='{"allowed_authenticators":["biometrics","security_key"],"session_duration":"24h"}'
-TOKEN_LINK='https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_r2%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22access%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22access_acct%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%5D&accountId=%2A&zoneId=all&name=kitshn'
+TOKEN_LINK='https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_r2%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22access%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22access_acct%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_observability%22%2C%22type%22%3A%22edit%22%7D%5D&accountId=%2A&zoneId=all&name=kitshn'
 
 say() { printf '%s\n' "$*"; }
 changed() { printf '  changed: %s\n' "$*"; }
@@ -92,6 +92,20 @@ ZONE=$(printf '%s' "$zones" | jq -r --arg host "$KITSHN_HOST" \
 [ -n "$ZONE" ] || die "no zone of this account contains $KITSHN_HOST. Add the domain to Cloudflare first (K-1111)."
 ZONE_NAME=$(printf '%s' "$zones" | jq -r --arg id "$ZONE" '.[] | select(.id == $id) | .name')
 kept "account $ACCOUNT, zone $ZONE_NAME"
+# K-1806: Worker log search is optional, so a token without it gets a warning, not a stop.
+now=$(($(date +%s) * 1000))
+status=$(curl -sS -o "$WORK/out" -w '%{http_code}' -X POST "$API/accounts/$ACCOUNT/workers/observability/telemetry/query" \
+  -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "content-type: application/json" \
+  -d "{\"queryId\":\"kitshn-logs\",\"view\":\"events\",\"limit\":1,\"dry\":true,\"timeframe\":{\"from\":$((now - 60000)),\"to\":$now},\"parameters\":{}}" 2>&1) || status="no answer"
+case "$status" in
+200) kept "Worker log search (K-1806)" ;;
+403)
+  say "  warning: the token has no \"Workers Observability: Edit\", so search in Worker logs is off (K-1806)."
+  say "           Live in Worker logs still works. To add it, edit the token at https://dash.cloudflare.com/profile/api-tokens:"
+  say "           add \"Account\", \"Workers Observability\", \"Edit\", then Update token."
+  ;;
+*) say "  warning: the check of Worker log search failed ($status): $(jq -r '[.errors[]?.message] | join("; ")' "$WORK/out" 2>/dev/null || head -c 200 "$WORK/out")" ;;
+esac
 
 say "2. Zero Trust organization (K-1207)"
 NEED="Access: Organizations, Identity Providers, and Groups: Edit"

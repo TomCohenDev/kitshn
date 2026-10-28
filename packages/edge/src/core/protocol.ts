@@ -1,6 +1,7 @@
 import type { Actor, Item, RevisionKind } from "./changes.ts";
 import type { Command, Machine, MachineStatus, ProjectVolume, Sample } from "./machine.ts";
 import type { MachineOs } from "./icons.ts";
+import type { LogLine, TailAnswer } from "./logs.ts";
 import type { Circle, PauseMode, Point, Resource, ShareSetting, Stack } from "./model.ts";
 import type { RepoGate } from "./repos.ts";
 
@@ -101,7 +102,17 @@ export type ServerMessage =
       /** K-909: what an undo of an app removal started again, or why it did not. */
       readonly notes: ReadonlyArray<string>;
     }
-  | { readonly type: "result"; readonly requestId: string; readonly ok: false; readonly error: string };
+  | { readonly type: "result"; readonly requestId: string; readonly ok: false; readonly error: string }
+  /** K-1805, K-1807: the answer to a `tail` message. */
+  | { readonly type: "tail"; readonly requestId: string; readonly answer: TailAnswer }
+  /** K-1805: new lines of a Compose tail of this map. */
+  | {
+      readonly type: "tailLines";
+      readonly tail: string;
+      readonly lines: ReadonlyArray<LogLine>;
+      readonly skipped: number;
+    }
+  | { readonly type: "tailEnd"; readonly tail: string; readonly reason: string };
 
 export interface MachineView {
   readonly machine: Machine;

@@ -90,6 +90,21 @@ export const ClientMessage = Schema.Union([
 ]);
 export type ClientMessage = typeof ClientMessage.Type;
 
+/** K-1801: a search in the logs view, as the body of `POST /api/apps/<card>/logs`. */
+export const LogQuery = Schema.Struct({
+  tab: Schema.Literals(["app", "deploys"]),
+  text: Schema.String.check(Schema.isMaxLength(200)),
+  from: Time,
+  to: Time,
+});
+
+/** K-1805, K-1807: "Live" in the logs view starts and stops a tail over the map's WebSocket. */
+export const TailMessage = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("tail"), requestId: Schema.String, card: Schema.String }),
+  Schema.Struct({ type: Schema.Literal("tailStop"), tail: Schema.String }),
+]);
+export type TailMessage = typeof TailMessage.Type;
+
 // The schemas and the model types must describe the same values.
 type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 const agree = <T extends true>(_: T) => _;

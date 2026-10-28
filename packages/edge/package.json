@@ -29,6 +29,7 @@
     "wrangler": "4.154.0"
   },
   "exports": {
-    "./machine": "./src/core/machine.ts"
+    "./machine": "./src/core/machine.ts",
+    "./logs": "./src/core/logs.ts"
   }
 }

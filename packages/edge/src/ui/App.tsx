@@ -18,11 +18,13 @@ import {
   type Stack,
   type State,
   type PauseMode,
+  type PauseReach,
   type Point,
   circlesHolding,
   insideCircle,
   isPublicCircle,
   memberLabel,
+  pauseReach,
   shareKey,
   shareLevel,
 } from "../core/model.ts";
@@ -65,7 +67,8 @@ import {
 } from "./actions.ts";
 import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
-import { PauseDialog, PausedBanner } from "./Pause.tsx";
+import { LOCKDOWN_TIP, PAUSE_TIP, PanicOpener, PausedBanner, type PauseView, RESUME_TIP, SafetyView } from "./Pause.tsx";
+import { playResumeSound, pressSound, showPanic, unlockAudio } from "./panic.ts";
 import { REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
@@ -114,6 +117,8 @@ interface Toast {
   readonly undo: number | null;
   /** More revisions that the same Undo takes back after `undo`, newest first (a drop of several files). */
   readonly alsoUndo?: ReadonlyArray<number>;
+  /** A way back that is not an undo, for example Resume after a pause (K-1504). */
+  readonly action?: { readonly label: string; readonly tip: string; readonly run: () => void };
 }
 
 const VIEW_KEY = "kitshn.view";
@@ -154,7 +159,8 @@ const TABS = {
 } as const;
 
 /** K-516, K-519: what the overlay panel shows. History, Library and Machines also have a full view (a tab). */
-type PanelKind = "details" | "history" | "library" | "machines";
+/** "safety" is the big red button (K-1504); like "details", it has no full view. */
+type PanelKind = "details" | "safety" | "history" | "library" | "machines";
 
 /** `html` font size in styles.css. */
 const REM = 18;
@@ -162,6 +168,7 @@ const REM = 18;
 const PANEL_WIDTH: WidthLimits = { min: 18 * REM, max: 46 * REM, initial: 26 * REM };
 const TRAY_WIDTH: WidthLimits = { min: 160, max: 420, initial: 210 };
 const PANEL_HEADINGS: Record<Exclude<PanelKind, "details">, string> = {
+  safety: "Big red button",
   history: "History",
   library: "Library",
   machines: "Machines",
@@ -170,13 +177,9 @@ const PANEL_HEADINGS: Record<Exclude<PanelKind, "details">, string> = {
 /** A highlight from History shows this long, once (K-1508). */
 const FLASH_MS = 1200;
 
-/** K-1504 */
-const PAUSE_TIP =
-  "Emergency pause: close every share except the Owner circle's admin, and stop agent keys and new deploys. Public sites, apps and pages stay up unless you choose a lockdown.";
-
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
-const routeFromHash = (): { readonly tab: "map" | Exclude<PanelKind, "details">; readonly id: string } => {
+const routeFromHash = (): { readonly tab: "map" | Exclude<PanelKind, "details" | "safety">; readonly id: string } => {
   const [tab = "map", id = ""] = location.hash.slice(1).split("/");
   return { tab: tab === "history" || tab === "machines" || tab === "library" ? tab : "map", id };
 };
@@ -211,7 +214,6 @@ export function App() {
   /** K-110: a sign-out or its retry waits for Cloudflare; the server also runs one at a time. */
   const [signingOut, setSigningOut] = useState(false);
   const [menu, setMenu] = useState<{ readonly target: MenuTarget; readonly anchor: Rect } | null>(null);
-  const [pausing, setPausing] = useState(false);
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
   const [route, setRoute] = useState(routeFromHash);
   /** The panel over the map, or null when closed. */
@@ -233,6 +235,19 @@ export function App() {
     () => (store.snapshot ? overlay(toState(store.snapshot), store.held) : null),
     [store.snapshot, store.held],
   );
+  const pausedBy = store.snapshot?.pausedBy ?? null;
+  const pauseView: PauseView | null = store.snapshot?.paused
+    ? { mode: store.snapshot.paused, by: pausedBy ? actorLabel(pausedBy.actor) : null, at: pausedBy?.at ?? null }
+    : null;
+  // K-1504: the counts of the paused banner, only while paused; the Safety panel counts while it shows.
+  const pausedReach = useMemo(
+    () => (state && store.snapshot?.paused ? pauseReach(state, Date.now()) : null),
+    [state, store.snapshot?.paused],
+  );
+  const reachNow = (): PauseReach => {
+    if (!state) throw new Error("The pause counts need the map state.");
+    return pauseReach(state, Date.now());
+  };
   const machines = useMemo(
     () => new Map((store.snapshot?.machines ?? []).map((view) => [view.machine.id, view])),
     [store.snapshot],
@@ -497,22 +512,38 @@ export function App() {
   const addMemberTo = (circleId: string) =>
     selectAndFocus({ cards: new Set(), circle: circleId }, ".add-member input");
 
-  /** K-1504: one press after the confirm pauses everything at once. */
+  /**
+   * K-1504: one press pauses everything at once, with no confirm. The thunk plays at once; the klaxon and the
+   * effects play only when this press made the pause, not for a second press or a refusal.
+   */
   const pauseNow = async (mode: PauseMode) => {
-    setPausing(false);
+    pressSound();
     const result = await applyEdits([{ _tag: "pause", after: mode }]);
-    showToast(
-      result.ok
-        ? {
-            text:
-              mode === "lockdown"
-                ? "Locked down. Only the Owner circle's people open the admin; public sites are closed too."
-                : "Paused. Only the Owner circle's people open the admin; public sites stay open.",
-            error: false,
-            undo: null,
-          }
-        : { text: result.error, error: true, undo: null },
-    );
+    if (!result.ok) {
+      showToast({ text: result.error, error: true, undo: null });
+      return;
+    }
+    // A second press replaces the first toast, so it keeps the way back too.
+    const resume = { label: "Resume with passkey", tip: RESUME_TIP, run: startResume };
+    if (result.revision === null) {
+      showToast({
+        text: mode === "lockdown" ? "Already locked down." : "Already paused.",
+        error: false,
+        undo: null,
+        action: resume,
+      });
+      return;
+    }
+    showPanic(mode === "lockdown" ? "lockdown" : "paused");
+    showToast({
+      text:
+        mode === "lockdown"
+          ? "Locked down. Only the Owner circle's people open the admin; public sites are closed too."
+          : "Paused. Only the Owner circle's people open the admin; public sites stay open.",
+      error: false,
+      undo: null,
+      action: resume,
+    });
   };
 
   /** Resume needs a fresh passkey: Access checks it on `/api/fresh` and sends the owner back to `#resume`. */
@@ -522,7 +553,9 @@ export function App() {
     history.replaceState(null, "", location.pathname + location.search);
     // MM-712: a link alone never resumes; the owner confirms once more after the passkey check.
     if (!(await ask("Your passkey check passed. Resume everything now? Every share comes back."))) return;
+    unlockAudio();
     const result = await callApi<{ revision: number | null }>("POST", "/api/fresh/resume", {});
+    if (!("error" in result)) playResumeSound();
     showToast(
       "error" in result
         ? { text: result.error, error: true, undo: null }
@@ -612,7 +645,7 @@ export function App() {
 
   const fullPage = route.tab !== "map";
   const shownPanel: PanelKind | null = fullPage ? route.tab : panel;
-  const large = fullPage || (panel === "details" && detailsLarge);
+  const large = fullPage || ((panel === "details" || panel === "safety") && detailsLarge);
   /** The panel floats over the map, so the map keeps its width and fit and pan leave its part free. */
   const floating = shownPanel !== null && !large;
 
@@ -642,20 +675,26 @@ export function App() {
     [store.snapshot, state],
   );
 
-  /** K-519: the toolbar's height, for the tray and the full view below it (styles.css `--bar-bottom`). */
-  const barRef = useMemo(() => {
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries)
-        document.documentElement.style.setProperty(
-          "--bar-bottom",
-          `${Math.round(entry.target.getBoundingClientRect().bottom)}px`,
-        );
-    });
-    return (element: HTMLElement | null) => {
-      if (!element) return;
-      observer.observe(element);
-      return () => observer.unobserve(element);
+  /**
+   * K-519: the toolbar's bottom, for the tray and the full view below it (styles.css `--bar-bottom`), and the
+   * hint line's height, so a toast sits above it (`--hint-height`; 0 when the hint is hidden on a phone).
+   */
+  const [barRef, hintRef] = useMemo(() => {
+    const measured = (property: string, measure: (rect: DOMRect) => number) => {
+      const observer = new ResizeObserver((entries) => {
+        for (const entry of entries)
+          document.documentElement.style.setProperty(
+            property,
+            `${Math.round(measure(entry.target.getBoundingClientRect()))}px`,
+          );
+      });
+      return (element: HTMLElement | null) => {
+        if (!element) return;
+        observer.observe(element);
+        return () => observer.unobserve(element);
+      };
     };
+    return [measured("--bar-bottom", (rect) => rect.bottom), measured("--hint-height", (rect) => rect.height)];
   }, []);
 
   if (!state || !store.snapshot) {
@@ -742,14 +781,21 @@ export function App() {
   };
 
   /** A toolbar tab opens its panel over the map; Enlarge in the panel opens the full view. */
-  const openTab = (tab: "map" | Exclude<PanelKind, "details">) => {
+  const openTab = (tab: "map" | Exclude<PanelKind, "details" | "safety">) => {
     rememberOpener();
     setPanel(tab === "map" ? "details" : tab);
     location.hash = "map";
   };
 
+  /** K-1504: the toolbar opener, the palette and the map panel open the big red button here. */
+  const openSafety = () => {
+    rememberOpener();
+    setPanel("safety");
+    location.hash = "map";
+  };
+
   const resizePanel = (kind: PanelKind) => {
-    if (kind === "details") setDetailsLarge(!large);
+    if (kind === "details" || kind === "safety") setDetailsLarge(!large);
     else if (large) openTab(kind);
     else location.hash = kind;
   };
@@ -993,7 +1039,14 @@ export function App() {
           onResize={() => resizePanel(shownPanel)}
           onClose={closePanel}
         >
-          {shownPanel === "history" ? (
+          {shownPanel === "safety" ? (
+            <SafetyView
+              reach={reachNow}
+              pause={pauseView}
+              onPress={() => void pauseNow("keep-public")}
+              onLockdown={() => void pauseNow("lockdown")}
+            />
+          ) : shownPanel === "history" ? (
             historyView
           ) : shownPanel === "library" ? (
             <LibraryView
@@ -1027,7 +1080,7 @@ export function App() {
               onReshare={(resource, circle, share) => void reshare(resource, circle, share)}
               onRemoveApp={(resource) => void removeApp(resource)}
               deployed={deployed}
-              paused={store.snapshot.paused !== null}
+              pause={pauseView}
               machines={machines}
               version={store.snapshot.version}
               jobs={store.snapshot.jobs}
@@ -1035,7 +1088,7 @@ export function App() {
               onRemoveMachine={handlers.removeMachine}
               onRunJob={runJob}
               warnings={store.snapshot.accessWarnings}
-              onPause={(pause) => (pause ? setPausing(true) : startResume())}
+              onOpenSafety={openSafety}
               onSignOut={(retry) => void signOut(retry)}
               signOutWarning={store.snapshot.signOutWarning}
               signingOut={signingOut}
@@ -1194,24 +1247,12 @@ export function App() {
             <span class="sticker wait">{plural(waitingRepos, "repo")} waiting</span>
           </button>
         ) : null}
-        {store.snapshot?.paused ? (
-          <button
-            class="btn resume"
-            onClick={startResume}
-            data-tip="Resume: confirm with your passkey again, and every share comes back."
-          >
+        <PanicOpener pause={pauseView} open={shownPanel === "safety"} onOpen={openSafety} />
+        {pauseView ? (
+          <button class="btn resume" onClick={startResume} data-tip={RESUME_TIP}>
             Resume
           </button>
-        ) : (
-          <button
-            class="btn big-red"
-            onClick={() => setPausing(true)}
-            data-tip={PAUSE_TIP}
-            aria-label="Emergency pause"
-          >
-            ■ Pause
-          </button>
-        )}
+        ) : null}
         <button
           class="btn"
           onClick={() => setPalette("")}
@@ -1297,27 +1338,36 @@ export function App() {
           </div>
         </aside>
       ) : null}
-      {store.snapshot.paused ? (
+      {pauseView && pausedReach ? (
         <PausedBanner
-          mode={store.snapshot.paused}
-          by={store.snapshot.pausedBy ? actorLabel(store.snapshot.pausedBy.actor) : null}
-          since={store.snapshot.pausedBy ? `since ${new Date(store.snapshot.pausedBy.at).toLocaleString()}` : null}
+          pause={pauseView}
+          reach={pausedReach}
+          besidePanel={floating}
           onLockdown={() => void pauseNow("lockdown")}
           onResume={startResume}
         />
       ) : null}
-      {pausing ? <PauseDialog onCancel={() => setPausing(false)} onPause={(mode) => void pauseNow(mode)} /> : null}
       {palette !== null ? (
         <Palette
           initialQuery={palette}
           onClose={() => setPalette(null)}
           entries={[
             { label: "Open History", tip: TABS.history, run: () => openTab("history") },
-            {
-              label: "Emergency pause, or Resume",
-              tip: PAUSE_TIP,
-              run: () => (store.snapshot?.paused ? startResume() : setPausing(true)),
-            },
+            ...(pauseView
+              ? [
+                  { label: "Resume with passkey", tip: RESUME_TIP, run: startResume },
+                  ...(pauseView.mode === "keep-public"
+                    ? [
+                        {
+                          label: "Close public sites too",
+                          danger: true as const,
+                          tip: LOCKDOWN_TIP,
+                          run: () => void pauseNow("lockdown"),
+                        },
+                      ]
+                    : []),
+                ]
+              : [{ label: "Emergency pause: open the big red button", danger: true as const, tip: PAUSE_TIP, run: openSafety }]),
             ...(store.snapshot.signOutWarning
               ? [
                   {
@@ -1358,7 +1408,7 @@ export function App() {
         </div>
       ) : null}
       {toast ? (
-        <div class={`toast${toast.error ? " error" : ""}`} role="status">
+        <div class={`toast${toast.error ? " error" : ""}${floating ? " beside-panel" : ""}`} role="status">
           <span>{toast.text}</span>
           {toast.undo !== null ? (
             <button
@@ -1375,6 +1425,18 @@ export function App() {
               Undo
             </button>
           ) : null}
+          {toast.action ? (
+            <button
+              class="btn resume"
+              data-tip={toast.action.tip}
+              onClick={() => {
+                setToast(null);
+                toast.action?.run();
+              }}
+            >
+              {toast.action.label}
+            </button>
+          ) : null}
           <button class="btn" onClick={() => setToast(null)} aria-label="Close" data-tip="Close this message.">
             ×
           </button>
@@ -1382,7 +1444,7 @@ export function App() {
       ) : null}
       {route.tab === "map" ? (
         // Beside a floating panel the hint stops at the panel and wraps, so it stays readable.
-        <div class={`hint${floating ? " beside-panel" : ""}`}>
+        <div class={`hint${floating ? " beside-panel" : ""}`} ref={hintRef}>
           Drag a card into a circle to share it · Right-click, a long press or ⋯: actions · Shift-click or drag
           empty space: select many · {ALONE_KEY.label}-drag a circle head: move it alone · Ctrl or ⌘ + wheel: zoom
         </div>
@@ -1405,7 +1467,7 @@ function Panel(props: {
   onRemoveApp: (resource: Resource) => void;
   /** K-909 */
   deployed: ReadonlySet<string>;
-  paused: boolean;
+  pause: PauseView | null;
   warnings: ReadonlyArray<string>;
   machines: ReadonlyMap<string, MachineView>;
   jobs: ReadonlyArray<JobView>;
@@ -1413,7 +1475,7 @@ function Panel(props: {
   onRunJob: (view: MachineView, command: Command) => Promise<void>;
   version: string;
   onToast: (text: string, error: boolean) => void;
-  onPause: (pause: boolean) => void;
+  onOpenSafety: () => void;
   onSignOut: (retry: boolean) => void;
   signOutWarning: string | null;
   signingOut: boolean;
@@ -1571,16 +1633,19 @@ function Panel(props: {
         </div>
         <div class="row">
           <button
+            type="button"
             class="btn danger"
             data-tip={
-              props.paused
-                ? "Resume: confirm with your passkey again, and every share comes back."
-                : PAUSE_TIP
+              props.pause
+                ? "Open the big red button: see who paused, what is closed, and close public sites too."
+                : "Open the big red button: lift its lid, then press to pause everything."
             }
-            onClick={() => props.onPause(!props.paused)}
+            onClick={props.onOpenSafety}
           >
-            {props.paused ? "Resume" : "Emergency pause"}
+            {props.pause ? `Big red button: ${props.pause.mode === "lockdown" ? "locked down" : "paused"}` : "Big red button…"}
           </button>
+        </div>
+        <div class="row">
           <button
             class="btn danger"
             data-tip="Sign out everywhere: ends every Access session of kitshn's apps at once. Everyone logs in again, you too. History records it."

@@ -6,11 +6,11 @@ import {
   type Edit,
   invert,
   itemKey,
-  itemOfKey,
   itemUndo,
   MOVE_MERGE_MS,
   mergeMoves,
-  movedSummary,
+  mergedSummary,
+  changedSince,
   partsLeft,
   refuseRaiseWhilePaused,
   refuseResume,
@@ -778,9 +778,20 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     const again = mergeMoves({ actor: A, at: 60_000, changes: merged!, undoes: null }, A, 170_000, second.changes);
     expect(again).toEqual([{ _tag: "place", id: "notes", before: null, after: { x: 900, y: 900 } }]);
     expect(undone(second.after, again!).after.places.has("notes")).toBe(false);
-    const summary = movedSummary("Added the file notes on the map", again!);
+    const nudge = move(first.after, "notes", 430, 10).after;
+    const summary = mergedSummary("Added the file notes on the map", withTray(), first.after, nudge, again!);
     expect(summary).toBe("Added the file notes on the map and moved it");
-    expect(movedSummary(summary, again!)).toBe(summary);
+    expect(mergedSummary(summary, withTray(), first.after, nudge, again!)).toBe(summary);
+    expect(mergedSummary("Moved a card", withTray(), first.after, nudge, again!)).toBe("Moved a card");
+  });
+
+  it("gives a merged revision whose move changed a share the net summary", () => {
+    const drop = move(withTray(), "notes", 0, -200);
+    const into = move(drop.after, "notes", 400, 0);
+    const merged = mergeMoves({ actor: A, at: 0, changes: drop.changes, undoes: null }, A, 1, into.changes)!;
+    expect(mergedSummary("Added the file notes on the map", withTray(), drop.after, into.after, merged)).toBe(
+      summarize(withTray(), into.after, merged),
+    );
   });
 
   it("keeps moves apart for another actor, after the window, for another card and after a share change", () => {
@@ -875,7 +886,7 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     );
     const gone = edit(start(), [{ _tag: "circle", id: "her", after: null }]);
     const movedIn = move(gone.after, "riffle", 400, 0);
-    const back = undoPlan(movedIn.after, gone.changes, () => new Set(["riffle"]));
+    const back = undoPlan(movedIn.after, gone.changes, () => changedSince([movedIn.changes]));
     expect(back.kept).toEqual(["The circle Her is back and now also holds riffle, which moved into its area since."]);
   });
 
@@ -930,15 +941,22 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     const drag = edit(inHer.after, [
       { _tag: "circle", id: "her", after: { ...circle(inHer.after, "her"), x: 600 } },
       { _tag: "place", id: "riffle", after: { x: 600, y: 0 } },
+      { _tag: "place", id: "kitshn-admin", after: { x: 0, y: 60 } },
     ]);
     const found = itemUndo(drag.after, [{ id: 1, changes: drag.changes }], { kind: "circle", id: "her" });
     const after = applyChanges(drag.after, found!.plan.changes);
     expect(after.circles.get("her")?.x).toBe(400);
     expect(after.places.get("riffle")).toEqual({ x: 400, y: 0 });
+    expect(after.places.get("kitshn-admin")).toEqual({ x: 0, y: 60 });
 
-    const removal = removeAppChanges(inHer.after, "riffle");
-    expect(partsLeft(removal, [{ kind: "card", id: "riffle" }])).toEqual([]);
-    expect(itemOfKey(itemKey({ kind: "circle", id: "a:b" }))).toEqual({ kind: "circle", id: "a:b" });
+    const shared = edit(inHer.after, [
+      { _tag: "shareSetting", resourceId: "riffle", circleId: "her", after: { level: null, endsAt: 5 } },
+    ]).after;
+    const removal = removeAppChanges(shared, "riffle");
+    expect(partsLeft(removal, invert(removal))).toEqual([]);
+    const partial = invert(removal).filter((change) => change._tag !== "shareSetting");
+    expect(partsLeft(removal, partial).map((change) => change._tag)).toEqual(["shareSetting"]);
+    expect(itemKey({ kind: "circle", id: "her" })).toBe("circle:her");
   });
 
   it("finds the undo in effect along a chain of undos of undos", () => {
@@ -947,5 +965,77 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     expect(undoneRevisions(chain(2))).toEqual(new Map([[2, 3]]));
     expect(undoneRevisions(chain(3))).toEqual(new Map([[1, 2], [3, 4]]));
     expect(undoneRevisions([...chain(2), { id: 5, undoes: 1 }])).toEqual(new Map([[1, 5], [2, 3]]));
+  });
+
+  describe("a share comes back only while its circle is unchanged since (K-1506)", () => {
+    const base = start();
+    /** riffle as a machine, so levels above view count, inside Her and then moved out by the undone revision. */
+    const machine: State = {
+      ...base,
+      resources: new Map([...base.resources, ["riffle", { ...base.resources.get("riffle")!, kind: "machine" }]]),
+    };
+    const inHer = move(machine, "riffle", 400, 0).after;
+    const out = move(inHer, "riffle", 0, -200);
+    const her = circle(inHer, "her");
+    const later = (edits: Array<Edit>) => {
+      const next = edit(out.after, edits);
+      return undoPlan(next.after, out.changes, () => changedSince([next.changes]));
+    };
+
+    it.each([
+      ["public since", { ...her, members: [...her.members, { _tag: "everyone" as const }] }],
+      ["level since", { ...her, level: "control" as const }],
+      ["members since", { ...her, members: [...her.members, { _tag: "domain" as const, domain: "x.com" }] }],
+    ])("keeps the card out when its circle went %s", (_, after) => {
+      expect(later([{ _tag: "circle", id: "her", after }])).toEqual({
+        changes: [],
+        kept: ["Her changed since; place riffle by hand."],
+      });
+    });
+
+    it("keeps a circle away when moving it back would cover a card and the circle changed since", () => {
+      const away = edit(inHer, [{ _tag: "circle", id: "her", after: { ...her, x: 1400 } }]);
+      const opened = edit(away.after, [
+        { _tag: "circle", id: "her", after: { ...her, x: 1400, members: [{ _tag: "everyone" }] } },
+      ]);
+      const plan = undoPlan(opened.after, away.changes, () => changedSince([opened.changes]));
+      expect(plan.changes).toEqual([]);
+      expect(plan.kept).toContain("Her changed since; place riffle by hand.");
+    });
+
+    it("checks the stack mates that follow a card back", () => {
+      const notes = { ...machine.resources.get("riffle")!, id: "notes", name: "notes" };
+      const withNotes = { ...out.after, resources: new Map([...out.after.resources, ["notes", notes]]) };
+      const stacked = edit(withNotes, [
+        { _tag: "place", id: "notes", after: { x: 0, y: -200 } },
+        { _tag: "stack", id: "s1", after: { id: "s1", name: "Pair", members: ["riffle", "notes"] } },
+      ]);
+      expect(() => undoPlan(stacked.after, out.changes, () => changedSince([stacked.changes]))).toThrow(
+        /let in more than anyone chose: notes would gain Her/,
+      );
+    });
+
+    it("restores a removed app to the tray when a circle at its old place changed since (K-909)", () => {
+      const app = move(start(), "riffle", 400, 0).after;
+      const removal = removeAppChanges(app, "riffle");
+      const removed = applyChanges(app, removal);
+      const changed = edit(removed, [{ _tag: "circle", id: "her", after: { ...her, level: "view" } }]);
+      const plan = undoPlan(changed.after, removal, () => changedSince([changed.changes]));
+      const back = applyChanges(changed.after, plan.changes);
+      expect(back.resources.has("riffle")).toBe(true);
+      expect(back.places.has("riffle")).toBe(false);
+      expect(plan.kept).toEqual(["riffle comes back in the tray: Her changed since."]);
+    });
+
+    it("does not refuse after a rename of the circle", () => {
+      const both = edit(inHer, [
+        { _tag: "circle", id: "her", after: { ...her, name: "Hers" } },
+        { _tag: "place", id: "riffle", after: { x: 0, y: -200 } },
+      ]);
+      const renamed = edit(both.after, [{ _tag: "circle", id: "her", after: { ...her, name: "Third" } }]);
+      const plan = undoPlan(renamed.after, both.changes, () => changedSince([renamed.changes]));
+      expect(applyChanges(renamed.after, plan.changes).places.get("riffle")).toEqual({ x: 400, y: 0 });
+      expect(plan.kept).toEqual(["The circle Hers keeps its name: a later change set it."]);
+    });
   });
 });

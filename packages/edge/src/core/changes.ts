@@ -13,6 +13,7 @@ import {
   type Stack,
   type State,
   circlesHolding,
+  insideCircle,
   isPublicCircle,
   levelRank,
   shareKey,
@@ -262,10 +263,20 @@ export function mergeMoves(
   return [...merged.values()];
 }
 
-/** K-1505: the summary of a revision that moves joined: the first summary, and that it moved. */
-export function movedSummary(first: string, changes: ReadonlyArray<Change>): string {
-  const tail = changes.length === 1 ? " and moved it" : " and moved them";
-  return first.endsWith(" and moved it") || first.endsWith(" and moved them") ? first : `${first}${tail}`;
+/**
+ * K-1505: the summary of a revision that moves joined. A move that changes a share gives the net summary
+ * from `start` (History is the audit trail); a pure move keeps the first summary and says that it moved.
+ */
+export function mergedSummary(
+  first: string,
+  start: State,
+  before: State,
+  after: State,
+  merged: ReadonlyArray<Change>,
+): string {
+  if (shareDiff(before, after).length > 0) return summarize(start, after, merged);
+  if (first.startsWith("Moved ") || first.endsWith(" and moved it") || first.endsWith(" and moved them")) return first;
+  return `${first}${merged.length === 1 ? " and moved it" : " and moved them"}`;
 }
 
 /** K-1506: what an undo reverses now, and a plain note for each part that it leaves as it is. */
@@ -323,7 +334,7 @@ function revertValue(
 export function undoPlan(
   state: State,
   changes: ReadonlyArray<Change>,
-  movedSince: () => ReadonlySet<string> = () => new Set(),
+  since: () => Since = () => NOTHING_SINCE,
 ): UndoPlan {
   const restored = new Set(
     changes.flatMap((change) => (change._tag === "app" && change.before && !change.after ? [change.id] : [])),
@@ -403,23 +414,41 @@ export function undoPlan(
   }
   // K-521: the cards of a stack that stays keep their place with it, so the undo moves none of them.
   const stayWithStack = new Set(keptStacks.flatMap((id) => state.stacks.get(id)?.members ?? []));
-  const plan = out.filter((change) => !(change._tag === "place" && stayWithStack.has(change.id)));
+  let plan = out.filter((change) => !(change._tag === "place" && stayWithStack.has(change.id)));
   for (const id of keptStacks) {
     const stack = state.stacks.get(id);
     if (stack && out.some((change) => change._tag === "place" && stack.members.includes(change.id)))
       kept.push(`The cards of the stack ${stack.name} stay with it.`);
   }
-  // An undo may let in more than now only where the revision took that access away.
-  const at = (side: "before" | "after") =>
-    applyChanges(state, changes.map((change) => ({ ...change, after: change[side] }) as Change));
-  const allowed = new Set(accessRaises(at("after"), at("before")));
-  const raise = accessRaises(state, applyChanges(state, plan)).find((entry) => !allowed.has(entry));
-  if (raise)
-    throw new RuleError(
-      [`This undo would let in more than anyone chose: ${raise}. Undo it by hand.`, ...kept].join(" "),
+  // A share that a card does not have now comes back only while its circle and its share setting are
+  // unchanged since the revision; otherwise the parts that give it stay out (fail closed).
+  const later = since();
+  for (;;) {
+    const after = applyChanges(state, withStackMates(state, plan));
+    const gain = shareDiff(state, after).find(
+      (diff) =>
+        diff.to !== null &&
+        (diff.from === null || levelRank(diff.to) > levelRank(diff.from)) &&
+        (later.circles.has(diff.circle.id) || later.shares.has(shareKey(diff.resource.id, diff.circle.id))),
     );
+    if (!gain) break;
+    const card = gain.resource.id;
+    const mates = [...state.stacks.values()].find((stack) => stack.members.includes(card))?.members ?? [card];
+    const gives = (change: Change) =>
+      (change._tag === "place" && mates.includes(change.id)) ||
+      (change._tag === "circle" && change.id === gain.circle.id) ||
+      (change._tag === "shareSetting" && change.id === shareKey(card, gain.circle.id));
+    if (!plan.some(gives))
+      throw new RuleError(`This undo would give ${gain.resource.name} a share with ${gain.circle.name}, which changed since.`);
+    plan = plan.filter((change) => !gives(change));
+    kept.push(
+      restored.has(card)
+        ? `${gain.resource.name} comes back in the tray: ${gain.circle.name} changed since.`
+        : `${gain.circle.name} changed since; place ${gain.resource.name} by hand.`,
+    );
+  }
   // A circle that comes back holds the cards that are in its area now (K-204).
-  const after = applyChanges(state, plan);
+  const after = applyChanges(state, withStackMates(state, plan));
   for (const change of plan) {
     if (change._tag !== "circle" || change.before !== null || change.after === null) continue;
     const circle = change.after;
@@ -428,11 +457,56 @@ export function undoPlan(
     );
     if (held.length > 0 && isPublicCircle(circle))
       throw new RuleError(`Re-creating ${circle.name} would make its cards public; drag them in by hand.`);
-    const moved = held.filter((card) => movedSince().has(card.id)).map((card) => card.name);
+    const moved = held.filter((card) => later.moved.has(card.id)).map((card) => card.name);
     if (moved.length > 0)
       kept.push(`The circle ${circle.name} is back and now also holds ${moved.join(", ")}, which moved into its area since.`);
   }
+  // A card that joined a stack since then takes its stack along (K-521), but never into a public circle
+  // without the question of K-210, which an undo does not ask.
+  const own = new Set(plan.flatMap((change) => (change._tag === "place" ? [change.id] : [])));
+  plan = withStackMates(state, plan);
+  const goingPublic = shareDiff(state, applyChanges(state, plan)).find(
+    (diff) => !own.has(diff.resource.id) && diff.to && !diff.from && isPublicCircle(diff.circle),
+  );
+  if (goingPublic)
+    throw new RuleError(`This undo would make ${goingPublic.resource.name} public through its stack. Move the stack by hand.`);
+  // An undo may let in more than now only where the revision took that access away.
+  const at = (side: "before" | "after") =>
+    applyChanges(state, changes.map((change) => ({ ...change, after: change[side] }) as Change));
+  const allowed = new Set(accessRaises(at("after"), at("before")).map((raise) => raise.key));
+  const raise = accessRaises(state, applyChanges(state, plan)).find((entry) => !allowed.has(entry.key));
+  if (raise)
+    throw new RuleError(
+      [`This undo would let in more than anyone chose: ${raise.message}. Undo it by hand.`, ...kept].join(" "),
+    );
   return { changes: plan, kept };
+}
+
+/** K-1506: what the revisions after an undone revision changed: cards moved, circles and share settings. */
+export interface Since {
+  readonly moved: ReadonlySet<string>;
+  readonly circles: ReadonlySet<string>;
+  readonly shares: ReadonlySet<string>;
+}
+
+const NOTHING_SINCE: Since = { moved: new Set(), circles: new Set(), shares: new Set() };
+
+/**
+ * K-1506: the cards, circles and share settings that `later` (the changes of the later revisions) touched.
+ * A circle counts when anything but its name or colour changed: its access, place, size or public status.
+ */
+export function changedSince(later: Iterable<ReadonlyArray<Change>>): Since {
+  const moved = new Set<string>();
+  const circles = new Set<string>();
+  const shares = new Set<string>();
+  const looks = (circle: Circle | null) => circle && { ...circle, name: "", color: "" };
+  for (const changes of later)
+    for (const change of changes) {
+      if (change._tag === "place") moved.add(change.id);
+      if (change._tag === "shareSetting") shares.add(change.id);
+      if (change._tag === "circle" && !deepEqual(looks(change.before), looks(change.after))) circles.add(change.id);
+    }
+  return { moved, circles, shares };
 }
 
 /**
@@ -502,24 +576,30 @@ export function itemParts(changes: ReadonlyArray<Change>, item: Item): Array<Cha
         change.after !== null &&
         (change.before.x !== change.after.x || change.before.y !== change.after.y),
     );
-  return changes.filter((change) => touches(change, item) || (dragged && change._tag === "place"));
+  // K-504: the cards that moved with the circle are the ones that sat inside it before the drag.
+  const circleBefore = changes.flatMap((change) =>
+    change._tag === "circle" && change.id === item.id && change.before ? [change.before] : [],
+  )[0];
+  const inside = (change: Change) =>
+    change._tag === "place" && change.before !== null && circleBefore !== undefined && insideCircle(change.before, circleBefore);
+  return changes.filter((change) => touches(change, item) || (dragged && inside(change)));
 }
 
-/** K-1507: the parts of a revision that no per-item undo of `items` took back already. */
-export const partsLeft = (changes: ReadonlyArray<Change>, items: ReadonlyArray<Item>): Array<Change> => {
-  const taken = new Set(items.flatMap((item) => itemParts(changes, item)));
-  return changes.filter((change) => !taken.has(change));
-};
+/**
+ * K-1507: the parts of a revision that the per-item undos in effect did not take back. `reverted` holds the
+ * changes that those undos made; a part counts as taken back only when an undo set it fully to its `before`.
+ */
+export const partsLeft = (changes: ReadonlyArray<Change>, reverted: ReadonlyArray<Change>): Array<Change> =>
+  changes.filter(
+    (change) =>
+      !reverted.some(
+        (undo) => undo._tag === change._tag && undo.id === change.id && deepEqual(undo.after, change.before),
+      ),
+  );
 
 /** K-1507: how `revisions.item` stores the item of a per-item undo. */
 export const itemKey = (item: Item) => `${item.kind}:${item.id}`;
 
-export function itemOfKey(key: string): Item {
-  const split = key.indexOf(":");
-  const kind = key.slice(0, split);
-  if (split < 0 || (kind !== "card" && kind !== "circle")) throw new Error(`"${key}" names no card or circle.`);
-  return { kind, id: key.slice(split + 1) };
-}
 
 /** The first change whose current value is not its `before`, or null. */
 export function conflictOf(state: State, changes: ReadonlyArray<Change>): Change | null {
@@ -719,14 +799,17 @@ export function refuseResume(changes: Array<Change>): Array<Change> {
  * Every way that `after` lets in more than `before`: a new share or a higher level, a new circle member,
  * "needs passkey" off, "all must match" to "any", or a later or removed end date (K-1504, K-1506).
  */
-export function accessRaises(before: State, after: State): Array<string> {
+export function accessRaises(before: State, after: State): Array<{ readonly key: string; readonly message: string }> {
   const raises = shareDiff(before, after)
     .filter((diff) => diff.to !== null && (diff.from === null || levelRank(diff.to) > levelRank(diff.from)))
-    .map((diff) => `${diff.resource.name} would gain ${diff.circle.name} · ${diff.to}`);
+    .map((diff) => ({
+      key: `share:${shareKey(diff.resource.id, diff.circle.id)}:${diff.to}`,
+      message: `${diff.resource.name} would gain ${diff.circle.name} · ${diff.to}`,
+    }));
   const ends = (time: number | null | undefined) => time ?? Number.POSITIVE_INFINITY;
   for (const key of new Set([...before.shareSettings.keys(), ...after.shareSettings.keys()]))
     if (ends(after.shareSettings.get(key)?.endsAt) > ends(before.shareSettings.get(key)?.endsAt))
-      raises.push(`the share ${key} would end later`);
+      raises.push({ key: `ends:${key}`, message: `the share ${key} would end later` });
   for (const circle of after.circles.values()) {
     const old = before.circles.get(circle.id);
     if (!old) continue;
@@ -748,7 +831,7 @@ export function accessRaises(before: State, after: State): Array<string> {
       ends(circle.endsAt) > ends(old.endsAt) ||
       levelRank(circle.level) > levelRank(old.level)
     )
-      raises.push(`the circle ${circle.name} would let in more`);
+      raises.push({ key: `circle:${circle.id}`, message: `the circle ${circle.name} would let in more` });
   }
   return raises;
 }
@@ -760,7 +843,7 @@ export function accessRaises(before: State, after: State): Array<string> {
 export function refuseRaiseWhilePaused(before: State, after: State): void {
   if (!before.paused || !after.paused) return;
   const [raise] = accessRaises(before, after);
-  if (raise) throw new RuleError(`While paused, access only goes down: ${raise}.`);
+  if (raise) throw new RuleError(`While paused, access only goes down: ${raise.message}.`);
 }
 
 /**
@@ -772,12 +855,12 @@ export function itemUndo(
   state: State,
   revisions: Iterable<{ readonly id: number; readonly changes: ReadonlyArray<Change> }>,
   item: Item,
-  movedSince: (revision: number) => ReadonlySet<string> = () => new Set(),
+  since: (revision: number) => Since = () => NOTHING_SINCE,
 ): { readonly revision: number; readonly plan: UndoPlan } | null {
   for (const revision of revisions) {
     const parts = itemParts(revision.changes, item);
     if (parts.length === 0) continue;
-    const plan = undoPlan(state, parts, () => movedSince(revision.id));
+    const plan = undoPlan(state, parts, () => since(revision.id));
     if (plan.changes.length > 0 || plan.kept.length > 0) return { revision: revision.id, plan };
   }
   return null;

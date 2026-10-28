@@ -11,6 +11,7 @@ import {
   applyChanges,
   conflictOf,
   deepEqual,
+  invert,
   type Item,
   mergeMoves,
   refuseRaiseWhilePaused,
@@ -19,23 +20,21 @@ import {
   resolveEdits,
   restoredResource,
   ruleViolation,
-  shareDiff,
   stacksWithout,
   summarize,
   itemKey,
-  itemOfKey,
   itemUndo,
-  movedSummary,
+  mergedSummary,
   partsLeft,
+  type Since,
+  changedSince,
   type UndoPlan,
   undoneRevisions,
   undoPlan,
-  withStackMates,
 } from "../core/changes.ts";
 import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
-  isPublicCircle,
   type Circle,
   type Member,
   type Point,
@@ -522,7 +521,7 @@ export class Kitshn extends DurableObject<Env> {
     const label =
       undo === null ? "" : undo.item === null ? `Undo #${undo.revision}: ` : `Undo #${undo.revision} for ${undo.name}: `;
     const summary = merge
-      ? movedSummary(merge.summary, merge.changes)
+      ? mergedSummary(merge.summary, applyChanges(before, invert(merge.previous)), before, after, merge.changes)
       : label + summarize(before, after, changes);
     const undoes = undo?.revision ?? null;
     const id = this.ctx.storage.transactionSync(() => {
@@ -588,7 +587,7 @@ export class Kitshn extends DurableObject<Env> {
       now,
       changes,
     );
-    return merged && { id: row.id, summary: row.summary, changes: merged };
+    return merged && { id: row.id, summary: row.summary, previous, changes: merged };
   }
 
   private apply(actor: Actor, edits: ReadonlyArray<Edit>) {
@@ -624,21 +623,21 @@ export class Kitshn extends DurableObject<Env> {
     const by = undone.get(revisionId);
     if (by !== undefined) throw new RuleError(`Revision #${revisionId} is undone already, by #${by}.`);
     // K-1507: the parts that a per-item undo in effect took back already stay out.
-    const items = this.sql<{ id: number; item: string }>(
-      "SELECT id, item FROM revisions WHERE undoes = ? AND item IS NOT NULL",
+    const reverted = this.sql<{ id: number; changes: string }>(
+      "SELECT id, changes FROM revisions WHERE undoes = ? AND item IS NOT NULL",
       revisionId,
     )
       .filter((row) => !undone.has(row.id))
-      .map((row) => itemOfKey(row.item));
-    const plan = undoPlan(this.state, partsLeft(changes, items), () => this.movedSince(revisionId));
+      .flatMap((row) => JSON.parse(row.changes) as Array<Change>);
+    const plan = undoPlan(this.state, partsLeft(changes, reverted), () => this.since(revisionId));
     return this.commitUndo(actor, plan, { revision: revisionId, item: null });
   }
 
-  /** K-1506: the cards that a revision after `revisionId` moved. */
-  private movedSince(revisionId: number): ReadonlySet<string> {
-    return new Set(
-      this.sql<{ changes: string }>("SELECT changes FROM revisions WHERE id > ?", revisionId).flatMap((row) =>
-        (JSON.parse(row.changes) as Array<Change>).flatMap((change) => (change._tag === "place" ? [change.id] : [])),
+  /** K-1506: what the revisions after `revisionId` changed. */
+  private since(revisionId: number): Since {
+    return changedSince(
+      this.sql<{ changes: string }>("SELECT changes FROM revisions WHERE id > ?", revisionId).map(
+        (row) => JSON.parse(row.changes) as Array<Change>,
       ),
     );
   }
@@ -674,7 +673,7 @@ export class Kitshn extends DurableObject<Env> {
     )
       .filter((row) => !skipped.has(row.id))
       .map((row) => ({ id: row.id, changes: JSON.parse(row.changes) as Array<Change> }));
-    const found = itemUndo(this.state, rows, item, (revision) => this.movedSince(revision));
+    const found = itemUndo(this.state, rows, item, (revision) => this.since(revision));
     if (!found) throw new RuleError(`History has no change to ${name} left to undo.`);
     return this.commitUndo(actor, found.plan, { revision: found.revision, item: key, name });
   }
@@ -687,18 +686,7 @@ export class Kitshn extends DurableObject<Env> {
           ? `Nothing to undo. ${plan.kept.join(" ")}`
           : `Everything that revision #${undo.revision} changed is back as before.`,
       );
-    // A card that joined a stack since then takes its stack along (K-521), but never into a public circle
-    // without the question of K-210, which an undo does not ask.
-    const changes = withStackMates(this.state, plan.changes);
-    const own = new Set(plan.changes.flatMap((change) => (change._tag === "place" ? [change.id] : [])));
-    const goingPublic = shareDiff(this.state, applyChanges(this.state, changes)).find(
-      (diff) => !own.has(diff.resource.id) && diff.to && !diff.from && isPublicCircle(diff.circle),
-    );
-    if (goingPublic)
-      throw new RuleError(
-        `This undo would make ${goingPublic.resource.name} public through its stack. Move the stack by hand.`,
-      );
-    const result = await this.commitApps(actor, refuseResume(changes), undo);
+    const result = await this.commitApps(actor, refuseResume(plan.changes), undo);
     return { ...result, notes: [...plan.kept, ...result.notes] };
   }
 

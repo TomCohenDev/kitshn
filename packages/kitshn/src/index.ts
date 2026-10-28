@@ -70,36 +70,37 @@ export interface WorkerApp {
 type Deploy = readonly [DeployEntry, ...Array<DeployEntry>];
 
 /** K-820, K-808: what an app needs. `vars` and `secrets` join `apps` with K-808. */
-interface Needs {
+interface Needs<Key extends string> {
   /**
    * Keys of other apps of this repo. They deploy first, and when one of them did not deploy, this app does not deploy
-   * either. An app with nothing to do for the event counts as deployed.
+   * either. An app with nothing to do for the event counts as deployed. In `defineApps`, a key that no app of the file
+   * has is a type error; kitshn checks it again when it reads the recipe.
    */
-  readonly apps?: ReadonlyArray<string>;
+  readonly apps?: ReadonlyArray<Key>;
 }
 
-/** K-801, K-804: a recipe has exactly one kind: `static`, `compose` or `worker`. */
-export type Recipe =
+/** K-801, K-804: a recipe has exactly one kind: `static`, `compose` or `worker`. `Key` is a key of the repo's apps. */
+export type Recipe<Key extends string = string> =
   | {
       readonly static: StaticApp;
       readonly compose?: never;
       readonly worker?: never;
       readonly deploy: Deploy;
-      readonly needs?: Needs;
+      readonly needs?: Needs<Key>;
     }
   | {
       readonly compose: ComposeApp;
       readonly static?: never;
       readonly worker?: never;
       readonly deploy: Deploy;
-      readonly needs?: Needs;
+      readonly needs?: Needs<Key>;
     }
   | {
       readonly worker: WorkerApp;
       readonly static?: never;
       readonly compose?: never;
       readonly deploy: Deploy;
-      readonly needs?: Needs;
+      readonly needs?: Needs<Key>;
     };
 
 /**
@@ -113,7 +114,13 @@ export type Apps = { readonly [key: string]: Recipe };
  * literal; `kitshn check` refuses anything that computes (K-802), because kitshn reads the recipe without running
  * it (K-803).
  */
-export const defineApp = (recipe: Recipe): Recipe => recipe;
+export const defineApp = (recipe: Recipe<never>): Recipe => recipe;
 
-/** K-804: the one export of `kitshn.config.ts`, for a repo with several apps. */
-export const defineApps = (apps: Apps): Apps => apps;
+/**
+ * K-804: the one export of `kitshn.config.ts`, for a repo with several apps. The keys of the object are the only keys
+ * that `needs.apps` takes, so the editor completes them and marks a typo. `NoInfer` keeps `needs.apps` from adding
+ * keys of its own.
+ */
+export const defineApps = <const Key extends string>(apps: {
+  readonly [K in Key]: Recipe<NoInfer<Key>>;
+}): Apps => apps;

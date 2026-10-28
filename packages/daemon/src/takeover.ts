@@ -71,9 +71,12 @@ export interface Step {
 /** The programs of root and of the user. The user's environment is empty but for what Docker needs. */
 export function programs(user: DaemonUser) {
   const system: Program = ["docker", "-H", "unix:///var/run/docker.sock"];
+  // A new session without a controlling terminal, so no program of the user can type into root's terminal
+  // (TIOCSTI); the user's Docker CLI hooks stay off.
   const asUser = (...command: [string, ...Array<string>]): Program => [
-    "runuser", "-u", user.name, "--",
+    "setsid", "--wait", "runuser", "-u", user.name, "--",
     "env", "-i", `HOME=${user.home}`, "PATH=/usr/local/bin:/usr/bin:/bin", `XDG_RUNTIME_DIR=/run/user/${user.uid}`,
+    "DOCKER_CLI_HOOKS=0",
     ...command,
   ];
   const rootless = (...args: Array<string>): Program =>
@@ -97,9 +100,13 @@ export const startCommand = (oldProject: string) =>
  */
 export function takeoverSteps(plan: RootTakeover, user: DaemonUser, volumes: ReadonlyArray<string>): Array<Step> {
   const { system, asUser, rootless, inApp } = programs(user);
+  // While the staged copy exists, `data` is not this run's; after the rename, `data` and the marker are.
   const removeAll: Step = {
     name: "remove the copy",
-    run: inApp(plan.appDir, "rm -rf /app/data.kitshn1 /app/data /app/kitshn1-taken"),
+    run: inApp(
+      plan.appDir,
+      "if [ -e /app/data.kitshn1 ]; then rm -rf /app/data.kitshn1; else rm -rf /app/data /app/kitshn1-taken; fi",
+    ),
   };
   const steps: Array<Step> = [
     { name: "make the app folder", run: asUser("mkdir", "-p", "--", plan.appDir) },
@@ -148,7 +155,11 @@ export function takeoverSteps(plan: RootTakeover, user: DaemonUser, volumes: Rea
     name: "make the copy the data folder",
     // Only a complete copy becomes `data`, with the marker that the daemon checks. A marker that fails after the
     // rename takes `data` with it, so a later deploy never runs on a copy without its marker.
-    run: inApp(plan.appDir, 'mv /app/data.kitshn1 /app/data && printf "%s\\n" "$FROM" > /app/kitshn1-taken', { FROM: plan.oldData }),
+    run: inApp(
+      plan.appDir,
+      'if [ -e /app/data ]; then echo "a data folder appeared after the check" >&2; exit 4; fi; mv /app/data.kitshn1 /app/data && printf "%s\\n" "$FROM" > /app/kitshn1-taken',
+      { FROM: plan.oldData },
+    ),
     undo: [removeAll],
   });
   return steps;
@@ -170,13 +181,18 @@ export interface Runner {
  */
 export async function executeSteps(steps: ReadonlyArray<Step>, runner: Runner, aborted: Promise<never>): Promise<void> {
   const undo: Array<Step> = [];
+  let current: Promise<void> | null = null;
   try {
     for (const step of steps) {
       undo.push(...(step.undo ?? []));
       runner.log(`kitshn: ${step.name}`);
-      await Promise.race([runner.run(step), aborted]);
+      current = runner.run(step);
+      await Promise.race([current, aborted]);
+      current = null;
     }
   } catch (error) {
+    // On a signal or the timeout, the programs of the current step end first, so no undo races them.
+    if (current) await current.catch(() => undefined);
     runner.log(`kitshn: failed: ${error instanceof Error ? error.message : String(error)}`);
     for (const step of [...undo].reverse()) {
       runner.log(`kitshn: undo: ${step.name}`);
@@ -188,24 +204,41 @@ export async function executeSteps(steps: ReadonlyArray<Step>, runner: Runner, a
   }
 }
 
+/** Text of a program without control characters, so output of the user cannot drive root's terminal. */
+export function printable(text: string): string {
+  return [...text]
+    .filter((char) => {
+      const code = char.codePointAt(0) ?? 0;
+      return char === "\n" || char === "\t" || (code >= 0x20 && code !== 0x7f && (code < 0x80 || code > 0x9f));
+    })
+    .join("");
+}
+
+/**
+ * The standard streams of every program of the takeover: never a terminal of root. Output goes to a pipe and shows
+ * only when the step fails.
+ */
+export const NO_TERMINAL = ["ignore", "pipe", "pipe"] as const;
+
 /** Runs a program, or a pipe of two, from "/". `children` lets a signal stop them. */
 export function runStep(step: Step, children: Set<ChildProcess>): Promise<void> {
   return new Promise((resolve, reject) => {
     let output = "";
     const keep = (chunk: Buffer) => {
-      output = (output + chunk.toString("utf8")).slice(-4000);
+      output = (output + printable(chunk.toString("utf8"))).slice(-4000);
     };
-    const start = ([program, ...args]: Program, stdin: "ignore" | "pipe", stdout: "inherit" | "pipe") => {
-      const child = spawn(program, args, { cwd: "/", stdio: [stdin, stdout, "pipe"] });
+    const start = ([program, ...args]: Program, stdin: "ignore" | "pipe", readOut: boolean) => {
+      const child = spawn(program, args, { cwd: "/", stdio: [stdin, NO_TERMINAL[1], NO_TERMINAL[2]] });
       children.add(child);
       child.stderr?.on("data", keep);
+      if (readOut) child.stdout?.on("data", keep);
       return child;
     };
-    const a = start(step.run, "ignore", step.pipeTo ? "pipe" : "inherit");
+    const a = start(step.run, NO_TERMINAL[0], !step.pipeTo);
     const all = [a];
     if (step.pipeTo) {
       // Bun takes no stream of another child as stdio, so the bytes go through this process.
-      const b = start(step.pipeTo, "pipe", "inherit");
+      const b = start(step.pipeTo, "pipe", true);
       a.stdout!.pipe(b.stdin!);
       // A reader that stops early must not crash this process with EPIPE; its exit code reports the failure.
       b.stdin!.on("error", () => undefined);
@@ -240,11 +273,13 @@ export function capture(program: Program): Promise<string> {
     let out = "";
     let err = "";
     const [name, ...args] = program;
-    const child = spawn(name, args, { cwd: "/", stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(name, args, { cwd: "/", stdio: [...NO_TERMINAL] });
     child.stdout.on("data", (chunk: Buffer) => (out += chunk.toString("utf8")));
     child.stderr.on("data", (chunk: Buffer) => (err += chunk.toString("utf8")));
     child.on("error", reject);
-    child.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error(`${program.join(" ")} failed: ${err.slice(-2000)}`))));
+    child.on("close", (code) =>
+      code === 0 ? resolve(out) : reject(new Error(`${program.join(" ")} failed: ${printable(err.slice(-2000))}`)),
+    );
   });
 }
 
@@ -257,30 +292,61 @@ const TAKEOVER_TIMEOUT_MS = 2 * 60 * 60_000;
  * the timeout undoes the started steps. Known limit: the copy keeps owners and modes, not ACLs or extended
  * attributes, and device nodes fail in the user namespace.
  */
-export async function rootTakeover(plan: RootTakeover, user: DaemonUser): Promise<void> {
+export type Capture = (program: Program) => Promise<string>;
+
+const lastLine = (text: string) => text.trim().split("\n").at(-1) ?? "";
+const bytesOf = (text: string) => {
+  const value = Number(lastLine(text).split("\t")[0]);
+  if (!Number.isFinite(value)) throw new Error(`kitshn cannot read a size from: ${printable(text.slice(0, 200))}`);
+  return value;
+};
+
+/**
+ * K-1404: the checks before anything stops. It returns the volumes of the KitSHn 1 project, or fails when a target
+ * volume exists already or a disk lacks room. Root reads only system Docker and its own folders; the folders of the
+ * user are measured by the user.
+ */
+export async function preflight(plan: RootTakeover, user: DaemonUser, run: Capture): Promise<Array<string>> {
   const { system, asUser, rootless } = programs(user);
-  const volumes = (await capture([...system, "volume", "ls", "-q", "--filter", `label=com.docker.compose.project=${plan.oldProject}`]))
+  const volumes = (await run([...system, "volume", "ls", "-q", "--filter", `label=com.docker.compose.project=${plan.oldProject}`]))
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
   for (const target of targetVolumes(plan, volumes)) {
-    const exists = await capture(rootless("volume", "inspect", target)).then(() => true, () => false);
+    const exists = await run(rootless("volume", "inspect", target)).then(() => true, () => false);
     if (exists) throw new Error(`the volume ${target} exists already in rootless Docker; remove it or check it first.`);
   }
   // The apparent size, so a sparse file counts in full: busybox tar in the helper cannot write sparse files.
-  const sources = [
-    plan.oldData,
-    ...(await Promise.all(volumes.map(async (volume) => (await capture([...system, "volume", "inspect", "-f", "{{.Mountpoint}}", volume])).trim()))),
-  ];
-  const need = (await capture(["du", "--apparent-size", "-sbc", ...sources])).trim().split("\n").at(-1)?.split("\t")[0];
-  await capture(asUser("mkdir", "-p", "--", plan.appDir));
-  const free = (await capture(asUser("df", "-B1", "--output=avail", "--", plan.appDir))).trim().split("\n").at(-1);
-  if (need === undefined || free === undefined || !Number.isFinite(Number(need)) || !Number.isFinite(Number(free)))
-    throw new Error("kitshn cannot read the size of the data or the free space.");
-  // Room for the copy and a tenth more, so the disk of the home folder never fills up.
-  if (Number(need) * 1.1 > Number(free))
-    throw new Error(`the copy needs ${need} bytes, and ${plan.appDir} has ${free} bytes free.`);
+  const dataNeed = bytesOf(await run(["du", "--apparent-size", "-sb", "--", plan.oldData]));
+  const mounts = await Promise.all(
+    volumes.map(async (volume) => (await run([...system, "volume", "inspect", "-f", "{{.Mountpoint}}", volume])).trim()),
+  );
+  const volumeNeed = mounts.length === 0 ? 0 : bytesOf(await run(["du", "--apparent-size", "-sbc", "--", ...mounts]));
+  await run(asUser("mkdir", "-p", "--", plan.appDir));
+  const dockerRoot = (await run(rootless("info", "--format", "{{.DockerRootDir}}"))).trim();
+  // One line for each folder: its mount point and its free bytes, so two folders on one disk add up.
+  const disks = (await run(asUser("df", "-B1", "--output=target,avail", "--", plan.appDir, dockerRoot)))
+    .trim()
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim().split(" ").filter(Boolean));
+  const [app, docker] = disks;
+  if (!app || !docker || app.length !== 2 || docker.length !== 2) throw new Error("kitshn cannot read the free space.");
+  const need = new Map<string, number>();
+  need.set(app[0]!, (need.get(app[0]!) ?? 0) + dataNeed);
+  need.set(docker[0]!, (need.get(docker[0]!) ?? 0) + volumeNeed);
+  const free = new Map([[app[0]!, Number(app[1])], [docker[0]!, Number(docker[1])]]);
+  for (const [disk, bytes] of need) {
+    const left = free.get(disk) ?? Number.NaN;
+    // Room for the copy and a tenth more, so the disk never fills up.
+    if (!Number.isFinite(left) || bytes * 1.1 > left)
+      throw new Error(`the copy needs ${bytes} bytes on ${disk}, which has ${left} bytes free.`);
+  }
+  return volumes;
+}
 
+export async function rootTakeover(plan: RootTakeover, user: DaemonUser): Promise<void> {
+  const volumes = await preflight(plan, user, capture);
   // Printed before anything stops, so it is on the screen even after a hard kill.
   console.log(`kitshn: if KitSHn 1 stays down after this command, start it with:\n  ${startCommand(plan.oldProject)}`);
   const children = new Set<ChildProcess>();
@@ -290,7 +356,11 @@ export async function rootTakeover(plan: RootTakeover, user: DaemonUser): Promis
   });
   aborted.catch(() => undefined);
   const stopAll = (reason: string) => {
-    for (const child of children) child.kill("SIGTERM");
+    for (const child of children) {
+      child.kill("SIGTERM");
+      // A program that ignores SIGTERM ends with SIGKILL, so the undo still runs.
+      setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
+    }
     abort(new Error(reason));
   };
   const onSignal = (signal: NodeJS.Signals) => stopAll(`stopped by ${signal}`);
@@ -312,12 +382,12 @@ export async function rootTakeover(plan: RootTakeover, user: DaemonUser): Promis
 }
 
 /** K-1404: the daemon user as root sees it, with the environment of its service manager. */
-export async function daemonUser(name: string): Promise<DaemonUser> {
-  const entry = (await capture(["getent", "passwd", name])).trim();
+export async function daemonUser(name: string, run: Capture = capture): Promise<DaemonUser> {
+  const entry = (await run(["getent", "passwd", name])).trim();
   const [, , uid = "", , , home = ""] = entry.split(":");
   if (!isDigits(uid) || !home) throw new Error(`there is no user ${name}.`);
   const user: DaemonUser = { name, uid: Number(uid), home, env: {} };
-  const shown = await capture(programs(user).asUser("systemctl", "--user", "show-environment"));
+  const shown = await run(programs(user).asUser("systemctl", "--user", "show-environment"));
   const env: Record<string, string> = {};
   for (const line of shown.split("\n")) {
     const at = line.indexOf("=");

@@ -2,9 +2,14 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   type DaemonUser,
+  NO_TERMINAL,
+  type Program,
   type Step,
+  daemonUser,
   dockerKind,
   executeSteps,
+  preflight,
+  printable,
   rootTakeoverPlan,
   runStep,
   takeoverSteps,
@@ -39,26 +44,96 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
     expect(rootTakeoverPlan({ ...base, repo: "Yarden-zamir/../x", exists: () => true })).toMatch("could use");
   });
 
-  it("never lets root touch the app folder, so a link there cannot make root follow it", () => {
-    const steps = takeoverSteps(plan, user, ["yarden-zamir-tick3d-prod_sessions"]);
+  it("never lets root touch the app folder, so a link there cannot make root follow it", async () => {
+    // The checks before the steps run through a fake capture that records each program.
+    const recorded: Array<Program> = [];
+    const answers = (program: Program) => {
+      const text = program.join(" ");
+      if (text.startsWith("getent")) return "kitshn:x:1000:1000::/home/kitshn:/bin/sh\n";
+      if (text.includes("show-environment")) return "PATH=/usr/bin\n";
+      if (text.includes("volume ls")) return "yarden-zamir-tick3d-prod_sessions\n";
+      if (text.includes("volume inspect -f")) return "/var/lib/docker/volumes/x/_data\n";
+      if (text.includes("volume inspect")) throw new Error("no such volume");
+      if (text.startsWith("du")) return "100\t/x\n100\ttotal\n";
+      if (text.includes("DockerRootDir")) return "/home/kitshn/.local/share/docker\n";
+      if (text.includes(" df ")) return "Mounted on Avail\n/ 1000000\n/ 1000000\n";
+      return "";
+    };
+    const fake = (program: Program) => {
+      recorded.push(program);
+      return Promise.resolve().then(() => answers(program));
+    };
+    await daemonUser("kitshn", fake);
+    const volumes = await preflight(plan, user, fake);
+    const steps = takeoverSteps(plan, user, volumes);
     const all = steps.flatMap((step): Array<Step> => [step, ...(step.undo ?? [])]);
-    const programs = all.flatMap((step) => [step.run, ...(step.pipeTo ? [step.pipeTo] : [])]);
+    const programs = [...recorded, ...all.flatMap((step) => [step.run, ...(step.pipeTo ? [step.pipeTo] : [])])];
+    expect(programs.some((program) => program[0] === "du")).toBe(true);
     for (const program of programs) {
-      const asUser = program[0] === "runuser" && program[1] === "-u" && program[2] === "kitshn";
+      const asUser = program[0] === "setsid" && program[2] === "runuser" && program[4] === "kitshn";
       if (asUser) {
-        // A clean environment: no HOME or DOCKER_* of root.
+        // A new session without a terminal, a clean environment, and no Docker CLI hooks of the user.
+        expect(program[1]).toBe("--wait");
         expect(program).toContain("-i");
         expect(program).toContain("HOME=/home/kitshn");
+        expect(program).toContain("DOCKER_CLI_HOOKS=0");
         continue;
       }
       expect(program.join(" ")).not.toContain("/home/kitshn");
-      // Root reads /persistent with tar, or talks to system Docker; nothing else.
+      // Root reads /persistent and system Docker volumes, looks up the user, and talks to system Docker.
       const reads = program[0] === "tar" && program.includes("-cf") && program[2] === plan.oldData;
       const system = program[0] === "docker" && program[2] === "unix:///var/run/docker.sock";
-      expect(reads || system, program.join(" ")).toBe(true);
+      const sizes = program[0] === "du";
+      const lookup = program[0] === "getent";
+      expect(reads || system || sizes || lookup, program.join(" ")).toBe(true);
     }
     // The code of the takeover has no file system calls of its own.
     expect(readFileSync(new URL("./takeover.ts", import.meta.url), "utf8")).not.toContain('from "node:fs"');
+  });
+
+  it("gives no program of the takeover a terminal", async () => {
+    expect(NO_TERMINAL).not.toContain("inherit");
+    const children = new Set<never>();
+    const noTerminal = "if [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; then exit 9; fi";
+    await expect(runStep({ name: "terminal", run: ["sh", "-c", noTerminal] }, children)).resolves.toBeUndefined();
+    await expect(
+      runStep({ name: "terminal", run: ["sh", "-c", "printf x"], pipeTo: ["sh", "-c", `cat >/dev/null; ${noTerminal}`] }, children),
+    ).resolves.toBeUndefined();
+  });
+
+  it("waits for the programs of the current step before the undo starts", async () => {
+    const order: Array<string> = [];
+    let end: () => void = () => undefined;
+    let abort: (error: Error) => void = () => undefined;
+    const aborted = new Promise<never>((_, reject) => (abort = reject));
+    aborted.catch(() => undefined);
+    const runner = {
+      run: (step: Step) => {
+        order.push(`run ${step.name}`);
+        if (step.name.startsWith("copy")) return new Promise<void>((_, reject) => (end = () => (order.push("copy ended"), reject(new Error("killed")))));
+        return Promise.resolve();
+      },
+      log: () => undefined,
+    };
+    const done = executeSteps(takeoverSteps(plan, user, []), runner, aborted);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    abort(new Error("stopped by SIGINT"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order.at(-1)).toBe(`run copy ${plan.oldData}`);
+    end();
+    await expect(done).rejects.toThrow("SIGINT");
+    expect(order.indexOf("copy ended")).toBeLessThan(order.indexOf("run remove the copy"));
+  });
+
+  it("removes control characters from the output of programs", () => {
+    expect(printable("ok\u001b[2J\u0007 line\n\tnext\u009b")).toBe("ok[2J line\n\tnext");
+  });
+
+  it("keeps a data folder that is not this run's, and refuses one that appeared before the rename", () => {
+    const steps = takeoverSteps(plan, user, []);
+    const finish = steps.find((step) => step.name === "make the copy the data folder")!;
+    expect(finish.run.join(" ")).toContain("if [ -e /app/data ]; then");
+    expect(finish.undo![0]!.run.join(" ")).toContain("if [ -e /app/data.kitshn1 ]; then rm -rf /app/data.kitshn1; else");
   });
 
   it("stops a deploy when docker info fails, instead of copying on a Docker it cannot name", () => {

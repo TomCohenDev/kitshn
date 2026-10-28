@@ -386,6 +386,9 @@ const circlePlans = new WeakMap<State, Map<string, ReturnType<typeof circleForCa
  * K-529: the actions on every selected card at once, in the menu of a selected card and in the palette. The plan
  * is cached per state and selection, so an open menu does not place the circle again on each render.
  */
+/** The ids of `selectionActions`, which the palette lists once and not under each selected card. */
+const SELECTION_IDS = new Set(["stack-these", "new-circle-for"]);
+
 export function selectionActions(ctx: ActionContext, h: ActionHandlers): Array<Action> {
   if (ctx.selected.size < 2) return [];
   const cache = circlePlans.get(ctx.state) ?? new Map<string, ReturnType<typeof circleForCards>>();
@@ -394,7 +397,23 @@ export function selectionActions(ctx: ActionContext, h: ActionHandlers): Array<A
   const plan = cache.get(key) ?? circleForCards(ctx.state, ctx.selected, { ...NEW_CIRCLE, id: "preview", color: "#6C5CE7" });
   cache.set(key, plan);
   const refused = "refused" in plan ? plan.refused : refusal(ctx.state, plan.edits);
+  // K-521: the first selected card on the map is the one the others stack onto, as a drop onto it would.
+  const ids = [...ctx.selected];
+  const target = ids.find((id) => ctx.state.places.has(id)) ?? ids[0] ?? "";
+  const stack = stackOntoEdits(ctx.state, ids, target, "preview");
   return [
+    // No entry when the cards already are one stack: there is nothing to stack.
+    ...(stack
+      ? [
+          {
+            id: "stack-these",
+            label: `Stack these (${ctx.selected.size})`,
+            tip: "Stack the selected cards: they sit on one point, move as one and get the same circles.",
+            ...("refused" in stack ? { refused: stack.refused } : {}),
+            run: () => h.stackOnto(ids, target),
+          },
+        ]
+      : []),
     {
       id: "new-circle-for",
       label: `New circle for these (${ctx.selected.size})`,
@@ -785,7 +804,7 @@ export function paletteEntries(ctx: ActionContext, h: ActionHandlers): Array<Pal
     ...[...state.resources.values()].flatMap((resource) =>
       // The selection's actions come once, with the map's, not once per selected card.
       flatten(
-        cardActions(ctx, h, resource).map((group) => group.filter((action) => action.id !== "new-circle-for")),
+        cardActions(ctx, h, resource).map((group) => group.filter((action) => !SELECTION_IDS.has(action.id))),
         `${KINDS[resource.kind].icon} ${resource.name}`,
       ),
     ),

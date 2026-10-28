@@ -1171,7 +1171,7 @@ export function App() {
               onRunJob={runJob}
               warnings={store.snapshot.accessWarnings}
               onOpenSafety={openSafety}
-              newCircleFor={selectionActions(actionContext, handlers).find((action) => action.id === "new-circle-for") ?? null}
+              selectionActions={selectionActions(actionContext, handlers)}
               onSignOut={(retry) => void signOut(retry)}
               signOutWarning={store.snapshot.signOutWarning}
               signingOut={signingOut}
@@ -1632,8 +1632,8 @@ function Panel(props: {
   version: string;
   onToast: (text: string, error: boolean) => void;
   onOpenSafety: () => void;
-  /** K-529: the shared action, so the panel shows the same refusal as the menu and the palette. */
-  newCircleFor: Action | null;
+  /** K-521, K-529: the shared selection actions, so the panel shows the same refusals as the menu and the palette. */
+  selectionActions: ReadonlyArray<Action>;
   onSignOut: (retry: boolean) => void;
   signOutWarning: string | null;
   signingOut: boolean;
@@ -1705,28 +1705,22 @@ function Panel(props: {
             </li>
           ))}
         </ul>
-        <button
-          class="btn primary"
-          data-tip="Stack these cards: they sit on one point, move as one and get the same circles."
-          onClick={() =>
-            void props.stacks.stackOnto(
-              cards.map((card) => card.id),
-              cards.find((card) => state.places.has(card.id))?.id ?? cards[0]?.id ?? "",
-            )
-          }
-        >
-          Stack these
-        </button>
-        {props.newCircleFor && "run" in props.newCircleFor ? (
-          <button
-            class="btn"
-            disabled={props.newCircleFor.refused !== undefined}
-            data-tip={props.newCircleFor.refused ?? `${props.newCircleFor.tip} Undo takes it all back.`}
-            onClick={props.newCircleFor.run}
-          >
-            New circle for these
-          </button>
-        ) : null}
+        <div class="row">
+          {props.selectionActions.map((action, index) =>
+            "run" in action ? (
+              <button
+                key={action.id}
+                class={index === 0 ? "btn primary" : "btn"}
+                disabled={action.refused !== undefined}
+                data-tip={action.refused ?? action.tip}
+                onClick={action.run}
+              >
+                {/* The panel already names the selection, so the buttons drop the count of the menu label. */}
+                {action.label.lastIndexOf(" (") > 0 ? action.label.slice(0, action.label.lastIndexOf(" (")) : action.label}
+              </button>
+            ) : null,
+          )}
+        </div>
       </section>
     );
     if (stackOfAll) body = (

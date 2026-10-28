@@ -302,6 +302,22 @@ describe("New circle for these (K-529)", () => {
   });
 });
 
+describe("Stack these (K-521)", () => {
+  it("is a shared selection action in the card menu and once in the palette, and runs stackOnto", () => {
+    const { handlers, calls } = recorder();
+    const ctx = { ...context(), selected: new Set(["riffle", "vps"]) };
+    run(find(actionsFor(ctx, handlers, { _tag: "card", id: "vps" }), "stack-these"));
+    expect(calls[0]).toEqual(["stackOnto", ["riffle", "vps"], "riffle"]);
+    expect(paletteEntries(ctx, handlers).filter((entry) => entry.label.startsWith("Stack these"))).toHaveLength(1);
+  });
+
+  it("is not offered when the selected cards already are one stack", () => {
+    const { handlers } = recorder();
+    const ctx = { ...context(), selected: new Set(["a", "b"]) };
+    expect(ids(actionsFor(ctx, handlers, { _tag: "card", id: "a" }))).not.toContain("stack-these");
+  });
+});
+
 describe("the palette", () => {
   it("has every action of every menu, so no action exists only in a menu", () => {
     const { handlers } = recorder();

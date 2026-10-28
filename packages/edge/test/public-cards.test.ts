@@ -144,8 +144,35 @@ it("draws the newest deploy of a card that anyone may open, and unknown for ever
     add("deploy-brew-2", "failed");
     // A skipped deploy changed nothing, so the badge keeps the failure before it.
     add("deploy-brew-3", "skipped");
+    // A run that stopped before it reported left a planned row that expired; one that still runs has not.
+    for (const [id, expires] of [
+      ["deploy-down-2", 0],
+      ["deploy-down-3", Date.now() + 60_000],
+    ] as const)
+      state.storage.sql.exec(
+        `INSERT OR REPLACE INTO deploys (id, repo, environment, resource_id, address, script, kind, sha, state, expires_at)
+         VALUES (?, ?, 'prod', 'down-app', '', '', 'deploy', 'def', 'planned', ?)`,
+        id,
+        id === "deploy-down-2" ? "o/expired" : "o/down-app",
+        expires,
+      );
+    state.storage.sql.exec("UPDATE deploys SET resource_id = 'tick3d' WHERE id = 'deploy-down-2'");
+    // Anyone can ask for any name, so the lookup must use the index of migration 20.
+    const plan = state.storage.sql
+      .exec<{ detail: string }>(
+        "EXPLAIN QUERY PLAN SELECT state FROM deploys WHERE lower(repo) = lower('x') AND app_key = 'app' AND environment = 'prod'",
+      )
+      .toArray();
+    expect(plan.map((step) => step.detail).join(" ")).toContain("deploys_badge");
   });
   expect(await badgeOf(stub, "o/brew")).toBe("failed");
+  expect(await badgeOf(stub, "o/expired")).toBe("failed");
+  expect(await badgeOf(stub, "o/down-app")).toBe("deploying");
+  // A name that GitHub does not allow draws unknown without a read; another path is not found.
+  const bad = await send("/public/badges/o/bad%20name.svg");
+  expect(bad.status).toBe(200);
+  expect(await bad.text()).toContain("kitshn: unknown");
+  expect((await send("/public/badges/o/tick3d")).status).toBe(404);
 });
 
 it("draws unknown during a lockdown (K-1504, K-1119)", async () => {

@@ -221,7 +221,8 @@ async function edgeCached(
   ctx: ExecutionContext,
   key: string,
   seconds: number,
-  load: () => Promise<Response>,
+  /** `fault` keeps the answer 30 seconds, also when its status is 200. */
+  load: () => Promise<{ readonly answer: Response; readonly fault: boolean }>,
 ) {
   const cache = caches.default;
   const cacheKey = new Request(key);
@@ -233,9 +234,9 @@ async function edgeCached(
   };
   const cached = await cache.match(cacheKey);
   if (cached) return toBrowser(cached);
-  const answer = await load();
+  const { answer, fault } = await load();
   const stored = new Response(await answer.arrayBuffer(), answer);
-  stored.headers.set("cache-control", `public, max-age=${answer.ok ? seconds : 30}`);
+  stored.headers.set("cache-control", `public, max-age=${fault ? 30 : seconds}`);
   ctx.waitUntil(cache.put(cacheKey, stored.clone()));
   return toBrowser(stored);
 }
@@ -252,34 +253,56 @@ function publicCards(request: Request, env: Env, ctx: ExecutionContext) {
     const answer = await env.KITSHN.getByName("kitshn")
       .fetch("https://kitshn.internal/internal/public-cards")
       .catch(() => Response.json({ error: "kitshn could not read its cards." }, { status: 503 }));
-    return new Response(answer.body, { status: answer.status, headers: publicHeaders("application/json") });
+    return {
+      answer: new Response(answer.body, {
+        status: answer.status,
+        headers: publicHeaders("application/json"),
+      }),
+      fault: !answer.ok,
+    };
   });
 }
 
+const NAME_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-";
+
+/** K-1119: a name that GitHub allows: letters, digits, `-` and the `extra` characters, at most `max` long. */
+const githubName = (value: string, max: number, extra = "") =>
+  value.length > 0 &&
+  value.length <= max &&
+  [...value].every((char) => NAME_CHARS.includes(char) || extra.includes(char));
+
 /**
  * K-1119: `/public/badges/<owner>/<repo>.svg`, public in Access, with `app` and `env` as the only query keys that
- * count. Null for any other path.
+ * count. A name that GitHub does not allow gets the `unknown` badge without a read, so random names cost nothing.
+ * Every other path below `/public/badges/` is not found, so the Bypass application covers only badges.
  */
 function badge(request: Request, env: Env, ctx: ExecutionContext) {
   const url = new URL(request.url);
   const rest = url.pathname.slice("/public/badges/".length);
-  if (!rest.endsWith(".svg")) return null;
-  const parts = rest.slice(0, -".svg".length).split("/");
-  if (parts.length !== 2 || parts.some((part) => part === "" || part.length > 100)) return null;
-  const query = new URLSearchParams({
-    repo: parts.join("/").toLowerCase(),
-    app: url.searchParams.get("app") ?? "app",
-    env: url.searchParams.get("env") ?? "prod",
+  const parts = rest.endsWith(".svg") ? rest.slice(0, -".svg".length).split("/") : [];
+  if (parts.length !== 2)
+    return new Response("Not found.", { status: 404, headers: { "cache-control": "no-store" } });
+  const [owner = "", name = ""] = parts;
+  const app = url.searchParams.get("app") ?? "app";
+  const environment = url.searchParams.get("env") ?? "prod";
+  const unknown = (fault: boolean) => ({
+    answer: new Response(badgeSvg("unknown"), { headers: publicHeaders("image/svg+xml") }),
+    fault,
   });
+  if (!githubName(owner, 39) || !githubName(name, 100, "._") || app.length > 64 || environment.length > 64)
+    return edgeCached(request, ctx, `${url.origin}/public/badges/unknown`, 60, async () => unknown(false));
+  const query = new URLSearchParams({ repo: `${owner}/${name}`.toLowerCase(), app, env: environment });
   return edgeCached(request, ctx, `${url.origin}/public/badges?${query}`, 60, async () => {
     const answer = await env.KITSHN.getByName("kitshn")
       .fetch(`https://kitshn.internal/internal/badge?${query}`)
       .catch(() => null);
-    const state = answer?.ok ? ((await answer.json()) as { state: BadgeState }).state : "unknown";
-    return new Response(badgeSvg(state), {
-      status: answer?.ok ? 200 : 503,
-      headers: publicHeaders("image/svg+xml"),
-    });
+    // A fault draws `unknown` with status 200: GitHub's image proxy shows a broken image for any other status.
+    if (!answer?.ok) return unknown(true);
+    const { state } = (await answer.json()) as { state: BadgeState };
+    return {
+      answer: new Response(badgeSvg(state), { headers: publicHeaders("image/svg+xml") }),
+      fault: false,
+    };
   });
 }
 
@@ -381,8 +404,7 @@ export default {
       url.pathname.startsWith("/public/badges/") &&
       (request.method === "GET" || request.method === "HEAD")
     ) {
-      const answer = badge(request, env, ctx);
-      if (answer) return answer;
+      return badge(request, env, ctx);
     }
     // K-1706: "kitshn rekey" trades its one-time code in the same way.
     if ((url.pathname === "/join/exchange" || url.pathname === "/join/rekey") && request.method === "POST") {

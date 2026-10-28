@@ -3212,17 +3212,20 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-1119: the badge state of the newest deploy of one repo, app and environment. Skipped deploys do not count. */
   private badge(query: URLSearchParams) {
-    // Limit: lower(repo) reads every deploy row; the edge asks at most once a minute per badge. Revisit with an index
-    // on lower(repo) if the deploys table grows past some 100 000 rows.
-    const [row] = this.sql<{ resource_id: string; state: string }>(
-      `SELECT resource_id, state FROM deploys WHERE lower(repo) = lower(?) AND app_key = ? AND environment = ?
+    // The index deploys_badge (migration 20) serves this lookup.
+    const [row] = this.sql<{ resource_id: string; state: string; expires_at: number }>(
+      `SELECT resource_id, state, expires_at FROM deploys WHERE lower(repo) = lower(?) AND app_key = ? AND environment = ?
        AND kind = 'deploy' AND state != 'skipped' ORDER BY rowid DESC LIMIT 1`,
       query.get("repo") ?? "",
       query.get("app") ?? "app",
       query.get("env") ?? "prod",
     );
     const resource = row ? this.state.resources.get(row.resource_id) : undefined;
-    return Response.json({ state: badgeState(this.state, resource, row?.state ?? null, Date.now()) });
+    const now = Date.now();
+    // A run that stopped before it reported leaves its row planned or running after it expired (as deployRuns reads).
+    const state =
+      row && row.state !== "done" && row.state !== "failed" && row.expires_at <= now ? "failed" : row?.state;
+    return Response.json({ state: badgeState(this.state, resource, state ?? null, now) });
   }
 
   /** K-1302: one alarm for the next due item. Access work, share end dates, and the daily run. */

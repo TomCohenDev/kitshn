@@ -1,5 +1,6 @@
 import { RESERVED_SITE_NAMES } from "../core/library.ts";
 import type { LiveSiteReport } from "../core/machine.ts";
+import type { Resource } from "../core/model.ts";
 import { type AccessRow, appliesBypass } from "./access-sync.ts";
 
 /** One live site of a machine (K-1104), as the Durable Object keeps it. */
@@ -91,6 +92,18 @@ export function ingressAccess(
   const teamName = teamDomain.split(".")[0];
   if (!teamName) return { kind: "pending", reason: "ACCESS_TEAM_DOMAIN is empty" };
   return { kind: "check", teamName, aud: row.aud };
+}
+
+/**
+ * K-817: one entry for each address that serves a live site. The socket of a Compose app serves every address of
+ * its card, each with its own ingress rule, DNS record and Access application; any other site serves its own.
+ */
+export function servedSites(
+  site: LiveSite,
+  card: Pick<Resource, "kind" | "addresses"> | undefined,
+): Array<LiveSite> {
+  if (card?.kind !== "site.compose" || card.addresses[0] !== site.address) return [site];
+  return card.addresses.map((address) => ({ ...site, address }));
 }
 
 /** K-603, K-607, K-1105: the ingress of a machine's tunnel from its live sites. */

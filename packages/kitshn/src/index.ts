@@ -10,8 +10,12 @@ export interface DeployEntry {
   readonly branch?: string;
   /** The environment name: lowercase letters, digits and `-`. `{pr}` becomes the pull request number. */
   readonly name: string;
-  /** The address, one level under a kitshn zone (K-901). Without it, kitshn picks `<repo>[-<name>].<zone>`. */
-  readonly address?: string;
+  /**
+   * The address, one level under a kitshn zone (K-901). Without it, kitshn picks `<repo>[-<name>].<zone>`. A `push`
+   * entry may list up to 10 addresses (K-817): the first under the kitshn zone is the main one, and each other is the
+   * apex or one name under a zone that kitshn publishes on. All serve the app.
+   */
+  readonly address?: string | ReadonlyArray<string>;
   /** A pull request environment that kitshn removes when the pull request closes (K-904). */
   readonly ephemeral?: boolean;
   /** The circle that a new environment starts in (K-807). Without it, the card waits in the tray, private. */

@@ -6,6 +6,9 @@ import type {
   StaticApp as PublicStaticApp,
 } from "./index.ts";
 
+/** K-817: the most addresses of one environment. Each costs an Access application and a DNS record. */
+export const MAX_ADDRESSES = 10;
+
 const Name = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9{}-]{0,40}$/));
 
 /** One entry of `deploy` (K-807). The first entry that matches the event wins. */
@@ -15,8 +18,17 @@ export const DeployEntry = Schema.Struct({
   branch: Schema.optionalKey(Schema.String),
   /** The environment name. `{pr}` becomes the pull request number. */
   name: Name,
-  /** The address, one level under a kitshn zone (K-901). Without it, kitshn picks `<repo>[-<name>].<zone>`. */
-  address: Schema.optionalKey(Schema.String),
+  /**
+   * The address, one level under a kitshn zone (K-901). Without it, kitshn picks `<repo>[-<name>].<zone>`. A
+   * `push` entry may list several (K-817); each serves the app. A list item stays a string, so a later item kind
+   * (a redirect) can join it.
+   */
+  address: Schema.optionalKey(
+    Schema.Union([
+      Schema.String,
+      Schema.Array(Schema.String).check(Schema.isMinLength(1), Schema.isMaxLength(MAX_ADDRESSES)),
+    ]),
+  ),
   /** A pull request environment that kitshn removes when the pull request closes (K-904). */
   ephemeral: Schema.optionalKey(Schema.Boolean),
   /** The circle that a new environment starts in (K-807). Without it, the card waits in the tray, private. */
@@ -103,7 +115,10 @@ export type Plan =
   | {
       readonly kind: "deploy" | "teardown";
       readonly environment: string;
+      /** The main address: the card address, the expose name, the route check and the deployment (K-817). */
       readonly address: string;
+      /** Every address that serves the app, the main one first (K-817). */
+      readonly addresses: ReadonlyArray<string>;
       readonly ephemeral: boolean;
       readonly startsIn: string | null;
     };
@@ -116,8 +131,29 @@ export const repoSlug = (repo: string) =>
     .replace(/[^a-z0-9-]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
-/** K-807, K-901: the environment and address of an event, or why kitshn skips it. */
-export function plan(recipe: Recipe, repo: string, event: DeployEvent, zone: string): Plan {
+/**
+ * K-817, K-1111: the zone of an address: the apex of a zone or one name under it, so Universal SSL covers it.
+ * Null when it is in no zone, or deeper.
+ */
+export function zoneOfAddress(address: string, zones: ReadonlyArray<string>): string | null {
+  for (const zone of zones) {
+    if (address === zone) return zone;
+    if (address.endsWith(`.${zone}`) && LABEL.test(address.slice(0, -zone.length - 1))) return zone;
+  }
+  return null;
+}
+
+/**
+ * K-807, K-901, K-817: the environment and addresses of an event, or why kitshn skips it. `zone` is the kitshn
+ * zone; `otherZones` are the further zones of K-1111, which only the extra addresses of a `push` entry may use.
+ */
+export function plan(
+  recipe: Recipe,
+  repo: string,
+  event: DeployEvent,
+  zone: string,
+  otherZones: ReadonlyArray<string> = [],
+): Plan {
   const entry = recipe.deploy.find(
     (item) =>
       item.on === event.name &&
@@ -134,17 +170,37 @@ export function plan(recipe: Recipe, repo: string, event: DeployEvent, zone: str
   if (!LABEL.test(environment))
     return { kind: "error", reason: `The environment name "${environment}" is not a valid name.` };
   const slug = repoSlug(repo);
-  const label = entry.address?.endsWith(`.${zone}`)
-    ? entry.address.slice(0, -zone.length - 1)
-    : environment === "prod"
-      ? slug
-      : `${slug}-${environment}`;
-  if (entry.address !== undefined && !entry.address.endsWith(`.${zone}`)) {
+  const listed =
+    entry.address === undefined
+      ? []
+      : typeof entry.address === "string"
+        ? [entry.address]
+        : [...entry.address];
+  if (listed.length > 1 && entry.on !== "push")
+    return { kind: "error", reason: "Only a push entry may list several addresses (K-817)." };
+  if (new Set(listed).size !== listed.length)
+    return { kind: "error", reason: "The address list names an address twice (K-817)." };
+  // K-817: the first address under the kitshn zone is the main one.
+  const main = listed.find((address) => address.endsWith(`.${zone}`));
+  if (listed.length > 0 && main === undefined) {
     return {
       kind: "error",
-      reason: `The address ${entry.address} is not under the kitshn zone ${zone} (K-1111).`,
+      reason: `The address ${listed[0]} is not under the kitshn zone ${zone} (K-1111). One address must be.`,
     };
   }
+  for (const address of listed) {
+    if (address !== main && zoneOfAddress(address, [zone, ...otherZones]) === null)
+      return {
+        kind: "error",
+        reason: `The address ${address} is not the apex or one name under a zone that kitshn publishes on (K-817, K-1111).`,
+      };
+  }
+  const label =
+    main !== undefined
+      ? main.slice(0, -zone.length - 1)
+      : environment === "prod"
+        ? slug
+        : `${slug}-${environment}`;
   // K-901: one level under the zone, so the free Universal SSL certificate covers it.
   if (!LABEL.test(label))
     return {
@@ -159,6 +215,7 @@ export function plan(recipe: Recipe, repo: string, event: DeployEvent, zone: str
     kind: closing ? "teardown" : "deploy",
     environment,
     address: `${label}.${zone}`,
+    addresses: [`${label}.${zone}`, ...listed.filter((address) => address !== main)],
     ephemeral,
     // K-907: a preview starts in Owner unless the recipe names another circle.
     startsIn: entry.startsIn ?? (ephemeral ? "Owner" : null),

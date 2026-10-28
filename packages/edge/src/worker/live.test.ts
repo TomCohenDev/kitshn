@@ -11,6 +11,7 @@ import {
   parseSites,
   reachableAddresses,
   seenText,
+  servedSites,
   sitesNeedingRoutes,
   tunnelConfig,
 } from "./live.ts";
@@ -188,5 +189,38 @@ describe("live sites (K-1104 to K-1108)", () => {
       routes: [{ address: "route.example.com", route_id: "x" }],
     });
     expect([...reachable].sort()).toEqual(["dns.example.com", "old.example.com", "route.example.com"]);
+  });
+});
+
+describe("several addresses of a Compose app (K-817)", () => {
+  const app: LiveSite = {
+    id: "app-climbing-1-prod",
+    machineId: "m1",
+    name: "climbing",
+    address: "climbing.example.com",
+    target: "unix:/run/app.sock",
+    dev: false,
+    up: true,
+    lastUp: 0,
+    state: "ok",
+  };
+  const card = {
+    kind: "site.compose" as const,
+    addresses: ["climbing.example.com", "onion-climbers.com", "www.onion-climbers.com"],
+  };
+
+  it("serves every address of the card from the same socket, each with its own ingress rule", () => {
+    const served = servedSites(app, card);
+    expect(served.map((item) => item.address)).toEqual(card.addresses);
+    expect(new Set(served.map((item) => item.target))).toEqual(new Set(["unix:/run/app.sock"]));
+    const config = tunnelConfig(served, () => ({ kind: "bypass" }));
+    const hostnames = config.config.ingress.flatMap((rule) => ("hostname" in rule ? [rule.hostname] : []));
+    expect(hostnames.sort()).toEqual([...card.addresses].sort());
+  });
+
+  it("keeps a live site and a card of another kind to its own address", () => {
+    expect(servedSites(app, undefined)).toEqual([app]);
+    expect(servedSites(app, { ...card, kind: "site.live" })).toEqual([app]);
+    expect(servedSites(app, { ...card, addresses: ["other.example.com"] })).toEqual([app]);
   });
 });

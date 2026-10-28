@@ -212,18 +212,26 @@ function onOtherZone(host: string, env: Env) {
 
 /**
  * K-1118: public in Access. Any site may read it. The Worker asks the Durable Object at most every 5 minutes, and
- * after a fault at most every 30 seconds.
+ * after a fault at most every 30 seconds. Browsers get `no-store`: the zone's Browser Cache TTL raises any lower
+ * `max-age` to its own 4 hours, and it leaves `no-store` alone.
  */
 async function publicCards(request: Request, env: Env, ctx: ExecutionContext) {
   const cache = caches.default;
   // The query string does not split the cache.
   const key = new Request(`${new URL(request.url).origin}/public/cards.json`);
+  const toBrowser = (answer: Response) => {
+    const response = new Response(request.method === "HEAD" ? null : answer.body, answer);
+    response.headers.set("cache-control", "no-store");
+    response.headers.delete("age");
+    return response;
+  };
   const cached = await cache.match(key);
-  if (cached) return cached;
+  if (cached) return toBrowser(cached);
   const answer = await env.KITSHN.getByName("kitshn")
     .fetch("https://kitshn.internal/internal/public-cards")
     .catch(() => Response.json({ error: "kitshn could not read its cards." }, { status: 503 }));
-  const response = new Response(answer.body, {
+  // Only the edge copy keeps a lifetime, so a fault, such as a 500 during a version switch, lasts 30 seconds.
+  const stored = new Response(await answer.text(), {
     status: answer.status,
     headers: {
       "content-type": "application/json",
@@ -232,8 +240,8 @@ async function publicCards(request: Request, env: Env, ctx: ExecutionContext) {
       "x-content-type-options": "nosniff",
     },
   });
-  ctx.waitUntil(cache.put(key, response.clone()));
-  return response;
+  ctx.waitUntil(cache.put(key, stored.clone()));
+  return toBrowser(stored);
 }
 
 export default {
@@ -328,7 +336,7 @@ export default {
       headers.set("x-kitshn-deployer", JSON.stringify(deployer));
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
     }
-    if (url.pathname === "/public/cards.json" && request.method === "GET")
+    if (url.pathname === "/public/cards.json" && (request.method === "GET" || request.method === "HEAD"))
       return publicCards(request, env, ctx);
     // K-1706: "kitshn rekey" trades its one-time code in the same way.
     if ((url.pathname === "/join/exchange" || url.pathname === "/join/rekey") && request.method === "POST") {

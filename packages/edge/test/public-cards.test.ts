@@ -86,6 +86,12 @@ it("lists only public app cards of push environments that are up, to any origin 
   const response = await send("/public/cards.json", { headers: { origin: "https://kitshn.com" } });
   expect(response.status).toBe(200);
   expect(response.headers.get("access-control-allow-origin")).toBe("*");
+  // The zone's Browser Cache TTL would raise a max-age to hours; only the edge copy keeps one.
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  const again = await send("/public/cards.json", { method: "HEAD" });
+  expect(again.status).toBe(200);
+  expect(again.headers.get("cache-control")).toBe("no-store");
+  expect(await again.text()).toBe("");
   expect(await response.json()).toEqual({
     cards: [
       { name: "brew", address: "brew.example.com", kind: "site.compose", icon: null },

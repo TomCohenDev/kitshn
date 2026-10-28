@@ -31,11 +31,11 @@ const COLORS: Record<BadgeState, string> = {
   unknown: "#8a8f98",
 };
 
-/** K-1119: a flat badge in the shields.io shape. 6.5 px per character fits Verdana 11 for these few words. */
+/** K-1119: a flat badge in the shields.io shape. 7 px per character fits Verdana 11 for these few words. */
 export function badgeSvg(value: BadgeState): string {
   const label = "kitshn";
-  const left = Math.round(label.length * 6.5) + 12;
-  const right = Math.round(value.length * 6.5) + 12;
+  const left = Math.round(label.length * 7) + 12;
+  const right = Math.round(value.length * 7) + 12;
   const width = left + right;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="20" role="img" aria-label="${label}: ${value}">
 <title>${label}: ${value}</title>

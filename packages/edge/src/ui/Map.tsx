@@ -14,7 +14,7 @@ import {
   shareLevel,
   stackTitle,
 } from "../core/model.ts";
-import type { AccessState, MachineView } from "../core/protocol.ts";
+import type { AccessState, MachineView, Snapshot } from "../core/protocol.ts";
 import { isAgentKey } from "../core/agent.ts";
 import { AGENT_TIP, LEVEL_TIPS, MATCH_TIPS, MEMBER_HELP, PASSKEY_TIP, RightStickers } from "./Circle.tsx";
 import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
@@ -94,6 +94,8 @@ interface Props {
   onDropCards: (ids: Array<string>, at: Point) => void;
   readonly state: State;
   readonly access: Readonly<Record<string, AccessState>>;
+  /** K-1125: up or down of each checked card. */
+  readonly uptime: Snapshot["uptime"];
   readonly machines: ReadonlyMap<string, MachineView>;
   readonly selection: Selection;
   readonly onSelect: (selection: Selection) => void;
@@ -700,6 +702,9 @@ export function MapView(props: Props) {
               count={stack && index === 0 ? stack[1].length : null}
               open={open}
               access={props.access[resource.id] ?? null}
+              downSince={
+                props.uptime[resource.id]?.up === false ? (props.uptime[resource.id]?.since ?? null) : null
+              }
               machine={props.machines.get(resource.id) ?? null}
               pullRequest={props.pullRequests[resource.id] ?? null}
               preview={previewIds.has(resource.id)}
@@ -883,6 +888,8 @@ function CardView(props: {
   count: number | null;
   open: boolean;
   access: AccessState | null;
+  /** K-1125: when the card went down, or null while it is up or unchecked. */
+  downSince: number | null;
   machine: MachineView | null;
   pullRequest: number | null;
   preview: boolean;
@@ -920,16 +927,29 @@ function CardView(props: {
           {props.count}
         </span>
       ) : null}
-      {props.access?.state === "applying" ? (
-        <span class="sticker wait state" data-tip={ACCESS_TIPS.applying}>
-          applying
-        </span>
-      ) : null}
-      {props.access?.state === "failed" ? (
-        <span class="sticker state" data-tip={`Failed: Cloudflare refused the change. ${props.access.error}`}>
-          failed
-        </span>
-      ) : null}
+      <div class="states">
+        {props.access?.state === "applying" ? (
+          <span class="sticker wait state" data-tip={ACCESS_TIPS.applying}>
+            applying
+          </span>
+        ) : null}
+        {props.access?.state === "failed" ? (
+          <span
+            class="sticker state"
+            data-tip={`Failed: Cloudflare refused the change. ${props.access.error}`}
+          >
+            failed
+          </span>
+        ) : null}
+        {props.downSince !== null ? (
+          <span
+            class="sticker state"
+            data-tip={`Down since ${new Date(props.downSince).toLocaleString()}: the uptime check of kitshn gets no good answer.`}
+          >
+            down
+          </span>
+        ) : null}
+      </div>
       <div class="name">
         <ItemIcon resource={resource} />
         {resource.name}

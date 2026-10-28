@@ -44,6 +44,7 @@ import type {
   OrphanWorker,
   RepoView,
   RevisionView,
+  Snapshot,
 } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
 import {
@@ -113,6 +114,7 @@ import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type 
 import { overlay } from "./held.ts";
 import { HistoryView } from "./History.tsx";
 import { UsageView } from "./Usage.tsx";
+import { UptimeRow } from "./Uptime.tsx";
 import {
   type Box,
   cardBox,
@@ -1212,6 +1214,7 @@ export function App() {
           zone={store.snapshot.zone}
           state={state}
           access={store.snapshot.access}
+          uptime={store.snapshot.uptime}
           selection={selection}
           onSelect={select}
           hidden={hidden}
@@ -1325,6 +1328,7 @@ export function App() {
               previewCards={previewCards}
               pullRequests={pullRequests}
               deployNotes={store.snapshot.deployNotes}
+              uptime={store.snapshot.uptime}
               pause={pauseView}
               machines={machines}
               version={store.snapshot.version}
@@ -1819,6 +1823,7 @@ function Panel(props: {
   previewCards: ReadonlySet<string>;
   pullRequests: Readonly<Record<string, number>>;
   deployNotes: Readonly<Record<string, DeployNote>>;
+  uptime: Snapshot["uptime"];
   pause: PauseView | null;
   warnings: ReadonlyArray<string>;
   machines: ReadonlyMap<string, MachineView>;
@@ -1885,6 +1890,7 @@ function Panel(props: {
         preview={props.previewCards.has(cards[0].id)}
         pullRequest={props.pullRequests[cards[0].id] ?? null}
         deployNote={props.deployNotes[cards[0].id] ?? null}
+        uptime={props.uptime[cards[0].id] ?? null}
         machine={props.machines.get(cards[0].id) ?? null}
         version={props.version}
         jobs={props.jobs}
@@ -2200,6 +2206,8 @@ function CardPanel(props: {
   preview: boolean;
   /** K-820: the newest deploy of this card failed or did not run. */
   deployNote: DeployNote | null;
+  /** K-1125: up or down, when kitshn checks this card. */
+  uptime: Snapshot["uptime"][string] | null;
   machine: MachineView | null;
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
@@ -2347,6 +2355,7 @@ function CardPanel(props: {
           {props.access.state === "failed" ? <span class="muted">{props.access.error}</span> : null}
         </div>
       ) : null}
+      {props.uptime ? <UptimeRow resource={resource} uptime={props.uptime} /> : null}
       {props.deployNote ? (
         <div class="row">
           <span

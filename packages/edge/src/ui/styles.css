@@ -546,10 +546,12 @@ button.count {
   margin-left: auto;
 }
 /* A status sticker sits on the top edge, above the title line, so it never covers the name. */
-.card .state {
+.card .states {
   position: absolute;
   left: 6px;
   bottom: calc(100% - 4px);
+  display: flex;
+  gap: 4px;
 }
 .mini {
   position: absolute;
@@ -2133,4 +2135,26 @@ a > code {
   padding: 8px 10px;
   border: var(--bw) solid var(--border);
   border-radius: var(--radius);
+}
+
+/* Uptime (K-1125) */
+.uptime-strip {
+  position: relative;
+  height: 12px;
+  margin: 4px 0 8px;
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.uptime-strip > span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+.uptime-strip > .up {
+  background: var(--green);
+}
+.uptime-strip > .down {
+  background: var(--error);
 }

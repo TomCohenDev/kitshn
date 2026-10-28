@@ -120,6 +120,17 @@ import {
 import { DEMO_MACHINES, DEMO_ICONS, demo, demoUsage } from "../core/demo.ts";
 import type { Usage } from "../core/usage.ts";
 import { readUsage } from "./usage.ts";
+import {
+  FAILS_TO_DOWN,
+  UPTIME_FETCHES_PER_RUN,
+  UPTIME_KEEP_MS,
+  UPTIME_RUN_MS,
+  type Uptime,
+  type UptimeChange,
+  addressesOfRun,
+  nextUptime,
+  probeUp,
+} from "../core/uptime.ts";
 import { type MachineOs, machineOs } from "../core/icons.ts";
 import {
   contentSecurityPolicy,
@@ -325,6 +336,16 @@ export class Kitshn extends DurableObject<Env> {
    * costs about 4 rows per revision. Writers change it only when it is loaded, because SQL has their row.
    */
   private revisionCache: Array<RevisionView> | null = null;
+  /** K-1125: the uptime of each checked card, read on first use (K-1302). */
+  private uptimeCache: Map<string, Uptime> | null = null;
+  private get uptime(): Map<string, Uptime> {
+    this.uptimeCache ??= new Map(
+      this.sql<{ card_id: string; up: number; fails: number; since: number }>(
+        "SELECT card_id, up, fails, since FROM uptime",
+      ).map((row) => [row.card_id, { up: row.up === 1, fails: row.fails, since: row.since }]),
+    );
+    return this.uptimeCache;
+  }
   private get revisions(): Array<RevisionView> {
     this.revisionCache ??= this.loadRevisions();
     return this.revisionCache;
@@ -503,6 +524,7 @@ export class Kitshn extends DurableObject<Env> {
     this.accessWarnings = JSON.parse(this.meta("access_warnings") ?? "[]") as Array<string>;
     this.accessCache = null;
     this.revisionCache = null;
+    this.uptimeCache = null;
   }
 
   private loadRevisions(): Array<RevisionView> {
@@ -2079,6 +2101,11 @@ export class Kitshn extends DurableObject<Env> {
       ...this.deployedAndPreviewCards(),
       orphanWorkers: this.orphanWorkers(),
       deployNotes: this.deployNotes(),
+      uptime: Object.fromEntries(
+        [...this.uptime]
+          .filter(([id]) => this.state.resources.has(id))
+          .map(([id, value]) => [id, { up: value.up, since: value.since }]),
+      ),
       icons: Object.fromEntries([...this.iconHashes].filter(([id]) => this.state.resources.has(id))),
       previousVersions: this.sql<{ id: string }>(
         "SELECT id FROM library WHERE previous_size IS NOT NULL",
@@ -2269,6 +2296,8 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/api/devices" && request.method === "GET") return this.listDevices();
     if (path === "/api/usage" && request.method === "GET") return await this.readUsage();
     if (path === "/api/library" && request.method === "GET") return Response.json(this.libraryItems());
+    if (path.startsWith("/api/uptime/") && request.method === "GET")
+      return Response.json(this.uptimeChanges(decodeURIComponent(path.slice("/api/uptime/".length))));
     if ((path === "/api/pages" || path === "/api/files") && request.method === "POST")
       return this.upload(caller, request, path === "/api/pages" ? "page" : "file").catch((error: unknown) => {
         if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 400 });
@@ -3902,6 +3931,7 @@ export class Kitshn extends DurableObject<Env> {
     ];
     for (const end of ends) if (end !== null && end > now && end < next) next = end;
     if (ends.some((end) => end !== null && end <= now) && this.expiredShares(now).length > 0) next = now;
+    if (this.uptimeTargets().length > 0) next = Math.min(next, now + UPTIME_RUN_MS);
     // Never move a pending alarm later: frequent wake-ups would otherwise push it away for good.
     const current = await this.ctx.storage.getAlarm();
     if (current === null || current <= now || next < current) await this.ctx.storage.setAlarm(next);
@@ -3984,6 +4014,15 @@ export class Kitshn extends DurableObject<Env> {
         this.iconHashes.delete(id);
         this.iconChangedAt.delete(id);
       }
+      // K-1126: changes stay 30 days; a removed card loses its uptime here, so a quick Undo keeps it.
+      this.sql(
+        "DELETE FROM uptime_changes WHERE at < ? OR card_id NOT IN (SELECT id FROM resources)",
+        now - UPTIME_KEEP_MS,
+      );
+      for (const { card_id } of this.sql<{ card_id: string }>(
+        "DELETE FROM uptime WHERE card_id NOT IN (SELECT id FROM resources) RETURNING card_id",
+      ))
+        this.uptimeCache?.delete(card_id);
       this.sql(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('daily_at', ?)",
         String(nextUtcMidnight(now)),
@@ -7147,6 +7186,87 @@ export class Kitshn extends DurableObject<Env> {
       cloudflare<T>(token, method, path, body);
   }
 
+  /** K-1125: the cards that uptime covers. A daemon site needs no fetch; a static or Worker app needs one per address. */
+  private uptimeTargets() {
+    return [...this.state.resources.values()].filter(
+      (resource) =>
+        (resource.kind === "site.compose" || resource.kind === "site.live"
+          ? this.liveSites.has(resource.id)
+          : resource.kind === "site.static" || resource.kind === "site.worker") &&
+        resource.addresses.length > 0,
+    );
+  }
+
+  /** K-1125, K-1126: one uptime run. Writes a row only when a card changes. */
+  private async checkUptime(now: number): Promise<{ fetches: number; changed: boolean }> {
+    const targets = this.uptimeTargets();
+    if (targets.length === 0) return { fetches: 0, changed: false };
+    const online = this.onlineMachines();
+    const probes = new Map<string, { up: boolean; failsToDown: number }>();
+    for (const card of targets) {
+      const site = this.liveSites.get(card.id);
+      if (site) probes.set(card.id, { up: site.up && online.has(site.machineId), failsToDown: 1 });
+    }
+    const fetched = addressesOfRun(
+      targets
+        .filter((card) => !this.liveSites.has(card.id))
+        .flatMap((card) => card.addresses.map((address) => ({ card: card.id, address }))),
+      Math.floor(now / UPTIME_RUN_MS),
+      UPTIME_FETCHES_PER_RUN,
+    );
+    const answers = await Promise.all(
+      fetched.map(async ({ card, address }) => {
+        // A timer that ends with the fetch; AbortSignal.timeout keeps the run open for the full 10 seconds.
+        const abort = new AbortController();
+        const timer = setTimeout(() => abort.abort(), 10_000);
+        const response = await fetch(`https://${address}/`, { redirect: "manual", signal: abort.signal })
+          .catch(() => null)
+          .finally(() => clearTimeout(timer));
+        return { card, up: probeUp(response?.status ?? null) };
+      }),
+    );
+    for (const { card, up } of answers)
+      probes.set(card, { up: up && (probes.get(card)?.up ?? true), failsToDown: FAILS_TO_DOWN });
+    let changed = false;
+    this.ctx.storage.transactionSync(() => {
+      for (const [card, probe] of probes) {
+        const before = this.uptime.get(card);
+        const after = nextUptime(before, probe.up, now, probe.failsToDown);
+        if (after === before) continue;
+        this.uptime.set(card, after);
+        this.sql(
+          "INSERT OR REPLACE INTO uptime (card_id, up, fails, since) VALUES (?, ?, ?, ?)",
+          card,
+          after.up ? 1 : 0,
+          after.fails,
+          after.since,
+        );
+        if (before?.up === after.up) continue;
+        changed = true;
+        this.sql(
+          "INSERT OR REPLACE INTO uptime_changes (card_id, at, up) VALUES (?, ?, ?)",
+          card,
+          now,
+          after.up ? 1 : 0,
+        );
+      }
+    });
+    return { fetches: fetched.length, changed };
+  }
+
+  /** K-1126: the changes of a card in the last 24 hours, and the one before them, for the strip in its panel. */
+  private uptimeChanges(card: string): ReadonlyArray<UptimeChange> {
+    const since = Date.now() - 24 * 60 * 60_000;
+    return this.sql<{ at: number; up: number }>(
+      `SELECT at, up FROM uptime_changes WHERE card_id = ? AND at >= coalesce(
+         (SELECT MAX(at) FROM uptime_changes WHERE card_id = ? AND at < ?), ?) ORDER BY at`,
+      card,
+      card,
+      since,
+      since,
+    ).map((row) => ({ at: row.at, up: row.up === 1 }));
+  }
+
   override async alarm() {
     const now = Date.now();
     this.checkLiveness(now);
@@ -7157,11 +7277,14 @@ export class Kitshn extends DurableObject<Env> {
     this.endShares(now);
     const daily = this.dailyAt() <= now;
     if (daily) this.daily(now);
+    // K-1126: the uptime fetches count against the 40 calls of this run (K-406).
+    const uptime = await this.checkUptime(now);
+    if (uptime.changed) changed = true;
     const api = this.api();
     if (api) {
       const desired = this.desired(now);
       // K-406: the daily compare spends part of the 40 calls of this run.
-      let spent = 0;
+      let spent = uptime.fetches;
       if (daily) {
         try {
           this.accessWarnings = await verifyAccess(

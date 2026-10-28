@@ -72,6 +72,8 @@ export interface Snapshot {
   readonly orphanWorkers: ReadonlyArray<OrphanWorker>;
   /** K-820: the cards whose newest deploy failed or did not run, with why. */
   readonly deployNotes: Readonly<Record<string, DeployNote>>;
+  /** K-1125: the uptime of each checked card: up or down, and since when. */
+  readonly uptime: Readonly<Record<string, { readonly up: boolean; readonly since: number }>>;
   /** K-1113: the cards with a stored icon, each with the hash of its bytes, which versions its address. */
   readonly icons: Readonly<Record<string, string>>;
   /** K-1117: the pages and files that have a previous version to restore. */

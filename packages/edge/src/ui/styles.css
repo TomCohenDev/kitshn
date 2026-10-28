@@ -29,6 +29,8 @@
   --shadow: 4px 4px 0 0 var(--shadow-ink);
   --sans: "Bricolage Grotesque", system-ui, sans-serif;
   --mono: "JetBrainsMono Nerd Font Mono", "JetBrains Mono", monospace;
+  /* The overlay panel; App.tsx `panelLeft` uses the same 26rem. */
+  --panel-width: min(26rem, calc(100vw - 24px));
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -201,8 +203,7 @@ code {
   padding: 1px 10px;
 }
 
-input,
-select {
+input {
   font: inherit;
   font-size: 1rem;
   padding: 4px 8px;
@@ -211,6 +212,12 @@ select {
   border: var(--bw) solid var(--border);
   border-radius: var(--radius);
   min-width: 0;
+}
+
+/* The browser's own clear button of a search field is native UI; Escape clears the field. */
+input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .chip {
@@ -237,7 +244,7 @@ select {
   position: fixed;
   top: 10px;
   left: 10px;
-  right: 400px;
+  right: 10px;
   z-index: 10;
   display: flex;
   flex-wrap: wrap;
@@ -261,38 +268,29 @@ select {
 .bar .grow {
   flex: 1;
 }
-.side {
-  position: fixed;
-  top: 10px;
-  right: 10px;
-  bottom: 10px;
-  width: 380px;
-  z-index: 10;
-  overflow: auto;
-  padding: 12px;
-  background: var(--surface);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+/* Beside a floating panel, the toolbar and the hint stop at the panel, so nothing runs under it. */
+.bar.beside-panel,
+.hint.beside-panel {
+  right: calc(var(--panel-width) + 24px);
 }
-.side h2 {
+.overlay-panel h2 {
   font-size: 1.15rem;
   margin-bottom: 6px;
   overflow-wrap: anywhere;
 }
-.side .row {
+.overlay-panel .row {
   display: flex;
   gap: 6px;
   align-items: center;
   flex-wrap: wrap;
   margin: 6px 0;
 }
-.side ul {
+.overlay-panel ul {
   list-style: none;
   padding: 0;
   margin: 4px 0 10px;
 }
-.side li {
+.overlay-panel li {
   padding: 5px 8px;
   margin-bottom: 6px;
   background: var(--raised);
@@ -300,11 +298,8 @@ select {
   border-radius: var(--radius);
   font-size: 0.95rem;
 }
-.side section + section {
+.overlay-panel section + section {
   margin-top: 14px;
-}
-.handle {
-  display: none;
 }
 
 /* Map */
@@ -337,8 +332,10 @@ select {
     0 0 0 4px var(--select),
     4px 4px 0 6px var(--shadow-ink);
 }
+/* A head draws above the cards, so a card never hides the circle's name and level (layout.ts headAngle). */
 .circle .head {
   position: absolute;
+  z-index: 2;
   left: 50%;
   top: -20px;
   transform: translateX(-50%);
@@ -356,6 +353,9 @@ select {
   font-weight: 800;
   font-size: 1rem;
   pointer-events: auto;
+}
+.circle .head .sticker {
+  flex: none;
 }
 .circle.sel .head {
   background: var(--select);
@@ -412,7 +412,58 @@ select {
   color: var(--select-fg);
 }
 .card.dragging {
+  z-index: 3;
   cursor: grabbing;
+}
+/* K-1508: a History row highlights its cards and circles once; the outline fades and never repeats. */
+.flash {
+  animation: flash 1.2s ease-out 1;
+}
+@keyframes flash {
+  0%,
+  60% {
+    outline: 6px solid var(--select);
+    outline-offset: 4px;
+  }
+  100% {
+    outline: 6px solid transparent;
+    outline-offset: 4px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flash {
+    animation: none;
+    outline: 6px solid var(--select);
+    outline-offset: 4px;
+  }
+}
+/* K-524: the icon of an item, in an ink tile. An image gets a white backing in both modes, so a dark logo
+   with a transparent background stays visible on the dark surface. */
+.item-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 1.4em;
+  height: 1.4em;
+  margin-right: 0.35em;
+  border: var(--bw) solid var(--border);
+  border-radius: 4px;
+  background: var(--raised);
+  font-size: 0.85em;
+  line-height: 1;
+  vertical-align: middle;
+  overflow: hidden;
+  flex: none;
+}
+.item-icon.image {
+  background: #fff;
+}
+.item-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.repo-list .item-icon {
+  margin-right: 0;
 }
 .card .name {
   font-weight: 800;
@@ -454,10 +505,38 @@ select {
   --tilt: 4deg;
   background: var(--yellow);
 }
+/* K-523: the "⋯" button opens the context menu of a card, a stack or a circle head. */
+.more {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.6rem;
+  height: 1.4rem;
+  padding: 0 4px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  line-height: 1;
+  color: inherit;
+  background: none;
+  border: var(--bw) solid transparent;
+  border-radius: 4px;
+}
+.more:hover,
+.more:focus-visible {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--border);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.card .foot .more {
+  margin-left: auto;
+}
+/* A status sticker sits on the top edge, above the title line, so it never covers the name. */
 .card .state {
   position: absolute;
-  left: -8px;
-  top: -12px;
+  left: 6px;
+  bottom: calc(100% - 4px);
 }
 .mini {
   position: absolute;
@@ -505,9 +584,9 @@ select {
 .tray {
   position: fixed;
   left: 10px;
-  /* Below the header, which wraps to two rows on a laptop. Revisit when the header height changes. */
-  top: 112px;
-  max-height: calc(100dvh - 180px);
+  /* Below the toolbar; App.tsx measures its height into `--bar-bottom`. */
+  top: calc(var(--bar-bottom, 102px) + 10px);
+  max-height: calc(100dvh - var(--bar-bottom, 102px) - 78px);
   width: 210px;
   z-index: 9;
   display: flex;
@@ -624,28 +703,18 @@ select {
   border-color: var(--shadow-ink);
   border-left-width: 8px;
 }
-
-/* History */
-.history {
-  position: fixed;
-  top: 112px;
-  left: 10px;
-  right: 400px;
-  bottom: 10px;
-  z-index: 9;
-  overflow: auto;
-  padding: 12px;
-  background: var(--surface);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+/* A dangerous palette entry runs only when picked (paletteEnter). */
+.dialog li[data-danger] {
+  color: var(--error-fg);
 }
-.history table {
+
+/* Tables of the Library and Machines views */
+.overlay-panel table {
   border-collapse: collapse;
   width: 100%;
   font-size: 0.95rem;
 }
-.history th {
+.overlay-panel th {
   text-transform: uppercase;
   font-weight: 800;
   font-size: 0.7rem;
@@ -653,15 +722,112 @@ select {
   color: var(--muted);
   background: var(--raised);
 }
-.history td,
-.history th {
+.overlay-panel td,
+.overlay-panel th {
   text-align: left;
   padding: 4px 8px;
   border: var(--bw) solid var(--border);
   vertical-align: top;
 }
-.history td.id {
-  font-family: var(--mono);
+/* A narrow panel (the floating one, or any on a phone) shows each table row as a card of labelled lines. */
+@container panel (max-width: 45rem) {
+  .overlay-panel :is(table, tbody, tr, td) {
+    display: block;
+  }
+  .overlay-panel thead {
+    display: none;
+  }
+  .overlay-panel tr {
+    margin-bottom: 8px;
+    padding: 4px 0;
+    border: var(--bw) solid var(--border);
+    border-radius: var(--radius);
+    background: var(--raised);
+  }
+  .overlay-panel td {
+    padding: 2px 8px;
+    border: 0;
+  }
+  .overlay-panel td[data-label]::before {
+    content: attr(data-label) ": ";
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+}
+.table-view > input[type="search"] {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+/* History (K-1508) */
+.history-view input[type="search"] {
+  width: 100%;
+  margin: 8px 0 4px;
+}
+.history-view .pills + .pills {
+  margin-top: 6px;
+}
+.history-day {
+  margin: 14px 0 4px;
+}
+.history-actor {
+  margin: 8px 0 4px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+.overlay-panel .history-group ul {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+}
+.overlay-panel .history-group li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+}
+.history-row {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 0.95rem;
+  text-align: left;
+  color: var(--ink);
+  background: var(--raised);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.history-row:hover {
+  background: var(--select);
+  color: var(--select-fg);
+}
+.history-row .muted {
+  font-size: 0.8rem;
+}
+.history-row:hover .muted {
+  color: inherit;
+}
+.btn[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: default;
+}
+.btn[aria-disabled="true"]:hover,
+.btn[aria-disabled="true"]:active {
+  transform: none;
+  box-shadow: none;
 }
 .stamp {
   display: inline-block;
@@ -690,35 +856,9 @@ select {
   font-size: 1rem;
 }
 
-/* K-516: on a phone the panel is a bottom sheet. */
 @media (max-width: 720px) {
-  .bar {
+  .bar.beside-panel {
     right: 10px;
-  }
-  .side {
-    top: auto;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    width: auto;
-    max-height: 45dvh;
-    border-radius: 12px 12px 0 0;
-  }
-  .side.closed {
-    max-height: 44px;
-    overflow: hidden;
-  }
-  .handle {
-    display: block;
-    width: 48px;
-    height: 6px;
-    margin: -4px auto 8px;
-    border-radius: 3px;
-    background: var(--border);
-  }
-  .history {
-    right: 10px;
-    bottom: 50dvh;
   }
   .tray {
     width: 150px;
@@ -838,7 +978,7 @@ pre.output {
   --tilt: 2deg;
 }
 
-.history .preview {
+.overlay-panel .preview {
   display: block;
   width: 100%;
   height: 50vh;
@@ -859,8 +999,7 @@ pre.output {
 }
 
 /* Forms (tick3d): ink borders, help lines in muted text, errors in the error colours. */
-input:focus-visible,
-select:focus-visible {
+input:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 0;
   box-shadow: 3px 3px 0 0 var(--shadow-ink);
@@ -898,46 +1037,253 @@ select:focus-visible {
   padding-top: 6px;
 }
 
-/* A switch; the one round control of tick3d. */
+/* Standard components of the neo-brutalism skill: tooltip, checkbox, radio, switch, menu, overlay panel. */
+.tooltip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  max-width: 18rem;
+  padding: 4px 8px;
+  z-index: 50;
+  pointer-events: none;
+  font: 600 0.8rem/1.35 var(--sans);
+  color: var(--ink);
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 3px 3px 0 0 var(--shadow-ink);
+}
+
+.check,
+.radio {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  flex: none;
+  width: 1.15em;
+  height: 1.15em;
+  cursor: pointer;
+  display: inline-grid;
+  place-content: center;
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
+  transition:
+    transform 80ms,
+    box-shadow 80ms;
+}
+.check {
+  border-radius: 4px;
+}
+.radio {
+  border-radius: 50%;
+}
+.check::after {
+  content: "";
+  width: 0.6em;
+  height: 0.32em;
+  opacity: 0;
+  border: solid var(--select-fg);
+  border-width: 0 0 3px 3px;
+  transform: rotate(-45deg) translate(1px, -1px);
+}
+.radio::after {
+  content: "";
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 50%;
+  background: var(--select-fg);
+  opacity: 0;
+}
+.check:checked,
+.radio:checked {
+  background: var(--select);
+}
+.check:checked::after,
+.radio:checked::after {
+  opacity: 1;
+}
+.check:active,
+.radio:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+.check:disabled,
+.radio:disabled,
+.switch:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .switch {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  flex: none;
+  position: relative;
+  cursor: pointer;
+  width: 2.4em;
+  height: 1.35em;
+  border-radius: 999px;
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
+  transition:
+    background 120ms,
+    transform 80ms,
+    box-shadow 80ms;
+}
+.switch::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 0.95em;
+  height: 0.95em;
+  border-radius: 50%;
+  background: var(--ink);
+  transform: translateY(-50%);
+  transition: left 120ms;
+}
+.switch:checked {
+  background: var(--select);
+}
+.switch:checked::before {
+  left: calc(100% - 0.95em - 2px);
+  background: var(--select-fg);
+}
+.switch:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+
+.choice {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 0;
-  font: inherit;
+  gap: 0.5em;
+  min-height: 1.75rem;
+  cursor: pointer;
   font-weight: 700;
+}
+.choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.menu {
+  position: fixed;
+  left: 0;
+  top: 0;
+  min-width: 12rem;
+  padding: 4px;
+  display: grid;
+  gap: 2px;
+  z-index: 40;
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 3px 3px 0 0 var(--shadow-ink);
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
   color: var(--ink);
   background: none;
   border: 0;
-  cursor: pointer;
+  border-radius: 4px;
 }
-.switch .knob {
-  position: relative;
-  width: 2.4rem;
-  height: 1.3rem;
-  background: var(--raised);
-  border: var(--bw) solid var(--border);
-  border-radius: 999px;
-  box-shadow: 2px 2px 0 0 var(--shadow-ink);
-  transition: background 120ms;
+.menu-item:is(:hover, :focus-visible, [data-highlighted]) {
+  background: var(--select);
+  color: var(--select-fg);
+  outline: none;
 }
-.switch .knob::after {
-  content: "";
-  position: absolute;
-  top: 1px;
-  left: 1px;
-  width: calc(1.3rem - 6px);
-  height: calc(1.3rem - 6px);
+.menu-item:is(:disabled, [aria-disabled="true"]) {
+  opacity: 0.55;
+  cursor: default;
+}
+.menu-item[data-danger] {
+  color: var(--error-fg);
+}
+.menu-sep {
+  height: var(--bw);
+  margin: 2px 4px;
+  background: var(--border);
+}
+.menu-key {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.75em;
+  color: var(--muted);
+}
+
+/* An overlay panel floats over the map instead of a fixed side bar (K-516). */
+.overlay-panel {
+  container: panel / inline-size;
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  width: var(--panel-width);
+  overflow: auto;
+  padding: 12px;
+  z-index: 30;
   background: var(--surface);
   border: var(--bw) solid var(--border);
-  border-radius: 50%;
-  transition: transform 120ms;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
 }
-.switch[aria-checked="true"] .knob {
-  background: var(--green);
+/* The head stays at the top while the panel scrolls, so Close is always in reach, also on a phone. */
+.overlay-head {
+  position: sticky;
+  top: -12px;
+  z-index: 1;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: -12px -12px 8px;
+  padding: 12px 12px 6px;
+  background: var(--surface);
+  border-bottom: var(--bw) solid var(--border);
 }
-.switch[aria-checked="true"] .knob::after {
-  transform: translateX(1.1rem);
+.overlay-head h2:focus {
+  outline: none;
+}
+.overlay-head h2 {
+  flex: 1;
+  margin: 0;
+}
+/* The full view: below the toolbar (`--bar-bottom`, measured in App.tsx). */
+.overlay-panel.large {
+  top: calc(var(--bar-bottom, 102px) + 10px);
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  width: auto;
+}
+/* K-516: on a phone the panel is a bottom sheet, and its full view takes the whole screen. After the rules
+   above, so it wins. */
+@media (max-width: 720px) {
+  .overlay-panel {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    max-height: 45dvh;
+    border-radius: 12px 12px 0 0;
+  }
+  .overlay-panel.large {
+    top: 0;
+    max-height: none;
+    border-radius: 0;
+  }
 }
 
 /* Circle editor */
@@ -988,15 +1334,15 @@ select:focus-visible {
   transform: translate(-1px, -1px);
   box-shadow: 3px 3px 0 0 var(--shadow-ink);
 }
-.side ul.members,
-.side ul.picks,
-.side ul.opens {
+.overlay-panel ul.members,
+.overlay-panel ul.picks,
+.overlay-panel ul.opens {
   display: flex;
   flex-direction: column;
   gap: 6px;
   margin: 0 0 8px;
 }
-.side ul.members li.member {
+.overlay-panel ul.members li.member {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1037,8 +1383,8 @@ select:focus-visible {
 .add-member .row {
   margin-top: 8px;
 }
-.side ul.picks li,
-.side ul.opens li {
+.overlay-panel ul.picks li,
+.overlay-panel ul.opens li {
   margin: 0;
   padding: 0;
   background: none;

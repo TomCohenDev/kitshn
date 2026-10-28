@@ -4,10 +4,10 @@ name: kitshn 2
 # release "edge", which the bootstrap script downloads (K-1203).
 on:
   pull_request:
-    paths: [packages/**, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, tsconfig.base.json, .github/workflows/edge.yml]
+    paths: [packages/**, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, tsconfig.base.json, .bun-version, .github/workflows/edge.yml]
   push:
     branches: [main]
-    paths: [packages/**, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, tsconfig.base.json, .github/workflows/edge.yml]
+    paths: [packages/**, package.json, pnpm-lock.yaml, pnpm-workspace.yaml, tsconfig.base.json, .bun-version, .github/workflows/edge.yml]
 
 permissions:
   contents: read
@@ -30,13 +30,17 @@ jobs:
       # The daemon's tests run on Bun, the runtime that it ships with (Bun.YAML, K-818).
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.4
+          bun-version-file: .bun-version
       - run: pnpm install --frozen-lockfile
       - run: pnpm run format:check
       - run: pnpm run lint
       - run: pnpm run typecheck
       - run: pnpm run test
       - run: sh -n packages/edge/public/install && sh -n packages/edge/public/join
+      # K-701: a compiled binary reads the peer user id with the daemon's code, so a Bun without `socket.fd` fails here.
+      - name: Peer user id self-test, compiled for linux-x64 (K-701)
+        working-directory: packages/daemon
+        run: bun build src/peer.selftest.ts --compile --outfile="$RUNNER_TEMP/selftest" && "$RUNNER_TEMP/selftest"
       - run: pnpm --filter @kitshn/edge run build
       - name: The kitshn types build, and the .d.ts has no imports (K-801)
         working-directory: packages/kitshn
@@ -48,9 +52,28 @@ jobs:
           name: kitshn-edge
           path: packages/edge/dist/kitshn-edge.tar.gz
 
+  # K-701: the same self-test on a native arm64 runner, for the linux-arm64 daemon.
+  selftest-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: pnpm install --frozen-lockfile
+      - name: Peer user id self-test, compiled for linux-arm64 (K-701)
+        working-directory: packages/daemon
+        run: bun build src/peer.selftest.ts --compile --outfile="$RUNNER_TEMP/selftest" && "$RUNNER_TEMP/selftest"
+
   release:
     if: github.event_name == 'push'
-    needs: check
+    needs: [check, selftest-arm64]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -65,10 +88,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.4
+          bun-version-file: .bun-version
       - name: Build the daemon for each platform (K-601)
         working-directory: packages/daemon
-        run: node scripts/build.ts
+        run: |
+          test "$(bun --version)" = "$(cat ../../.bun-version)" || { echo "Bun $(bun --version) is not the Bun of .bun-version"; exit 1; }
+          node scripts/build.ts
       - name: Build the kitshn CLI and pack the kitshn package (K-801, K-803)
         working-directory: packages/kitshn
         run: |

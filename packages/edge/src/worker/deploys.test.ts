@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { environmentNames, eventOf, legacyRepos, parseManifest, repoIdOf } from "./deploys.ts";
+import { environmentNames, eventOf, legacyRepos, parseManifest, parseSiteIcon, repoIdOf } from "./deploys.ts";
 
 describe("deploys (K-811, K-903)", () => {
   it("takes the event, branch and pull request from the token, not from the request", () => {
@@ -96,5 +96,22 @@ describe("deploys (K-811, K-903)", () => {
     expect(Object.fromEntries(repoIds)).toEqual({ d1: "1", d2: "1", d3: "2", d4: "3" });
     expect(Object.fromEntries(allowed)).toEqual({ "1": "me/old-name" });
     expect(unknown).toEqual(["d5"]);
+  });
+});
+
+describe("site icon of a deploy (K-1113)", () => {
+  const PNG = btoa(String.fromCharCode(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0));
+
+  it("takes an image by its bytes, and keeps the stored icon for a CLI without icons", () => {
+    expect(parseSiteIcon(PNG)).toMatchObject({ type: "image/png" });
+    expect(parseSiteIcon(null)).toBeNull();
+    expect(parseSiteIcon(undefined)).toBeUndefined();
+  });
+
+  it("refuses what is no image, too large, or no base64", () => {
+    expect(parseSiteIcon(btoa("<html>hi</html>"))).toMatch(/not a PNG/);
+    expect(parseSiteIcon("A".repeat(200_000))).toMatch(/larger than 100 KB/);
+    expect(parseSiteIcon("%%%")).toMatch(/base64/);
+    expect(parseSiteIcon(42)).toMatch(/base64 text or null/);
   });
 });

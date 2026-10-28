@@ -1,16 +1,27 @@
 // The kitshn daemon (SPEC section 6). One program: `kitshn join`, `kitshn run`, `kitshn service`.
 import {
+  connectText,
+  fingerprintOf,
+  newMachineKey,
   openJoin,
+  parsePrivateKey,
+  rotateText,
+  signText,
   type Command,
   type DaemonMessage,
   type JoinSecrets,
+  type MachinePrivateKey,
   type ProjectVolume,
   type ServerToDaemon,
 } from "@kitshn/edge/machine";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import type { Answer, Request } from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
+import { keyPlan } from "./keys.ts";
+import { type LocalOutcome, askLocal, listenLocal } from "./local.ts";
+import { localUsersOf, peerDecision } from "./peer.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
 import {
   chmodSync,
@@ -46,6 +57,9 @@ import {
   releaseAsset,
   serviceCommands,
   serviceFile,
+  tunnelCommands,
+  tunnelServiceFile,
+  tunnelStateOf,
 } from "./service.ts";
 import { type SiteEntry, addSite, parseSiteFile, probe, targetOf } from "./sites.ts";
 import { RUNNING_FORMAT, VOLUME_FORMAT, idleVolumes, volumeRemoveRefusal } from "./volumes.ts";
@@ -81,39 +95,220 @@ function readConfig(): JoinSecrets {
   return JSON.parse(readFileSync(paths.config, "utf8")) as JoinSecrets;
 }
 
-/** K-602: trades the join code for the machine secrets and saves them for the daemon user only. */
+/**
+ * K-1702: the private half of the machine key lives next to `machine.json`, mode 0600 in a folder with mode
+ * 0700. During a rotation the new half waits in `machine.key.next` until kitshn has it (K-1705).
+ */
+const keyFile = join(dirname(paths.config), "machine.key");
+const nextKeyFile = `${keyFile}.next`;
+/** K-1703, K-1706: a key from a join or rekey code waits here until kitshn takes it. */
+const codeKeyFile = `${keyFile}.rekey`;
+
+/** The key in a file, or null when the file is missing. A broken file stops the daemon (K-006). */
+function readKey(file: string): MachinePrivateKey | null {
+  if (!existsSync(file)) return null;
+  const key = parsePrivateKey(JSON.parse(readFileSync(file, "utf8")));
+  if (!key) fail(`${file} holds no Ed25519 key. Use Reset key on the map, then kitshn rekey <code>.`);
+  return key;
+}
+
+/** Writes a key through a rename, so a stop never leaves half a key. */
+function writeKey(file: string, key: MachinePrivateKey) {
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  chmodSync(dirname(file), 0o700);
+  const temporary = `${file}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(key)}\n`, { mode: 0o600 });
+  renameSync(temporary, file);
+}
+
+/**
+ * K-602, K-1703: trades the join code and the public half of a new machine key for the machine secrets, and saves
+ * both for the daemon user only.
+ */
 async function joinCommand(code: string | undefined, server: string | undefined) {
   if (!code || !server) fail("usage: kitshn join <code> --server https://kit.example.com");
+  // K-1703: the key pair comes first, in machine.key.rekey before kitshn stores its public half, so a wrong code
+  // never replaces a valid key. The next challenge that names it promotes it.
+  const key = await newMachineKey();
+  writeKey(codeKeyFile, key);
   const response = await fetch(new URL("/join/exchange", server), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code }),
+    body: JSON.stringify({ code, publicKey: key.x }),
   });
   const body = (await response.json().catch(() => null)) as {
     iv?: string;
     sealed?: string;
     error?: string;
   } | null;
-  if (!response.ok || !body?.iv || !body.sealed)
+  if (!response.ok || !body?.iv || !body.sealed) {
+    rmSync(codeKeyFile, { force: true });
     fail(body?.error ?? `the server answered ${response.status}.`);
+  }
   const secrets = await openJoin(code, { iv: body.iv, sealed: body.sealed });
   mkdirSync(dirname(paths.config), { recursive: true, mode: 0o700 });
   // An older file can have looser permissions; tighten them before the secrets go in.
   if (existsSync(paths.config)) chmodSync(paths.config, 0o600);
   writeFileSync(paths.config, `${JSON.stringify(secrets, null, 2)}\n`, { mode: 0o600 });
-  console.log(`Joined as machine ${secrets.machineId}. Saved the tokens in ${paths.config}.`);
+  renameSync(codeKeyFile, keyFile);
+  console.log(`Joined as machine ${secrets.machineId} with the key ${await fingerprintOf(key.x)}.`);
 }
 
-function serviceCommand(action: string | undefined) {
+/**
+ * K-1706, K-1708: trades a key code for a new key, then asks the running daemon to connect again with it. Only
+ * the daemon's own connection to kitshn changes; the tunnel and the apps keep serving. A stopped daemon signs
+ * with the new `machine.key` when it starts.
+ */
+async function rekeyCommand(code: string | undefined) {
+  if (!code) fail("usage: kitshn rekey <code>");
+  const config = readConfig();
+  // In its own file before kitshn stores its public half, so a failed write cannot lock the machine out, a wrong
+  // code cannot replace a valid key, and a rotation or a reconnect never touches it. The next challenge that
+  // names it promotes it.
+  const key = await newMachineKey();
+  writeKey(codeKeyFile, key);
+  const response = await fetch(new URL("/join/rekey", config.server), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code, machineId: config.machineId, publicKey: key.x }),
+  });
+  const body = (await response.json().catch(() => null)) as { fingerprint?: string; error?: string } | null;
+  if (!response.ok || !body?.fingerprint) {
+    rmSync(codeKeyFile, { force: true });
+    fail(body?.error ?? `the server answered ${response.status}.`);
+  }
+  renameSync(codeKeyFile, keyFile);
+  console.log(`Saved the new key ${body?.fingerprint} in ${keyFile}.`);
+  const answer = await ask({ id: "1", type: "reconnect" });
+  console.log(
+    answer === null
+      ? "The daemon is not running. It signs with the new key when it starts."
+      : "The daemon connects again with the new key.",
+  );
+}
+
+/** K-1705: asks the running daemon to rotate its key over its connection. */
+async function rotateKeyCommand() {
+  const answer = await ask({ id: "1", type: "rotate-key" });
+  if (answer === null) fail(notRunning);
+  if (answer.type !== "rotate-key") fail(`the daemon answered ${answer.type} to rotate-key.`);
+  console.log(`Rotated. The new key is ${answer.fingerprint}.`);
+}
+
+async function statusCommand() {
+  const answer = await ask({ id: "1", type: "status" });
+  if (answer === null) fail(notRunning);
+  if (answer.type !== "status") fail(`the daemon answered ${answer.type} to status.`);
+  const { status } = answer;
+  console.log(
+    [
+      `version  ${status.version}`,
+      `machine  ${status.machineId}`,
+      `key      ${status.fingerprint ?? "none (kitshn rekey <code>)"}`,
+      `kitshn   ${status.connection}`,
+      `tunnel   ${status.tunnel}`,
+    ].join("\n"),
+  );
+}
+
+/** K-701: where the commands find the daemon. `KITSHN_LOCAL_SOCKET` names the socket for a user other than its own. */
+const socketPath = process.env["KITSHN_LOCAL_SOCKET"] || paths.socket;
+const notRunning = `the daemon is not running (no daemon listens on ${socketPath}). Start it with: kitshn service install`;
+
+/** K-702: one request to the running daemon; null when it does not run. An error answer ends the command. */
+async function ask(request: Request): Promise<Exclude<Answer, { type: "error" }> | null> {
+  // A rotation waits for kitshn to store the new key (K-1705).
+  const outcome: LocalOutcome = await askLocal(socketPath, request, 30_000).catch((error: unknown) =>
+    fail(error instanceof Error ? error.message : String(error)),
+  );
+  if (outcome.kind === "not-running") return null;
+  if (outcome.answer.type === "error") fail(outcome.answer.error);
+  return outcome.answer;
+}
+
+/**
+ * K-701: `kitshn local-users list|add|remove [user]` edits `localUsers` in `machine.json`. Only the daemon user
+ * (and root) can read that file. The daemon reads the list at each new connection.
+ */
+function localUsersCommand(action: string | undefined, who: string | undefined) {
+  readConfig();
+  const machine = JSON.parse(readFileSync(paths.config, "utf8")) as Record<string, unknown>;
+  const users = localUsersOf(machine);
+  if (users === null) fail(`localUsers in ${paths.config} is not a list of user ids. Fix it by hand.`);
+  const own = process.getuid!();
+  if (action === "list") {
+    console.log([`${own} (the daemon user)`, ...users.map(String)].join("\n"));
+    return;
+  }
+  if ((action !== "add" && action !== "remove") || !who) fail("usage: kitshn local-users list|add|remove <user or uid>");
+  const uid = uidOf(who);
+  if (uid === own) fail("the daemon user always can use the local socket.");
+  // K-701: the socket folder is 0700 (on Linux also the folder $XDG_RUNTIME_DIR), so only root reaches it.
+  if (action === "add" && uid !== 0)
+    fail(`only root can reach the socket of this user, so the user id ${uid} cannot connect (K-701).`);
+  const next = action === "add" ? [...new Set([...users, uid])] : users.filter((user) => user !== uid);
+  // Through a rename, so a stop never leaves half of the file that holds the machine token.
+  const temporary = `${paths.config}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify({ ...machine, localUsers: next }, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temporary, paths.config);
+  console.log(`Local users: ${next.length > 0 ? next.join(", ") : "none"}, and the daemon user ${own}.`);
+}
+
+/** A user id, from a number or a user name. */
+function uidOf(who: string): number {
+  if ([...who].every((char) => char >= "0" && char <= "9")) return Number(who);
+  const result = spawnSync("id", ["-u", who], { encoding: "utf8" });
+  if (result.status !== 0) fail(`there is no user ${who}.`);
+  return Number(result.stdout.trim());
+}
+
+const run = (argv: ReadonlyArray<string>, mayFail = false) => {
+  const [program = "", ...rest] = argv;
+  const result = spawnSync(program, rest, { stdio: "inherit" });
+  if (result.status !== 0 && !mayFail) fail(`${argv.join(" ")} failed.`);
+};
+
+const tunnel = tunnelCommands(platform, paths.tunnelService, process.getuid?.() ?? 0);
+
+/** Writes a file only when its text changes. Returns whether it changed. */
+function writeChanged(file: string, text: string, mode: number): boolean {
+  if (existsSync(file) && readFileSync(file, "utf8") === text) return false;
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, text, { mode });
+  chmodSync(file, mode);
+  return true;
+}
+
+/**
+ * K-603: installs the tunnel as its own user service and starts it. It restarts the tunnel only when cloudflared,
+ * its token or its service file changed, so a daemon restart or update never stops the tunnel.
+ */
+async function ensureTunnel(config: JoinSecrets) {
+  const { file: binary, fresh } = await ensureCloudflared();
+  const tokenFile = join(paths.data, "tunnel-token");
+  const tokenChanged = writeChanged(tokenFile, config.tunnelToken, 0o600);
+  const unitChanged = writeChanged(paths.tunnelService, tunnelServiceFile(platform, binary, tokenFile), 0o644);
+  const steps = fresh || tokenChanged || unitChanged ? tunnel.restart : tunnel.start;
+  for (const step of steps) run(step.argv, step.mayFail);
+}
+
+/**
+ * K-603, K-615: stops and removes the tunnel service and its token file, after "Remove machine" or on
+ * `kitshn service uninstall`. The cloudflared binary stays in the data folder.
+ */
+function removeTunnel() {
+  for (const step of tunnel.stop) run(step.argv, step.mayFail);
+  rmSync(paths.tunnelService, { force: true });
+  rmSync(join(paths.data, "tunnel-token"), { force: true });
+}
+
+async function serviceCommand(action: string | undefined) {
   const file = paths.service;
   const commands = serviceCommands(platform, file, process.getuid?.() ?? 0);
-  const run = (argv: Array<string>, mayFail = false) => {
-    const [program = "", ...rest] = argv;
-    const result = spawnSync(program, rest, { stdio: "inherit" });
-    if (result.status !== 0 && !mayFail) fail(`${argv.join(" ")} failed.`);
-  };
   if (action === "install") {
-    readConfig();
+    // The tunnel service starts before the old daemon stops, so a daemon that still runs its own cloudflared
+    // hands over with no gap.
+    await ensureTunnel(readConfig());
     mkdirSync(dirname(file), { recursive: true });
     // A second install replaces the running daemon, for example after a new download.
     for (const argv of commands.stop) run(argv, true);
@@ -126,16 +321,20 @@ function serviceCommand(action: string | undefined) {
   } else if (action === "uninstall") {
     for (const argv of commands.stop) run(argv, true);
     rmSync(file, { force: true });
+    removeTunnel();
+    const folders = [...new Set([dirname(paths.config), paths.data])];
     console.log(
-      `Removed ${file}. The tokens stay in ${paths.config}; delete them with: rm -r "${dirname(paths.config)}"`,
+      `Removed ${file}, ${paths.tunnelService} and the tunnel token. These folders stay: ${folders.join(", ")}` +
+        ` (${paths.config} and machine.key hold the machine token and key; the data folder holds cloudflared,` +
+        ` the apps and the sample history). Delete them with: rm -r ${folders.map((folder) => `"${folder}"`).join(" ")}`,
     );
   } else fail("usage: kitshn service install|uninstall");
 }
 
-/** K-603: the daemon runs its own cloudflared, downloaded once, with the tunnel token in its environment. */
-async function ensureCloudflared(): Promise<string> {
+/** K-603: the cloudflared of the tunnel service, downloaded once. `fresh` says that this call downloaded it. */
+async function ensureCloudflared(): Promise<{ file: string; fresh: boolean }> {
   const file = join(paths.data, "cloudflared");
-  if (existsSync(file)) return file;
+  if (existsSync(file)) return { file, fresh: false };
   mkdirSync(paths.data, { recursive: true });
   const { url, archive } = cloudflaredUrl(platform, arch());
   log(`downloading cloudflared from ${url}`);
@@ -150,7 +349,7 @@ async function ensureCloudflared(): Promise<string> {
     if (result.status !== 0) throw new Error("cloudflared archive could not be unpacked.");
   } else writeFileSync(file, bytes);
   chmodSync(file, 0o755);
-  return file;
+  return { file, fresh: true };
 }
 
 function sample() {
@@ -723,33 +922,18 @@ function report() {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 }
 
-/** Keeps cloudflared running, with a growing pause after each exit. */
-function superviseTunnel(binary: string, token: string) {
-  let delay = 1000;
-  let child: ChildProcess | null = null;
-  process.on("exit", () => child?.kill());
-  const start = () => {
-    tunnelState = "starting";
+/** K-605: the tunnel state comes from its service manager; a change goes out in the status. */
+function watchTunnel() {
+  const check = () => {
+    const [program = "", ...rest] = tunnel.state;
+    const result = spawnSync(program, rest, { encoding: "utf8" });
+    const state = tunnelStateOf(platform, result.stdout ?? "");
+    if (state === tunnelState) return;
+    tunnelState = state;
     report();
-    child = spawn(binary, ["tunnel", "--no-autoupdate", "run"], {
-      env: { ...process.env, TUNNEL_TOKEN: token },
-      stdio: ["ignore", "inherit", "inherit"],
-    });
-    const healthy = setTimeout(() => {
-      tunnelState = "running";
-      delay = 1000;
-      report();
-    }, 5000);
-    child.on("exit", (code) => {
-      clearTimeout(healthy);
-      tunnelState = "stopped";
-      report();
-      log(`cloudflared exited with ${code}; starting it again in ${delay / 1000} s`);
-      setTimeout(start, delay);
-      delay = Math.min(delay * 2, 60_000);
-    });
   };
-  start();
+  check();
+  setInterval(check, 5000);
 }
 
 const pendingResults: Array<DaemonMessage> = [];
@@ -760,32 +944,126 @@ function flushResults() {
   }
 }
 
+/** K-1704: the challenge of the accepted connection; a rotation signs it too (K-1705). */
+let challenge: string | null = null;
+let rotating = false;
+
+/**
+ * K-1704: signs the challenge with the key that kitshn names. Returns "answered", "token-only" when kitshn has
+ * no key for this machine (K-1708: status only, no jobs, until `kitshn rekey`), or why this key cannot pass.
+ */
+async function answerChallenge(
+  ws: WebSocket,
+  config: JoinSecrets,
+  message: Extract<ServerToDaemon, { type: "challenge" }>,
+): Promise<"answered" | "wrong-key" | "no-key" | "token-only"> {
+  const fingerprint = async (file: string) => {
+    const key = readKey(file);
+    return key ? fingerprintOf(key.x) : null;
+  };
+  const plan = keyPlan(message.fingerprint, {
+    current: await fingerprint(keyFile),
+    next: await fingerprint(nextKeyFile),
+    fromCode: await fingerprint(codeKeyFile),
+  });
+  // kitshn took the key, but the end of its command or the 4004 close never came (K-1705, K-1706).
+  if (plan.promote === "fromCode") renameSync(codeKeyFile, keyFile);
+  if (plan.promote === "next") renameSync(nextKeyFile, keyFile);
+  // A rotation that kitshn never took; a new "Rotate key" or `kitshn rotate-key` asks again.
+  if (plan.dropNext) rmSync(nextKeyFile, { force: true });
+  if (message.fingerprint === null) {
+    log("kitshn has no key for this machine, so it gets status only and no job. Run kitshn rekey with the key code of its panel.");
+    return "token-only";
+  }
+  const key = readKey(keyFile);
+  if (!key) {
+    log(`kitshn expects the key ${message.fingerprint}, and ${keyFile} is missing. Use Reset key on the map, then kitshn rekey <code>.`);
+    return "no-key";
+  }
+  const signing = await fingerprintOf(key.x);
+  const signature = await signText(key, connectText(config.server, config.machineId, message.challenge));
+  ws.send(JSON.stringify({ type: "answer", signature } satisfies DaemonMessage));
+  challenge = message.challenge;
+  if (message.fingerprint === signing) return "answered";
+  log(`kitshn expects the key ${message.fingerprint}, but this machine has ${signing}. Use Reset key on the map, then kitshn rekey <code>.`);
+  return "wrong-key";
+}
+
+type RotationOutcome = { readonly fingerprint: string } | { readonly error: string };
+/** K-1705: the `rotate-key` requests of the local socket that wait for kitshn to store the new key. */
+const rotationWaiters: Array<(outcome: RotationOutcome) => void> = [];
+const settleRotation = (outcome: RotationOutcome) => {
+  for (const waiter of rotationWaiters.splice(0)) waiter(outcome);
+};
+/** The fingerprint of the key that the current connection rotates to. */
+let rotatingTo: string | null = null;
+
+/** K-1705: makes a new pair and hands over to it with a signature of the old key, bound to this connection. */
+async function rotateKey(ws: WebSocket) {
+  if (rotating || challenge === null || socket !== ws || !joined) return;
+  const current = readKey(keyFile);
+  if (!current) {
+    log(`no key to rotate in ${keyFile}`);
+    return settleRotation({ error: `there is no key to rotate in ${keyFile}.` });
+  }
+  rotating = true;
+  let next: MachinePrivateKey;
+  let signature: string;
+  try {
+    next = await newMachineKey();
+    writeKey(nextKeyFile, next);
+    signature = await signText(current, rotateText(joined.server, joined.machineId, challenge, next.x));
+  } catch (error) {
+    // Nothing went out yet, so kitshn has no new key.
+    rotating = false;
+    rmSync(nextKeyFile, { force: true });
+    log(`the key rotation failed: ${String(error)}`);
+    return settleRotation({ error: `the key rotation failed: ${String(error)}` });
+  }
+  rotatingTo = await fingerprintOf(next.x);
+  // From here kitshn may store the new key, so `machine.key.next` stays until the next challenge names a key.
+  ws.send(JSON.stringify({ type: "rotate", publicKey: next.x, signature } satisfies DaemonMessage));
+  log(`rotating the machine key to ${rotatingTo}`);
+}
+
+/** K-1706, K-1708: ends the current connection or wait and connects again at once, for `kitshn rekey`. */
+let reconnectNow = () => {};
+
 /** K-604: one WebSocket to kitshn, with backoff after a failure and a ping every 10 seconds. */
 function connect(config: JoinSecrets) {
   joined = config;
   let delay = 1000;
-  // After a 4001 or 4002 close, every later try waits an hour, until a connection opens again.
+  // After a 4001, 4002 or 4005 close, or a key that cannot pass, every later try waits an hour, until a
+  // connection opens again.
   let stopped = false;
+  let current: WebSocket | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let soon = false;
+  reconnectNow = () => {
+    stopped = false;
+    delay = 1000;
+    if (current) {
+      soon = true;
+      current.close();
+    } else {
+      if (timer) clearTimeout(timer);
+      open();
+    }
+  };
   const open = () => {
+    timer = null;
     const url = new URL("/connect", config.server);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(url.toString(), {
       headers: { "CF-Access-Client-Id": config.clientId, "CF-Access-Client-Secret": config.clientSecret },
     } as unknown as string);
-    socket = ws;
+    current = ws;
     let lastPong = Date.now();
     let ping: ReturnType<typeof setInterval> | null = null;
+    /** True when kitshn expects a key that this machine does not have, so the next try fails the same way. */
+    let wrongKey = false;
     ws.onopen = () => {
-      log("connected to kitshn");
-      delay = 1000;
-      stopped = false;
-      flushResults();
       lastPong = Date.now();
-      report();
-      lastSites = "";
-      void checkSites().catch((error: unknown) => log(`site check failed: ${String(error)}`));
-      void reportVolumes().catch((error: unknown) => log(`volume report failed: ${String(error)}`));
-      ws.send(JSON.stringify({ type: "sample", sample: sample() } satisfies DaemonMessage));
       ping = setInterval(() => {
         if (Date.now() - lastPong > PONG_TIMEOUT_MS) {
           log("no pong for 30 s; connecting again");
@@ -795,6 +1073,19 @@ function connect(config: JoinSecrets) {
         ws.send("ping");
       }, PING_MS);
     };
+    /** K-1704: kitshn reads this connection from now on. */
+    const accepted = (how: string) => {
+      log(`connected to kitshn ${how}`);
+      socket = ws;
+      delay = 1000;
+      stopped = false;
+      flushResults();
+      report();
+      lastSites = "";
+      void checkSites().catch((error: unknown) => log(`site check failed: ${String(error)}`));
+      void reportVolumes().catch((error: unknown) => log(`volume report failed: ${String(error)}`));
+      ws.send(JSON.stringify({ type: "sample", sample: sample() } satisfies DaemonMessage));
+    };
     ws.onmessage = (event) => {
       const text = String(event.data);
       if (text === "pong") {
@@ -802,7 +1093,22 @@ function connect(config: JoinSecrets) {
         return;
       }
       const message = JSON.parse(text) as ServerToDaemon;
-      if (message.type === "job") {
+      if (message.type === "challenge") {
+        void answerChallenge(ws, config, message)
+          .then((result) => {
+            wrongKey = result === "wrong-key" || result === "no-key";
+            if (result === "no-key") ws.close();
+            if (result === "token-only") accepted("on the token alone");
+          })
+          .catch((error: unknown) => {
+            log(`could not answer the challenge: ${String(error)}`);
+            ws.close();
+          });
+      } else if (message.type === "accepted") {
+        accepted(`with the key ${message.fingerprint}`);
+      } else if (message.type === "rotateKey") {
+        void rotateKey(ws);
+      } else if (message.type === "job") {
         log(`job ${message.id}: ${message.command.kind}`);
         // A job that throws (for example a file it cannot delete) still sends a result, and never ends the daemon.
         void runJob(message.command)
@@ -823,13 +1129,31 @@ function connect(config: JoinSecrets) {
     };
     ws.onclose = (event) => {
       if (ping) clearInterval(ping);
-      socket = null;
-      // 4001: another daemon with the same token took over; 4002: the owner removed this machine. Both
-      // would swap forever with a short backoff, so they wait long (a removed machine also needs a new join).
-      if (event.code === 4001 || event.code === 4002) stopped = true;
-      const wait = stopped ? 60 * 60_000 : delay;
+      if (socket === ws) socket = null;
+      // K-1705: kitshn stored the new key; the next connection signs with it.
+      if (event.code === 4004 && existsSync(nextKeyFile)) renameSync(nextKeyFile, keyFile);
+      settleRotation(
+        event.code === 4004 && rotatingTo !== null
+          ? { fingerprint: rotatingTo }
+          : { error: `the connection closed (${event.code}) before kitshn stored the new key. See kitshn status.` },
+      );
+      challenge = null;
+      rotating = false;
+      rotatingTo = null;
+      // 4001: another daemon with the same token took over; 4002: the owner removed this machine; 4005: the
+      // owner reset its key. Like a key that cannot pass, they would repeat forever with a short backoff, so
+      // they wait long (a removed machine also needs a new join, a reset one `kitshn rekey`).
+      if (event.code === 4001 || event.code === 4002 || event.code === 4005 || wrongKey) stopped = true;
+      // K-615: kitshn deleted the tunnel of this machine; its service has nothing left to serve.
+      if (event.code === 4002) {
+        log("the owner removed this machine; removing the tunnel service. Run kitshn service uninstall to stop the daemon.");
+        removeTunnel();
+      }
+      if (current === ws) current = null;
+      const wait = soon || event.code === 4004 ? 0 : stopped ? 60 * 60_000 : delay;
+      soon = false;
       log(`connection closed (${event.code} ${event.reason}); trying again in ${wait / 1000} s`);
-      setTimeout(open, wait);
+      timer = setTimeout(open, wait);
       delay = Math.min(delay * 2, 60_000);
     };
     ws.onerror = () => ws.close();
@@ -899,8 +1223,23 @@ async function checkSites() {
 async function runCommand() {
   const config = readConfig();
   log(`kitshn ${VERSION} starts as machine ${config.machineId}`);
+  // Before the socket opens, so `status` answers from the first request.
+  joined = config;
+  // First, so a second daemon stops before it touches the tunnel or the connection of the running one.
+  const own = process.getuid!();
+  const local = await listenLocal(paths.socket, {
+    platform,
+    // Read at each connection, so `kitshn local-users` needs no restart.
+    decide: (peer) => peerDecision(peer, own, localUsersOf(readMachineFile())),
+    handle: answerLocal,
+    log,
+  });
+  process.on("exit", local.stop);
+  // The service manager stops the daemon with SIGTERM; an exit runs the clean-up of the socket and the jobs.
+  for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => process.exit(0));
   pruneSamples();
-  superviseTunnel(await ensureCloudflared(), config.tunnelToken);
+  await ensureTunnel(config);
+  watchTunnel();
   connect(config);
   setInterval(() => {
     const value = sample();
@@ -913,6 +1252,49 @@ async function runCommand() {
     () => void checkSites().catch((error: unknown) => log(`site check failed: ${String(error)}`)),
     10_000,
   );
+}
+
+/** `machine.json` as it is on disk now, or null when it cannot be read. */
+function readMachineFile(): unknown {
+  try {
+    return JSON.parse(readFileSync(paths.config, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/** K-701, K-702: the requests of the local socket. */
+async function answerLocal(request: Request): Promise<Answer> {
+  const { id } = request;
+  if (request.type === "status") {
+    if (!joined) throw new Error("the daemon has not read machine.json yet.");
+    const key = readKey(keyFile);
+    return {
+      id,
+      type: "status",
+      status: {
+        version: VERSION,
+        machineId: joined.machineId,
+        fingerprint: key ? await fingerprintOf(key.x) : null,
+        connection: socket === null ? "disconnected" : challenge === null ? "token-only" : "connected",
+        tunnel: tunnelState,
+      },
+    };
+  }
+  if (request.type === "reconnect") {
+    log("kitshn rekey saved a new key; connecting again");
+    reconnectNow();
+    return { id, type: "reconnect" };
+  }
+  const ws = socket;
+  if (ws === null || challenge === null)
+    throw new Error("the daemon has no signed connection to kitshn, and a rotation needs one (K-1705). See kitshn status.");
+  const outcome = await new Promise<RotationOutcome>((resolve) => {
+    rotationWaiters.push(resolve);
+    void rotateKey(ws);
+  });
+  if ("error" in outcome) throw new Error(outcome.error);
+  return { id, type: "rotate-key", fingerprint: outcome.fingerprint };
 }
 
 const [command, ...args] = process.argv.slice(2);
@@ -929,7 +1311,19 @@ switch (command) {
     await runCommand();
     break;
   case "service":
-    serviceCommand(args[0]);
+    await serviceCommand(args[0]);
+    break;
+  case "rotate-key":
+    await rotateKeyCommand();
+    break;
+  case "rekey":
+    await rekeyCommand(args[0]);
+    break;
+  case "status":
+    await statusCommand();
+    break;
+  case "local-users":
+    localUsersCommand(args[0], args[1]);
     break;
   case "version":
     console.log(VERSION);
@@ -947,6 +1341,10 @@ kitshn join <code> --server <address>   join this machine to kitshn (K-602)
 kitshn service install                  run the daemon as a user service (K-601)
 kitshn service uninstall                stop and remove the user service
 kitshn run                              run the daemon in the foreground
+kitshn rotate-key                       replace the machine key over the live connection (K-1705)
+kitshn rekey <code>                     make a new machine key with the key code of its panel (K-1706, K-1708)
+kitshn status                           the machine, its key, its connection to kitshn and its tunnel
+kitshn local-users list|add|remove <u>  who else may use the local socket, as the daemon user (K-701)
 kitshn expose <port|socket> --name <n>  share a local server at <n>.<zone> (K-1104); --dev sets Host localhost
 kitshn unexpose <name>                  stop sharing it
 kitshn version`);

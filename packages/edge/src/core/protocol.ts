@@ -1,5 +1,6 @@
-import type { Actor } from "./changes.ts";
+import type { Actor, Item, RevisionKind } from "./changes.ts";
 import type { Command, Machine, MachineStatus, ProjectVolume, Sample } from "./machine.ts";
+import type { MachineOs } from "./icons.ts";
 import type { Circle, PauseMode, Point, Resource, ShareSetting, Stack } from "./model.ts";
 import type { RepoGate } from "./repos.ts";
 
@@ -19,6 +20,9 @@ export interface RevisionView {
   readonly undoneBy: number | null;
   /** False for a revision that records an action, such as a shell command, and changes nothing. */
   readonly undoable: boolean;
+  /** K-1508: for the History filters and the map highlight. */
+  readonly kind: RevisionKind;
+  readonly items: ReadonlyArray<Item>;
 }
 
 /** K-407: whether Cloudflare has the Access state of a card. */
@@ -37,11 +41,15 @@ export interface Snapshot {
   readonly access: Readonly<Record<string, AccessState>>;
   /** K-408: Access applications that kitshn did not make but that cover a kitshn address. */
   readonly accessWarnings: ReadonlyArray<string>;
+  /** K-110: sessions that the last sign-out everywhere did not end, with "Retry sign-out"; null when all ended. */
+  readonly signOutWarning: string | null;
   readonly paused: PauseMode | null;
   /** K-819: the repos that deployed or wait to deploy, newest first. */
   readonly repos: ReadonlyArray<RepoView>;
   /** K-909: the cards that a deploy made; only these show "Remove app". */
   readonly deployedCards: ReadonlyArray<string>;
+  /** K-1113: the cards with a stored icon, each with the hash of its bytes, which versions its address. */
+  readonly icons: Readonly<Record<string, string>>;
   /** K-1504: who paused and when, while paused. */
   readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;
@@ -78,6 +86,10 @@ export interface MachineView {
   readonly lastSeen: number | null;
   readonly status: MachineStatus | null;
   readonly sample: Sample | null;
+  /** K-524: the system of the last status, also while offline; null before the first status or for another system. */
+  readonly os: MachineOs | null;
+  /** K-1708: the last failed challenge since kitshn started, until the next one passes. */
+  readonly keyFailure: { readonly at: number; readonly reason: string } | null;
   /** K-909: idle volumes of kitshn apps that have no card; each has its own delete. */
   readonly orphanVolumes: ReadonlyArray<ProjectVolume>;
 }

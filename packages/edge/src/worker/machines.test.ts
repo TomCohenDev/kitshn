@@ -3,7 +3,16 @@ import { circlePolicies } from "../core/access.ts";
 import { type Machine, newJoinCode, openJoin, sealJoin } from "../core/machine.ts";
 import type { Circle } from "../core/model.ts";
 import { circleMatches } from "../core/visitor.ts";
-import { legacyUpdateScript, machineIdFor, parseCommand, parseLabels, pickMachine } from "./machines.ts";
+import {
+  answerCheck,
+  legacyUpdateScript,
+  machineIdFor,
+  parseCommand,
+  parseLabels,
+  pickMachine,
+  rekeyDecision,
+  socketStart,
+} from "./machines.ts";
 
 const machine = (id: string, order: number, labels: Array<string>): Machine => ({
   id,
@@ -99,5 +108,50 @@ describe("machine members (K-107)", () => {
     expect(script).toContain("SHA256SUMS");
     expect(legacyUpdateScript("f5d93ff436db", "win32 10", "x64")).toBeNull();
     expect(legacyUpdateScript("local", "linux", "x64")).toBeNull();
+  });
+});
+
+describe("the check of a machine socket (K-1704, K-1706, K-1708)", () => {
+  const key = { kind: "public", publicKey: "pub", fingerprint: "SHA256:f", since: 1 } as const;
+  const fresh = { check: "waiting", answered: false } as const;
+
+  it("sends a machine with a key a challenge for that key", () => {
+    expect(socketStart(key)).toEqual({ kind: "challenge", fingerprint: "SHA256:f" });
+    expect(answerCheck(key, fresh)).toEqual({ kind: "verify", publicKey: "pub", fingerprint: "SHA256:f" });
+  });
+
+  it("closes the socket of a machine that waits for its key code", () => {
+    expect(socketStart({ kind: "waiting", since: 1 })).toEqual({ kind: "waitsForKey" });
+    expect(answerCheck({ kind: "waiting", since: 1 }, fresh).kind).toBe("refuse");
+  });
+
+  it("takes a machine without a key on its token for status only, and never takes a first key from it", () => {
+    expect(socketStart(undefined)).toEqual({ kind: "token" });
+    expect(answerCheck(undefined, { check: "token", answered: false }).kind).toBe("refuse");
+  });
+
+  it("takes one answer per socket", () => {
+    expect(answerCheck(key, { check: "waiting", answered: true }).kind).toBe("refuse");
+    expect(answerCheck(key, { check: "signed", answered: true }).kind).toBe("refuse");
+  });
+});
+
+describe("key codes (K-1706, K-1708)", () => {
+  const keyless = machine("m1", 0, []);
+  const code = { machineId: "m1", expiresAt: 100 };
+
+  it("gives a key to the machine of the code", () => {
+    expect(rekeyDecision(code, "m1", keyless, 50)).toEqual({ kind: "store" });
+  });
+
+  it("refuses another machine and keeps the code for its own machine", () => {
+    expect(rekeyDecision(code, "m2", keyless, 50)).toMatchObject({ kind: "refuse", keepCode: true });
+  });
+
+  it("uses up an expired code and a code of a machine that has a key again", () => {
+    expect(rekeyDecision(code, "m1", keyless, 200)).toMatchObject({ kind: "refuse", keepCode: false });
+    const keyed = { ...keyless, key: { kind: "public", publicKey: "p", fingerprint: "f", since: 1 } } as const;
+    expect(rekeyDecision(code, "m1", keyed, 50)).toMatchObject({ kind: "refuse", keepCode: false });
+    expect(rekeyDecision(code, "m1", undefined, 50)).toMatchObject({ kind: "refuse", keepCode: false });
   });
 });

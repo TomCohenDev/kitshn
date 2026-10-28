@@ -15,7 +15,6 @@ export function LibraryView(props: {
   /** The newest revision; the list loads again when it changes, for example after an upload. */
   revision: number;
   onToast: (text: string, error: boolean) => void;
-  ask: (text: string) => Promise<boolean>;
   onShowCard: (id: string) => void;
 }) {
   const [items, setItems] = useState<ReadonlyArray<LibraryItem> | null>(null);
@@ -37,21 +36,25 @@ export function LibraryView(props: {
     return words.every((word) => text.includes(word));
   });
 
+  /** K-1006: no confirm and no undo, so the label names what goes; History records it. */
   const remove = async (item: LibraryItem) => {
-    if (!(await props.ask(`Delete ${item.title}? Its address stops working for everyone.`))) return;
     const result = await callApi<{ deleted: string }>("DELETE", `/api/library/${item.id}`);
     if ("error" in result) props.onToast(result.error, true);
-    else if (preview === item.id) setPreview(null);
+    else {
+      if (preview === item.id) setPreview(null);
+      props.onToast(`Deleted ${item.title}. Its address no longer works.`, false);
+    }
   };
 
   return (
-    <section class="history">
-      <h2>Library</h2>
+    <div class="table-view">
       <p class="muted">
         Pages and files. A new one is private and waits in the tray; place its card in a circle to share it.
       </p>
       <input
         type="search"
+        aria-label="Search the library"
+        data-tip="Search pages and files by title, thread or machine."
         placeholder="Search by title, thread or machine"
         value={query}
         onInput={(event) => setQuery(event.currentTarget.value)}
@@ -59,7 +62,7 @@ export function LibraryView(props: {
       {preview ? (
         <iframe
           class="preview"
-          title="Preview"
+          aria-label="Preview"
           sandbox="allow-scripts"
           src={`/api/library/${encodeURIComponent(preview)}/content`}
         />
@@ -82,7 +85,7 @@ export function LibraryView(props: {
             const circles = circlesHolding(props.state, item.id).map((circle) => circle.name);
             return (
               <tr key={item.id}>
-                <td>
+                <td data-label="Title">
                   {KINDS[item.kind].icon}{" "}
                   {resource?.addresses[0] ? (
                     <a href={`https://${resource.addresses[0]}`} target="_blank" rel="noreferrer">
@@ -92,20 +95,40 @@ export function LibraryView(props: {
                     item.title
                   )}
                 </td>
-                <td>{item.thread ?? "–"}</td>
-                <td>{item.machine ?? "–"}</td>
-                <td>{new Date(item.createdAt).toLocaleString()}</td>
-                <td>{size(item.size)}</td>
-                <td>{circles.length > 0 ? circles.join(", ") : <span class="muted">private</span>}</td>
+                <td data-label="Thread">{item.thread ?? "–"}</td>
+                <td data-label="Machine">{item.machine ?? "–"}</td>
+                <td data-label="Added">{new Date(item.createdAt).toLocaleString()}</td>
+                <td data-label="Size">{size(item.size)}</td>
+                <td data-label="Shared with">
+                  {circles.length > 0 ? (
+                    circles.join(", ")
+                  ) : (
+                    <span class="muted" data-tip="Private: no circle holds it, so only the admin sees it.">
+                      private
+                    </span>
+                  )}
+                </td>
                 <td>
-                  <button class="btn" onClick={() => setPreview(preview === item.id ? null : item.id)}>
+                  <button
+                    class="btn"
+                    data-tip={preview === item.id ? "Hide the preview." : `Show a preview of ${item.title} above the table.`}
+                    onClick={() => setPreview(preview === item.id ? null : item.id)}
+                  >
                     {preview === item.id ? "Hide" : "Preview"}
                   </button>
-                  <button class="btn" onClick={() => props.onShowCard(item.id)}>
+                  <button
+                    class="btn"
+                    data-tip="Show its card and panel on the map."
+                    onClick={() => props.onShowCard(item.id)}
+                  >
                     Card
                   </button>
-                  <button class="btn danger" onClick={() => void remove(item)}>
-                    Delete
+                  <button
+                    class="btn danger"
+                    data-tip={`Delete ${item.title} at once: its stored ${item.kind} and its card go, and its address stops working for everyone. Undo cannot bring it back.`}
+                    onClick={() => void remove(item)}
+                  >
+                    Delete {item.kind} for good
                   </button>
                 </td>
               </tr>
@@ -120,6 +143,6 @@ export function LibraryView(props: {
           ) : null}
         </tbody>
       </table>
-    </section>
+    </div>
   );
 }

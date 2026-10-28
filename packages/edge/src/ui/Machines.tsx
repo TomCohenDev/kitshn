@@ -1,6 +1,7 @@
 import { useState } from "preact/hooks";
 import type { Command } from "../core/machine.ts";
 import type { JobView, MachineView } from "../core/protocol.ts";
+import { MACHINE_TIPS, isRelease } from "./actions.ts";
 import { callApi } from "./store.ts";
 
 /** "5 min", "3 h", "2 d": how long ago a time was (K-515). */
@@ -12,16 +13,108 @@ export function ago(time: number | null, now = Date.now()): string {
   return hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} d`;
 }
 
+const JOB_TIPS: Record<JobView["state"], string> = {
+  queued: "Queued: the job waits for the machine.",
+  sent: "Sent: the machine has the job and runs it.",
+  done: "Done: the job ended well.",
+  failed: "Failed: the job ended with an error; the output says why.",
+  expired: "Expired: the machine did not take the job before its expiry.",
+};
+
 const percent = (value: number | undefined) => (value === undefined ? "–" : `${Math.round(value * 100)}%`);
 
 /** K-515: the presence sticker of a machine card. */
 export function PresenceSticker(props: { view: MachineView }) {
   return props.view.online ? (
-    <span class="sticker ok presence">online</span>
+    <span class="sticker ok presence" data-tip="Online: the daemon has a connection to kitshn now.">
+      online
+    </span>
   ) : (
-    <span class="sticker presence" title="Last seen">
+    <span class="sticker presence" data-tip="Offline: the time since kitshn last heard from the daemon.">
       offline · {ago(props.view.lastSeen)}
     </span>
+  );
+}
+
+/** K-1708: a machine without a key, or one that waits for `kitshn rekey` (K-1706), shows it on its card. */
+export function KeySticker(props: { view: MachineView }) {
+  const key = props.view.machine.key;
+  if (key === undefined)
+    return (
+      <span class="sticker wait" data-tip="Needs a key: it reports status but gets no job until kitshn rekey runs on it.">
+        needs a key
+      </span>
+    );
+  if (key.kind === "waiting")
+    return (
+      <span class="sticker wait" data-tip="Waits for key: run the rekey command on the machine.">
+        waits for key
+      </span>
+    );
+  return null;
+}
+
+/** K-1702: the start of a fingerprint is enough to compare it by eye. */
+const shortFingerprint = (fingerprint: string) => `${fingerprint.slice(0, "SHA256:".length + 12)}…`;
+
+/** K-1702, K-1705, K-1706: the key of the machine, "Rotate key" and "Reset key". */
+function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error: boolean) => void }) {
+  const { machine, keyFailure } = props.view;
+  const [rekey, setRekey] = useState<{ command: string; expiresAt: number } | null>(null);
+  const path = `/api/machines/${encodeURIComponent(machine.id)}`;
+  const rotate = async () => {
+    const result = await callApi<{ rotating: string }>("POST", `${path}/rotate-key`, {});
+    props.onToast("error" in result ? result.error : `${machine.name} rotates its key now.`, "error" in result);
+  };
+  const reset = async () => {
+    const result = await callApi<{ command: string; expiresAt: number }>("POST", `${path}/reset-key`, {});
+    if ("error" in result) props.onToast(result.error, true);
+    else setRekey(result);
+  };
+  return (
+    <>
+      <div class="row">
+        <span class="label" data-tip="Key: the key pair that the machine proves itself with to kitshn.">
+          Key
+        </span>
+        {machine.key?.kind === "public" ? (
+          <span class="mono" data-tip={`The fingerprint of the machine key: ${machine.key.fingerprint}`}>
+            {shortFingerprint(machine.key.fingerprint)} · {ago(machine.key.since)} old
+          </span>
+        ) : (
+          <KeySticker view={props.view} />
+        )}
+        <button
+          class="btn"
+          disabled={machine.key?.kind !== "public" || !props.view.online}
+          data-tip="Rotate key: the online machine makes a new key pair and sends its public half."
+          onClick={() => void rotate()}
+        >
+          Rotate key
+        </button>
+        <button
+          class="btn"
+          data-tip="Make a one-time rekey command; the machine gets a new key when you run it there."
+          onClick={() => void reset()}
+        >
+          {machine.key === undefined ? "Make key code" : "Reset key"}
+        </button>
+      </div>
+      {keyFailure ? (
+        <p class="muted">
+          Failed check {ago(keyFailure.at)} ago: {keyFailure.reason}
+        </p>
+      ) : null}
+      {rekey ? (
+        <>
+          <p>
+            Run this on the machine, as the user that runs the daemon. It works once, until{" "}
+            {new Date(rekey.expiresAt).toLocaleTimeString()}.
+          </p>
+          <pre class="command">{rekey.command}</pre>
+        </>
+      ) : null}
+    </>
   );
 }
 
@@ -43,10 +136,14 @@ export function AddMachine(props: { onClose: () => void }) {
             </p>
             <pre class="command">{result.command}</pre>
             <div class="row">
-              <button class="btn primary" onClick={() => void navigator.clipboard.writeText(result.command)}>
+              <button
+                class="btn primary"
+                data-tip="Copy the join command to the clipboard."
+                onClick={() => void navigator.clipboard.writeText(result.command)}
+              >
                 Copy
               </button>
-              <button class="btn" onClick={props.onClose}>
+              <button class="btn" data-tip="Close this dialog. The command keeps working until it expires." onClick={props.onClose}>
                 Done
               </button>
             </div>
@@ -71,21 +168,27 @@ export function AddMachine(props: { onClose: () => void }) {
             }}
           >
             <p class="muted">
-              The new machine card starts in the tray, so it is private until you place it (K-509).
+              The new machine card starts in the tray, so it is private until you place it.
             </p>
             <input
+              aria-label="Machine name"
+              data-tip="The name of the machine card."
               placeholder="Name, for example Oracle VPS"
               value={name}
               onInput={(event) => setName((event.target as HTMLInputElement).value)}
             />
             <input
+              aria-label="Labels"
+              data-tip="Labels, split by commas. A job runs on the first online machine that has all labels that it needs."
               placeholder="Labels, for example docker, server, arm"
               value={labels}
               onInput={(event) => setLabels((event.target as HTMLInputElement).value)}
             />
             <div class="row">
-              <button class="btn primary">Make a join code</button>
-              <button class="btn" type="button" onClick={props.onClose}>
+              <button class="btn primary" data-tip="Make a join command with a code that works once, for 10 minutes.">
+                Make a join code
+              </button>
+              <button class="btn" type="button" data-tip="Close this dialog; nothing changes." onClick={props.onClose}>
                 Cancel
               </button>
             </div>
@@ -106,6 +209,12 @@ const describe = (command: Command) =>
         ? `delete volume ${command.volume}`
         : command.kind;
 
+/** K-612: queues one command on a machine, and says what happened. */
+export async function queueJob(machineId: string, command: Command): Promise<{ text: string; error: boolean }> {
+  const result = await callApi<{ id: number }>("POST", "/api/jobs", { machineId, command });
+  return "error" in result ? { text: result.error, error: true } : { text: `Job #${result.id} is queued.`, error: false };
+}
+
 /** The machine part of the card panel: status, sample, commands (K-612) and removal (K-615). */
 export function MachinePanel(props: {
   view: MachineView;
@@ -113,18 +222,12 @@ export function MachinePanel(props: {
   version: string;
   jobs: ReadonlyArray<JobView>;
   onRemove: () => void;
+  onRun: (command: Command) => Promise<void>;
   onToast: (text: string, error: boolean) => void;
 }) {
   const { view } = props;
   const [script, setScript] = useState("");
-  const run = async (command: Command) => {
-    const result = await callApi<{ id: number }>("POST", "/api/jobs", {
-      machineId: view.machine.id,
-      command,
-    });
-    if ("error" in result) props.onToast(result.error, true);
-    else props.onToast(`Job #${result.id} is queued.`, false);
-  };
+  const run = props.onRun;
   const jobs = props.jobs.filter((job) => job.machineId === view.machine.id);
   return (
     <>
@@ -137,10 +240,21 @@ export function MachinePanel(props: {
           </span>
         ) : null}
       </div>
+      <MachineKeyRow view={view} onToast={props.onToast} />
       {view.sample ? (
         <div class="row">
-          <span class="label">CPU</span> {percent(view.sample.cpu)} <span class="label">Memory</span>{" "}
-          {percent(view.sample.memory)} <span class="label">Disk</span> {percent(view.sample.disk)}
+          <span class="label" data-tip="CPU: the share in use, from the latest sample of the minute.">
+            CPU
+          </span>{" "}
+          {percent(view.sample.cpu)}{" "}
+          <span class="label" data-tip="Memory: the share in use, from the latest sample of the minute.">
+            Memory
+          </span>{" "}
+          {percent(view.sample.memory)}{" "}
+          <span class="label" data-tip="Disk: the share in use, from the latest sample of the minute.">
+            Disk
+          </span>{" "}
+          {percent(view.sample.disk)}
         </div>
       ) : null}
       <form
@@ -166,11 +280,15 @@ export function MachinePanel(props: {
         <span class="label">Labels</span>
         <input
           name="labels"
+          aria-label="Labels"
+          data-tip="Labels, split by commas. A job runs on the first online machine that has all labels that it needs."
           key={view.machine.labels.join(",")}
           defaultValue={view.machine.labels.join(", ")}
           placeholder="docker, server"
         />
-        <button class="btn">Save</button>
+        <button class="btn" data-tip="Save the labels of this machine.">
+          Save
+        </button>
       </form>
       <form
         class="allow-list"
@@ -200,21 +318,31 @@ export function MachinePanel(props: {
           );
         }}
       >
-        <span class="label">Allowed Compose settings (K-818)</span>
+        <span class="label" data-tip="Allowed Compose settings: the risky settings that deploys on this machine may use.">
+          Allowed Compose settings
+        </span>
         <p class="help">
           One line per repo and setting, for example <code>Yarden-zamir/dozzle bind:/var/run/docker.sock</code>. A
           deploy names the setting it needs when it stops.
         </p>
         <textarea
           name="allow"
+          aria-label="Allowed Compose settings"
+          data-tip="One repo and one risky Compose setting per line. A deploy on this machine may use only these."
           rows={3}
           class="mono"
           key={(view.machine.allow ?? []).map((entry) => `${entry.repo} ${entry.setting}`).join("|")}
           defaultValue={(view.machine.allow ?? []).map((entry) => `${entry.repo} ${entry.setting}`).join("\n")}
         />
-        <button class="btn">Save</button>
+        <button class="btn" data-tip="Save the allowed Compose settings of this machine.">
+          Save
+        </button>
       </form>
-      <div class="label" style={{ marginTop: "10px" }}>
+      <div
+        class="label"
+        style={{ marginTop: "10px" }}
+        data-tip="Commands: jobs that the daemon runs. They need control on the machine card."
+      >
         Commands
       </div>
       <form
@@ -226,24 +354,36 @@ export function MachinePanel(props: {
       >
         <input
           class="mono"
+          aria-label="Shell command"
+          data-tip="A shell command that the daemon runs as a job. It needs control on the machine card."
           placeholder="Shell command, needs control"
           value={script}
           onInput={(event) => setScript((event.target as HTMLInputElement).value)}
         />
-        <button class="btn">Run</button>
+        <button class="btn" data-tip="Queue the command as a job; it waits while the machine is offline.">
+          Run
+        </button>
       </form>
       <div class="row">
-        <button class="btn" onClick={() => void run({ kind: "diagnostics" })}>
+        <button
+          class="btn"
+          data-tip="Collect diagnostics of the daemon as a job; the output shows below."
+          onClick={() => void run({ kind: "diagnostics" })}
+        >
           Diagnostics
         </button>
-        <button class="btn" onClick={() => void run({ kind: "restart" })}>
+        <button
+          class="btn"
+          data-tip={MACHINE_TIPS.restart}
+          onClick={() => void run({ kind: "restart" })}
+        >
           Restart daemon
         </button>
         {/* A local build names no release, so there is nothing to update to (K-617). */}
-        {/^[0-9a-f]{12}$/.test(props.version) ? (
+        {isRelease(props.version) ? (
           <button
             class={`btn${view.status && view.status.version !== props.version ? " primary" : ""}`}
-            title={`Install the daemon of release ${props.version}`}
+            data-tip={MACHINE_TIPS.update(props.version)}
             onClick={() => void run({ kind: "update", version: props.version })}
           >
             {view.status && view.status.version !== props.version
@@ -254,11 +394,15 @@ export function MachinePanel(props: {
       </div>
       {view.orphanVolumes.length > 0 ? (
         <>
-          <div class="label" style={{ marginTop: "10px" }}>
+          <div
+            class="label"
+            style={{ marginTop: "10px" }}
+            data-tip="Orphaned volumes: volumes of removed apps that still hold their data on this machine."
+          >
             Orphaned volumes
           </div>
           <p class="help">
-            Volumes of removed apps. Undo of a removal does not bring back a deleted volume (K-909).
+            Volumes of removed apps. Undo of a removal does not bring back a deleted volume.
           </p>
           <ul>
             {view.orphanVolumes.map((volume) => (
@@ -267,6 +411,7 @@ export function MachinePanel(props: {
                   <code>{volume.name}</code>
                   <button
                     class="btn danger"
+                    data-tip={`Delete the volume ${volume.name} and its data. Undo cannot bring it back.`}
                     onClick={() => void run({ kind: "compose-volume-remove", project: volume.project, volume: volume.name })}
                   >
                     Delete
@@ -284,6 +429,7 @@ export function MachinePanel(props: {
               <code>#{job.id}</code> <code>{describe(job.command)}</code>
               <span
                 class={`sticker ${job.state === "done" ? "ok" : job.state === "queued" || job.state === "sent" ? "wait" : ""}`}
+                data-tip={JOB_TIPS[job.state]}
               >
                 {job.state}
               </span>
@@ -292,8 +438,12 @@ export function MachinePanel(props: {
           </li>
         ))}
       </ul>
-      <button class="btn danger" onClick={props.onRemove}>
-        Remove machine
+      <button
+        class="btn danger"
+        data-tip={MACHINE_TIPS.remove}
+        onClick={props.onRemove}
+      >
+        Remove machine: deletes its token and tunnel
       </button>
     </>
   );
@@ -302,12 +452,15 @@ export function MachinePanel(props: {
 /** K-519: the Machines view, a table of status and health. */
 export function MachinesView(props: { machines: ReadonlyArray<MachineView>; onAdd: () => void }) {
   return (
-    <section class="history">
-      <h2>Machines</h2>
+    <div class="table-view">
       <p class="muted">
         Each machine runs the kitshn daemon. Commands and jobs need control on the machine card.
       </p>
-      <button class="btn primary" onClick={props.onAdd}>
+      <button
+        class="btn primary"
+        data-tip="Make a join command for a new machine. Its card starts in the tray, private."
+        onClick={props.onAdd}
+      >
         + Machine
       </button>
       <table>
@@ -326,16 +479,18 @@ export function MachinesView(props: { machines: ReadonlyArray<MachineView>; onAd
           {props.machines.map((view) => (
             <tr key={view.machine.id}>
               <td>
-                <a href={`#map/${view.machine.id}`}>{view.machine.name}</a>
+                <a href={`#map/${view.machine.id}`} data-tip="Show the machine card and its panel on the map.">
+                  {view.machine.name}
+                </a>
               </td>
-              <td>
+              <td data-label="Status">
                 <PresenceSticker view={view} />
               </td>
-              <td>{view.machine.labels.join(", ")}</td>
-              <td>{percent(view.sample?.cpu)}</td>
-              <td>{percent(view.sample?.memory)}</td>
-              <td>{percent(view.sample?.disk)}</td>
-              <td>{view.status ? `${view.status.version} · ${view.status.arch}` : "–"}</td>
+              <td data-label="Labels">{view.machine.labels.join(", ")}</td>
+              <td data-label="CPU">{percent(view.sample?.cpu)}</td>
+              <td data-label="Memory">{percent(view.sample?.memory)}</td>
+              <td data-label="Disk">{percent(view.sample?.disk)}</td>
+              <td data-label="Daemon">{view.status ? `${view.status.version} · ${view.status.arch}` : "–"}</td>
             </tr>
           ))}
           {props.machines.length === 0 ? (
@@ -345,6 +500,6 @@ export function MachinesView(props: { machines: ReadonlyArray<MachineView>; onAd
           ) : null}
         </tbody>
       </table>
-    </section>
+    </div>
   );
 }

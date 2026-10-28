@@ -3,7 +3,7 @@
 //   node scripts/next-k.ts --check   fails when this checkout's SPEC.md adds a number that origin/main or another open PR
 //                                    defines with other text, or uses one number twice. PR_NUMBER skips this PR's head.
 // It reads origin/main with git and the open PRs with gh, so it needs a fetched origin and a gh login (GH_TOKEN in CI).
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const MARK = "- **K-";
@@ -32,15 +32,33 @@ interface Source {
   readonly definitions: ReadonlyMap<number, string>;
 }
 
-/** origin/main first, then the head of every open PR except `skipPr`. */
-function sources(skipPr: string | undefined): Array<Source> {
+/** True when HEAD and `head` share a commit that origin/main does not have: two PRs of one stack. */
+function sameStack(head: string) {
+  const fetched = spawnSync("git", ["fetch", "--quiet", "origin", head]).status === 0;
+  const shared = spawnSync("git", ["merge-base", "HEAD", head], { encoding: "utf8" });
+  if (!fetched || shared.status !== 0) return false;
+  const onMain = spawnSync("git", [
+    "merge-base",
+    "--is-ancestor",
+    shared.stdout.trim(),
+    "origin/main",
+  ]).status;
+  if (onMain !== 0 && onMain !== 1) throw new Error(`git merge-base --is-ancestor failed for ${head}.`);
+  return onMain === 1;
+}
+
+/**
+ * origin/main first, then the head of every open PR except `skipPr`. With `skipStack`, also except the PRs of this
+ * PR's stack: a lower PR may change the text of a number that this PR still carries until its next rebase.
+ */
+function sources(skipPr: string | undefined, skipStack = false): Array<Source> {
   const main = { name: "origin/main", definitions: definitions(run("git", ["show", "origin/main:SPEC.md"])) };
   const repo = run("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).trim();
   const prs = JSON.parse(
     run("gh", ["pr", "list", "--state", "open", "--limit", "200", "--json", "number,headRefOid"]),
   ) as Array<{ readonly number: number; readonly headRefOid: string }>;
   const open = prs
-    .filter((pr) => String(pr.number) !== skipPr)
+    .filter((pr) => String(pr.number) !== skipPr && !(skipStack && sameStack(pr.headRefOid)))
     .flatMap((pr) => {
       let spec: string;
       try {
@@ -94,7 +112,7 @@ function clashes(all: ReadonlyArray<Source>): Array<string> {
 const [argument] = process.argv.slice(2);
 const block = Number(argument);
 if (argument === "--check") {
-  const found = clashes(sources(process.env["PR_NUMBER"]));
+  const found = clashes(sources(process.env["PR_NUMBER"], true));
   for (const clash of found) console.error(clash);
   if (found.length > 0) {
     console.error("Pick a free number with: node scripts/next-k.ts <block>");

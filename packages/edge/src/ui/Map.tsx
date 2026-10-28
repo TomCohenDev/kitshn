@@ -99,6 +99,8 @@ interface Props {
   readonly onView: (view: View) => void;
   /** The left edge of a panel that floats over the map, or null; live previews skip cards under it. */
   readonly panelLeft: number | null;
+  /** The right edge of the shelf (K-525), or 0 without one; live previews skip cards under it too. */
+  readonly trayRight: number;
   /** K-1508: `itemKey`s of the cards and circles that a History row highlights now. */
   readonly flash: ReadonlySet<string>;
   readonly openStacks: ReadonlySet<string>;
@@ -454,7 +456,11 @@ export function MapView(props: Props) {
           })
           .map(([id, place]) => ({ id, x: place.x * view.s + view.x, y: place.y * view.s + view.y }))
           .filter(
-            (card) => card.x > 240 && card.y > 120 && card.x < (props.panelLeft ?? innerWidth) && card.y < innerHeight,
+            (card) =>
+              card.x > props.trayRight &&
+              card.y > 120 &&
+              card.x < (props.panelLeft ?? innerWidth) &&
+              card.y < innerHeight,
           )
           .sort(
             (a, b) =>

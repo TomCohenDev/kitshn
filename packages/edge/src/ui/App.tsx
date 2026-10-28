@@ -42,7 +42,17 @@ import {
   MEMBER_HELP,
   SecretDialog,
 } from "./Circle.tsx";
-import { ActionMenu, Menu, MenuItem, MoreButton, OverlayPanel, TooltipLayer } from "./controls.tsx";
+import {
+  ActionMenu,
+  Menu,
+  MenuItem,
+  MoreButton,
+  OverlayPanel,
+  ResizeEdge,
+  TooltipLayer,
+  useScreenWidth,
+  useStoredWidth,
+} from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import {
   type ActionContext,
@@ -86,6 +96,8 @@ import {
   panInto,
   shownCardBoxes,
   union,
+  type WidthLimits,
+  shownWidths,
 } from "./layout.ts";
 import { actorLabel } from "./revisions.ts";
 import {
@@ -161,10 +173,12 @@ const TABS = {
 /** "safety" is the big red button (K-1504); like "details", it has no full view. */
 type PanelKind = "details" | "safety" | "history" | "library" | "machines";
 
-/** `html` font size in styles.css; the panel width is 26rem (`--panel-width`). */
+/** `html` font size in styles.css. */
 const REM = 18;
-/** The left edge of the overlay panel on a wide screen. */
-const panelLeft = () => innerWidth - 12 - Math.min(26 * REM, innerWidth - 24);
+/** K-525: the side panel and the shelf; the owner drags their edges, and each device keeps its widths. */
+const PANEL_WIDTH: WidthLimits = { min: 18 * REM, max: 46 * REM, initial: 26 * REM };
+const TRAY_WIDTH: WidthLimits = { min: 160, max: 420, initial: 210 };
+const LIMITS = { panel: PANEL_WIDTH, tray: TRAY_WIDTH } as const;
 const PANEL_HEADINGS: Record<Exclude<PanelKind, "details">, string> = {
   safety: "Big red button",
   history: "History",
@@ -201,6 +215,9 @@ export function App() {
   const [progress, setProgress] = useState<string | null>(null);
   const [trayFilter, setTrayFilter] = useState("");
   const [previews, setPreviews] = useState(() => localStorage.getItem(PREVIEWS_KEY) === "on");
+  const [wantedPanel, setPanelWidth] = useStoredWidth("kitshn.panelWidth", PANEL_WIDTH);
+  const [wantedTray, setTrayWidth] = useStoredWidth("kitshn.trayWidth", TRAY_WIDTH);
+  const screenWidth = useScreenWidth();
   const [addingSite, setAddingSite] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
   /** Where the next upload of the file chooser lands: a map point, or null for the tray. */
@@ -709,6 +726,22 @@ export function App() {
   }
 
   const tray = [...state.resources.values()].filter((resource) => !state.places.has(resource.id));
+  const trayShown = tray.length > 0 && route.tab === "map";
+  const wide = screenWidth > 720;
+  /** K-525: the widths that show leave room for each other and for the map; a phone keeps its own layout. */
+  const widthsFor = (panel: number, shelf: number) =>
+    shownWidths(screenWidth, { panel: floating ? panel : null, tray: trayShown ? shelf : null }, LIMITS);
+  const widths = widthsFor(wantedPanel, wantedTray);
+  // The page's CSS reads these, also outside this tree's elements; a drag sets them alone until it ends.
+  if (wide) {
+    document.documentElement.style.setProperty("--panel-width", `${widths.panel || wantedPanel}px`);
+    document.documentElement.style.setProperty("--tray-width", `${widths.tray || wantedTray}px`);
+  } else {
+    document.documentElement.style.removeProperty("--panel-width");
+    document.documentElement.style.removeProperty("--tray-width");
+  }
+  /** The left edge of the overlay panel on a wide screen, for a panel `width` wide. */
+  const panelLeft = (width = widths.panel || wantedPanel) => innerWidth - 12 - Math.min(width, innerWidth - 24);
   const shownTray = tray
     .filter((resource) =>
       `${resource.name} ${resource.kind} ${resource.addresses[0] ?? ""}`
@@ -718,7 +751,7 @@ export function App() {
     .reverse();
 
   /** The part of the screen where the map shows clear of the toolbar, the tray and a floating panel. */
-  const mapArea = (withPanel: boolean): Box =>
+  const mapArea = (withPanel: boolean, panelWidth?: number): Box =>
     openArea({
       width: innerWidth,
       // The hint line at the bottom shows only on a wide screen; the map stays above it.
@@ -727,8 +760,8 @@ export function App() {
       // The tray is not drawn yet when a full view switches to the map, so its width then comes from the tray cards.
       left:
         document.querySelector(".tray")?.getBoundingClientRect().right ??
-        (tray.length > 0 ? (wideScreen() ? 220 : 160) : 0),
-      panelLeft: withPanel ? panelLeft() : null,
+        (tray.length > 0 ? (wideScreen() ? widths.tray + 10 : 160) : 0),
+      panelLeft: withPanel ? panelLeft(panelWidth) : null,
       narrow: !wideScreen(),
     });
 
@@ -902,6 +935,17 @@ export function App() {
     setTimeout(() => uploadInput.current?.click());
   };
 
+  /** K-525: after a panel resize, selected cards that the panel now covers pan clear of it. */
+  const keepSelectionClear = (panelWidth: number) => {
+    const boxes = [...selection.cards].flatMap((id) => {
+      const place = state.places.get(id);
+      return place ? [cardBox(place)] : [];
+    });
+    if (boxes.length === 0) return;
+    const next = panInto(union(boxes), mapArea(true, panelWidth), view);
+    if (next !== view) changeView(next);
+  };
+
   /** K-523: the menu and the palette run these, the same as the toolbar and the panel. */
   const handlers: ActionHandlers = {
     select: (selected) => {
@@ -993,6 +1037,7 @@ export function App() {
             changeView(next);
           }}
           panelLeft={floating && wideScreen() ? panelLeft() : null}
+          trayRight={trayShown ? 10 + (wide ? widths.tray : 150) : 0}
           flash={flash}
           openStacks={openStacks}
           onToggleStack={(key) => {
@@ -1004,6 +1049,20 @@ export function App() {
           onCommit={(edits, diffs) => void commit(edits, diffs)}
           machines={machines}
           onMenu={setMenu}
+        />
+      ) : null}
+      {floating && wide ? (
+        <ResizeEdge
+          label="Panel width"
+          width={widths.panel}
+          limits={PANEL_WIDTH}
+          grows="left"
+          cssVar="--panel-width"
+          fit={(wanted) => widthsFor(wanted, wantedTray).panel}
+          onCommit={(width) => {
+            setPanelWidth(width);
+            keepSelectionClear(width);
+          }}
         />
       ) : null}
       {shownPanel ? (
@@ -1233,6 +1292,17 @@ export function App() {
       </header>
       {tray.length > 0 && route.tab === "map" ? (
         <aside class="tray">
+          {wide ? (
+            <ResizeEdge
+              label="Shelf width"
+              width={widths.tray}
+              limits={TRAY_WIDTH}
+              grows="right"
+              cssVar="--tray-width"
+              fit={(wanted) => widthsFor(wantedPanel, wanted).tray}
+              onCommit={setTrayWidth}
+            />
+          ) : null}
           <div class="tray-head">
             <span
               class="label"

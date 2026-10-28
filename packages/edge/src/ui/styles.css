@@ -710,6 +710,9 @@ select {
   }
   .handle {
     display: block;
+    padding: 0;
+    border: 0;
+    cursor: pointer;
     width: 48px;
     height: 6px;
     margin: -4px auto 8px;

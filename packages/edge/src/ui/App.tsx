@@ -41,7 +41,7 @@ import {
 import { TooltipLayer } from "./controls.tsx";
 import { AddSite } from "./Add.tsx";
 import { PauseDialog, PausedBanner } from "./Pause.tsx";
-import { RepoList, setRepoState } from "./Repos.tsx";
+import { REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
@@ -107,12 +107,6 @@ const TABS = {
   machines: "Machines: a table of every machine and its status.",
   library: "Library: every page and file, with a search, a preview and Delete.",
   history: "History: every change as one revision, with Undo.",
-} as const;
-
-const REPO_TIPS = {
-  waiting: "Waiting: the first deploy of this repo waits for one click.",
-  allowed: "Allowed: pushes of this repo deploy.",
-  blocked: "Blocked: kitshn refuses deploys of this repo.",
 } as const;
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
@@ -1226,9 +1220,9 @@ function Panel(props: {
   }
   return (
     <aside class={`side${sheetOpen ? "" : " closed"}`}>
-      <div
+      <button
+        type="button"
         class="handle"
-        role="button"
         aria-label={sheetOpen ? "Close the panel" : "Open the panel"}
         data-tip={sheetOpen ? "Close the panel." : "Open the panel."}
         onClick={() => setSheetOpen(!sheetOpen)}
@@ -1367,8 +1361,8 @@ function CardPanel(props: {
             Deploys
           </span>
           <span
-            class={`sticker ${props.repo.state === "allowed" ? "ok" : props.repo.state === "waiting" ? "wait" : ""}`}
-            data-tip={REPO_TIPS[props.repo.state]}
+            class={`sticker ${REPO_STICKERS[props.repo.state].style}`}
+            data-tip={REPO_STICKERS[props.repo.state].tip}
           >
             {props.repo.state}
           </span>

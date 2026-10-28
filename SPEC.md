@@ -105,7 +105,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-501** The map shows every card and every circle. A toggle for each kind hides that kind. Hidden kinds still count for their circles.
 - **K-502** A drag of a card, or of a selection, into or out of a circle shows a preview before the drop: each circle edge lights up, and a label says what changes, for example "+ Qlik · view" or "− Her". The drop applies it.
 - **K-503** After each drop that changes a share, a toast names the change and has Undo for 10 seconds. Undo is also in the history (K-1502).
-- **K-504** A drag of a circle by its head moves its cards with it. ⌘ and a drag on macOS, or Ctrl and a drag on other systems, moves the circle alone. The tooltip of the head and the hint line name the key. The preview of K-502 then names every card that gains or loses the circle.
+- **K-504** A drag of a circle by its head moves its cards with it. ⌘ and a drag on macOS and iOS, or Ctrl and a drag on other systems, moves the circle alone. The tooltip of the head and the hint line name the key. The preview of K-502 then names every card that gains or loses the circle.
 - **K-505** A resize of a circle shows the same preview as K-504 before the release.
 - **K-506** A circle shows its members as chips on its edge, at most 4. A "+N" chip opens the full list.
 - **K-507** A card shows a dot for each circle that holds it, and a chip for each override (K-205). A hover on a dot names the circle and the level.

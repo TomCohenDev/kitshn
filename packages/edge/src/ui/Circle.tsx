@@ -94,12 +94,15 @@ const END_PRESETS = [
   { label: "1 month", after: 30 * DAY },
 ] as const;
 
-/** The end of the day that is `days` days from now, in local time. */
-const endOfDayIn = (days: number) => {
+/** The end of the day that is `days` days from now, in local time, or null for text that is no such day. */
+const endOfDayIn = (days: string): number | null => {
+  const count = Number(days);
+  if (!Number.isInteger(count) || count <= 0) return null;
   const date = new Date();
-  date.setDate(date.getDate() + days);
+  date.setDate(date.getDate() + count);
   date.setHours(23, 59, 0, 0);
-  return date.getTime();
+  const time = date.getTime();
+  return Number.isFinite(time) ? time : null;
 };
 
 /**
@@ -113,6 +116,7 @@ export function EndsPicker(props: {
 }) {
   const [custom, setCustom] = useState(false);
   const [days, setDays] = useState("");
+  const customEnd = endOfDayIn(days);
   return (
     <div>
       <div class="pills">
@@ -148,8 +152,7 @@ export function EndsPicker(props: {
           class="row"
           onSubmit={(event) => {
             event.preventDefault();
-            const count = Number(days);
-            if (Number.isInteger(count) && count > 0) props.onChange(endOfDayIn(count));
+            if (customEnd !== null) props.onChange(customEnd);
           }}
         >
           <input
@@ -161,7 +164,7 @@ export function EndsPicker(props: {
             value={days}
             onInput={(event) => setDays(event.currentTarget.value.trim())}
           />
-          <button class="btn" disabled={!(Number.isInteger(Number(days)) && Number(days) > 0)} data-tip="Set this end date.">
+          <button class="btn" disabled={customEnd === null} data-tip="Set this end date.">
             Set
           </button>
         </form>

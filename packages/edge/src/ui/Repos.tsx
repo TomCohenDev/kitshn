@@ -35,7 +35,7 @@ export async function setRepoState(
   return { text: `Allowed deploys of ${repo.name}. Run its workflow again to deploy.`, error: false };
 }
 
-const STICKERS: Record<RepoState, { readonly style: string; readonly tip: string }> = {
+export const REPO_STICKERS: Record<RepoState, { readonly style: string; readonly tip: string }> = {
   waiting: { style: "wait", tip: "Waiting: the first deploy of this repo waits for one click." },
   allowed: { style: "ok", tip: "Allowed: pushes of this repo deploy." },
   blocked: { style: "", tip: "Blocked: kitshn refuses deploys of this repo." },
@@ -71,7 +71,7 @@ export function RepoList(props: {
           .map((repo) => (
             <li key={repo.repoId}>
               <code>{repo.name}</code>
-              <span class={`sticker ${STICKERS[repo.state].style}`} data-tip={STICKERS[repo.state].tip}>
+              <span class={`sticker ${REPO_STICKERS[repo.state].style}`} data-tip={REPO_STICKERS[repo.state].tip}>
                 {repo.state}
               </span>
               {repo.allowedBy ? (

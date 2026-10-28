@@ -172,7 +172,7 @@ function publishRefusal(state: State, visitor: Visitor, now: number) {
   );
   return overlaps
     ? "Publish into the overlap of an agent circle and Everyone, so the key keeps managing the card."
-    : `No agent circle of this key overlaps Everyone. Ask the owner to ${CIRCLE_ALONE_KEY.mac.label}-drag (${CIRCLE_ALONE_KEY.other.label}-drag outside macOS) the head of the Agents circle, which moves the circle alone, so it overlaps Everyone and its cards stay in place.`;
+    : `No agent circle of this key overlaps Everyone. Ask the owner to ${CIRCLE_ALONE_KEY.mac.label}-drag (on a Mac, iPad or iPhone) or ${CIRCLE_ALONE_KEY.other.label}-drag (on other systems) the head of the Agents circle, which moves the circle alone, so it overlaps Everyone and its cards stay in place.`;
 }
 
 /**

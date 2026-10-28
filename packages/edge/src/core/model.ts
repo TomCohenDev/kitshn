@@ -136,8 +136,8 @@ export function levelForKind(kind: ResourceKind, wanted: Level): Level | null {
 }
 
 /**
- * K-504: the modifier key that drags a circle head without the cards inside: ⌘ on macOS, where Ctrl and a
- * click opens the context menu, and Ctrl elsewhere.
+ * K-504: the modifier key that drags a circle head without the cards inside: ⌘ on macOS and iOS (on macOS,
+ * Ctrl and a click opens the context menu), and Ctrl elsewhere.
  */
 export const CIRCLE_ALONE_KEY = {
   mac: { property: "metaKey", label: "⌘" },

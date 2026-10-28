@@ -1,8 +1,9 @@
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { Machine } from "../src/core/machine.ts";
 import { liveSiteId } from "../src/worker/live.ts";
+import { accessToken, send, stubAccessCerts } from "./access.ts";
 
 const png = (last: number) => new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, last]);
 const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
@@ -73,4 +74,46 @@ it("stores the icon that a daemon reads from its own site, at most one change an
   // Not an image: refused, also for a site without an icon.
   await send("m1", { type: "icon", site: "fresh", icon: btoa("<html></html>") });
   expect(await stored()).toEqual([first]);
+});
+
+afterEach(() => vi.restoreAllMocks());
+
+/** The owner uploads a page or a file (K-1101), and gets the id of its card. */
+async function upload(kind: "pages" | "files", name: string, body: Uint8Array, type: string) {
+  const token = await accessToken("admin-aud", { email: "owner@example.com" });
+  const response = await send(`/api/${kind}`, {
+    method: "POST",
+    headers: {
+      "cf-access-jwt-assertion": token,
+      "x-kitshn-name": name,
+      "content-type": type,
+      "content-length": String(body.length),
+    },
+    body,
+  });
+  expect(response.status).toBe(201);
+  return ((await response.json()) as { id: string }).id;
+}
+
+it("keeps the data: icon of a page and a small image file as card icons (K-1115)", async () => {
+  stubAccessCerts();
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg"></svg>';
+  const page = `<html><head><link rel="icon" href="data:image/svg+xml,${encodeURIComponent(svg)}"></head><body>hi</body></html>`;
+  const withIcon = await upload("pages", "With icon", new TextEncoder().encode(page), "text/html");
+  const plain = await upload(
+    "pages",
+    "Plain",
+    new TextEncoder().encode('<link rel="icon" href="/x.png">'),
+    "text/html",
+  );
+  const image = await upload("files", "logo.png", png(7), "image/png");
+  const text = await upload("files", "notes.txt", new TextEncoder().encode("not an image"), "text/plain");
+  const ids = (
+    await runInDurableObject(env.KITSHN.getByName("kitshn"), (_, state) =>
+      state.storage.sql.exec<{ id: string }>("SELECT id FROM icons").toArray(),
+    )
+  ).map((row) => row.id);
+  expect(ids).toEqual(expect.arrayContaining([withIcon, image]));
+  expect(ids).not.toContain(plain);
+  expect(ids).not.toContain(text);
 });

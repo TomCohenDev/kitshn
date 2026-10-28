@@ -133,6 +133,28 @@ async function iconCandidates(readText: (path: string) => Promise<string | null>
   return candidates;
 }
 
+/**
+ * K-1115: the first `<link rel="icon">` of a page whose href is a `data:` URL, as bytes; null when there is none.
+ * A page is one file, so a link to another path names nothing kitshn has.
+ */
+export function pageDataIcon(html: string): Uint8Array | null {
+  for (const link of tags(html, "link").filter((item) => relHas(item, "icon"))) {
+    const href = (link.get("href") ?? "").trim();
+    const comma = href.indexOf(",");
+    if (!href.toLowerCase().startsWith("data:") || comma === -1) continue;
+    const meta = href.slice("data:".length, comma).toLowerCase();
+    const data = href.slice(comma + 1);
+    try {
+      return meta.endsWith(";base64")
+        ? Uint8Array.from(atob([...data].filter((char) => !" \t\n\r".includes(char)).join("")), (char) => char.charCodeAt(0))
+        : new TextEncoder().encode(decodeURIComponent(data));
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 export interface SiteIcon {
   readonly path: string;
   readonly type: IconType;

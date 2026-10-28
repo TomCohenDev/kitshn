@@ -2100,22 +2100,6 @@ a > code {
   margin: 10px 0;
 }
 .gauge-head {
-
-/* Notifications (K-1905) */
-.notification {
-  margin: 10px 0;
-  padding: 8px 10px;
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 2px 2px 0 0 var(--shadow-ink);
-}
-.notification.level-error {
-  background: var(--error-surface);
-}
-.notification.quiet {
-  opacity: 0.7;
-}
-.notification-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2173,7 +2157,28 @@ a > code {
 }
 .uptime-strip > .down {
   background: var(--error);
+}
 
+/* Notifications (K-1905) */
+.notification {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
+}
+.notification.level-error {
+  background: var(--error-surface);
+}
+.notification.quiet {
+  opacity: 0.7;
+}
+.notification-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
 .notification p {
   margin: 4px 0;
 }

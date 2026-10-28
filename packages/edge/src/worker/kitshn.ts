@@ -7390,6 +7390,8 @@ export class Kitshn extends DurableObject<Env> {
       since,
       since,
     ).map((row) => ({ at: row.at, up: row.up === 1 }));
+  }
+
   /** K-1903: opens or changes the notification of a source and key. Writes only when it changes (K-1302). */
   private notify(input: NotificationInput, now = Date.now()) {
     const id = `${input.source}\u0000${input.key}`;
@@ -7468,6 +7470,27 @@ export class Kitshn extends DurableObject<Env> {
     for (const notification of this.openNotifications.values())
       if (notification.source === "deploy" && !(notification.key in notes))
         this.setNotificationState("deploy", notification.key, "closed");
+    // K-1904: a card that is down (K-1125); the uptime rows exist only for cards that are down or failing.
+    const down = new Set<string>();
+    for (const card of this.uptimeTargets()) {
+      const uptime = this.uptime.get(card.id);
+      if (!uptime || uptime.up) continue;
+      down.add(card.id);
+      this.notify({
+        source: "uptime",
+        key: card.id,
+        card: card.id,
+        recipients: { _tag: "owner" },
+        level: "error",
+        priority: "normal",
+        title: `${card.name} is down`,
+        text: `kitshn gets no good answer from ${card.addresses.join(", ")}.`,
+        actions: [{ id: "show", label: "Show card", kind: "link", path: `#map/${card.id}` }],
+      });
+    }
+    for (const notification of this.openNotifications.values())
+      if (notification.source === "uptime" && !down.has(notification.key))
+        this.setNotificationState("uptime", notification.key, "closed");
   }
 
   /** K-1902: the owner gets every notification; a circle adds its people. */

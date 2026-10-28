@@ -49,3 +49,32 @@ it("opens a deploy notification when the newest deploy fails, and closes it afte
   expect(rows.failed).toEqual([{ state: "open", title: "Deploy of shop failed", text: "The build failed." }]);
   expect(rows.after.map((row) => row.state)).toEqual(["closed"]);
 });
+
+it("opens an uptime notification while a card is down, and closes it when it is up (K-1904)", async () => {
+  const stub = env.KITSHN.getByName("notify-uptime");
+  const states = await runInDurableObject(stub, (instance) => {
+    const kitshn = instance as unknown as Kitshn & { uptimeCache: unknown };
+    const shop: Resource = {
+      id: "shop",
+      kind: "site.static",
+      name: "shop",
+      addresses: ["shop.example.com"],
+      status: "running",
+      group: null,
+      machine: null,
+    };
+    kitshn.sql("INSERT INTO resources (id, body) VALUES ('shop', ?)", JSON.stringify(shop));
+    kitshn.load();
+    const read = () =>
+      kitshn.sql("SELECT state FROM notifications WHERE source = 'uptime'").map((row) => row.state);
+    kitshn.sql("INSERT INTO uptime (card_id, up, failing_since, since) VALUES ('shop', 0, NULL, 1)");
+    kitshn.uptimeCache = null;
+    kitshn.broadcast();
+    const down = read();
+    kitshn.sql("DELETE FROM uptime WHERE card_id = 'shop'");
+    kitshn.uptimeCache = null;
+    kitshn.broadcast();
+    return { down, up: read() };
+  });
+  expect(states).toEqual({ down: ["open"], up: ["closed"] });
+});

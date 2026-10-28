@@ -165,6 +165,16 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "CREATE TABLE uptime (card_id TEXT PRIMARY KEY, up INTEGER NOT NULL, failing_since INTEGER, since INTEGER NOT NULL)",
     "CREATE TABLE uptime_changes (card_id TEXT NOT NULL, at INTEGER NOT NULL, up INTEGER NOT NULL, PRIMARY KEY (card_id, at))",
   ],
+  // 26: notifications (K-1901, K-1905). A key that opens again gets a new row, so the view keeps each time; the
+  // partial index lets the reconcile after each change read only the open rows (K-1906).
+  [
+    `CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, key TEXT NOT NULL,
+     card_id TEXT, recipients TEXT NOT NULL, level TEXT NOT NULL, priority TEXT NOT NULL, title TEXT NOT NULL,
+     text TEXT NOT NULL, actions TEXT NOT NULL, state TEXT NOT NULL, opened_at INTEGER NOT NULL, closed_at INTEGER,
+     snoozed_until INTEGER, episode TEXT NOT NULL)`,
+    "CREATE UNIQUE INDEX notifications_open ON notifications (source, key) WHERE closed_at IS NULL",
+    "CREATE TABLE notification_mutes (card_id TEXT NOT NULL, source TEXT NOT NULL, until INTEGER, PRIMARY KEY (card_id, source))",
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

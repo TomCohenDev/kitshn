@@ -43,6 +43,7 @@ import {
 import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
+  OWNER_CIRCLE_ID,
   type Circle,
   type Member,
   type Point,
@@ -156,7 +157,20 @@ import {
 import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
 import { seed } from "../core/seed.ts";
-import { type Visitor, visitorLevel } from "../core/visitor.ts";
+import { type Visitor, circleMatches, visitorLevel } from "../core/visitor.ts";
+import {
+  type Mute,
+  NOTIFICATIONS_KEEP_MS,
+  NOTIFICATIONS_MAX,
+  type Notification,
+  type NotificationInput,
+  TEXT_MAX,
+  TITLE_MAX,
+  NOTIFICATION_SOURCES,
+  changed,
+  clip,
+  onBell,
+} from "../core/notifications.ts";
 import {
   type AccessRow,
   type AccessStore,
@@ -314,13 +328,57 @@ interface UndoOf {
   readonly item: string | null;
 }
 
+interface NotificationRow extends Record<string, SqlStorageValue> {
+  id: number;
+  source: string;
+  key: string;
+  card_id: string | null;
+  recipients: string;
+  level: string;
+  priority: string;
+  title: string;
+  text: string;
+  actions: string;
+  state: string;
+  opened_at: number;
+  closed_at: number | null;
+  snoozed_until: number | null;
+  episode: string;
+}
+
+/** A stored value outside its set is a bug, so it fails loudly (K-006). */
+function oneOf<const T extends string>(value: string, values: ReadonlyArray<T>): T {
+  const found = values.find((each) => each === value);
+  if (found === undefined) throw new Error(`kitshn read ${value}, which is none of ${values.join(", ")}.`);
+  return found;
+}
+
+const notificationOf = (row: NotificationRow): Notification => ({
+  id: row.id,
+  source: row.source,
+  key: row.key,
+  card: row.card_id,
+  recipients: JSON.parse(row.recipients) as Notification["recipients"],
+  level: oneOf(row.level, ["info", "warn", "error"] as const),
+  priority: oneOf(row.priority, ["normal", "high"] as const),
+  title: row.title,
+  text: row.text,
+  actions: JSON.parse(row.actions) as Notification["actions"],
+  episode: row.episode,
+  state: row.state,
+  openedAt: row.opened_at,
+  closedAt: row.closed_at,
+  snoozedUntil: row.snoozed_until,
+});
+
 interface DeployFacts {
   readonly deployed: ReadonlyArray<string>;
   /** The deployed cards with a deploy of a pull request environment (K-821). */
   readonly previews: ReadonlyArray<string>;
   /** K-303: the pull request number of each preview card, from its `pr-<n>` environment. */
   readonly pullRequests: ReadonlyArray<readonly [string, number]>;
-  readonly notes: ReadonlyArray<{ resource_id: string; state: string; reason: string | null }>;
+  /** `id` is the newest deploy of the card, the episode of its deploy notification (K-1905). */
+  readonly notes: ReadonlyArray<{ resource_id: string; id: string; state: string; reason: string | null }>;
   readonly repoCards: ReadonlyArray<{ repo_id: string; resource_id: string }>;
 }
 
@@ -351,6 +409,42 @@ export class Kitshn extends DurableObject<Env> {
     );
     return this.uptimeCache;
   }
+  /** K-1906: the open notifications by source and key, read on first use. */
+  private openCache: Map<string, Notification> | null = null;
+  private get openNotifications(): Map<string, Notification> {
+    this.openCache ??= new Map(
+      this.sql<NotificationRow>("SELECT * FROM notifications WHERE closed_at IS NULL").map((row) => {
+        const notification = notificationOf(row);
+        return [`${notification.source}\u0000${notification.key}`, notification];
+      }),
+    );
+    return this.openCache;
+  }
+  /** K-1905: the mutes, read on first use. */
+  private muteCache: Array<Mute> | null = null;
+  private get mutes(): Array<Mute> {
+    this.muteCache ??= this.sql<{ card_id: string; source: string; until: number | null }>(
+      "SELECT card_id, source, until FROM notification_mutes",
+    ).map((row) => ({ card: row.card_id, source: row.source, until: row.until }));
+    return this.muteCache;
+  }
+  /** K-1905: the dismissed episode of each source and key, read on first use; the newest row wins. */
+  private dismissedCache: Map<string, string> | null = null;
+  private get dismissed(): Map<string, string> {
+    this.dismissedCache ??= new Map(
+      this.sql<{ source: string; key: string; episode: string }>(
+        "SELECT source, key, episode FROM notifications WHERE state = 'dismissed' ORDER BY id",
+      ).map((row) => [`${row.source}\u0000${row.key}`, row.episode]),
+    );
+    return this.dismissedCache;
+  }
+  /** K-1905: the last time the alarm looked for ended mutes and snoozes, so the bell count follows them. */
+  private bellCheckedAt = 0;
+  /** K-1903: the handler of "run" actions, per source. */
+  private readonly actionHandlers = new Map<
+    string,
+    (notification: Notification, action: string, caller: Caller) => Promise<void> | void
+  >();
   private get revisions(): Array<RevisionView> {
     this.revisionCache ??= this.loadRevisions();
     return this.revisionCache;
@@ -530,6 +624,9 @@ export class Kitshn extends DurableObject<Env> {
     this.accessCache = null;
     this.revisionCache = null;
     this.uptimeCache = null;
+    this.openCache = null;
+    this.muteCache = null;
+    this.dismissedCache = null;
   }
 
   private loadRevisions(): Array<RevisionView> {
@@ -1925,15 +2022,16 @@ export class Kitshn extends DurableObject<Env> {
     const previews = new Set<string>();
     const pullRequests = new Map<string, number>();
     const repoCards = new Map<string, Set<string>>();
-    const newest = new Map<string, { state: string; reason: string | null }>();
+    const newest = new Map<string, { id: string; state: string; reason: string | null }>();
     for (const row of this.sql<{
+      id: string;
       resource_id: string;
       repo_id: string | null;
       environment: string;
       state: string;
       reason: string | null;
     }>(
-      "SELECT resource_id, repo_id, environment, state, reason FROM deploys WHERE kind = 'deploy' ORDER BY rowid",
+      "SELECT id, resource_id, repo_id, environment, state, reason FROM deploys WHERE kind = 'deploy' ORDER BY rowid",
     )) {
       if (row.repo_id !== null || row.state === "done") {
         deployed.add(row.resource_id);
@@ -1947,7 +2045,7 @@ export class Kitshn extends DurableObject<Env> {
       }
       if (row.repo_id !== null)
         repoCards.set(row.repo_id, (repoCards.get(row.repo_id) ?? new Set()).add(row.resource_id));
-      newest.set(row.resource_id, { state: row.state, reason: row.reason });
+      newest.set(row.resource_id, { id: row.id, state: row.state, reason: row.reason });
     }
     this.deployFacts = {
       deployed: [...deployed],
@@ -2084,7 +2182,8 @@ export class Kitshn extends DurableObject<Env> {
     return admin !== undefined && visitorLevel(this.state, admin, visitor, Date.now()) === "control";
   }
 
-  private snapshot(me: Actor, repos: ReadonlyArray<RepoView> = this.repoViews()): Snapshot {
+  private snapshot(caller: Caller, repos: ReadonlyArray<RepoView> = this.repoViews()): Snapshot {
+    const me = caller.actor;
     const desired = this.desired(Date.now());
     const loginError = this.meta("login_error");
     return {
@@ -2113,6 +2212,10 @@ export class Kitshn extends DurableObject<Env> {
           return [card.id, { up: value.up, since: value.since }];
         }),
       ),
+      bell: [...this.openNotifications.values()].filter(
+        (notification) =>
+          this.receives(caller.visitor, notification) && onBell(notification, this.mutes, Date.now()),
+      ).length,
       icons: Object.fromEntries([...this.iconHashes].filter(([id]) => this.state.resources.has(id))),
       previousVersions: this.sql<{ id: string }>(
         "SELECT id FROM library WHERE previous_size IS NOT NULL",
@@ -2165,6 +2268,8 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private broadcast() {
+    // K-1904: the sources that kitshn derives from its own state follow each change before the maps hear of it.
+    this.reconcileNotifications();
     const repos = this.repoViews();
     for (const socket of this.ctx.getWebSockets("map")) {
       const attachment = attachmentOf(socket);
@@ -2174,7 +2279,7 @@ export class Kitshn extends DurableObject<Env> {
         socket.close(4003, "You lost access to the kitshn admin.");
         continue;
       }
-      send(socket, { type: "snapshot", snapshot: this.snapshot(caller.actor, repos) });
+      send(socket, { type: "snapshot", snapshot: this.snapshot(caller, repos) });
     }
   }
 
@@ -2235,10 +2340,10 @@ export class Kitshn extends DurableObject<Env> {
       const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
       this.ctx.acceptWebSocket(server, ["map"]);
       server.serializeAttachment({ kind: "map", caller } satisfies Attachment);
-      send(server, { type: "snapshot", snapshot: this.snapshot(caller.actor) });
+      send(server, { type: "snapshot", snapshot: this.snapshot(caller) });
       return new Response(null, { status: 101, webSocket: client });
     }
-    if (path === "/api/state" && request.method === "GET") return Response.json(this.snapshot(caller.actor));
+    if (path === "/api/state" && request.method === "GET") return Response.json(this.snapshot(caller));
     if (path === "/api/sign-out" && request.method === "POST") return this.signOut(caller);
     if (path === "/api/sign-out/retry" && request.method === "POST") return this.retrySignOut(caller);
     if (path === "/api/machines" && request.method === "POST")
@@ -2305,6 +2410,7 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/api/library" && request.method === "GET") return Response.json(this.libraryItems());
     if (path.startsWith("/api/uptime/") && request.method === "GET")
       return Response.json(this.uptimeChanges(decodeURIComponent(path.slice("/api/uptime/".length))));
+    if (path.startsWith("/api/notifications")) return this.notificationRequest(path, request, caller);
     if ((path === "/api/pages" || path === "/api/files") && request.method === "POST")
       return this.upload(caller, request, path === "/api/pages" ? "page" : "file").catch((error: unknown) => {
         if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 400 });
@@ -3940,6 +4046,8 @@ export class Kitshn extends DurableObject<Env> {
     if (ends.some((end) => end !== null && end <= now) && this.expiredShares(now).length > 0) next = now;
     // K-1126: a connected daemon keeps the 2-minute alarm going; without one, uptime wakes at most every 10 minutes.
     if (this.uptimeTargets().length > 0) next = Math.min(next, now + UPTIME_IDLE_MS);
+    const bellEnd = this.nextBellEnd(now);
+    if (bellEnd !== null) next = Math.min(next, bellEnd);
     // Never move a pending alarm later: frequent wake-ups would otherwise push it away for good.
     const current = await this.ctx.storage.getAlarm();
     if (current === null || current <= now || next < current) await this.ctx.storage.setAlarm(next);
@@ -4014,6 +4122,15 @@ export class Kitshn extends DurableObject<Env> {
       );
       this.sql("DELETE FROM join_codes WHERE expires_at < ?", now);
       this.sql("DELETE FROM rekey_codes WHERE expires_at < ?", now);
+      // K-1901, K-1905: closed notifications stay 30 days and 500 at most; an ended mute goes.
+      this.sql(
+        `DELETE FROM notifications WHERE closed_at IS NOT NULL AND (closed_at < ? OR id <= (SELECT id FROM notifications
+         ORDER BY id DESC LIMIT 1 OFFSET ?))`,
+        now - NOTIFICATIONS_KEEP_MS,
+        NOTIFICATIONS_MAX,
+      );
+      this.sql("DELETE FROM notification_mutes WHERE until IS NOT NULL AND until < ?", now);
+      this.muteCache = null;
       // K-1113: a removed card keeps its icon until this run, so a quick Undo keeps it; a deploy sends it again.
       for (const { id } of this.sql<{ id: string }>(
         "DELETE FROM icons WHERE id NOT IN (SELECT id FROM resources) RETURNING id",
@@ -7295,6 +7412,248 @@ export class Kitshn extends DurableObject<Env> {
     ).map((row) => ({ at: row.at, up: row.up === 1 }));
   }
 
+  /** K-1903: opens or changes the notification of a source and key. Writes only when it changes (K-1302). */
+  private notify(input: NotificationInput, now = Date.now()) {
+    const id = `${input.source}\u0000${input.key}`;
+    const before = this.openNotifications.get(id);
+    const value = { ...input, title: clip(input.title, TITLE_MAX), text: clip(input.text, TEXT_MAX) };
+    if (before && !changed(before, value)) return;
+    // K-1905: a dismissed episode stays closed; only a new one opens a notification again.
+    if (!before && this.dismissed.get(id) === value.episode) return;
+    const columns = [
+      value.card,
+      JSON.stringify(value.recipients),
+      value.level,
+      value.priority,
+      value.title,
+      value.text,
+      JSON.stringify(value.actions),
+    ] as const;
+    if (before) {
+      this.sql(
+        `UPDATE notifications SET card_id = ?, recipients = ?, level = ?, priority = ?, title = ?, text = ?, actions = ?,
+         state = 'open', episode = ? WHERE id = ?`,
+        ...columns,
+        value.episode,
+        before.id,
+      );
+      this.openNotifications.set(id, { ...before, ...value, state: "open" });
+      return;
+    }
+    const [row] = this.sql<{ id: number }>(
+      `INSERT INTO notifications (source, key, card_id, recipients, level, priority, title, text, actions, state, opened_at,
+       episode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?) RETURNING id`,
+      value.source,
+      value.key,
+      ...columns,
+      now,
+      value.episode,
+    );
+    if (!row) throw new Error("kitshn wrote a notification and got no id back.");
+    this.openNotifications.set(id, {
+      ...value,
+      id: row.id,
+      state: "open",
+      openedAt: now,
+      closedAt: null,
+      snoozedUntil: null,
+    });
+  }
+
+  /** K-1903: sets the state of an open notification; any state but "open" closes it for every recipient. */
+  private setNotificationState(source: string, key: string, state: string, now = Date.now()) {
+    const id = `${source}\u0000${key}`;
+    const before = this.openNotifications.get(id);
+    if (!before || before.state === state) return;
+    if (state === "open") throw new Error("A notification opens through notify, not through its state.");
+    this.sql("UPDATE notifications SET state = ?, closed_at = ? WHERE id = ?", state, now, before.id);
+    this.openNotifications.delete(id);
+    if (state === "dismissed") this.dismissed.set(id, before.episode);
+  }
+
+  /** K-1904: the sources that kitshn derives from its own state. */
+  private reconcileNotifications() {
+    const notes = new Map(
+      this.deploys()
+        .notes.filter((note) => this.state.resources.has(note.resource_id))
+        .map((note) => [note.resource_id, note]),
+    );
+    for (const [card, note] of notes) {
+      const resource = this.state.resources.get(card);
+      if (!resource) continue;
+      this.notify({
+        source: "deploy",
+        key: card,
+        episode: note.id,
+        card,
+        recipients: { _tag: "owner" },
+        level: note.state === "failed" ? "error" : "warn",
+        priority: "normal",
+        title:
+          note.state === "failed"
+            ? `Deploy of ${resource.name} failed`
+            : `Deploy of ${resource.name} did not run`,
+        text: note.reason ?? "The deploy failed; its workflow run has the log.",
+        actions: [{ id: "show", label: "Show card", kind: "link", path: `#map/${card}` }],
+      });
+    }
+    for (const notification of this.openNotifications.values())
+      if (notification.source === "deploy" && !notes.has(notification.key))
+        this.setNotificationState("deploy", notification.key, "closed");
+    // K-1904: a card that is down (K-1125); the uptime rows exist only for cards that are down or failing.
+    const down = new Set<string>();
+    for (const card of this.uptimeTargets()) {
+      const uptime = this.uptime.get(card.id);
+      if (!uptime || uptime.up) continue;
+      down.add(card.id);
+      this.notify({
+        source: "uptime",
+        key: card.id,
+        episode: String(uptime.since),
+        card: card.id,
+        recipients: { _tag: "owner" },
+        level: "error",
+        priority: "normal",
+        title: `${card.name} is down`,
+        text: `kitshn gets no good answer from ${card.addresses.join(", ")}.`,
+        actions: [{ id: "show", label: "Show card", kind: "link", path: `#map/${card.id}` }],
+      });
+    }
+    for (const notification of this.openNotifications.values())
+      if (notification.source === "uptime" && !down.has(notification.key))
+        this.setNotificationState("uptime", notification.key, "closed");
+  }
+
+  /** K-1902: the owner gets every notification; a circle adds its people. */
+  private receives(visitor: Visitor, notification: Notification) {
+    const now = Date.now();
+    const member = (id: string) => {
+      const circle = this.state.circles.get(id);
+      return (
+        circle !== undefined &&
+        (circle.endsAt === null || circle.endsAt > now) &&
+        circleMatches(circle, visitor, this.state.machines)
+      );
+    };
+    return (
+      member(OWNER_CIRCLE_ID) ||
+      (notification.recipients._tag === "circle" && member(notification.recipients.circle))
+    );
+  }
+
+  /** K-1902: a member of the Owner circle. */
+  private isOwner(visitor: Visitor) {
+    const owner = this.state.circles.get(OWNER_CIRCLE_ID);
+    return owner !== undefined && circleMatches(owner, visitor, this.state.machines);
+  }
+
+  /** K-1905: the Notifications view and its ways out, for the owner only in this version (K-1902). */
+  private async notificationRequest(path: string, request: Request, caller: Caller): Promise<Response> {
+    const now = Date.now();
+    if (!this.isOwner(caller.visitor))
+      return Response.json(
+        { error: "Notifications are for the Owner circle in this version (K-1902)." },
+        { status: 403 },
+      );
+    const body = request.method === "POST" ? ((await request.json().catch(() => null)) as unknown) : null;
+    if (path === "/api/notifications" && request.method === "GET") {
+      const rows = this.sql<NotificationRow>(
+        "SELECT * FROM notifications ORDER BY id DESC LIMIT ?",
+        NOTIFICATIONS_MAX,
+      );
+      return Response.json({
+        notifications: rows
+          .map(notificationOf)
+          .filter((notification) => this.receives(caller.visitor, notification)),
+        mutes: this.mutes.filter((mute) => mute.until === null || mute.until > now),
+      });
+    }
+    if (
+      (path === "/api/notifications/mute" || path === "/api/notifications/unmute") &&
+      request.method === "POST"
+    ) {
+      if (!isRecord(body) || typeof body["card"] !== "string" || typeof body["source"] !== "string")
+        return Response.json({ error: "Name the card and the source." }, { status: 400 });
+      const card = body["card"];
+      const source = NOTIFICATION_SOURCES.find((each) => each === body["source"]);
+      if (path === "/api/notifications/unmute") {
+        this.sql("DELETE FROM notification_mutes WHERE card_id = ? AND source = ?", card, body["source"]);
+      } else {
+        if (!this.state.resources.has(card))
+          return Response.json({ error: `kitshn has no card ${card}.` }, { status: 400 });
+        if (source === undefined)
+          return Response.json(
+            { error: `A mute names one of the sources ${NOTIFICATION_SOURCES.join(", ")}.` },
+            { status: 400 },
+          );
+        const until = body["until"];
+        if (until !== null && (typeof until !== "number" || until <= now))
+          return Response.json({ error: "A mute ends at a future time, or never (null)." }, { status: 400 });
+        this.sql(
+          "INSERT OR REPLACE INTO notification_mutes (card_id, source, until) VALUES (?, ?, ?)",
+          card,
+          source,
+          until,
+        );
+      }
+      this.muteCache = null;
+      this.broadcast();
+      void this.scheduleAlarm();
+      return Response.json({ ok: true });
+    }
+    const [id = "", verb = "", action = ""] = path.slice("/api/notifications/".length).split("/");
+    const notification = [...this.openNotifications.values()].find((each) => String(each.id) === id);
+    if (!notification || !this.receives(caller.visitor, notification))
+      return Response.json({ error: "No such open notification for you." }, { status: 404 });
+    if (verb === "snooze" && request.method === "POST") {
+      const until = isRecord(body) ? body["until"] : undefined;
+      if (until !== null && (typeof until !== "number" || until <= now))
+        return Response.json({ error: "A snooze ends at a future time, or now (null)." }, { status: 400 });
+      this.sql("UPDATE notifications SET snoozed_until = ? WHERE id = ?", until, notification.id);
+      this.openNotifications.set(`${notification.source}\u0000${notification.key}`, {
+        ...notification,
+        snoozedUntil: until,
+      });
+      this.broadcast();
+      void this.scheduleAlarm();
+      return Response.json({ ok: true });
+    }
+    if (verb === "dismiss" && request.method === "POST") {
+      this.setNotificationState(notification.source, notification.key, "dismissed", now);
+      this.broadcast();
+      return Response.json({ ok: true });
+    }
+    if (verb === "actions" && request.method === "POST") {
+      const known = notification.actions.find((each) => each.id === action);
+      const handler = this.actionHandlers.get(notification.source);
+      if (!known || known.kind !== "run" || !handler)
+        return Response.json({ error: `The notification has no action ${action} to run.` }, { status: 400 });
+      await handler(notification, action, caller);
+      this.broadcast();
+      return Response.json({ ok: true });
+    }
+    return Response.json({ error: "Not found." }, { status: 404 });
+  }
+
+  /** K-1905: the next end of a mute or a snooze, so the alarm can bring the bell count up to date then. */
+  private nextBellEnd(now: number): number | null {
+    const ends = [
+      ...this.mutes.map((mute) => mute.until),
+      ...[...this.openNotifications.values()].map((notification) => notification.snoozedUntil),
+    ].filter((end): end is number => end !== null && end > now);
+    return ends.length === 0 ? null : Math.min(...ends);
+  }
+
+  /** K-1905: true when a mute or a snooze ended since the last look, so the bell count changed. */
+  private bellEnded(now: number): boolean {
+    const since = this.bellCheckedAt;
+    this.bellCheckedAt = now;
+    return [
+      ...this.mutes.map((mute) => mute.until),
+      ...[...this.openNotifications.values()].map((notification) => notification.snoozedUntil),
+    ].some((end) => end !== null && end > since && end <= now);
+  }
+
   override async alarm() {
     const now = Date.now();
     this.checkLiveness(now);
@@ -7309,6 +7668,7 @@ export class Kitshn extends DurableObject<Env> {
     // so it fetches nothing and keeps 10 subrequests spare.
     const uptime = await this.checkUptime(now, daily ? 0 : UPTIME_FETCHES_PER_RUN);
     if (uptime.changed) changed = true;
+    if (this.bellEnded(now)) changed = true;
     const api = this.api();
     if (api) {
       const desired = this.desired(now);

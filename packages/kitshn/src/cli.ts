@@ -158,8 +158,10 @@ async function deploy(server: string, dir: string) {
 }
 
 /**
- * The environment of the build command and of npx: without the two variables that mint GitHub OIDC tokens, so code
- * of the repo and of npm packages cannot ask for a token of this run.
+ * The environment of the build command and of npx, without the two variables that mint GitHub OIDC tokens. This is
+ * defense in depth, not isolation: a build runs as the same user and can still read the environment of this process,
+ * and hosted runners give sudo. A build that runs untrusted code belongs in its own job without `id-token: write`,
+ * which passes its output as an artifact (K-805).
  */
 function childEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };

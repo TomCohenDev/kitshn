@@ -256,6 +256,8 @@ const API_MESSAGES: Readonly<Record<string, ClientMessage["type"]>> = {
 export class Kitshn extends DurableObject<Env> {
   private state!: State;
   private revisions: Array<RevisionView> = [];
+  /** K-909: the cards whose orphaned Worker storage kitshn deletes now; their deploys and Undo wait. */
+  private readonly deletingStorage = new Set<string>();
   private access = new Map<string, AccessRow>();
   /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
   private stuckShares = new Set<string>();
@@ -773,9 +775,22 @@ export class Kitshn extends DurableObject<Env> {
     return [...byCard].map(([card, entry]) => ({ card, ...entry }));
   }
 
+  /** K-909: a deploy of this card that has not ended yet. */
+  private deployRuns(card: string) {
+    return (
+      this.sql<{ id: string }>(
+        "SELECT id FROM deploys WHERE resource_id = ? AND state IN ('planned', 'running') AND expires_at > ? LIMIT 1",
+        card,
+        Date.now(),
+      ).length > 0
+    );
+  }
+
   /**
    * K-909: deletes the orphaned Worker storage of a removed card: its kept script, and with it its Durable Objects,
-   * and its KV namespaces. History records it, and Undo cannot bring the data back.
+   * and its KV namespaces. It refuses while a deploy of the card runs, and a deploy or an Undo of the card waits for
+   * it (`deletingStorage`). Before each Cloudflare call it checks again that the card is gone and no deploy runs, and
+   * stops otherwise. History records what went, also when a call failed; Undo cannot bring the data back.
    */
   private async deleteOrphanWorker(caller: Caller, card: string) {
     const orphan = this.orphanWorkers().find((item) => item.card === card);
@@ -784,34 +799,71 @@ export class Kitshn extends DurableObject<Env> {
         { error: `${card} has no orphaned Worker storage; its card may be back on the map (K-909).` },
         { status: 409 },
       );
+    if (this.deployRuns(card) || this.deletingStorage.has(card))
+      return Response.json(
+        {
+          error: `A deploy of ${card}, or a delete of its storage, runs now. Try again after it ends (K-909).`,
+        },
+        { status: 409 },
+      );
     const api = this.api();
     if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
     const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
     const gone = (error: unknown) =>
       error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error);
-    try {
-      if (orphan.script) {
-        await api("DELETE", `${account}/workers/scripts/${orphan.script}?force=true`).catch(gone);
-        this.sql("DELETE FROM worker_storage WHERE card_id = ? AND kind = 'script'", card);
-      }
-      for (const { name, cf_id } of this.sql<{ name: string; cf_id: string }>(
+    const steps: Array<{ readonly what: string; readonly run: () => Promise<void> }> = [
+      ...(orphan.script
+        ? [
+            {
+              what: `the Worker ${orphan.script} with its Durable Objects`,
+              run: async () => {
+                await api("DELETE", `${account}/workers/scripts/${orphan.script}?force=true`).catch(gone);
+                this.sql("DELETE FROM worker_storage WHERE card_id = ? AND kind = 'script'", card);
+              },
+            },
+          ]
+        : []),
+      ...this.sql<{ name: string; cf_id: string }>(
         "SELECT name, cf_id FROM worker_storage WHERE card_id = ? AND kind = 'kv'",
         card,
-      )) {
-        await api("DELETE", `${account}/storage/kv/namespaces/${cf_id}`).catch(gone);
-        this.sql("DELETE FROM worker_storage WHERE card_id = ? AND kind = 'kv' AND name = ?", card, name);
-      }
-    } catch (error) {
-      this.broadcast();
-      return Response.json({ error: `kitshn could not delete it all: ${String(error)}` }, { status: 502 });
-    }
-    const parts = [
-      ...(orphan.script ? [`the Worker ${orphan.script} with its Durable Objects`] : []),
-      ...orphan.kv.map((name) => `the KV ${name}`),
+      ).map(({ name, cf_id }) => ({
+        what: `the KV ${name}`,
+        run: async () => {
+          await api("DELETE", `${account}/storage/kv/namespaces/${cf_id}`).catch(gone);
+          this.sql("DELETE FROM worker_storage WHERE card_id = ? AND kind = 'kv' AND name = ?", card, name);
+        },
+      })),
     ];
-    this.insertRevision(caller.actor, `Deleted ${parts.join(", ")} of the removed app ${card}`, [], null);
+    const deleted: Array<string> = [];
+    let problem: string | null = null;
+    this.deletingStorage.add(card);
+    try {
+      for (const step of steps) {
+        if (this.state.resources.has(card) || this.deployRuns(card)) {
+          problem = "stopped, because the card came back or a deploy of it started";
+          break;
+        }
+        try {
+          await step.run();
+          deleted.push(step.what);
+        } catch (error) {
+          problem = `${step.what} failed: ${error instanceof Error ? error.message : String(error)}`;
+          break;
+        }
+      }
+    } finally {
+      this.deletingStorage.delete(card);
+    }
+    const done = deleted.length > 0 ? deleted.join(", ") : "nothing";
+    this.insertRevision(
+      caller.actor,
+      `Deleted ${done} of the removed app ${card}${problem ? `; ${problem}` : ""}`,
+      [],
+      null,
+    );
     this.broadcast();
-    return Response.json({ deleted: parts });
+    if (problem) return Response.json({ error: `Deleted ${done}; ${problem}.`, deleted }, { status: 502 });
+    return Response.json({ deleted });
   }
 
   /** K-909: removes a deployed app; the card panel, the palette and `DELETE /api/apps/<card>` all come here. */
@@ -852,6 +904,12 @@ export class Kitshn extends DurableObject<Env> {
         continue;
       }
       await this.removeDomains(api, teardown.addresses, teardown.script);
+      // A removed app runs no crons either, so it does not write to its kept storage; Undo puts them back.
+      await api(
+        "PUT",
+        `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${teardown.script}/schedules`,
+        [],
+      );
       // K-909: the kept script is listed under "Orphaned" while its card is gone, with a way to delete it.
       this.sql(
         "INSERT OR REPLACE INTO worker_storage (card_id, kind, name, cf_id) VALUES (?, 'script', 'script', ?)",
@@ -867,6 +925,11 @@ export class Kitshn extends DurableObject<Env> {
     const restored = apps.flatMap(({ after }) =>
       after?.kind === "site.compose" && !this.closedPreview(after.id) ? [after] : [],
     );
+    for (const { after } of apps)
+      if (after?.kind === "site.worker" && this.deletingStorage.has(after.id))
+        throw new RuleError(
+          `kitshn deletes the storage of ${after.name} now; undo after it finishes (K-909).`,
+        );
     for (const card of restored)
       if (composeUndo(removalDown(this.query, card.id)) === "refuse")
         throw new RuleError(`The machine is stopping ${card.name} now; undo after it finishes (K-909).`);
@@ -3367,6 +3430,11 @@ export class Kitshn extends DurableObject<Env> {
     if (gate) return gate;
     const { resourceId, script } = environmentNames(deployer.repoId, deployer.repo, result.environment);
     const existing = this.state.resources.get(resourceId);
+    if (this.deletingStorage.has(resourceId))
+      return Response.json(
+        { error: `kitshn deletes the storage of ${resourceId} now. Deploy again after it finishes (K-909).` },
+        { status: 409 },
+      );
     // K-804: a card keeps its kind, because its removal and its teardown follow the kind. A deploy of another kind
     // would leave the old app running behind a card that cannot take it down.
     const kind = "compose" in recipe ? "site.compose" : "worker" in recipe ? "site.worker" : "site.static";
@@ -3928,36 +3996,17 @@ export class Kitshn extends DurableObject<Env> {
     const ephemeral = isPreview(row.environment);
     const crons = ephemeral ? [] : (app.crons ?? []);
     const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+    if (this.deletingStorage.has(row.resource_id))
+      return fail(
+        `kitshn deletes the storage of ${row.resource_id} now. Deploy again after it finishes (K-909).`,
+      );
     const response = await this.publish(
       api,
       row,
       deployer,
       "site.worker",
       icon,
-      async (scripts) => {
-        // K-806: the Free plan runs 5 crons per account. kitshn counts the crons of every other script with a
-        // scheduled handler, its own and others, before the upload, so the limit never fails a live deploy.
-        if (crons.length > 0) {
-          const scheduled = scripts.filter(
-            (item) => item.id !== row.script && (item.handlers ?? []).includes("scheduled"),
-          );
-          if (scheduled.length > 10)
-            throw new RuleError(
-              `The account has ${scheduled.length} Workers with crons; kitshn counts at most 10 (K-806).`,
-            );
-          let used = 0;
-          for (const item of scheduled)
-            used += (
-              await api<{ schedules: ReadonlyArray<unknown> }>(
-                "GET",
-                `${account}/workers/scripts/${item.id}/schedules`,
-              )
-            ).schedules.length;
-          if (used + crons.length > CRON_LIMIT)
-            throw new RuleError(
-              `Other Workers of the account run ${used} crons, and ${crons.length} more pass the limit of ${CRON_LIMIT} of the Free plan (K-806).`,
-            );
-        }
+      async () => {
         const metadata = workerMetadata(app, {
           kv,
           secrets: secrets.secrets,
@@ -3995,8 +4044,11 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /**
-   * K-805, K-806: uploads the Worker of a deploy and publishes it at its addresses. `build` gets the scripts of the
-   * account and gives the upload metadata and the one module; `afterUpload` runs before the addresses go live.
+   * K-805, K-806: uploads the Worker of a deploy and publishes it at its addresses. `build` gives the upload metadata
+   * and the one module; `afterUpload` runs before the addresses go live.
+   * K-406: at most 42 of the 50 subrequests of the Free plan, with 5 addresses (K-817): the Access sync 20, the script
+   * list 1, the upload 1, workers.dev 1, the schedules 1, a lookup and an attach per address 10, the stale domains
+   * 2 lists and up to 5 deletes, and the route check 1. Keep it under 45 when a step joins.
    */
   private async publish(
     api: Api,
@@ -4004,9 +4056,7 @@ export class Kitshn extends DurableObject<Env> {
     deployer: Deployer,
     kind: "site.static" | "site.worker",
     icon: { readonly bytes: Uint8Array; readonly type: string } | null | undefined,
-    build: (
-      scripts: ReadonlyArray<{ readonly id: string; readonly handlers?: ReadonlyArray<string> }>,
-    ) => Promise<{ readonly metadata: Record<string, unknown>; readonly module: string }>,
+    build: () => Promise<{ readonly metadata: Record<string, unknown>; readonly module: string }>,
     afterUpload: () => Promise<void> = async () => undefined,
   ) {
     const card = this.ensureCard(row, deployer, kind, null);
@@ -4015,12 +4065,9 @@ export class Kitshn extends DurableObject<Env> {
     const notReady = this.accessNotReady(row);
     if (notReady) return notReady;
     const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
-    const scripts = await api<Array<{ id: string; handlers?: ReadonlyArray<string> }>>(
-      "GET",
-      `${account}/workers/scripts`,
-    );
+    const scripts = await api<Array<{ id: string }>>("GET", `${account}/workers/scripts`);
     const isNew = !scripts.some((item) => item.id === row.script);
-    const { metadata, module } = await build(scripts);
+    const { metadata, module } = await build();
     const form = new FormData();
     form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
     form.append("worker.js", new Blob([module], { type: "application/javascript+module" }), "worker.js");
@@ -4085,12 +4132,56 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /**
+   * K-806: the crons that the other Workers of the account run, from one script list and the schedules of each
+   * script with a scheduled handler. It runs in the storage step, before the upload, so the limit never fails a live
+   * deploy. K-406: that step makes at most 20 calls for 10 KV bindings, so this reads at most 24 schedules and keeps
+   * the step under 45 subrequests; with more such Workers, the deploy fails and says so.
+   */
+  private async cronsOfOtherWorkers(api: Api, script: string): Promise<number> {
+    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+    const scheduled = (
+      await api<Array<{ id: string; handlers?: ReadonlyArray<string> }>>("GET", `${account}/workers/scripts`)
+    ).filter((item) => item.id !== script && (item.handlers ?? []).includes("scheduled"));
+    if (scheduled.length > 24)
+      throw new RuleError(
+        `${scheduled.length} Workers of the account have a scheduled handler; kitshn reads the crons of at most 24 in one deploy step (K-406).`,
+      );
+    let used = 0;
+    for (const item of scheduled)
+      used += (
+        await api<{ schedules: ReadonlyArray<unknown> }>(
+          "GET",
+          `${account}/workers/scripts/${item.id}/schedules`,
+        )
+      ).schedules.length;
+    return used;
+  }
+
+  /**
    * K-806: makes the KV namespace of each binding of the recipe that this environment does not have yet. A
    * namespace stays with the card across deploys, so its data stays too.
    */
   private async workerStorage(api: Api, row: DeployRow) {
     const app = workerOf(row);
     const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+    if (this.deletingStorage.has(row.resource_id))
+      return Response.json(
+        {
+          error: `kitshn deletes the storage of ${row.resource_id} now. Deploy again after it finishes (K-909).`,
+        },
+        { status: 409 },
+      );
+    const crons = isPreview(row.environment) ? [] : (app.crons ?? []);
+    if (crons.length > 0) {
+      const used = await this.cronsOfOtherWorkers(api, row.script);
+      if (used + crons.length > CRON_LIMIT)
+        return Response.json(
+          {
+            error: `Other Workers of the account run ${used} crons, and ${crons.length} more pass the limit of ${CRON_LIMIT} of the Free plan (K-806).`,
+          },
+          { status: 409 },
+        );
+    }
     const have = new Set(
       this.sql<{ name: string }>(
         "SELECT name FROM worker_storage WHERE card_id = ? AND kind = 'kv'",
@@ -4308,8 +4399,20 @@ export class Kitshn extends DurableObject<Env> {
     } catch (error) {
       return `${back}, but its addresses did not come back: ${error instanceof Error ? error.message : String(error)}. Deploy it again.`;
     }
+    // The crons of the last deploy come back, as the removal took them off; a preview never had any.
+    const crons = done?.app === "worker" && !isPreview(done.environment) ? (workerOf(done).crons ?? []) : [];
+    try {
+      if (crons.length > 0)
+        await api(
+          "PUT",
+          `${account}/workers/scripts/${script}/schedules`,
+          crons.map((cron) => ({ cron })),
+        );
+    } catch (error) {
+      return `${back} at ${card.addresses.join(", ")}, but its crons did not come back: ${error instanceof Error ? error.message : String(error)}. Deploy it again.`;
+    }
     this.sql("DELETE FROM worker_storage WHERE card_id = ? AND kind = 'script'", card.id);
-    return `${back} at ${card.addresses.join(", ")}, with its data.`;
+    return `${back} at ${card.addresses.join(", ")}, with its data${crons.length > 0 ? " and its crons" : ""}.`;
   }
 
   /** A job that kitshn makes itself, so it needs no member with control (K-614). Returns the job id. */

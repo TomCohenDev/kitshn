@@ -15,7 +15,8 @@ name: kitshn 2 deploy
 #       uses: Yarden-zamir/kitshn/.github/workflows/kitshn2-deploy.yml@main
 #       secrets: inherit
 #
-# A static site with its own build job passes `artifact` and `artifact-path` (K-805). The closing of a pull request
+# A static site with its own build job passes `artifact` and `artifact-path` (K-805). Use that pattern for a build
+# that runs untrusted code: its job has no `id-token: write`, so it cannot ask for the token that deploys. The closing of a pull request
 # builds nothing but must still remove its preview, so the caller uses this pattern:
 #
 #   jobs:

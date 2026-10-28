@@ -82,15 +82,13 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "CREATE TABLE icons (id TEXT PRIMARY KEY, type TEXT NOT NULL, hash TEXT NOT NULL, bytes BLOB NOT NULL)",
     "ALTER TABLE presence ADD COLUMN os TEXT",
   ],
-  // 12: History words a new level of a share apart from a new share (K-1508). Only code: levelSummaries.
-  [],
+  // 12: History words a new level of a share apart from a new share (K-1508). The rewording of older rows
+  // runs once from the alarm (levelSummaries), not here, so it never blocks the start of the Durable Object.
+  ["INSERT OR REPLACE INTO meta (key, value) VALUES ('level_summaries', '0')"],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */
 export const REPO_GATE_MIGRATION = 6;
-
-/** K-1508: the migration after which the Durable Object words older new levels of a share in the new way. */
-export const LEVEL_SUMMARY_MIGRATION = 12;
 
 export type SummaryRow = {
   readonly id: number;
@@ -101,45 +99,119 @@ export type SummaryRow = {
 /** Before K-1508 worded a new level apart, every share that ends at a level read as a new share. */
 const oldDescribe = (diff: ShareDiff) => describeDiff({ ...diff, from: null });
 
+/** Only a row with such a part can hold the old wording of a new level. */
+const OLD_SHARE_PART = ": + ";
+
+const CHANGE_TAGS: ReadonlySet<string> = new Set(["circle", "place", "shareSetting", "stack", "app", "pause", "forget"]);
+
+const isValue = (value: unknown) => value === null || typeof value === "object";
+const isPause = (value: unknown) => value === null || value === "keep-public" || value === "lockdown";
+
+/** A stored change of a known tag and shape; anything else would corrupt the states of the walk. */
+function isStoredChange(value: unknown): value is Change | Forget {
+  if (typeof value !== "object" || value === null || !("before" in value) || !("after" in value)) return false;
+  const change = value as { _tag?: unknown; id?: unknown; before: unknown; after: unknown };
+  if (typeof change._tag !== "string" || !CHANGE_TAGS.has(change._tag) || typeof change.id !== "string") return false;
+  return change._tag === "pause"
+    ? isPause(change.before) && isPause(change.after)
+    : isValue(change.before) && isValue(change.after);
+}
+
+function storedChanges(row: SummaryRow): Array<Change> {
+  const changes: unknown = JSON.parse(row.changes);
+  if (!Array.isArray(changes)) throw new Error("its changes are not a list");
+  const bad = changes.find((change) => !isStoredChange(change));
+  if (bad !== undefined) throw new Error(`it holds an unknown change ${JSON.stringify(bad)}`);
+  return (changes as Array<Change | Forget>).filter((change): change is Change => change._tag !== "forget");
+}
+
 /**
- * K-1508: part of migration 12. Gives the revisions that name a new level of a share as a new share the summary of
- * the new rule. It walks back from `state` through `rows` (newest first) to the state around each revision, and
- * rewrites a summary only when the old rule on those states gives the stored text, so a row never gets a fact
- * that its changes do not hold. A row with changes whose stored text neither rule gives stays as it is and counts
- * as skipped: the walk cannot rebuild it (a card that kitshn forgot or renamed), or its text is not a plain summary
- * (moves that joined it, K-1505).
+ * The state with only the cards that `changes` name, so a summary does not compare every card with every circle.
+ * Only a circle change can change the shares of other cards, so then it keeps all.
  */
-export function levelSummaries(
-  state: State,
-  rows: ReadonlyArray<SummaryRow>,
-): { readonly updates: Array<{ readonly id: number; readonly summary: string }>; readonly skipped: number } {
-  const updates: Array<{ id: number; summary: string }> = [];
-  let skipped = 0;
-  let after = state;
-  for (const row of rows) {
-    const changes = (JSON.parse(row.changes) as Array<Change | Forget>).filter(
-      (change): change is Change => change._tag !== "forget",
-    );
-    const before = applyChanges(after, invert(changes));
-    const summary = summarize(before, after, changes);
-    const old = summarize(before, after, changes, oldDescribe);
-    after = before;
-    // A revision without changes records an action in its own words.
-    if (changes.length === 0) continue;
-    // An undo starts with its label, "Undo #12: " or "Undo #12 for tick3d: ".
-    const labelOf = (text: string) => {
-      const label = row.summary.slice(0, row.summary.length - text.length);
-      return row.summary.endsWith(text) &&
-        (label === "" || (label.startsWith("Undo #") && label.endsWith(": ")))
-        ? label
-        : null;
-    };
-    if (labelOf(summary) !== null) continue;
-    const label = labelOf(old);
-    if (label === null) skipped++;
-    else updates.push({ id: row.id, summary: label + summary });
+function narrowed(state: State, changes: ReadonlyArray<Change>): State {
+  if (changes.some((change) => change._tag === "circle")) return state;
+  const ids = new Set(
+    changes.flatMap((change) =>
+      change._tag === "shareSetting"
+        ? [change.id.split("/")[0] ?? ""]
+        : change._tag === "stack"
+          ? [...(change.before?.members ?? []), ...(change.after?.members ?? [])]
+          : [change.id],
+    ),
+  );
+  return { ...state, resources: new Map([...state.resources].filter(([id]) => ids.has(id))) };
+}
+
+/** K-1505: a pure move that joined a revision adds one of these to its first summary. */
+const MOVED_SUFFIXES = ["", " and moved it", " and moved them"];
+
+/**
+ * The stored text in the new wording: itself when the new rule gives it, or the new summary when the old rule gives
+ * it, with its undo label ("Undo #12: ", "Undo #12 for tick3d: ") and its move suffix. Null when neither rule does.
+ */
+function reworded(stored: string, before: State, after: State, changes: ReadonlyArray<Change>): string | null {
+  const summary = summarize(before, after, changes);
+  const old = summarize(before, after, changes, oldDescribe);
+  for (const suffix of MOVED_SUFFIXES) {
+    for (const [text, result] of [
+      [summary, null],
+      [old, summary],
+    ] as const) {
+      const end = text + suffix;
+      const label = stored.slice(0, stored.length - end.length);
+      if (stored.endsWith(end) && (label === "" || (label.startsWith("Undo #") && label.endsWith(": "))))
+        return result === null ? stored : label + result + suffix;
+    }
   }
-  return { updates, skipped };
+  return null;
+}
+
+export type LevelSummaryRun = {
+  readonly updates: Array<{ readonly id: number; readonly summary: string }>;
+  readonly unchanged: number;
+  readonly failed: number;
+  readonly errors: Array<{ readonly id: number; readonly message: string }>;
+};
+
+/**
+ * K-1508: the one-time run of migration 12. Gives the revisions that name a new level of a share as a new share the
+ * summary of the new rule. It walks back from `state` through `rows` (newest first) to the state around each
+ * revision, and rewrites a summary only when the old rule on those states gives the stored text, so a row never
+ * gets a fact that its changes do not hold. A row with a new share part that it cannot reword keeps its text and
+ * counts as failed: neither rule gives its text (a card that kitshn forgot or renamed), or the rewording throws.
+ * A row whose changes the walk cannot apply leaves the state of every older row unknown, so the walk stops there,
+ * and that row and the older rows with a new share part count as failed. Every other row counts as unchanged.
+ */
+export function levelSummaries(state: State, rows: ReadonlyArray<SummaryRow>): LevelSummaryRun {
+  const updates: Array<{ id: number; summary: string }> = [];
+  const errors: Array<{ id: number; message: string }> = [];
+  let failed = 0;
+  let after = state;
+  for (const [index, row] of rows.entries()) {
+    let changes: Array<Change>;
+    let before: State;
+    try {
+      changes = storedChanges(row);
+      before = applyChanges(after, invert(changes));
+    } catch (error) {
+      errors.push({ id: row.id, message: String(error) });
+      failed += rows.slice(index).filter((rest) => rest.summary.includes(OLD_SHARE_PART)).length;
+      break;
+    }
+    if (changes.length > 0 && row.summary.includes(OLD_SHARE_PART)) {
+      try {
+        const summary = reworded(row.summary, narrowed(before, changes), narrowed(after, changes), changes);
+        if (summary === null) failed++;
+        else if (summary !== row.summary) updates.push({ id: row.id, summary });
+      } catch (error) {
+        errors.push({ id: row.id, message: String(error) });
+        failed++;
+      }
+    }
+    after = before;
+  }
+  return { updates, unchanged: rows.length - updates.length - failed, failed, errors };
 }
 
 /** Runs the migrations after `from`. Returns the new version. The caller provides the transaction. */

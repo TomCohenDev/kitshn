@@ -136,7 +136,7 @@ import type { Caller, Deployer } from "./auth.ts";
 import { CloudflareError, cloudflare } from "./cloudflare.ts";
 import { dispatchDeploy } from "./github.ts";
 import { REPLACED, dropLiveSite, failQueuedDowns, removalDown, requeueDowns } from "./downs.ts";
-import { LEVEL_SUMMARY_MIGRATION, REPO_GATE_MIGRATION, type SummaryRow, levelSummaries, migrate } from "./migrations.ts";
+import { REPO_GATE_MIGRATION, type SummaryRow, levelSummaries, migrate } from "./migrations.ts";
 import {
   DEPLOY_MS,
   SCRIPT_LIMIT,
@@ -211,6 +211,8 @@ const KEY_RESET = 4005;
 const SIGN_OUT_RUN_MS = 3 * 60_000;
 /** The map keeps this many recent revisions in memory; History reads them (K-519). */
 const RECENT_REVISIONS = 200;
+/** K-1508: the tries of the one-time rewording of migration 12. */
+const LEVEL_SUMMARY_TRIES = 3;
 /** K-1503 */
 const REVISION_DAYS = 90;
 const REVISION_COUNT = 5000;
@@ -278,11 +280,6 @@ export class Kitshn extends DurableObject<Env> {
         migrate((query) => ctx.storage.sql.exec(query), from);
         // The rest of migration 6 needs code: the repo id comes out of each card id.
         if (from < REPO_GATE_MIGRATION) this.backfillRepoIds();
-        // The rest of migration 12 rewinds the state from the stored revisions.
-        if (from < LEVEL_SUMMARY_MIGRATION) {
-          this.load();
-          this.rewriteLevelSummaries();
-        }
       });
       this.load();
       if (this.state.circles.size === 0) this.seed();
@@ -879,6 +876,7 @@ export class Kitshn extends DurableObject<Env> {
   private snapshot(me: Actor, repos: ReadonlyArray<RepoView> = this.repoViews()): Snapshot {
     const desired = this.desired(Date.now());
     const loginError = this.meta("login_error");
+    const historyWarning = this.meta("history_warning");
     return {
       circles: [...this.state.circles.values()],
       resources: [...this.state.resources.values()],
@@ -890,6 +888,7 @@ export class Kitshn extends DurableObject<Env> {
       accessWarnings: [
         ...this.accessWarnings,
         ...(loginError ? [loginError] : []),
+        ...(historyWarning ? [historyWarning] : []),
         ...loginWarnings(desired, this.access),
       ],
       signOutWarning: signOutWarning(this.signOutLeft()),
@@ -2453,6 +2452,8 @@ export class Kitshn extends DurableObject<Env> {
         next = Math.min(next, attachment.since + CHALLENGE_MS);
     }
     if (this.env.CLOUDFLARE_API_TOKEN && this.tunnelWork()) next = now;
+    // K-1508: the one-time rewording of migration 12 runs in the next alarm.
+    if (this.levelSummaryTries() !== null) next = now;
     const [job] = this.sql<{ expires_at: number }>(
       "SELECT MIN(expires_at) AS expires_at FROM jobs WHERE state IN ('queued', 'sent')",
     );
@@ -2544,6 +2545,8 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("UPDATE access_objects SET error = NULL WHERE error IS NOT NULL");
       this.sql("DELETE FROM meta WHERE key = 'launcher_failed'");
       this.sql("DELETE FROM meta WHERE key = 'login_failed'");
+      // K-1508: the warning of the History rewording goes with the next daily run.
+      this.sql("DELETE FROM meta WHERE key = 'history_warning'");
       this.sql("INSERT OR REPLACE INTO meta (key, value) VALUES ('login_check', 'due')");
       // A refused address may be free now, for example after the other machine let it go.
       this.sql("UPDATE live_sites SET state = 'checking' WHERE state = 'refused'");
@@ -2740,16 +2743,54 @@ export class Kitshn extends DurableObject<Env> {
       );
   }
 
-  /** K-1508: part of migration 12; see levelSummaries. */
-  private rewriteLevelSummaries() {
-    const { updates, skipped } = levelSummaries(
-      this.state,
-      this.sql<SummaryRow>("SELECT id, summary, changes FROM revisions ORDER BY id DESC"),
-    );
-    for (const { id, summary } of updates) this.sql("UPDATE revisions SET summary = ? WHERE id = ?", summary, id);
-    console.log(
-      `K-1508: migration 12 worded ${updates.length} History summaries of a new share level anew; ${skipped} revisions keep a summary that their changes do not give.`,
-    );
+  /** K-1508: the tries so far of the one-time rewording, or null when it is done (or from before migration 12). */
+  private levelSummaryTries(): number | null {
+    const stored = this.meta("level_summaries");
+    const tries = stored === null ? NaN : Number(stored);
+    return Number.isInteger(tries) ? tries : null;
+  }
+
+  /**
+   * K-1508: the one-time run of migration 12 (levelSummaries), in the alarm so that it never blocks the start.
+   * `level_summaries` counts the tries; a run that the runtime kills tries again, three times at most.
+   */
+  private rewriteLevelSummaries(): boolean {
+    const tries = this.levelSummaryTries();
+    if (tries === null) return false;
+    if (tries >= LEVEL_SUMMARY_TRIES) {
+      console.error(`K-1508: the History rewording ended ${tries} times without a result; it stops.`);
+      this.setMeta("history_warning", "History: the rewording of old entries did not finish; they keep their old wording (K-1508).");
+      this.setMeta("level_summaries", "done");
+      return true;
+    }
+    this.setMeta("level_summaries", String(tries + 1));
+    try {
+      const { updates, unchanged, failed, errors } = levelSummaries(
+        this.state,
+        this.sql<SummaryRow>("SELECT id, summary, changes FROM revisions ORDER BY id DESC"),
+      );
+      this.ctx.storage.transactionSync(() => {
+        for (const { id, summary } of updates) this.sql("UPDATE revisions SET summary = ? WHERE id = ?", summary, id);
+        if (failed > 0)
+          this.setMeta("history_warning", `History: ${failed} old entries keep their old wording (K-1508).`);
+        this.setMeta("level_summaries", "done");
+      });
+      const shown = errors.slice(0, 3).map((error) => `#${error.id}: ${error.message}`);
+      console.log(
+        `K-1508: History rewording: ${updates.length} rewritten, ${unchanged} unchanged, ${failed} failed${shown.length > 0 ? `; ${shown.join("; ")}` : ""}.`,
+      );
+      const summaries = new Map(updates.map((update) => [update.id, update.summary]));
+      this.revisions = this.revisions.map((revision) => {
+        const summary = summaries.get(revision.id);
+        return summary === undefined ? revision : { ...revision, summary };
+      });
+      return summaries.size > 0 || failed > 0;
+    } catch (error) {
+      console.error(`K-1508: the History rewording failed: ${String(error)}`);
+      this.setMeta("history_warning", "History: the rewording of old entries failed; they keep their old wording (K-1508).");
+      this.setMeta("level_summaries", "done");
+      return true;
+    }
   }
 
   /** K-819: refuses a deploy step of a repo that waits for the owner or that the owner blocked. */
@@ -4243,6 +4284,7 @@ export class Kitshn extends DurableObject<Env> {
       changed ||=
         daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
     }
+    changed = this.rewriteLevelSummaries() || changed;
     if (changed) this.broadcast();
     await this.scheduleAlarm();
   }

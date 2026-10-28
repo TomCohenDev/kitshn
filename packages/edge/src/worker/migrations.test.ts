@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { type Change, type Forget, invert } from "../core/changes.ts";
-import { type Circle, type Resource, type State, shareKey } from "../core/model.ts";
+import { type Circle, type Resource, type Stack, type State, shareKey } from "../core/model.ts";
 import { seed } from "../core/seed.ts";
 import { MIGRATIONS, levelSummaries, migrate } from "./migrations.ts";
 
@@ -103,20 +103,58 @@ describe("migration 12: History words a new level of a share apart (K-1508)", ()
         { id: 3, summary: "Undo #2: box: Her · view → use" },
         { id: 2, summary: "box: Her · use → view" },
       ],
-      skipped: 0,
+      unchanged: 2,
+      failed: 0,
+      errors: [],
     });
+    expect(levelSummaries(now, [row(2, "box: + Her · view and moved it", [toView])]).updates).toEqual([
+      { id: 2, summary: "box: Her · use → view and moved it" },
+    ]);
   });
 
-  it("skips a row that the stored changes do not explain, and finds nothing more on a second run", () => {
-    // Without the card, the walk back cannot rebuild the share that the stored text names; the row without changes is an action.
+  it("counts a row that the stored changes do not explain as failed, and finds nothing more on a second run", () => {
+    // Without the card, the walk back cannot rebuild the share that the stored text names.
     const forgotten = { ...now, resources: new Map(s.resources.map((resource) => [resource.id, resource])) };
-    expect(levelSummaries(forgotten, rows.slice(0, 2))).toEqual({ updates: [], skipped: 1 });
-    expect(levelSummaries(now, [row(2, "box: + Her · use", [toView])])).toEqual({ updates: [], skipped: 1 });
+    expect(levelSummaries(forgotten, rows.slice(0, 2))).toMatchObject({ updates: [], unchanged: 1, failed: 1 });
+    expect(levelSummaries(now, [row(2, "box: + Her · use", [toView])])).toMatchObject({ updates: [], failed: 1 });
     const { updates } = levelSummaries(now, rows);
     const done = rows.map((old) => ({
       ...old,
       summary: updates.find((update) => update.id === old.id)?.summary ?? old.summary,
     }));
-    expect(levelSummaries(now, done)).toEqual({ updates: [], skipped: 0 });
+    expect(levelSummaries(now, done)).toEqual({ updates: [], unchanged: 5, failed: 0, errors: [] });
+  });
+
+  it("keeps the text of a row whose rewording throws and goes on", () => {
+    const broken: Change = { _tag: "stack", id: "s", before: {} as Stack, after: { id: "s", name: "s", members: ["box"] } };
+    const run = levelSummaries(now, [
+      row(9, "box: + Her · view", [toView]),
+      row(8, "box: + Her · view", [broken]),
+      rows[4]!,
+    ]);
+    expect(run).toMatchObject({ updates: [{ id: 9 }], unchanged: 1, failed: 1, errors: [{ id: 8 }] });
+  });
+
+  it("stops the walk at changes that it cannot apply, and counts that row and the older rows with a new share as failed", () => {
+    for (const bad of [
+      "null",
+      "[null]",
+      JSON.stringify([{ _tag: "circle", id: "her", after: null }]),
+      JSON.stringify([{ _tag: "grow", id: "box", before: null, after: null }]),
+      JSON.stringify([{ _tag: "pause", id: "pause", before: false, after: true }]),
+    ]) {
+      const run = levelSummaries(now, [
+        row(9, "box: + Her · view", [toView]),
+        { id: 8, summary: "box: + Her · use", changes: bad },
+        row(7, "box: + Her · use", []),
+        row(6, "Deployed riffle", []),
+      ]);
+      expect(run).toMatchObject({
+        updates: [{ id: 9, summary: "box: Her · use → view" }],
+        unchanged: 1,
+        failed: 2,
+        errors: [{ id: 8 }],
+      });
+    }
   });
 });

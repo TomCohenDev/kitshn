@@ -658,6 +658,7 @@ export function summarize(
   before: State,
   after: State,
   changes: ReadonlyArray<Change>,
+  // Only the one-time rewording of migration 12 (levelSummaries) passes the old rule here.
   describe: (diff: ShareDiff) => string = describeDiff,
 ): string {
   const app = changes.find((change) => change._tag === "app");

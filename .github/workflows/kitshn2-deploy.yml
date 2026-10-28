@@ -15,6 +15,8 @@ name: kitshn 2 deploy
 #       uses: Yarden-zamir/kitshn/.github/workflows/kitshn2-deploy.yml@main
 #       secrets: inherit
 #
+# A static site with its own build job passes `artifact` and `artifact-path`; that job must finish first (needs).
+#
 # A Compose app gets each KITSHN_<NAME> secret and variable as <NAME> (K-808), from the GitHub Environment
 # "prod" for pushes and "pr-<number>" for pull requests, as in KitSHn 1.
 #
@@ -27,6 +29,16 @@ on:
         description: The kitshn address.
         type: string
         default: https://kit.yarden-zamir.com
+      artifact:
+        description: >-
+          A static site that an earlier job of the same run built (K-805): the name of its artifact. kitshn puts it
+          at artifact-path, the output folder of the recipe, and the recipe then names no build.
+        type: string
+        default: ""
+      artifact-path:
+        description: Where the artifact goes, the output folder of the recipe. Needed with artifact.
+        type: string
+        default: ""
 
 jobs:
   deploy:
@@ -43,6 +55,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - if: inputs.artifact != '' && inputs.artifact-path == ''
+        run: |
+          echo "kitshn: artifact needs artifact-path, the output folder of the recipe."
+          exit 1
+      - if: inputs.artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact }}
+          path: ${{ inputs.artifact-path }}
       - uses: actions/setup-node@v7
         with:
           node-version: 24

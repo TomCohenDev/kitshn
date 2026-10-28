@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { extname, join, relative, resolve, sep } from "node:path";
-import { headersWarnings } from "./headers.ts";
+import { headersWarnings, redirectsWarnings } from "./headers.ts";
 import { pickSiteIcon } from "./icon.ts";
 import { RecipeError, readRecipe } from "./parse.ts";
 import { type DeployEvent, decodeRecipe } from "./recipe.ts";
@@ -142,12 +142,19 @@ async function deploy(server: string, dir: string) {
   const manifest: Record<string, { hash: string; size: number }> = {};
   const byHash = new Map<string, { path: string; type: string }>();
   const byPath = new Map<string, string>();
-  // K-805: `_headers` sets response headers of the site; Cloudflare reads it as config, not as a file to serve.
+  // K-805: `_headers` sets response headers and `_redirects` redirects of the site; Cloudflare reads them as config,
+  // not as files to serve.
   let headers: string | null = null;
+  let redirects: string | null = null;
   for (const path of files(output)) {
     if (relative(output, path) === "_headers") {
       headers = readFileSync(path, "utf8");
       for (const warning of headersWarnings(headers)) console.log(`kitshn: warning: ${warning}`);
+      continue;
+    }
+    if (relative(output, path) === "_redirects") {
+      redirects = readFileSync(path, "utf8");
+      for (const warning of redirectsWarnings(redirects)) console.log(`kitshn: warning: ${warning}`);
       continue;
     }
     const bytes = readFileSync(path);
@@ -203,8 +210,10 @@ async function deploy(server: string, dir: string) {
     jwt: completion,
     icon: icon ? Buffer.from(icon.bytes).toString("base64") : null,
     headers,
+    redirects,
   });
   if (headers !== null) console.log("kitshn: the site sets its own headers with _headers.");
+  if (redirects !== null) console.log("kitshn: the site sets its own redirects with _redirects.");
   console.log(
     `kitshn: deployed ${Object.keys(manifest).length} files to https://${done.address} (route check: ${done.status}).`,
   );

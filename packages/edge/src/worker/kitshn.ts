@@ -147,7 +147,7 @@ import {
   eventOf,
   legacyRepos,
   parseManifest,
-  parseHeadersFile,
+  parseConfigFile,
   parseSiteIcon,
 } from "./deploys.ts";
 import { type Recipe, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
@@ -3190,7 +3190,15 @@ export class Kitshn extends DurableObject<Env> {
       if (path === "/deploy/assets" && row.kind === "deploy")
         return await this.deployAssets(api, row, input["manifest"]);
       if (path === "/deploy/finish" && row.kind === "deploy")
-        return await this.finishDeploy(api, row, deployer, input["jwt"], input["icon"], input["headers"]);
+        return await this.finishDeploy(
+          api,
+          row,
+          deployer,
+          input["jwt"],
+          input["icon"],
+          input["headers"],
+          input["redirects"],
+        );
       if (row.app === "compose") {
         if (path === "/deploy/start" && row.kind === "deploy")
           return await this.startCompose(api, row, deployer);
@@ -3682,12 +3690,16 @@ export class Kitshn extends DurableObject<Env> {
     jwt: unknown,
     iconValue: unknown,
     headersValue: unknown,
+    redirectsValue: unknown,
   ) {
     if (typeof jwt !== "string" || !jwt)
       return Response.json({ error: "The deploy needs the upload completion token." }, { status: 400 });
-    const headers = parseHeadersFile(headersValue);
+    const headers = parseConfigFile("_headers", headersValue);
     if (typeof headers === "object" && headers !== null)
       return Response.json({ error: headers.error }, { status: 400 });
+    const redirects = parseConfigFile("_redirects", redirectsValue);
+    if (typeof redirects === "object" && redirects !== null)
+      return Response.json({ error: redirects.error }, { status: 400 });
     const icon = parseSiteIcon(iconValue);
     if (typeof icon === "string") return Response.json({ error: icon }, { status: 400 });
     const card = this.ensureCard(row, deployer, "site.static", null);
@@ -3712,6 +3724,7 @@ export class Kitshn extends DurableObject<Env> {
           not_found_handling: "404-page",
           html_handling: "auto-trailing-slash",
           ...(headers ? { _headers: headers } : {}),
+          ...(redirects ? { _redirects: redirects } : {}),
         },
       },
       bindings: [{ type: "assets", name: "ASSETS" }],

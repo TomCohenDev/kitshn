@@ -17,9 +17,17 @@ export interface LogSearch {
 /** K-1801: a search shows at most this many lines, the newest. */
 export const LOG_LINES = 500;
 
-/** K-1801: `matched` counts every line that matched, also the ones beyond `LOG_LINES`. */
+/**
+ * K-1801: `matched` counts every line that matched, also the ones beyond `LOG_LINES`. `cut` is true when the
+ * daemon stopped the search at its time limit, so the newest lines of the range may be missing (K-1804).
+ */
 export type LogAnswer =
-  | { readonly state: "lines"; readonly lines: ReadonlyArray<LogLine>; readonly matched: number }
+  | {
+      readonly state: "lines";
+      readonly lines: ReadonlyArray<LogLine>;
+      readonly matched: number;
+      readonly cut: boolean;
+    }
   | { readonly state: "error"; readonly error: string }
   /** K-1806: the token has no "Workers Observability: Edit". */
   | { readonly state: "needs-permission" };
@@ -170,7 +178,12 @@ export function logLinesOf(value: unknown, limit: number): Array<LogLine> {
 export function logAnswerOf(value: unknown): LogAnswer {
   const answer = record(value);
   if (answer["state"] === "lines" && typeof answer["matched"] === "number")
-    return { state: "lines", lines: logLinesOf(answer["lines"], LOG_LINES), matched: answer["matched"] };
+    return {
+      state: "lines",
+      lines: logLinesOf(answer["lines"], LOG_LINES),
+      matched: answer["matched"],
+      cut: answer["cut"] === true,
+    };
   if (answer["state"] === "error" && typeof answer["error"] === "string")
     return { state: "error", error: answer["error"].slice(0, 2000) };
   return { state: "error", error: "The daemon sent an answer that kitshn cannot read." };

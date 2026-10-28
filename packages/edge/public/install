@@ -94,16 +94,18 @@ ZONE_NAME=$(printf '%s' "$zones" | jq -r --arg id "$ZONE" '.[] | select(.id == $
 kept "account $ACCOUNT, zone $ZONE_NAME"
 # K-1806: Worker log search is optional, so a token without it gets a warning, not a stop.
 now=$(($(date +%s) * 1000))
-if curl -sS -X POST "$API/accounts/$ACCOUNT/workers/observability/telemetry/query" \
+status=$(curl -sS -o "$WORK/out" -w '%{http_code}' -X POST "$API/accounts/$ACCOUNT/workers/observability/telemetry/query" \
   -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "content-type: application/json" \
-  -d "{\"queryId\":\"kitshn-logs\",\"view\":\"events\",\"limit\":1,\"dry\":true,\"timeframe\":{\"from\":$((now - 60000)),\"to\":$now},\"parameters\":{}}" \
-  2>/dev/null | jq -e '.success == true' >/dev/null 2>&1; then
-  kept "Worker log search (K-1806)"
-else
+  -d "{\"queryId\":\"kitshn-logs\",\"view\":\"events\",\"limit\":1,\"dry\":true,\"timeframe\":{\"from\":$((now - 60000)),\"to\":$now},\"parameters\":{}}" 2>&1) || status="no answer"
+case "$status" in
+200) kept "Worker log search (K-1806)" ;;
+403)
   say "  warning: the token has no \"Workers Observability: Edit\", so search in Worker logs is off (K-1806)."
   say "           Live in Worker logs still works. To add it, edit the token at https://dash.cloudflare.com/profile/api-tokens:"
   say "           add \"Account\", \"Workers Observability\", \"Edit\", then Update token."
-fi
+  ;;
+*) say "  warning: the check of Worker log search failed ($status): $(jq -r '[.errors[]?.message] | join("; ")' "$WORK/out" 2>/dev/null || head -c 200 "$WORK/out")" ;;
+esac
 
 say "2. Zero Trust organization (K-1207)"
 NEED="Access: Organizations, Identity Providers, and Groups: Edit"

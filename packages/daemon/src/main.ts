@@ -1229,6 +1229,13 @@ function watchTunnel() {
 
 const pendingResults: Array<DaemonMessage> = [];
 
+/** K-1804: kitshn reads only the logs of apps that it deployed here, which each have a folder below `apps`. */
+const kitshnApp = (project: string) => existsSync(join(paths.data, "apps", project));
+const notKitshnApp = (project: string) => ({
+  state: "error" as const,
+  error: `${project} is no app that kitshn deployed on this machine, so the daemon reads no logs of it.`,
+});
+
 /** K-1805: the running tails by id; each ends when its connection closes. */
 const tails = new Map<string, () => void>();
 
@@ -1421,9 +1428,15 @@ function connect(config: JoinSecrets) {
         void rotateKey(ws);
       } else if (message.type === "logs") {
         // K-1804: the data folder holds no Compose file, so Compose finds the app by its project label alone.
-        void searchLogs(composeLogs(message.project, rangeArgs(message.search)), message.search, paths.data)
+        void (
+          kitshnApp(message.project)
+            ? searchLogs(composeLogs(message.project, rangeArgs(message.search)), message.search, paths.data)
+            : Promise.resolve(notKitshnApp(message.project))
+        )
           .catch((error: unknown) => ({ state: "error" as const, error: String(error) }))
           .then((answer) => sendOn(ws, { type: "logs", id: message.id, answer }));
+      } else if (message.type === "tail" && !kitshnApp(message.project)) {
+        sendOn(ws, { type: "tailEnd", id: message.id, reason: notKitshnApp(message.project).error });
       } else if (message.type === "tail") {
         tails.get(message.id)?.();
         tails.set(

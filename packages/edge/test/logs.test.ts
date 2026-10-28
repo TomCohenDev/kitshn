@@ -1,4 +1,4 @@
-import { evictDurableObject, runInDurableObject } from "cloudflare:test";
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LogLine } from "../src/core/logs.ts";
@@ -11,7 +11,7 @@ import { accessToken, send, stubAccessCerts } from "./access.ts";
 const stub = () => env.KITSHN.getByName("kitshn");
 
 async function composeCard(machineId: string, card: string) {
-  await runInDurableObject(stub(), (_instance, durable) => {
+  await runInDurableObject(stub(), (instance, durable) => {
     const machine: Machine = {
       id: machineId,
       name: machineId,
@@ -40,9 +40,9 @@ async function composeCard(machineId: string, card: string) {
       card,
       JSON.stringify(resource),
     );
+    // The machines and cards in memory follow the tables. No eviction: a Live timer can keep the object awake.
+    (instance as unknown as { load(): void }).load();
   });
-  // The Durable Object reads machines and cards again when it starts.
-  await evictDurableObject(stub());
 }
 
 /** A socket that the Durable Object accepted, and the messages that it sent on it. */
@@ -121,9 +121,9 @@ describe("Compose logs (K-1804, K-1805)", () => {
     await fromDaemon(server, {
       type: "logs",
       id: request?.["id"],
-      answer: { state: "lines", lines: [line], matched: 7 },
+      answer: { state: "lines", lines: [line], matched: 7, cut: true },
     });
-    expect((await answer).body).toEqual({ answer: { state: "lines", lines: [line], matched: 7 } });
+    expect((await answer).body).toEqual({ answer: { state: "lines", lines: [line], matched: 7, cut: true } });
     await close(server);
   });
 

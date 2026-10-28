@@ -30,7 +30,7 @@ describe("logs (K-1804, K-1807)", () => {
   it("turns a daemon answer of the wrong shape into an error, and drops lines of the wrong shape", () => {
     expect(
       logAnswerOf({ state: "lines", matched: 2, lines: [{ at: 1, source: "a", text: "b" }, { at: "x" }] }),
-    ).toEqual({ state: "lines", matched: 2, lines: [{ at: 1, source: "a", text: "b" }] });
+    ).toEqual({ state: "lines", matched: 2, cut: false, lines: [{ at: 1, source: "a", text: "b" }] });
     expect(logAnswerOf({ state: "needs-permission" })).toMatchObject({ state: "error" });
   });
 });

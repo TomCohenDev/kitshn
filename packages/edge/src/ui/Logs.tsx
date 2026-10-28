@@ -240,6 +240,11 @@ export function LogsDialog(props: { card: Resource; onClose: () => void }) {
                 </ol>
               </div>
             ) : null}
+            {answer?.state === "lines" && answer.cut ? (
+              <p class="error">
+                Search stopped at 15 s, so the newest lines may be missing. Narrow the time range.
+              </p>
+            ) : null}
             {answer?.state === "lines" ? (
               <p class="muted">
                 {answer.matched > shown.length

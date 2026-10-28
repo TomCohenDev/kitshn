@@ -1156,6 +1156,7 @@ export class Kitshn extends DurableObject<Env> {
       if ("error" in daemon) return refuse(daemon.error);
       const id = crypto.randomUUID();
       send(daemon.socket, { type: "tail", id, project: resource.id } satisfies ServerToDaemon);
+      this.keepAwakeForTails();
       return {
         answer: { kind: "compose", tail: id },
         tail: { kind: "compose", id, machineId: resource.machine ?? "" },
@@ -1190,6 +1191,25 @@ export class Kitshn extends DurableObject<Env> {
     const attachment = attachmentOf(socket);
     if (attachment?.kind !== "map") return;
     socket.serializeAttachment({ ...attachment, tails: change(attachment.tails ?? []) } satisfies Attachment);
+  }
+
+  /**
+   * K-1805: a quiet tail would wake the object for each batch, and each wake reads the small tables again. A timer
+   * keeps the object in memory while any map holds a Compose tail, and stops itself after the last one.
+   */
+  private tailTimer: ReturnType<typeof setInterval> | null = null;
+
+  private keepAwakeForTails() {
+    if (this.tailTimer !== null) return;
+    this.tailTimer = setInterval(() => {
+      const open = this.ctx.getWebSockets("map").some((socket) => {
+        const attachment = attachmentOf(socket);
+        return attachment?.kind === "map" && (attachment.tails ?? []).some((tail) => tail.kind === "compose");
+      });
+      if (open || this.tailTimer === null) return;
+      clearInterval(this.tailTimer);
+      this.tailTimer = null;
+    }, 30_000);
   }
 
   /** K-1805: the map that holds a Compose tail of this machine. */
@@ -2445,7 +2465,11 @@ export class Kitshn extends DurableObject<Env> {
       const lines = logLinesOf(message.lines, TAIL_BATCH);
       const skipped = typeof message.skipped === "number" ? message.skipped : 0;
       const owner = this.tailOwner(message.id, machine.id);
-      if (owner) send(owner, { type: "tailLines", tail: message.id, lines, skipped });
+      if (owner) {
+        send(owner, { type: "tailLines", tail: message.id, lines, skipped });
+        // After an eviction, the first batch starts the timer again.
+        this.keepAwakeForTails();
+      }
       // A tail that no map holds stops, so a lost stop costs no more messages.
       else send(socket, { type: "tailStop", id: message.id } satisfies ServerToDaemon);
     } else if (message.type === "tailEnd" && typeof message.id === "string") {

@@ -43,6 +43,7 @@ describe("Worker logs and deploy runs (K-1806, K-1808)", () => {
     expect(answer).toEqual({
       state: "lines",
       matched: 900,
+      cut: false,
       lines: [
         { at: 1, source: "", text: "first" },
         { at: 2, source: "info GET /", text: "second" },

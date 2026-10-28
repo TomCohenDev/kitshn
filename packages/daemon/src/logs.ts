@@ -13,7 +13,7 @@ import {
 import { type ChildProcess, spawn } from "node:child_process";
 
 /** K-1804: kitshn waits 20 seconds for an answer, so the daemon stops its search a little earlier. */
-const SEARCH_MS = 15_000;
+export const SEARCH_MS = 15_000;
 
 /** The program and its arguments; a test passes another program. */
 export type Program = readonly [string, ReadonlyArray<string>];
@@ -64,7 +64,12 @@ function stop(child: ChildProcess) {
  * K-1804: the newest lines that match. Compose writes each container in time order, but mixes the
  * containers as they come, so each source keeps its own newest lines before they merge.
  */
-export async function searchLogs(program: Program, search: LogSearch, cwd: string): Promise<LogAnswer> {
+export async function searchLogs(
+  program: Program,
+  search: LogSearch,
+  cwd: string,
+  limitMs = SEARCH_MS,
+): Promise<LogAnswer> {
   const sources = new Map<string, Newest<LogLine>>();
   let matched = 0;
   const { child, ended } = run(program, cwd, (raw) => {
@@ -76,15 +81,19 @@ export async function searchLogs(program: Program, search: LogSearch, cwd: strin
     if (!newest) sources.set(line.source, (newest = new Newest(LOG_LINES)));
     newest.add(line);
   });
-  const timer = setTimeout(() => stop(child), SEARCH_MS);
+  let cut = false;
+  const timer = setTimeout(() => {
+    cut = true;
+    stop(child);
+  }, limitMs);
   const error = await ended;
   clearTimeout(timer);
-  if (error !== null && child.signalCode === null) return { state: "error", error };
+  if (error !== null && !cut) return { state: "error", error };
   const lines = [...sources.values()]
     .flatMap((newest) => newest.items)
     .sort((a, b) => a.at - b.at)
     .slice(-LOG_LINES);
-  return { state: "lines", lines, matched };
+  return { state: "lines", lines, matched, cut };
 }
 
 /** `since` and `until` for a search; Docker reads RFC 3339. */

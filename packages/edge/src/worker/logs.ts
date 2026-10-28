@@ -39,7 +39,7 @@ export async function searchWorker(
   }
   const events = result.events?.events ?? [];
   const lines = events.map(telemetryLine).sort((a, b) => a.at - b.at);
-  return { state: "lines", lines, matched: Math.max(result.events?.count ?? 0, lines.length) };
+  return { state: "lines", lines, matched: Math.max(result.events?.count ?? 0, lines.length), cut: false };
 }
 
 /** K-1807: a tail of one Worker script; the map connects to `url` itself. */

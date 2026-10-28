@@ -19,12 +19,24 @@ describe("Compose logs on the daemon (K-1803, K-1804)", () => {
     expect(answer).toEqual({
       state: "lines",
       matched: 3,
+      cut: false,
       lines: [
         { at: Date.parse("2026-10-28T10:00:01Z"), source: "db-1", text: "boom one" },
         { at: Date.parse("2026-10-28T10:00:02Z"), source: "db-1", text: "BOOM two" },
         { at: Date.parse("2026-10-28T10:00:03Z"), source: "web-1", text: "boom three" },
       ],
     });
+  });
+
+  it("stops a search at its time limit and says that it cut the answer", async () => {
+    // A Compose that keeps writing: the newest lines of the range never arrive.
+    const answer = await searchLogs(
+      ["sh", ["-c", `printf '%s\\n' '${lines[0]}'; exec sleep 30`]],
+      { text: "", from: 0, to: Date.parse("2026-10-29T00:00:00Z") },
+      process.cwd(),
+      200,
+    );
+    expect(answer).toMatchObject({ state: "lines", matched: 1, cut: true });
   });
 
   it("reports a failed docker compose logs as an error", async () => {

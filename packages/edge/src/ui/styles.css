@@ -624,6 +624,26 @@ button.count {
   overscroll-behavior: contain;
   padding: 8px;
 }
+/* Folded, the shelf shows only its count (K-509, K-528). */
+.tray.closed {
+  width: auto;
+}
+.tray.closed .tray-head {
+  border-bottom: 0;
+}
+.tray.closed .tray-head > :not(.tray-toggle),
+.tray.closed .tray-list {
+  display: none;
+}
+.tray-toggle {
+  font: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+}
 
 .tray .card {
   position: relative;
@@ -928,21 +948,6 @@ pre.output.log-lines {
   .tray {
     width: min(16rem, calc(100vw - 20px));
     max-height: 40dvh;
-  }
-  .tray.closed {
-    width: auto;
-  }
-  .tray.closed .tray-head > :not(.tray-toggle),
-  .tray.closed .tray-list {
-    display: none;
-  }
-  .tray-toggle {
-    font: inherit;
-    background: none;
-    border: 0;
-    padding: 0;
-    color: inherit;
-    cursor: pointer;
   }
   .hint {
     display: none;

@@ -141,6 +141,8 @@ import {
 } from "./store.ts";
 
 const PREVIEWS_KEY = "kitshn.previews";
+/** The shelf folded or not, as the owner left it on this device; unset, it is open on a wide screen only. */
+const SHELF_KEY = "kitshn.shelf";
 /**
  * On a wide screen a saved view stays at least this close, so card names stay readable on a laptop. A fit
  * zooms out further when the map needs it (layout.ts fitMap).
@@ -271,8 +273,8 @@ export function App() {
   const [showMenu, setShowMenu] = useState<Rect | null>(null);
   /** K-528: the phone's "☰" menu, which holds the tabs and the map tools that the toolbar has on a wide screen. */
   const [moreMenu, setMoreMenu] = useState<Rect | null>(null);
-  /** K-528: on a phone the shelf is a sheet that the owner opens; closed, it shows only its count. */
-  const [trayOpen, setTrayOpen] = useState(false);
+  /** K-509, K-528: folded, the shelf shows only its count; on a phone it is a sheet. */
+  const [shelfChoice, setShelfChoice] = useState(() => localStorage.getItem(SHELF_KEY));
   const [refusal, setRefusal] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
@@ -831,9 +833,19 @@ export function App() {
   const tray = [...state.resources.values()].filter((resource) => !state.places.has(resource.id));
   const trayShown = tray.length > 0 && route.tab === "map";
   const wide = screenWidth > 720;
+  const trayOpen = shelfChoice === null ? wide : shelfChoice === "open";
+  const toggleTray = () => {
+    const next = trayOpen ? "closed" : "open";
+    localStorage.setItem(SHELF_KEY, next);
+    setShelfChoice(next);
+  };
   /** K-525: the widths that show leave room for each other and for the map; a phone keeps its own layout. */
   const widthsFor = (panel: number, shelf: number) =>
-    shownWidths(screenWidth, { panel: floating ? panel : null, tray: trayShown ? shelf : null }, LIMITS);
+    shownWidths(
+      screenWidth,
+      { panel: floating ? panel : null, tray: trayShown && trayOpen ? shelf : null },
+      LIMITS,
+    );
   const widths = widthsFor(wantedPanel, wantedTray);
   // The page's CSS reads these, also outside this tree's elements; a drag sets them alone until it ends.
   if (wide) {
@@ -856,7 +868,7 @@ export function App() {
 
   /** The right edge of the shelf where it covers the map, or 0: a closed shelf on a phone covers none of it. */
   const shelfRight = () => {
-    if (!trayShown || (!wide && !trayOpen)) return 0;
+    if (!trayShown || !trayOpen) return 0;
     return (
       document.querySelector(".tray")?.getBoundingClientRect().right ??
       10 + (wide ? widths.tray : Math.min(16 * REM, screenWidth - 20))
@@ -1549,8 +1561,8 @@ export function App() {
         ) : null}
       </header>
       {tray.length > 0 && route.tab === "map" ? (
-        <aside class={`tray${!wide && !trayOpen ? " closed" : ""}`}>
-          {wide ? (
+        <aside class={`tray${trayOpen ? "" : " closed"}`}>
+          {wide && trayOpen ? (
             <ResizeEdge
               label="Shelf width"
               width={widths.tray}
@@ -1562,24 +1574,15 @@ export function App() {
             />
           ) : null}
           <div class="tray-head">
-            {wide ? (
-              <span
-                class="label"
-                data-tip="New cards arrive here, outside every circle, so they start private."
-              >
-                New · private ({tray.length})
-              </span>
-            ) : (
-              <button
-                type="button"
-                class="label tray-toggle"
-                aria-expanded={trayOpen}
-                data-tip="New cards arrive here, outside every circle, so they start private. Tap to open or close."
-                onClick={() => setTrayOpen(!trayOpen)}
-              >
-                New · private ({tray.length}) {trayOpen ? "▴" : "▾"}
-              </button>
-            )}
+            <button
+              type="button"
+              class="label tray-toggle"
+              aria-expanded={trayOpen}
+              data-tip={`New cards arrive here, outside every circle, so they start private. A click ${trayOpen ? "folds" : "opens"} the shelf.`}
+              onClick={toggleTray}
+            >
+              New · private ({tray.length}) {trayOpen ? "▴" : "▾"}
+            </button>
             <input
               type="search"
               placeholder="Filter"

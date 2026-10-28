@@ -579,7 +579,8 @@ export class Kitshn extends DurableObject<Env> {
       changes: string;
       undoes: number | null;
     }>("SELECT id, at, actor, summary, changes, undoes FROM revisions ORDER BY id DESC LIMIT 1");
-    if (!row) return null;
+    // A per-item undo keeps `undoes` null (K-1507); its label is what marks it, and moves never join an undo.
+    if (!row || row.summary.startsWith("Undo #")) return null;
     const previous = JSON.parse(row.changes) as Array<Change>;
     const merged = mergeMoves(
       { actor: JSON.parse(row.actor) as Actor, at: row.at, changes: previous, undoes: row.undoes },

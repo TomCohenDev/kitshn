@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./recipe": "./src/recipe.ts"
+    "./recipe": "./src/recipe.ts",
+    "./icon": "./src/icon.ts"
   },
   "publishConfig": {
     "exports": {

@@ -437,6 +437,34 @@ input[type="search"]::-webkit-search-cancel-button {
     outline-offset: 4px;
   }
 }
+/* K-524: the icon of an item, in an ink tile. An image gets a white backing in both modes, so a dark logo
+   with a transparent background stays visible on the dark surface. */
+.item-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 1.4em;
+  height: 1.4em;
+  margin-right: 0.35em;
+  border: var(--bw) solid var(--border);
+  border-radius: 4px;
+  background: var(--raised);
+  font-size: 0.85em;
+  line-height: 1;
+  vertical-align: middle;
+  overflow: hidden;
+  flex: none;
+}
+.item-icon.image {
+  background: #fff;
+}
+.item-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.repo-list .item-icon {
+  margin-right: 0;
+}
 .card .name {
   font-weight: 800;
   letter-spacing: -0.01em;

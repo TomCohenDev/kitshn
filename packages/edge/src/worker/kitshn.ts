@@ -90,7 +90,8 @@ import {
   mayDeployOn,
   publishPlace,
 } from "../core/agent.ts";
-import { demo } from "../core/demo.ts";
+import { DEMO_MACHINES, DEMO_SITE_ICON, demo } from "../core/demo.ts";
+import { type MachineOs, machineOs } from "../core/icons.ts";
 import {
   contentSecurityPolicy,
   type ContentVisitor,
@@ -144,6 +145,7 @@ import {
   eventOf,
   legacyRepos,
   parseManifest,
+  parseSiteIcon,
 } from "./deploys.ts";
 import { type Recipe, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
 import {
@@ -240,7 +242,9 @@ export class Kitshn extends DurableObject<Env> {
   private stuckShares = new Set<string>();
   private accessWarnings: Array<string> = [];
   /** K-606: presence is stored on change; status and the latest sample live on the socket. */
-  private presence = new Map<string, { online: boolean; lastSeen: number }>();
+  private presence = new Map<string, { online: boolean; lastSeen: number; os: MachineOs | null }>();
+  /** K-1113: the hash of each stored card icon; the bytes stay in SQLite until a map asks. */
+  private iconHashes = new Map<string, string>();
   /** K-1104: live sites of the machines. */
   private liveSites = new Map<string, LiveSite>();
   /** Address checks that failed, and when to try them again. Memory only; a restart retries at once. */
@@ -334,9 +338,16 @@ export class Kitshn extends DurableObject<Env> {
       ]),
     );
     this.presence = new Map(
-      this.sql<{ id: string; online: number; last_seen: number }>(
-        "SELECT id, online, last_seen FROM presence",
-      ).map((row) => [row.id, { online: row.online === 1, lastSeen: row.last_seen }]),
+      this.sql<{ id: string; online: number; last_seen: number; os: string | null }>(
+        "SELECT id, online, last_seen, os FROM presence",
+      ).map((row) => [
+        row.id,
+        // Only setMachineOs writes `os`, with a MachineOs.
+        { online: row.online === 1, lastSeen: row.last_seen, os: row.os as MachineOs | null },
+      ]),
+    );
+    this.iconHashes = new Map(
+      this.sql<{ id: string; hash: string }>("SELECT id, hash FROM icons").map((row) => [row.id, row.hash]),
     );
     this.accessWarnings = JSON.parse(this.meta("access_warnings") ?? "[]") as Array<string>;
     this.access = new Map(
@@ -424,6 +435,19 @@ export class Kitshn extends DurableObject<Env> {
             state,
             Date.now(),
           );
+      // K-524, K-1113: the demo cards show a site icon and the system of each machine.
+      if (extra.resources.length > 0) {
+        this.sql(
+          "INSERT OR IGNORE INTO icons (id, type, hash, bytes) VALUES (?, ?, 'demo', ?)",
+          DEMO_SITE_ICON.id,
+          DEMO_SITE_ICON.type,
+          new TextEncoder().encode(DEMO_SITE_ICON.svg).slice().buffer,
+        );
+        for (const { machine, os } of DEMO_MACHINES) {
+          this.sql("INSERT OR IGNORE INTO machines (id, body) VALUES (?, ?)", machine.id, JSON.stringify(machine));
+          this.sql("INSERT OR IGNORE INTO presence (id, online, last_seen, os) VALUES (?, 0, ?, ?)", machine.id, Date.now() - 3_600_000, os);
+        }
+      }
       // The demo's riffle card counts as deployed, so the card panel shows "Remove app" (K-909).
       if (extra.resources.some((resource) => resource.id === "riffle"))
         this.sql(
@@ -867,6 +891,7 @@ export class Kitshn extends DurableObject<Env> {
       paused: this.state.paused,
       repos,
       deployedCards: this.deployedCards(),
+      icons: Object.fromEntries([...this.iconHashes].filter(([id]) => this.state.resources.has(id))),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
@@ -888,6 +913,7 @@ export class Kitshn extends DurableObject<Env> {
       lastSeen: this.presence.get(machine.id)?.lastSeen ?? null,
       status: live?.status ?? null,
       sample: live?.sample ?? null,
+      os: this.presence.get(machine.id)?.os ?? null,
       keyFailure: this.keyFailures.get(machine.id) ?? null,
       orphanVolumes: orphanVolumes(live?.volumes ?? [], this.state),
     };
@@ -971,6 +997,7 @@ export class Kitshn extends DurableObject<Env> {
         { status: 403 },
       );
     }
+    if (path.startsWith("/api/icons/") && request.method === "GET") return this.icon(path.slice("/api/icons/".length));
     if (path === "/api/ws") {
       if (request.headers.get("upgrade") !== "websocket")
         return new Response("Expected a WebSocket.", { status: 426 });
@@ -1122,13 +1149,16 @@ export class Kitshn extends DurableObject<Env> {
   /** K-605: presence rows change only when a machine goes online or offline (K-1302). */
   private setPresence(machineId: string, online: boolean) {
     const now = Date.now();
-    if (this.presence.get(machineId)?.online === online) return;
-    this.presence.set(machineId, { online, lastSeen: now });
+    const before = this.presence.get(machineId);
+    if (before?.online === online) return;
+    const os = before?.os ?? null;
+    this.presence.set(machineId, { online, lastSeen: now, os });
     this.sql(
-      "INSERT OR REPLACE INTO presence (id, online, last_seen) VALUES (?, ?, ?)",
+      "INSERT OR REPLACE INTO presence (id, online, last_seen, os) VALUES (?, ?, ?, ?)",
       machineId,
       online ? 1 : 0,
       now,
+      os,
     );
     this.broadcast();
     // K-1108: a machine that goes off or comes back changes the offline routes of its live sites.
@@ -1149,6 +1179,15 @@ export class Kitshn extends DurableObject<Env> {
         return attachment?.kind === "machine" && attachment.check === "signed";
       }),
     );
+  }
+
+  /** K-524: the system of a machine; its presence row changes only when the system does (K-1302). */
+  private setMachineOs(machineId: string, os: MachineOs | null) {
+    const presence = this.presence.get(machineId);
+    if (!presence) throw new Error(`kitshn read a status of ${machineId} before the machine was online.`);
+    if (presence.os === os) return;
+    this.presence.set(machineId, { ...presence, os });
+    this.sql("UPDATE presence SET os = ? WHERE id = ?", os, machineId);
   }
 
   /** After a restart, a presence row says online although its socket is gone; set it offline once. */
@@ -1347,6 +1386,7 @@ export class Kitshn extends DurableObject<Env> {
           : "stopped",
       };
       socket.serializeAttachment({ ...attachment, status } satisfies Attachment);
+      this.setMachineOs(machine.id, machineOs(status.os));
       this.sendMachine(machine);
       // An update job waits for the status; it can go now.
       this.deliverJobs();
@@ -2508,6 +2548,8 @@ export class Kitshn extends DurableObject<Env> {
       );
       this.sql("DELETE FROM join_codes WHERE expires_at < ?", now);
       this.sql("DELETE FROM rekey_codes WHERE expires_at < ?", now);
+      // K-1113: a removed card keeps its icon until this run, so a quick Undo keeps it; a deploy sends it again.
+      this.sql("DELETE FROM icons WHERE id NOT IN (SELECT id FROM resources)");
       this.sql(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('daily_at', ?)",
         String(nextUtcMidnight(now)),
@@ -2896,7 +2938,7 @@ export class Kitshn extends DurableObject<Env> {
       if (path === "/deploy/assets" && row.kind === "deploy")
         return await this.deployAssets(api, row, input["manifest"]);
       if (path === "/deploy/finish" && row.kind === "deploy")
-        return await this.finishDeploy(api, row, deployer, input["jwt"]);
+        return await this.finishDeploy(api, row, deployer, input["jwt"], input["icon"]);
       if (row.app === "compose") {
         if (path === "/deploy/start" && row.kind === "deploy")
           return await this.startCompose(api, row, deployer);
@@ -3367,9 +3409,11 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ removed: row.address });
   }
 
-  private async finishDeploy(api: Api, row: DeployRow, deployer: Deployer, jwt: unknown) {
+  private async finishDeploy(api: Api, row: DeployRow, deployer: Deployer, jwt: unknown, iconValue: unknown) {
     if (typeof jwt !== "string" || !jwt)
       return Response.json({ error: "The deploy needs the upload completion token." }, { status: 400 });
+    const icon = parseSiteIcon(iconValue);
+    if (typeof icon === "string") return Response.json({ error: icon }, { status: 400 });
     const card = this.ensureCard(row, deployer, "site.static", null);
     // Fail closed: the Access application exists before the address does.
     await this.syncAccessLocked(api, 20);
@@ -3443,10 +3487,52 @@ export class Kitshn extends DurableObject<Env> {
     const resource = this.state.resources.get(row.resource_id);
     if (resource) this.putResource({ ...resource, status: "running" });
     this.sql("UPDATE deploys SET state = 'done' WHERE id = ? AND state = 'planned'", row.id);
+    if (icon !== undefined) await this.setIcon(row.resource_id, icon);
     this.load();
     this.broadcast();
     void this.scheduleAlarm();
     return Response.json({ address: row.address, status: check?.status ?? 0, card });
+  }
+
+  /** K-1113: one icon per card, written only when its bytes change (K-1302). */
+  private async setIcon(id: string, icon: { readonly bytes: Uint8Array; readonly type: string } | null) {
+    if (icon === null) {
+      if (this.iconHashes.delete(id)) this.sql("DELETE FROM icons WHERE id = ?", id);
+      return;
+    }
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", icon.bytes));
+    const hash = [...digest.subarray(0, 8)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    if (this.iconHashes.get(id) === hash) return;
+    this.sql(
+      "INSERT OR REPLACE INTO icons (id, type, hash, bytes) VALUES (?, ?, ?, ?)",
+      id,
+      icon.type,
+      hash,
+      icon.bytes.slice().buffer,
+    );
+    this.iconHashes.set(id, hash);
+  }
+
+  /** K-1113: the stored icon of a card. Its route sits behind the map's own check (K-104, K-208). */
+  private icon(encodedId: string) {
+    let id: string;
+    try {
+      id = decodeURIComponent(encodedId);
+    } catch {
+      return Response.json({ error: "The icon address is not valid." }, { status: 404 });
+    }
+    const [row] = this.sql<{ type: string; bytes: ArrayBuffer }>("SELECT type, bytes FROM icons WHERE id = ?", id);
+    if (!row) return Response.json({ error: `kitshn has no icon for ${id}.` }, { status: 404 });
+    return new Response(row.bytes, {
+      headers: {
+        "content-type": row.type,
+        // The map asks with the hash in the address, so a new icon gets a new address.
+        "cache-control": "private, max-age=86400",
+        "x-content-type-options": "nosniff",
+        // An SVG that someone opens on its own runs no script on the admin host.
+        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+      },
+    });
   }
 
   /** K-904: a closed pull request removes its preview: the address, the Worker, the card and its Access app. */

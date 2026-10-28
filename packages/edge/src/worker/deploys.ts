@@ -1,3 +1,4 @@
+import { ICON_LIMIT, type IconType, iconType } from "kitshn/icon";
 import type { DeployEvent } from "kitshn/recipe";
 
 /** K-903: kitshn refuses a new preview at this many Worker scripts in the account. */
@@ -120,6 +121,29 @@ export function parseManifest(value: unknown): Record<string, { hash: string; si
     manifest[path] = { hash: file.hash, size: file.size };
   }
   return manifest;
+}
+
+/**
+ * K-1113: the site icon that the CLI sends with `/deploy/finish`, as base64. Null means the site has none, so
+ * kitshn drops a stored icon. A missing field is a CLI from before card icons: the stored icon stays.
+ */
+export function parseSiteIcon(
+  value: unknown,
+): { readonly bytes: Uint8Array; readonly type: IconType } | null | undefined | string {
+  if (value === undefined || value === null) return value;
+  if (typeof value !== "string") return "The site icon must be base64 text or null.";
+  // Base64 grows by 4/3, so a longer text cannot fit the limit; this check comes before the decode.
+  if (value.length > Math.ceil(ICON_LIMIT / 3) * 4) return `The site icon is larger than ${ICON_LIMIT / 1024} KB.`;
+  let bytes: Uint8Array;
+  try {
+    bytes = Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  } catch {
+    return "The site icon is not valid base64.";
+  }
+  if (bytes.length === 0 || bytes.length > ICON_LIMIT) return `The site icon is empty or larger than ${ICON_LIMIT / 1024} KB.`;
+  const type = iconType(bytes);
+  if (type === null) return "The site icon is not a PNG, ICO, GIF, JPEG, WebP or SVG image.";
+  return { bytes, type };
 }
 
 /**

@@ -1,6 +1,6 @@
 # Host move: `kit.<zone>` to `kitshn.<zone>` (K-1209)
 
-The move has no redirect. Everything that names the old host changes to the new one. Run it after the section 17 pull request deploys: that release takes the old host and the audience tags of both hosts while `KITSHN_OLD_HOST` is set.
+The move has no redirect at all: `kit.<zone>` stops fully (the owner decided on 2026-10-29). So everything that names the old host changes to the new one during the move, and a script proves that nothing is left before the old host goes. Run it after the section 17 pull request deploys: that release takes the old host and the audience tags of both hosts while `KITSHN_OLD_HOST` is set.
 
 Passkeys survive the move, because they belong to the Access team domain (K-113). During the move, the count of Access applications doubles (K-1303).
 
@@ -18,8 +18,12 @@ Passkeys survive the move, because they belong to the Access team domain (K-113)
 4. Daemons: on each joined machine, change the server address in `machine.json` and restart the daemon. Check that each card shows a signed connection.
 5. GitHub App: change the homepage, callback and webhook addresses.
 6. Text and config in this repo: `.github/workflows/kitshn2-deploy.yml` (its default `server`, which app repos call with `@main`), `packages/edge/public/install`, `site/apps.js`, `site/index.html`, `site/install/index.html`, `packages/kitshn/skill/SKILL.md`, `AGENTS.md`, `docs/`, and every `kit.<zone>` in `SPEC.md`.
-7. App repos: run `gh search code "kit.yarden-zamir.com" --owner Yarden-zamir` and change each hit, also README badges. The search sees only default branches, so open branches that name `kit.` break after the move.
-8. T3 fork docs: run the same search on `Yarden-zamir/t3code`.
+7. Change every link and badge that names the old host, in each of these places:
+   - every app repo (`kitshn.config.ts` comments, `kitshn.md`, README badges and links, workflow files);
+   - kitshn.com (`site/`) and the kitshn skill (`packages/kitshn/skill/SKILL.md`);
+   - the T3 fork docs (`Yarden-zamir/t3code`);
+   - the dotfiles skills (`Yarden-zamir/dotfiles`, for example `.claude/skills/neo-brutalism/SKILL.md`).
+8. Prove it: `node scripts/host-move-check.ts kit.yarden-zamir.com Yarden-zamir` lists each file that still names the old host and exits 1 while one remains. Repeat steps 7 and 8 until it prints "No link to kit.yarden-zamir.com remains." It searches default branches only, so an open branch that names `kit.` breaks after the move.
 
 ## Checks
 
@@ -33,5 +37,5 @@ Passkeys survive the move, because they belong to the Access team domain (K-113)
 
 1. Run the bootstrap with `KITSHN_OLD_HOST=none`. The Worker then takes only the new host and its audience tags.
 2. Remove the `kit.` Access applications, the `kit.` custom domain and its DNS record.
-3. Run the search of step 7 of the move again. It finds nothing.
+3. Run `node scripts/host-move-check.ts kit.yarden-zamir.com Yarden-zamir` again. It passes.
 4. Turn on "Passes" in Settings (17.7). Check that `/.well-known/openid-configuration` names `https://kitshn.<zone>` as its issuer.

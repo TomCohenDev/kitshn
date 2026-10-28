@@ -165,7 +165,6 @@ import {
   type AskAction,
   PROPOSAL_MS,
   type Proposal,
-  SELF_APPROVAL_ALLOWED,
   APPROVED_WINDOW_MS,
   MAX_OPEN_PROPOSALS,
   MAX_SHOWN,
@@ -7285,8 +7284,6 @@ export class Kitshn extends DurableObject<Env> {
       };
     if (proposal.state !== "pending")
       return { ok: false, error: `This ask is already decided (${proposal.state}).` };
-    if (!SELF_APPROVAL_ALLOWED && by.machineId === proposal.machineId)
-      return { ok: false, error: "The machine that asked does not answer its own ask (K-1727)." };
     if (decision === "approved" && seenHash !== null && seenHash !== proposal.shownHash)
       return {
         ok: false,

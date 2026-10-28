@@ -23,6 +23,7 @@ import { callApi } from "./store.ts";
 import { Check, Switch } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import { MachineRights, withMode } from "./MachineRights.tsx";
+import { selfApprovers } from "../core/asks.ts";
 import type { ComponentChildren } from "preact";
 import { levelEdit } from "./actions.ts";
 
@@ -687,6 +688,12 @@ export function CircleEditor(props: {
               ) : null
             }
           />
+        ))}
+        {selfApprovers(state.circles, circle).map((machineId) => (
+          <li key={`self-${machineId}`} class="warning">
+            ⚠️ {state.machines.get(machineId)?.name ?? machineId} can approve its own asks here: a right of it
+            asks this circle (K-1727).
+          </li>
         ))}
         {circle.members.length === 0 ? (
           <li class="help">Nobody yet. A circle with no members matches nobody.</li>

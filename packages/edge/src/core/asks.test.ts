@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ASK_ACTIONS as LOCAL_ACTIONS } from "../../../local/src/index.ts";
-import { ASK_ACTIONS, askRequest, labelProblem, rightWarnings } from "./asks.ts";
+import { ASK_ACTIONS, askRequest, labelProblem, rightWarnings, selfApprovers } from "./asks.ts";
 import type { Circle } from "./model.ts";
 
 describe("asks of agents on machines (K-1710, K-1711, K-1750)", () => {
@@ -63,5 +63,44 @@ describe("warnings of machine rights (K-1725)", () => {
     });
     expect(warnings).toHaveLength(4);
     expect(warnings.join(" ")).toMatch(/approve itself/);
+  });
+});
+
+describe("self-approval (K-1727)", () => {
+  it("names a machine that a right of it lets approve its own asks in this circle", () => {
+    const base = {
+      color: "#000000",
+      level: "control" as const,
+      match: "any" as const,
+      needsPasskey: false,
+      endsAt: null,
+      x: 0,
+      y: 0,
+      r: 1,
+    };
+    const bots = {
+      ...base,
+      id: "bots",
+      name: "bots",
+      members: [{ _tag: "machine" as const, machineId: "vps" }],
+    };
+    const agents = {
+      ...base,
+      id: "agents",
+      name: "agents",
+      members: [
+        {
+          _tag: "machine" as const,
+          machineId: "vps",
+          rights: { deploys: { mode: "ask" as const, circleId: "bots" } },
+        },
+      ],
+    };
+    const circles = new Map([
+      ["bots", bots],
+      ["agents", agents],
+    ]);
+    expect(selfApprovers(circles, bots)).toEqual(["vps"]);
+    expect(selfApprovers(circles, agents)).toEqual([]);
   });
 });

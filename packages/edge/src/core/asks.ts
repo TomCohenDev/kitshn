@@ -172,12 +172,6 @@ export interface Proposal {
 /** K-1724: a proposal expires 24 hours after the ask (K-1607). */
 export const PROPOSAL_MS = 24 * 60 * 60_000;
 
-/**
- * K-1727: kitshn takes an approve or a deny from the machine that asked; K-1725 warns about it. Pending owner decision:
- * set this to false to refuse it always.
- */
-export const SELF_APPROVAL_ALLOWED = true;
-
 /** K-1723: after an approval of a token, the same ask of that machine runs at once for this long. */
 export const APPROVED_WINDOW_MS = 60 * 60_000;
 
@@ -225,4 +219,25 @@ export function rightWarnings(
       );
   }
   return [...new Set(warnings)];
+}
+
+/**
+ * K-1725, K-1727: the machines of this circle that it would let approve their own asks, because one of their rights asks
+ * this circle. The circle editor warns at once, when the owner adds the machine or sets the rule.
+ */
+export function selfApprovers(circles: ReadonlyMap<string, Circle>, circle: Circle): Array<string> {
+  return circle.members.flatMap((member) => {
+    if (member._tag !== "machine") return [];
+    const asks = [...circles.values()].some((other) =>
+      (other.id === circle.id ? circle : other).members.some(
+        (each) =>
+          each._tag === "machine" &&
+          each.machineId === member.machineId &&
+          Object.values(each.rights ?? {}).some(
+            (mode) => mode?.mode === "ask" && mode.circleId === circle.id,
+          ),
+      ),
+    );
+    return asks ? [member.machineId] : [];
+  });
 }

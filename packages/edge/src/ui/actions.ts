@@ -35,6 +35,8 @@ export type Action = {
   /** Stable within one list, for tests and keys. */
   readonly id: string;
   readonly label: string;
+  /** A shorter label for a place that already names the items, such as the buttons of the selection panel. */
+  readonly short?: string;
   /** One sentence: what happens. */
   readonly tip: string;
   readonly danger?: true;
@@ -381,33 +383,44 @@ export const NEW_CIRCLE = {
   endsAt: null,
 } as const satisfies Omit<Circle, "id" | "color" | "x" | "y" | "r">;
 
-const circlePlans = new WeakMap<State, Map<string, ReturnType<typeof circleForCards>>>();
-/**
- * K-529: the actions on every selected card at once, in the menu of a selected card and in the palette. The plan
- * is cached per state and selection, so an open menu does not place the circle again on each render.
- */
 /** The ids of `selectionActions`, which the palette lists once and not under each selected card. */
 const SELECTION_IDS = new Set(["stack-these", "new-circle-for"]);
 
-export function selectionActions(ctx: ActionContext, h: ActionHandlers): Array<Action> {
-  if (ctx.selected.size < 2) return [];
-  const cache = circlePlans.get(ctx.state) ?? new Map<string, ReturnType<typeof circleForCards>>();
-  circlePlans.set(ctx.state, cache);
-  const key = [...ctx.selected].sort().join(",");
-  const plan = cache.get(key) ?? circleForCards(ctx.state, ctx.selected, { ...NEW_CIRCLE, id: "preview", color: "#6C5CE7" });
+const circlePlans = new WeakMap<State, Map<string, ReturnType<typeof circleForCards>>>();
+const stackPlans = new WeakMap<State, Map<string, ReturnType<typeof stackOntoEdits>>>();
+/** A plan per state and key, so an open menu or palette does not plan the same action again on each render. */
+function cached<T>(plans: WeakMap<State, Map<string, T>>, state: State, key: string, make: () => T): T {
+  const cache = plans.get(state) ?? new Map<string, T>();
+  plans.set(state, cache);
+  const plan = cache.has(key) ? (cache.get(key) as T) : make();
   cache.set(key, plan);
+  return plan;
+}
+
+/**
+ * K-521, K-529: the actions on every selected card at once, for the selection panel, the menu of a selected card
+ * and the palette. Both plans are cached per state and selection.
+ */
+export function selectionActions(ctx: ActionContext, h: ActionHandlers): Array<Action> {
+  // A card that another device removed while it was selected drops out, as it does from the panel.
+  const ids = [...ctx.selected].filter((id) => ctx.state.resources.has(id));
+  if (ids.length < 2) return [];
+  const plan = cached(circlePlans, ctx.state, [...ids].sort().join(","), () =>
+    circleForCards(ctx.state, ids, { ...NEW_CIRCLE, id: "preview", color: "#6C5CE7" }),
+  );
   const refused = "refused" in plan ? plan.refused : refusal(ctx.state, plan.edits);
-  // K-521: the first selected card on the map is the one the others stack onto, as a drop onto it would.
-  const ids = [...ctx.selected];
+  // K-521: the first selected card on the map is the one the others stack onto, as a drop onto it would. The
+  // target depends on the order of the selection, so its cache key keeps that order.
   const target = ids.find((id) => ctx.state.places.has(id)) ?? ids[0] ?? "";
-  const stack = stackOntoEdits(ctx.state, ids, target, "preview");
+  const stack = cached(stackPlans, ctx.state, ids.join(","), () => stackOntoEdits(ctx.state, ids, target, "preview"));
   return [
     // No entry when the cards already are one stack: there is nothing to stack.
     ...(stack
       ? [
           {
             id: "stack-these",
-            label: `Stack these (${ctx.selected.size})`,
+            label: `Stack these (${ids.length})`,
+            short: "Stack these",
             tip: "Stack the selected cards: they sit on one point, move as one and get the same circles.",
             ...("refused" in stack ? { refused: stack.refused } : {}),
             run: () => h.stackOnto(ids, target),
@@ -416,8 +429,9 @@ export function selectionActions(ctx: ActionContext, h: ActionHandlers): Array<A
       : []),
     {
       id: "new-circle-for",
-      label: `New circle for these (${ctx.selected.size})`,
-      tip: "Make one new circle with no members around the selected cards. Every card keeps its circles; cards in the way move out.",
+      label: `New circle for these (${ids.length})`,
+      short: "New circle for these",
+      tip: "Make one new circle with no members around the selected cards. Every card keeps its circles; cards in the way move out. Undo takes it all back.",
       ...(refused ? { refused } : {}),
       run: h.newCircleFor,
     },

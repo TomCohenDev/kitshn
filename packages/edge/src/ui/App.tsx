@@ -883,7 +883,9 @@ export function App() {
   const newCircleFor = async () => {
     const id = `c-${crypto.randomUUID().slice(0, 8)}`;
     const color = CIRCLE_COLORS[state.circles.size % CIRCLE_COLORS.length] ?? "#6C5CE7";
-    const plan = circleForCards(state, selection.cards, { ...NEW_CIRCLE, id, color });
+    // A card that another device removed while it was selected drops out, as in `selectionActions`.
+    const ids = [...selection.cards].filter((card) => state.resources.has(card));
+    const plan = circleForCards(state, ids, { ...NEW_CIRCLE, id, color });
     if ("refused" in plan) {
       showToast({ text: plan.refused, error: true, undo: null });
       return;
@@ -1715,8 +1717,7 @@ function Panel(props: {
                 data-tip={action.refused ?? action.tip}
                 onClick={action.run}
               >
-                {/* The panel already names the selection, so the buttons drop the count of the menu label. */}
-                {action.label.lastIndexOf(" (") > 0 ? action.label.slice(0, action.label.lastIndexOf(" (")) : action.label}
+                {action.short ?? action.label}
               </button>
             ) : null,
           )}

@@ -311,6 +311,15 @@ describe("Stack these (K-521)", () => {
     expect(paletteEntries(ctx, handlers).filter((entry) => entry.label.startsWith("Stack these"))).toHaveLength(1);
   });
 
+  it("skips a selected card that no longer exists", () => {
+    const { handlers, calls } = recorder();
+    const ctx = { ...context(), selected: new Set(["gone", "riffle", "vps"]) };
+    run(find(actionsFor(ctx, handlers, { _tag: "card", id: "vps" }), "stack-these"));
+    expect(calls[0]).toEqual(["stackOnto", ["riffle", "vps"], "riffle"]);
+    const alone = { ...context(), selected: new Set(["gone", "riffle"]) };
+    expect(ids(actionsFor(alone, handlers, { _tag: "card", id: "riffle" }))).not.toContain("stack-these");
+  });
+
   it("is not offered when the selected cards already are one stack", () => {
     const { handlers } = recorder();
     const ctx = { ...context(), selected: new Set(["a", "b"]) };

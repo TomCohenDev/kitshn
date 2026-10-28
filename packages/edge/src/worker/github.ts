@@ -127,7 +127,7 @@ export async function dispatchDeploy(app: GitHubApp, repoId: string, branch: str
   const name = repo?.["full_name"];
   if (typeof name !== "string") throw new Error(`The installation token does not reach the repo ${repoId}.`);
   // A full branch ref, so a tag with the same name never runs.
-  await call(token, "POST", `/repos/${name}/actions/workflows/${workflow}/dispatches`, {
+  await call(token, "POST", `/repos/${name}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
     ref: `refs/heads/${branch}`,
   });
   return name;

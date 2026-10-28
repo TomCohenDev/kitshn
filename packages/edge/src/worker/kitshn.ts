@@ -965,9 +965,9 @@ export class Kitshn extends DurableObject<Env> {
       this.sql(
         `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state,
            expires_at, branch, app, machine_id, job_id, compose_file, addresses, worker, app_key, reason, version_id,
-           run_id, run_attempt, images, needs, origin)
+           run_id, run_attempt, images, needs, origin, workflow)
          SELECT ?, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, ?, ?, branch, app,
-           machine_id, ?, compose_file, addresses, worker, app_key, ?, version_id, NULL, NULL, images, needs, ?
+           machine_id, ?, compose_file, addresses, worker, app_key, ?, version_id, NULL, NULL, images, needs, ?, workflow
          FROM deploys WHERE id = ?`,
         id,
         state,
@@ -1461,7 +1461,11 @@ export class Kitshn extends DurableObject<Env> {
       return `${back} and starts its last good build on ${machine.name}.`;
     }
     try {
-      const repo = await this.dispatchBuild(done?.repo_id ?? "", plan.branch);
+      const repo = await this.dispatchBuild(
+        done?.repo_id ?? "",
+        plan.branch,
+        done?.workflow ?? AGENT_WORKFLOW,
+      );
       return `${back}; kitshn started a build of ${repo} from ${plan.branch}.`;
     } catch (error) {
       return `${back}, but the build did not start: ${error instanceof Error ? error.message : String(error)}`;
@@ -3689,7 +3693,7 @@ export class Kitshn extends DurableObject<Env> {
         );
       if (state === "blocked")
         this.sql(
-          "UPDATE repos SET state = 'blocked', branch = NULL, allowed_by_client = NULL, allowed_by_name = NULL WHERE repo_id = ?",
+          "UPDATE repos SET state = 'blocked', branch = NULL, workflow = NULL, allowed_by_client = NULL, allowed_by_name = NULL WHERE repo_id = ?",
           repoId,
         );
       this.insertRevision(
@@ -4173,8 +4177,8 @@ export class Kitshn extends DurableObject<Env> {
     }
     const deployId = crypto.randomUUID();
     this.sql(
-      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file, addresses, worker, app_key, run_id, run_attempt, needs)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file, addresses, worker, app_key, run_id, run_attempt, needs, workflow)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       deployId,
       deployer.repo,
       deployer.repoId,
@@ -4197,6 +4201,7 @@ export class Kitshn extends DurableObject<Env> {
       deployer.runId,
       deployer.runAttempt,
       JSON.stringify(recipe.needs?.apps ?? []),
+      deployer.workflow,
     );
     return Response.json({ deployId, plan: result });
   }
@@ -5206,7 +5211,8 @@ export class Kitshn extends DurableObject<Env> {
       const repoId = row?.repo_id ?? null;
       const refusal = this.repoRefusal(repoId);
       if (refusal !== null || repoId === null) return Response.json({ error: refusal }, { status: 403 });
-      if (plan.kind === "build") return this.agentBuild(agent, repoId, plan.branch);
+      if (plan.kind === "build")
+        return this.agentBuild(agent, repoId, plan.branch, row?.workflow ?? AGENT_WORKFLOW);
       if (!machine) return Response.json({ error: "The machine of this app is gone." }, { status: 409 });
       return this.agentRedeploy(agent, machine.id, plan.command);
     }
@@ -5785,6 +5791,8 @@ interface DeployRow extends Record<string, SqlStorageValue> {
   needs: string | null;
   /** K-821: the deploy whose build this rollback row repeats; null on a row that a workflow run made. */
   origin: string | null;
+  /** K-1121: the workflow file of the run that made the deploy; null starts `kitshn.yml`. */
+  workflow: string | null;
 }
 
 /** K-821: one finished deploy of a card in the rollback list; `why` says why a rollback cannot go there. */

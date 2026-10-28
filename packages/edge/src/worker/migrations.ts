@@ -123,8 +123,9 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `CREATE TABLE rollbacks (id TEXT PRIMARY KEY, steps TEXT NOT NULL, next INTEGER NOT NULL, state TEXT NOT NULL,
       actor TEXT NOT NULL, notes TEXT NOT NULL, job_id INTEGER)`,
   ],
-  // 19: the workflow file of the run that waits at the repo gate, which Allow starts again (K-1121).
-  ["ALTER TABLE repos ADD COLUMN workflow TEXT"],
+  // 19: the workflow file of the run that waits at the repo gate, which Allow starts again, and of the run of each
+  // deploy, which a restore from the trash and an agent key build start again (K-1121).
+  ["ALTER TABLE repos ADD COLUMN workflow TEXT", "ALTER TABLE deploys ADD COLUMN workflow TEXT"],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

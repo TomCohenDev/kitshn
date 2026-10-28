@@ -43,7 +43,14 @@ export function gateDecision(
   if (!gate)
     return {
       allow: false,
-      record: { ...repo, state: "waiting", firstSeen: now, allowedBy: null },
+      // The workflow belongs to the run that waits on the branch; a pull request run has neither.
+      record: {
+        ...repo,
+        workflow: repo.branch === null ? null : repo.workflow,
+        state: "waiting",
+        firstSeen: now,
+        allowedBy: null,
+      },
       error: waiting(repo.name),
     };
   const branch = gate.state === "waiting" || removed ? (gate.branch ?? repo.branch) : null;

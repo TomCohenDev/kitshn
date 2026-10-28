@@ -132,6 +132,17 @@ async function deploy(server: string, dir: string) {
     execFileSync("sh", ["-c", recipe.static.build], { cwd: dir, stdio: "inherit" });
   }
   const output = resolve(dir, recipe.static.output);
+  // K-805: a site that its own job built arrives at artifact-path, which must be the output folder of the recipe.
+  const artifactPath = process.env["KITSHN_ARTIFACT_PATH"];
+  if (artifactPath && resolve(dir, artifactPath) !== output) {
+    fail(
+      `the artifact went to ${artifactPath}, but the output folder of the recipe is ${recipe.static.output}. Make artifact-path and output the same folder.`,
+    );
+  }
+  if (artifactPath && recipe.static.build)
+    console.log(
+      "kitshn: warning: the recipe builds too, over the artifact; a site with its own build job names no build.",
+    );
   // realpath follows a symlinked output folder, so a link cannot point outside the repo.
   const real = existsSync(output) ? realpathSync(output) : output;
   const root = realpathSync(dir);

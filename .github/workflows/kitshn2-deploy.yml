@@ -15,7 +15,21 @@ name: kitshn 2 deploy
 #       uses: Yarden-zamir/kitshn/.github/workflows/kitshn2-deploy.yml@main
 #       secrets: inherit
 #
-# A static site with its own build job passes `artifact` and `artifact-path`; that job must finish first (needs).
+# A static site with its own build job passes `artifact` and `artifact-path` (K-805). The closing of a pull request
+# builds nothing but must still remove its preview, so the caller uses this pattern:
+#
+#   jobs:
+#     build:
+#       if: github.event.action != 'closed'
+#       permissions:
+#         contents: read
+#       steps: [... build, then actions/upload-artifact with the name of `artifact` ...]
+#     kitshn:
+#       needs: build
+#       if: ${{ !cancelled() && !failure() }}
+#       uses: Yarden-zamir/kitshn/.github/workflows/kitshn2-deploy.yml@main
+#       with: { artifact: site, artifact-path: dist }
+#       secrets: inherit
 #
 # A Compose app gets each KITSHN_<NAME> secret and variable as <NAME> (K-808), from the GitHub Environment
 # "prod" for pushes and "pr-<number>" for pull requests, as in KitSHn 1.
@@ -55,11 +69,18 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - if: inputs.artifact != '' && inputs.artifact-path == ''
+      # A closed pull request only removes its preview, so its build job did not run (see the header).
+      - if: inputs.artifact != '' && github.event.action != 'closed'
+        env:
+          ARTIFACT_PATH: ${{ inputs.artifact-path }}
         run: |
-          echo "kitshn: artifact needs artifact-path, the output folder of the recipe."
-          exit 1
-      - if: inputs.artifact != ''
+          case "$ARTIFACT_PATH" in
+            "" | . | ./ | /* | ..*)
+              echo "kitshn: artifact-path must be the output folder of the recipe inside the repo, not '$ARTIFACT_PATH'."
+              exit 1
+              ;;
+          esac
+      - if: inputs.artifact != '' && github.event.action != 'closed'
         uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.artifact }}
@@ -82,6 +103,7 @@ jobs:
         env:
           SERVER: ${{ inputs.server }}
           KITSHN_PARAMS_JSON: ${{ runner.temp }}/kitshn-params.json
+          KITSHN_ARTIFACT_PATH: ${{ inputs.artifact != '' && inputs.artifact-path || '' }}
         # K-617: the CLI of the release that the kitshn server names, checked against its SHA256SUMS.
         run: |
           version=$(curl -fsSL "$SERVER/deploy/version")

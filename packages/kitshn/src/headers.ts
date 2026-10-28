@@ -35,7 +35,9 @@ export function redirectsWarnings(text: string): Array<string> {
   const lines = text.split("\n");
   const rules = lines.map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("#"));
   const dynamic = rules.filter((rule) => {
-    const source = rule.split(" ")[0] ?? "";
+    // The fields of a rule are separated by any whitespace, also a tab.
+    const end = [...rule].findIndex((char) => char === " " || char === "\t");
+    const source = end === -1 ? rule : rule.slice(0, end);
     return source.includes("*") || source.includes(":");
   }).length;
   const long = lines.flatMap((line, index) => (line.length > MAX_REDIRECT_LINE ? [index + 1] : []));

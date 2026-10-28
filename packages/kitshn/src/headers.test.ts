@@ -24,5 +24,10 @@ describe("_redirects limits (K-805)", () => {
     const staticRules = Array.from({ length: 2001 }, (_, index) => `/p${index} /q 301`).join("\n");
     expect(redirectsWarnings(staticRules)).toEqual([expect.stringContaining("2001 static rules")]);
     expect(redirectsWarnings(`/a /${"x".repeat(1000)} 301`)).toEqual([expect.stringContaining("line 1")]);
+    // A tab separates fields too: a static source with a tab, then a target that holds a colon, stays static.
+    const tabbed = Array.from({ length: 101 }, (_, index) => `/p${index}\thttps://example.com/q\t301`).join(
+      "\n",
+    );
+    expect(redirectsWarnings(tabbed)).toEqual([]);
   });
 });

@@ -93,6 +93,14 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   ["ALTER TABLE deploys ADD COLUMN addresses TEXT"],
   // 15: the card that made each DNS record (K-817); null on older rows, which then count as another card's.
   ["ALTER TABLE dns_objects ADD COLUMN card_id TEXT"],
+  // 16: Worker apps (K-806). A deploy keeps the `worker` part of its recipe as JSON, so later steps use the planned
+  // recipe. `worker_storage` holds the KV namespace of each binding (`kv`) and the Durable Object classes that the
+  // Worker script has (`class`, with an empty cf_id).
+  [
+    "ALTER TABLE deploys ADD COLUMN worker TEXT",
+    `CREATE TABLE worker_storage (card_id TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('kv', 'class')),
+      name TEXT NOT NULL, cf_id TEXT NOT NULL, PRIMARY KEY (card_id, kind, name))`,
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

@@ -66,7 +66,7 @@ export function appRestart(
     return none(
       `The pull request of the preview ${last.environment} is closed, so the preview does not come back.`,
     );
-  if (last.app === "static" && isPreview(last.environment))
+  if (last.app !== "compose" && isPreview(last.environment))
     return none(`The preview ${last.environment} comes back on the next push to its pull request.`);
   const plan = agentDeployPlan(last, last.app === "compose" ? "redeploy" : "build", machine);
   return plan.kind === "refused" ? none(plan.error) : plan;

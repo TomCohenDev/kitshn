@@ -200,3 +200,37 @@ describe("kitshn's own names (K-817)", () => {
     expect(planOf(["x.example.com", "y.example.com"])).toMatchObject({ kind: "deploy" });
   });
 });
+
+describe("Worker recipes (K-806)", () => {
+  const worker = (app: Record<string, unknown>) => ({
+    worker: { main: "worker/index.js", compatibilityDate: "2026-10-01", ...app },
+    deploy: [{ on: "push", name: "prod" }],
+  });
+
+  it("takes a Worker with assets, KV, Durable Objects, crons and vars", () => {
+    const recipe = worker({
+      assets: { folder: "site", runWorkerFirst: ["/api/*"] },
+      kv: ["STATS"],
+      durableObjects: { ROOMS: "Room" },
+      crons: ["*/30 * * * *"],
+      vars: { MODE: "live" },
+    });
+    expect(decodeRecipe(recipe)).toEqual(recipe);
+  });
+
+  it("refuses place fields, paths outside the repo and a binding name used twice", () => {
+    expect(() => decodeRecipe(worker({ name: "github-stats" }))).toThrow();
+    expect(() => decodeRecipe(worker({ routes: ["x.example.com"] }))).toThrow();
+    expect(() => decodeRecipe(worker({ main: "../other/index.js" }))).toThrow(/inside the repo/);
+    expect(() => decodeRecipe(worker({ assets: { folder: "/srv" } }))).toThrow(/inside the repo/);
+    expect(() => decodeRecipe(worker({ kv: ["DATA"], vars: { DATA: "x" } }))).toThrow(/DATA is used twice/);
+    expect(() => decodeRecipe(worker({ assets: { folder: "site" }, kv: ["ASSETS"] }))).toThrow(/twice/);
+    expect(() => decodeRecipe(worker({ kv: ["not-an-identifier"] }))).toThrow();
+    expect(() => decodeRecipe(worker({ crons: ["daily"] }))).toThrow();
+    expect(() => decodeRecipe(worker({ compatibilityDate: "October" }))).toThrow();
+  });
+
+  it("refuses a recipe with a Worker and another kind", () => {
+    expect(() => decodeRecipe({ ...worker({}), static: { output: "site" } })).toThrow();
+  });
+});

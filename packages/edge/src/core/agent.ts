@@ -244,7 +244,7 @@ export const isPreview = (environment: string) => /^pr-\d+$/.test(environment);
 
 /** The last finished deploy of a card, as kitshn stores it (K-807, K-812). */
 export interface LastDeploy {
-  readonly app: "static" | "compose";
+  readonly app: "static" | "compose" | "worker";
   readonly repo: string;
   readonly branch: string;
   readonly resourceId: string;
@@ -287,7 +287,9 @@ export function agentDeployPlan(
       : refused("kitshn does not know the branch of this environment.");
   }
   if (last.app !== "compose")
-    return refused("A static site keeps serving its last build; a new build comes from the repo (build).");
+    return refused(
+      "A static site or Worker app keeps serving its last build; a new build comes from the repo (build).",
+    );
   if (!machine || !machine.runsCard)
     return refused("This app no longer runs on the machine of its last deploy.");
   if (!machine.takesDeploys)

@@ -2,12 +2,14 @@
 // The kitshn CLI for app repos: `kitshn check` (K-802) and `kitshn deploy` (K-803, K-805, K-811).
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { extname, join, relative, resolve, sep } from "node:path";
+import { gzipSync } from "node:zlib";
 import { headersWarnings, redirectsWarnings } from "./headers.ts";
 import { pickSiteIcon } from "./icon.ts";
 import { RecipeError, readRecipe } from "./parse.ts";
-import { type DeployEvent, decodeRecipe } from "./recipe.ts";
+import { type DeployEvent, type WorkerApp, decodeRecipe } from "./recipe.ts";
 
 const fail = (text: string): never => {
   console.error(`kitshn: ${text}`);
@@ -108,7 +110,7 @@ const TYPES: Record<string, string> = {
   ".webmanifest": "application/manifest+json",
 };
 
-/** K-805: uploads the built files through the Workers direct upload flow; kitshn deploys them. */
+/** K-805, K-806: plans the deploy, then deploys the recipe's kind. */
 async function deploy(server: string, dir: string) {
   const env = params();
   const recipe = loadRecipe(dir);
@@ -127,10 +129,8 @@ async function deploy(server: string, dir: string) {
     return;
   }
   if ("compose" in recipe) return deployCompose(server, dir, plan.deployId, plan.plan.address ?? "", env);
-  if (recipe.static.build) {
-    console.log(`kitshn: building with: ${recipe.static.build}`);
-    execFileSync("sh", ["-c", recipe.static.build], { cwd: dir, stdio: "inherit" });
-  }
+  if ("worker" in recipe) return deployWorker(server, dir, plan.deployId, recipe.worker, env);
+  if (recipe.static.build) runBuild(dir, recipe.static.build);
   const output = resolve(dir, recipe.static.output);
   // K-805: a site that its own job built arrives at artifact-path, which must be the output folder of the recipe.
   const artifactPath = process.env["KITSHN_ARTIFACT_PATH"];
@@ -143,18 +143,45 @@ async function deploy(server: string, dir: string) {
     console.log(
       "kitshn: warning: the recipe builds too, over the artifact; a site with its own build job names no build.",
     );
-  // realpath follows a symlinked output folder, so a link cannot point outside the repo.
-  const real = existsSync(output) ? realpathSync(output) : output;
+  const assets = await uploadAssets(server, dir, plan.deployId, recipe.static.output);
+  const done = await call<{ address: string; status: number; card: string }>(server, "/deploy/finish", {
+    deployId: plan.deployId,
+    jwt: assets.jwt,
+    icon: assets.icon,
+    headers: assets.headers,
+    redirects: assets.redirects,
+  });
+  console.log(
+    `kitshn: deployed ${assets.count} files to https://${done.address} (route check: ${done.status}).`,
+  );
+  console.log(`kitshn: ${done.card}`);
+}
+
+function runBuild(dir: string, command: string) {
+  console.log(`kitshn: building with: ${command}`);
+  execFileSync("sh", ["-c", command], { cwd: dir, stdio: "inherit" });
+}
+
+/** A path of the recipe after symlinks, or a failure when it leaves the repo. */
+function insideRepo(dir: string, path: string, what: string): string {
+  const full = resolve(dir, path);
+  // realpath follows a symlink, so a link cannot point outside the repo.
+  const real = existsSync(full) ? realpathSync(full) : full;
   const root = realpathSync(dir);
-  if (real !== root && !real.startsWith(root + sep)) {
-    fail(`the output folder ${recipe.static.output} is outside the repo.`);
-  }
-  if (!existsSync(output)) fail(`the output folder ${recipe.static.output} does not exist after the build.`);
+  if (real !== root && !real.startsWith(root + sep)) fail(`${what} ${path} is outside the repo.`);
+  if (!existsSync(full)) fail(`${what} ${path} does not exist after the build.`);
+  return full;
+}
+
+/**
+ * K-805: uploads a folder of files through the Workers direct upload flow, and picks the card icon (K-1112).
+ * `_headers` and `_redirects` are config that Cloudflare reads, not files to serve.
+ */
+async function uploadAssets(server: string, dir: string, deployId: string, folder: string) {
+  const output = insideRepo(dir, folder, "the output folder");
   const manifest: Record<string, { hash: string; size: number }> = {};
   const byHash = new Map<string, { path: string; type: string }>();
   const byPath = new Map<string, string>();
-  // K-805: `_headers` sets response headers and `_redirects` redirects of the site; Cloudflare reads them as config,
-  // not as files to serve.
   let headers: string | null = null;
   let redirects: string | null = null;
   for (const path of files(output)) {
@@ -179,14 +206,11 @@ async function deploy(server: string, dir: string) {
     byPath.set(sitePath, path);
     byHash.set(hash, { path, type: TYPES[extension] ?? "application/octet-stream" });
   }
-  if (Object.keys(manifest).length === 0) fail(`the output folder ${recipe.static.output} is empty.`);
+  if (Object.keys(manifest).length === 0) fail(`the output folder ${folder} is empty.`);
   const session = await call<{ jwt: string; buckets: Array<Array<string>>; uploadUrl: string }>(
     server,
     "/deploy/assets",
-    {
-      deployId: plan.deployId,
-      manifest,
-    },
+    { deployId, manifest },
   );
   let completion = session.jwt;
   for (const bucket of session.buckets) {
@@ -205,7 +229,7 @@ async function deploy(server: string, dir: string) {
     if (!body.success) fail(`the file upload failed: ${JSON.stringify(body.errors)}`);
     if (body.result?.jwt) completion = body.result.jwt;
   }
-  // K-1112: the card icon comes from the built files; a site without one gets its kind icon.
+  // K-1112: the card icon comes from the files; a site without one gets its kind icon.
   const { icon, notes } = await pickSiteIcon((path) => {
     const file = byPath.get(path);
     return file === undefined ? null : readFileSync(file);
@@ -216,19 +240,103 @@ async function deploy(server: string, dir: string) {
       ? `kitshn: the card icon is ${icon.path}.`
       : "kitshn: the site has no icon; the card shows the kind icon.",
   );
-  const done = await call<{ address: string; status: number; card: string }>(server, "/deploy/finish", {
-    deployId: plan.deployId,
+  if (headers !== null) console.log("kitshn: the site sets its own headers with _headers.");
+  if (redirects !== null) console.log("kitshn: the site sets its own redirects with _redirects.");
+  return {
     jwt: completion,
     icon: icon ? Buffer.from(icon.bytes).toString("base64") : null,
     headers,
     redirects,
-  });
-  if (headers !== null) console.log("kitshn: the site sets its own headers with _headers.");
-  if (redirects !== null) console.log("kitshn: the site sets its own redirects with _redirects.");
-  console.log(
-    `kitshn: deployed ${Object.keys(manifest).length} files to https://${done.address} (route check: ${done.status}).`,
-  );
-  console.log(`kitshn: ${done.card}`);
+    count: Object.keys(manifest).length,
+  };
+}
+
+/**
+ * K-806: the esbuild that bundles Worker apps, pinned. Known limit: npx downloads it from npm in each deploy, so a
+ * deploy needs the npm registry and trusts that package. Revisit when that download fails a deploy, or when the
+ * kitshn release can ship esbuild itself.
+ */
+const ESBUILD = "esbuild@0.28.2";
+
+/** K-806: the Free plan limit of a Worker, gzip-compressed. */
+const WORKER_GZIP_LIMIT = 3 * 1024 * 1024;
+
+/**
+ * K-806: bundles `main` into one ES module, uploads the assets folder, and sends both with the `KITSHN_<NAME>` values
+ * of the run (K-808). kitshn makes the storage of the environment and the Worker.
+ */
+async function deployWorker(
+  server: string,
+  dir: string,
+  deployId: string,
+  app: WorkerApp,
+  env: ReadonlyMap<string, string>,
+) {
+  if (process.env["KITSHN_ARTIFACT_PATH"])
+    fail("artifact and artifact-path are for static sites; a Worker app builds with `build` (K-806).");
+  if (app.build) runBuild(dir, app.build);
+  const main = insideRepo(dir, app.main, "the entry module");
+  const work = mkdtempSync(join(tmpdir(), "kitshn-worker-"));
+  try {
+    const outfile = join(work, "worker.js");
+    const metafile = join(work, "meta.json");
+    console.log(`kitshn: bundling ${app.main} with ${ESBUILD}`);
+    execFileSync(
+      "npx",
+      [
+        "--yes",
+        ESBUILD,
+        main,
+        "--bundle",
+        "--format=esm",
+        "--platform=neutral",
+        "--conditions=workerd,worker,browser",
+        "--main-fields=module,main",
+        "--external:cloudflare:*",
+        "--external:node:*",
+        `--outfile=${outfile}`,
+        `--metafile=${metafile}`,
+        "--log-level=warning",
+      ],
+      { cwd: dir, stdio: "inherit" },
+    );
+    const module = readFileSync(outfile, "utf8");
+    const size = gzipSync(module).length;
+    if (size > WORKER_GZIP_LIMIT)
+      fail(
+        `the bundle is ${Math.round(size / 1024)} KB gzip-compressed; a Worker on the Free plan takes 3 MB.`,
+      );
+    const meta = JSON.parse(readFileSync(metafile, "utf8")) as {
+      outputs: Record<string, { exports?: ReadonlyArray<string> }>;
+    };
+    const exports = new Set(Object.values(meta.outputs).flatMap((output) => output.exports ?? []));
+    for (const [binding, name] of Object.entries(app.durableObjects ?? {}))
+      if (!exports.has(name))
+        fail(`${app.main} exports no class ${name} for the Durable Object binding ${binding}.`);
+    const storage = await call<{ created: ReadonlyArray<string> }>(server, "/deploy/storage", { deployId });
+    for (const name of storage.created) console.log(`kitshn: made the KV namespace of ${name}.`);
+    const assets = app.assets ? await uploadAssets(server, dir, deployId, app.assets.folder) : null;
+    const done = await call<{ address: string; status: number; card: string; notes: ReadonlyArray<string> }>(
+      server,
+      "/deploy/finish",
+      {
+        deployId,
+        jwt: assets?.jwt ?? null,
+        icon: assets?.icon ?? null,
+        headers: assets?.headers ?? null,
+        redirects: assets?.redirects ?? null,
+        module,
+        secrets: Object.fromEntries(env),
+      },
+    );
+    for (const note of done.notes) console.log(`kitshn: ${note}`);
+    console.log(
+      `kitshn: deployed the Worker (${Math.round(size / 1024)} KB gzip-compressed${assets ? `, ${assets.count} files` : ""}) to https://${done.address} (route check: ${done.status}).`,
+    );
+    console.log(`kitshn: ${done.card}`);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 }
 
 /** The largest source archive kitshn takes (K-812): under the 100 MB request body limit of Cloudflare. */
@@ -238,14 +346,13 @@ const MAX_ARCHIVE = 95 * 1024 * 1024;
 const INFRASTRUCTURE = new Set(["SSH_KEY", "VPS_HOST", "SSH_KNOWN_HOSTS"]);
 
 /**
- * K-808: the `KITSHN_<NAME>` secrets and variables of the run as Compose env lines `<NAME>="value"`, quoted
- * as JSON like KitSHn 1, so a line break or a `#` survives. The workflow filters them into a file in an
- * earlier step, so build commands never see secrets; a secret wins over a variable with the same name.
+ * K-808: the `KITSHN_<NAME>` secrets and variables of the run by `<NAME>`. The workflow filters them into a file in
+ * an earlier step, so build commands never see secrets; a secret wins over a variable with the same name.
  */
-function params(): string {
+function params(): Map<string, string> {
   const file = process.env["KITSHN_PARAMS_JSON"];
   delete process.env["KITSHN_PARAMS_JSON"];
-  if (!file) return "";
+  if (!file) return new Map();
   if (!existsSync(file)) fail(`the params file ${file} is missing; the workflow and the CLI do not match.`);
   const text = readFileSync(file, "utf8");
   // Gone before any build command runs, so a build cannot read the secrets.
@@ -266,8 +373,12 @@ function params(): string {
       values.set(name, value);
     }
   }
-  return [...values].map(([key, value]) => `${key}=${JSON.stringify(value)}`).join("\n");
+  return values;
 }
+
+/** K-808: Compose env lines `<NAME>="value"`, quoted as JSON like KitSHn 1, so a line break or a `#` survives. */
+const envLines = (values: ReadonlyMap<string, string>) =>
+  [...values].map(([key, value]) => `${key}=${JSON.stringify(value)}`).join("\n");
 
 async function upload(server: string, path: string, deployId: string, body: Buffer, type: string) {
   const response = await fetch(new URL(path, server), {
@@ -288,7 +399,14 @@ async function upload(server: string, path: string, deployId: string, body: Buff
  * prints its output until it ends. The checkout keeps `.git`, because builds can read it; the workflow
  * checks out without a stored token.
  */
-async function deployCompose(server: string, dir: string, deployId: string, address: string, env: string) {
+async function deployCompose(
+  server: string,
+  dir: string,
+  deployId: string,
+  address: string,
+  values: ReadonlyMap<string, string>,
+) {
+  const env = envLines(values);
   const archive = execFileSync("tar", ["-czf", "-", "--exclude=./node_modules", "-C", dir, "."], {
     maxBuffer: MAX_ARCHIVE + 1,
   });

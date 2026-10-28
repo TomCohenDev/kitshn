@@ -32,7 +32,7 @@ name: kitshn 2 deploy
 #       secrets: inherit
 #
 # A Compose app gets each KITSHN_<NAME> secret and variable as <NAME> (K-808), from the GitHub Environment
-# "prod" for pushes and "pr-<number>" for pull requests, as in KitSHn 1.
+# "prod" for pushes and "pr-<number>" for pull requests, as in KitSHn 1. A Worker app gets them as secret bindings.
 #
 # It reads kitshn.config.ts without running it, and sends it with the GitHub OIDC token (K-811).
 # KitSHn 1 apps keep calling deploy.yml in this repo.

@@ -89,6 +89,7 @@ import {
   cardsControlledBy,
   circlesOf,
   isEveryoneCircle,
+  isPreview,
   mayDeployOn,
   publishPlace,
 } from "../core/agent.ts";
@@ -143,6 +144,10 @@ import {
   DEPLOY_MS,
   SCRIPT_LIMIT,
   STATIC_WORKER,
+  classMigration,
+  parseWorkerModule,
+  parseWorkerSecrets,
+  workerMetadata,
   environmentNames,
   eventOf,
   legacyRepos,
@@ -150,7 +155,7 @@ import {
   parseConfigFile,
   parseSiteIcon,
 } from "./deploys.ts";
-import { type Recipe, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
+import { type Recipe, WorkerApp, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
 import { type Zone, removeStaleDomains, zoneFor, zoneOfAddressIn, zonesOf } from "./zones.ts";
 import {
   type LiveSite,
@@ -3213,6 +3218,10 @@ export class Kitshn extends DurableObject<Env> {
       if (gate) return gate;
       if (path === "/deploy/assets" && row.kind === "deploy")
         return await this.deployAssets(api, row, input["manifest"]);
+      if (row.app === "worker" && row.kind === "deploy") {
+        if (path === "/deploy/storage") return await this.workerStorage(api, row);
+        if (path === "/deploy/finish") return await this.finishWorker(api, row, deployer, input);
+      }
       if (path === "/deploy/finish" && row.kind === "deploy")
         return await this.finishDeploy(
           api,
@@ -3466,8 +3475,8 @@ export class Kitshn extends DurableObject<Env> {
     }
     const deployId = crypto.randomUUID();
     this.sql(
-      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file, addresses)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file, addresses, worker)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?)`,
       deployId,
       deployer.repo,
       deployer.repoId,
@@ -3481,10 +3490,11 @@ export class Kitshn extends DurableObject<Env> {
       Date.now() + DEPLOY_MS,
       // A push binds its environment to the branch (K-807); a preview records its head branch for its close.
       event.branch,
-      compose ? "compose" : "static",
+      compose ? "compose" : "worker" in recipe ? "worker" : "static",
       machineId,
       compose?.file ?? null,
       JSON.stringify(result.addresses),
+      "worker" in recipe ? JSON.stringify(recipe.worker) : null,
     );
     return Response.json({ deployId, plan: result });
   }
@@ -3512,7 +3522,7 @@ export class Kitshn extends DurableObject<Env> {
   private ensureCard(
     row: DeployRow,
     deployer: Deployer,
-    kind: "site.static" | "site.compose",
+    kind: "site.static" | "site.worker" | "site.compose",
     machine: string | null,
   ) {
     const actor: Actor = { _tag: "kitshn", reason: `deploy of ${row.repo} ${deployer.sha.slice(0, 7)}` };
@@ -3780,12 +3790,6 @@ export class Kitshn extends DurableObject<Env> {
       return Response.json({ error: redirects.error }, { status: 400 });
     const icon = parseSiteIcon(iconValue);
     if (typeof icon === "string") return Response.json({ error: icon }, { status: 400 });
-    const card = this.ensureCard(row, deployer, "site.static", null);
-    // Fail closed: the Access application of each address exists before the address does (K-817).
-    await this.syncAccessLocked(api, 20);
-    const notReady = this.accessNotReady(row);
-    if (notReady) return notReady;
-    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
     const metadata = {
       main_module: "worker.js",
       compatibility_date: "2026-10-20",
@@ -3800,15 +3804,118 @@ export class Kitshn extends DurableObject<Env> {
       },
       bindings: [{ type: "assets", name: "ASSETS" }],
     };
+    return this.publish(api, row, deployer, "site.static", icon, async () => ({
+      metadata,
+      module: STATIC_WORKER,
+    }));
+  }
+
+  /**
+   * K-806: the deploy of a Worker app. The bindings come from the recipe that the plan stored, the KV ids from the
+   * storage step, the classes and their migration from what the script has now (classMigration).
+   */
+  private async finishWorker(api: Api, row: DeployRow, deployer: Deployer, input: Record<string, unknown>) {
+    const fail = (error: string) => Response.json({ error }, { status: 400 });
+    const app = workerOf(row);
+    const module = parseWorkerModule(input["module"]);
+    if (typeof module !== "string") return fail(module.error);
+    const secrets = parseWorkerSecrets(input["secrets"]);
+    if ("error" in secrets) return fail(secrets.error);
+    const headers = parseConfigFile("_headers", input["headers"]);
+    if (typeof headers === "object" && headers !== null) return fail(headers.error);
+    const redirects = parseConfigFile("_redirects", input["redirects"]);
+    if (typeof redirects === "object" && redirects !== null) return fail(redirects.error);
+    const icon = parseSiteIcon(input["icon"]);
+    if (typeof icon === "string") return fail(icon);
+    const jwt = input["jwt"];
+    if (app.assets !== undefined && (typeof jwt !== "string" || !jwt))
+      return fail("The deploy needs the upload completion token of the assets.");
+    const kv = new Map(
+      this.sql<{ name: string; cf_id: string }>(
+        "SELECT name, cf_id FROM worker_storage WHERE card_id = ? AND kind = 'kv'",
+        row.resource_id,
+      ).map((item) => [item.name, item.cf_id]),
+    );
+    const known = this.sql<{ name: string }>(
+      "SELECT name FROM worker_storage WHERE card_id = ? AND kind = 'class'",
+      row.resource_id,
+    ).map((item) => item.name);
+    const classes = Object.values(app.durableObjects ?? {});
+    const ephemeral = isPreview(row.environment);
+    const response = await this.publish(api, row, deployer, "site.worker", icon, async (script) => {
+      // A removed app lost its script and the data of its classes, so its classes start again (K-909).
+      const migration = classMigration(classes, script ? known : null, script?.migration_tag ?? null);
+      if ("error" in migration) throw new RuleError(migration.error);
+      const metadata = workerMetadata(app, {
+        kv,
+        secrets: secrets.secrets,
+        migration: migration.migration,
+        assets:
+          app.assets === undefined
+            ? null
+            : {
+                jwt: jwt as string,
+                headers: headers as string | null,
+                redirects: redirects as string | null,
+              },
+      });
+      if ("error" in metadata) throw new RuleError(metadata.error);
+      return { metadata: metadata.metadata, module };
+    });
+    if (!response.ok) return response;
+    this.ctx.storage.transactionSync(() => {
+      this.sql("DELETE FROM worker_storage WHERE card_id = ? AND kind = 'class'", row.resource_id);
+      for (const name of classes)
+        this.sql(
+          "INSERT OR REPLACE INTO worker_storage (card_id, kind, name, cf_id) VALUES (?, 'class', ?, '')",
+          row.resource_id,
+          name,
+        );
+    });
+    const notes: Array<string> = [];
+    // K-806: only a push environment runs crons; the Free plan has 5 per account, and a preview would run them twice.
+    if (!ephemeral) {
+      await api(
+        "PUT",
+        `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${row.script}/schedules`,
+        (app.crons ?? []).map((cron) => ({ cron })),
+      );
+      if ((app.crons ?? []).length > 0) notes.push(`crons: ${(app.crons ?? []).join(", ")}`);
+    } else if ((app.crons ?? []).length > 0) notes.push("a preview runs no crons (K-806).");
+    const body = (await response.json()) as Record<string, unknown>;
+    return Response.json({ ...body, notes });
+  }
+
+  /**
+   * K-805, K-806: uploads the Worker of a deploy and publishes it at its addresses. `build` gets the script as
+   * Cloudflare lists it now (null when there is none) and gives the upload metadata and the one module.
+   */
+  private async publish(
+    api: Api,
+    row: DeployRow,
+    deployer: Deployer,
+    kind: "site.static" | "site.worker",
+    icon: { readonly bytes: Uint8Array; readonly type: string } | null | undefined,
+    build: (
+      script: { readonly id: string; readonly migration_tag?: string | null } | null,
+    ) => Promise<{ readonly metadata: Record<string, unknown>; readonly module: string }>,
+  ) {
+    const card = this.ensureCard(row, deployer, kind, null);
+    // Fail closed: the Access application of each address exists before the address does (K-817).
+    await this.syncAccessLocked(api, 20);
+    const notReady = this.accessNotReady(row);
+    if (notReady) return notReady;
+    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+    const scripts = await api<Array<{ id: string; migration_tag?: string | null }>>(
+      "GET",
+      `${account}/workers/scripts`,
+    );
+    const existing = scripts.find((item) => item.id === row.script) ?? null;
+    const isNew = existing === null;
+    const { metadata, module } = await build(existing);
     const form = new FormData();
     form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
-    form.append(
-      "worker.js",
-      new Blob([STATIC_WORKER], { type: "application/javascript+module" }),
-      "worker.js",
-    );
-    const scripts = await api<Array<{ id: string }>>("GET", `${account}/workers/scripts`);
-    const isNew = !scripts.some((item) => item.id === row.script);
+    form.append("worker.js", new Blob([module], { type: "application/javascript+module" }), "worker.js");
     // An existing site goes live with this upload, so Block must win right before it.
     const endedBeforeUpload = this.endedRefusal(row.id);
     if (endedBeforeUpload) return endedBeforeUpload;
@@ -3866,6 +3973,48 @@ export class Kitshn extends DurableObject<Env> {
     this.broadcast();
     void this.scheduleAlarm();
     return Response.json({ address: row.address, status: check?.status ?? 0, card });
+  }
+
+  /**
+   * K-806: makes the KV namespace of each binding of the recipe that this environment does not have yet. A
+   * namespace stays with the card across deploys, so its data stays too.
+   */
+  private async workerStorage(api: Api, row: DeployRow) {
+    const app = workerOf(row);
+    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+    const have = new Set(
+      this.sql<{ name: string }>(
+        "SELECT name FROM worker_storage WHERE card_id = ? AND kind = 'kv'",
+        row.resource_id,
+      ).map((item) => item.name),
+    );
+    const created: Array<string> = [];
+    for (const binding of app.kv ?? []) {
+      if (have.has(binding)) continue;
+      const title = `kitshn-${row.resource_id}-${binding}`;
+      let id: string;
+      try {
+        id = (await api<{ id: string }>("POST", `${account}/storage/kv/namespaces`, { title })).id;
+      } catch (error) {
+        // A namespace that an earlier run made before kitshn wrote its row has this title. Known limit: this reads
+        // only the first 100 namespaces of the account; revisit when the account has more.
+        const list = await api<Array<{ id: string; title: string }>>(
+          "GET",
+          `${account}/storage/kv/namespaces?per_page=100`,
+        );
+        const found = list.find((item) => item.title === title);
+        if (!found) throw error;
+        id = found.id;
+      }
+      this.sql(
+        "INSERT OR REPLACE INTO worker_storage (card_id, kind, name, cf_id) VALUES (?, 'kv', ?, ?)",
+        row.resource_id,
+        binding,
+        id,
+      );
+      created.push(binding);
+    }
+    return Response.json({ created });
   }
 
   /**
@@ -3938,8 +4087,24 @@ export class Kitshn extends DurableObject<Env> {
   /** K-904: a closed pull request removes its preview: the address, the Worker, the card and its Access app. */
   private async teardown(api: Api, row: DeployRow, deployer: Deployer) {
     await this.removeWorker(api, rowAddresses(row), row.script);
+    // K-904, K-806: a closed preview takes its KV data with it; the script delete took its Durable Objects.
+    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
+    for (const { name, cf_id } of this.sql<{ name: string; cf_id: string }>(
+      "SELECT name, cf_id FROM worker_storage WHERE card_id = ? AND kind = 'kv'",
+      row.resource_id,
+    )) {
+      await api("DELETE", `${account}/storage/kv/namespaces/${cf_id}`).catch((error: unknown) =>
+        error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error),
+      );
+      this.sql(
+        "DELETE FROM worker_storage WHERE card_id = ? AND kind = 'kv' AND name = ?",
+        row.resource_id,
+        name,
+      );
+    }
     const resource = this.state.resources.get(row.resource_id);
     this.ctx.storage.transactionSync(() => {
+      this.sql("DELETE FROM worker_storage WHERE card_id = ?", row.resource_id);
       const forgotten = this.forgetCard(row.resource_id);
       this.sql("UPDATE deploys SET state = 'done' WHERE id = ?", row.id);
       if (resource)
@@ -4754,7 +4919,7 @@ interface DeployRow extends Record<string, SqlStorageValue> {
   sha: string;
   state: string;
   expires_at: number;
-  app: "static" | "compose";
+  app: "static" | "compose" | "worker";
   machine_id: string | null;
   job_id: number | null;
   compose_file: string | null;
@@ -4762,7 +4927,18 @@ interface DeployRow extends Record<string, SqlStorageValue> {
   branch: string;
   /** K-817: every address that serves the environment, the main one first, as JSON; null on older rows. */
   addresses: string | null;
+  /** K-806: the `worker` part of the recipe as JSON, for a Worker app. */
+  worker: string | null;
 }
+
+/** K-806: the Worker part of the recipe that the plan of a Worker deploy stored. */
+function workerOf(row: DeployRow): typeof WorkerApp.Type {
+  if (row.app !== "worker" || row.worker === null)
+    throw new Error(`The deploy ${row.id} is not a Worker deploy.`);
+  return decodeWorkerApp(JSON.parse(row.worker));
+}
+
+const decodeWorkerApp = Schema.decodeUnknownSync(WorkerApp);
 
 /** K-817: the addresses of a deploy row, the main one first. */
 function rowAddresses(row: Pick<DeployRow, "address" | "addresses">): Array<string> {

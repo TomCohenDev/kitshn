@@ -6,7 +6,10 @@ import {
   parseConfigFile,
   parseManifest,
   parseSiteIcon,
+  classMigration,
+  parseWorkerSecrets,
   repoIdOf,
+  workerMetadata,
 } from "./deploys.ts";
 
 describe("deploys (K-811, K-903)", () => {
@@ -135,5 +138,70 @@ describe("site icon of a deploy (K-1113)", () => {
     expect(parseConfigFile("_redirects", "€".repeat(40_000))).toEqual({
       error: expect.stringContaining("larger"),
     });
+  });
+});
+
+describe("Worker apps (K-806)", () => {
+  it("adds a new Durable Object class with SQLite storage after the script's tag", () => {
+    // A new script, also one that a removal deleted, gets every class again.
+    expect(classMigration(["Room"], null, null)).toEqual({
+      migration: { new_tag: "kitshn-1", new_sqlite_classes: ["Room"] },
+    });
+    expect(classMigration(["Room", "Lobby"], ["Room"], "kitshn-1")).toEqual({
+      migration: { old_tag: "kitshn-1", new_tag: "kitshn-2", new_sqlite_classes: ["Lobby"] },
+    });
+    expect(classMigration(["Room"], ["Room"], "kitshn-1")).toEqual({ migration: null });
+  });
+
+  it("refuses a class that leaves the recipe, because its deletion deletes its data", () => {
+    expect(classMigration([], ["Room"], "kitshn-1")).toEqual({ error: expect.stringMatching(/Room/) });
+  });
+
+  it("sets the KV ids of the environment and passes the values of the run as secrets", () => {
+    const result = workerMetadata(
+      {
+        main: "worker.js",
+        compatibilityDate: "2026-10-01",
+        kv: ["STATS"],
+        durableObjects: { ROOMS: "Room" },
+        vars: { MODE: "live" },
+        assets: { folder: "site", runWorkerFirst: ["/api/*"] },
+      },
+      {
+        kv: new Map([["STATS", "ns-1"]]),
+        secrets: { GITHUB_TOKEN: "t" },
+        migration: null,
+        assets: { jwt: "j", headers: null, redirects: null },
+      },
+    );
+    if ("error" in result) throw new Error(result.error);
+    expect(result.metadata["bindings"]).toEqual([
+      { type: "assets", name: "ASSETS" },
+      { type: "kv_namespace", name: "STATS", namespace_id: "ns-1" },
+      { type: "durable_object_namespace", name: "ROOMS", class_name: "Room" },
+      { type: "plain_text", name: "MODE", text: "live" },
+      { type: "secret_text", name: "GITHUB_TOKEN", text: "t" },
+    ]);
+    expect(result.metadata["assets"]).toEqual({
+      jwt: "j",
+      config: { html_handling: "auto-trailing-slash", run_worker_first: ["/api/*"] },
+    });
+  });
+
+  it("refuses a secret with the name of a binding, and a KV binding without its namespace", () => {
+    const app = { main: "worker.js", compatibilityDate: "2026-10-01", kv: ["STATS"] };
+    const base = { kv: new Map([["STATS", "ns-1"]]), secrets: {}, migration: null, assets: null };
+    expect(workerMetadata(app, { ...base, secrets: { STATS: "x" } })).toEqual({
+      error: expect.stringMatching(/STATS/),
+    });
+    expect(workerMetadata(app, { ...base, kv: new Map() })).toEqual({
+      error: expect.stringMatching(/missing/),
+    });
+  });
+
+  it("takes only KITSHN_<NAME> style names and values of at most 5 KB as secrets", () => {
+    expect(parseWorkerSecrets({ GITHUB_TOKEN: "t" })).toEqual({ secrets: { GITHUB_TOKEN: "t" } });
+    expect(parseWorkerSecrets({ "bad-name": "t" })).toHaveProperty("error");
+    expect(parseWorkerSecrets({ BIG: "x".repeat(6000) })).toHaveProperty("error");
   });
 });

@@ -51,6 +51,7 @@ export type CardIcon =
 /** K-1113, K-1114, K-1115: the kinds whose card shows a stored icon. */
 const STORED_ICON_KINDS: ReadonlySet<Resource["kind"]> = new Set([
   "site.static",
+  "site.worker",
   "site.compose",
   "site.live",
   "page",

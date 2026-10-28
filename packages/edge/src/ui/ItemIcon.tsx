@@ -13,6 +13,7 @@ const OS_ICONS: Record<MachineOs, { readonly glyph: string; readonly name: strin
 /** K-524: where a stored icon comes from, for the tooltip; Compose apps and live sites read it from the app. */
 const ICON_SOURCES: Partial<Record<Resource["kind"], string>> = {
   "site.static": "its files",
+  "site.worker": "its assets folder",
   page: "the icon link of the page",
   file: "the image itself",
 };

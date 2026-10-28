@@ -1,5 +1,5 @@
 import { ICON_LIMIT, type IconType, iconType } from "kitshn/icon";
-import type { DeployEvent } from "kitshn/recipe";
+import { type DeployEvent, type WorkerApp, workerBindingNames } from "kitshn/recipe";
 
 /** K-903: kitshn refuses a new preview at this many Worker scripts in the account. */
 export const SCRIPT_LIMIT = 90;
@@ -171,3 +171,139 @@ export function parseConfigFile(
  * for a path that is not a file, and the free plan does not count asset requests.
  */
 export const STATIC_WORKER = `export default { fetch(request, env) { return env.ASSETS.fetch(request); } };\n`;
+
+/** K-806: the largest bundle that kitshn takes; the Free plan limit of 3 MB applies after gzip, which the CLI checks. */
+export const WORKER_MODULE_LIMIT = 10 * 1024 * 1024;
+
+/** K-806: the bundled Worker module that the CLI sends with `/deploy/finish`. */
+export function parseWorkerModule(value: unknown): string | { readonly error: string } {
+  if (typeof value !== "string" || value === "")
+    return { error: "The deploy needs the bundled Worker module." };
+  if (value.length > WORKER_MODULE_LIMIT)
+    return { error: `The Worker bundle is larger than ${WORKER_MODULE_LIMIT / 1024 / 1024} MB.` };
+  return value;
+}
+
+/**
+ * K-806, K-808: the `KITSHN_<NAME>` values of the run, which the Worker gets as secret bindings `<NAME>`. kitshn
+ * never stores them. Cloudflare takes at most 5 KB per secret.
+ */
+export function parseWorkerSecrets(
+  value: unknown,
+): { readonly secrets: Readonly<Record<string, string>> } | { readonly error: string } {
+  if (value === undefined || value === null) return { secrets: {} };
+  if (typeof value !== "object" || Array.isArray(value)) return { error: "The secrets must be an object." };
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 100) return { error: "A Worker takes at most 100 KITSHN_<NAME> values." };
+  const secrets: Record<string, string> = {};
+  for (const [name, text] of entries) {
+    if (!/^[A-Z0-9_]{1,64}$/.test(name)) return { error: `${name} is not a valid secret name.` };
+    if (typeof text !== "string" || new TextEncoder().encode(text).length > 5 * 1024)
+      return { error: `The value of ${name} must be text of at most 5 KB.` };
+    secrets[name] = text;
+  }
+  return { secrets };
+}
+
+/** K-806: one step of Durable Object migrations, as the Workers upload metadata takes it. */
+export interface ClassMigration {
+  readonly old_tag?: string;
+  readonly new_tag: string;
+  readonly new_sqlite_classes: ReadonlyArray<string>;
+}
+
+/**
+ * K-806: kitshn derives the Durable Object migration from the classes of the recipe, so the recipe keeps no
+ * history. A new class gets SQLite storage. A class that leaves the recipe fails the deploy, because its deletion
+ * removes its data. `known` is null for a script that does not exist (yet, or again after a removal).
+ */
+export function classMigration(
+  wanted: ReadonlyArray<string>,
+  known: ReadonlyArray<string> | null,
+  oldTag: string | null,
+): { readonly migration: ClassMigration | null } | { readonly error: string } {
+  const classes = [...new Set(wanted)].sort();
+  if (known !== null) {
+    const removed = known.filter((name) => !classes.includes(name));
+    if (removed.length > 0)
+      return {
+        error: `The recipe no longer names the Durable Object class ${removed.join(", ")}. kitshn does not delete a class, because that deletes its data; keep it, or remove the app on the map (K-806).`,
+      };
+  }
+  const added = known === null ? classes : classes.filter((name) => !known.includes(name));
+  if (added.length === 0) return { migration: null };
+  const last = known === null ? 0 : Number(/^kitshn-(\d+)$/.exec(oldTag ?? "")?.[1] ?? 0);
+  return {
+    migration: {
+      ...(known !== null && oldTag !== null ? { old_tag: oldTag } : {}),
+      new_tag: `kitshn-${last + 1}`,
+      new_sqlite_classes: added,
+    },
+  };
+}
+
+/**
+ * K-806: the upload metadata of a Worker app. kitshn sets everything that names a place: the KV namespace ids of
+ * this environment and the script itself; the recipe gives only names.
+ */
+export function workerMetadata(
+  app: WorkerApp,
+  input: {
+    readonly kv: ReadonlyMap<string, string>;
+    readonly secrets: Readonly<Record<string, string>>;
+    readonly migration: ClassMigration | null;
+    readonly assets: {
+      readonly jwt: string;
+      readonly headers: string | null;
+      readonly redirects: string | null;
+    } | null;
+  },
+): { readonly metadata: Record<string, unknown> } | { readonly error: string } {
+  const names = workerBindingNames(app);
+  const clash = Object.keys(input.secrets).find((name) => names.includes(name));
+  if (clash !== undefined)
+    return { error: `KITSHN_${clash} gives a secret with the name of a binding of the recipe: ${clash}.` };
+  if (app.assets !== undefined && input.assets === null)
+    return { error: "The recipe names an assets folder, but the deploy sent no assets." };
+  const bindings: Array<Record<string, string>> = [];
+  if (app.assets !== undefined) bindings.push({ type: "assets", name: "ASSETS" });
+  for (const name of app.kv ?? []) {
+    const id = input.kv.get(name);
+    if (id === undefined) return { error: `The KV namespace of ${name} is missing. Run the deploy again.` };
+    bindings.push({ type: "kv_namespace", name, namespace_id: id });
+  }
+  for (const [name, className] of Object.entries(app.durableObjects ?? {}))
+    bindings.push({ type: "durable_object_namespace", name, class_name: className });
+  for (const [name, text] of Object.entries(app.vars ?? {}))
+    bindings.push({ type: "plain_text", name, text });
+  for (const [name, text] of Object.entries(input.secrets))
+    bindings.push({ type: "secret_text", name, text });
+  const runWorkerFirst = app.assets?.runWorkerFirst;
+  const metadata = {
+    main_module: "worker.js",
+    compatibility_date: app.compatibilityDate,
+    compatibility_flags: [...(app.compatibilityFlags ?? [])],
+    bindings,
+    observability: { enabled: true },
+    ...(input.migration ? { migrations: input.migration } : {}),
+    ...(app.assets !== undefined && input.assets !== null
+      ? {
+          assets: {
+            jwt: input.assets.jwt,
+            config: {
+              html_handling: "auto-trailing-slash",
+              ...(runWorkerFirst === undefined
+                ? {}
+                : {
+                    run_worker_first:
+                      typeof runWorkerFirst === "boolean" ? runWorkerFirst : [...runWorkerFirst],
+                  }),
+              ...(input.assets.headers ? { _headers: input.assets.headers } : {}),
+              ...(input.assets.redirects ? { _redirects: input.assets.redirects } : {}),
+            },
+          },
+        }
+      : {}),
+  };
+  return { metadata };
+}

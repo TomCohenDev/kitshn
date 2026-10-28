@@ -5,6 +5,7 @@ import type {
   DeployEntry as PublicDeployEntry,
   Recipe as PublicRecipe,
   StaticApp as PublicStaticApp,
+  WorkerApp as PublicWorkerApp,
 } from "./index.ts";
 
 /**
@@ -50,26 +51,86 @@ export const StaticApp = Schema.Struct({
  * K-804, K-812: a Compose app. A machine with all `runsOn` labels builds and runs `file`. The app listens on
  * the socket `$KITSHN_DEFAULT_SOCKET` (K-607), as in KitSHn 1, and the tunnel sends the address there.
  */
+/** A relative path that stays inside the repo; the CLI checks it again after symlinks. */
+const RepoPath = Schema.String.check(
+  Schema.makeFilter((path) =>
+    path === "" || path.startsWith("/") || path.split("/").includes("..")
+      ? "the path must be inside the repo"
+      : undefined,
+  ),
+);
+
 export const ComposeApp = Schema.Struct({
   runsOn: Schema.optionalKey(Schema.Array(Schema.String).check(Schema.isMaxLength(10))),
   /** K-818: a path inside the repo; the daemon checks it again after symlinks. */
-  file: Schema.optionalKey(
-    Schema.String.check(
-      Schema.makeFilter((file) =>
-        file === "" || file.startsWith("/") || file.split("/").includes("..")
-          ? "file must be a path inside the repo"
-          : undefined,
+  file: Schema.optionalKey(RepoPath),
+});
+
+/** K-806: a binding or class name, a JavaScript identifier. */
+const Identifier = Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/));
+
+/** K-806: a Worker app. Each binding name is unique in the app; `ASSETS` belongs to the assets folder. */
+export const WorkerApp = Schema.Struct({
+  main: RepoPath,
+  compatibilityDate: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/)),
+  compatibilityFlags: Schema.optionalKey(
+    Schema.Array(Schema.String.check(Schema.isPattern(/^[a-z0-9_]{1,80}$/))).check(Schema.isMaxLength(20)),
+  ),
+  build: Schema.optionalKey(Schema.String),
+  assets: Schema.optionalKey(
+    Schema.Struct({
+      folder: RepoPath,
+      runWorkerFirst: Schema.optionalKey(
+        Schema.Union([
+          Schema.Boolean,
+          Schema.Array(Schema.String.check(Schema.isPattern(/^!?\/\S{0,200}$/))).check(
+            Schema.isMinLength(1),
+            Schema.isMaxLength(20),
+          ),
+        ]),
       ),
+    }),
+  ),
+  kv: Schema.optionalKey(Schema.Array(Identifier).check(Schema.isMaxLength(10))),
+  durableObjects: Schema.optionalKey(Schema.Record(Identifier, Identifier).check(Schema.isMaxProperties(10))),
+  crons: Schema.optionalKey(
+    Schema.Array(Schema.String.check(Schema.isPattern(/^\S+( \S+){4,5}$/))).check(Schema.isMaxLength(3)),
+  ),
+  vars: Schema.optionalKey(
+    Schema.Record(Identifier, Schema.String.check(Schema.isMaxLength(5000))).check(
+      Schema.isMaxProperties(50),
     ),
   ),
-});
+}).check(
+  Schema.makeFilter((app) => {
+    const names = workerBindingNames(app);
+    const twice = names.find((name, index) => names.indexOf(name) !== index);
+    return twice === undefined ? undefined : `the binding name ${twice} is used twice`;
+  }),
+);
+
+export type WorkerApp = typeof WorkerApp.Type;
+
+/** K-806: every binding name that the recipe gives the Worker, `ASSETS` for the assets folder. */
+export const workerBindingNames = (app: {
+  readonly assets?: unknown;
+  readonly kv?: ReadonlyArray<string>;
+  readonly durableObjects?: { readonly [binding: string]: string };
+  readonly vars?: { readonly [name: string]: string };
+}): Array<string> => [
+  ...(app.assets === undefined ? [] : ["ASSETS"]),
+  ...(app.kv ?? []),
+  ...Object.keys(app.durableObjects ?? {}),
+  ...Object.keys(app.vars ?? {}),
+];
 
 const deploy = Schema.Array(DeployEntry).check(Schema.isMinLength(1), Schema.isMaxLength(20));
 
-/** K-801, K-804: a recipe has exactly one kind. Worker apps follow later. */
+/** K-801, K-804: a recipe has exactly one kind. */
 export const Recipe = Schema.Union([
   Schema.Struct({ static: StaticApp, deploy }),
   Schema.Struct({ compose: ComposeApp, deploy }),
+  Schema.Struct({ worker: WorkerApp, deploy }),
 ]);
 export type Recipe = typeof Recipe.Type;
 
@@ -88,14 +149,28 @@ export type PublicTypesMatch = [
   Assert<Same<typeof DeployEntry.Type, PublicDeployEntry>>,
   Assert<Same<typeof StaticApp.Type, PublicStaticApp>>,
   Assert<Same<typeof ComposeApp.Type, PublicComposeApp>>,
+  Assert<Same<typeof WorkerApp.Type, PublicWorkerApp>>,
   Assert<Same<Keys<Recipe>, Keys<PublicRecipe>>>,
-  Assert<Same<Extract<Recipe, { static: unknown }>, Kind<PublicRecipe, "static", "compose">>>,
-  Assert<Same<Extract<Recipe, { compose: unknown }>, Kind<PublicRecipe, "compose", "static">>>,
+  Assert<Same<Extract<Recipe, { static: unknown }>, Kind<PublicRecipe, "static", "compose" | "worker">>>,
+  Assert<Same<Extract<Recipe, { compose: unknown }>, Kind<PublicRecipe, "compose", "static" | "worker">>>,
+  Assert<Same<Extract<Recipe, { worker: unknown }>, Kind<PublicRecipe, "worker", "static" | "compose">>>,
   Assert<
-    Same<Pick<Extract<PublicRecipe, { static: PublicStaticApp }>, "compose">, { readonly compose?: never }>
+    Same<
+      Pick<Extract<PublicRecipe, { static: PublicStaticApp }>, "compose" | "worker">,
+      { readonly compose?: never; readonly worker?: never }
+    >
   >,
   Assert<
-    Same<Pick<Extract<PublicRecipe, { compose: PublicComposeApp }>, "static">, { readonly static?: never }>
+    Same<
+      Pick<Extract<PublicRecipe, { compose: PublicComposeApp }>, "static" | "worker">,
+      { readonly static?: never; readonly worker?: never }
+    >
+  >,
+  Assert<
+    Same<
+      Pick<Extract<PublicRecipe, { worker: PublicWorkerApp }>, "static" | "compose">,
+      { readonly static?: never; readonly compose?: never }
+    >
   >,
 ];
 

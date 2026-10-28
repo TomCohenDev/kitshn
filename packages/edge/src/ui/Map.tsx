@@ -125,8 +125,8 @@ export const ALONE_KEY = circleAloneKey(navigator.platform);
 
 /** Preact 11 does not add a unit to numeric style values. */
 const px = (value: number) => `${value}px`;
-/** The row step of an open stack. */
-const STACK_ROW = 100;
+/** The row step of an open stack: a card with a row of stickers, such as a machine, plus a gap. */
+const STACK_ROW = 124;
 
 /** Live previews: at most this many frames, for these kinds, from this zoom on. */
 const MAX_PREVIEWS = 4;
@@ -322,8 +322,14 @@ export function MapView(props: Props) {
       }
       // A closed stack of the owner is selected whole, so its panel shows (K-521).
       const whole = stack && !props.openStacks.has(stack[0]) && stack[0].startsWith(USER_STACK);
+      // In an open stack a click picks the one card, also when the whole stack was selected (K-521).
+      const wholeOpenStack =
+        stack !== undefined &&
+        props.openStacks.has(stack[0]) &&
+        props.selection.cards.size > 1 &&
+        [...props.selection.cards].every((card) => stack[1].includes(card));
       const choose = () => {
-        if (!props.selection.cards.has(id))
+        if (!props.selection.cards.has(id) || wholeOpenStack)
           props.onSelect({ cards: whole ? new Set(ids) : new Set([id]), circle: null });
       };
       const origins = new Map<string, Point>();

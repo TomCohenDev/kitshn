@@ -675,7 +675,7 @@ export function App() {
     const result = await undoRevision(revision);
     showToast(
       result.ok
-        ? { text: [`Undid #${revision}.`, ...result.notes].join(" "), error: false, undo: null }
+        ? { text: [`Undid #${revision}.`, ...result.notes].join(" "), error: false, undo: result.revision }
         : { text: result.error, error: true, undo: null },
     );
   };
@@ -1012,7 +1012,7 @@ export function App() {
     const { moved, cards } = plan;
     selectAndFocus({ cards: new Set(), circle: id }, ".add-member input");
     showToast({
-      text: `Made a circle for ${cards} cards${moved > 0 ? `; ${plural(moved, "card")} moved to keep their circles` : ""}. Add members next.`,
+      text: `Made a circle for ${plural(cards, "card")}${moved > 0 ? `; ${plural(moved, "card")} moved to keep their circles` : ""}. Add members next.`,
       error: false,
       undo: result.revision,
     });

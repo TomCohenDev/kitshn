@@ -7,18 +7,21 @@ import { askLocal, listenLocal } from "./local.ts";
 import { peerDecision } from "./peer.ts";
 
 const own = process.getuid!();
+const platform = process.platform === "darwin" ? "darwin" : "linux";
 const path = join(mkdtempSync(join(tmpdir(), "kitshn-selftest-")), "kitshn", "kitshn.sock");
 let seen: number | null = null;
 const server = await listenLocal(path, {
-  platform: process.platform === "darwin" ? "darwin" : "linux",
+  platform,
   decide: (peer) => {
     seen = peer;
     return peerDecision(peer, own, []);
   },
   handle: (request) => Promise.resolve({ id: request.id, type: "reconnect" }),
   log: console.log,
+  access: "private",
 });
-const outcome = await askLocal(path, { id: "selftest", type: "reconnect" }, 5000).catch((error: unknown) => {
+// The client side reads the peer user id too, before it sends (K-701).
+const outcome = await askLocal(path, { id: "selftest", type: "reconnect" }, 5000, { platform, daemonUid: own }).catch((error: unknown) => {
   console.error(`kitshn self-test: ${String(error)}`);
   return null;
 });

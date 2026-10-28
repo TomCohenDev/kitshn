@@ -99,7 +99,7 @@ import {
   isEveryoneCircle,
   isPreview,
   mayDeployOn,
-  publishPlace,
+  agentUploadPlace,
 } from "../core/agent.ts";
 import { DEMO_MACHINES, DEMO_ICONS, demo } from "../core/demo.ts";
 import { type MachineOs, machineOs } from "../core/icons.ts";
@@ -112,6 +112,8 @@ import {
   fileNameError,
   newLibraryId,
   objectKey,
+  slotKey,
+  uploadKind,
 } from "../core/library.ts";
 import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
@@ -338,6 +340,8 @@ export class Kitshn extends DurableObject<Env> {
   }
   /** K-1104: live sites of the machines. */
   private liveSites = new Map<string, LiveSite>();
+  /** K-1117: the library items that an update, a restore or a delete changes now. */
+  private busyItems = new Set<string>();
   /** Address checks that failed, and when to try them again. Memory only; a restart retries at once. */
   private checkRetryAt = new Map<string, number>();
   /**
@@ -588,6 +592,13 @@ export class Kitshn extends DurableObject<Env> {
 
   private persist(changes: ReadonlyArray<Change>) {
     for (const change of changes) {
+      // K-1117: the first move or share of a card ends the tray right of the key that published it.
+      const card =
+        change._tag === "place" ? change.id : change._tag === "shareSetting" ? change.id.split("/")[0] : null;
+      if (card) this.sql("UPDATE library SET agent_tray = 0 WHERE id = ?", card);
+      if (change._tag === "stack")
+        for (const id of [...(change.before?.members ?? []), ...(change.after?.members ?? [])])
+          this.sql("UPDATE library SET agent_tray = 0 WHERE id = ?", id);
       if (change._tag === "pause") {
         this.setMeta("paused", change.after ?? "");
         continue;
@@ -657,11 +668,11 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** The rules that every write keeps (K-105, K-1504). Returns the state after the changes. */
-  private checked(changes: ReadonlyArray<Change>): State {
-    const after = applyChanges(this.state, changes);
+  private checked(changes: ReadonlyArray<Change>, base: State = this.state): State {
+    const after = applyChanges(base, changes);
     const violation = ruleViolation(after);
     if (violation) throw new RuleError(violation);
-    refuseRaiseWhilePaused(this.state, after);
+    refuseRaiseWhilePaused(base, after);
     return after;
   }
 
@@ -1581,6 +1592,9 @@ export class Kitshn extends DurableObject<Env> {
       orphanWorkers: this.orphanWorkers(),
       deployNotes: this.deployNotes(),
       icons: Object.fromEntries([...this.iconHashes].filter(([id]) => this.state.resources.has(id))),
+      previousVersions: this.sql<{ id: string }>(
+        "SELECT id FROM library WHERE previous_size IS NOT NULL",
+      ).map((row) => row.id),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
@@ -1770,6 +1784,8 @@ export class Kitshn extends DurableObject<Env> {
       return this.preview(path.slice("/api/library/".length, -"/content".length));
     if (path.startsWith("/api/library/") && request.method === "DELETE")
       return this.deleteItem(caller, path.slice("/api/library/".length));
+    if (path.startsWith("/api/library/") && path.endsWith("/previous") && request.method === "POST")
+      return this.restorePrevious(caller, path.slice("/api/library/".length, -"/previous".length), "owner");
     if (path === "/api/devices" && request.method === "POST")
       return this.addDevice(await request.json().catch(() => null));
     if (path === "/api/undo-item" && request.method === "GET") {
@@ -5137,7 +5153,9 @@ export class Kitshn extends DurableObject<Env> {
     const added = new Set(
       this.sql<{ resource_id: string }>(
         `SELECT DISTINCT deploys.resource_id FROM deploys JOIN repos ON repos.repo_id = deploys.repo_id AND deploys.kind = 'deploy'
-         WHERE repos.allowed_by_client = ?`,
+         WHERE repos.allowed_by_client = ?
+         UNION SELECT id FROM library WHERE added_by = ?`,
+        caller.visitor.clientId,
         caller.visitor.clientId,
       ).map((row) => row.resource_id),
     );
@@ -5211,20 +5229,10 @@ export class Kitshn extends DurableObject<Env> {
       }
       return move(edits);
     }
-    if (path === "/agent/publish" && request.method === "POST") {
-      const body: unknown = await request.json().catch(() => null);
-      const card = isRecord(body) && typeof body["card"] === "string" ? body["card"] : null;
-      const publish = isRecord(body) ? body["public"] : null;
-      if (card === null || typeof publish !== "boolean")
-        return Response.json({ error: 'Send {"card": <id>, "public": true | false}.' }, { status: 400 });
-      if (!managed.has(card))
-        return Response.json({ error: `This key has no control on the card "${card}".` }, { status: 403 });
-      const place = publishPlace(this.state, caller.visitor, card, publish, now, added);
-      if (typeof place === "string") return Response.json({ error: place }, { status: 409 });
-      // The card is not in Everyone, so there is nothing to take out.
-      if (place === null) return Response.json({ revision: null });
-      return move([{ _tag: "place", id: card, after: place }]);
-    }
+    // K-1116: an agent key publishes a page or a file, the same upload as a drop on the map.
+    if (path === "/agent/library" && request.method === "POST") return this.agentPublish(agent, request, now);
+    if (path.startsWith("/agent/library/") && path.endsWith("/previous") && request.method === "POST")
+      return this.restorePrevious(agent, path.slice("/agent/library/".length, -"/previous".length), "agent");
     if (path === "/agent/jobs" && request.method === "POST") {
       const body: unknown = await request.json().catch(() => null);
       const machineId =
@@ -5412,7 +5420,16 @@ export class Kitshn extends DurableObject<Env> {
    * K-1101, K-1002: puts a page or a file into R2 and its card into the tray. The metadata comes in
    * URI-encoded headers. An import names a `source`, and a second upload of the same source changes nothing.
    */
-  private async upload(caller: Caller, request: Request, kind: "page" | "file") {
+  /**
+   * K-1101, K-1116: one upload for the map and for agent keys. An agent upload (`agent`) names its title, its source
+   * key for an update by name (K-1117) and where it lands; it never reads the drop point of the headers.
+   */
+  private async upload(
+    caller: Caller,
+    request: Request,
+    kind: "page" | "file",
+    agent: AgentUpload | null = null,
+  ) {
     const header = (name: string) => {
       const value = request.headers.get(name);
       if (value === null) return null;
@@ -5434,10 +5451,14 @@ export class Kitshn extends DurableObject<Env> {
       const error = fileNameError(name);
       if (error) return refuse(error);
     }
-    const title = (kind === "page" ? name : (header("x-kitshn-title") ?? name)).slice(0, 200);
+    const title = (agent?.title ?? (kind === "page" ? name : (header("x-kitshn-title") ?? name))).slice(
+      0,
+      200,
+    );
     if (title === "") return refuse("Give the page a title in X-Kitshn-Name.");
-    const source = header("x-kitshn-source");
-    if (source) {
+    const source = agent?.source ?? header("x-kitshn-source");
+    // The agent route looks its source up itself, and a key may publish a name again after the owner deleted it.
+    if (source && !agent) {
       const [known] = this.sql<{ id: string }>(
         "SELECT id FROM library WHERE source = ? UNION ALL SELECT '' FROM library_deleted WHERE source = ?",
         source,
@@ -5460,6 +5481,8 @@ export class Kitshn extends DurableObject<Env> {
           ? { x: Math.round(x), y: Math.round(y) }
           : undefined;
     if (place === undefined) return refuse("X-Kitshn-X and X-Kitshn-Y are not a point on the map.");
+    const decided = agent ? agent.place() : place;
+    if (typeof decided === "string") return refuse(decided, 403);
     const item: LibraryItem = {
       id: newLibraryId(),
       kind,
@@ -5471,15 +5494,16 @@ export class Kitshn extends DurableObject<Env> {
       contentType:
         kind === "page" ? "text/html" : request.headers.get("content-type") || "application/octet-stream",
       createdAt,
+      slot: 0,
     };
     // K-1115: a page may hold a data: icon, and a small file may be an image; read their start beside R2.
     const [body, sniffed] =
       kind === "page" || size <= ICON_LIMIT ? request.body.tee() : ([request.body, null] as const);
     // The icon comes first, before any R2 write, so a CPU limit while it decodes leaves no object behind.
-    const head = sniffed ? await readStart(sniffed, kind === "page" ? PAGE_ICON_SCAN : ICON_LIMIT) : null;
-    const iconBytes =
-      head === null ? null : kind === "page" ? pageDataIcon(new TextDecoder().decode(head)) : head;
-    const iconKind = iconBytes !== null && iconBytes.length <= ICON_LIMIT ? iconType(iconBytes) : null;
+    const icon = headIcon(
+      kind,
+      sniffed ? await readStart(sniffed, kind === "page" ? PAGE_ICON_SCAN : ICON_LIMIT) : null,
+    );
     // The stream fails when the body is not exactly Content-Length bytes, so the limit holds.
     const { readable, writable } = new FixedLengthStream(size);
     const piped = body.pipeTo(writable);
@@ -5505,9 +5529,12 @@ export class Kitshn extends DurableObject<Env> {
     };
     const record = () =>
       this.ctx.storage.transactionSync(() => {
+        // K-1116: the state can change while R2 takes the bytes, so the spot of an agent key is decided again.
+        const spot = agent ? agent.place() : decided;
+        if (typeof spot === "string") throw new RuleError(spot);
         this.sql(
-          `INSERT INTO library (id, kind, title, file_name, thread, machine, size, content_type, created_at, source)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO library (id, kind, title, file_name, thread, machine, size, content_type, created_at, source, added_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           item.id,
           item.kind,
           item.title,
@@ -5518,12 +5545,21 @@ export class Kitshn extends DurableObject<Env> {
           item.contentType,
           item.createdAt,
           source,
+          agent?.clientId ?? null,
         );
         this.putResource(resource);
-        if (!place)
+        if (!spot) {
+          // K-1117: the key keeps a card that waits in the tray from its publish on; the first change ends that.
+          if (agent) this.sql("UPDATE library SET agent_tray = 1 WHERE id = ?", item.id);
           return this.insertRevision(caller.actor, `Added the ${kind} ${title} to the tray`, [], null);
-        // The UI asks before a drop makes a card public (K-210); an agent tool must ask the same way (K-715).
-        const changes: Array<Change> = [{ _tag: "place", id: item.id, before: null, after: place }];
+        }
+        // The UI asks before a drop makes a card public (K-210); an agent key lands only where K-1116 lets it.
+        // The pause and K-105 hold for both (K-1504).
+        const changes: Array<Change> = [{ _tag: "place", id: item.id, before: null, after: spot }];
+        this.checked(changes, {
+          ...this.state,
+          resources: new Map(this.state.resources).set(resource.id, resource),
+        });
         this.persist(changes);
         return this.insertRevision(caller.actor, `Added the ${kind} ${title} on the map`, changes, null);
       });
@@ -5533,13 +5569,216 @@ export class Kitshn extends DurableObject<Env> {
     } catch (error) {
       // No card names the object, so it goes too (K-1115).
       await bucket.delete(objectKey(item)).catch(() => undefined);
+      if (error instanceof RuleError) return refuse(error.message, 403);
       throw error;
     }
-    if (iconBytes !== null && iconKind !== null)
-      await this.setIcon(item.id, { bytes: iconBytes, type: iconKind });
+    if (icon) await this.setIcon(item.id, icon);
     this.load();
     this.broadcast();
     return Response.json({ id: item.id, address: resource.addresses[0], revision }, { status: 201 });
+  }
+
+  /**
+   * K-1116: `kitshn publish` of an agent key. A name that this key published before updates that card (K-1117);
+   * a new name is a new upload, in the tray or in one of its agent circles, and public only with "may publish".
+   */
+  private async agentPublish(agent: Caller, request: Request, now: number) {
+    const clientId = agent.visitor.clientId;
+    if (!clientId)
+      return Response.json({ error: "Only an agent key publishes here (K-1116)." }, { status: 403 });
+    const header = (key: string) => {
+      const value = request.headers.get(key);
+      try {
+        return value === null ? null : decodeURIComponent(value).trim();
+      } catch {
+        return null;
+      }
+    };
+    const name = header("x-kitshn-name") ?? "";
+    const nameError = fileNameError(name);
+    if (nameError) return Response.json({ error: nameError }, { status: 400 });
+    const source = `agent:${clientId}:${name}`;
+    const [known] = this.sql<LibraryRow>(
+      "SELECT * FROM library WHERE source = ? AND added_by = ?",
+      source,
+      clientId,
+    );
+    const circle = header("x-kitshn-circle") || null;
+    const publish = header("x-kitshn-public") === "true";
+    if (known) {
+      // K-1117: an update changes only the bytes; a move goes through `kitshn apply`, with its checks (K-718).
+      if (circle !== null || publish)
+        return Response.json(
+          {
+            error: `${known.title} exists already, and --circle and --public apply only to a first publish. Publish without them, and move the card with /agent/apply.`,
+          },
+          { status: 409 },
+        );
+      const refusal = this.agentMayChange(agent, known.id, now);
+      if (refusal) return Response.json({ error: refusal }, { status: 403 });
+      return this.updateLibrary(agent, known, request, now);
+    }
+    const kind = uploadKind(name);
+    const dot = name.lastIndexOf(".");
+    const title = header("x-kitshn-title") || (kind === "page" && dot > 0 ? name.slice(0, dot) : name);
+    const place = () => agentUploadPlace(this.state, agent.visitor, circle, publish, Date.now());
+    return this.upload(agent, request, kind, { clientId, source, title, place });
+  }
+
+  /**
+   * K-1117: a key updates or restores a page or a file that it published only while it still controls the card,
+   * as K-718 asks for a move, or while the card has waited in the tray since its publish (`agent_tray`).
+   */
+  private agentMayChange(agent: Caller, id: string, now: number): string | null {
+    const [row] = this.sql<{ added_by: string | null; agent_tray: number }>(
+      "SELECT added_by, agent_tray FROM library WHERE id = ?",
+      id,
+    );
+    if (!row || row.added_by !== agent.visitor.clientId)
+      return "This key changes only what it published (K-1117).";
+    if (row.agent_tray === 1 || cardsControlledBy(this.state, agent.visitor, now).has(id)) return null;
+    return "This key no longer controls the card, so it cannot change it (K-1117).";
+  }
+
+  /**
+   * K-1117: one update, restore or delete of an item at a time. R2 awaits let other requests in, so without this
+   * two of them could mix their slots.
+   */
+  private async exclusive(id: string, work: () => Promise<Response>): Promise<Response> {
+    if (this.busyItems.has(id))
+      return Response.json(
+        { error: "kitshn changes this item now; try again when it finishes (K-1117)." },
+        { status: 409 },
+      );
+    this.busyItems.add(id);
+    try {
+      return await work();
+    } finally {
+      this.busyItems.delete(id);
+    }
+  }
+
+  /**
+   * K-1117: new bytes for a page or a file. They go into the slot that does not serve, which held the previous
+   * version; one transaction then makes it current. A failed upload leaves the bytes that serve as they were.
+   */
+  private updateLibrary(caller: Caller, row: LibraryRow, request: Request, now: number) {
+    return this.exclusive(row.id, async () => {
+      const refuse = (error: string, status = 400) => Response.json({ error }, { status });
+      const bucket = this.env.BUCKET;
+      if (!bucket) return refuse("R2 is off for this kitshn. Run the bootstrap again after R2 is on.", 503);
+      const size = Number(request.headers.get("content-length"));
+      if (!request.body || !Number.isInteger(size) || size <= 0)
+        return refuse("Send the bytes with a Content-Length.", 411);
+      if (size > MAX_UPLOAD_BYTES) return refuse("A page or a file is at most 100 MB (K-1101).", 413);
+      const item = libraryItem(row);
+      const contentType =
+        item.kind === "page"
+          ? "text/html"
+          : request.headers.get("content-type") || "application/octet-stream";
+      const [body, sniffed] =
+        item.kind === "page" || size <= ICON_LIMIT ? request.body.tee() : ([request.body, null] as const);
+      const icon = headIcon(
+        item.kind,
+        sniffed ? await readStart(sniffed, item.kind === "page" ? PAGE_ICON_SCAN : ICON_LIMIT) : null,
+      );
+      const next = item.slot === 0 ? 1 : 0;
+      const { readable, writable } = new FixedLengthStream(size);
+      const piped = body.pipeTo(writable);
+      try {
+        await bucket.put(slotKey(item, next), readable, { httpMetadata: { contentType } });
+        await piped;
+      } catch (error) {
+        await piped.catch(() => undefined);
+        return refuse(`The upload did not reach R2, so ${item.title} keeps its bytes: ${String(error)}`, 502);
+      }
+      const flip = (): number =>
+        this.ctx.storage.transactionSync(() => {
+          // The owner can move the card while R2 takes the bytes, so the key's control counts at the flip.
+          const refusal = this.agentMayChange(caller, row.id, now);
+          if (refusal) throw new RuleError(refusal);
+          this.sql(
+            `UPDATE library SET current_slot = ?, size = ?, content_type = ?, previous_size = ?, previous_type = ?
+             WHERE id = ?`,
+            next,
+            size,
+            contentType,
+            row.size,
+            row.content_type,
+            row.id,
+          );
+          return this.insertRevision(
+            caller.actor,
+            `Updated the ${item.kind} ${item.title}; kitshn keeps the previous version (K-1117)`,
+            [],
+            null,
+          );
+        });
+      let revision: number;
+      try {
+        revision = flip();
+      } catch (error) {
+        // The other slot holds the refused bytes now, not the previous version, so that version is gone.
+        this.sql("UPDATE library SET previous_size = NULL, previous_type = NULL WHERE id = ?", row.id);
+        await bucket.delete(slotKey(item, next)).catch(() => undefined);
+        this.broadcast();
+        if (error instanceof RuleError) return refuse(error.message, 403);
+        throw error;
+      }
+      await this.setIcon(row.id, icon);
+      this.load();
+      this.broadcast();
+      const address = this.state.resources.get(row.id)?.addresses[0] ?? null;
+      return Response.json({ id: row.id, address, revision, updated: true });
+    });
+  }
+
+  /**
+   * K-1117: makes the previous version of a page or a file current, so a second restore swaps them back. It only
+   * switches the slot; R2 copies nothing. The owner restores any item; an agent key what K-1117 lets it change.
+   */
+  private restorePrevious(caller: Caller, id: string, by: "owner" | "agent") {
+    return this.exclusive(id, async () => {
+      const refusal = by === "agent" ? this.agentMayChange(caller, id, Date.now()) : null;
+      if (refusal) return Response.json({ error: refusal }, { status: 403 });
+      const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", id);
+      if (!row) return Response.json({ error: `The library has no item ${id}.` }, { status: 404 });
+      if (row.previous_size === null || row.previous_type === null)
+        return Response.json({ error: `${row.title} has no previous version.` }, { status: 409 });
+      const item = libraryItem(row);
+      const previous = item.slot === 0 ? 1 : 0;
+      const revision = this.ctx.storage.transactionSync(() => {
+        this.sql(
+          `UPDATE library SET current_slot = ?, size = ?, content_type = ?, previous_size = ?, previous_type = ?
+           WHERE id = ?`,
+          previous,
+          row.previous_size,
+          row.previous_type,
+          row.size,
+          row.content_type,
+          id,
+        );
+        // K-1117: a change by the owner ends the tray right of the key that published the item.
+        if (by === "owner") this.sql("UPDATE library SET agent_tray = 0 WHERE id = ?", id);
+        return this.insertRevision(
+          caller.actor,
+          `Restored the previous version of the ${item.kind} ${item.title} (K-1117)`,
+          [],
+          null,
+        );
+      });
+      const small = item.kind === "page" || (row.previous_size ?? 0) <= ICON_LIMIT;
+      const start =
+        small && this.env.BUCKET
+          ? await this.env.BUCKET.get(slotKey(item, previous), {
+              range: { offset: 0, length: item.kind === "page" ? PAGE_ICON_SCAN : ICON_LIMIT },
+            })
+          : null;
+      await this.setIcon(id, start ? headIcon(item.kind, new Uint8Array(await start.arrayBuffer())) : null);
+      this.load();
+      this.broadcast();
+      return Response.json({ id, revision });
+    });
   }
 
   /**
@@ -5561,12 +5800,16 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-1006: removes the bytes from R2 first, then the card and the index row. */
-  private async deleteItem(caller: Caller, id: string) {
+  private deleteItem(caller: Caller, id: string) {
+    return this.exclusive(id, () => this.deleteItemNow(caller, id));
+  }
+
+  private async deleteItemNow(caller: Caller, id: string) {
     const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", id);
     if (!row) return Response.json({ error: `The library has no item ${id}.` }, { status: 404 });
     const item = libraryItem(row);
     if (!this.env.BUCKET) return Response.json({ error: "R2 is off for this kitshn." }, { status: 503 });
-    await this.env.BUCKET.delete(objectKey(item));
+    await this.env.BUCKET.delete([slotKey(item, 0), slotKey(item, 1)]);
     this.ctx.storage.transactionSync(() => {
       this.sql(
         "INSERT OR IGNORE INTO library_deleted (source) SELECT source FROM library WHERE id = ? AND source IS NOT NULL",
@@ -5967,6 +6210,13 @@ interface LibraryRow extends Record<string, SqlStorageValue> {
   size: number;
   content_type: string;
   created_at: number;
+  /** K-1116: the client id of the agent key that published it, or null. */
+  added_by: string | null;
+  /** K-1117: the R2 slot that serves (`slotKey`). */
+  current_slot: number;
+  /** K-1117: the size and the type of the one previous version, or null. */
+  previous_size: number | null;
+  previous_type: string | null;
 }
 
 const libraryItem = (row: LibraryRow): LibraryItem => ({
@@ -5979,6 +6229,7 @@ const libraryItem = (row: LibraryRow): LibraryItem => ({
   size: row.size,
   contentType: row.content_type,
   createdAt: row.created_at,
+  slot: row.current_slot === 1 ? 1 : 0,
 });
 
 /** The R2 key of a file of a Compose deploy (K-812). */
@@ -6015,6 +6266,22 @@ async function iconHash(bytes: Uint8Array) {
 
 /** K-1115: how much of a page kitshn reads for a data: icon; a 100 KB icon is about 137 KB as base64. */
 const PAGE_ICON_SCAN = 256 * 1024;
+
+/** K-1115: the icon of a page (a `data:` link) or of a small image file, from the start of its bytes. */
+function headIcon(kind: "page" | "file", head: Uint8Array | null) {
+  const bytes = head === null ? null : kind === "page" ? pageDataIcon(new TextDecoder().decode(head)) : head;
+  const type = bytes !== null && bytes.length <= ICON_LIMIT ? iconType(bytes) : null;
+  return bytes !== null && type !== null ? { bytes, type } : null;
+}
+
+/** K-1116: what the agent route decides for an upload before `upload` writes anything. */
+interface AgentUpload {
+  readonly clientId: string;
+  readonly source: string;
+  readonly title: string;
+  /** The spot of K-1116 against the current state; `upload` asks before and again after the R2 write. */
+  readonly place: () => Point | null | string;
+}
 
 /** The first `limit` bytes of a stream, or all of a shorter one; it stops reading after that. */
 async function readStart(stream: ReadableStream<Uint8Array>, limit: number): Promise<Uint8Array | null> {

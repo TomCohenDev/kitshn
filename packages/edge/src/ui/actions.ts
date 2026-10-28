@@ -73,6 +73,8 @@ export interface ActionContext {
   readonly undoCheck: UndoCheck | null;
   /** The cards selected on the map now, for actions on all of them (K-529). */
   readonly selected: ReadonlySet<string>;
+  /** K-1117: the pages and files that have a previous version. */
+  readonly previousVersions: ReadonlySet<string>;
 }
 
 export interface ActionHandlers {
@@ -91,6 +93,8 @@ export interface ActionHandlers {
   readonly removeApp: (resource: Resource) => void;
   /** K-821: opens the rollback of one card, or of the run that made its current deploy. */
   readonly rollback: (resource: Resource, mode: "card" | "run") => void;
+  /** K-1117: swaps a page or a file with its previous version. */
+  readonly restorePrevious: (resource: Resource) => void;
   readonly runJob: (view: MachineView, command: Command) => void;
   readonly removeMachine: (view: MachineView) => void;
   readonly editCircle: (circleId: string) => void;
@@ -597,6 +601,17 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
                 },
               ]
             : []),
+        ]
+      : [],
+    // K-1117: an update keeps one previous version; restoring it twice gets the newer one back.
+    ctx.previousVersions.has(resource.id)
+      ? [
+          {
+            id: "restore-previous",
+            label: "Restore previous version",
+            tip: `Put the previous version of ${resource.name} back. The current one becomes the previous version, so a second restore swaps them back.`,
+            run: () => h.restorePrevious(resource),
+          },
         ]
       : [],
     undoItemAction(ctx, h, { kind: "card", id: resource.id }),

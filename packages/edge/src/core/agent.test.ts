@@ -7,10 +7,10 @@ import {
   agentHomeCircle,
   agentMayRunOn,
   agentRefusal,
+  agentUploadPlace,
   cardsControlledBy,
   isAgentKey,
   mayDeployOn,
-  publishPlace,
 } from "./agent.ts";
 import { type Edit, applyChanges, resolveEdits } from "./changes.ts";
 import {
@@ -230,6 +230,10 @@ function withRights(circleId: string, rights: Partial<Record<AgentRight, true>>)
   return { ...base, circles: new Map(base.circles).set(circleId, { ...circle, members }) };
 }
 
+/** The spot in the overlap of the agent circle and Everyone, where a public move through `/agent/apply` goes. */
+const overlapSpot = (state: State) =>
+  placeInside(state, state.circles.get("agents")!, new Set(["agents", "everyone"])) as Point;
+
 describe("agent keys that add and publish apps (K-718, K-819)", () => {
   it("has no right by default, and only an agent circle gives one", () => {
     expect(agentHas(start(), as("agent-1"), "addsApps", 0)).toBe(false);
@@ -240,8 +244,7 @@ describe("agent keys that add and publish apps (K-718, K-819)", () => {
   });
   it("publishes a card that it added into the overlap of its agent circle and Everyone, and keeps managing it", () => {
     const state = overlapping({ publishes: true });
-    const place = publishPlace(state, as("agent-1"), "site", true, 0, ADDED);
-    if (typeof place === "string" || place === null) throw new Error(String(place));
+    const place = overlapSpot(state);
     const after = moved(state, place);
     expect(
       circlesHolding(after, "site")
@@ -253,14 +256,7 @@ describe("agent keys that add and publish apps (K-718, K-819)", () => {
     expect(cardsControlledBy(after, as("agent-1"), 0).has("site")).toBe(true);
   });
   it("refuses a publish without the right, of a card that it did not add, or of a live site", () => {
-    const place = publishPlace(
-      overlapping({ publishes: true }),
-      as("agent-1"),
-      "site",
-      true,
-      0,
-      ADDED,
-    ) as Point;
+    const place = overlapSpot(overlapping({ publishes: true }));
     const into = (state: State, added: ReadonlySet<string>) => {
       const changes = resolveEdits(state, [{ _tag: "place", id: "site", after: place }]);
       return agentRefusal(state, applyChanges(state, changes), as("agent-1"), changes, 0, added);
@@ -275,7 +271,6 @@ describe("agent keys that add and publish apps (K-718, K-819)", () => {
   });
   it("refuses a publish that leaves every agent circle, and names the missing overlap", () => {
     const apart = withRights("agents", { publishes: true });
-    expect(publishPlace(apart, as("agent-1"), "site", true, 0, ADDED)).toMatch(/overlaps Everyone/);
     expect(check(apart, [{ _tag: "place", id: "site", after: { x: 760, y: 0 } }])).toMatch(
       /overlaps Everyone/,
     );
@@ -284,34 +279,47 @@ describe("agent keys that add and publish apps (K-718, K-819)", () => {
     ).toMatch(/overlap of an agent circle/);
   });
   it("takes a published card back into the agent circle alone, also without the right", () => {
-    const published = overlapping({ publishes: true });
-    const place = publishPlace(published, as("agent-1"), "site", true, 0, ADDED) as Point;
+    const place = overlapSpot(overlapping({ publishes: true }));
     const after = moved(overlapping({}), place);
-    const back = publishPlace(after, as("agent-1"), "site", false, 0, ADDED);
-    if (typeof back === "string" || back === null) throw new Error(String(back));
+    const back = placeInside(after, place, new Set(["agents"])) as Point;
     expect(circlesHolding(moved(after, back), "site").map((circle) => circle.id)).toEqual(["agents"]);
     expect(check(after, [{ _tag: "place", id: "site", after: back }])).toBeNull();
   });
-  it("names why it does not publish: no right, a card that it did not add, a live site", () => {
-    const state = overlapping({ publishes: true });
-    expect(publishPlace(overlapping({}), as("agent-1"), "site", true, 0, ADDED)).toMatch(/may not publish/);
-    expect(publishPlace(state, as("agent-1"), "site", true, 0, new Set())).toMatch(/repos that it allowed/);
-    const live = { ...state.resources.get("site")!, kind: "site.live" as const };
-    const withLive = { ...state, resources: new Map(state.resources).set("site", live) };
-    expect(publishPlace(withLive, as("agent-1"), "site", true, 0, ADDED)).toMatch(/never a live site/);
+  it("places an upload in the tray, in one of its agent circles, or with the right in the overlap with Everyone (K-1116)", () => {
+    const plain = overlapping({});
+    expect(agentUploadPlace(plain, as("agent-1"), null, false, 0)).toBeNull();
+    const inAgents = agentUploadPlace(plain, as("agent-1"), "agents", false, 0) as Point;
+    expect(circlesHolding(moved(plain, inAgents), "site").map((circle) => circle.id)).toEqual(["agents"]);
+    // By name too, and never a circle that is not an agent circle of the key with control.
+    expect(agentUploadPlace(plain, as("agent-1"), "watch", false, 0)).toMatch(/not an agent circle/);
+    expect(agentUploadPlace(plain, as("agent-1"), "everyone", false, 0)).toMatch(/not an agent circle/);
+    expect(agentUploadPlace(plain, as("stranger"), null, true, 0)).toMatch(/no agent circle/);
+    expect(agentUploadPlace(plain, as("agent-1"), null, true, 0)).toMatch(/may not publish/);
+    const right = overlapping({ publishes: true });
+    const open = agentUploadPlace(right, as("agent-1"), null, true, 0) as Point;
+    expect(
+      circlesHolding(moved(right, open), "site")
+        .map((circle) => circle.id)
+        .sort(),
+    ).toEqual(["agents", "everyone"]);
+    expect(agentUploadPlace(withRights("agents", { publishes: true }), as("agent-1"), null, true, 0)).toMatch(
+      /overlaps Everyone/,
+    );
   });
-  it("takes a card out of Everyone only, and does nothing for a card outside Everyone", () => {
-    expect(publishPlace(overlapping({}), as("agent-1"), "site", false, 0, ADDED)).toBeNull();
+  it("lets a page or a file that the key published become public, as an app of a repo that it allowed", () => {
+    const state = overlapping({ publishes: true });
+    const page = { ...state.resources.get("site")!, kind: "page" as const };
+    const withPage = { ...state, resources: new Map(state.resources).set("site", page) };
+    expect(check(withPage, [{ _tag: "place", id: "site", after: overlapSpot(withPage) }])).toBeNull();
+  });
+  it("takes a card out of Everyone through apply and keeps its other agent circles", () => {
     // Agents and staging both overlap Everyone; the card sits in all three and keeps its two agent circles.
     const base = overlapping({ publishes: true });
     const staging = { ...base.circles.get("staging")!, x: 760, y: 360 };
     const state = { ...base, circles: new Map(base.circles).set("staging", staging) };
     const published = moved(state, { x: 760, y: 230 });
-    const inAll = circlesHolding(published, "site")
-      .map((circle) => circle.id)
-      .sort();
-    expect(inAll).toEqual(["agents", "everyone", "staging"]);
-    const back = publishPlace(published, as("agent-1"), "site", false, 0, ADDED) as Point;
+    const back = placeInside(published, { x: 760, y: 230 }, new Set(["agents", "staging"])) as Point;
+    expect(check(published, [{ _tag: "place", id: "site", after: back }])).toBeNull();
     expect(
       circlesHolding(moved(published, back), "site")
         .map((circle) => circle.id)
@@ -320,7 +328,7 @@ describe("agent keys that add and publish apps (K-718, K-819)", () => {
   });
   it("treats a repurposed Everyone circle as any other circle", () => {
     const state = overlapping({ publishes: true });
-    const place = publishPlace(state, as("agent-1"), "site", true, 0, ADDED) as Point;
+    const place = overlapSpot(state);
     const everyone = state.circles.get("everyone")!;
     const members = [...everyone.members, { _tag: "email", email: "her@example.com" } as const];
     const repurposed = {
@@ -372,8 +380,6 @@ function overlapping(rights: Partial<Record<AgentRight, true>>): State {
     places: new Map(state.places).set("site", { x: 760, y: 500 }),
   };
 }
-
-const ADDED: ReadonlySet<string> = new Set(["site"]);
 
 const moved = (state: State, place: Point): State => ({
   ...state,

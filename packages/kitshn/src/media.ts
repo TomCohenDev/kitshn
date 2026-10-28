@@ -1,4 +1,4 @@
-/** The content type of a file by its extension, for deploys (K-805) and the preview arrow (K-520). */
+/** The content type of a file by its extension, for deploys (K-805), `kitshn publish` (K-1116) and the preview arrow (K-520). */
 const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",

@@ -115,6 +115,7 @@ function context(version = "0123456789ab"): ActionContext {
     version,
     undoCheck: null,
     selected: new Set(),
+    previousVersions: new Set(),
   };
 }
 
@@ -364,6 +365,18 @@ describe("Stack these (K-521)", () => {
     const { handlers } = recorder();
     const ctx = { ...context(), selected: new Set(["a", "b"]) };
     expect(ids(actionsFor(ctx, handlers, { _tag: "card", id: "a" }))).not.toContain("stack-these");
+  });
+});
+
+describe("Restore previous version (K-1117)", () => {
+  it("is offered only for a page or a file that has a previous version, and runs restorePrevious", () => {
+    const { handlers, calls } = recorder();
+    expect(ids(actionsFor(context(), handlers, { _tag: "card", id: "notes" }))).not.toContain(
+      "restore-previous",
+    );
+    const ctx = { ...context(), previousVersions: new Set(["notes"]) };
+    run(find(actionsFor(ctx, handlers, { _tag: "card", id: "notes" }), "restore-previous"));
+    expect(calls[0]).toMatchObject(["restorePrevious", { id: "notes" }]);
   });
 });
 

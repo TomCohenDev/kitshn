@@ -876,7 +876,6 @@ export class Kitshn extends DurableObject<Env> {
   private snapshot(me: Actor, repos: ReadonlyArray<RepoView> = this.repoViews()): Snapshot {
     const desired = this.desired(Date.now());
     const loginError = this.meta("login_error");
-    const historyWarning = this.meta("history_warning");
     return {
       circles: [...this.state.circles.values()],
       resources: [...this.state.resources.values()],
@@ -888,10 +887,10 @@ export class Kitshn extends DurableObject<Env> {
       accessWarnings: [
         ...this.accessWarnings,
         ...(loginError ? [loginError] : []),
-        ...(historyWarning ? [historyWarning] : []),
         ...loginWarnings(desired, this.access),
       ],
       signOutWarning: signOutWarning(this.signOutLeft()),
+      historyWarning: this.meta("history_warning"),
       paused: this.state.paused,
       repos,
       deployedCards: this.deployedCards(),
@@ -2759,7 +2758,7 @@ export class Kitshn extends DurableObject<Env> {
     if (tries === null) return false;
     if (tries >= LEVEL_SUMMARY_TRIES) {
       console.error(`K-1508: the History rewording ended ${tries} times without a result; it stops.`);
-      this.setMeta("history_warning", "History: the rewording of old entries did not finish; they keep their old wording (K-1508).");
+      this.setMeta("history_warning", "History: old entries kept old wording; the rewording did not finish (K-1508).");
       this.setMeta("level_summaries", "done");
       return true;
     }
@@ -2772,7 +2771,7 @@ export class Kitshn extends DurableObject<Env> {
       this.ctx.storage.transactionSync(() => {
         for (const { id, summary } of updates) this.sql("UPDATE revisions SET summary = ? WHERE id = ?", summary, id);
         if (failed > 0)
-          this.setMeta("history_warning", `History: ${failed} old entries keep their old wording (K-1508).`);
+          this.setMeta("history_warning", `History: ${failed} entries kept old wording (K-1508)`);
         this.setMeta("level_summaries", "done");
       });
       const shown = errors.slice(0, 3).map((error) => `#${error.id}: ${error.message}`);
@@ -2787,7 +2786,7 @@ export class Kitshn extends DurableObject<Env> {
       return summaries.size > 0 || failed > 0;
     } catch (error) {
       console.error(`K-1508: the History rewording failed: ${String(error)}`);
-      this.setMeta("history_warning", "History: the rewording of old entries failed; they keep their old wording (K-1508).");
+      this.setMeta("history_warning", "History: old entries kept old wording; the rewording failed (K-1508).");
       this.setMeta("level_summaries", "done");
       return true;
     }

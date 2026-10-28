@@ -43,6 +43,8 @@ export interface Snapshot {
   readonly accessWarnings: ReadonlyArray<string>;
   /** K-110: sessions that the last sign-out everywhere did not end, with "Retry sign-out"; null when all ended. */
   readonly signOutWarning: string | null;
+  /** K-1508: old History entries that the one-time rewording could not reword, until the next daily run. */
+  readonly historyWarning: string | null;
   readonly paused: PauseMode | null;
   /** K-819: the repos that deployed or wait to deploy, newest first. */
   readonly repos: ReadonlyArray<RepoView>;

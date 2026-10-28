@@ -1023,6 +1023,7 @@ export function App() {
               onPause={(pause) => (pause ? setPausing(true) : startResume())}
               onSignOut={(retry) => void signOut(retry)}
               signOutWarning={store.snapshot.signOutWarning}
+              historyWarning={store.snapshot.historyWarning}
               signingOut={signingOut}
             />
           )}
@@ -1398,6 +1399,7 @@ function Panel(props: {
   onPause: (pause: boolean) => void;
   onSignOut: (retry: boolean) => void;
   signOutWarning: string | null;
+  historyWarning: string | null;
   signingOut: boolean;
   accessTeam: string;
   onSelectCard: (id: string) => void;
@@ -1547,6 +1549,11 @@ function Panel(props: {
               ) : null}
             </ul>
           </>
+        ) : null}
+        {props.historyWarning ? (
+          <p data-tip="Old History entries that name a new level of a share as a new share, because kitshn could not rebuild them from their changes. Access is not affected. This note goes after the next daily run.">
+            {props.historyWarning}
+          </p>
         ) : null}
         <div class="label" data-tip="Safety: stop everything at once, or end every session.">
           Safety

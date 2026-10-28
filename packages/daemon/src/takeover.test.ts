@@ -71,7 +71,7 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
       return Promise.resolve().then(() => answers(program));
     };
     await daemonUser("kitshn", fake);
-    const volumes = await preflight(plan, user, fake);
+    const { volumes } = await preflight(plan, user, fake);
     const steps = takeoverSteps(plan, user, volumes);
     const all = steps.flatMap((step): Array<Step> => [step, ...(step.undo ?? [])]);
     const programs = [...recorded, ...all.flatMap((step) => [step.run, ...(step.pipeTo ? [step.pipeTo] : [])])];
@@ -98,15 +98,24 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
     expect(readFileSync(new URL("./takeover.ts", import.meta.url), "utf8")).not.toContain('from "node:fs"');
   });
 
-  it("refuses data with a device node, FIFO or socket before anything stops", async () => {
-    const answers = (program: Program) => {
+  it("refuses a device node or a FIFO before anything stops, and leaves sockets out by name", async () => {
+    const answers = (found: string, sockets: string) => (program: Program) => {
       const text = program.join(" ");
       if (text.includes("volume ls")) return "";
       if (text.startsWith("du")) return "100\t/x\n";
-      if (text.startsWith("find")) return `${plan.oldData}/run/app.sock\n`;
+      if (text.startsWith("find") && text.includes("-type s")) return sockets;
+      if (text.startsWith("find")) return found;
+      if (text.includes(" df ")) return "Mounted on Avail\n/ 1000000\n/ 1000000\n";
       return "";
     };
-    await expect(preflight(plan, user, (program) => Promise.resolve(answers(program)))).rejects.toThrow("app.sock");
+    const capture = (found: string, sockets: string) => (program: Program) => Promise.resolve(answers(found, sockets)(program));
+    await expect(preflight(plan, user, capture(`${plan.oldData}/fifo\n`, ""))).rejects.toThrow("Remove or move it");
+    const checked = await preflight(plan, user, capture("", `${plan.oldData}/run/app.sock\n`));
+    expect(checked.skipped).toEqual([`${plan.oldData}/run/app.sock`]);
+    // A linked data folder is scanned through the link, as tar -C copies it.
+    const programs: Array<Program> = [];
+    await preflight(plan, user, (program) => (programs.push(program), capture("", "")(program)));
+    for (const find of programs.filter((program) => program[0] === "find")) expect(find[1]).toBe("-H");
   });
 
   it("gives no program of the takeover a terminal", async () => {

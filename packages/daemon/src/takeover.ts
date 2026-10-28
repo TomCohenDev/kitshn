@@ -313,12 +313,18 @@ const bytesOf = (text: string) => {
   return value;
 };
 
+/** K-1404: what the checks found: the volumes of the KitSHn 1 project, and the sockets that the copy leaves out. */
+export interface Preflight {
+  readonly volumes: Array<string>;
+  readonly skipped: Array<string>;
+}
+
 /**
- * K-1404: the checks before anything stops. It returns the volumes of the KitSHn 1 project, or fails when a target
- * volume exists already or a disk lacks room. Root reads only system Docker and its own folders; the folders of the
- * user are measured by the user.
+ * K-1404: the checks before anything stops. It fails when a target volume exists already, a disk lacks room, or the
+ * data holds a device node or a FIFO. Root reads only system Docker and its own folders; the folders of the user are
+ * measured by the user.
  */
-export async function preflight(plan: RootTakeover, user: DaemonUser, run: Capture): Promise<Array<string>> {
+export async function preflight(plan: RootTakeover, user: DaemonUser, run: Capture): Promise<Preflight> {
   const { system, asUser, rootless } = programs(user);
   const volumes = (await run([...system, "volume", "ls", "-q", "--filter", `label=com.docker.compose.project=${plan.oldProject}`]))
     .split("\n")
@@ -329,17 +335,26 @@ export async function preflight(plan: RootTakeover, user: DaemonUser, run: Captu
     if (exists) throw new Error(`the volume ${target} exists already in rootless Docker; remove it or check it first.`);
   }
   // The apparent size, so a sparse file counts in full: busybox tar in the helper cannot write sparse files.
-  const dataNeed = bytesOf(await run(["du", "--apparent-size", "-sb", "--", plan.oldData]));
+  // -D and -H: a linked data folder counts and is scanned as `tar -C` copies it, through the link.
+  const dataNeed = bytesOf(await run(["du", "-D", "--apparent-size", "-sb", "--", plan.oldData]));
   const mounts = await Promise.all(
     volumes.map(async (volume) => (await run([...system, "volume", "inspect", "-f", "{{.Mountpoint}}", volume])).trim()),
   );
   const volumeNeed = mounts.length === 0 ? 0 : bytesOf(await run(["du", "--apparent-size", "-sbc", "--", ...mounts]));
-  // busybox tar in a user namespace drops device nodes, FIFOs and sockets with a warning and exits 0, so the copy would
-  // lose them in silence. kitshn refuses such data before anything stops.
+  // tar in a user namespace drops device nodes and FIFOs with a warning and exits 0, so the copy would lose them in
+  // silence; kitshn refuses such data before anything stops. A socket holds no data and a running app makes it again,
+  // so the copy leaves sockets out and the command names them.
   const special = (
-    await run(["find", plan.oldData, ...mounts, "(", "-type", "b", "-o", "-type", "c", "-o", "-type", "p", "-o", "-type", "s", ")", "-print", "-quit"])
+    await run(["find", "-H", plan.oldData, ...mounts, "(", "-type", "b", "-o", "-type", "c", "-o", "-type", "p", ")", "-print", "-quit"])
   ).trim();
-  if (special) throw new Error(`the data holds a device node, FIFO or socket that the copy would drop: ${special}`);
+  if (special)
+    throw new Error(
+      `the data holds a device node or a FIFO, which the copy would drop: ${special}. Remove or move it, then run this command again.`,
+    );
+  const skipped = (await run(["find", "-H", plan.oldData, ...mounts, "-type", "s", "-print"]))
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
   await run(asUser("mkdir", "-p", "--", plan.appDir));
   const dockerRoot = (await run(rootless("info", "--format", "{{.DockerRootDir}}"))).trim();
   // One line for each folder: its mount point and its free bytes, so two folders on one disk add up.
@@ -360,14 +375,15 @@ export async function preflight(plan: RootTakeover, user: DaemonUser, run: Captu
     if (!Number.isFinite(left) || bytes * 1.1 > left)
       throw new Error(`the copy needs ${bytes} bytes on ${disk}, which has ${left} bytes free.`);
   }
-  return volumes;
+  return { volumes, skipped };
 }
 
 export async function rootTakeover(plan: RootTakeover, user: DaemonUser): Promise<void> {
-  const volumes = await preflight(plan, user, capture);
-  // Printed before anything stops, so it is on the screen even after a hard kill.
+  const { volumes, skipped } = await preflight(plan, user, capture);
   // Every line that root prints goes through printable(): paths and output can hold text of the user.
   const say = (text: string) => console.log(printable(text));
+  for (const path of skipped) say(`kitshn: skipped: ${path}`);
+  // Printed before anything stops, so it is on the screen even after a hard kill.
   say(`kitshn: if KitSHn 1 stays down after this command, start it with:\n  ${startCommand(plan.oldProject)}`);
   const children = new Set<ChildProcess>();
   let abort: (reason: Error) => void = () => undefined;

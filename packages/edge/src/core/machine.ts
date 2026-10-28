@@ -279,7 +279,7 @@ export async function openJoin(code: string, box: { iv: string; sealed: string }
   return JSON.parse(new TextDecoder().decode(plain)) as JoinSecrets;
 }
 
-/** A join code: 20 random characters from an alphabet without look-alikes, about 100 bits. */
+/** A join code: 20 random characters from an alphabet without look-alikes, about 99 bits. */
 export function newJoinCode(): string {
   const alphabet = "23456789abcdefghjkmnpqrstuvwxyz";
   const random = crypto.getRandomValues(new Uint8Array(20));

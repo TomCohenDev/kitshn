@@ -153,6 +153,12 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
      address TEXT NOT NULL, circle TEXT, public INTEGER NOT NULL DEFAULT 0, agent_tray INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
      UNIQUE (client_id, folder))`,
   ],
+  // 24: old site addresses (K-817, K-1124). Each one sends its visitors on to the main address of its card through the
+  // kitshn-redirects Worker; the rowid orders them, and a card keeps its 5 newest (K-1122).
+  // `attached` is 1 while the custom domain is on the redirect Worker, so its Access application stays until it goes.
+  [
+    "CREATE TABLE old_addresses (address TEXT PRIMARY KEY, card_id TEXT NOT NULL, attached INTEGER NOT NULL DEFAULT 0)",
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

@@ -41,7 +41,8 @@ function raw(path: string, text: string, answers: number): Promise<Array<unknown
     const socket = createConnection(path, () => socket.write(text));
     socket.on("data", (chunk) => {
       buffer += chunk.toString();
-      const lines = buffer.split("\n").filter(Boolean);
+      // Only newline-terminated lines count; a chunk can end inside an answer.
+      const lines = buffer.split("\n").slice(0, -1);
       if (lines.length < answers) return;
       socket.end();
       resolve(lines.map((value) => JSON.parse(value) as unknown));

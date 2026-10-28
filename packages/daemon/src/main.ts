@@ -1223,6 +1223,8 @@ async function checkSites() {
 async function runCommand() {
   const config = readConfig();
   log(`kitshn ${VERSION} starts as machine ${config.machineId}`);
+  // Before the socket opens, so `status` answers from the first request.
+  joined = config;
   // First, so a second daemon stops before it touches the tunnel or the connection of the running one.
   const own = process.getuid!();
   const local = await listenLocal(paths.socket, {

@@ -1241,7 +1241,8 @@ async function sendIcons(ws: WebSocket, reports: ReadonlyArray<LiveSiteReport>) 
     for (const report of reports) {
       const known = memory.get(report.name);
       if (!due.has(report.name)) {
-        if (known && known.up !== report.up) memory.set(report.name, { ...known, up: report.up });
+        // Only "down" is recorded here: a site that came back stays marked until its delayed read is due.
+        if (known?.up && !report.up) memory.set(report.name, { ...known, up: false });
         continue;
       }
       const icon = await targetIcon(report.target);

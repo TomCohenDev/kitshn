@@ -58,17 +58,19 @@ it("stores the icon that a daemon reads from its own site, at most one change an
     );
 
   const site = { name: "demo", target: "http://localhost:5173", dev: true, up: true };
-  await send("m1", { type: "sites", sites: [site] });
+  const fresh = { ...site, name: "fresh", target: "http://localhost:5174" };
+  await send("m1", { type: "sites", sites: [site, fresh] });
   await send("m1", { type: "icon", site: "demo", icon: base64(png(1)) });
   const [first] = await stored();
   expect(first?.id).toBe(liveSiteId("m1", "demo"));
 
-  // Another machine cannot set the icon of a site that it does not report.
-  await send("m2", { type: "icon", site: "demo", icon: base64(png(2)) });
+  // Another machine cannot set the icon of a site that it does not report; "fresh" has no icon yet, so no
+  // hourly limit hides this.
+  await send("m2", { type: "icon", site: "fresh", icon: base64(png(2)) });
   // A second change within the hour waits; the daemon sends it again later.
   await send("m1", { type: "icon", site: "demo", icon: base64(png(3)) });
   await send("m1", { type: "icon", site: "demo", icon: null });
-  // Not an image: refused.
-  await send("m1", { type: "icon", site: "demo", icon: btoa("<html></html>") });
+  // Not an image: refused, also for a site without an icon.
+  await send("m1", { type: "icon", site: "fresh", icon: btoa("<html></html>") });
   expect(await stored()).toEqual([first]);
 });

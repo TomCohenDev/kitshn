@@ -1,5 +1,6 @@
 // K-524, K-1114: the card icon of a Compose app or a live site, read from the app itself through its own target.
 import { type SiteIcon, pickSiteIcon } from "kitshn/icon";
+import { isSocketFile } from "./sites.ts";
 
 /** Enough for the entry page and the manifest; the picker refuses an icon over its own limit (K-1113). */
 const READ_LIMIT = 256 * 1024;
@@ -18,6 +19,7 @@ const AGAIN_MS = 60_000;
  */
 export async function readTarget(target: string, path: string): Promise<Uint8Array | null> {
   const unix = target.startsWith("unix:") ? target.slice("unix:".length) : null;
+  if (unix !== null && !isSocketFile(unix)) return null;
   const url = `${unix === null ? target : "http://localhost"}${encodeURI(path)}`;
   const response = await fetch(url, {
     redirect: "manual",
@@ -56,7 +58,7 @@ export async function targetIcon(target: string): Promise<SiteIcon | null> {
 /** What the daemon remembers of one site during one connection. */
 export interface IconMemory {
   readonly readAt: number;
-  /** Whether the site was up at the last site check, so a site that comes up is read again. */
+  /** False after the site went down, until the next read, so a site that comes up is read again. */
   readonly up: boolean;
   /** The hash that the daemon last sent, and when; null hash means "no icon". */
   readonly sent: { readonly hash: string | null; readonly at: number } | null;

@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, symlinkSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,8 +7,8 @@ import { ICON_SITES_PER_PASS, type IconMemory, iconToSend, iconsDue, readTarget,
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1]);
 
-/** An app on a Unix socket that answers each path from `files`; `/moved` redirects. */
-async function app(files: Record<string, Uint8Array | string>) {
+/** An app on a Unix socket, or on a localhost port, that answers each path from `files`; `/moved` redirects. */
+async function app(files: Record<string, Uint8Array | string>, on: "socket" | "port" = "socket") {
   const path = join(mkdtempSync(join(tmpdir(), "kitshn-icons-")), "app.sock");
   const server = createServer((request, response) => {
     if (request.url === "/moved") {
@@ -19,8 +19,10 @@ async function app(files: Record<string, Uint8Array | string>) {
     if (body === undefined) response.writeHead(404).end();
     else response.end(body);
   });
-  await new Promise<void>((done) => server.listen(path, done));
-  return { target: `unix:${path}`, [Symbol.asyncDispose]: () => new Promise<void>((done) => server.close(() => done())) };
+  if (on === "socket") await new Promise<void>((done) => server.listen(path, done));
+  else await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const target = on === "socket" ? `unix:${path}` : `http://localhost:${(server.address() as { port: number }).port}`;
+  return { target, [Symbol.asyncDispose]: () => new Promise<void>((done) => server.close(() => done())) };
 }
 
 describe("app icons (K-1114)", () => {
@@ -30,10 +32,22 @@ describe("app icons (K-1114)", () => {
   });
 
   it("follows no redirect and refuses a body over the limit", async () => {
-    await using site = await app({ "/": '<link rel="icon" href="/moved">', "/big": "x".repeat(300 * 1024) });
+    // On a port, with a redirect target that exists, so a read that follows redirects would find an icon.
+    await using site = await app(
+      { "/": '<link rel="icon" href="/moved">', "/logo.png": PNG, "/big": "x".repeat(300 * 1024) },
+      "port",
+    );
     expect(await readTarget(site.target, "/moved")).toBeNull();
     expect(await readTarget(site.target, "/big")).toBeNull();
     expect(await targetIcon(site.target)).toBeNull();
+  });
+
+  it("reads only a socket file, not a link to one", async () => {
+    await using site = await app({ "/": "<html></html>", "/favicon.ico": PNG });
+    const link = join(mkdtempSync(join(tmpdir(), "kitshn-icons-")), "link.sock");
+    symlinkSync(site.target.slice("unix:".length), link);
+    expect(await readTarget(site.target, "/favicon.ico")).not.toBeNull();
+    expect(await readTarget(`unix:${link}`, "/favicon.ico")).toBeNull();
   });
 
   it("reads up sites that are new, an hour old or just came up, a few per pass", () => {

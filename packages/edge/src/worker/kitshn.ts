@@ -2567,7 +2567,11 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("DELETE FROM join_codes WHERE expires_at < ?", now);
       this.sql("DELETE FROM rekey_codes WHERE expires_at < ?", now);
       // K-1113: a removed card keeps its icon until this run, so a quick Undo keeps it; a deploy sends it again.
-      this.sql("DELETE FROM icons WHERE id NOT IN (SELECT id FROM resources)");
+      for (const { id } of this.sql<{ id: string }>("DELETE FROM icons WHERE id NOT IN (SELECT id FROM resources) RETURNING id")) {
+        // The same id can get a card again (K-1114), so memory forgets the icon too.
+        this.iconHashes.delete(id);
+        this.iconChangedAt.delete(id);
+      }
       this.sql(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('daily_at', ?)",
         String(nextUtcMidnight(now)),

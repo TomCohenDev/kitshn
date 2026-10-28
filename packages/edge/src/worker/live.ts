@@ -235,3 +235,39 @@ export function dnsRecordRefusal(
     return `${address} still has the DNS record of another kitshn card; it goes when that card lets go of ${address}. Deploy again then.`;
   return `${address} already has a DNS record.`;
 }
+
+/** K-817, K-901: a Compose deploy that is planned, running or done, with the addresses that it serves. */
+export interface ComposeRun {
+  readonly card: string;
+  readonly addresses: ReadonlyArray<string>;
+  readonly machineId: string | null;
+  readonly expiresAt: number;
+}
+
+/**
+ * K-1104, K-817, K-901: the proxied CNAME that each address should have, to the tunnel of its machine. A Compose
+ * deploy gets its records at plan time, before its build, so no lookup during the build caches another answer, such
+ * as an old wildcard. Its tunnel has no ingress for the address until the site is live and its Access application
+ * exists (K-410), so the record exposes nothing. A done deploy keeps the record until it expires, by when the live
+ * site of its card holds it; a failed, cut-off or expired deploy gives it up unless the site went live.
+ */
+export function wantedRecords(
+  runs: ReadonlyArray<ComposeRun>,
+  sites: ReadonlyArray<Pick<LiveSite, "id" | "machineId" | "address">>,
+  tunnelOf: (machineId: string) => string | undefined,
+  now: number,
+): Map<string, { content: string; cardId: string }> {
+  const wanted = new Map<string, { content: string; cardId: string }>();
+  for (const run of runs) {
+    const tunnel = run.machineId === null ? undefined : tunnelOf(run.machineId);
+    if (tunnel === undefined || run.expiresAt <= now) continue;
+    for (const address of run.addresses)
+      wanted.set(address, { content: `${tunnel}.cfargotunnel.com`, cardId: run.card });
+  }
+  for (const site of sites) {
+    const tunnel = tunnelOf(site.machineId);
+    if (tunnel !== undefined)
+      wanted.set(site.address, { content: `${tunnel}.cfargotunnel.com`, cardId: site.id });
+  }
+  return wanted;
+}

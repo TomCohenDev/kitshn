@@ -976,9 +976,9 @@ export class Kitshn extends DurableObject<Env> {
       this.sql(
         `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state,
            expires_at, branch, app, machine_id, job_id, compose_file, addresses, worker, app_key, reason, version_id,
-           run_id, run_attempt, images, needs, origin)
+           run_id, run_attempt, images, needs, origin, workflow)
          SELECT ?, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, ?, ?, branch, app,
-           machine_id, ?, compose_file, addresses, worker, app_key, ?, version_id, NULL, NULL, images, needs, ?
+           machine_id, ?, compose_file, addresses, worker, app_key, ?, version_id, NULL, NULL, images, needs, ?, workflow
          FROM deploys WHERE id = ?`,
         id,
         state,
@@ -1499,7 +1499,11 @@ export class Kitshn extends DurableObject<Env> {
       return `${back} and starts its last good build on ${machine.name}.`;
     }
     try {
-      const repo = await this.dispatchBuild(done?.repo_id ?? "", plan.branch);
+      const repo = await this.dispatchBuild(
+        done?.repo_id ?? "",
+        plan.branch,
+        done?.workflow ?? AGENT_WORKFLOW,
+      );
       return `${back}; kitshn started a build of ${repo} from ${plan.branch}.`;
     } catch (error) {
       return `${back}, but the build did not start: ${error instanceof Error ? error.message : String(error)}`;
@@ -3578,6 +3582,7 @@ export class Kitshn extends DurableObject<Env> {
         repoId: deployer.repoId,
         name: deployer.repo,
         branch: deployer.eventName === "push" ? deployer.branch : null,
+        workflow: deployer.workflow,
       },
       Date.now(),
       gate !== undefined && this.keyRemoved(gate),
@@ -3591,13 +3596,15 @@ export class Kitshn extends DurableObject<Env> {
     if (record) {
       this.ctx.storage.transactionSync(() => {
         this.sql(
-          `INSERT OR REPLACE INTO repos (repo_id, name, state, first_seen, branch, allowed_by_client, allowed_by_name)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT OR REPLACE INTO repos (repo_id, name, state, first_seen, branch, workflow, allowed_by_client,
+             allowed_by_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           record.repoId,
           record.name,
           record.state,
           record.firstSeen,
           record.branch,
+          record.workflow,
           record.allowedBy?.clientId ?? null,
           record.allowedBy?.name ?? null,
         );
@@ -3722,7 +3729,7 @@ export class Kitshn extends DurableObject<Env> {
         );
       if (state === "blocked")
         this.sql(
-          "UPDATE repos SET state = 'blocked', branch = NULL, allowed_by_client = NULL, allowed_by_name = NULL WHERE repo_id = ?",
+          "UPDATE repos SET state = 'blocked', branch = NULL, workflow = NULL, allowed_by_client = NULL, allowed_by_name = NULL WHERE repo_id = ?",
           repoId,
         );
       this.insertRevision(
@@ -3753,7 +3760,7 @@ export class Kitshn extends DurableObject<Env> {
     );
     if (!claimed) return Response.json({ repoId, state });
     this.broadcast();
-    const started = await this.agentBuild(caller, repoId, branch);
+    const started = await this.agentBuild(caller, repoId, branch, row.workflow ?? AGENT_WORKFLOW);
     if (started.ok) return Response.json({ repoId, state, dispatched: branch });
     // A failed start gives the branch back, unless the owner blocked or forgot the repo meanwhile.
     this.sql(
@@ -4206,8 +4213,8 @@ export class Kitshn extends DurableObject<Env> {
     }
     const deployId = crypto.randomUUID();
     this.sql(
-      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file, addresses, worker, app_key, run_id, run_attempt, needs)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file, addresses, worker, app_key, run_id, run_attempt, needs, workflow)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       deployId,
       deployer.repo,
       deployer.repoId,
@@ -4230,6 +4237,7 @@ export class Kitshn extends DurableObject<Env> {
       deployer.runId,
       deployer.runAttempt,
       JSON.stringify(recipe.needs?.apps ?? []),
+      deployer.workflow,
     );
     return Response.json({ deployId, plan: result });
   }
@@ -5239,7 +5247,8 @@ export class Kitshn extends DurableObject<Env> {
       const repoId = row?.repo_id ?? null;
       const refusal = this.repoRefusal(repoId);
       if (refusal !== null || repoId === null) return Response.json({ error: refusal }, { status: 403 });
-      if (plan.kind === "build") return this.agentBuild(agent, repoId, plan.branch);
+      if (plan.kind === "build")
+        return this.agentBuild(agent, repoId, plan.branch, row?.workflow ?? AGENT_WORKFLOW);
       if (!machine) return Response.json({ error: "The machine of this app is gone." }, { status: 409 });
       return this.agentRedeploy(agent, machine.id, plan.command);
     }
@@ -5286,12 +5295,12 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-718, K-812, K-819: a new build runs the kitshn workflow of the repo with this id on one branch. */
-  private async agentBuild(caller: Caller, repoId: string, branch: string) {
+  private async agentBuild(caller: Caller, repoId: string, branch: string, workflow = AGENT_WORKFLOW) {
     if (!this.env.GITHUB_APP_ID || !this.env.GITHUB_APP_KEY)
       return Response.json({ error: NO_GITHUB_APP }, { status: 503 });
     let repo: string;
     try {
-      repo = await this.dispatchBuild(repoId, branch);
+      repo = await this.dispatchBuild(repoId, branch, workflow);
     } catch (error) {
       return Response.json(
         { error: error instanceof Error ? error.message : String(error) },
@@ -5303,15 +5312,15 @@ export class Kitshn extends DurableObject<Env> {
     );
     this.load();
     this.broadcast();
-    return Response.json({ dispatched: { repo, branch, workflow: AGENT_WORKFLOW } });
+    return Response.json({ dispatched: { repo, branch, workflow } });
   }
 
   /** K-718, K-908, K-909: runs the kitshn workflow of a repo on one branch. Returns the repo's current name. */
-  private async dispatchBuild(repoId: string, branch: string) {
+  private async dispatchBuild(repoId: string, branch: string, workflow = AGENT_WORKFLOW) {
     const appId = this.env.GITHUB_APP_ID;
     const key = this.env.GITHUB_APP_KEY;
     if (!appId || !key) throw new Error(NO_GITHUB_APP);
-    const repo = await dispatchDeploy({ id: appId, key }, repoId, branch, AGENT_WORKFLOW);
+    const repo = await dispatchDeploy({ id: appId, key }, repoId, branch, workflow);
     this.sql("UPDATE repos SET name = ?, gone_at = NULL WHERE repo_id = ?", repo, repoId);
     return repo;
   }
@@ -5758,6 +5767,8 @@ interface RepoRow extends Record<string, SqlStorageValue> {
   state: RepoState;
   first_seen: number;
   branch: string | null;
+  /** K-1121: the workflow file of the run that waits on `branch`. */
+  workflow: string | null;
   allowed_by_client: string | null;
   allowed_by_name: string | null;
   /** K-819: when kitshn last got an answer from GitHub about this repo id. */
@@ -5772,6 +5783,7 @@ const repoGateOf = (row: RepoRow): RepoGate => ({
   state: row.state,
   firstSeen: row.first_seen,
   branch: row.branch,
+  workflow: row.workflow,
   allowedBy:
     row.allowed_by_client === null
       ? null
@@ -5815,6 +5827,8 @@ interface DeployRow extends Record<string, SqlStorageValue> {
   needs: string | null;
   /** K-821: the deploy whose build this rollback row repeats; null on a row that a workflow run made. */
   origin: string | null;
+  /** K-1121: the workflow file of the run that made the deploy; null starts `kitshn.yml`. */
+  workflow: string | null;
 }
 
 /** K-821: one finished deploy of a card in the rollback list; `why` says why a rollback cannot go there. */

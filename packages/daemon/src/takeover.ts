@@ -78,7 +78,8 @@ export function programs(user: DaemonUser) {
   // A new session without a controlling terminal, so no program of the user can type into root's terminal
   // (TIOCSTI); the user's Docker CLI hooks stay off.
   const asUser = (...command: [string, ...Array<string>]): Program => [
-    "setsid", "--wait", "runuser", "-u", user.name, "--",
+    // Absolute paths: the PATH of root can lack /usr/sbin, for example in a remote shell.
+    "/usr/bin/setsid", "--wait", "/usr/sbin/runuser", "-u", user.name, "--",
     "env", "-i", `HOME=${user.home}`, "PATH=/usr/local/bin:/usr/bin:/bin", `XDG_RUNTIME_DIR=/run/user/${user.uid}`,
     "DOCKER_CLI_HOOKS=0",
     ...command,
@@ -333,6 +334,12 @@ export async function preflight(plan: RootTakeover, user: DaemonUser, run: Captu
     volumes.map(async (volume) => (await run([...system, "volume", "inspect", "-f", "{{.Mountpoint}}", volume])).trim()),
   );
   const volumeNeed = mounts.length === 0 ? 0 : bytesOf(await run(["du", "--apparent-size", "-sbc", "--", ...mounts]));
+  // busybox tar in a user namespace drops device nodes, FIFOs and sockets with a warning and exits 0, so the copy would
+  // lose them in silence. kitshn refuses such data before anything stops.
+  const special = (
+    await run(["find", plan.oldData, ...mounts, "(", "-type", "b", "-o", "-type", "c", "-o", "-type", "p", "-o", "-type", "s", ")", "-print", "-quit"])
+  ).trim();
+  if (special) throw new Error(`the data holds a device node, FIFO or socket that the copy would drop: ${special}`);
   await run(asUser("mkdir", "-p", "--", plan.appDir));
   const dockerRoot = (await run(rootless("info", "--format", "{{.DockerRootDir}}"))).trim();
   // One line for each folder: its mount point and its free bytes, so two folders on one disk add up.

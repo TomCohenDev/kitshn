@@ -77,7 +77,7 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
     const programs = [...recorded, ...all.flatMap((step) => [step.run, ...(step.pipeTo ? [step.pipeTo] : [])])];
     expect(programs.some((program) => program[0] === "du")).toBe(true);
     for (const program of programs) {
-      const asUser = program[0] === "setsid" && program[2] === "runuser" && program[4] === "kitshn";
+      const asUser = program[0] === "/usr/bin/setsid" && program[2] === "/usr/sbin/runuser" && program[4] === "kitshn";
       if (asUser) {
         // A new session without a terminal, a clean environment, and no Docker CLI hooks of the user.
         expect(program[1]).toBe("--wait");
@@ -90,12 +90,23 @@ describe("KitSHn 1 takeover by root (K-1404)", () => {
       // Root reads /persistent and system Docker volumes, looks up the user, and talks to system Docker.
       const reads = program[0] === "tar" && program.includes("-cf") && program[2] === plan.oldData;
       const system = program[0] === "docker" && program[2] === "unix:///var/run/docker.sock";
-      const sizes = program[0] === "du";
+      const sizes = program[0] === "du" || program[0] === "find";
       const lookup = program[0] === "getent";
       expect(reads || system || sizes || lookup, program.join(" ")).toBe(true);
     }
     // The code of the takeover has no file system calls of its own.
     expect(readFileSync(new URL("./takeover.ts", import.meta.url), "utf8")).not.toContain('from "node:fs"');
+  });
+
+  it("refuses data with a device node, FIFO or socket before anything stops", async () => {
+    const answers = (program: Program) => {
+      const text = program.join(" ");
+      if (text.includes("volume ls")) return "";
+      if (text.startsWith("du")) return "100\t/x\n";
+      if (text.startsWith("find")) return `${plan.oldData}/run/app.sock\n`;
+      return "";
+    };
+    await expect(preflight(plan, user, (program) => Promise.resolve(answers(program)))).rejects.toThrow("app.sock");
   });
 
   it("gives no program of the takeover a terminal", async () => {

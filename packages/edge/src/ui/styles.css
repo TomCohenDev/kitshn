@@ -898,46 +898,217 @@ select:focus-visible {
   padding-top: 6px;
 }
 
-/* A switch; the one round control of tick3d. */
+/* Standard components of the neo-brutalism skill: tooltip, checkbox, radio, switch, menu, overlay panel. */
+.tooltip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  max-width: 18rem;
+  padding: 4px 8px;
+  z-index: 50;
+  pointer-events: none;
+  font: 600 0.8rem/1.35 var(--sans);
+  color: var(--ink);
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 3px 3px 0 0 var(--shadow-ink);
+}
+
+.check,
+.radio {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  flex: none;
+  width: 1.15em;
+  height: 1.15em;
+  cursor: pointer;
+  display: inline-grid;
+  place-content: center;
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
+  transition:
+    transform 80ms,
+    box-shadow 80ms;
+}
+.check {
+  border-radius: 4px;
+}
+.radio {
+  border-radius: 50%;
+}
+.check::after {
+  content: "";
+  width: 0.6em;
+  height: 0.32em;
+  opacity: 0;
+  border: solid var(--select-fg);
+  border-width: 0 0 3px 3px;
+  transform: rotate(-45deg) translate(1px, -1px);
+}
+.radio::after {
+  content: "";
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 50%;
+  background: var(--select-fg);
+  opacity: 0;
+}
+.check:checked,
+.radio:checked {
+  background: var(--select);
+}
+.check:checked::after,
+.radio:checked::after {
+  opacity: 1;
+}
+.check:active,
+.radio:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+.check:disabled,
+.radio:disabled,
+.switch:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .switch {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  flex: none;
+  position: relative;
+  cursor: pointer;
+  width: 2.4em;
+  height: 1.35em;
+  border-radius: 999px;
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
+  transition:
+    background 120ms,
+    transform 80ms,
+    box-shadow 80ms;
+}
+.switch::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 0.95em;
+  height: 0.95em;
+  border-radius: 50%;
+  background: var(--ink);
+  transform: translateY(-50%);
+  transition: left 120ms;
+}
+.switch:checked {
+  background: var(--select);
+}
+.switch:checked::before {
+  left: calc(100% - 0.95em - 2px);
+  background: var(--select-fg);
+}
+.switch:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+
+.choice {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 0;
-  font: inherit;
+  gap: 0.5em;
+  min-height: 1.75rem;
+  cursor: pointer;
   font-weight: 700;
+}
+.choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.menu {
+  position: fixed;
+  left: 0;
+  top: 0;
+  min-width: 12rem;
+  padding: 4px;
+  display: grid;
+  gap: 2px;
+  z-index: 40;
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 3px 3px 0 0 var(--shadow-ink);
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
   color: var(--ink);
   background: none;
   border: 0;
-  cursor: pointer;
+  border-radius: 4px;
 }
-.switch .knob {
-  position: relative;
-  width: 2.4rem;
-  height: 1.3rem;
-  background: var(--raised);
-  border: var(--bw) solid var(--border);
-  border-radius: 999px;
-  box-shadow: 2px 2px 0 0 var(--shadow-ink);
-  transition: background 120ms;
+.menu-item:is(:hover, :focus-visible, [data-highlighted]) {
+  background: var(--select);
+  color: var(--select-fg);
+  outline: none;
 }
-.switch .knob::after {
-  content: "";
+.menu-item:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.menu-item[data-danger] {
+  color: var(--error-fg);
+}
+.menu-sep {
+  height: var(--bw);
+  margin: 2px 4px;
+  background: var(--border);
+}
+.menu-key {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.75em;
+  color: var(--muted);
+}
+
+/* An overlay panel floats over the map instead of a fixed side bar. */
+.overlay-panel {
   position: absolute;
-  top: 1px;
-  left: 1px;
-  width: calc(1.3rem - 6px);
-  height: calc(1.3rem - 6px);
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  width: min(26rem, calc(100% - 24px));
+  overflow: auto;
+  padding: 12px;
+  z-index: 30;
   background: var(--surface);
   border: var(--bw) solid var(--border);
-  border-radius: 50%;
-  transition: transform 120ms;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
 }
-.switch[aria-checked="true"] .knob {
-  background: var(--green);
+.overlay-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
 }
-.switch[aria-checked="true"] .knob::after {
-  transform: translateX(1.1rem);
+.overlay-head h2 {
+  flex: 1;
+  font-size: 1.15rem;
+  overflow-wrap: anywhere;
 }
 
 /* Circle editor */

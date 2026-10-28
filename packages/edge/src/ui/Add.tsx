@@ -1,7 +1,7 @@
 import { useState } from "preact/hooks";
 import type { MachineView } from "../core/protocol.ts";
 import { RESERVED_SITE_NAMES } from "../core/library.ts";
-import { Toggle } from "./Circle.tsx";
+import { Radio, Switch } from "./controls.tsx";
 import { callApi } from "./store.ts";
 
 const isName = (name: string) =>
@@ -55,7 +55,12 @@ function Snippet(props: { file: string; text: string }) {
     <div>
       <div class="row">
         <code>{props.file}</code>
-        <button type="button" class="btn" onClick={() => void navigator.clipboard.writeText(props.text)}>
+        <button
+          type="button"
+          class="btn"
+          data-tip={`Copy ${props.file} to the clipboard.`}
+          onClick={() => void navigator.clipboard.writeText(props.text)}
+        >
           Copy
         </button>
       </div>
@@ -111,10 +116,20 @@ export function AddSite(props: {
       <div class="dialog" role="dialog" aria-label="Add a site">
         <h2>Add a site</h2>
         <div class="seg">
-          <button type="button" aria-pressed={kind === "live"} onClick={() => setKind("live")}>
+          <button
+            type="button"
+            aria-pressed={kind === "live"}
+            data-tip="Live: a local server of a machine, through its tunnel, while the machine is on."
+            onClick={() => setKind("live")}
+          >
             Live, from a machine
           </button>
-          <button type="button" aria-pressed={kind === "static"} onClick={() => setKind("static")}>
+          <button
+            type="button"
+            aria-pressed={kind === "static"}
+            data-tip="Static: GitHub Actions builds the repo and kitshn serves the files."
+            onClick={() => setKind("static")}
+          >
             Static, from a repo
           </button>
         </div>
@@ -133,22 +148,26 @@ export function AddSite(props: {
               {online.length === 0 ? (
                 <span class="help">No machine is online. Start a daemon first.</span>
               ) : (
-                <select
-                  value={machineId}
-                  onChange={(event) => setPicked((event.target as HTMLSelectElement).value)}
-                >
+                <div class="choices" role="radiogroup" aria-label="Machine">
                   {online.map((view) => (
-                    <option key={view.machine.id} value={view.machine.id}>
-                      {view.machine.name}
-                    </option>
+                    <Radio
+                      key={view.machine.id}
+                      name="site-machine"
+                      checked={view.machine.id === machineId}
+                      label={view.machine.name}
+                      tip={`Share a server of ${view.machine.name}.`}
+                      onSelect={() => setPicked(view.machine.id)}
+                    />
                   ))}
-                </select>
+                </div>
               )}
             </div>
             <div class="field-row">
               <span class="label">Server</span>
               <input
                 value={target}
+                aria-label="Server"
+                data-tip="The port or the Unix socket of the local server on the machine."
                 placeholder="5173 or /run/app.sock"
                 onInput={(event) => setTarget((event.target as HTMLInputElement).value)}
               />
@@ -158,6 +177,8 @@ export function AddSite(props: {
               <div>
                 <input
                   value={name}
+                  aria-label="Name"
+                  data-tip="The name of the site: 1 to 40 lowercase letters, digits and dashes. It is the first part of the address."
                   placeholder="my-app"
                   onInput={(event) => setName((event.target as HTMLInputElement).value.toLowerCase())}
                 />
@@ -167,9 +188,16 @@ export function AddSite(props: {
               </div>
             </div>
             <div class="field-row">
-              <span class="label">Dev</span>
+              <span class="label" data-tip="Dev: whether the server is a dev server such as Vite.">
+                Dev
+              </span>
               <div>
-                <Toggle checked={dev} label="A dev server" onChange={setDev} />
+                <Switch
+                  checked={dev}
+                  label="A dev server"
+                  tip="A dev server: kitshn sends Host: localhost, because Vite and similar servers refuse other hosts."
+                  onChange={setDev}
+                />
                 <p class="help">
                   Vite and similar servers refuse other hosts, so kitshn sends <code>Host: localhost</code>.
                 </p>
@@ -177,10 +205,14 @@ export function AddSite(props: {
             </div>
             {error ? <p class="error">{error}</p> : null}
             <div class="row">
-              <button class="btn primary" disabled={busy || online.length === 0}>
+              <button
+                class="btn primary"
+                disabled={busy || online.length === 0}
+                data-tip="Send the machine a job that shares the server. The card then waits in the tray, private."
+              >
                 Share it
               </button>
-              <button type="button" class="btn" onClick={props.onClose}>
+              <button type="button" class="btn" data-tip="Close this dialog; nothing changes." onClick={props.onClose}>
                 Cancel
               </button>
             </div>
@@ -194,7 +226,7 @@ export function AddSite(props: {
             <Snippet file="kitshn.config.ts" text={RECIPE} />
             <Snippet file=".github/workflows/kitshn.yml" text={workflow(location.origin)} />
             <div class="row">
-              <button type="button" class="btn" onClick={props.onClose}>
+              <button type="button" class="btn" data-tip="Close this dialog." onClick={props.onClose}>
                 Done
               </button>
             </div>

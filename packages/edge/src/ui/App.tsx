@@ -18,7 +18,6 @@ import {
   type State,
   type PauseMode,
   type Point,
-  CIRCLE_ALONE_KEY,
   circlesHolding,
   insideCircle,
   isPublicCircle,
@@ -30,15 +29,25 @@ import { MAX_UPLOAD_BYTES } from "../core/library.ts";
 import { placeInside } from "../core/place.ts";
 import type { JobView, MachineView, RepoView, RevisionView } from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
-import { CircleEditor, type DeviceSecret, EndsPicker, LevelOverride, SecretDialog } from "./Circle.tsx";
+import {
+  CircleEditor,
+  type DeviceSecret,
+  EndsPicker,
+  LEVEL_TIPS,
+  LevelOverride,
+  MEMBER_HELP,
+  SecretDialog,
+} from "./Circle.tsx";
+import { TooltipLayer } from "./controls.tsx";
 import { AddSite } from "./Add.tsx";
 import { PauseDialog, PausedBanner } from "./Pause.tsx";
 import { RepoList, setRepoState } from "./Repos.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView } from "./Machines.tsx";
-import { MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
+import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
 import { overlay } from "./held.ts";
 import {
+  type Connection,
   applyEdits,
   callApi,
   explainRefusal,
@@ -85,6 +94,26 @@ const actorLabel = (actor: Actor) =>
     : actor._tag === "device"
       ? `📱 ${actor.name}`
       : `kitshn (${actor.reason})`;
+
+const CONNECTION_TIPS: Record<Connection, string> = {
+  connecting: "Connecting: the map opens a connection to kitshn.",
+  live: "Live: the map shows each change at once.",
+  offline: "Offline: kitshn is not reachable. The map tries again.",
+  refused: "Refused: kitshn did not take the connection. The panel says why.",
+};
+
+const TABS = {
+  map: "Map: circles say who, and a card inside a circle is shared with it.",
+  machines: "Machines: a table of every machine and its status.",
+  library: "Library: every page and file, with a search, a preview and Delete.",
+  history: "History: every change as one revision, with Undo.",
+} as const;
+
+const REPO_TIPS = {
+  waiting: "Waiting: the first deploy of this repo waits for one click.",
+  allowed: "Allowed: pushes of this repo deploy.",
+  blocked: "Blocked: kitshn refuses deploys of this repo.",
+} as const;
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
@@ -603,21 +632,21 @@ export function App() {
           <span class="sticker wait">upload</span> {progress}
         </div>
       ) : null}
+      <TooltipLayer />
       <header class="bar">
         <h1>kitshn</h1>
         <div class="seg">
-          <button aria-pressed={route.tab === "map"} onClick={() => (location.hash = "map")}>
-            Map
-          </button>
-          <button aria-pressed={route.tab === "machines"} onClick={() => (location.hash = "machines")}>
-            Machines
-          </button>
-          <button aria-pressed={route.tab === "library"} onClick={() => (location.hash = "library")}>
-            Library
-          </button>
-          <button aria-pressed={route.tab === "history"} onClick={() => (location.hash = "history")}>
-            History
-          </button>
+          {(["map", "machines", "library", "history"] as const).map((tab) => (
+            <button
+              key={tab}
+              aria-pressed={route.tab === tab}
+              data-tip={TABS[tab]}
+              onClick={() => (location.hash = tab)}
+            >
+              {tab[0]?.toUpperCase()}
+              {tab.slice(1)}
+            </button>
+          ))}
         </div>
         {route.tab === "map" ? (
           <>
@@ -629,7 +658,7 @@ export function App() {
                   key={kind}
                   class="btn toggle"
                   aria-pressed={!hidden.has(kind)}
-                  title={`Show or hide ${KINDS[kind].label}`}
+                  data-tip={`${hidden.has(kind) ? "Show" : "Hide"} ${KINDS[kind].label.toLowerCase()} on the map. Hidden kinds still count for their circles.`}
                   onClick={() => {
                     const next = new Set(hidden);
                     if (next.has(kind)) next.delete(kind);
@@ -641,25 +670,37 @@ export function App() {
                 </button>
               ))}
             <span class="sep" />
-            <button class="btn primary" onClick={() => void newCircle()}>
+            <button
+              class="btn primary"
+              data-tip="Make a new circle in the middle of the view. It matches nobody until you add members."
+              onClick={() => void newCircle()}
+            >
               + Circle
             </button>
-            <button class="btn" onClick={() => setAddingMachine(true)}>
+            <button
+              class="btn"
+              data-tip="Make a join command for a new machine. Its card starts in the tray, private."
+              onClick={() => setAddingMachine(true)}
+            >
               + Machine
             </button>
             <button
               class="btn"
-              title="Add a person, a domain, a device or a network to a circle"
+              data-tip="Add a person, a domain, a device or a network to a circle."
               onClick={() => setPalette("add a member to ")}
             >
               + Member
             </button>
-            <button class="btn" onClick={() => setAddingSite(true)}>
+            <button
+              class="btn"
+              data-tip="Share a local server of a machine, or set up a static site from a repo."
+              onClick={() => setAddingSite(true)}
+            >
               + Site
             </button>
             <label
               class="btn"
-              title="An HTML file becomes a page; any other file stays a file (at most 100 MB). You can also drop files on the map."
+              data-tip="Upload files: an HTML file becomes a page, any other file stays a file (at most 100 MB). They wait in the tray, private. You can also drop files on the map."
             >
               Upload
               <input
@@ -674,13 +715,13 @@ export function App() {
                 }}
               />
             </label>
-            <button class="btn" onClick={fit}>
+            <button class="btn" data-tip="Fit every circle and card in the view." onClick={fit}>
               Fit
             </button>
             <button
               class="btn toggle"
               aria-pressed={previews}
-              title="Live previews of sites and pages near the centre, when zoomed in"
+              data-tip={`${previews ? "Hide" : "Show"} live previews of up to four site and page cards near the centre, from zoom 80%.`}
               onClick={() => {
                 localStorage.setItem(PREVIEWS_KEY, previews ? "off" : "on");
                 setPreviews(!previews);
@@ -694,7 +735,7 @@ export function App() {
         {waitingRepos > 0 ? (
           <button
             class="btn"
-            title="Repos that wait for you to allow their first deploy (K-819)"
+            data-tip="Repos that wait for you to allow their first deploy. A click shows them in the panel."
             onClick={() => {
               location.hash = "map";
               setSelection({ cards: new Set(), circle: null });
@@ -704,34 +745,53 @@ export function App() {
           </button>
         ) : null}
         {store.snapshot?.paused ? (
-          <button class="btn resume" onClick={startResume} title="Resume needs your passkey again">
+          <button
+            class="btn resume"
+            onClick={startResume}
+            data-tip="Resume: confirm with your passkey again, and every share comes back."
+          >
             Resume
           </button>
         ) : (
           <button
             class="btn big-red"
             onClick={() => setPausing(true)}
-            title="Emergency pause: stop shares, agents and deploys at once"
+            data-tip="Emergency pause: stop shares, agents and deploys at once. A dialog first lists what stops."
             aria-label="Emergency pause"
           >
             ■ Pause
           </button>
         )}
-        <button class="btn" onClick={() => setPalette("")} title="Command palette (Cmd+K or Ctrl+K)">
+        <button
+          class="btn"
+          onClick={() => setPalette("")}
+          aria-label="Command palette"
+          data-tip="Command palette (Cmd+K or Ctrl+K): find every card, circle and action."
+        >
           ⌘K
         </button>
-        <span class={`sticker ${store.connection === "live" ? "ok" : "wait"}`} style={{ "--tilt": "3deg" }}>
+        <span
+          class={`sticker ${store.connection === "live" ? "ok" : "wait"}`}
+          style={{ "--tilt": "3deg" }}
+          data-tip={CONNECTION_TIPS[store.connection]}
+        >
           {store.connection}
         </span>
       </header>
       {tray.length > 0 && route.tab === "map" ? (
         <aside class="tray">
           <div class="tray-head">
-            <span class="label">New · private ({tray.length})</span>
+            <span
+              class="label"
+              data-tip="New cards arrive here, outside every circle, so they start private."
+            >
+              New · private ({tray.length})
+            </span>
             <input
               type="search"
               placeholder="Filter"
               aria-label="Filter the tray"
+              data-tip="Filter the tray by name, kind or address."
               value={trayFilter}
               onInput={(event) => setTrayFilter((event.target as HTMLInputElement).value)}
             />
@@ -743,6 +803,7 @@ export function App() {
               <div
                 key={resource.id}
                 class={`card${selection.cards.has(resource.id) ? " sel" : ""}`}
+                data-tip={`${KINDS[resource.kind].help} Drag it onto the map; it lands in exactly the circles there.`}
                 draggable
                 onDragStart={(event) => {
                   // A selected card carries the whole selection of tray cards with it.
@@ -814,7 +875,7 @@ export function App() {
         onRemoveMachine={async (view) => {
           if (
             !(await ask(
-              `Remove ${view.machine.name}? kitshn deletes its service token, its tunnel and its queue (K-615).`,
+              `Remove ${view.machine.name}? kitshn deletes its service token, its tunnel and its queue.`,
             ))
           )
             return;
@@ -889,10 +950,19 @@ export function App() {
           <div class="dialog" role="alertdialog">
             <p style={{ marginTop: 0, fontWeight: 700 }}>{confirm.text}</p>
             <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
-              <button class="btn" onClick={() => (confirm.resolve(false), setConfirm(null))}>
+              <button
+                class="btn"
+                data-tip="Cancel: nothing changes."
+                onClick={() => (confirm.resolve(false), setConfirm(null))}
+              >
                 Cancel
               </button>
-              <button class="btn primary" autoFocus onClick={() => (confirm.resolve(true), setConfirm(null))}>
+              <button
+                class="btn primary"
+                autoFocus
+                data-tip="Continue with the change."
+                onClick={() => (confirm.resolve(true), setConfirm(null))}
+              >
                 Continue
               </button>
             </div>
@@ -905,6 +975,7 @@ export function App() {
           {toast.undo !== null ? (
             <button
               class="btn primary"
+              data-tip="Undo: take this change back."
               onClick={() => {
                 const revisions = [...(toast.undo === null ? [] : [toast.undo]), ...(toast.alsoUndo ?? [])];
                 setToast(null);
@@ -916,14 +987,14 @@ export function App() {
               Undo
             </button>
           ) : null}
-          <button class="btn" onClick={() => setToast(null)} aria-label="Close">
+          <button class="btn" onClick={() => setToast(null)} aria-label="Close" data-tip="Close this message.">
             ×
           </button>
         </div>
       ) : null}
       {route.tab === "map" ? (
         <div class="hint">
-          Drag a card into a circle to share it · Shift-click or drag empty space to select many · {CIRCLE_ALONE_KEY.label}-drag a
+          Drag a card into a circle to share it · Shift-click or drag empty space to select many · {ALONE_KEY.label}-drag a
           circle head to move it alone · Ctrl or ⌘ + wheel zooms
         </div>
       ) : null}
@@ -955,11 +1026,15 @@ function History(props: { revisions: ReadonlyArray<RevisionView>; onUndo: (id: n
               <td>{revision.summary}</td>
               <td>
                 {revision.undoneBy !== null ? (
-                  <span class="stamp" title={`Undone by #${revision.undoneBy}`}>
+                  <span class="stamp" data-tip={`Undone: revision #${revision.undoneBy} reverses this one.`}>
                     ✓ undone
                   </span>
                 ) : revision.undoes === null && revision.undoable ? (
-                  <button class="btn" onClick={() => props.onUndo(revision.id)}>
+                  <button
+                    class="btn"
+                    data-tip="Undo: a new revision that reverses this one."
+                    onClick={() => props.onUndo(revision.id)}
+                  >
                     Undo
                   </button>
                 ) : null}
@@ -1060,6 +1135,7 @@ function Panel(props: {
         </ul>
         <button
           class="btn primary"
+          data-tip="Stack these cards: they sit on one point, move as one and get the same circles."
           onClick={() =>
             void props.stacks.stackOnto(
               cards.map((card) => card.id),
@@ -1091,7 +1167,12 @@ function Panel(props: {
         <ul class="opens">
           {[...state.circles.values()].map((item) => (
             <li key={item.id}>
-              <button type="button" class="open-card" onClick={() => props.onSelectCircle(item.id)}>
+              <button
+                type="button"
+                class="open-card"
+                data-tip={`Edit ${item.name}: its members, level, match and end.`}
+                onClick={() => props.onSelectCircle(item.id)}
+              >
                 <span class="name">
                   <span class="swatch" style={{ background: item.color }} /> {item.name}
                 </span>
@@ -1121,10 +1202,22 @@ function Panel(props: {
         ) : null}
         <div class="label">Safety</div>
         <div class="row">
-          <button class="btn danger" onClick={() => props.onPause(!props.paused)}>
+          <button
+            class="btn danger"
+            data-tip={
+              props.paused
+                ? "Resume: confirm with your passkey again, and every share comes back."
+                : "Emergency pause: stop shares, agents and deploys at once. A dialog first lists what stops."
+            }
+            onClick={() => props.onPause(!props.paused)}
+          >
             {props.paused ? "Resume" : "Emergency pause"}
           </button>
-          <button class="btn" onClick={props.onSignOut}>
+          <button
+            class="btn"
+            data-tip="End every session of every application that kitshn made. Everyone logs in again, you too."
+            onClick={props.onSignOut}
+          >
             Sign out everywhere
           </button>
         </div>
@@ -1133,7 +1226,13 @@ function Panel(props: {
   }
   return (
     <aside class={`side${sheetOpen ? "" : " closed"}`}>
-      <div class="handle" onClick={() => setSheetOpen(!sheetOpen)} />
+      <div
+        class="handle"
+        role="button"
+        aria-label={sheetOpen ? "Close the panel" : "Open the panel"}
+        data-tip={sheetOpen ? "Close the panel." : "Open the panel."}
+        onClick={() => setSheetOpen(!sheetOpen)}
+      />
       {body}
     </aside>
   );
@@ -1161,6 +1260,7 @@ function StackPanel(props: {
       <input
         class="title"
         aria-label="Stack name"
+        data-tip="The name of the stack. Enter saves it."
         key={stack.name}
         defaultValue={stack.name}
         onKeyDown={(event) => event.key === "Enter" && (event.target as HTMLInputElement).blur()}
@@ -1178,10 +1278,20 @@ function StackPanel(props: {
             <li key={id}>
               <div class="open-card">
                 {/* One card's own level and end date (K-205, K-209) are in its panel. */}
-                <button type="button" class="name link" onClick={() => props.onSelectCard(id)}>
+                <button
+                  type="button"
+                  class="name link"
+                  data-tip="Show this card's panel, with its own level and end date."
+                  onClick={() => props.onSelectCard(id)}
+                >
                   {resource ? `${KINDS[resource.kind].icon} ${resource.name}` : id}
                 </button>
-                <button type="button" class="btn" onClick={() => void props.actions.pullOut(stack.id, id)}>
+                <button
+                  type="button"
+                  class="btn"
+                  data-tip="Pull out: the card lands next to the stack, in the same circles, so no share changes."
+                  onClick={() => void props.actions.pullOut(stack.id, id)}
+                >
                   Pull out
                 </button>
               </div>
@@ -1189,7 +1299,12 @@ function StackPanel(props: {
           );
         })}
       </ul>
-      <button type="button" class="btn" onClick={() => void props.actions.unstack(stack.id)}>
+      <button
+        type="button"
+        class="btn"
+        data-tip="Unstack: spread all cards in the same circles."
+        onClick={() => void props.actions.unstack(stack.id)}
+      >
         Unstack
       </button>
     </section>
@@ -1219,30 +1334,52 @@ function CardPanel(props: {
   const address = resource.addresses[0];
   return (
     <section>
-      <div class="label">{KINDS[resource.kind].label}</div>
+      <div class="label" data-tip={KINDS[resource.kind].help}>
+        {KINDS[resource.kind].label}
+      </div>
       <h2>
         {KINDS[resource.kind].icon} {resource.name}
       </h2>
       {address ? (
         <div class="row">
           <code>{address}</code>
-          <button class="btn" onClick={() => void navigator.clipboard.writeText(`https://${address}`)}>
+          <button
+            class="btn"
+            data-tip={`Copy https://${address} to the clipboard.`}
+            onClick={() => void navigator.clipboard.writeText(`https://${address}`)}
+          >
             Copy address
           </button>
-          <a class="btn" href={`https://${address}`} target="_blank" rel="noreferrer">
+          <a
+            class="btn"
+            href={`https://${address}`}
+            target="_blank"
+            rel="noreferrer"
+            data-tip="Open the address in a new tab."
+          >
             Open
           </a>
         </div>
       ) : null}
       {props.repo ? (
         <div class="row">
-          <span class="label">Deploys</span>
-          <span class={`sticker ${props.repo.state === "allowed" ? "ok" : props.repo.state === "waiting" ? "wait" : ""}`}>
+          <span class="label" data-tip="Deploys: whether pushes of the repo of this card deploy.">
+            Deploys
+          </span>
+          <span
+            class={`sticker ${props.repo.state === "allowed" ? "ok" : props.repo.state === "waiting" ? "wait" : ""}`}
+            data-tip={REPO_TIPS[props.repo.state]}
+          >
             {props.repo.state}
           </span>
           <button
             type="button"
             class={props.repo.state === "blocked" ? "btn" : "btn danger"}
+            data-tip={
+              props.repo.state === "blocked"
+                ? `Allow deploys of ${props.repo.name} again.`
+                : `Block deploys of ${props.repo.name}: kitshn refuses them until you allow it again.`
+            }
             onClick={async () => {
               if (!props.repo) return;
               const next = props.repo.state === "blocked" ? "allowed" : "blocked";
@@ -1256,13 +1393,20 @@ function CardPanel(props: {
       ) : null}
       {props.access ? (
         <div class="row">
-          <span class="label">Access</span>
+          <span class="label" data-tip="Access: whether Cloudflare has the latest shares of this card.">
+            Access
+          </span>
           {props.access.state === "applied" ? (
-            <span class="stamp" title="Cloudflare has this change">
+            <span class="stamp" data-tip={ACCESS_TIPS.applied}>
               ✓ applied
             </span>
           ) : (
-            <span class={`sticker ${props.access.state === "applying" ? "wait" : ""}`}>
+            <span
+              class={`sticker ${props.access.state === "applying" ? "wait" : ""}`}
+              data-tip={
+                props.access.state === "applying" ? ACCESS_TIPS.applying : "Failed: Cloudflare refused the change."
+              }
+            >
               {props.access.state}
             </span>
           )}
@@ -1270,14 +1414,18 @@ function CardPanel(props: {
         </div>
       ) : null}
       {!state.places.has(resource.id) ? (
-        <button class="btn primary" onClick={() => props.onPlace(resource)}>
+        <button
+          class="btn primary"
+          data-tip="Place the card in the middle of the view, outside every circle, so it stays private."
+          onClick={() => props.onPlace(resource)}
+        >
           Place on the map
         </button>
       ) : null}
       {isAppCard(resource) && props.deployed ? (
         <button
           class="btn danger"
-          title="Takes down what the deploy made and keeps the volumes. Undo starts it again (K-909)."
+          data-tip="Remove app: take down what the deploy made and keep the volumes. Undo starts it again."
           onClick={() => props.onRemoveApp(resource)}
         >
           Remove app
@@ -1317,12 +1465,16 @@ function CardPanel(props: {
               <li key={circle.id}>
                 <div class="row">
                   <span class="swatch" style={{ background: circle.color }} /> <b>{circle.name}</b>
-                  <span class="sticker" style={{ background: level ? LEVEL_COLORS[level] : undefined }}>
+                  <span
+                    class="sticker"
+                    data-tip={level ? LEVEL_TIPS[level] : "None: this kind has no level at or below the circle's level."}
+                    style={{ background: level ? LEVEL_COLORS[level] : undefined }}
+                  >
                     {level ?? "none"}
                   </span>
                   <button
                     class="btn"
-                    title="Unshare without a drag"
+                    data-tip={`Remove ${resource.name} from ${circle.name}, without a drag.`}
                     onClick={() => props.onReshare(resource, circle, false)}
                   >
                     Remove
@@ -1330,19 +1482,24 @@ function CardPanel(props: {
                 </div>
                 <div class="row">
                   {circle.members.map((member, index) => (
-                    <span class="chip" key={index}>
+                    <span class="chip" key={index} data-tip={MEMBER_HELP[member._tag]}>
                       {MEMBER_ICONS[member._tag]} {memberLabel(member)}
                     </span>
                   ))}
                 </div>
                 <div class="field-row">
-                  <span class="label">Level</span>
+                  <span class="label" data-tip="Level: the level of this card in this circle. Default follows the circle.">
+                    Level
+                  </span>
                   <LevelOverride resource={resource} circle={circle} state={state} onEdit={props.onEdit} />
                 </div>
                 <div class="field-row">
-                  <span class="label">Ends</span>
+                  <span class="label" data-tip="Ends: at this date kitshn moves the card out of this circle.">
+                    Ends
+                  </span>
                   <EndsPicker
                     endsAt={setting?.endsAt ?? null}
+                    ends="kitshn moves the card out of this circle"
                     onChange={(endsAt) => void put({ level: setting?.level ?? null, endsAt })}
                   />
                 </div>
@@ -1353,12 +1510,19 @@ function CardPanel(props: {
       )}
       {state.places.has(resource.id) ? (
         <>
-          <div class="label">Share with</div>
+          <div class="label" data-tip="Share with: put the card into one more circle, without a drag.">
+            Share with
+          </div>
           <div class="row">
             {[...state.circles.values()]
               .filter((circle) => !holding.includes(circle))
               .map((circle) => (
-                <button key={circle.id} class="btn" onClick={() => props.onReshare(resource, circle, true)}>
+                <button
+                  key={circle.id}
+                  class="btn"
+                  data-tip={`Share ${resource.name} with ${circle.name} at ${circle.level}, without a drag.`}
+                  onClick={() => props.onReshare(resource, circle, true)}
+                >
                   <span class="swatch" style={{ background: circle.color }} /> {circle.name}
                 </button>
               ))}
@@ -1456,6 +1620,7 @@ function Palette(props: {
       <div class="dialog" role="dialog" aria-label="Command palette">
         <input
           autoFocus
+          aria-label="Find"
           placeholder="Find a card, a circle or an action. Try “share”."
           value={query}
           onInput={(event) => {

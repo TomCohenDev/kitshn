@@ -114,8 +114,12 @@ describe("New circle for these (K-529)", () => {
 
   it("never pulls a card onto a selected card that stays (review repro)", () => {
     const state = world([circle("c1", -328, -126, 438), circle("c2", -543, -487, 734)], {
+      k0: { x: -252, y: -204 },
+      k1: { x: 412, y: 353 },
       k2: { x: -415, y: -291 },
+      k3: { x: 254, y: -251 },
       k4: { x: -498, y: -139 },
+      k5: { x: -274, y: -330 },
     });
     const { after } = apply(state, ["k2", "k4"]);
     expect(overlap(after.places.get("k2") as Point, after.places.get("k4") as Point)).toBe(false);

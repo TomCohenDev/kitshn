@@ -10,15 +10,25 @@ const TEAM = "https://team.example.com";
 const keys = await generateKeyPair("RS256");
 const jwk = { ...(await exportJWK(keys.publicKey)), kid: "test", alg: "RS256" };
 
-/** An Access token signed by the test team key, as Access sends it in `Cf-Access-Jwt-Assertion`. */
-const accessToken = (audience: string, claims: { email: string } | { common_name: string }) =>
+/** A second key pair that the team does not publish. */
+const strangerKeys = await generateKeyPair("RS256");
+
+/**
+ * An Access token signed by the test team key, as Access sends it in `Cf-Access-Jwt-Assertion`. `changes` makes a
+ * token that the Worker must refuse.
+ */
+const accessToken = (
+  audience: string,
+  claims: { email: string } | { common_name: string },
+  changes: { key?: CryptoKey; issuer?: string; expiresAt?: number } = {},
+) =>
   new SignJWT(claims)
     .setProtectedHeader({ alg: "RS256", kid: "test" })
-    .setIssuer(TEAM)
+    .setIssuer(changes.issuer ?? TEAM)
     .setAudience(audience)
     .setIssuedAt()
-    .setExpirationTime("5m")
-    .sign(keys.privateKey);
+    .setExpirationTime(changes.expiresAt ?? "5m")
+    .sign(changes.key ?? keys.privateKey);
 
 /** The Worker fetches only the team keys; any other outbound request fails the test. */
 function stubAccessCerts() {
@@ -64,6 +74,34 @@ describe("owner route /api/state", () => {
     stubAccessCerts();
     const response = await call("/api/state", await accessToken("agent-aud", { email: "owner@example.com" }));
     expect(response.status).toBe(401);
+  });
+
+  it("refuses a token signed by another key with the same key id", async () => {
+    stubAccessCerts();
+    const token = await accessToken(
+      "admin-aud",
+      { email: "owner@example.com" },
+      { key: strangerKeys.privateKey },
+    );
+    expect((await call("/api/state", token)).status).toBe(401);
+  });
+
+  it("refuses an expired token", async () => {
+    stubAccessCerts();
+    // Older than the 60 seconds of clock tolerance.
+    const expiresAt = Math.floor(Date.now() / 1000) - 120;
+    const token = await accessToken("admin-aud", { email: "owner@example.com" }, { expiresAt });
+    expect((await call("/api/state", token)).status).toBe(401);
+  });
+
+  it("refuses a token of another issuer", async () => {
+    stubAccessCerts();
+    const token = await accessToken(
+      "admin-aud",
+      { email: "owner@example.com" },
+      { issuer: "https://other.example.com" },
+    );
+    expect((await call("/api/state", token)).status).toBe(401);
   });
 
   it("refuses a request without an Access token", async () => {

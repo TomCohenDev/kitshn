@@ -160,3 +160,17 @@ describe("several addresses (K-817)", () => {
     });
   });
 });
+
+describe("address limit (K-817)", () => {
+  it("takes at most 5 addresses, under the API calls of one deploy request", () => {
+    const deploy = (count: number) => [
+      {
+        on: "push",
+        name: "prod",
+        address: Array.from({ length: count }, (_, index) => `a${index}.example.com`),
+      },
+    ];
+    expect(() => decodeRecipe({ compose: {}, deploy: deploy(5) })).not.toThrow();
+    expect(() => decodeRecipe({ compose: {}, deploy: deploy(6) })).toThrow();
+  });
+});

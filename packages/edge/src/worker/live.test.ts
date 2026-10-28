@@ -10,6 +10,8 @@ import {
   offlineReason,
   parseSites,
   reachableAddresses,
+  nextCardAddresses,
+  protectedLiveSites,
   seenText,
   servedSites,
   sitesNeedingRoutes,
@@ -222,5 +224,24 @@ describe("several addresses of a Compose app (K-817)", () => {
     expect(servedSites(app, undefined)).toEqual([app]);
     expect(servedSites(app, { ...card, kind: "site.live" })).toEqual([app]);
     expect(servedSites(app, { ...card, addresses: ["other.example.com"] })).toEqual([app]);
+  });
+
+  it("gives an address no ingress, DNS record or route before its own Access application exists (K-410)", () => {
+    const pending = new Set(["onion-climbers.com"]);
+    const sites = protectedLiveSites(
+      [app, { ...app, id: "app-other", name: "other", address: "other.example.com", state: "checking" }],
+      (id) => (id === app.id ? card : undefined),
+      (item) => !pending.has(item.address),
+    );
+    expect(sites.map((item) => item.address)).toEqual(["climbing.example.com", "www.onion-climbers.com"]);
+  });
+
+  it("keeps the old addresses of a static card until the deploy took their domains off, and not of a Compose card", () => {
+    expect(nextCardAddresses("site.static", ["a.example.com"], ["a.example.com", "old.example.com"])).toEqual(
+      ["a.example.com", "old.example.com"],
+    );
+    expect(
+      nextCardAddresses("site.compose", ["a.example.com"], ["a.example.com", "old.example.com"]),
+    ).toEqual(["a.example.com"]);
   });
 });

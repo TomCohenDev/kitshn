@@ -106,6 +106,35 @@ export function servedSites(
   return card.addresses.map((address) => ({ ...site, address }));
 }
 
+/**
+ * K-410, K-817: the live sites that may get ingress, a DNS record and an offline route: checked sites, one entry for
+ * each address that serves them, and only the addresses whose Access application exists.
+ */
+export function protectedLiveSites(
+  sites: Iterable<LiveSite>,
+  cardOf: (id: string) => Pick<Resource, "kind" | "addresses"> | undefined,
+  hasApplication: (site: LiveSite) => boolean,
+): Array<LiveSite> {
+  return [...sites]
+    .filter((site) => site.state === "ok")
+    .flatMap((site) => servedSites(site, cardOf(site.id)))
+    .filter(hasApplication);
+}
+
+/**
+ * K-817, K-410: the addresses of an existing card after a deploy. A Compose card takes the new list at once, because
+ * its tunnel sync drops an old address in order. A static card keeps its old addresses until the deploy has taken
+ * their custom domains off, so their Access applications stay meanwhile.
+ */
+export function nextCardAddresses(
+  kind: Resource["kind"],
+  addresses: ReadonlyArray<string>,
+  existing: ReadonlyArray<string>,
+): Array<string> {
+  if (kind === "site.compose") return [...addresses];
+  return [...addresses, ...existing.filter((address) => !addresses.includes(address))];
+}
+
 /** K-603, K-607, K-1105: the ingress of a machine's tunnel from its live sites. */
 export function tunnelConfig(sites: ReadonlyArray<LiveSite>, accessOf: (site: LiveSite) => IngressAccess) {
   return {

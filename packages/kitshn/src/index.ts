@@ -12,7 +12,7 @@ export interface DeployEntry {
   readonly name: string;
   /**
    * The address, one level under a kitshn zone (K-901). Without it, kitshn picks `<repo>[-<name>].<zone>`. A `push`
-   * entry may list up to 10 addresses (K-817): the first under the kitshn zone is the main one, and each other is the
+   * entry may list up to 5 addresses (K-817): the first under the kitshn zone is the main one, and each other is the
    * apex or one name under a zone that kitshn publishes on. All serve the app.
    */
   readonly address?: string | ReadonlyArray<string>;

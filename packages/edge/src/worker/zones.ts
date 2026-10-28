@@ -32,3 +32,22 @@ export function zoneFor(address: string, zones: ReadonlyArray<Zone>): Zone | nul
   );
   return zones.find((zone) => zone.name === name) ?? null;
 }
+
+/**
+ * K-1111, K-817: the zone of an address as the Worker uses it. An address on the kitshn zone does not depend on
+ * KITSHN_ZONES, so a broken value never stops the kitshn zone (K-006 still fails the other addresses).
+ */
+export function zoneOfAddressIn(
+  address: string,
+  env: Pick<Env, "KITSHN_ZONE" | "CLOUDFLARE_ZONE_ID" | "KITSHN_ZONES">,
+): Zone | null {
+  let zones: Array<Zone>;
+  try {
+    zones = zonesOf(env);
+  } catch (error) {
+    if (zoneOfAddress(address, [env.KITSHN_ZONE]))
+      return { name: env.KITSHN_ZONE, id: env.CLOUDFLARE_ZONE_ID };
+    throw error;
+  }
+  return zoneFor(address, zones);
+}

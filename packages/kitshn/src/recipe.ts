@@ -6,8 +6,11 @@ import type {
   StaticApp as PublicStaticApp,
 } from "./index.ts";
 
-/** K-817: the most addresses of one environment. Each costs an Access application and a DNS record. */
-export const MAX_ADDRESSES = 10;
+/**
+ * K-817: the most addresses of one environment. Each costs Cloudflare API calls in one deploy request, and the free
+ * plan allows 50 there (K-406); 5 keeps a new static site with all of its custom domains under that.
+ */
+export const MAX_ADDRESSES = 5;
 
 const Name = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9{}-]{0,40}$/));
 
@@ -136,7 +139,8 @@ export const repoSlug = (repo: string) =>
  * Null when it is in no zone, or deeper.
  */
 export function zoneOfAddress(address: string, zones: ReadonlyArray<string>): string | null {
-  for (const zone of zones) {
+  // The longest zone first, so a zone inside another zone takes its own names.
+  for (const zone of [...zones].sort((a, b) => b.length - a.length)) {
     if (address === zone) return zone;
     if (address.endsWith(`.${zone}`) && LABEL.test(address.slice(0, -zone.length - 1))) return zone;
   }

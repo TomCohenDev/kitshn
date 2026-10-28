@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { zoneFor, zonesOf } from "./zones.ts";
+import { zoneFor, zoneOfAddressIn, zonesOf } from "./zones.ts";
 
 const env = { KITSHN_ZONE: "example.com", CLOUDFLARE_ZONE_ID: "z1" };
 
@@ -21,5 +21,20 @@ describe("zones (K-1111, K-817)", () => {
     expect(zoneFor("climbing.example.com", zones)?.id).toBe("z1");
     expect(zoneFor("a.b.example.com", zones)).toBeNull();
     expect(zoneFor("other.org", zones)).toBeNull();
+  });
+
+  it("refuses look-alike, trailing-dot and uppercase names, and takes the longest zone", () => {
+    const zones = zonesOf({ ...env, KITSHN_ZONES: '{"onion-climbers.com":"z2","lab.example.com":"z3"}' });
+    expect(zoneFor("evilexample.com", zones)).toBeNull();
+    expect(zoneFor("x.example.com.", zones)).toBeNull();
+    expect(zoneFor("X.example.com", zones)).toBeNull();
+    expect(zoneFor("lab.example.com", zones)?.id).toBe("z3");
+    expect(zoneFor("a.lab.example.com", zones)?.id).toBe("z3");
+  });
+
+  it("keeps the kitshn zone working when KITSHN_ZONES is broken", () => {
+    const broken = { ...env, KITSHN_ZONES: "not json" };
+    expect(zoneOfAddressIn("climbing.example.com", broken)?.id).toBe("z1");
+    expect(() => zoneOfAddressIn("onion-climbers.com", broken)).toThrow();
   });
 });

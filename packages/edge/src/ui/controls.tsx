@@ -312,8 +312,8 @@ export function MenuSep() {
 
 /**
  * K-523: a menu of action groups. An action with a sub-list shows that list in the same menu, with "Back"
- * first, so the menu needs no second layer. The open sub-list is kept by id and read from the current
- * groups, so it never runs actions of an older state.
+ * first, so the menu needs no second layer; a sub-list can hold sub-lists too (K-527). The open sub-lists are
+ * kept as a path of ids and read from the current groups, so the menu never runs actions of an older state.
  */
 export function ActionMenu(props: {
   readonly label: string;
@@ -321,14 +321,21 @@ export function ActionMenu(props: {
   readonly groups: ActionGroups;
   readonly onClose: () => void;
 }) {
-  const [path, setPath] = useState<{ readonly open: string | null; readonly from: string | null }>({
-    open: null,
+  const [path, setPath] = useState<{ readonly open: ReadonlyArray<string>; readonly from: string | null }>({
+    open: [],
     from: null,
   });
-  const open = props.groups
-    .flat()
-    .find((action): action is Extract<Action, { items: unknown }> => action.id === path.open && "items" in action);
-  const back = () => setPath({ open: null, from: open?.id ?? null });
+  // Each id opens a sub-list of the list before it; an id that is gone from the current groups ends the walk.
+  let open: Extract<Action, { items: unknown }> | undefined;
+  let depth = 0;
+  for (const id of path.open) {
+    const list: ReadonlyArray<Action> = open ? open.items : props.groups.flat();
+    const next = list.find((action): action is Extract<Action, { items: unknown }> => action.id === id && "items" in action);
+    if (!next) break;
+    open = next;
+    depth += 1;
+  }
+  const back = () => setPath({ open: path.open.slice(0, Math.max(depth - 1, 0)), from: open?.id ?? null });
   const item = (action: Action) => {
     const shared = {
       key: action.id,
@@ -345,7 +352,7 @@ export function ActionMenu(props: {
         </MenuItem>
       );
     return "items" in action ? (
-      <MenuItem {...shared} opens onSelect={() => setPath({ open: action.id, from: null })}>
+      <MenuItem {...shared} opens onSelect={() => setPath({ open: [...path.open.slice(0, depth), action.id], from: null })}>
         {action.label}
         <span class="menu-key">▸</span>
       </MenuItem>
@@ -367,7 +374,7 @@ export function ActionMenu(props: {
     >
       {open ? (
         <>
-          <MenuItem tip={`Back to the actions; leaves ${open.label}.`} keepOpen onSelect={back}>
+          <MenuItem tip={`Back one level; leaves ${open.label}.`} keepOpen onSelect={back}>
             <span aria-hidden="true">◂ </span>Back
           </MenuItem>
           <MenuSep />

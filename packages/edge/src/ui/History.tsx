@@ -1,0 +1,165 @@
+import { Fragment } from "preact";
+import { useMemo, useState } from "preact/hooks";
+import type { Actor, Item, RevisionKind } from "../core/changes.ts";
+import type { State } from "../core/model.ts";
+import type { RevisionView } from "../core/protocol.ts";
+import {
+  type HistoryFilter,
+  actorKey,
+  actorLabel,
+  filterHistory,
+  groupHistory,
+  sentence,
+  undoStates,
+} from "./revisions.ts";
+
+const KIND_LABELS: Record<RevisionKind, { readonly label: string; readonly tip: string }> = {
+  card: { label: "Cards", tip: "Cards: moves and shares of cards." },
+  circle: { label: "Circles", tip: "Circles: new, changed and deleted circles, also a circle moved with its cards." },
+  stack: { label: "Stacks", tip: "Stacks: cards stacked, pulled out and unstacked." },
+  app: { label: "Apps", tip: "Apps: apps removed and restored." },
+  pause: { label: "Pause", tip: "Pause: the emergency pause, the lockdown and Resume." },
+  action: { label: "Actions", tip: "Actions: records such as a command, a deploy or a sign-out, with nothing to undo." },
+};
+
+const NO_FILTER: HistoryFilter = { kind: null, actor: null, item: "" };
+
+const timeOf = (at: number, older: boolean) =>
+  older
+    ? new Date(at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })
+    : new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+/**
+ * K-1508: every change as a plain sentence, grouped by day and by who made it, with filters. A click on a row
+ * shows its cards and circles on the map. Undo shows on each row; only the caller's own newest change runs it.
+ */
+export function HistoryView(props: {
+  revisions: ReadonlyArray<RevisionView>;
+  me: Actor;
+  state: State;
+  onUndo: (id: number) => void;
+  onShow: (revision: RevisionView) => void;
+}) {
+  const [filter, setFilter] = useState(NO_FILTER);
+  const { state } = props;
+  const nameOf = (item: Item) =>
+    (item.kind === "card" ? state.resources.get(item.id)?.name : state.circles.get(item.id)?.name) ?? item.id;
+  const groups = useMemo(
+    () => groupHistory(filterHistory(props.revisions, filter, nameOf), Date.now()),
+    [props.revisions, filter, state],
+  );
+  const undoOf = useMemo(() => undoStates(props.revisions, props.me), [props.revisions, props.me]);
+  const kinds = [...new Set(props.revisions.map((revision) => revision.kind))];
+  const actors = [...new Map(props.revisions.map((revision) => [actorKey(revision.actor), revision.actor])).values()];
+  const who = (actor: Actor) => (actorKey(actor) === actorKey(props.me) ? "You" : actorLabel(actor));
+
+  return (
+    <div class="history-view">
+      <p class="muted">
+        Every change is one revision. Undo makes a new revision that reverses it. A click on a change shows its
+        cards and circles on the map.
+      </p>
+      <div class="pills" role="group" aria-label="Kind of change">
+        <button
+          type="button"
+          aria-pressed={filter.kind === null}
+          data-tip="Every kind of change."
+          onClick={() => setFilter({ ...filter, kind: null })}
+        >
+          All
+        </button>
+        {kinds.map((kind) => (
+          <button
+            key={kind}
+            type="button"
+            aria-pressed={filter.kind === kind}
+            data-tip={KIND_LABELS[kind].tip}
+            onClick={() => setFilter({ ...filter, kind })}
+          >
+            {KIND_LABELS[kind].label}
+          </button>
+        ))}
+      </div>
+      <div class="pills" role="group" aria-label="Who made the change">
+        <button
+          type="button"
+          aria-pressed={filter.actor === null}
+          data-tip="Changes by everyone."
+          onClick={() => setFilter({ ...filter, actor: null })}
+        >
+          Everyone
+        </button>
+        {actors.map((actor) => (
+          <button
+            key={actorKey(actor)}
+            type="button"
+            aria-pressed={filter.actor === actorKey(actor)}
+            data-tip={`Only the changes by ${who(actor)}.`}
+            onClick={() => setFilter({ ...filter, actor: actorKey(actor) })}
+          >
+            {actor._tag === "kitshn" ? "kitshn" : who(actor)}
+          </button>
+        ))}
+      </div>
+      <input
+        type="search"
+        aria-label="Filter by card or circle"
+        data-tip="Only the changes of a card or circle with these words in its name, or in the change."
+        placeholder="Card or circle"
+        value={filter.item}
+        onInput={(event) => setFilter({ ...filter, item: event.currentTarget.value })}
+      />
+      {groups.length === 0 ? (
+        <p class="muted">{props.revisions.length === 0 ? "No change yet." : "No change matches the filters."}</p>
+      ) : null}
+      {groups.map((group, index) => (
+        <Fragment key={group.revisions[0]?.id}>
+          {groups[index - 1]?.day !== group.day ? <h3 class="label history-day">{group.day}</h3> : null}
+          <div class="history-group">
+            <div class="history-actor">{who(group.actor)}</div>
+            <ul>
+              {group.revisions.map((revision) => {
+                const undo = undoOf(revision);
+                return (
+                  <li key={revision.id} id={`rev-${revision.id}`}>
+                    <button
+                      type="button"
+                      class="history-row"
+                      data-tip={
+                        revision.items.length > 0
+                          ? "Show its cards and circles on the map."
+                          : "This change has no card or circle to show."
+                      }
+                      onClick={() => props.onShow(revision)}
+                    >
+                      <span>{sentence(revision, props.me)}</span>
+                      <span class="muted">
+                        <span class="mono">#{revision.id}</span> · {timeOf(revision.at, group.day === "Older")}
+                      </span>
+                    </button>
+                    {revision.undoneBy !== null ? (
+                      <span class="stamp" data-tip={`Undone: revision #${revision.undoneBy} reverses this one.`}>
+                        ✓ undone
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        class="btn"
+                        // Stays focusable when refused, so its tooltip says why.
+                        aria-disabled={!undo.allowed || undefined}
+                        data-tip={undo.allowed ? "Undo: a new revision that reverses this one." : undo.reason}
+                        onClick={() => undo.allowed && props.onUndo(revision.id)}
+                      >
+                        Undo
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        </Fragment>
+      ))}
+    </div>
+  );
+}

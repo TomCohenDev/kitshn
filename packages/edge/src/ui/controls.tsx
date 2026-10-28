@@ -404,19 +404,32 @@ export function MoreButton(props: { readonly name: string; readonly onOpen: (anc
   );
 }
 
-/** A panel that floats over the map, with its heading, "Enlarge" to the full view, and Close. */
+/**
+ * A panel that floats over the map, with its heading, "Enlarge" to the full view, and Close. `large` is the
+ * full view of the same content; its button "To the map" goes back to the panel.
+ */
 export function OverlayPanel(props: {
   readonly heading: string;
-  readonly onEnlarge: () => void;
+  readonly large: boolean;
+  readonly onResize: () => void;
   readonly onClose: () => void;
   readonly children: ComponentChildren;
 }) {
   return (
-    <section class="overlay-panel" aria-label={props.heading}>
+    <section class={`overlay-panel${props.large ? " large" : ""}`} aria-label={props.heading}>
       <header class="overlay-head">
         <h2>{props.heading}</h2>
-        <button type="button" class="btn" data-tip={`Open the full view of ${props.heading}.`} onClick={props.onEnlarge}>
-          Enlarge
+        <button
+          type="button"
+          class="btn"
+          data-tip={
+            props.large
+              ? `Show ${props.heading} as a panel over the map again.`
+              : `Open the full view of ${props.heading}.`
+          }
+          onClick={props.onResize}
+        >
+          {props.large ? "To the map" : "Enlarge"}
         </button>
         <button type="button" class="btn" aria-label="Close" data-tip={`Close ${props.heading}.`} onClick={props.onClose}>
           ×

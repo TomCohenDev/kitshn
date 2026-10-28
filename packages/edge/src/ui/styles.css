@@ -29,6 +29,8 @@
   --shadow: 4px 4px 0 0 var(--shadow-ink);
   --sans: "Bricolage Grotesque", system-ui, sans-serif;
   --mono: "JetBrainsMono Nerd Font Mono", "JetBrains Mono", monospace;
+  /* The overlay panel; App.tsx `panelLeft` uses the same 26rem. */
+  --panel-width: min(26rem, calc(100vw - 24px));
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -242,7 +244,7 @@ input[type="search"]::-webkit-search-cancel-button {
   position: fixed;
   top: 10px;
   left: 10px;
-  right: 400px;
+  right: 10px;
   z-index: 10;
   display: flex;
   flex-wrap: wrap;
@@ -266,38 +268,29 @@ input[type="search"]::-webkit-search-cancel-button {
 .bar .grow {
   flex: 1;
 }
-.side {
-  position: fixed;
-  top: 10px;
-  right: 10px;
-  bottom: 10px;
-  width: 380px;
-  z-index: 10;
-  overflow: auto;
-  padding: 12px;
-  background: var(--surface);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+/* Beside a floating panel, the toolbar and the hint stop at the panel, so nothing runs under it. */
+.bar.beside-panel,
+.hint.beside-panel {
+  right: calc(var(--panel-width) + 24px);
 }
-.side h2 {
+.overlay-panel h2 {
   font-size: 1.15rem;
   margin-bottom: 6px;
   overflow-wrap: anywhere;
 }
-.side .row {
+.overlay-panel .row {
   display: flex;
   gap: 6px;
   align-items: center;
   flex-wrap: wrap;
   margin: 6px 0;
 }
-.side ul {
+.overlay-panel ul {
   list-style: none;
   padding: 0;
   margin: 4px 0 10px;
 }
-.side li {
+.overlay-panel li {
   padding: 5px 8px;
   margin-bottom: 6px;
   background: var(--raised);
@@ -305,11 +298,8 @@ input[type="search"]::-webkit-search-cancel-button {
   border-radius: var(--radius);
   font-size: 0.95rem;
 }
-.side section + section {
+.overlay-panel section + section {
   margin-top: 14px;
-}
-.handle {
-  display: none;
 }
 
 /* Map */
@@ -342,8 +332,10 @@ input[type="search"]::-webkit-search-cancel-button {
     0 0 0 4px var(--select),
     4px 4px 0 6px var(--shadow-ink);
 }
+/* A head draws above the cards, so a card never hides the circle's name and level (layout.ts headAngle). */
 .circle .head {
   position: absolute;
+  z-index: 2;
   left: 50%;
   top: -20px;
   transform: translateX(-50%);
@@ -361,6 +353,9 @@ input[type="search"]::-webkit-search-cancel-button {
   font-weight: 800;
   font-size: 1rem;
   pointer-events: auto;
+}
+.circle .head .sticker {
+  flex: none;
 }
 .circle.sel .head {
   background: var(--select);
@@ -417,7 +412,30 @@ input[type="search"]::-webkit-search-cancel-button {
   color: var(--select-fg);
 }
 .card.dragging {
+  z-index: 3;
   cursor: grabbing;
+}
+/* K-1508: a History row highlights its cards and circles once; the outline fades and never repeats. */
+.flash {
+  animation: flash 1.2s ease-out 1;
+}
+@keyframes flash {
+  0%,
+  60% {
+    outline: 6px solid var(--select);
+    outline-offset: 4px;
+  }
+  100% {
+    outline: 6px solid transparent;
+    outline-offset: 4px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flash {
+    animation: none;
+    outline: 6px solid var(--select);
+    outline-offset: 4px;
+  }
 }
 .card .name {
   font-weight: 800;
@@ -662,27 +680,13 @@ input[type="search"]::-webkit-search-cancel-button {
   color: var(--error-fg);
 }
 
-/* History */
-.history {
-  position: fixed;
-  top: 112px;
-  left: 10px;
-  right: 400px;
-  bottom: 10px;
-  z-index: 9;
-  overflow: auto;
-  padding: 12px;
-  background: var(--surface);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-}
-.history table {
+/* Tables of the Library and Machines views */
+.overlay-panel table {
   border-collapse: collapse;
   width: 100%;
   font-size: 0.95rem;
 }
-.history th {
+.overlay-panel th {
   text-transform: uppercase;
   font-weight: 800;
   font-size: 0.7rem;
@@ -690,15 +694,110 @@ input[type="search"]::-webkit-search-cancel-button {
   color: var(--muted);
   background: var(--raised);
 }
-.history td,
-.history th {
+.overlay-panel td,
+.overlay-panel th {
   text-align: left;
   padding: 4px 8px;
   border: var(--bw) solid var(--border);
   vertical-align: top;
 }
-.history td.id {
-  font-family: var(--mono);
+/* In the floating panel each table row is a small card of labelled lines. */
+.overlay-panel:not(.large) :is(table, tbody, tr, td) {
+  display: block;
+}
+.overlay-panel:not(.large) thead {
+  display: none;
+}
+.overlay-panel:not(.large) tr {
+  margin-bottom: 8px;
+  padding: 4px 0;
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+.overlay-panel:not(.large) td {
+  padding: 2px 8px;
+  border: 0;
+}
+.overlay-panel:not(.large) td[data-label]::before {
+  content: attr(data-label) ": ";
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.table-view > input[type="search"] {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+/* History (K-1508) */
+.history-view input[type="search"] {
+  width: 100%;
+  margin: 8px 0 4px;
+}
+.history-view .pills + .pills {
+  margin-top: 6px;
+}
+.history-day {
+  margin: 14px 0 4px;
+}
+.history-actor {
+  margin: 8px 0 4px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+.overlay-panel .history-group ul {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+}
+.overlay-panel .history-group li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+}
+.history-row {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 0.95rem;
+  text-align: left;
+  color: var(--ink);
+  background: var(--raised);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.history-row:hover {
+  background: var(--select);
+  color: var(--select-fg);
+}
+.history-row .muted {
+  font-size: 0.8rem;
+}
+.history-row:hover .muted {
+  color: inherit;
+}
+.btn[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: default;
+}
+.btn[aria-disabled="true"]:hover,
+.btn[aria-disabled="true"]:active {
+  transform: none;
+  box-shadow: none;
 }
 .stamp {
   display: inline-block;
@@ -727,12 +826,12 @@ input[type="search"]::-webkit-search-cancel-button {
   font-size: 1rem;
 }
 
-/* K-516: on a phone the panel is a bottom sheet. */
+/* K-516: on a phone the panel is a bottom sheet, and its full view takes the whole screen. */
 @media (max-width: 720px) {
-  .bar {
+  .bar.beside-panel {
     right: 10px;
   }
-  .side {
+  .overlay-panel {
     top: auto;
     left: 0;
     right: 0;
@@ -741,24 +840,16 @@ input[type="search"]::-webkit-search-cancel-button {
     max-height: 45dvh;
     border-radius: 12px 12px 0 0;
   }
-  .side.closed {
-    max-height: 44px;
-    overflow: hidden;
+  .overlay-panel.large {
+    top: 0;
+    max-height: none;
+    border-radius: 0;
   }
-  .handle {
+  .overlay-panel.large :is(table, tbody, tr, td) {
     display: block;
-    padding: 0;
-    border: 0;
-    cursor: pointer;
-    width: 48px;
-    height: 6px;
-    margin: -4px auto 8px;
-    border-radius: 3px;
-    background: var(--border);
   }
-  .history {
-    right: 10px;
-    bottom: 50dvh;
+  .overlay-panel.large thead {
+    display: none;
   }
   .tray {
     width: 150px;
@@ -878,7 +969,7 @@ pre.output {
   --tilt: 2deg;
 }
 
-.history .preview {
+.overlay-panel .preview {
   display: block;
   width: 100%;
   height: 50vh;
@@ -1123,13 +1214,13 @@ input:focus-visible {
   color: var(--muted);
 }
 
-/* An overlay panel floats over the map instead of a fixed side bar. */
+/* An overlay panel floats over the map instead of a fixed side bar (K-516). */
 .overlay-panel {
-  position: absolute;
+  position: fixed;
   top: 12px;
   right: 12px;
   bottom: 12px;
-  width: min(26rem, calc(100% - 24px));
+  width: var(--panel-width);
   overflow: auto;
   padding: 12px;
   z-index: 30;
@@ -1146,8 +1237,15 @@ input:focus-visible {
 }
 .overlay-head h2 {
   flex: 1;
-  font-size: 1.15rem;
-  overflow-wrap: anywhere;
+  margin: 0;
+}
+/* The full view: below the toolbar, which wraps to two rows on a laptop. Revisit when its height changes. */
+.overlay-panel.large {
+  top: 112px;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  width: auto;
 }
 
 /* Circle editor */
@@ -1198,15 +1296,15 @@ input:focus-visible {
   transform: translate(-1px, -1px);
   box-shadow: 3px 3px 0 0 var(--shadow-ink);
 }
-.side ul.members,
-.side ul.picks,
-.side ul.opens {
+.overlay-panel ul.members,
+.overlay-panel ul.picks,
+.overlay-panel ul.opens {
   display: flex;
   flex-direction: column;
   gap: 6px;
   margin: 0 0 8px;
 }
-.side ul.members li.member {
+.overlay-panel ul.members li.member {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1247,8 +1345,8 @@ input:focus-visible {
 .add-member .row {
   margin-top: 8px;
 }
-.side ul.picks li,
-.side ul.opens li {
+.overlay-panel ul.picks li,
+.overlay-panel ul.opens li {
   margin: 0;
   padding: 0;
   background: none;

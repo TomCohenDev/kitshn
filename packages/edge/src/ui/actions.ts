@@ -1,4 +1,12 @@
-import { type Edit, isAppCard } from "../core/changes.ts";
+import {
+  type Edit,
+  RuleError,
+  applyChanges,
+  isAppCard,
+  refuseRaiseWhilePaused,
+  resolveEdits,
+  ruleViolation,
+} from "../core/changes.ts";
 import type { Command } from "../core/machine.ts";
 import {
   ADMIN_RESOURCE_ID,
@@ -13,6 +21,7 @@ import {
   circlesHolding,
   shareKey,
 } from "../core/model.ts";
+import { placeInside } from "../core/place.ts";
 import type { MachineView } from "../core/protocol.ts";
 import { KINDS } from "./kinds.ts";
 import type { Selection } from "./Map.tsx";
@@ -28,6 +37,12 @@ export type Action = {
   /** One sentence: what happens. */
   readonly tip: string;
   readonly danger?: true;
+  /** More words that the palette search finds, such as the words of an older label. */
+  readonly keywords?: string;
+  /** The choice of a group of options, such as a level, that is the current one (a radio item). */
+  readonly checked?: boolean;
+  /** Why kitshn refuses this action now; the menu shows it disabled with this as its tooltip. */
+  readonly refused?: string;
 } & ({ readonly run: () => void } | { readonly items: ReadonlyArray<Action> });
 
 /** Groups that the menu splits with a separator. */
@@ -96,6 +111,51 @@ export function levelEdit(state: State, resource: Resource, circle: Circle, leve
   };
 }
 
+/** The reason why kitshn refuses these edits (K-105, K-521, K-1504), or null. The server checks the same. */
+export function refusal(state: State, edits: ReadonlyArray<Edit>): string | null {
+  try {
+    const after = applyChanges(state, resolveEdits(state, edits));
+    refuseRaiseWhilePaused(state, after);
+    return ruleViolation(after);
+  } catch (error) {
+    if (error instanceof RuleError) return error.message;
+    throw error;
+  }
+}
+
+/** K-511: the edit that shares or unshares a card without a drag, or why no spot on the map fits. */
+export function reshareEdits(
+  state: State,
+  resource: Resource,
+  circle: Circle,
+  share: boolean,
+): { readonly edits: Array<Edit> } | { readonly refused: string } {
+  const wanted = new Set(circlesHolding(state, resource.id).map((held) => held.id));
+  if (share) wanted.add(circle.id);
+  else wanted.delete(circle.id);
+  const to = placeInside(state, state.places.get(resource.id) ?? { x: circle.x, y: circle.y }, wanted);
+  if (!to)
+    return {
+      refused: `No spot on the map is inside exactly those circles. Move "${circle.name}" so it overlaps the others, or drag the card.`,
+    };
+  // A stacked card takes its stack along (K-521); resolveEdits adds its mates.
+  const edits: Array<Edit> = [{ _tag: "place", id: resource.id, after: to }];
+  const refused = refusal(state, edits);
+  return refused ? { refused } : { edits };
+}
+
+const refusedBy = (state: State, edits: ReadonlyArray<Edit>) => {
+  const refused = refusal(state, edits);
+  return refused ? { refused } : {};
+};
+
+/** The first card of a stack; a stack always holds two or more (K-521). */
+const firstOf = (stack: Stack): string => {
+  const first = stack.members[0];
+  if (first === undefined) throw new Error(`The stack ${stack.id} has no card.`);
+  return first;
+};
+
 const ownStack = (state: State, id: string): Stack | undefined =>
   [...state.stacks.values()].find((stack) => stack.members.includes(id));
 
@@ -113,12 +173,16 @@ function shareActions(state: State, h: ActionHandlers, resource: Resource): Arra
             id: "share",
             label: "Share with",
             tip: `Put ${resource.name} where one more circle holds it, without a drag.`,
-            items: others.map((circle) => ({
-              id: `share:${circle.id}`,
-              label: circle.name,
-              tip: `Share ${resource.name} with ${circle.name} at ${circle.level}. Its other circles stay.`,
-              run: () => h.reshare(resource, circle, true),
-            })),
+            items: others.map((circle) => {
+              const plan = reshareEdits(state, resource, circle, true);
+              return {
+                id: `share:${circle.id}`,
+                label: circle.name,
+                tip: `Share ${resource.name} with ${circle.name} at ${circle.level}. Its other circles stay.`,
+                ...("refused" in plan ? { refused: plan.refused } : {}),
+                run: () => h.reshare(resource, circle, true),
+              };
+            }),
           },
         ]
       : []),
@@ -128,12 +192,16 @@ function shareActions(state: State, h: ActionHandlers, resource: Resource): Arra
             id: "unshare",
             label: "Unshare from",
             tip: `Move ${resource.name} out of one circle, without a drag. Its other circles stay.`,
-            items: held.map((circle) => ({
-              id: `unshare:${circle.id}`,
-              label: circle.name,
-              tip: `Move ${resource.name} out of ${circle.name}. Its other circles stay.`,
-              run: () => h.reshare(resource, circle, false),
-            })),
+            items: held.map((circle) => {
+              const plan = reshareEdits(state, resource, circle, false);
+              return {
+                id: `unshare:${circle.id}`,
+                label: circle.name,
+                tip: `Move ${resource.name} out of ${circle.name}. Its other circles stay.`,
+                ...("refused" in plan ? { refused: plan.refused } : {}),
+                run: () => h.reshare(resource, circle, false),
+              };
+            }),
           },
         ]
       : []),
@@ -152,7 +220,9 @@ function levelActions(state: State, h: ActionHandlers, resource: Resource): Arra
       tip: `Give ${resource.name} its own level in ${circle.name}, or follow the circle.`,
       items: [null, ...levels].map((level) => ({
         id: `level:${circle.id}:${level ?? "default"}`,
-        label: `${level ?? `default (${circle.level})`}${level === current ? " ✓" : ""}`,
+        label: level ?? `default (${circle.level})`,
+        checked: level === current,
+        ...(level === current ? {} : refusedBy(state, [levelEdit(state, resource, circle, level)])),
         tip:
           level === null
             ? `Default: ${resource.name} follows the level of ${circle.name}, now ${circle.level}.`
@@ -245,7 +315,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
                 id: `add-to-stack:${other.id}`,
                 label: other.name,
                 tip: `Put ${resource.name} into ${other.name}. It gets the circles of ${other.name}.`,
-                run: () => h.stackOnto([resource.id], other.members[0] ?? ""),
+                run: () => h.stackOnto([resource.id], firstOf(other)),
               })),
             },
           ]
@@ -256,6 +326,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
               id: "tray",
               label: "Move to tray",
               tip: "Take the card off the map. It leaves every circle, so it is private. Undo puts it back.",
+              ...refusedBy(state, [{ _tag: "place", id: resource.id, after: null }]),
               run: () => h.toTray(resource),
             },
           ]
@@ -303,7 +374,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
 /** K-521, K-522: a closed stack of the owner. Shares go through its first card, which takes the stack along. */
 export function stackActions(ctx: ActionContext, h: ActionHandlers, stack: Stack): ActionGroups {
   const { state } = ctx;
-  const first = state.resources.get(stack.members[0] ?? "");
+  const first = state.resources.get(firstOf(stack));
   const members = stack.members.flatMap((id) => state.resources.get(id) ?? []);
   return [
     [
@@ -343,7 +414,7 @@ export function stackActions(ctx: ActionContext, h: ActionHandlers, stack: Stack
   ].filter((group) => group.length > 0);
 }
 
-export function circleActions(_ctx: ActionContext, h: ActionHandlers, circle: Circle): ActionGroups {
+export function circleActions(ctx: ActionContext, h: ActionHandlers, circle: Circle): ActionGroups {
   return [
     [
       {
@@ -369,6 +440,7 @@ export function circleActions(_ctx: ActionContext, h: ActionHandlers, circle: Ci
             label: "Delete circle",
             tip: `Delete ${circle.name} at once. Its cards stay where they are and lose this share; Undo brings it back.`,
             danger: true as const,
+            ...refusedBy(ctx.state, [{ _tag: "circle", id: circle.id, after: null }]),
             run: () => h.deleteCircle(circle),
           },
         ],
@@ -389,6 +461,7 @@ export function mapActions(_ctx: ActionContext, h: ActionHandlers, at: Point | n
       {
         id: "upload",
         label: `Upload a page or a file${here}`,
+        keywords: "upload html",
         tip: at
           ? "Upload files to this spot: they land in exactly the circles here, so they get those shares."
           : "Upload files: they wait in the tray, private.",
@@ -397,12 +470,14 @@ export function mapActions(_ctx: ActionContext, h: ActionHandlers, at: Point | n
       {
         id: "add-site",
         label: "Add a site",
+        keywords: "live from a machine or static from a repo",
         tip: "Share a local server of a machine, or set up a static site from a repo. Its card starts in the tray, private.",
         run: h.addSite,
       },
       {
         id: "add-machine",
         label: "Add a machine",
+        keywords: "join code",
         tip: "Make a join command for a new machine. Its card starts in the tray, private.",
         run: h.addMachine,
       },
@@ -435,16 +510,44 @@ export interface PaletteEntry {
   readonly label: string;
   readonly tip: string;
   readonly danger?: true;
+  readonly keywords?: string;
   readonly run: () => void;
 }
 
-/** One entry per action, with sub-lists spelled out and the item name in front, so a search finds them. */
+/**
+ * One entry per action, with sub-lists spelled out and the item name in front, so a search finds them. A
+ * refused action and the current choice of a radio group have no entry: there is nothing to run.
+ */
 export function flatten(groups: ActionGroups, prefix: string): Array<PaletteEntry> {
   const walk = (action: Action, label: string): Array<PaletteEntry> =>
-    "items" in action
-      ? action.items.flatMap((item) => walk(item, `${label}: ${item.label}`))
-      : [{ label, tip: action.tip, run: action.run, ...(action.danger ? { danger: action.danger } : {}) }];
+    action.refused !== undefined || action.checked
+      ? []
+      : "items" in action
+        ? action.items.flatMap((item) => walk(item, `${label}: ${item.label}`))
+        : [
+            {
+              label,
+              tip: action.tip,
+              run: action.run,
+              ...(action.danger ? { danger: action.danger } : {}),
+              ...(action.keywords ? { keywords: action.keywords } : {}),
+            },
+          ];
   return groups.flat().flatMap((action) => walk(action, prefix ? `${prefix} · ${action.label}` : action.label));
+}
+
+/**
+ * What Enter runs in the palette: the active entry, unless it is dangerous and the owner did not pick it with
+ * the arrows or the pointer while other entries match. Then Enter does nothing, so a typo never removes.
+ */
+export function paletteEnter(
+  matches: ReadonlyArray<Pick<PaletteEntry, "danger">>,
+  active: number,
+  picked: boolean,
+): number | null {
+  const entry = matches[active];
+  if (!entry) return null;
+  return entry.danger && matches.length > 1 && !picked ? null : active;
 }
 
 /** K-511: every card, stack and circle action, after the actions of the whole map. */

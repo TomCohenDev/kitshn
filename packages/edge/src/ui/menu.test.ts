@@ -61,8 +61,12 @@ describe("the ⋯ menu from the keyboard", () => {
     await key("ArrowDown");
     expect(focused()).toBe("Share with▸");
     await press();
-    // A sub-list keeps the menu open and starts with Back.
-    expect(focused()).toBe("◂ Share with");
+    // A sub-list keeps the menu open and starts with Back; Escape goes back to the item it came from.
+    expect(focused()).toBe("◂ Back");
+    expect(document.activeElement?.hasAttribute("aria-haspopup")).toBe(false);
+    await key("Escape");
+    expect(focused()).toBe("Share with▸");
+    await press();
     await key("ArrowDown");
     await press();
     expect(ran).toEqual(["share:her"]);

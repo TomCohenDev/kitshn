@@ -524,13 +524,7 @@ export class Kitshn extends DurableObject<Env> {
       if (change._tag === "place")
         for (const id of this.stuckShares) if (id.startsWith(`${change.id}/`)) this.stuckShares.delete(id);
     }
-    this.revisions = [
-      { id, at: Date.now(), actor, summary, undoes, undoneBy: null, undoable: changes.length > 0 },
-      ...this.revisions.map((revision) =>
-        revision.id === undoes ? { ...revision, undoneBy: id } : revision,
-      ),
-    ].slice(0, RECENT_REVISIONS);
-    this.broadcast();
+    this.showRevision({ id, at: Date.now(), actor, summary, undoes, undoneBy: null, undoable: changes.length > 0 });
     void this.scheduleAlarm();
     return id;
   }
@@ -2411,10 +2405,7 @@ export class Kitshn extends DurableObject<Env> {
     // K-110: the Worker checks pages and files itself, so it refuses every login from before this second.
     this.setMeta("signed_out_at", String(Math.floor(Date.now() / 1000) * 1000));
     // K-110: no confirm in the map, so History records the start before any Cloudflare call, and the outcome.
-    this.recordRevision(
-      caller.actor,
-      "Started sign-out everywhere: page and file logins end now; kitshn asks Cloudflare to end Access sessions",
-    );
+    this.recordRevision(caller.actor, "Sign out everywhere: kitshn refuses older page and file logins");
     return this.finishSignOut(caller, (api) => this.revokeEverything(api));
   }
 
@@ -2474,9 +2465,14 @@ export class Kitshn extends DurableObject<Env> {
    */
   private recordRevision(actor: Actor, summary: string) {
     const id = this.insertRevision(actor, summary, [], null);
+    this.showRevision({ id, at: Date.now(), actor, summary, undoes: null, undoneBy: null, undoable: false });
+  }
+
+  /** Puts a new revision at the top of the in-memory History (K-519), marks what it undoes, and tells everyone. */
+  private showRevision(revision: RevisionView) {
     this.revisions = [
-      { id, at: Date.now(), actor, summary, undoes: null, undoneBy: null, undoable: false },
-      ...this.revisions,
+      revision,
+      ...this.revisions.map((old) => (old.id === revision.undoes ? { ...old, undoneBy: revision.id } : old)),
     ].slice(0, RECENT_REVISIONS);
     this.broadcast();
   }

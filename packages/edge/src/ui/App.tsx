@@ -39,7 +39,7 @@ import {
   MEMBER_HELP,
   SecretDialog,
 } from "./Circle.tsx";
-import { ActionMenu, TooltipLayer } from "./controls.tsx";
+import { ActionMenu, MoreButton, TooltipLayer } from "./controls.tsx";
 import {
   type ActionContext,
   type ActionHandlers,
@@ -48,7 +48,9 @@ import {
   actionsFor,
   REMOVE_APP_TIP,
   levelEdit,
+  paletteEnter,
   paletteEntries,
+  reshareEdits,
 } from "./actions.ts";
 import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
@@ -576,22 +578,13 @@ export function App() {
 
   /** K-511: share or unshare without a drag, by placing the card where exactly the wanted circles hold it. */
   const reshare = async (resource: Resource, circle: Circle, share: boolean) => {
-    const current = new Set(circlesHolding(state, resource.id).map((held) => held.id));
-    if (share) current.add(circle.id);
-    else current.delete(circle.id);
-    const from = state.places.get(resource.id) ?? { x: circle.x, y: circle.y };
-    const to = placeInside(state, from, current);
-    if (!to) {
-      showToast({
-        text: `No spot on the map is inside exactly those circles. Move "${circle.name}" so it overlaps the others, or drag the card.`,
-        error: true,
-        undo: null,
-      });
+    const plan = reshareEdits(state, resource, circle, share);
+    if ("refused" in plan) {
+      showToast({ text: plan.refused, error: true, undo: null });
       return;
     }
     // A stacked card takes its stack along (K-521), so the diff comes from the resolved changes.
-    const edits: Array<Edit> = [{ _tag: "place", id: resource.id, after: to }];
-    await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
+    await commit(plan.edits, shareDiff(state, applyChanges(state, resolveEdits(state, plan.edits))));
   };
 
   /** No confirm: Undo in the toast and in History brings the circle back. */
@@ -945,6 +938,14 @@ export function App() {
                   event.dataTransfer?.setData(TRAY_CARDS_TYPE, JSON.stringify(ids));
                   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
                 }}
+                onContextMenu={(event) => {
+                  // K-523: a tray card has the same menu as on the map, with Place on the map.
+                  event.preventDefault();
+                  setMenu({
+                    target: { _tag: "card", id: resource.id },
+                    anchor: { left: event.clientX, top: event.clientY, width: 0, height: 0 },
+                  });
+                }}
                 onClick={(event) => {
                   const cards = new Set(event.shiftKey ? selection.cards : []);
                   if (event.shiftKey && cards.has(resource.id)) cards.delete(resource.id);
@@ -956,6 +957,12 @@ export function App() {
                   {KINDS[resource.kind].icon} {resource.name}
                 </div>
                 <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
+                <div class="foot">
+                  <MoreButton
+                    name={resource.name}
+                    onOpen={(anchor) => setMenu({ target: { _tag: "card", id: resource.id }, anchor })}
+                  />
+                </div>
               </div>
             ))}
           </div>
@@ -1439,7 +1446,7 @@ function CardPanel(props: {
   version: string;
   onToast: (text: string, error: boolean) => void;
 }) {
-  const { resource, state } = props;
+  const { resource, state, machine } = props;
   const holding = circlesHolding(state, resource.id);
   const address = resource.addresses[0];
   return (
@@ -1541,13 +1548,13 @@ function CardPanel(props: {
           Remove app
         </button>
       ) : null}
-      {props.machine ? (
+      {machine ? (
         <MachinePanel
-          view={props.machine}
+          view={machine}
           version={props.version}
           jobs={props.jobs}
-          onRemove={() => props.machine && props.onRemoveMachine(props.machine)}
-          onRun={(command) => (props.machine ? props.onRunJob(props.machine, command) : Promise.resolve())}
+          onRemove={() => props.onRemoveMachine(machine)}
+          onRun={(command) => props.onRunJob(machine, command)}
           onToast={props.onToast}
         />
       ) : null}
@@ -1678,9 +1685,14 @@ function Palette(props: {
 }) {
   const [query, setQuery] = useState(props.initialQuery);
   const [active, setActive] = useState(0);
+  /** The owner moved to the active entry with the arrows, so Enter may run a dangerous one (paletteEnter). */
+  const [picked, setPicked] = useState(false);
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const matches = props.entries
-    .filter((entry) => words.every((word) => entry.label.toLowerCase().includes(word)))
+    .filter((entry) => {
+      const text = `${entry.label} ${entry.keywords ?? ""}`.toLowerCase();
+      return words.every((word) => text.includes(word));
+    })
     .slice(0, 50);
   const listId = useId();
   const run = (index: number) => {
@@ -1704,12 +1716,16 @@ function Palette(props: {
           onInput={(event) => {
             setQuery((event.target as HTMLInputElement).value);
             setActive(0);
+            setPicked(false);
           }}
           onKeyDown={(event) => {
             if (event.key === "ArrowDown") setActive(Math.min(active + 1, matches.length - 1));
             else if (event.key === "ArrowUp") setActive(Math.max(active - 1, 0));
-            else if (event.key === "Enter") run(active);
-            else return;
+            else if (event.key === "Enter") {
+              const index = paletteEnter(matches, active, picked);
+              if (index !== null) run(index);
+            } else return;
+            if (event.key !== "Enter") setPicked(true);
             event.preventDefault();
           }}
         />
@@ -1719,7 +1735,8 @@ function Palette(props: {
               key={entry.label}
               id={`${listId}-${index}`}
               role="option"
-              data-tip={entry.tip}
+              data-tip={entry.danger && matches.length > 1 ? `${entry.tip} Pick it with the arrows or a click; Enter alone does not run it.` : entry.tip}
+              data-danger={entry.danger || undefined}
               aria-selected={index === active}
               onClick={() => run(index)}
               onMouseEnter={() => setActive(index)}

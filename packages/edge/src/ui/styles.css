@@ -657,6 +657,10 @@ input[type="search"]::-webkit-search-cancel-button {
   border-color: var(--shadow-ink);
   border-left-width: 8px;
 }
+/* A dangerous palette entry runs only when picked (paletteEnter). */
+.dialog li[data-danger] {
+  color: var(--error-fg);
+}
 
 /* History */
 .history {
@@ -1100,7 +1104,7 @@ input:focus-visible {
   color: var(--select-fg);
   outline: none;
 }
-.menu-item:disabled {
+.menu-item:is(:disabled, [aria-disabled="true"]) {
   opacity: 0.55;
   cursor: default;
 }

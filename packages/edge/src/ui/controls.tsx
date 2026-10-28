@@ -176,18 +176,20 @@ export function Radio(props: ChoiceProps & { readonly name: string; readonly onS
   );
 }
 
-const ITEMS = '[role="menuitem"]:not(:disabled)';
+const ITEMS = '[role="menuitem"]:not(:disabled), [role="menuitemradio"]:not(:disabled)';
 
 /**
  * A menu in a portal next to `anchor` (a button's rect, or a zero-size rect at the pointer for a context
- * menu). It takes the focus, and gives it back on close. Arrows, Home, End and a first letter move; Enter
- * runs the item; Escape, Tab or a press outside closes it. A chosen item closes it too, except an item that
- * opens a sub-list.
+ * menu). It takes the focus (the item `focus` names, else the first), and gives it back on close. Arrows,
+ * Home, End and a first letter move; Enter runs the item; Escape goes `onBack` when it is set, else Escape,
+ * Tab or a press outside closes it. A chosen item closes it too, except one with `data-keep-open`.
  */
 export function Menu(props: {
   readonly label: string;
   readonly anchor: Rect;
   readonly onClose: () => void;
+  readonly onBack?: () => void;
+  readonly focus?: string;
   readonly children: ComponentChildren;
 }) {
   const menu = useRef<HTMLDivElement>(null);
@@ -211,7 +213,8 @@ export function Menu(props: {
 
   useEffect(() => {
     const before = document.activeElement;
-    items()[0]?.focus();
+    const list = items();
+    (list.find((item) => item.dataset["key"] === props.focus) ?? list[0])?.focus();
     const outside = (event: PointerEvent) => {
       if (!menu.current?.contains(event.target as Node | null)) onClose.current();
     };
@@ -233,7 +236,8 @@ export function Menu(props: {
         if (event.key === "Escape" || event.key === "Tab") {
           event.preventDefault();
           event.stopPropagation();
-          onClose.current();
+          if (event.key === "Escape" && props.onBack) props.onBack();
+          else onClose.current();
           return;
         }
         const list = items();
@@ -248,7 +252,7 @@ export function Menu(props: {
       }}
       onClick={(event) => {
         const item = (event.target as Element).closest(ITEMS);
-        if (item && !item.hasAttribute("aria-haspopup")) onClose.current();
+        if (item && !item.hasAttribute("data-keep-open")) onClose.current();
       }}
     >
       {props.children}
@@ -264,23 +268,36 @@ export function MenuItem(props: {
   readonly keys?: string;
   readonly danger?: boolean;
   readonly disabled?: boolean;
-  /** The item opens a sub-list in the same menu, so a choice keeps the menu open. */
+  /** The item opens a sub-list in the same menu. */
   readonly opens?: boolean;
+  /** A choice keeps the menu open (an item that opens a sub-list, or Back). */
+  readonly keepOpen?: boolean;
+  /** A radio item of a group of options; true marks the current one. */
+  readonly checked?: boolean;
+  /** kitshn refuses it now: it stays focusable so its tooltip says why, and a choice does nothing. */
+  readonly unavailable?: boolean;
+  /** Names the item for `Menu`'s `focus`. */
+  readonly itemKey?: string;
   readonly children: ComponentChildren;
 }) {
   return (
     <button
       type="button"
-      role="menuitem"
+      role={props.checked === undefined ? "menuitem" : "menuitemradio"}
+      aria-checked={props.checked}
       tabIndex={-1}
       class="menu-item"
       aria-haspopup={props.opens ? "menu" : undefined}
+      aria-disabled={props.unavailable || undefined}
+      data-keep-open={props.keepOpen || props.opens || props.unavailable || undefined}
+      data-key={props.itemKey}
       data-danger={props.danger || undefined}
       data-tip={props.tip}
       disabled={props.disabled}
       onClick={props.onSelect}
     >
       {props.children}
+      {props.checked ? <span class="menu-key">✓</span> : null}
       {props.keys ? <span class="menu-key">{props.keys}</span> : null}
     </button>
   );
@@ -292,7 +309,8 @@ export function MenuSep() {
 
 /**
  * K-523: a menu of action groups. An action with a sub-list shows that list in the same menu, with "Back"
- * first, so the menu needs no second layer.
+ * first, so the menu needs no second layer. The open sub-list is kept by id and read from the current
+ * groups, so it never runs actions of an older state.
  */
 export function ActionMenu(props: {
   readonly label: string;
@@ -300,25 +318,54 @@ export function ActionMenu(props: {
   readonly groups: ActionGroups;
   readonly onClose: () => void;
 }) {
-  const [open, setOpen] = useState<Extract<Action, { items: unknown }> | null>(null);
-  const item = (action: Action) =>
-    "items" in action ? (
-      <MenuItem key={action.id} tip={action.tip} danger={action.danger ?? false} opens onSelect={() => setOpen(action)}>
+  const [path, setPath] = useState<{ readonly open: string | null; readonly from: string | null }>({
+    open: null,
+    from: null,
+  });
+  const open = props.groups
+    .flat()
+    .find((action): action is Extract<Action, { items: unknown }> => action.id === path.open && "items" in action);
+  const back = () => setPath({ open: null, from: open?.id ?? null });
+  const item = (action: Action) => {
+    const shared = {
+      key: action.id,
+      itemKey: action.id,
+      // A refused action stays visible, so its tooltip says why it does not run.
+      tip: action.refused ?? action.tip,
+      danger: action.danger ?? false,
+      ...(action.checked === undefined ? {} : { checked: action.checked }),
+    };
+    if (action.refused !== undefined)
+      return (
+        <MenuItem {...shared} unavailable onSelect={() => undefined}>
+          {action.label}
+        </MenuItem>
+      );
+    return "items" in action ? (
+      <MenuItem {...shared} opens onSelect={() => setPath({ open: action.id, from: null })}>
         {action.label}
         <span class="menu-key">▸</span>
       </MenuItem>
     ) : (
-      <MenuItem key={action.id} tip={action.tip} danger={action.danger ?? false} onSelect={action.run}>
+      <MenuItem {...shared} onSelect={action.run}>
         {action.label}
       </MenuItem>
     );
+  };
   return (
-    // A new key mounts a new menu, so the focus moves to the first item of the sub-list.
-    <Menu key={open?.id ?? ""} label={open ? `${props.label}: ${open.label}` : props.label} anchor={props.anchor} onClose={props.onClose}>
+    // A new key mounts a new menu, so the focus moves into the list that shows.
+    <Menu
+      key={open?.id ?? ""}
+      label={open ? `${props.label}: ${open.label}` : props.label}
+      anchor={props.anchor}
+      onClose={props.onClose}
+      {...(open ? { onBack: back } : {})}
+      {...(path.from ? { focus: path.from } : {})}
+    >
       {open ? (
         <>
-          <MenuItem tip="Back to the first list." opens onSelect={() => setOpen(null)}>
-            ◂ {open.label}
+          <MenuItem tip={`Back to the actions; leaves ${open.label}.`} keepOpen onSelect={back}>
+            <span aria-hidden="true">◂ </span>Back
           </MenuItem>
           <MenuSep />
           {open.items.map(item)}
@@ -346,7 +393,11 @@ export function MoreButton(props: { readonly name: string; readonly onOpen: (anc
       data-tip={`Actions for ${props.name}. Right-click or a long press opens them too.`}
       // The map starts a drag on a press; this button only opens the menu.
       onPointerDown={(event) => event.stopPropagation()}
-      onClick={(event) => props.onOpen(event.currentTarget.getBoundingClientRect())}
+      onClick={(event) => {
+        // A tray card selects itself on a click; this click only opens the menu.
+        event.stopPropagation();
+        props.onOpen(event.currentTarget.getBoundingClientRect());
+      }}
     >
       ⋯
     </button>

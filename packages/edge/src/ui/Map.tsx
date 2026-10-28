@@ -1,4 +1,4 @@
-import { useRef, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { type Change, type Edit, type ShareDiff, applyChanges, shareDiff } from "../core/changes.ts";
 import {
   type Circle,
@@ -141,10 +141,22 @@ export function MapView(props: Props) {
   /** K-523: a right press or a touch that may open the context menu. */
   const hold = useRef<{ press: Press; readonly target: MenuTarget; timer: number | null } | null>(null);
   /**
-   * A right release that the browser's `contextmenu` follows (Windows, Linux): that event opens the menu,
-   * unless the press panned. On macOS `contextmenu` comes before the release instead, while `hold` is set.
+   * A right release that the browser's `contextmenu` follows (Windows): that event opens the menu, unless the
+   * press panned. On macOS and Linux `contextmenu` comes with the press instead, while `hold` is set.
    */
   const rightRelease = useRef<{ readonly panned: boolean } | null>(null);
+  useEffect(() => {
+    // A press anywhere else, or leaving the window, ends a right release that no `contextmenu` followed.
+    const forget = () => {
+      rightRelease.current = null;
+    };
+    addEventListener("pointerdown", forget, true);
+    addEventListener("blur", forget);
+    return () => {
+      removeEventListener("pointerdown", forget, true);
+      removeEventListener("blur", forget);
+    };
+  }, []);
   const viewport = useRef<HTMLDivElement>(null);
   /** The cards that had a frame in the last render (live previews keep them, see below). */
   const previewed = useRef<ReadonlySet<string>>(new Set());
@@ -222,7 +234,8 @@ export function MapView(props: Props) {
   const onPointerDown = (event: PointerEvent) => {
     const target = event.target as HTMLElement;
     const world = toWorld(event.clientX, event.clientY);
-    rightRelease.current = null;
+    // A new press ends an older one, also a touch whose release never came.
+    endPress();
     try {
       (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
     } catch {

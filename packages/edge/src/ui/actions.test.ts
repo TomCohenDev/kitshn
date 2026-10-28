@@ -18,6 +18,7 @@ import {
   actionsFor,
   flatten,
   levelEdit,
+  paletteEnter,
   paletteEntries,
 } from "./actions.ts";
 
@@ -42,7 +43,7 @@ const her: Circle = {
   match: "any",
   needsPasskey: false,
   endsAt: null,
-  x: 2000,
+  x: -400,
   y: 0,
   r: 200,
 };
@@ -59,14 +60,19 @@ function context(version = "0123456789ab"): ActionContext {
     card("loose", "file"),
   ];
   const state: State = {
-    circles: new Map([...s.circles, her].map((circle) => [circle.id, circle])),
+    // Everyone overlaps Owner, so a card fits into both; Her overlaps Owner on the other side.
+    circles: new Map(
+      [...s.circles.map((circle) => (circle.id === EVERYONE_CIRCLE_ID ? { ...circle, x: 500 } : circle)), her].map(
+        (circle) => [circle.id, circle],
+      ),
+    ),
     resources: new Map(resources.map((resource) => [resource.id, resource])),
     places: new Map([
       ...s.places,
       ["riffle", { x: 0, y: -200 }],
       ["vps", { x: 10, y: 10 }],
-      ["a", { x: 2000, y: 0 }],
-      ["b", { x: 2000, y: 0 }],
+      ["a", { x: -500, y: 0 }],
+      ["b", { x: -500, y: 0 }],
     ]),
     shareSettings: new Map(),
     stacks: new Map([["s1", { id: "s1", name: "Docs", members: ["a", "b"] }]]),
@@ -205,12 +211,53 @@ describe("the palette", () => {
     const palette = new Set(paletteEntries(ctx, handlers).map((entry) => entry.label));
     for (const id of ctx.state.resources.keys()) {
       const groups = actionsFor(ctx, handlers, { _tag: "card", id });
+      // flatten leaves out refused actions, in the menu and in the palette alike.
       for (const entry of flatten(groups ?? [], "")) expect([...palette].some((label) => label.endsWith(entry.label))).toBe(true);
     }
     // K-511: the words of "Share <card> with <circle>" find the entry.
     expect([...palette].filter((label) => ["share", "riffle", "her"].every((word) => label.toLowerCase().includes(word)))).toEqual([
       "📦 riffle · Share with: Her",
     ]);
+  });
+});
+
+describe("refused actions", () => {
+  it("shows an action that the rules refuse as refused, and leaves it out of the palette", () => {
+    const { handlers, calls } = recorder();
+    const ctx = context();
+    // K-105: the admin card stays in the Owner circle, so the menu says why before anything is sent.
+    const unshare = items(find(actionsFor(ctx, handlers, { _tag: "card", id: ADMIN_RESOURCE_ID }), "unshare"));
+    expect(unshare.find((item) => item.id === `unshare:${OWNER_CIRCLE_ID}`)?.refused).toMatch(/admin/);
+    expect(paletteEntries(ctx, handlers).map((entry) => entry.label)).not.toContain("🔐 kitshn admin · Unshare from: Owner");
+    // A card in Everyone only cannot also be in Her: the two circles do not overlap.
+    const loose = { ...ctx, state: { ...ctx.state, places: new Map([...ctx.state.places, ["loose", { x: 700, y: 0 }]]) } };
+    const share = items(find(actionsFor(loose, handlers, { _tag: "card", id: "loose" }), "share"));
+    expect(share.find((item) => item.id === "share:her")?.refused).toMatch(/No spot/);
+    expect(calls).toEqual([]);
+  });
+
+  it("marks the current level as the checked radio item", () => {
+    const groups = actionsFor(context(), recorder().handlers, { _tag: "card", id: "vps" });
+    const levels = items(find(groups, `level:${OWNER_CIRCLE_ID}`));
+    expect(levels.filter((item) => item.checked).map((item) => item.id)).toEqual([`level:${OWNER_CIRCLE_ID}:default`]);
+  });
+});
+
+describe("Enter in the palette", () => {
+  const safe = {};
+  const danger = { danger: true as const };
+  it("never runs a dangerous top match from Enter alone while other entries match", () => {
+    expect(paletteEnter([danger, safe], 0, false)).toBeNull();
+    expect(paletteEnter([danger, safe], 0, true)).toBe(0);
+    expect(paletteEnter([danger], 0, false)).toBe(0);
+    expect(paletteEnter([safe, danger], 0, false)).toBe(0);
+    expect(paletteEnter([], 0, false)).toBeNull();
+  });
+
+  it("finds an action by the words of its older label", () => {
+    const entries = paletteEntries(context(), recorder().handlers);
+    expect(entries.find((entry) => entry.label === "Add a machine")?.keywords).toContain("join");
+    expect(entries.find((entry) => entry.label === "Add a site")?.keywords).toContain("static");
   });
 });
 

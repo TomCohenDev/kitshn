@@ -154,6 +154,8 @@ const SHELF_KEY = "kitshn.shelf";
 const FIT_MIN_SCALE = 0.85;
 const wideScreen = () => innerWidth > 720;
 const UNDO_MS = 10_000;
+/** A press on a toast button this soon after it shows is the second press of the button that made it; it does nothing. */
+const TOAST_GUARD_MS = 500;
 
 interface Toast {
   readonly text: string;
@@ -295,6 +297,7 @@ export function App() {
   const [shelfChoice, setShelfChoice] = useState(() => localStorage.getItem(SHELF_KEY));
   const [refusal, setRefusal] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
+  const toastShownAt = useRef(0);
   const fitRef = useRef<(() => void) | null>(null);
 
   // The map shows held edits on top of the server state, so a drop never jumps back (see held.ts).
@@ -647,6 +650,7 @@ export function App() {
   };
 
   const showToast = (next: Toast) => {
+    toastShownAt.current = Date.now();
     setToast(next);
     if (toastTimer.current !== null) clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(null), UNDO_MS);
@@ -1777,6 +1781,7 @@ export function App() {
               class="btn primary"
               data-tip="Undo: take this change back."
               onClick={() => {
+                if (Date.now() - toastShownAt.current < TOAST_GUARD_MS) return;
                 const revisions = [...(toast.undo === null ? [] : [toast.undo]), ...(toast.alsoUndo ?? [])];
                 setToast(null);
                 void (async () => {
@@ -1792,6 +1797,7 @@ export function App() {
               class="btn resume"
               data-tip={toast.action.tip}
               onClick={() => {
+                if (Date.now() - toastShownAt.current < TOAST_GUARD_MS) return;
                 setToast(null);
                 toast.action?.run();
               }}

@@ -40,7 +40,7 @@ import {
   MEMBER_HELP,
   SecretDialog,
 } from "./Circle.tsx";
-import { ActionMenu, MoreButton, OverlayPanel, TooltipLayer } from "./controls.tsx";
+import { ActionMenu, Menu, MenuItem, MoreButton, OverlayPanel, TooltipLayer } from "./controls.tsx";
 import {
   type ActionContext,
   type ActionHandlers,
@@ -86,10 +86,9 @@ import {
   useStore,
 } from "./store.ts";
 
-const VIEW_KEY = "kitshn.view";
 const PREVIEWS_KEY = "kitshn.previews";
 /**
- * On a wide screen the fit and a saved view stay at least this close, so card names stay readable on a
+ * On a wide screen the fit stays at least this close, so card names stay readable on a
  * laptop. A bigger map is then centred, not shown whole; the wheel still zooms out to 0.15.
  */
 const FIT_MIN_SCALE = 0.85;
@@ -104,16 +103,8 @@ interface Toast {
   readonly alsoUndo?: ReadonlyArray<number>;
 }
 
-const loadView = (): View => {
-  try {
-    const saved = JSON.parse(localStorage.getItem(VIEW_KEY) ?? "null") as View | null;
-    if (saved && [saved.x, saved.y, saved.s].every(Number.isFinite))
-      return wideScreen() ? { ...saved, s: Math.max(saved.s, FIT_MIN_SCALE) } : saved;
-  } catch {
-    // A broken saved view falls back to the default.
-  }
-  return { x: innerWidth / 2 - 200, y: innerHeight / 2, s: 1 };
-};
+/** The view until the first fit (K-514). */
+const START_VIEW: View = { x: 0, y: 0, s: 1 };
 
 const CONNECTION_TIPS: Record<Connection, string> = {
   connecting: "Connecting: the map opens a connection to kitshn.",
@@ -162,7 +153,9 @@ export function App() {
   const store = useStore();
   const [selection, setSelection] = useState<Selection>({ cards: new Set(), circle: null });
   const [hidden, setHidden] = useState<ReadonlySet<ResourceKind>>(new Set());
-  const [view, setView] = useState<View>(loadView);
+  const [view, setView] = useState<View>(START_VIEW);
+  /** K-514: once the owner pans or zooms, the map stops fitting on its own until the next load. */
+  const userMoved = useRef(false);
   const [openStacks, setOpenStacks] = useState<ReadonlySet<string>>(new Set());
   const [toast, setToast] = useState<Toast | null>(null);
   /** The palette's first query, or null while it is closed. */
@@ -189,8 +182,10 @@ export function App() {
   /** K-1508: `itemKey`s of the cards and circles that a History row highlights now. */
   const [flash, setFlash] = useState<ReadonlySet<string>>(new Set());
   const flashTimer = useRef<number | null>(null);
+  const escapeRef = useRef<() => void>(() => undefined);
+  /** The anchor of the open "Show" menu of kinds, or null. */
+  const [showMenu, setShowMenu] = useState<Rect | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
-  const [fitted, setFitted] = useState(() => localStorage.getItem(VIEW_KEY) !== null);
   const toastTimer = useRef<number | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
 
@@ -263,10 +258,7 @@ export function App() {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setPalette((open) => (open === null ? "" : null));
-      } else if (event.key === "Escape") {
-        setPalette(null);
-        setSelection({ cards: new Set(), circle: null });
-      }
+      } else if (event.key === "Escape") escapeRef.current();
     };
     // A file dropped outside the map would make the browser open it and leave kitshn.
     const keepFiles = (event: DragEvent) => {
@@ -292,15 +284,22 @@ export function App() {
     }
   }, [store.connection, store.snapshot]);
 
-  const changeView = (next: View) => {
-    setView(next);
-    localStorage.setItem(VIEW_KEY, JSON.stringify(next));
+  const changeView = (next: View) => setView(next);
+
+  /** The control that opened the panel; Close and Escape give it the focus back. */
+  const opener = useRef<HTMLElement | null>(null);
+  const rememberOpener = () => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body) opener.current = active;
   };
 
   /** Selects cards or a circle; a selection shows its details in the panel. */
   const select = (next: Selection) => {
     setSelection(next);
-    if (next.cards.size > 0 || next.circle !== null) setPanel("details");
+    if (next.cards.size > 0 || next.circle !== null) {
+      if (panel !== "details") rememberOpener();
+      setPanel("details");
+    }
   };
 
   /**
@@ -567,6 +566,34 @@ export function App() {
     showToast({ text: [`Removed ${resource.name}.`, ...result.notes].join(" "), error: false, undo: result.revision });
   };
 
+  const fullPage = route.tab !== "map";
+  const shownPanel: PanelKind | null = fullPage ? route.tab : panel;
+  const large = fullPage || (panel === "details" && detailsLarge);
+  /** The panel floats over the map, so the map keeps its width and fit and pan leave its part free. */
+  const floating = shownPanel !== null && !large;
+
+  const ready = state !== null;
+  // K-514: fits on load and when the panel opens or closes, until the owner pans or zooms.
+  useEffect(() => {
+    if (ready && !userMoved.current) fitRef.current?.();
+  }, [ready, floating]);
+
+  /** K-519: the toolbar's height, for the tray and the full view below it (styles.css `--bar-bottom`). */
+  const barRef = useMemo(() => {
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries)
+        document.documentElement.style.setProperty(
+          "--bar-bottom",
+          `${Math.round(entry.target.getBoundingClientRect().bottom)}px`,
+        );
+    });
+    return (element: HTMLElement | null) => {
+      if (!element) return;
+      observer.observe(element);
+      return () => observer.unobserve(element);
+    };
+  }, []);
+
   if (!state || !store.snapshot) {
     return (
       <div class="center">
@@ -584,10 +611,6 @@ export function App() {
     );
   }
 
-  if (!fitted) {
-    setFitted(true);
-    queueMicrotask(() => fitRef.current?.());
-  }
   const tray = [...state.resources.values()].filter((resource) => !state.places.has(resource.id));
   const shownTray = tray
     .filter((resource) =>
@@ -596,12 +619,6 @@ export function App() {
         .includes(trayFilter.trim().toLowerCase()),
     )
     .reverse();
-
-  const fullPage = route.tab !== "map";
-  const shownPanel: PanelKind | null = fullPage ? route.tab : panel;
-  const large = fullPage || (panel === "details" && detailsLarge);
-  /** The panel floats over the map, so the map keeps its width and fit and pan leave its part free. */
-  const floating = shownPanel !== null && !large;
 
   /** The part of the screen where the map shows clear of the toolbar, the tray and a floating panel. */
   const mapArea = (withPanel: boolean): Box =>
@@ -648,6 +665,8 @@ export function App() {
       setPanel("history");
       location.hash = "map";
     }
+    // A pan to chosen items is the owner's view now, so a panel that opens next does not fit over it.
+    userMoved.current = true;
     changeView(panInto(union(shown.map((entry) => entry.box)), mapArea(true), view));
     setFlash(new Set(shown.map((entry) => itemKey(entry.item))));
     if (flashTimer.current !== null) clearTimeout(flashTimer.current);
@@ -656,6 +675,7 @@ export function App() {
 
   /** A toolbar tab opens its panel over the map; Enlarge in the panel opens the full view. */
   const openTab = (tab: "map" | Exclude<PanelKind, "details">) => {
+    rememberOpener();
     setPanel(tab === "map" ? "details" : tab);
     location.hash = "map";
   };
@@ -670,6 +690,14 @@ export function App() {
     setPanel(null);
     setDetailsLarge(false);
     if (fullPage) location.hash = "map";
+    if (opener.current?.isConnected) opener.current.focus();
+  };
+
+  // Escape closes the palette, then clears a selection, then closes the panel.
+  escapeRef.current = () => {
+    if (palette !== null) setPalette(null);
+    else if (selection.cards.size > 0 || selection.circle !== null) setSelection({ cards: new Set(), circle: null });
+    else if (shownPanel !== null) closePanel();
   };
 
   /** A new circle at `at`, or in the middle of the view. */
@@ -778,7 +806,10 @@ export function App() {
           circle ? [headBox(circle, 0)] : [],
         ),
       ];
-      if (boxes.length > 0) changeView(panInto(union(boxes), mapArea(true), view));
+      if (boxes.length > 0) {
+        userMoved.current = true;
+        changeView(panInto(union(boxes), mapArea(true), view));
+      }
     },
     openAddress: (address) => void open(`https://${address}`, "_blank", "noreferrer"),
     copyAddress: (address) => void navigator.clipboard.writeText(`https://${address}`),
@@ -845,7 +876,10 @@ export function App() {
           onSelect={select}
           hidden={hidden}
           view={view}
-          onView={changeView}
+          onView={(next) => {
+            userMoved.current = true;
+            changeView(next);
+          }}
           panelLeft={floating && wideScreen() ? panelLeft() : null}
           flash={flash}
           openStacks={openStacks}
@@ -966,7 +1000,7 @@ export function App() {
           void uploadFiles(files, at);
         }}
       />
-      <header class={`bar${floating ? " beside-panel" : ""}`}>
+      <header class={`bar${floating ? " beside-panel" : ""}`} ref={barRef}>
         <h1>kitshn</h1>
         <div class="seg">
           {(["map", "machines", "library", "history"] as const).map((tab) => (
@@ -990,24 +1024,39 @@ export function App() {
         {route.tab === "map" ? (
           <>
             <span class="sep" />
-            {(Object.keys(RESOURCE_KINDS) as Array<ResourceKind>)
-              .filter((kind) => [...state.resources.values()].some((resource) => resource.kind === kind))
-              .map((kind) => (
-                <button
-                  key={kind}
-                  class="btn toggle"
-                  aria-pressed={!hidden.has(kind)}
-                  data-tip={`${hidden.has(kind) ? "Show" : "Hide"} ${KINDS[kind].label.toLowerCase()} on the map. Hidden kinds still count for their circles.`}
-                  onClick={() => {
-                    const next = new Set(hidden);
-                    if (next.has(kind)) next.delete(kind);
-                    else next.add(kind);
-                    setHidden(next);
-                  }}
-                >
-                  {KINDS[kind].icon} {KINDS[kind].label}
-                </button>
-              ))}
+            {/* K-501: one menu for the kinds, so the toolbar stays short and "Machines" names only the tab. */}
+            <button
+              type="button"
+              class="btn"
+              aria-haspopup="menu"
+              data-tip="Show or hide kinds of cards on the map. Hidden kinds still count for their circles."
+              onClick={(event) => setShowMenu(event.currentTarget.getBoundingClientRect())}
+            >
+              Show{hidden.size > 0 ? ` (${hidden.size} hidden)` : ""} ▾
+            </button>
+            {showMenu ? (
+              <Menu label="Show kinds on the map" anchor={showMenu} onClose={() => setShowMenu(null)}>
+                {(Object.keys(RESOURCE_KINDS) as Array<ResourceKind>)
+                  .filter((kind) => [...state.resources.values()].some((resource) => resource.kind === kind))
+                  .map((kind) => (
+                    <MenuItem
+                      key={kind}
+                      checkbox
+                      checked={!hidden.has(kind)}
+                      keepOpen
+                      tip={`${hidden.has(kind) ? "Show" : "Hide"} ${KINDS[kind].label.toLowerCase()} on the map.`}
+                      onSelect={() => {
+                        const next = new Set(hidden);
+                        if (next.has(kind)) next.delete(kind);
+                        else next.add(kind);
+                        setHidden(next);
+                      }}
+                    >
+                      {KINDS[kind].icon} {KINDS[kind].label}
+                    </MenuItem>
+                  ))}
+              </Menu>
+            ) : null}
             <span class="sep" />
             <button
               class="btn primary"

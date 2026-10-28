@@ -17,7 +17,7 @@ import {
   mergeMoves,
   mergedSummary,
   type StoredRevision,
-  undoItemAnswer,
+  undoAnswer,
   prepareUndo,
   undoTarget,
   refuseRaiseWhilePaused,
@@ -1027,7 +1027,14 @@ export class Kitshn extends DurableObject<Env> {
       const id = query.get("id");
       if ((kind !== "card" && kind !== "circle") || !id)
         return Response.json({ error: "Name the item with kind=card or kind=circle and an id." }, { status: 400 });
-      return Response.json(undoItemAnswer(this.state, this.storedRevisions(), caller.actor, { kind, id }));
+      return Response.json(undoAnswer(this.state, this.storedRevisions(), caller.actor, { item: { kind, id } }));
+    }
+    if (path === "/api/undo" && request.method === "GET") {
+      // K-1508: History asks once for the caller's newest row, by the same checks as the undo.
+      const revision = Number(new URL(request.url).searchParams.get("revision"));
+      if (!Number.isSafeInteger(revision) || revision <= 0)
+        return Response.json({ error: "Name the revision with revision=<id>." }, { status: 400 });
+      return Response.json(undoAnswer(this.state, this.storedRevisions(), caller.actor, { revision }));
     }
     const type = API_MESSAGES[path];
     if (type !== undefined) {

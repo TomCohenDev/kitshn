@@ -10,9 +10,7 @@ export const actorLabel = (actor: Actor) =>
 export const actorKey = (actor: Actor) =>
   actor._tag === "person" ? `person:${actor.email}` : actor._tag === "device" ? `device:${actor.clientId}` : "kitshn";
 
-const who = (actor: Actor, me: Actor) => (deepEqual(actor, me) ? "You" : actorLabel(actor));
-
-/** The first words of summaries that are a verb, so the sentence reads "<who> <verb> …". */
+/** The first words of summaries that are a verb, so a row under its actor reads "<verb> …". */
 const VERBS = new Set([
   "Added",
   "Changed",
@@ -75,13 +73,10 @@ function phrase(summary: string): string | null {
 }
 
 /**
- * A plain sentence for a revision, from its summary alone, so it adds no fact: "You shared tick3d with Everyone
- * at view". A summary of a shape that this does not know stays as it is after the actor.
+ * The text of a History row under its actor, from the summary alone, so it adds no fact: "shared tick3d with
+ * Everyone at view". A summary of a shape that this does not know stays as it is.
  */
-export function sentence(revision: Pick<RevisionView, "actor" | "summary">, me: Actor): string {
-  const said = phrase(revision.summary);
-  return said === null ? `${who(revision.actor, me)}: ${revision.summary}` : `${who(revision.actor, me)} ${said}`;
-}
+export const rowText = (summary: string): string => phrase(summary) ?? summary;
 
 export type Day = "Today" | "Yesterday" | "Older";
 
@@ -135,30 +130,12 @@ export function filterHistory(
   });
 }
 
-export type UndoState = { readonly allowed: true } | { readonly allowed: false; readonly reason: string };
-
 /**
- * K-1506: Undo of each History row, from the list alone: only the caller's own newest revision that changes
- * something and is not undone. kitshn still checks later revisions when the undo runs, and its toast says why.
+ * K-1506, K-1508: the one History row that can take Undo: the caller's own newest revision that changes
+ * something and is not undone. kitshn answers whether its undo works now (GET /api/undo).
  */
-export function undoStates(revisions: ReadonlyArray<RevisionView>, me: Actor): (revision: RevisionView) => UndoState {
-  const newest = revisions.find(
+export const undoableRow = (revisions: ReadonlyArray<RevisionView>, me: Actor): number | null =>
+  revisions.find(
     (revision) =>
       revision.undoable && revision.undoes === null && revision.undoneBy === null && deepEqual(revision.actor, me),
-  )?.id;
-  return (revision) =>
-    revision.id === newest
-      ? { allowed: true }
-      : {
-          allowed: false,
-          reason: !revision.undoable
-            ? "This records an action and changes nothing that Undo can reverse."
-            : revision.undoneBy !== null
-              ? `Undone already: #${revision.undoneBy} reverses it.`
-              : revision.undoes !== null
-              ? "This is an undo. Make the change again instead."
-              : !deepEqual(revision.actor, me)
-                ? "Only the one who made a change can undo it."
-                : `Only your newest change can be undone${newest === undefined ? "" : `: #${newest}`}.`,
-        };
-}
+  )?.id ?? null;

@@ -11,7 +11,7 @@ import {
   mergeMoves,
   type StoredRevision,
   prepareUndo,
-  undoItemAnswer,
+  undoAnswer,
   undoTarget,
   mergedSummary,
   refuseRaiseWhilePaused,
@@ -959,14 +959,18 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
       [A, [herAs({ level: "view" })]],
       [B, [place("riffle", 400, 0)]],
     ]);
-    expect(undoItemAnswer(state, revisions, A, { kind: "card", id: "box" })).toEqual({ allowed: true });
-    expect(undoItemAnswer(state, revisions, A, { kind: "circle", id: "her" })).toEqual({
+    expect(undoAnswer(state, revisions, A, { item: { kind: "card", id: "box" } })).toEqual({ allowed: true });
+    expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: "her" } })).toEqual({
       allowed: false,
       reason: '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
     });
-    expect(undoItemAnswer(state, revisions, B, { kind: "card", id: "box" })).toEqual({
+    expect(undoAnswer(state, revisions, B, { item: { kind: "card", id: "box" } })).toEqual({
       allowed: false,
       reason: "You have no change to this item left to undo.",
+    });
+    expect(undoAnswer(state, revisions, A, { revision: 2 })).toEqual({
+      allowed: false,
+      reason: '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
     });
   });
 
@@ -977,7 +981,7 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     ]);
     const reason = "This undo would make riffle public in Everyone. An undo never does that without asking; share it by hand.";
     expect(() => prepareUndo(state, revisions[0]!.changes)).toThrow(reason);
-    expect(undoItemAnswer(state, revisions, A, { kind: "circle", id: EVERYONE_CIRCLE_ID })).toEqual({
+    expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: EVERYONE_CIRCLE_ID } })).toEqual({
       allowed: false,
       reason,
     });

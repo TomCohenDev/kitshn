@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Actor } from "../core/changes.ts";
 import type { RevisionView } from "../core/protocol.ts";
-import { dayOf, filterHistory, groupHistory, sentence, undoStates } from "./revisions.ts";
+import { dayOf, filterHistory, groupHistory, rowText, undoableRow } from "./revisions.ts";
 
 const me: Actor = { _tag: "person", email: "me@example.com" };
 const bot: Actor = { _tag: "device", clientId: "c1", name: "Bot" };
@@ -21,25 +21,26 @@ const revision = (id: number, at: number, actor: Actor, summary = "Moved a card"
   items: [{ kind: "card", id: "tick3d" }],
 });
 
-describe("History sentences (K-1508)", () => {
+describe("History rows start with the verb, under their actor (K-1508)", () => {
   it.each([
-    ["tick3d: + Everyone · view", "You shared tick3d with Everyone at view"],
-    ["tick3d: − Her", "You removed tick3d from Her"],
-    ["a: + Qlik · use; b: − Her", "You shared a with Qlik at use and removed b from Her"],
+    ["tick3d: + Everyone · view", "shared tick3d with Everyone at view"],
+    ["tick3d: − Her", "removed tick3d from Her"],
+    ["a: + Qlik · use; b: − Her", "shared a with Qlik at use and removed b from Her"],
     [
       "a: + X · view; b: + X · view; c: + X · view; and 2 more",
-      "You shared a with X at view, shared b with X at view, shared c with X at view and 2 more",
+      "shared a with X at view, shared b with X at view, shared c with X at view and 2 more",
     ],
-    ["Created circle Agents", "You created circle Agents"],
-    ["Undo #12: tick3d: − Her", "You undid #12: removed tick3d from Her"],
-    ["Undo #12 for tick3d: Moved a card", "You undid #12 for tick3d: moved a card"],
-  ])("says %s as a sentence", (summary, said) => {
-    expect(sentence({ actor: me, summary }, me)).toBe(said);
+    ["Set up kitshn", "set up kitshn"],
+    ["Created circle Agents", "created circle Agents"],
+    ["Undo #12: tick3d: − Her", "undid #12: removed tick3d from Her"],
+    ["Undo #12 for tick3d: Moved a card", "undid #12 for tick3d: moved a card"],
+  ])("says %s as %s", (summary, said) => {
+    expect(rowText(summary)).toBe(said);
   });
 
   it("keeps a summary of an unknown shape as it is, so it adds no fact", () => {
-    expect(sentence({ actor: bot, summary: "Sign out everywhere: kitshn refuses older logins" }, me)).toBe(
-      "📱 Bot: Sign out everywhere: kitshn refuses older logins",
+    expect(rowText("Sign out everywhere: kitshn refuses older logins")).toBe(
+      "Sign out everywhere: kitshn refuses older logins",
     );
   });
 });
@@ -89,19 +90,16 @@ describe("History groups (K-1508)", () => {
   });
 });
 
-describe("History Undo per row (K-1506)", () => {
-  it("allows only the caller's own newest change and gives every other row a reason", () => {
+describe("History Undo (K-1506)", () => {
+  it("offers Undo only on the caller's own newest change that is not an action or undone", () => {
     const revisions = [
-      revision(4, NOW, bot),
-      { ...revision(3, NOW, me), undoable: false },
+      revision(5, NOW, bot),
+      { ...revision(4, NOW, me), undoable: false },
+      { ...revision(3, NOW, me), undoneBy: 6 },
       revision(2, NOW, me),
       revision(1, NOW, me),
     ];
-    const undo = undoStates(revisions, me);
-    expect(revisions.map((item) => undo(item).allowed)).toEqual([false, false, true, false]);
-    expect(undo(revisions[3] as RevisionView)).toEqual({
-      allowed: false,
-      reason: "Only your newest change can be undone: #2.",
-    });
+    expect(undoableRow(revisions, me)).toBe(2);
+    expect(undoableRow(revisions, { _tag: "person", email: "other@example.com" })).toBeNull();
   });
 });

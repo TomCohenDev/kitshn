@@ -1,17 +1,19 @@
 import { Fragment } from "preact";
-import { useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import type { Actor, Item, RevisionKind } from "../core/changes.ts";
 import type { State } from "../core/model.ts";
 import type { RevisionView } from "../core/protocol.ts";
+import { CHECKING_TIP, type UndoAnswer } from "./actions.ts";
 import {
   type HistoryFilter,
   actorKey,
   actorLabel,
   filterHistory,
   groupHistory,
-  sentence,
-  undoStates,
+  rowText,
+  undoableRow,
 } from "./revisions.ts";
+import { callApi } from "./store.ts";
 
 const KIND_LABELS: Record<RevisionKind, { readonly label: string; readonly tip: string }> = {
   card: { label: "Cards", tip: "Cards: moves and shares of cards." },
@@ -30,8 +32,8 @@ const timeOf = (at: number, older: boolean) =>
     : new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 /**
- * K-1508: every change as a plain sentence, grouped by day and by who made it, with filters. A click on a row
- * shows its cards and circles on the map. Undo shows on each row; only the caller's own newest change runs it.
+ * K-1508: every change in plain words, grouped by day and by who made it, with filters. A click on a row shows
+ * its cards and circles on the map. Undo shows only on the caller's own newest change.
  */
 export function HistoryView(props: {
   revisions: ReadonlyArray<RevisionView>;
@@ -48,7 +50,23 @@ export function HistoryView(props: {
     () => groupHistory(filterHistory(props.revisions, filter, nameOf), Date.now()),
     [props.revisions, filter, state],
   );
-  const undoOf = useMemo(() => undoStates(props.revisions, props.me), [props.revisions, props.me]);
+  const undoable = undoableRow(props.revisions, props.me);
+  const newest = props.revisions[0]?.id ?? 0;
+  /** kitshn's answer for the undoable row; null while it checks. */
+  const [answer, setAnswer] = useState<{ readonly id: number; readonly answer: UndoAnswer } | null>(null);
+  // Asks once for the undoable row, and again when any new revision arrives, since a later change can block it.
+  useEffect(() => {
+    if (undoable === null) return;
+    let live = true;
+    void callApi<UndoAnswer>("GET", `/api/undo?revision=${undoable}`).then((result) => {
+      if (live)
+        setAnswer({ id: undoable, answer: "error" in result ? { allowed: false, reason: result.error } : result });
+    });
+    return () => {
+      live = false;
+    };
+  }, [undoable, newest]);
+  const undoAnswer = answer?.id === undoable ? answer.answer : null;
   const kinds = [...new Set(props.revisions.map((revision) => revision.kind))];
   const actors = [...new Map(props.revisions.map((revision) => [actorKey(revision.actor), revision.actor])).values()];
   const who = (actor: Actor) => (actorKey(actor) === actorKey(props.me) ? "You" : actorLabel(actor));
@@ -119,7 +137,6 @@ export function HistoryView(props: {
             <div class="history-actor">{who(group.actor)}</div>
             <ul>
               {group.revisions.map((revision) => {
-                const undo = undoOf(revision);
                 return (
                   <li key={revision.id} id={`rev-${revision.id}`}>
                     <button
@@ -132,7 +149,7 @@ export function HistoryView(props: {
                       }
                       onClick={() => props.onShow(revision)}
                     >
-                      <span>{sentence(revision, props.me)}</span>
+                      <span>{rowText(revision.summary)}</span>
                       <span class="muted">
                         <span class="mono">#{revision.id}</span> · {timeOf(revision.at, group.day === "Older")}
                       </span>
@@ -141,18 +158,24 @@ export function HistoryView(props: {
                       <span class="stamp" data-tip={`Undone: revision #${revision.undoneBy} reverses this one.`}>
                         ✓ undone
                       </span>
-                    ) : (
+                    ) : revision.id === undoable ? (
                       <button
                         type="button"
                         class="btn"
-                        // Stays focusable when refused, so its tooltip says why.
-                        aria-disabled={!undo.allowed || undefined}
-                        data-tip={undo.allowed ? "Undo: a new revision that reverses this one." : undo.reason}
-                        onClick={() => undo.allowed && props.onUndo(revision.id)}
+                        // Stays focusable while it checks or when refused, so its tooltip says why.
+                        aria-disabled={undoAnswer?.allowed !== true || undefined}
+                        data-tip={
+                          undoAnswer === null
+                            ? CHECKING_TIP
+                            : undoAnswer.allowed
+                              ? "Undo: a new revision that reverses this one."
+                              : undoAnswer.reason
+                        }
+                        onClick={() => undoAnswer?.allowed && props.onUndo(revision.id)}
                       >
                         Undo
                       </button>
-                    )}
+                    ) : null}
                   </li>
                 );
               })}

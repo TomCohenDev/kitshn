@@ -804,15 +804,18 @@ export function prepareUndo(state: State, original: ReadonlyArray<Change>): Arra
   return changes;
 }
 
-/** K-523, K-1507: whether the per-item undo of `actor` works now, or why kitshn refuses it. */
-export function undoItemAnswer(
+/**
+ * K-523, K-1507, K-1508: whether the undo of a revision or the per-item undo of `actor` works now, or why
+ * kitshn refuses it.
+ */
+export function undoAnswer(
   state: State,
   revisions: ReadonlyArray<StoredRevision>,
   actor: Actor,
-  item: Item,
+  target: { readonly revision: number } | { readonly item: Item },
 ): { readonly allowed: true } | { readonly allowed: false; readonly reason: string } {
   try {
-    prepareUndo(state, undoTarget(state, revisions, actor, { item }).changes);
+    prepareUndo(state, undoTarget(state, revisions, actor, target).changes);
     return { allowed: true };
   } catch (error) {
     if (!(error instanceof RuleError)) throw error;

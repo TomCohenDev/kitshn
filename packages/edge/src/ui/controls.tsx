@@ -176,7 +176,8 @@ export function Radio(props: ChoiceProps & { readonly name: string; readonly onS
   );
 }
 
-const ITEMS = '[role="menuitem"]:not(:disabled), [role="menuitemradio"]:not(:disabled)';
+const ITEMS =
+  '[role="menuitem"]:not(:disabled), [role="menuitemradio"]:not(:disabled), [role="menuitemcheckbox"]:not(:disabled)';
 
 /**
  * A menu in a portal next to `anchor` (a button's rect, or a zero-size rect at the pointer for a context
@@ -272,8 +273,9 @@ export function MenuItem(props: {
   readonly opens?: boolean;
   /** A choice keeps the menu open (an item that opens a sub-list, or Back). */
   readonly keepOpen?: boolean;
-  /** A radio item of a group of options; true marks the current one. */
+  /** A radio item of a group of options; true marks the current one. With `checkbox`, an item that is on or off. */
   readonly checked?: boolean;
+  readonly checkbox?: boolean;
   /** kitshn refuses it now: it stays focusable so its tooltip says why, and a choice does nothing. */
   readonly unavailable?: boolean;
   /** Names the item for `Menu`'s `focus`. */
@@ -283,7 +285,7 @@ export function MenuItem(props: {
   return (
     <button
       type="button"
-      role={props.checked === undefined ? "menuitem" : "menuitemradio"}
+      role={props.checked === undefined ? "menuitem" : props.checkbox ? "menuitemcheckbox" : "menuitemradio"}
       aria-checked={props.checked}
       tabIndex={-1}
       class="menu-item"

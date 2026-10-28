@@ -556,9 +556,9 @@ input[type="search"]::-webkit-search-cancel-button {
 .tray {
   position: fixed;
   left: 10px;
-  /* Below the header, which wraps to two rows on a laptop. Revisit when the header height changes. */
-  top: 112px;
-  max-height: calc(100dvh - 180px);
+  /* Below the toolbar; App.tsx measures its height into `--bar-bottom`. */
+  top: calc(var(--bar-bottom, 102px) + 10px);
+  max-height: calc(100dvh - var(--bar-bottom, 102px) - 78px);
   width: 210px;
   z-index: 9;
   display: flex;
@@ -1239,9 +1239,9 @@ input:focus-visible {
   flex: 1;
   margin: 0;
 }
-/* The full view: below the toolbar, which wraps to two rows on a laptop. Revisit when its height changes. */
+/* The full view: below the toolbar (`--bar-bottom`, measured in App.tsx). */
 .overlay-panel.large {
-  top: 112px;
+  top: calc(var(--bar-bottom, 102px) + 10px);
   left: 10px;
   right: 10px;
   bottom: 10px;

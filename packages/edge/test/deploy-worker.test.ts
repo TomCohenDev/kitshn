@@ -530,11 +530,12 @@ describe("rollback (K-821)", () => {
    */
   const IMAGE = `sha256:${"a".repeat(64)}`;
 
-  async function composeApp(id: string, name: string) {
+  async function composeApp(id: string, name: string, keys: ReadonlyArray<string> = ["app"]) {
     fakeCloudflare();
     const app = repo(id, name);
     const machineId = `m-${id}`;
     const stub = env.KITSHN.getByName("kitshn");
+    const cardOf = (key: string) => environmentNames(id, `owner/${name}`, "prod", key).resourceId;
     await allow(app);
     await runInDurableObject(stub, (_instance, durable) => {
       const sql = durable.storage.sql;
@@ -548,33 +549,37 @@ describe("rollback (K-821)", () => {
         tunnelId: `tunnel-${machineId}`,
       };
       sql.exec("INSERT INTO machines (id, body) VALUES (?, ?)", machineId, JSON.stringify(machine));
-      const resource: Resource = {
-        id: app.card,
-        kind: "site.compose",
-        name,
-        addresses: [app.address],
-        status: "running",
-        group: null,
-        machine: machineId,
-      };
-      sql.exec("INSERT INTO resources (id, body) VALUES (?, ?)", app.card, JSON.stringify(resource));
-      sql.exec("INSERT INTO places (id, x, y) VALUES (?, 0, 0)", app.card);
-      for (const [index, run] of ["100", "101"].entries())
-        sql.exec(
-          `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, kind, sha, state, expires_at,
-             app, machine_id, compose_file, images, run_id, run_attempt)
-           VALUES (?, ?, ?, 'prod', ?, ?, '', 'deploy', ?, 'done', ?, 'compose', ?, 'compose.yml', ?, ?, '1')`,
-          `d${index + 1}-${id}`,
-          `owner/${name}`,
-          id,
-          app.card,
-          app.address,
-          `${index + 1}`.repeat(14),
-          1000 + index,
-          machineId,
-          JSON.stringify({ web: IMAGE }),
-          run,
-        );
+      for (const key of keys) {
+        const card = cardOf(key);
+        const resource: Resource = {
+          id: card,
+          kind: "site.compose",
+          name: `${name}-${key}`,
+          addresses: [`${key}.${app.address}`],
+          status: "running",
+          group: null,
+          machine: machineId,
+        };
+        sql.exec("INSERT INTO resources (id, body) VALUES (?, ?)", card, JSON.stringify(resource));
+        sql.exec("INSERT INTO places (id, x, y) VALUES (?, 0, 0)", card);
+        for (const [index, run] of ["100", "101"].entries())
+          sql.exec(
+            `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, kind, sha, state, expires_at,
+               app, machine_id, compose_file, images, run_id, run_attempt, app_key)
+             VALUES (?, ?, ?, 'prod', ?, ?, '', 'deploy', ?, 'done', ?, 'compose', ?, 'compose.yml', ?, ?, '1', ?)`,
+            key === "app" ? `d${index + 1}-${id}` : `d${index + 1}-${id}-${key}`,
+            `owner/${name}`,
+            id,
+            card,
+            `${key}.${app.address}`,
+            `${index + 1}`.repeat(14),
+            1000 + index,
+            machineId,
+            JSON.stringify({ web: IMAGE }),
+            run,
+            key,
+          );
+      }
     });
     // The Durable Object reads machines and cards again when it starts.
     await evictDurableObject(stub);
@@ -586,25 +591,27 @@ describe("rollback (K-821)", () => {
       tunnel: "running",
       capabilities: ["compose-rollback"],
     };
-    // Sockets belong to the Durable Object that made them, so the pair comes from inside it.
-    const socket = await runInDurableObject(stub, (_instance, durable) => {
-      const pair = new WebSocketPair();
-      durable.acceptWebSocket(pair[1], [machineId, "machines"]);
-      pair[0].accept();
-      pair[1].serializeAttachment({
-        kind: "machine",
-        machineId,
-        // The alarm closes a socket without a ping for 30 seconds.
-        since: Date.now(),
-        challenge: "",
-        check: "signed",
-        answered: true,
-        rotateBy: null,
-        status,
-        sample: null,
+    /** The daemon connects. Sockets belong to the Durable Object that made them, so the pair comes from inside it. */
+    const open = () =>
+      runInDurableObject(stub, (_instance, durable) => {
+        const pair = new WebSocketPair();
+        durable.acceptWebSocket(pair[1], [machineId, "machines"]);
+        pair[0].accept();
+        pair[1].serializeAttachment({
+          kind: "machine",
+          machineId,
+          // The alarm closes a socket without a ping for 30 seconds.
+          since: Date.now(),
+          challenge: "",
+          check: "signed",
+          answered: true,
+          rotateBy: null,
+          status,
+          sample: null,
+        });
+        return pair[1];
       });
-      return pair[1];
-    });
+    let socket = await open();
     const jobs = () =>
       runInDurableObject(stub, (_instance, durable) =>
         durable.storage.sql
@@ -638,7 +645,10 @@ describe("rollback (K-821)", () => {
         socket.close(1001, "gone");
         await instance.webSocketClose(socket);
       });
-    return { app, stub, result, commands, close };
+    const reconnect = async () => {
+      socket = await open();
+    };
+    return { app, stub, cardOf, result, commands, close, reconnect };
   }
 
   it("rolls a Compose card back, forward and back again, each time to the build that its machine keeps", async () => {
@@ -665,8 +675,11 @@ describe("rollback (K-821)", () => {
     await close();
   });
 
-  it("goes on with a run rollback after a job result, stops at a failed job, and settles a job without a result", async () => {
-    const { app, stub, result, close } = await composeApp("64", "compose-b");
+  it("goes on with a run rollback after a job result, stops at a failed job, and waits for a machine that was offline", async () => {
+    const { app, stub, cardOf, result, close, reconnect } = await composeApp("64", "compose-b", [
+      "app",
+      "cv",
+    ]);
     const rollbackRow = () =>
       runInDurableObject(stub, (_instance, durable) =>
         durable.storage.sql
@@ -675,26 +688,49 @@ describe("rollback (K-821)", () => {
           )
           .one(),
       );
+    /** A failed or settled step leaves its rollback row running until it expires; the next run rollback needs it gone. */
+    const endRunningRows = () =>
+      runInDurableObject(stub, (_instance, durable) =>
+        durable.storage.sql.exec("UPDATE deploys SET state = 'failed' WHERE state = 'running'"),
+      );
+    /** A restart of the Durable Object, which settles the run rollbacks that wait for nothing. */
+    const restart = async () => {
+      await close();
+      await evictDurableObject(stub);
+      await choices(app.card);
+    };
     const started = await admin(`/api/apps/${app.card}/run-rollback`, "POST");
     expect(started.body["state"]).toBe("running");
-    // A second run rollback of the same card waits until the first ends.
-    const second = await admin(`/api/apps/${app.card}/run-rollback`, "POST");
-    expect(second.status).toBe(409);
+    // A second run rollback of the same cards waits until the first ends.
+    expect((await admin(`/api/apps/${app.card}/run-rollback`, "POST")).status).toBe(409);
     await result(false);
     expect(await rollbackRow()).toMatchObject({ state: "failed" });
     expect(JSON.parse((await rollbackRow()).notes).at(-1)).toMatch(/stopped here/);
 
-    // The machine goes offline during the next run rollback, so its job sends no result; the next start (or alarm)
-    // of the Durable Object stops the run rollback.
-    await runInDurableObject(stub, (_instance, durable) =>
-      durable.storage.sql.exec("UPDATE deploys SET state = 'failed' WHERE state = 'running'"),
-    );
-    const retried = await admin(`/api/apps/${app.card}/run-rollback`, "POST");
-    expect(retried.body["state"], JSON.stringify(retried.body)).toBe("running");
+    // The machine goes offline and its job expires with no result: the run rollback stops.
+    await endRunningRows();
+    expect((await admin(`/api/apps/${app.card}/run-rollback`, "POST")).body["state"]).toBe("running");
     await close();
+    await runInDurableObject(stub, (_instance, durable) =>
+      durable.storage.sql.exec("UPDATE jobs SET expires_at = 0 WHERE state = 'failed'"),
+    );
     await evictDurableObject(stub);
     await choices(app.card);
     expect(await rollbackRow()).toMatchObject({ state: "failed" });
     expect(JSON.parse((await rollbackRow()).notes).at(-1)).toMatch(/no result/);
+
+    // A short drop: the job failed only because the machine went offline, so the run rollback waits. The late result
+    // of the reconnected machine goes on, and the next card rolls back too.
+    await endRunningRows();
+    await reconnect();
+    expect((await admin(`/api/apps/${app.card}/run-rollback`, "POST")).body["state"]).toBe("running");
+    await restart();
+    expect(await rollbackRow()).toMatchObject({ state: "running" });
+    await reconnect();
+    await result(true);
+    await result(true);
+    expect(await rollbackRow()).toMatchObject({ state: "done" });
+    for (const key of ["app", "cv"]) expect((await choices(cardOf(key)))[0]?.sha).toBe("11111111111111");
+    await close();
   });
 });

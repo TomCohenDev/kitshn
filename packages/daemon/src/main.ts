@@ -1137,8 +1137,9 @@ async function removeVolume(
   if (refusal !== null) return { ok: false, exitCode: null, output: refusal };
   const removed = await runProgram("docker", ["volume", "rm", command.volume]);
   if (!removed.ok) return removed;
-  // K-821: an orphaned volume belongs to a removed app, so its kept builds for a rollback go with it.
-  rmSync(join(paths.data, "apps", command.project, "good.prev"), { recursive: true, force: true });
+  // K-821: an orphaned volume belongs to a removed app, so its kept builds go with it, also good/ with its params.
+  for (const set of ["good", "good.prev"])
+    rmSync(join(paths.data, "apps", command.project, set), { recursive: true, force: true });
   return { ...removed, output: removed.output + (await pruneKept(command.project, [])) };
 }
 

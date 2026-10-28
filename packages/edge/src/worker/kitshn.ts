@@ -1213,18 +1213,23 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /**
-   * K-821: stops each run rollback that waits for nothing: its job ended without a result (it expired, its machine
-   * went offline, the repo was blocked, the delivery failed), or a restart cut off a step. Returns how many stopped.
+   * K-821: stops each run rollback that waits for nothing: its job ended without a result (it expired, the repo was
+   * blocked, the delivery failed), or a restart cut off a step. A job that failed only because its machine went
+   * offline still waits until it expires, because kitshn takes its late result. Returns how many stopped.
    */
   private settleRollbacks() {
-    const stuck = this.sql<{ id: string; notes: string }>(
-      `SELECT rollbacks.id, rollbacks.notes FROM rollbacks LEFT JOIN jobs ON jobs.id = rollbacks.job_id
-       WHERE rollbacks.state = 'running' AND (jobs.id IS NULL OR jobs.state NOT IN ('queued', 'sent'))`,
+    const stuck = this.sql<{ id: string; notes: string; job_id: number | null }>(
+      `SELECT rollbacks.id, rollbacks.notes, rollbacks.job_id FROM rollbacks LEFT JOIN jobs ON jobs.id = rollbacks.job_id
+       WHERE rollbacks.state = 'running' AND (jobs.id IS NULL OR (jobs.state NOT IN ('queued', 'sent')
+         AND NOT (jobs.state = 'failed' AND jobs.output = '${OFFLINE_OUTPUT}' AND jobs.expires_at > ?)))`,
+      Date.now(),
     ).filter((row) => !this.advancing.has(row.id));
     for (const row of stuck)
       this.finishRollback(row.id, "failed", [
         ...(JSON.parse(row.notes) as Array<string>),
-        "The machine sent no result for the last step. The rollback stopped here.",
+        row.job_id === null
+          ? "kitshn restarted during this step, so it may or may not have rolled back. Check the card. The rollback stopped here."
+          : "The machine sent no result for the last step. The rollback stopped here.",
       ]);
     return stuck.length;
   }
@@ -1349,6 +1354,18 @@ export class Kitshn extends DurableObject<Env> {
     )
       .map((row) => row.resource_id)
       .filter((card) => this.state.resources.has(card));
+  }
+
+  /** K-909, K-821: the deployed cards and, of them, the preview cards, from one read of the deploy rows. */
+  private deployedAndPreviewCards() {
+    const rows = this.sql<{ resource_id: string; preview: number }>(
+      `SELECT resource_id, MAX(environment GLOB 'pr-[0-9]*') AS preview FROM deploys
+       WHERE kind = 'deploy' AND (repo_id IS NOT NULL OR state = 'done') GROUP BY resource_id`,
+    ).filter((row) => this.state.resources.has(row.resource_id));
+    return {
+      deployedCards: rows.map((row) => row.resource_id),
+      previewCards: rows.filter((row) => row.preview === 1).map((row) => row.resource_id),
+    };
   }
 
   /** K-820: the cards on the map whose newest deploy failed or was skipped. */
@@ -1479,12 +1496,7 @@ export class Kitshn extends DurableObject<Env> {
       signOutWarning: signOutWarning(this.signOutLeft()),
       paused: this.state.paused,
       repos,
-      deployedCards: this.deployedCards(),
-      previewCards: this.sql<{ resource_id: string }>(
-        "SELECT DISTINCT resource_id FROM deploys WHERE kind = 'deploy' AND environment GLOB 'pr-[0-9]*'",
-      )
-        .map((row) => row.resource_id)
-        .filter((card) => this.state.resources.has(card)),
+      ...this.deployedAndPreviewCards(),
       orphanWorkers: this.orphanWorkers(),
       deployNotes: this.deployNotes(),
       icons: Object.fromEntries([...this.iconHashes].filter(([id]) => this.state.resources.has(id))),

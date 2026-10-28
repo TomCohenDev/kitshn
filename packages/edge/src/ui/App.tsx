@@ -239,6 +239,8 @@ export function App() {
   const [showMenu, setShowMenu] = useState<Rect | null>(null);
   /** K-528: the phone's "☰" menu, which holds the tabs and the map tools that the toolbar has on a wide screen. */
   const [moreMenu, setMoreMenu] = useState<Rect | null>(null);
+  /** K-528: on a phone the shelf is a sheet that the owner opens; closed, it shows only its count. */
+  const [trayOpen, setTrayOpen] = useState(false);
   const [refusal, setRefusal] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
@@ -1343,16 +1345,19 @@ export function App() {
         >
           {wide ? "⌘K" : "Find"}
         </button>
-        <span
-          class={`sticker ${store.connection === "live" ? "ok" : "wait"}`}
-          style={{ "--tilt": "3deg" }}
-          data-tip={CONNECTION_TIPS[store.connection]}
-        >
-          {store.connection}
-        </span>
+        {/* A phone shows the connection only when it is not live, so the toolbar fits one row. */}
+        {wide || store.connection !== "live" ? (
+          <span
+            class={`sticker ${store.connection === "live" ? "ok" : "wait"}`}
+            style={{ "--tilt": "3deg" }}
+            data-tip={CONNECTION_TIPS[store.connection]}
+          >
+            {store.connection}
+          </span>
+        ) : null}
       </header>
       {tray.length > 0 && route.tab === "map" ? (
-        <aside class="tray">
+        <aside class={`tray${!wide && !trayOpen ? " closed" : ""}`}>
           {wide ? (
             <ResizeEdge
               label="Shelf width"
@@ -1365,12 +1370,24 @@ export function App() {
             />
           ) : null}
           <div class="tray-head">
-            <span
-              class="label"
-              data-tip="New cards arrive here, outside every circle, so they start private."
-            >
-              New · private ({tray.length})
-            </span>
+            {wide ? (
+              <span
+                class="label"
+                data-tip="New cards arrive here, outside every circle, so they start private."
+              >
+                New · private ({tray.length})
+              </span>
+            ) : (
+              <button
+                type="button"
+                class="label tray-toggle"
+                aria-expanded={trayOpen}
+                data-tip="New cards arrive here, outside every circle, so they start private. Tap to open or close."
+                onClick={() => setTrayOpen(!trayOpen)}
+              >
+                New · private ({tray.length}) {trayOpen ? "▴" : "▾"}
+              </button>
+            )}
             <input
               type="search"
               placeholder="Filter"

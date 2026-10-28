@@ -13,6 +13,8 @@ import {
   mapBox,
   openArea,
   panInto,
+  pinchView,
+  ZOOM,
   shownWidths,
   storedWidth,
 } from "./layout.ts";
@@ -164,5 +166,30 @@ describe("resizable widths (K-525)", () => {
     expect(keyWidth("Home", 300, limits.tray, "left")).toBe(160);
     expect(keyWidth("End", 300, limits.tray, "right")).toBe(420);
     expect(keyWidth("a", 300, limits.tray, "left")).toBeNull();
+  });
+});
+
+describe("pinch (K-528)", () => {
+  const view = { x: 100, y: 50, s: 1 };
+  const at = (view: { x: number; y: number; s: number }, point: { x: number; y: number }) => ({
+    x: (point.x - view.x) / view.s,
+    y: (point.y - view.y) / view.s,
+  });
+  it("zooms by the spread of the fingers and keeps the map point between them", () => {
+    const from = { a: { x: 150, y: 200 }, b: { x: 250, y: 200 } };
+    const to = { a: { x: 100, y: 200 }, b: { x: 300, y: 200 } };
+    const next = pinchView(view, from, to);
+    expect(next.s).toBe(2);
+    expect(at(next, { x: 200, y: 200 })).toEqual(at(view, { x: 200, y: 200 }));
+  });
+  it("pans when both fingers move together", () => {
+    const from = { a: { x: 150, y: 200 }, b: { x: 250, y: 200 } };
+    const to = { a: { x: 150, y: 140 }, b: { x: 250, y: 140 } };
+    expect(pinchView(view, from, to)).toEqual({ x: 100, y: -10, s: 1 });
+  });
+  it("stays inside the zoom range of the wheel", () => {
+    const from = { a: { x: 0, y: 0 }, b: { x: 10, y: 0 } };
+    expect(pinchView(view, from, { a: { x: 0, y: 0 }, b: { x: 1000, y: 0 } }).s).toBe(ZOOM.max);
+    expect(pinchView(view, from, { a: { x: 0, y: 0 }, b: { x: 0.1, y: 0 } }).s).toBe(ZOOM.min);
   });
 });

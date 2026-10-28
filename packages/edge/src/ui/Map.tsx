@@ -21,6 +21,8 @@ import { KeySticker, PresenceSticker } from "./Machines.tsx";
 import type { MenuTarget } from "./actions.ts";
 import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
+import { FRAMED_KINDS, peekable } from "./frames.ts";
+import { CardPreview, PeekArrow } from "./Peek.tsx";
 import type { Rect } from "./popover.ts";
 import { HOLD_MS, type Press, fingerDown, startPress, stepPress } from "./press.ts";
 import { type Fingers, type View, ZOOM, headAngle, pinchView, shownCardBoxes } from "./layout.ts";
@@ -98,6 +100,9 @@ interface Props {
   readonly view: View;
   /** Live previews of site and page cards (when the zoom allows). */
   readonly previews: boolean;
+  /** K-520: the preview arrow under the selected card (a wide screen; a phone has it in the card sheet). */
+  readonly peek: boolean;
+  readonly zone: string;
   readonly onView: (view: View) => void;
   /** The left edge of a panel that floats over the map, or null; live previews skip cards under it. */
   readonly panelLeft: number | null;
@@ -127,13 +132,6 @@ const STACK_ROW = 100;
 /** Live previews: at most this many frames, for these kinds, from this zoom on. */
 const MAX_PREVIEWS = 4;
 const PREVIEW_SCALE = 0.8;
-const PREVIEW_KINDS: ReadonlySet<ResourceKind> = new Set([
-  "site.static",
-  "site.worker",
-  "site.compose",
-  "site.live",
-  "page",
-]);
 
 /** The drag data of tray cards: a JSON list of card ids. */
 export const TRAY_CARDS_TYPE = "application/x-kitshn-cards";
@@ -507,7 +505,7 @@ export function MapView(props: Props) {
               !stack ||
               props.openStacks.has(stack[0]) ||
               (stack[1][0] === id && !stack[0].startsWith(USER_STACK));
-            return kind !== undefined && PREVIEW_KINDS.has(kind) && !props.hidden.has(kind) && drawn;
+            return kind !== undefined && FRAMED_KINDS.has(kind) && !props.hidden.has(kind) && drawn;
           })
           .map(([id, place]) => ({ id, x: place.x * view.s + view.x, y: place.y * view.s + view.y }))
           .filter(
@@ -691,6 +689,8 @@ export function MapView(props: Props) {
               access={props.access[resource.id] ?? null}
               machine={props.machines.get(resource.id) ?? null}
               preview={previewIds.has(resource.id)}
+              peek={props.peek && props.selection.cards.size === 1}
+              zone={props.zone}
               onMenu={(anchor) => props.onMenu({ target: { _tag: "card", id: resource.id }, anchor })}
             />
           );
@@ -870,6 +870,9 @@ function CardView(props: {
   access: AccessState | null;
   machine: MachineView | null;
   preview: boolean;
+  /** K-520: the selected card offers the preview arrow; a phone has it in the card sheet instead. */
+  peek: boolean;
+  zone: string;
   onMenu: (anchor: Rect) => void;
 }) {
   const { resource, state } = props;
@@ -942,51 +945,11 @@ function CardView(props: {
           ))}
         <MoreButton name={resource.name} onOpen={props.onMenu} />
       </div>
-      {props.preview && resource.addresses[0] ? <CardPreview address={resource.addresses[0]} /> : null}
-    </div>
-  );
-}
-
-/**
- * A live view of a site or page. A site behind Access shows only when this browser already has its Access
- * cookie: the Access login refuses to load in a frame, so "Open site" logs in in a tab.
- */
-function CardPreview(props: { address: string }) {
-  const [interact, setInteract] = useState(false);
-  const url = `https://${props.address}`;
-  return (
-    <div class="preview-frame">
-      <iframe
-        src={url}
-        aria-label={`Preview of ${props.address}`}
-        loading="lazy"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-        style={{ pointerEvents: interact ? "auto" : "none" }}
-      />
-      <div class="row" onPointerDown={(event) => event.stopPropagation()}>
-        <button
-          type="button"
-          class="btn"
-          data-tip={
-            interact
-              ? "Done: the preview takes no clicks again."
-              : "Interact: the preview takes clicks and keys."
-          }
-          onClick={() => setInteract(!interact)}
-        >
-          {interact ? "Done" : "Interact"}
-        </button>
-        <a
-          class="btn"
-          href={url}
-          target="_blank"
-          rel="noreferrer"
-          data-tip="Open the site in a new tab, and log in there if it asks."
-        >
-          Open site
-        </a>
-      </div>
-      <div class="help">Blank? Open the site once to log in.</div>
+      {props.preview && resource.addresses[0] ? (
+        <CardPreview resource={resource} state={state} zone={props.zone} />
+      ) : props.selected && props.peek && peekable(resource) ? (
+        <PeekArrow resource={resource} state={state} zone={props.zone} />
+      ) : null}
     </div>
   );
 }

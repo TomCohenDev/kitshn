@@ -17,6 +17,7 @@ import { extname, join, relative, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 import { headersWarnings, redirectsWarnings } from "./headers.ts";
 import { pickSiteIcon } from "./icon.ts";
+import { contentType } from "./media.ts";
 import { type Artifact, artifactsByApp } from "./artifacts.ts";
 import { RecipeError, readApps } from "./parse.ts";
 import {
@@ -108,28 +109,6 @@ const files = (dir: string): Array<string> =>
     if (stat.isSymbolicLink()) return [];
     return stat.isDirectory() ? files(path) : [path];
   });
-
-const TYPES: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".json": "application/json",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".webp": "image/webp",
-  ".ico": "image/x-icon",
-  ".txt": "text/plain; charset=utf-8",
-  ".xml": "application/xml",
-  ".woff2": "font/woff2",
-  ".pdf": "application/pdf",
-  ".gif": "image/gif",
-  ".heic": "image/heic",
-  ".gpx": "application/gpx+xml",
-  ".webmanifest": "application/manifest+json",
-};
 
 /**
  * K-804, K-820: deploys each app of the repo as its own deploy, after the apps that it needs. When an app does not
@@ -304,7 +283,7 @@ async function uploadAssets(server: string, dir: string, deployId: string, folde
     const sitePath = `/${relative(output, path).split("\\").join("/")}`;
     manifest[sitePath] = { hash, size: bytes.length };
     byPath.set(sitePath, path);
-    byHash.set(hash, { path, type: TYPES[extension] ?? "application/octet-stream" });
+    byHash.set(hash, { path, type: contentType(path) });
   }
   if (Object.keys(manifest).length === 0) fail(`the output folder ${folder} is empty.`);
   const session = await call<{ jwt: string; buckets: Array<Array<string>>; uploadUrl: string }>(

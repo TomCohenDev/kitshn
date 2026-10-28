@@ -8,7 +8,8 @@
     ".": "./src/index.ts",
     "./recipe": "./src/recipe.ts",
     "./icon": "./src/icon.ts",
-    "./names": "./src/names.ts"
+    "./names": "./src/names.ts",
+    "./media": "./src/media.ts"
   },
   "publishConfig": {
     "exports": {

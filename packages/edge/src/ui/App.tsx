@@ -64,6 +64,8 @@ import {
   useStoredWidth,
 } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
+import { peekable } from "./frames.ts";
+import { PeekArrow } from "./Peek.tsx";
 import {
   type Action,
   type ActionContext,
@@ -1132,6 +1134,8 @@ export function App() {
           onDropCards={(ids, at) => void placeFromTray(ids, at)}
           onStackOnto={(ids, target) => void stacks.stackOnto(ids, target)}
           previews={previews}
+          peek={wide}
+          zone={store.snapshot.zone}
           state={state}
           access={store.snapshot.access}
           selection={selection}
@@ -1211,6 +1215,8 @@ export function App() {
           ) : (
             <Panel
               state={state}
+              zone={store.snapshot.zone}
+              peek={!wide}
               repos={store.snapshot.repos}
               selection={selection}
               access={store.snapshot.access}
@@ -1700,6 +1706,9 @@ export function App() {
 
 function Panel(props: {
   state: State;
+  zone: string;
+  /** K-520: a phone has the preview arrow in the card sheet, not under the card on the map. */
+  peek: boolean;
   /** K-819: the repos that deploy or wait to deploy. */
   repos: ReadonlyArray<RepoView>;
   selection: Selection;
@@ -1762,6 +1771,8 @@ function Panel(props: {
         key={cards[0].id}
         resource={cards[0]}
         state={state}
+        zone={props.zone}
+        peek={props.peek}
         repo={props.repos.find((repo) => repo.resourceIds.includes(cards[0]?.id ?? "")) ?? null}
         access={props.access[cards[0].id] ?? null}
         onEdit={props.onEdit}
@@ -2013,6 +2024,8 @@ function StackPanel(props: {
 function CardPanel(props: {
   resource: Resource;
   state: State;
+  zone: string;
+  peek: boolean;
   /** K-819: the repo gate of the repo that deploys this card, when it has one. */
   repo: RepoView | null;
   access: import("../core/protocol.ts").AccessState | null;
@@ -2087,6 +2100,9 @@ function CardPanel(props: {
             Open
           </a>
         </div>
+      ) : null}
+      {props.peek && peekable(resource) ? (
+        <PeekArrow resource={resource} state={state} zone={props.zone} />
       ) : null}
       {props.repo ? (
         <div class="row">

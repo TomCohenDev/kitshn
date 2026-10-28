@@ -1869,6 +1869,7 @@ a > code {
 }
 .preview-frame .row {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   margin-top: 4px;
 }
@@ -2021,4 +2022,37 @@ a > code {
   .tray .resize-edge.at-right {
     right: -14px;
   }
+}
+
+/* K-520: the preview arrow under a selected card, and its large view over the map. */
+.peek {
+  margin-top: 6px;
+}
+/* An open preview reaches below its card, so the card sits above its neighbours (a drag stays on top). */
+.card:has(.peek) {
+  z-index: 2;
+}
+.peek-toggle {
+  font-size: 0.75rem;
+  padding: 1px 6px;
+}
+.peek-scrim {
+  padding-top: 4vh;
+}
+.peek-large {
+  display: flex;
+  flex-direction: column;
+  width: min(1280px, calc(100vw - 20px));
+  height: 88vh;
+  padding: 12px;
+}
+.peek-large h2 {
+  flex: 1;
+  font-size: 1.15rem;
+}
+.peek-large iframe {
+  flex: 1;
+  width: 100%;
+  background: #fff;
+  border: var(--bw) solid var(--border);
 }

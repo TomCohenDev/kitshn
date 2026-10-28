@@ -869,23 +869,194 @@ input[type="search"]::-webkit-search-cancel-button {
   }
 }
 
-/* K-1504: the big red button. */
+/* K-1504: the big red button, after the panic button of the machine map (MM-708). It looks the same in
+   both modes, so it never reads as an ordinary action. */
 :root {
-  --hazard: #e5232e;
-  --hazard-dark: #c8101b;
+  --panic: #ff2d3a;
+  --panic-deep: #8c0014;
+  --hazard-stripes: repeating-linear-gradient(-45deg, var(--yellow) 0 10px, #000000 10px 20px);
 }
-/* The big red button. Red in both modes, so it never reads as an ordinary action. */
-.btn.big-red {
-  background: var(--hazard);
-  color: #ffffff;
-  font-weight: 800;
-  letter-spacing: 0.02em;
-  border-color: var(--shadow-ink);
+.panic {
+  position: relative;
+  padding: 3px;
+  background: var(--hazard-stripes);
+  border: var(--bw) solid #000000;
+  border-radius: var(--radius);
   box-shadow: 3px 3px 0 0 var(--shadow-ink);
 }
-.btn.big-red:not(:disabled):hover {
-  background: var(--hazard-dark);
+.panic-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px 2px 2px;
+  background: var(--surface);
+  border: var(--bw) solid #000000;
+  border-radius: var(--radius);
 }
+.panic-well {
+  display: grid;
+  place-items: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  background: #24203a;
+  border: var(--bw) solid #000000;
+  border-radius: 8px;
+}
+.mushroom {
+  width: 1.65rem;
+  height: 1.65rem;
+  padding: 0;
+  font: inherit;
+  font-size: 0.5rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #ffffff;
+  background: var(--panic);
+  border: var(--bw) solid #000000;
+  border-radius: 50%;
+  box-shadow: 0 4px 0 0 var(--panic-deep);
+  transform: translateY(-3px);
+  transition:
+    transform 80ms,
+    box-shadow 80ms;
+  cursor: pointer;
+}
+.mushroom:not([aria-disabled="true"]):hover {
+  transform: translateY(-4px);
+  box-shadow: 0 5px 0 0 var(--panic-deep);
+}
+.mushroom:not([aria-disabled="true"]):active {
+  transform: translateY(1px);
+  box-shadow: none;
+}
+/* While paused the button stays down. */
+.panic.is-paused .mushroom {
+  background: var(--panic-deep);
+  transform: translateY(1px);
+  box-shadow: none;
+  cursor: default;
+}
+.panic-label {
+  display: grid;
+  line-height: 1.15;
+}
+.panic-label b {
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.panic-label span {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.panic.is-paused .panic-label span {
+  color: var(--error-fg);
+}
+.panic-info {
+  width: 1.4rem;
+  height: 1.4rem;
+  padding: 0;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 800;
+  line-height: 1;
+  color: #000000;
+  background: var(--info);
+  border: var(--bw) solid #000000;
+  border-radius: 50%;
+  box-shadow: 2px 2px 0 0 #000000;
+  cursor: pointer;
+  transition:
+    transform 80ms,
+    box-shadow 80ms;
+}
+.panic-info:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 0 #000000;
+}
+.panic-info:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+.hazard-strip {
+  height: 12px;
+  background: var(--hazard-stripes);
+  border-bottom: var(--bw) solid var(--border);
+}
+.sticker.cut,
+.sticker.paused-sticker {
+  background: var(--panic);
+}
+
+/* The "i" of the big red button: what one press does (controls.tsx `Popover` places it). */
+.popover {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 40;
+  color: var(--ink);
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.pause-info {
+  width: min(27rem, calc(100vw - 16px));
+  overflow: hidden;
+}
+.pause-info-body {
+  padding: 10px 14px 12px;
+}
+.pause-info-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.pause-info h3 {
+  font-size: 1.3rem;
+  text-transform: uppercase;
+}
+.pause-info-now {
+  margin: 6px 0 0;
+  font-weight: 700;
+}
+.pause-info-effects {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.pause-info-effects li {
+  display: grid;
+  grid-template-columns: 4rem minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+.pause-info-effects .sticker {
+  justify-self: start;
+}
+.pause-info-effects li:nth-child(even) .sticker {
+  --tilt: 2deg;
+}
+.pause-info-resume {
+  margin: 12px 0 0;
+  padding-top: 8px;
+  font-size: 0.85rem;
+  color: var(--muted);
+  border-top: var(--bw) dashed var(--border);
+}
+.pause-info-resume b {
+  color: var(--ink);
+}
+
+/* The paused state: a hazard frame around the page and a banner with Resume, centred over the map. */
 .btn.resume {
   background: var(--green);
   color: #000000;
@@ -897,49 +1068,81 @@ input[type="search"]::-webkit-search-cancel-button {
   z-index: 30;
   pointer-events: none;
   border: 10px solid transparent;
-  border-image: repeating-linear-gradient(-45deg, var(--hazard) 0 14px, #000000 14px 28px) 10;
+  border-image: var(--hazard-stripes) 10;
 }
-.paused-banner {
+.paused-place {
   position: fixed;
-  top: 112px;
-  /* Centred over the map, left of the side panel. */
-  left: calc(50% - 190px);
-  transform: translateX(-50%);
+  top: calc(var(--bar-bottom, 100px) + 12px);
+  /* Right of the tray (210px at 10px). */
+  left: 240px;
+  right: 20px;
   z-index: 31;
   display: flex;
-  gap: 12px;
-  align-items: center;
-  padding: 6px 8px 6px 14px;
-  color: #ffffff;
-  background: var(--hazard);
-  border: var(--bw) solid var(--shadow-ink);
+  justify-content: center;
+  pointer-events: none;
+}
+.paused-place.beside-panel {
+  right: calc(var(--panel-width) + 24px);
+}
+/* On a phone the panel is a bottom sheet, and the banner may cover the narrow tray. */
+@media (max-width: 720px) {
+  .paused-place,
+  .paused-place.beside-panel {
+    left: 10px;
+    right: 10px;
+  }
+}
+.paused-banner {
+  width: min(36rem, 100%);
+  overflow: hidden;
+  pointer-events: auto;
+  background: var(--error-surface);
+  border: var(--bw) solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
 }
-.paused-banner > * {
-  white-space: nowrap;
+.paused-body {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  padding: 10px 14px 12px;
 }
-.paused-banner strong {
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+.paused-body h2 {
+  font-size: 1.3rem;
 }
-.pause-dialog {
-  max-width: 34rem;
-  border-color: var(--hazard);
-  box-shadow: 6px 6px 0 0 var(--hazard);
+.paused-body p {
+  margin: 0;
+  font-size: 0.9rem;
 }
-.pause-dialog h2 {
-  color: var(--hazard);
-}
-.pause-dialog li {
-  margin-bottom: 6px;
-  cursor: default;
-}
-.pause-dialog .row {
+.paused-body .row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  margin-top: 8px;
+}
+
+/* The one-shot effects of a press; panic.ts adds and removes them. */
+.panic-flash,
+.panic-stamp {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  pointer-events: none;
+}
+.panic-flash {
+  background: var(--panic);
+}
+.panic-stamp {
+  display: grid;
+  place-items: center;
+}
+.panic-stamp .stamp {
+  padding: 6px 28px;
+  font-size: clamp(3rem, 12vw, 7rem);
+  text-transform: uppercase;
+  color: var(--panic);
+  background: #ffffffd9;
+  border: 8px solid var(--panic);
+  transform: none;
 }
 .secret {
   display: flex;

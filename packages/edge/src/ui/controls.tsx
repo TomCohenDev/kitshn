@@ -384,6 +384,70 @@ export function ActionMenu(props: {
   );
 }
 
+/**
+ * A card in a portal under `anchor` that explains more than a tooltip can. It takes the focus and gives it
+ * back on close; Escape, Tab out or a press outside closes it.
+ */
+export function Popover(props: {
+  readonly label: string;
+  readonly anchor: Rect;
+  readonly onClose: () => void;
+  readonly class?: string;
+  readonly children: ComponentChildren;
+}) {
+  const card = useRef<HTMLDivElement>(null);
+  const onClose = useRef(props.onClose);
+  useLayoutEffect(() => {
+    onClose.current = props.onClose;
+  });
+  useLayoutEffect(() => {
+    const element = card.current;
+    if (!element) return;
+    const place = placeFloating(props.anchor, element.getBoundingClientRect(), viewport(), {
+      side: "bottom",
+      align: "start",
+    });
+    element.style.left = `${place.left}px`;
+    element.style.top = `${place.top}px`;
+    element.style.visibility = "visible";
+  }, [props.anchor]);
+  useEffect(() => {
+    const before = document.activeElement;
+    card.current?.focus();
+    const outside = (event: PointerEvent) => {
+      if (!card.current?.contains(event.target as Node | null)) onClose.current();
+    };
+    addEventListener("pointerdown", outside, true);
+    return () => {
+      removeEventListener("pointerdown", outside, true);
+      if (before instanceof HTMLElement && before.isConnected) before.focus();
+    };
+  }, []);
+  return createPortal(
+    <div
+      ref={card}
+      role="dialog"
+      aria-label={props.label}
+      tabIndex={-1}
+      class={`popover${props.class ? ` ${props.class}` : ""}`}
+      style={{ visibility: "hidden" }}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.stopPropagation();
+        onClose.current();
+      }}
+      onFocusOut={(event) => {
+        // No related target: the window lost the focus, or a press outside, which `outside` handles.
+        const next = event.relatedTarget as Node | null;
+        if (next && !card.current?.contains(next)) onClose.current();
+      }}
+    >
+      {props.children}
+    </div>,
+    document.body,
+  );
+}
+
 /** The "⋯" button of a card, a stack or a circle head: a keyboard path to its context menu (K-523). */
 export function MoreButton(props: { readonly name: string; readonly onOpen: (anchor: Rect) => void }) {
   return (

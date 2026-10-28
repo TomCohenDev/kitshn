@@ -31,6 +31,7 @@ import {
   type Circle,
   EVERYONE_CIRCLE_ID,
   pauseModeOf,
+  pauseReach,
   OWNER_CIRCLE_ID,
   RESOURCE_KINDS,
   type ResourceKind,
@@ -677,6 +678,24 @@ describe("stacks (K-521, K-522)", () => {
 });
 
 describe("emergency pause (K-1504)", () => {
+  it("counts what a press closes and what stays open, also while paused", () => {
+    const state = start();
+    const everyone = circle(state, EVERYONE_CIRCLE_ID);
+    const base = state.resources.get("riffle")!;
+    const site = { ...base, id: "site", kind: "site.static" as const, addresses: [] };
+    const box = { ...base, id: "box", kind: "machine" as const, addresses: [] };
+    const at = { x: everyone.x, y: everyone.y };
+    const open = {
+      ...state,
+      resources: new Map(state.resources).set("site", site).set("box", box),
+      places: new Map(state.places).set("site", at).set("box", at),
+    };
+    const before = pauseReach(state, 0);
+    const reach = pauseReach(open, 0);
+    // The public site stays open unless it is a lockdown; the public machine closes in every pause.
+    expect(reach).toEqual({ closes: before.closes + 1, cards: before.cards + 1, keptPublic: before.keptPublic + 1 });
+    expect(pauseReach(edit(open, [{ _tag: "pause", after: "lockdown" }]).after, 0)).toEqual(reach);
+  });
   it("lets an edit or an undo pause, but never resume", () => {
     const paused = edit(start(), [{ _tag: "pause", after: "lockdown" }]);
     expect(refuseResume(paused.changes)).toEqual(paused.changes);

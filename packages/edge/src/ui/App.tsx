@@ -23,6 +23,7 @@ import {
   insideCircle,
   isPublicCircle,
   memberLabel,
+  pauseReach,
   shareKey,
   shareLevel,
 } from "../core/model.ts";
@@ -65,7 +66,8 @@ import {
 } from "./actions.ts";
 import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
-import { PauseDialog, PausedBanner } from "./Pause.tsx";
+import { LOCKDOWN_TIP, PAUSE_TIP, PanicButton, PausedBanner, type PauseView, RESUME_TIP } from "./Pause.tsx";
+import { playResumeSound, showPanic, unlockAudio } from "./panic.ts";
 import { REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
@@ -168,10 +170,6 @@ const PANEL_HEADINGS: Record<Exclude<PanelKind, "details">, string> = {
 /** A highlight from History shows this long, once (K-1508). */
 const FLASH_MS = 1200;
 
-/** K-1504 */
-const PAUSE_TIP =
-  "Emergency pause: close every share except the Owner circle's admin, and stop agent keys and new deploys. Public sites, apps and pages stay up unless you choose a lockdown.";
-
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
 const routeFromHash = (): { readonly tab: "map" | Exclude<PanelKind, "details">; readonly id: string } => {
@@ -205,7 +203,6 @@ export function App() {
   /** K-110: a sign-out or its retry waits for Cloudflare; the server also runs one at a time. */
   const [signingOut, setSigningOut] = useState(false);
   const [menu, setMenu] = useState<{ readonly target: MenuTarget; readonly anchor: Rect } | null>(null);
-  const [pausing, setPausing] = useState(false);
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
   const [route, setRoute] = useState(routeFromHash);
   /** The panel over the map, or null when closed. */
@@ -227,6 +224,12 @@ export function App() {
     () => (store.snapshot ? overlay(toState(store.snapshot), store.held) : null),
     [store.snapshot, store.held],
   );
+  // K-1504: what the big red button closes and keeps, for its explanation and the paused banner.
+  const reach = useMemo(() => (state ? pauseReach(state, Date.now()) : null), [state]);
+  const pausedBy = store.snapshot?.pausedBy ?? null;
+  const pauseView: PauseView | null = store.snapshot?.paused
+    ? { mode: store.snapshot.paused, by: pausedBy ? actorLabel(pausedBy.actor) : null, at: pausedBy?.at ?? null }
+    : null;
   const machines = useMemo(
     () => new Map((store.snapshot?.machines ?? []).map((view) => [view.machine.id, view])),
     [store.snapshot],
@@ -491,10 +494,11 @@ export function App() {
   const addMemberTo = (circleId: string) =>
     selectAndFocus({ cards: new Set(), circle: circleId }, ".add-member input");
 
-  /** K-1504: one press after the confirm pauses everything at once. */
+  /** K-1504: one press pauses everything at once, with no confirm; the sound and effects play once the server took it. */
   const pauseNow = async (mode: PauseMode) => {
-    setPausing(false);
+    unlockAudio();
     const result = await applyEdits([{ _tag: "pause", after: mode }]);
+    if (result.ok) showPanic(mode === "lockdown" ? "lockdown" : "paused");
     showToast(
       result.ok
         ? {
@@ -516,7 +520,9 @@ export function App() {
     history.replaceState(null, "", location.pathname + location.search);
     // MM-712: a link alone never resumes; the owner confirms once more after the passkey check.
     if (!(await ask("Your passkey check passed. Resume everything now? Every share comes back."))) return;
+    unlockAudio();
     const result = await callApi<{ revision: number | null }>("POST", "/api/fresh/resume", {});
+    if (!("error" in result)) playResumeSound();
     showToast(
       "error" in result
         ? { text: result.error, error: true, undo: null }
@@ -1020,7 +1026,7 @@ export function App() {
               onRemoveMachine={handlers.removeMachine}
               onRunJob={runJob}
               warnings={store.snapshot.accessWarnings}
-              onPause={(pause) => (pause ? setPausing(true) : startResume())}
+              onPause={(pause) => (pause ? void pauseNow("keep-public") : startResume())}
               onSignOut={(retry) => void signOut(retry)}
               signOutWarning={store.snapshot.signOutWarning}
               signingOut={signingOut}
@@ -1179,24 +1185,12 @@ export function App() {
             <span class="sticker wait">{plural(waitingRepos, "repo")} waiting</span>
           </button>
         ) : null}
-        {store.snapshot?.paused ? (
-          <button
-            class="btn resume"
-            onClick={startResume}
-            data-tip="Resume: confirm with your passkey again, and every share comes back."
-          >
+        {reach ? <PanicButton reach={reach} pause={pauseView} onPress={() => void pauseNow("keep-public")} /> : null}
+        {pauseView ? (
+          <button class="btn resume" onClick={startResume} data-tip={RESUME_TIP}>
             Resume
           </button>
-        ) : (
-          <button
-            class="btn big-red"
-            onClick={() => setPausing(true)}
-            data-tip={PAUSE_TIP}
-            aria-label="Emergency pause"
-          >
-            ■ Pause
-          </button>
-        )}
+        ) : null}
         <button
           class="btn"
           onClick={() => setPalette("")}
@@ -1279,27 +1273,36 @@ export function App() {
           </div>
         </aside>
       ) : null}
-      {store.snapshot.paused ? (
+      {pauseView && reach ? (
         <PausedBanner
-          mode={store.snapshot.paused}
-          by={store.snapshot.pausedBy ? actorLabel(store.snapshot.pausedBy.actor) : null}
-          since={store.snapshot.pausedBy ? `since ${new Date(store.snapshot.pausedBy.at).toLocaleString()}` : null}
+          pause={pauseView}
+          reach={reach}
+          besidePanel={floating}
           onLockdown={() => void pauseNow("lockdown")}
           onResume={startResume}
         />
       ) : null}
-      {pausing ? <PauseDialog onCancel={() => setPausing(false)} onPause={(mode) => void pauseNow(mode)} /> : null}
       {palette !== null ? (
         <Palette
           initialQuery={palette}
           onClose={() => setPalette(null)}
           entries={[
             { label: "Open History", tip: TABS.history, run: () => openTab("history") },
-            {
-              label: "Emergency pause, or Resume",
-              tip: PAUSE_TIP,
-              run: () => (store.snapshot?.paused ? startResume() : setPausing(true)),
-            },
+            ...(pauseView
+              ? [
+                  { label: "Resume with passkey", tip: RESUME_TIP, run: startResume },
+                  ...(pauseView.mode === "keep-public"
+                    ? [
+                        {
+                          label: "Close public sites too",
+                          danger: true as const,
+                          tip: LOCKDOWN_TIP,
+                          run: () => void pauseNow("lockdown"),
+                        },
+                      ]
+                    : []),
+                ]
+              : [{ label: "Emergency pause", danger: true as const, tip: PAUSE_TIP, run: () => void pauseNow("keep-public") }]),
             ...(store.snapshot.signOutWarning
               ? [
                   {
@@ -1554,11 +1557,7 @@ function Panel(props: {
         <div class="row">
           <button
             class="btn danger"
-            data-tip={
-              props.paused
-                ? "Resume: confirm with your passkey again, and every share comes back."
-                : PAUSE_TIP
-            }
+            data-tip={props.paused ? RESUME_TIP : PAUSE_TIP}
             onClick={() => props.onPause(!props.paused)}
           >
             {props.paused ? "Resume" : "Emergency pause"}

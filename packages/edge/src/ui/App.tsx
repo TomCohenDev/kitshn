@@ -115,6 +115,7 @@ import { overlay } from "./held.ts";
 import { HistoryView } from "./History.tsx";
 import { UsageView } from "./Usage.tsx";
 import { UptimeRow } from "./Uptime.tsx";
+import { NotificationsView } from "./Notifications.tsx";
 import {
   type Box,
   cardBox,
@@ -200,11 +201,12 @@ const TABS = {
   history:
     "History: every change as a sentence, with filters and Undo, in a panel over the map. Enlarge shows the full page.",
   usage: "Usage: how close the account is to the Cloudflare free plan limits, and how full each machine is.",
+  notifications: "Notifications: what kitshn told you in the last 30 days, with Mute and Snooze.",
 } as const;
 
 /** K-516, K-519: what the overlay panel shows. History, Library, Machines and Usage also have a full view (a tab). */
 /** "safety" is the big red button (K-1504); like "details", it has no full view. */
-type PanelKind = "details" | "safety" | "history" | "library" | "machines" | "usage";
+type PanelKind = "details" | "safety" | "history" | "library" | "machines" | "usage" | "notifications";
 
 /** `html` font size in styles.css. */
 const REM = 18;
@@ -218,6 +220,7 @@ const PANEL_HEADINGS: Record<Exclude<PanelKind, "details">, string> = {
   library: "Library",
   machines: "Machines",
   usage: "Usage",
+  notifications: "Notifications",
 };
 
 /** A highlight from History shows this long, once (K-1508). */
@@ -231,7 +234,14 @@ const routeFromHash = (): {
 } => {
   const [tab = "map", id = ""] = location.hash.slice(1).split("/");
   return {
-    tab: tab === "history" || tab === "machines" || tab === "library" || tab === "usage" ? tab : "map",
+    tab:
+      tab === "history" ||
+      tab === "machines" ||
+      tab === "library" ||
+      tab === "usage" ||
+      tab === "notifications"
+        ? tab
+        : "map",
     id,
   };
 };
@@ -1292,6 +1302,12 @@ export function App() {
             <MachinesView machines={store.snapshot.machines} onAdd={() => setAddingMachine(true)} />
           ) : shownPanel === "usage" ? (
             <UsageView machines={store.snapshot.machines} />
+          ) : shownPanel === "notifications" ? (
+            <NotificationsView
+              state={state}
+              bell={store.snapshot.bell}
+              onToast={(text, error) => showToast({ text, error, undo: null })}
+            />
           ) : (
             <Panel
               state={state}
@@ -1541,6 +1557,16 @@ export function App() {
           </>
         ) : null}
         <span class="grow" />
+        <button
+          class="btn"
+          aria-pressed={fullPage ? route.tab === "notifications" : panel === "notifications"}
+          aria-label={`Notifications, ${store.snapshot.bell} open`}
+          data-tip={TABS.notifications}
+          onClick={() => openTab("notifications")}
+        >
+          🔔
+          {store.snapshot.bell > 0 ? <span class="sticker">{store.snapshot.bell}</span> : null}
+        </button>
         {waitingRepos > 0 && wide ? (
           <button
             class="btn"
@@ -1679,6 +1705,7 @@ export function App() {
           entries={[
             { label: "Open History", tip: TABS.history, run: () => openTab("history") },
             { label: "Open Usage", tip: TABS.usage, run: () => openTab("usage") },
+            { label: "Open Notifications", tip: TABS.notifications, run: () => openTab("notifications") },
             ...(pauseView
               ? [
                   { label: "Resume with passkey", tip: RESUME_TIP, run: startResume },

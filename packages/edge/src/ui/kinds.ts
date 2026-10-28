@@ -8,6 +8,8 @@ export const KINDS: Record<
   ResourceKind,
   {
     readonly label: string;
+    /** What a card of this kind is (K-301), for its tooltip. */
+    readonly help: string;
     readonly icon: string;
     readonly color: string;
     readonly ink?: string;
@@ -16,19 +18,20 @@ export const KINDS: Record<
 > = {
   "kitshn.admin": {
     label: "Admin",
+    help: "kitshn administration: whoever opens it changes kitshn.",
     icon: "🔐",
     color: "var(--accent)",
     ink: "var(--accent-fg)",
     tilt: "-2deg",
   },
-  machine: { label: "Machines", icon: "🖥", color: "var(--info)", tilt: "-3deg" },
-  "site.static": { label: "Static sites", icon: "🌐", color: "var(--green)", tilt: "2deg" },
-  "site.worker": { label: "Worker apps", icon: "⚙️", color: "var(--green)", tilt: "1deg" },
-  "site.compose": { label: "Compose apps", icon: "📦", color: "var(--green)", tilt: "-1deg" },
-  "site.live": { label: "Live sites", icon: "📡", color: "var(--warning)", tilt: "3deg" },
-  page: { label: "Pages", icon: "📄", color: "var(--yellow)", tilt: "-1.5deg" },
-  file: { label: "Files", icon: "🗂", color: "var(--warning)", tilt: "-2deg" },
-  repo: { label: "Repos", icon: "📚", color: "var(--pink)", tilt: "2.5deg" },
+  machine: { label: "Machines", help: "A machine with a daemon.", icon: "🖥", color: "var(--info)", tilt: "-3deg" },
+  "site.static": { label: "Static sites", help: "A static site on Workers static assets.", icon: "🌐", color: "var(--green)", tilt: "2deg" },
+  "site.worker": { label: "Worker apps", help: "A Worker app.", icon: "⚙️", color: "var(--green)", tilt: "1deg" },
+  "site.compose": { label: "Compose apps", help: "A Compose app on a machine.", icon: "📦", color: "var(--green)", tilt: "-1deg" },
+  "site.live": { label: "Live sites", help: "A local site of a machine, through its tunnel.", icon: "📡", color: "var(--warning)", tilt: "3deg" },
+  page: { label: "Pages", help: "An HTML page in the library.", icon: "📄", color: "var(--yellow)", tilt: "-1.5deg" },
+  file: { label: "Files", help: "A file in R2.", icon: "🗂", color: "var(--warning)", tilt: "-2deg" },
+  repo: { label: "Repos", help: "A repo that has a recipe; its environments are its children.", icon: "📚", color: "var(--pink)", tilt: "2.5deg" },
 };
 
 export const MEMBER_ICONS: Record<Member["_tag"], string> = {

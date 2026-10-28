@@ -34,6 +34,7 @@ import {
   type ResourceKind,
   type Resource,
   type State,
+  circleAloneKey,
   levelForKind,
   shareKey,
 } from "./model.ts";
@@ -94,6 +95,15 @@ describe("levels", () => {
     expect(levelForKind("file", "control")).toBe("view");
     expect(levelForKind("machine", "use")).toBe("use");
     expect(levelForKind("kitshn.admin", "view")).toBeNull();
+  });
+});
+
+describe("circle-alone key (K-504)", () => {
+  it("is ⌘ on macOS and iOS, and Ctrl elsewhere", () => {
+    for (const platform of ["MacIntel", "iPad", "iPhone"])
+      expect(circleAloneKey(platform)).toEqual({ property: "metaKey", label: "⌘" });
+    for (const platform of ["Win32", "Linux x86_64", "Linux armv8l", ""])
+      expect(circleAloneKey(platform)).toEqual({ property: "ctrlKey", label: "Ctrl" });
   });
 });
 

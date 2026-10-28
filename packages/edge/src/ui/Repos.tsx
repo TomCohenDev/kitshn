@@ -35,7 +35,11 @@ export async function setRepoState(
   return { text: `Allowed deploys of ${repo.name}. Run its workflow again to deploy.`, error: false };
 }
 
-const STICKERS: Record<RepoState, string> = { waiting: "wait", allowed: "ok", blocked: "" };
+export const REPO_STICKERS: Record<RepoState, { readonly style: string; readonly tip: string }> = {
+  waiting: { style: "wait", tip: "Waiting: the first deploy of this repo waits for one click." },
+  allowed: { style: "ok", tip: "Allowed: pushes of this repo deploy." },
+  blocked: { style: "", tip: "Blocked: kitshn refuses deploys of this repo." },
+};
 
 /** K-819: the repos that deployed or wait to deploy; a waiting repo needs one click. */
 export function RepoList(props: {
@@ -60,28 +64,44 @@ export function RepoList(props: {
   };
   return (
     <>
-      <div class="label">Repos that deploy (K-819)</div>
+      <div class="label" data-tip="Repos that deploy: repos with a recipe. The first deploy of each waits for one click.">
+        Repos that deploy
+      </div>
       <ul class="repo-list">
         {[...props.repos]
           .sort((a, b) => Number(b.state === "waiting") - Number(a.state === "waiting"))
           .map((repo) => (
             <li key={repo.repoId}>
               <code>{repo.name}</code>
-              <span class={`sticker ${STICKERS[repo.state]}`}>{repo.state}</span>
+              <span class={`sticker ${REPO_STICKERS[repo.state].style}`} data-tip={REPO_STICKERS[repo.state].tip}>
+                {repo.state}
+              </span>
               {repo.allowedBy ? (
-                <span class="muted" title="An agent key allowed this repo; its apps stay in its circles (K-819)">
+                <span class="muted" data-tip="An agent key allowed this repo; its apps stay in its circles.">
                   allowed by {repo.allowedBy.name}
                   {repo.keyRemoved ? ", key removed" : ""}
                 </span>
               ) : null}
               {repo.state !== "allowed" && !repo.keyRemoved ? (
-                <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "allowed")}>
+                <button
+                  type="button"
+                  class="btn"
+                  disabled={busy.has(repo.repoId)}
+                  data-tip={`Allow deploys of ${repo.name}${repo.branch ? ` and start ${repo.branch}` : ""}.`}
+                  onClick={() => void decide(repo, "allowed")}
+                >
                   Allow
                 </button>
               ) : null}
               {/* K-819: the owner takes over a repo that an agent key allowed; its apps then follow the owner's rules. */}
               {repo.allowedBy ? (
-                <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "allowed")}>
+                <button
+                  type="button"
+                  class="btn"
+                  disabled={busy.has(repo.repoId)}
+                  data-tip="Take over: the repo's apps then follow your rules, not the agent key's."
+                  onClick={() => void decide(repo, "allowed")}
+                >
                   Take over
                 </button>
               ) : null}
@@ -91,17 +111,35 @@ export function RepoList(props: {
               {/* An Allow whose start failed or met the pause keeps the branch to start again. */}
               {/* Take over already starts the branch of a repo that a key allowed. */}
               {repo.state === "allowed" && repo.branch !== null && !repo.allowedBy ? (
-                <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "allowed")}>
+                <button
+                  type="button"
+                  class="btn"
+                  disabled={busy.has(repo.repoId)}
+                  data-tip={`Start the deploy of ${repo.branch} again.`}
+                  onClick={() => void decide(repo, "allowed")}
+                >
                   Start {repo.branch}
                 </button>
               ) : null}
               {repo.state !== "blocked" ? (
-                <button type="button" class="btn danger" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "blocked")}>
+                <button
+                  type="button"
+                  class="btn danger"
+                  disabled={busy.has(repo.repoId)}
+                  data-tip={`Block deploys of ${repo.name}: kitshn refuses them until you allow it again.`}
+                  onClick={() => void decide(repo, "blocked")}
+                >
                   Block
                 </button>
               ) : null}
               {repo.state === "waiting" && !repo.keyRemoved ? (
-                <button type="button" class="btn" disabled={busy.has(repo.repoId)} onClick={() => void decide(repo, "forget")}>
+                <button
+                  type="button"
+                  class="btn"
+                  disabled={busy.has(repo.repoId)}
+                  data-tip={`Forget ${repo.name}: it leaves this list until it asks to deploy again.`}
+                  onClick={() => void decide(repo, "forget")}
+                >
                   Forget
                 </button>
               ) : null}

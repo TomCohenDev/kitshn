@@ -105,7 +105,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-501** The map shows every card and every circle. A toggle for each kind hides that kind. Hidden kinds still count for their circles.
 - **K-502** A drag of a card, or of a selection, into or out of a circle shows a preview before the drop: each circle edge lights up, and a label says what changes, for example "+ Qlik · view" or "− Her". The drop applies it.
 - **K-503** After each drop that changes a share, a toast names the change and has Undo for 10 seconds. Undo is also in the history (K-1502).
-- **K-504** A drag of a circle by its head moves its cards with it. Alt and a drag moves the circle alone. The preview of K-502 then names every card that gains or loses the circle.
+- **K-504** A drag of a circle by its head moves its cards with it. ⌘ and a drag on macOS and iOS, or Ctrl and a drag on other systems, moves the circle alone. The tooltip of the head and the hint line name the key. The preview of K-502 then names every card that gains or loses the circle.
 - **K-505** A resize of a circle shows the same preview as K-504 before the release.
 - **K-506** A circle shows its members as chips on its edge, at most 4. A "+N" chip opens the full list.
 - **K-507** A card shows a dot for each circle that holds it, and a chip for each override (K-205). A hover on a dot names the circle and the level.
@@ -118,7 +118,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-514** Pan, zoom, fit and auto layout work as in the machine map (MM-1111, MM-1114 to MM-1121). Each device keeps its own view in local storage. On a wide screen the fit and a saved view zoom out no further than 0.85, so card names stay readable; a larger map is centred, and the wheel zooms out further.
 - **K-515** A card of an offline machine, or of an app on it, shows the "offline" sticker and the time since it was last seen.
 - **K-516** The map works on a phone: a long press starts a drag, and the panel is a bottom sheet.
-- **K-517** The map uses the tick3d look in light and dark mode (the `neo-brutalism` skill): lilac dotted canvas, ink borders, hard shadows, tilted stickers, Bricolage Grotesque.
+- **K-517** The map uses the tick3d look in light and dark mode (the `neo-brutalism` skill): lilac dotted canvas, ink borders, hard shadows, tilted stickers, Bricolage Grotesque. It uses the standard components of the skill and no native browser UI: every icon button, control, option, sticker and short label has a tooltip. Needed information is never only in a tooltip.
 - **K-518** Map state (places, circles, members, shares, stacks) lives in the kitshn database, never in Git (K-001).
 - **K-519** Views next to the map: History (with presets, K-716), Queue, Inbox (K-1607), Seats, usage, Machines (a table of status), Health (alerts and charts, K-1604, K-1605), Settings (K-1613), Tasks (K-1614), Clients (K-1602), Library (section 10). Each view and each selected item has its own link.
 - **K-520** "Previews" shows a live view of up to four site and page cards near the centre of the map, from zoom 80%. Each is a lazy, sandboxed frame that takes no clicks until "Interact". A site behind Access shows only when the browser has its Access session already, because the Access login refuses to load in a frame; the card offers "Open site" to log in.

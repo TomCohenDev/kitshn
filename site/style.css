@@ -310,7 +310,8 @@ figcaption {
 .apps {
   display: grid;
   gap: 1rem;
-  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  row-gap: 1.6rem;
   padding: 0;
   margin: 0;
   list-style: none;
@@ -361,9 +362,17 @@ figcaption {
 .apps li:nth-child(3n) .sticker {
   --tilt: -1.5deg;
 }
+.apps li a {
+  position: relative;
+  padding-top: 1.1rem;
+}
+.apps li a > span:not(.sticker) {
+  min-width: 0;
+}
 .apps .sticker {
-  margin-left: auto;
-  align-self: flex-start;
+  position: absolute;
+  top: -0.7rem;
+  right: 0.7rem;
 }
 
 ol.steps {

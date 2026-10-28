@@ -152,3 +152,33 @@ export function panInto(box: Box, area: Box, view: View): View {
     y: view.y + (area.top + area.bottom) / 2 - (screen.top + screen.bottom) / 2,
   };
 }
+
+/** K-525: the widths that the owner can drag for the side panel and the shelf, in px. */
+export interface WidthLimits {
+  readonly min: number;
+  readonly max: number;
+  /** The width of a device that never resized. */
+  readonly initial: number;
+}
+
+/** A width inside its limits, and never wider than the screen leaves room for (`room`). */
+export const clampWidth = (width: number, limits: WidthLimits, room: number) =>
+  Math.round(Math.max(limits.min, Math.min(width, limits.max, room)));
+
+/** A stored width, or the initial one when the device stored none or something broken. */
+export function storedWidth(raw: string | null, limits: WidthLimits): number {
+  const width = raw === null ? Number.NaN : Number(raw);
+  return Number.isFinite(width) ? Math.max(limits.min, Math.min(width, limits.max)) : limits.initial;
+}
+
+/** The width after a key on a resize edge, or null for a key that does not resize. */
+export function keyWidth(key: string, width: number, limits: WidthLimits, grows: "left" | "right"): number | null {
+  const step = 24;
+  const wider = grows === "left" ? "ArrowLeft" : "ArrowRight";
+  const narrower = grows === "left" ? "ArrowRight" : "ArrowLeft";
+  if (key === wider) return width + step;
+  if (key === narrower) return width - step;
+  if (key === "Home") return limits.min;
+  if (key === "End") return limits.max;
+  return null;
+}

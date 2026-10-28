@@ -1,6 +1,7 @@
 import { type ComponentChildren, Fragment, createPortal } from "preact";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { Action, ActionGroups } from "./actions.ts";
+import { type WidthLimits, clampWidth, keyWidth, storedWidth } from "./layout.ts";
 import { type Rect, type Side, menuMove, placeFloating, tipTimer } from "./popover.ts";
 
 /**
@@ -445,5 +446,77 @@ export function OverlayPanel(props: {
       </header>
       {props.children}
     </section>
+  );
+}
+
+/**
+ * K-525: a width that this device remembers, inside its limits. It also sets `cssVar` on the page, so every
+ * rule that places things beside the panel or the shelf follows the drag. A narrow screen still caps it.
+ */
+export function useStoredWidth(key: string, cssVar: string, limits: WidthLimits) {
+  const show = (width: number) =>
+    document.documentElement.style.setProperty(cssVar, `min(${width}px, calc(100vw - 24px))`);
+  const [width, setWidth] = useState(() => {
+    const stored = storedWidth(localStorage.getItem(key), limits);
+    show(stored);
+    return stored;
+  });
+  const change = (next: number) => {
+    const clamped = clampWidth(next, limits, innerWidth - 24);
+    setWidth(clamped);
+    show(clamped);
+    localStorage.setItem(key, String(clamped));
+  };
+  return [width, change] as const;
+}
+
+/**
+ * K-525: the drag edge of the side panel or the shelf. A pointer drags it, and as a focusable separator the
+ * arrow keys, Home and End move it. `grows` is the side the element grows to when the edge moves that way.
+ */
+export function ResizeEdge(props: {
+  readonly label: string;
+  readonly width: number;
+  readonly limits: WidthLimits;
+  readonly grows: "left" | "right";
+  readonly onChange: (width: number) => void;
+}) {
+  const drag = useRef<{ readonly x: number; readonly width: number } | null>(null);
+  return (
+    <div
+      class={`resize-edge ${props.grows === "left" ? "at-left" : "at-right"}`}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={props.label}
+      aria-valuemin={props.limits.min}
+      aria-valuemax={props.limits.max}
+      aria-valuenow={props.width}
+      tabIndex={0}
+      data-tip={`${props.label}: drag, or focus and use the arrow keys.`}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        drag.current = { x: event.clientX, width: props.width };
+      }}
+      onPointerMove={(event) => {
+        const start = drag.current;
+        if (!start) return;
+        const moved = event.clientX - start.x;
+        props.onChange(start.width + (props.grows === "left" ? -moved : moved));
+      }}
+      onPointerUp={() => {
+        drag.current = null;
+      }}
+      onPointerCancel={() => {
+        drag.current = null;
+      }}
+      onKeyDown={(event) => {
+        const next = keyWidth(event.key, props.width, props.limits, props.grows);
+        if (next === null) return;
+        event.preventDefault();
+        props.onChange(next);
+      }}
+    />
   );
 }

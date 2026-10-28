@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 import type { Circle } from "../core/model.ts";
-import { type Box, cardBox, circleBox, fitMap, fitView, headAngle, headBox, mapBox, openArea, panInto } from "./layout.ts";
+import {
+  type Box,
+  cardBox,
+  circleBox,
+  clampWidth,
+  fitMap,
+  fitView,
+  headAngle,
+  headBox,
+  keyWidth,
+  mapBox,
+  openArea,
+  panInto,
+  storedWidth,
+} from "./layout.ts";
 
 const circle = (x: number, y: number, r: number, name = "Agents"): Circle => ({
   id: name,
@@ -108,5 +122,28 @@ describe("a circle head slides along its edge off the cards", () => {
       [-240, -200, -160, -120].map((y) => cardBox({ x, y })),
     );
     expect(headAngle(her, cards)).toBe(0);
+  });
+});
+
+describe("resizable widths (K-525)", () => {
+  const limits = { min: 160, max: 420, initial: 210 };
+  it("keeps a dragged width inside its limits and the room on screen", () => {
+    expect(clampWidth(100, limits, 2000)).toBe(160);
+    expect(clampWidth(900, limits, 2000)).toBe(420);
+    expect(clampWidth(400, limits, 300)).toBe(300);
+    expect(clampWidth(250.6, limits, 2000)).toBe(251);
+  });
+  it("falls back to the initial width for a missing or broken stored value", () => {
+    expect(storedWidth(null, limits)).toBe(210);
+    expect(storedWidth("wide", limits)).toBe(210);
+    expect(storedWidth("9999", limits)).toBe(420);
+    expect(storedWidth("300", limits)).toBe(300);
+  });
+  it("moves the edge with the arrow keys towards the side the element grows to", () => {
+    expect(keyWidth("ArrowLeft", 300, limits, "left")).toBe(324);
+    expect(keyWidth("ArrowLeft", 300, limits, "right")).toBe(276);
+    expect(keyWidth("Home", 300, limits, "left")).toBe(160);
+    expect(keyWidth("End", 300, limits, "right")).toBe(420);
+    expect(keyWidth("a", 300, limits, "left")).toBeNull();
   });
 });

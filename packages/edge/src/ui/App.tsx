@@ -40,7 +40,7 @@ import {
   MEMBER_HELP,
   SecretDialog,
 } from "./Circle.tsx";
-import { ActionMenu, Menu, MenuItem, MoreButton, OverlayPanel, TooltipLayer } from "./controls.tsx";
+import { ActionMenu, Menu, MenuItem, MoreButton, OverlayPanel, ResizeEdge, TooltipLayer, useStoredWidth } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import {
   type ActionContext,
@@ -83,6 +83,7 @@ import {
   panInto,
   shownCardBoxes,
   union,
+  type WidthLimits,
 } from "./layout.ts";
 import { actorLabel } from "./revisions.ts";
 import {
@@ -155,10 +156,11 @@ const TABS = {
 /** K-516, K-519: what the overlay panel shows. History, Library and Machines also have a full view (a tab). */
 type PanelKind = "details" | "history" | "library" | "machines";
 
-/** `html` font size in styles.css; the panel width is 26rem (`--panel-width`). */
+/** `html` font size in styles.css. */
 const REM = 18;
-/** The left edge of the overlay panel on a wide screen. */
-const panelLeft = () => innerWidth - 12 - Math.min(26 * REM, innerWidth - 24);
+/** K-525: the side panel and the shelf; the owner drags their edges, and each device keeps its widths. */
+const PANEL_WIDTH: WidthLimits = { min: 18 * REM, max: 46 * REM, initial: 26 * REM };
+const TRAY_WIDTH: WidthLimits = { min: 160, max: 420, initial: 210 };
 const PANEL_HEADINGS: Record<Exclude<PanelKind, "details">, string> = {
   history: "History",
   library: "Library",
@@ -198,6 +200,10 @@ export function App() {
   const [progress, setProgress] = useState<string | null>(null);
   const [trayFilter, setTrayFilter] = useState("");
   const [previews, setPreviews] = useState(() => localStorage.getItem(PREVIEWS_KEY) === "on");
+  const [panelWidth, setPanelWidth] = useStoredWidth("kitshn.panelWidth", "--panel-width", PANEL_WIDTH);
+  const [trayWidth, setTrayWidth] = useStoredWidth("kitshn.trayWidth", "--tray-width", TRAY_WIDTH);
+  /** The left edge of the overlay panel on a wide screen. */
+  const panelLeft = () => innerWidth - 12 - Math.min(panelWidth, innerWidth - 24);
   const [addingSite, setAddingSite] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
   /** Where the next upload of the file chooser lands: a map point, or null for the tray. */
@@ -688,7 +694,7 @@ export function App() {
       // The tray is not drawn yet when a full view switches to the map, so its width then comes from the tray cards.
       left:
         document.querySelector(".tray")?.getBoundingClientRect().right ??
-        (tray.length > 0 ? (wideScreen() ? 220 : 160) : 0),
+        (tray.length > 0 ? (wideScreen() ? trayWidth + 10 : 160) : 0),
       panelLeft: withPanel ? panelLeft() : null,
       narrow: !wideScreen(),
     });
@@ -959,6 +965,15 @@ export function App() {
           onMenu={setMenu}
         />
       ) : null}
+      {floating && wideScreen() ? (
+        <ResizeEdge
+          label="Panel width"
+          width={panelWidth}
+          limits={PANEL_WIDTH}
+          grows="left"
+          onChange={setPanelWidth}
+        />
+      ) : null}
       {shownPanel ? (
         <OverlayPanel
           // New content mounts a new panel, so the focus moves to its heading.
@@ -1215,6 +1230,9 @@ export function App() {
       </header>
       {tray.length > 0 && route.tab === "map" ? (
         <aside class="tray">
+          {wideScreen() ? (
+            <ResizeEdge label="Shelf width" width={trayWidth} limits={TRAY_WIDTH} grows="right" onChange={setTrayWidth} />
+          ) : null}
           <div class="tray-head">
             <span
               class="label"

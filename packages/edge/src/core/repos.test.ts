@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentAllowRefusal, gateDecision, keyRemoved } from "./repos.ts";
+import { agentAllowRefusal, awaitsAllow, forgetRefusal, gateDecision, keyRemoved } from "./repos.ts";
 
 const repo = { repoId: "42", name: "o/new", branch: "main" };
 
@@ -48,12 +48,14 @@ describe("the repo gate (K-819)", () => {
   });
   it("lets an agent key allow only a waiting repo, and only with the right to add apps (K-718)", () => {
     const waiting = { ...repo, state: "waiting" as const, firstSeen: 1, allowedBy: null };
-    expect(agentAllowRefusal(waiting, "allowed", true)).toBeNull();
-    expect(agentAllowRefusal(waiting, "allowed", false)?.status).toBe(403);
-    expect(agentAllowRefusal(waiting, "blocked", true)?.status).toBe(400);
-    expect(agentAllowRefusal(undefined, "allowed", true)?.status).toBe(404);
-    expect(agentAllowRefusal({ ...waiting, state: "blocked" }, "allowed", true)?.status).toBe(409);
-    expect(agentAllowRefusal({ ...waiting, state: "allowed" }, "allowed", true)?.status).toBe(409);
+    expect(agentAllowRefusal(waiting, "allowed", true, false)).toBeNull();
+    expect(agentAllowRefusal(waiting, "allowed", false, false)?.status).toBe(403);
+    expect(agentAllowRefusal(waiting, "blocked", true, false)?.status).toBe(400);
+    expect(agentAllowRefusal(undefined, "allowed", true, false)?.status).toBe(404);
+    expect(agentAllowRefusal({ ...waiting, state: "blocked" }, "allowed", true, false)?.status).toBe(409);
+    expect(agentAllowRefusal({ ...waiting, state: "allowed" }, "allowed", true, false)?.status).toBe(409);
+    // A repo that GitHub deleted is not waiting for anyone, as /agent/state leaves it out.
+    expect(agentAllowRefusal(waiting, "allowed", true, true)?.status).toBe(409);
   });
   it("lets a repo wait again while the agent key that allowed it has no agent circle", () => {
     const agent = { clientId: "agent-1", name: "Builder" };
@@ -68,5 +70,32 @@ describe("the repo gate (K-819)", () => {
       record: { state: "allowed", allowedBy: agent, branch: "main" },
       error: expect.stringMatching(/takes it over/),
     });
+  });
+  it("forgets a repo without cards, a blocked one only after GitHub deleted it, and a forgotten repo waits again", () => {
+    const base = { name: "o/new", goneOnGitHub: false, keyRemoved: false };
+    for (const state of ["waiting", "allowed"] as const) {
+      expect(forgetRefusal({ ...base, state }, 0)).toBeNull();
+      expect(forgetRefusal({ ...base, state }, 1)).toMatch(/Remove app/);
+    }
+    // Forget would let an agent key with "adds apps" allow a repo that the owner blocked.
+    expect(forgetRefusal({ ...base, state: "blocked" }, 0)).toMatch(/blocked/);
+    expect(forgetRefusal({ ...base, state: "blocked", goneOnGitHub: true }, 0)).toBeNull();
+    expect(forgetRefusal({ ...base, state: "blocked", goneOnGitHub: true }, 2)).toMatch(/Remove app/);
+    // The same for a repo whose agent key was removed: Take over or Block it first.
+    expect(forgetRefusal({ ...base, state: "allowed", keyRemoved: true }, 0)).toMatch(/Take it over/);
+    expect(forgetRefusal({ ...base, state: "allowed", keyRemoved: true, goneOnGitHub: true }, 0)).toBeNull();
+    // Forget drops the row, so the next deploy finds none: it waits, with no agent key.
+    expect(gateDecision(undefined, repo, 9)).toMatchObject({
+      allow: false,
+      record: { state: "waiting", allowedBy: null },
+    });
+  });
+  it("counts a repo as waiting only while the owner can allow it", () => {
+    const view = { state: "waiting" as const, keyRemoved: false, goneOnGitHub: false };
+    expect(awaitsAllow(view)).toBe(true);
+    expect(awaitsAllow({ ...view, keyRemoved: true })).toBe(false);
+    expect(awaitsAllow({ ...view, goneOnGitHub: true })).toBe(false);
+    expect(awaitsAllow({ ...view, state: "allowed" })).toBe(false);
+    expect(awaitsAllow({ ...view, state: "blocked" })).toBe(false);
   });
 });

@@ -79,6 +79,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "CREATE TABLE icons (id TEXT PRIMARY KEY, type TEXT NOT NULL, hash TEXT NOT NULL, bytes BLOB NOT NULL)",
     "ALTER TABLE presence ADD COLUMN os TEXT",
   ],
+  // 12: what GitHub said about each repo id (K-819): when kitshn last asked, and since when the repo is gone.
+  ["ALTER TABLE repos ADD COLUMN checked_at INTEGER", "ALTER TABLE repos ADD COLUMN gone_at INTEGER"],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

@@ -73,6 +73,7 @@ import {
   type RepoGate,
   type RepoState,
   agentAllowRefusal,
+  forgetRefusal,
   gateDecision,
   keyRemoved,
 } from "../core/repos.ts";
@@ -134,7 +135,7 @@ import {
 } from "./access-sync.ts";
 import type { Caller, Deployer } from "./auth.ts";
 import { CloudflareError, cloudflare } from "./cloudflare.ts";
-import { dispatchDeploy } from "./github.ts";
+import { type RepoOnGitHub, dispatchDeploy, reposOnGitHub } from "./github.ts";
 import { REPLACED, dropLiveSite, failQueuedDowns, removalDown, requeueDowns } from "./downs.ts";
 import { REPO_GATE_MIGRATION, migrate } from "./migrations.ts";
 import {
@@ -241,6 +242,8 @@ export class Kitshn extends DurableObject<Env> {
   /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
   private stuckShares = new Set<string>();
   private accessWarnings: Array<string> = [];
+  /** K-819: a GitHub check of the repos runs, so a second open tab starts none. */
+  private checkingRepos = false;
   /** K-606: presence is stored on change; status and the latest sample live on the socket. */
   private presence = new Map<string, { online: boolean; lastSeen: number; os: MachineOs | null }>();
   /** K-1113: the hash of each stored card icon; the bytes stay in SQLite until a map asks. */
@@ -422,18 +425,25 @@ export class Kitshn extends DurableObject<Env> {
         })),
       ];
       this.persist(changes);
-      // The local demo shows the repo gate (K-819): one repo that deploys, one that waits.
+      // The local demo shows the repo gate (K-819): one repo that deploys, one that waits, and two that GitHub
+      // deleted, one of them allowed by an agent key that the owner removed.
       if (extra.resources.length > 0)
-        for (const [id, name, state] of [
-          ["1001", "Yarden-zamir/riffle", "allowed"],
-          ["1002", "Yarden-zamir/new-app", "waiting"],
+        for (const [id, name, state, key, goneAt] of [
+          ["1001", "Yarden-zamir/riffle", "allowed", null, null],
+          ["1002", "Yarden-zamir/new-app", "waiting", null, null],
+          ["1003", "Yarden-zamir/kitshn-hello", "allowed", null, Date.now()],
+          ["1004", "Yarden-zamir/kitshn-agent-e2e", "allowed", "demo-removed-key", Date.now()],
         ] as const)
           this.sql(
-            "INSERT OR IGNORE INTO repos (repo_id, name, state, first_seen) VALUES (?, ?, ?, ?)",
+            `INSERT OR IGNORE INTO repos (repo_id, name, state, first_seen, allowed_by_client, allowed_by_name, gone_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
             id,
             name,
             state,
             Date.now(),
+            key,
+            key === null ? null : "Yarden's agents",
+            goneAt,
           );
       // K-524, K-1113: the demo cards show a site icon and the system of each machine.
       if (extra.resources.length > 0) {
@@ -1026,6 +1036,7 @@ export class Kitshn extends DurableObject<Env> {
       return this.removeMachine(caller, decodeURIComponent(path.slice("/api/machines/".length)));
     if (path.startsWith("/api/apps/") && request.method === "DELETE")
       return this.removeApp(caller, decodeURIComponent(path.slice("/api/apps/".length)));
+    if (path === "/api/repos/check" && request.method === "POST") return await this.checkReposOnGitHub();
     if (path.startsWith("/api/repos/") && request.method === "POST")
       return await this.setRepoState(
         caller,
@@ -2750,6 +2761,11 @@ export class Kitshn extends DurableObject<Env> {
       gate !== undefined && this.keyRemoved(gate),
     );
     const record = decision.record;
+    // K-819: a deploy step proves that the repo exists on GitHub.
+    if (row && row.gone_at !== null && !record) {
+      this.sql("UPDATE repos SET gone_at = NULL WHERE repo_id = ?", row.repo_id);
+      this.broadcast();
+    }
     if (record) {
       this.ctx.storage.transactionSync(() => {
         this.sql(
@@ -2777,19 +2793,31 @@ export class Kitshn extends DurableObject<Env> {
     return decision.allow ? null : Response.json({ error: decision.error }, { status: 403 });
   }
 
-  /** K-819: each repo with its cards on the map, for the card panel. */
-  private repoViews(): Array<RepoView> {
+  /** K-819: the cards on the map that each repo deployed. */
+  private repoCards(): Map<string, Array<string>> {
     const cards = new Map<string, Array<string>>();
     for (const { repo_id, resource_id } of this.sql<{ repo_id: string; resource_id: string }>(
       "SELECT repo_id, resource_id FROM deploys WHERE repo_id IS NOT NULL AND kind = 'deploy' GROUP BY repo_id, resource_id",
     ))
       if (this.state.resources.has(resource_id))
         cards.set(repo_id, [...(cards.get(repo_id) ?? []), resource_id]);
+    return cards;
+  }
+
+  /** K-819: each repo with its cards on the map, for the card panel. */
+  private repoViews(): Array<RepoView> {
+    const cards = this.repoCards();
     return this.sql<RepoRow>("SELECT * FROM repos ORDER BY first_seen DESC").map((row) => {
       const gate = repoGateOf(row);
       const removed = this.keyRemoved(gate);
       // K-819: the repo of a removed key shows as waiting, so the owner sees it and takes it over.
-      return { ...gate, state: removed ? "waiting" : gate.state, keyRemoved: removed, resourceIds: cards.get(row.repo_id) ?? [] };
+      return {
+        ...gate,
+        state: removed ? "waiting" : gate.state,
+        keyRemoved: removed,
+        goneOnGitHub: row.gone_at !== null,
+        resourceIds: cards.get(row.repo_id) ?? [],
+      };
     });
   }
 
@@ -2834,16 +2862,25 @@ export class Kitshn extends DurableObject<Env> {
       return Response.json({ error: 'Send {"state": "allowed" | "blocked" | "forget"}.' }, { status: 400 });
     const [row] = this.sql<RepoRow>("SELECT * FROM repos WHERE repo_id = ?", repoId);
     if (!row) return Response.json({ error: `kitshn knows no repo ${repoId}.` }, { status: 404 });
-    if (state === "forget" && row.state !== "waiting")
-      return Response.json(
-        { error: "Only a waiting repo can be forgotten; block the others." },
-        { status: 409 },
-      );
+    const forgetError =
+      state === "forget"
+        ? forgetRefusal(
+            {
+              name: row.name,
+              state: row.state,
+              goneOnGitHub: row.gone_at !== null,
+              keyRemoved: this.keyRemoved(repoGateOf(row)),
+            },
+            (this.repoCards().get(repoId) ?? []).length,
+          )
+        : null;
+    if (forgetError) return Response.json({ error: forgetError }, { status: 409 });
     const stopped = this.ctx.storage.transactionSync(() => {
+      // K-819: Forget stops what the repo has under way as Block does, then drops the row; the repo waits again.
       if (state === "forget") {
         this.sql("DELETE FROM repos WHERE repo_id = ?", repoId);
         this.insertRevision(caller.actor, `Forgot ${row.name} (K-819)`, [], null);
-        return [];
+        return this.stopRepoDeploys(repoId, `The owner forgot ${row.name} (K-819).`);
       }
       // K-819: the owner's Allow takes over a repo that an agent key allowed, and clears the key.
       const takeOver = state === "allowed" && allowedBy === null && row.allowed_by_client !== null;
@@ -2869,19 +2906,7 @@ export class Kitshn extends DurableObject<Env> {
         null,
       );
       if (state === "allowed") return [];
-      // A teardown still runs (K-819); a daemon that already has the source can still finish its build.
-      this.sql(
-        `UPDATE jobs SET state = 'failed', output = ? WHERE state IN ('queued', 'sent')
-         AND json_extract(command, '$.kind') != 'compose-down'
-         AND json_extract(command, '$.project') IN (SELECT resource_id FROM deploys WHERE repo_id = ?)`,
-        `The owner blocked deploys of ${row.name} (K-819).`,
-        repoId,
-      );
-      return this.sql<{ id: string; app: string }>(
-        `UPDATE deploys SET state = 'failed' WHERE repo_id = ? AND kind = 'deploy' AND state IN ('planned', 'running')
-         RETURNING id, app`,
-        repoId,
-      );
+      return this.stopRepoDeploys(repoId, `The owner blocked deploys of ${row.name} (K-819).`);
     });
     const files = stopped
       .filter(({ app }) => app === "compose")
@@ -2914,6 +2939,81 @@ export class Kitshn extends DurableObject<Env> {
       state,
       dispatchError: ((await started.json()) as { error: string }).error,
     });
+  }
+
+  /** K-819: fails the deploys and jobs of a repo that have not finished. A teardown still runs. */
+  private stopRepoDeploys(repoId: string, output: string) {
+    // A daemon that already has the source can still finish its build.
+    this.sql(
+      `UPDATE jobs SET state = 'failed', output = ? WHERE state IN ('queued', 'sent')
+       AND json_extract(command, '$.kind') != 'compose-down'
+       AND json_extract(command, '$.project') IN (SELECT resource_id FROM deploys WHERE repo_id = ?)`,
+      output,
+      repoId,
+    );
+    return this.sql<{ id: string; app: string }>(
+      `UPDATE deploys SET state = 'failed' WHERE repo_id = ? AND kind = 'deploy' AND state IN ('planned', 'running')
+       RETURNING id, app`,
+      repoId,
+    );
+  }
+
+  /**
+   * K-819: marks the repos that GitHub reports as deleted, and clears the mark of a repo that exists. The repo
+   * list asks for it when it opens. Each repo gets at most one answer a day, and only an answer writes a row.
+   */
+  private async checkReposOnGitHub(): Promise<Response> {
+    const appId = this.env.GITHUB_APP_ID;
+    const key = this.env.GITHUB_APP_KEY;
+    if (!appId || !key || this.checkingRepos) return Response.json({ checked: 0 });
+    const now = Date.now();
+    const due = this.sql<RepoRow>(
+      "SELECT * FROM repos WHERE checked_at IS NULL OR checked_at <= ? ORDER BY coalesce(checked_at, 0)",
+      now - DAY_MS,
+    );
+    if (due.length === 0) return Response.json({ checked: 0 });
+    this.checkingRepos = true;
+    let found: Map<string, RepoOnGitHub>;
+    try {
+      found = await reposOnGitHub(
+        { id: appId, key },
+        due.map((row) => ({ repoId: row.repo_id, name: row.name })),
+        GITHUB_CALLS_PER_CHECK,
+      );
+    } finally {
+      this.checkingRepos = false;
+    }
+    let changed = false;
+    this.ctx.storage.transactionSync(() => {
+      for (const row of due) {
+        const answer = found.get(row.repo_id);
+        // A skipped repo (the call budget ran out) waits for the next check; every answer counts as a check,
+        // so an unknown repo never sorts first again and starves the others.
+        if (answer === undefined) continue;
+        const goneAt = answer === "gone" ? (row.gone_at ?? now) : answer === "unknown" ? row.gone_at : null;
+        // A deploy step or Forget can change the row while GitHub answers; it then keeps what they wrote.
+        const [updated] = this.sql<{ repo_id: string }>(
+          "UPDATE repos SET checked_at = ?, gone_at = ? WHERE repo_id = ? AND gone_at IS ? RETURNING repo_id",
+          now,
+          goneAt,
+          row.repo_id,
+          row.gone_at,
+        );
+        if (!updated || goneAt === row.gone_at) continue;
+        changed = true;
+        this.insertRevision(
+          { _tag: "kitshn", reason: "GitHub" },
+          goneAt === null ? `GitHub reports ${row.name} again (K-819)` : `GitHub deleted ${row.name} (K-819)`,
+          [],
+          null,
+        );
+      }
+    });
+    if (changed) {
+      this.load();
+      this.broadcast();
+    }
+    return Response.json({ checked: [...found.values()].filter((answer) => answer !== "unknown").length });
   }
 
   /** K-803 to K-807, K-901 to K-904: the steps of a static site deploy from GitHub Actions. */
@@ -3648,7 +3748,7 @@ export class Kitshn extends DurableObject<Env> {
         rights,
         // K-819: with "may add apps", the waiting repos that the key may allow.
         repos: rights.includes("addsApps")
-          ? this.sql<RepoRow>("SELECT * FROM repos WHERE state = 'waiting' ORDER BY first_seen DESC").map((row) => ({
+          ? this.sql<RepoRow>("SELECT * FROM repos WHERE state = 'waiting' AND gone_at IS NULL ORDER BY first_seen DESC").map((row) => ({
               repoId: row.repo_id,
               name: row.name,
               branch: row.branch,
@@ -3749,6 +3849,7 @@ export class Kitshn extends DurableObject<Env> {
         row ? repoGateOf(row) : undefined,
         isRecord(body) ? body["state"] : null,
         agentHas(this.state, caller.visitor, "addsApps", Date.now()),
+        row?.gone_at !== null && row?.gone_at !== undefined,
       );
       if (refusal) return Response.json({ error: refusal.error }, { status: refusal.status });
       // An agent circle names this key, so its device member exists.
@@ -3838,7 +3939,7 @@ export class Kitshn extends DurableObject<Env> {
     const key = this.env.GITHUB_APP_KEY;
     if (!appId || !key) throw new Error(NO_GITHUB_APP);
     const repo = await dispatchDeploy({ id: appId, key }, repoId, branch, AGENT_WORKFLOW);
-    this.sql("UPDATE repos SET name = ? WHERE repo_id = ?", repo, repoId);
+    this.sql("UPDATE repos SET name = ?, gone_at = NULL WHERE repo_id = ?", repo, repoId);
     return repo;
   }
 
@@ -4260,6 +4361,10 @@ interface RepoRow extends Record<string, SqlStorageValue> {
   branch: string | null;
   allowed_by_client: string | null;
   allowed_by_name: string | null;
+  /** K-819: when kitshn last got an answer from GitHub about this repo id. */
+  checked_at: number | null;
+  /** K-819: since when GitHub answers that the repo id no longer exists; null while it exists. */
+  gone_at: number | null;
 }
 
 const repoGateOf = (row: RepoRow): RepoGate => ({
@@ -4296,6 +4401,11 @@ interface DeployRow extends Record<string, SqlStorageValue> {
 
 /** A failed tunnel, DNS or route write tries again after this time. */
 const RETRY_MS = 5 * 60_000;
+
+const DAY_MS = 24 * 3_600_000;
+
+/** K-819: GitHub calls of one repo check; a Free plan request may make 50 subrequests. */
+const GITHUB_CALLS_PER_CHECK = 40;
 
 /** A machine as the actor of what its daemon does, such as a key rotation (K-1705). */
 const deviceActor = (machine: Machine): Actor => ({ _tag: "device", clientId: machine.clientId, name: machine.name });

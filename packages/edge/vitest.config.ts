@@ -1,5 +1,11 @@
+import { generateKeyPairSync } from "node:crypto";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
+
+/** A GitHub App key for the tests; the tests stub every GitHub call, so it signs only test tokens. */
+const githubAppKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
+  .privateKey.export({ type: "pkcs1", format: "pem" })
+  .toString();
 
 export default defineConfig({
   test: {
@@ -24,6 +30,8 @@ export default defineConfig({
                 ACCESS_AGENT_AUD: "agent-aud",
                 DEV_IDENTITY: "",
                 DEV_DEMO: "",
+                GITHUB_APP_ID: "1",
+                GITHUB_APP_KEY: githubAppKey,
               },
             },
           }),

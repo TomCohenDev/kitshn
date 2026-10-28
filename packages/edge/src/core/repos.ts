@@ -79,6 +79,7 @@ export function agentAllowRefusal(
   gate: RepoGate | undefined,
   state: unknown,
   addsApps: boolean,
+  goneOnGitHub: boolean,
 ): { readonly status: 400 | 403 | 404 | 409; readonly error: string } | null {
   if (state !== "allowed") return { status: 400, error: 'Send {"state": "allowed"}.' };
   if (!addsApps)
@@ -86,5 +87,42 @@ export function agentAllowRefusal(
   if (!gate) return { status: 404, error: "kitshn knows no such repo. Its first deploy step records it (K-819)." };
   if (gate.state !== "waiting")
     return { status: 409, error: `${gate.name} is ${gate.state}; an agent key allows only a waiting repo (K-819).` };
+  if (goneOnGitHub) return { status: 409, error: `GitHub deleted ${gate.name}; an agent key allows only a waiting repo (K-819).` };
   return null;
 }
+
+/**
+ * K-819: why the owner may not forget this repo, or null. A forgotten repo waits again on its next deploy. A
+ * repo with cards keeps its row, so each card keeps its "Deploys" switch and its agent redeploys stay refused
+ * for the right reason; the owner removes the apps first (K-909). A blocked repo is forgotten only once GitHub
+ * deleted it: otherwise its next deploy would wait, and an agent key with "adds apps" could then allow a repo
+ * that the owner blocked.
+ */
+export function forgetRefusal(
+  repo: {
+    readonly name: string;
+    readonly state: RepoState;
+    readonly goneOnGitHub: boolean;
+    readonly keyRemoved: boolean;
+  },
+  cards: number,
+): string | null {
+  if (cards > 0)
+    return `${repo.name} still deploys ${cards === 1 ? "1 app" : `${cards} apps`}. Remove ${cards === 1 ? "it" : "them"} with "Remove app" first (K-909), then forget the repo.`;
+  if (repo.goneOnGitHub) return null;
+  if (repo.state === "blocked")
+    return `${repo.name} is blocked. Unblock it first; a blocked repo is forgotten only after GitHub deleted it (K-819).`;
+  if (repo.keyRemoved)
+    return `${repo.name} was allowed by a removed agent key. Take it over or block it first; such a repo is forgotten only after GitHub deleted it (K-819).`;
+  return null;
+}
+
+/**
+ * K-819: the toolbar counts a repo as waiting only while the owner can allow it. A repo of a removed key needs
+ * Take over, and a repo that GitHub deleted can only be forgotten.
+ */
+export const awaitsAllow = (repo: {
+  readonly state: RepoState;
+  readonly keyRemoved: boolean;
+  readonly goneOnGitHub: boolean;
+}) => repo.state === "waiting" && !repo.keyRemoved && !repo.goneOnGitHub;

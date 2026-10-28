@@ -1,6 +1,6 @@
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import type { RepoView } from "../core/protocol.ts";
-import type { RepoState } from "../core/repos.ts";
+import { type RepoState, awaitsAllow, forgetRefusal } from "../core/repos.ts";
 import { RepoIcon } from "./ItemIcon.tsx";
 import { callApi } from "./store.ts";
 
@@ -42,6 +42,25 @@ export const REPO_STICKERS: Record<RepoState, { readonly style: string; readonly
   blocked: { style: "", tip: "Blocked: kitshn refuses deploys of this repo." },
 };
 
+export const GONE_STICKER = {
+  style: "",
+  tip: "Deleted on GitHub: GitHub has no repo with this id anymore. Forget takes it off this list.",
+} as const;
+
+/** K-819: a row hides Forget when only another action (Allow, Take over, Block) can make it work. */
+const forgetHidden = (repo: RepoView) => !repo.goneOnGitHub && (repo.state === "blocked" || repo.keyRemoved);
+
+/** K-819: the tooltip of Forget. A repo with apps keeps the button, and its tooltip says why it waits. */
+function forgetTip(repo: RepoView) {
+  const refused = forgetRefusal(repo, repo.resourceIds.length);
+  if (refused) return refused;
+  if (repo.goneOnGitHub) return `Forget ${repo.name}: it leaves this list.`;
+  return `Forget ${repo.name}: it leaves this list. Its next deploy waits for Allow again, and an agent key with "adds apps" can then allow it.`;
+}
+
+// K-819: the repo list asks GitHub about deleted repos once per page load; the server keeps it to one check a day.
+let checkedRepos = false;
+
 /** K-819: the repos that deployed or wait to deploy; a waiting repo needs one click. */
 export function RepoList(props: {
   repos: ReadonlyArray<RepoView>;
@@ -49,7 +68,13 @@ export function RepoList(props: {
 }) {
   // The buttons of a repo wait for its request, so a double click never starts a workflow twice.
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
-  if (props.repos.length === 0) return null;
+  const hasRepos = props.repos.length > 0;
+  useEffect(() => {
+    if (!hasRepos || checkedRepos) return;
+    checkedRepos = true;
+    void callApi("POST", "/api/repos/check", {});
+  }, [hasRepos]);
+  if (!hasRepos) return null;
   const decide = async (repo: RepoView, state: RepoAction) => {
     setBusy((ids) => new Set(ids).add(repo.repoId));
     try {
@@ -70,21 +95,27 @@ export function RepoList(props: {
       </div>
       <ul class="repo-list">
         {[...props.repos]
-          .sort((a, b) => Number(b.state === "waiting") - Number(a.state === "waiting"))
+          .sort((a, b) => Number(awaitsAllow(b)) - Number(awaitsAllow(a)))
           .map((repo) => (
             <li key={repo.repoId}>
               <RepoIcon name={repo.name} />
               <code>{repo.name}</code>
-              <span class={`sticker ${REPO_STICKERS[repo.state].style}`} data-tip={REPO_STICKERS[repo.state].tip}>
-                {repo.state}
-              </span>
-              {repo.allowedBy ? (
+              {repo.goneOnGitHub ? (
+                <span class={`sticker ${GONE_STICKER.style}`} data-tip={GONE_STICKER.tip}>
+                  deleted on GitHub
+                </span>
+              ) : (
+                <span class={`sticker ${REPO_STICKERS[repo.state].style}`} data-tip={REPO_STICKERS[repo.state].tip}>
+                  {repo.state}
+                </span>
+              )}
+              {repo.allowedBy && !repo.goneOnGitHub ? (
                 <span class="muted" data-tip="An agent key allowed this repo; its apps stay in its circles.">
                   allowed by {repo.allowedBy.name}
                   {repo.keyRemoved ? ", key removed" : ""}
                 </span>
               ) : null}
-              {repo.state !== "allowed" && !repo.keyRemoved ? (
+              {repo.state !== "allowed" && !repo.keyRemoved && !repo.goneOnGitHub ? (
                 <button
                   type="button"
                   class="btn"
@@ -96,7 +127,7 @@ export function RepoList(props: {
                 </button>
               ) : null}
               {/* K-819: the owner takes over a repo that an agent key allowed; its apps then follow the owner's rules. */}
-              {repo.allowedBy ? (
+              {repo.allowedBy && !repo.goneOnGitHub ? (
                 <button
                   type="button"
                   class="btn"
@@ -107,12 +138,12 @@ export function RepoList(props: {
                   Take over
                 </button>
               ) : null}
-              {repo.state === "waiting" && repo.branch !== null ? (
+              {awaitsAllow(repo) && repo.branch !== null ? (
                 <span class="muted">Allow starts {repo.branch}</span>
               ) : null}
               {/* An Allow whose start failed or met the pause keeps the branch to start again. */}
               {/* Take over already starts the branch of a repo that a key allowed. */}
-              {repo.state === "allowed" && repo.branch !== null && !repo.allowedBy ? (
+              {repo.state === "allowed" && repo.branch !== null && !repo.allowedBy && !repo.goneOnGitHub ? (
                 <button
                   type="button"
                   class="btn"
@@ -134,17 +165,18 @@ export function RepoList(props: {
                   Block
                 </button>
               ) : null}
-              {repo.state === "waiting" && !repo.keyRemoved ? (
+              {/* A blocked repo, or one of a removed key, is forgotten only after GitHub deleted it (K-819). */}
+              {forgetHidden(repo) ? null : (
                 <button
                   type="button"
                   class="btn"
                   disabled={busy.has(repo.repoId)}
-                  data-tip={`Forget ${repo.name}: it leaves this list until it asks to deploy again.`}
+                  data-tip={forgetTip(repo)}
                   onClick={() => void decide(repo, "forget")}
                 >
                   Forget
                 </button>
-              ) : null}
+              )}
             </li>
           ))}
       </ul>

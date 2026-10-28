@@ -47,7 +47,7 @@ A repo with `.kitshn.yaml` and `Caddyfile.j2` is a KitSHn 1 repo. Do not mix the
    - `startsIn`: the circle of a new card. Without it, the card waits private in the tray. After the first deploy, the map decides (K-518).
    - `needs.apps`: deploy after those apps of the same file, and skip when one of them failed (K-820).
 2. Run `npx -y https://github.com/Yarden-zamir/kitshn/releases/download/edge/kitshn.tgz check` (or `node kitshn.mjs check`). It prints the recipe as JSON or names the mistake.
-3. Add `.github/workflows/kitshn.yml`. Keep this file name: Allow on the map starts that workflow again (K-819).
+3. Add a workflow, for example `.github/workflows/kitshn.yml`. Any file name works: Allow starts the file of the waiting push run again (K-1121).
 
    ```yaml
    on:
@@ -82,8 +82,8 @@ A key never raises access on its own: `--public` needs "may publish" (K-718).
 
 ## Rollback and badges
 
-- After [#112](https://github.com/Yarden-zamir/kitshn/pull/112): "Roll back…" on a card returns it to one of its last deploys (K-821).
-- After [#117](https://github.com/Yarden-zamir/kitshn/pull/117): a README badge at `kit.<zone>/public/badges/<owner>/<repo>.svg`, with `?app=<key>&env=<name>` (K-1119). A private app shows `unknown`.
+- "Roll back…" on a card, in its panel, menu or the command palette, returns it to one of its last deploys (K-821).
+- A README badge: `![kitshn](https://kit.<zone>/public/badges/<owner>/<repo>.svg)`, with `?app=<key>&env=<name>` (K-1119). A private app shows `unknown`.
 
 ## Debug a failed deploy
 
@@ -91,7 +91,7 @@ Read the Actions log first: the deploy step prints the job output and the final 
 
 | Message or sign | Cause and fix |
 | --- | --- |
-| "waits on the kitshn map" | First deploy of a repo (K-819). Allow it, then run the workflow again. |
+| "waits on the kitshn map" | First deploy of a repo (K-819). After Allow, a waiting push run starts again by itself (K-1121); run a pull request run again on GitHub. |
 | A recipe error before any work | `kitshn check` names it. Fix `kitshn.config.ts`. |
 | A missing value name | A needed `KITSHN_<NAME>` is not set (K-808). |
 | A refused Compose setting | Remove it, or ask the owner to allow it for that machine (K-818). |

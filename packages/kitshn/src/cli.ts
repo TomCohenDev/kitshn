@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { extname, join, relative, resolve, sep } from "node:path";
+import { headersWarnings } from "./headers.ts";
 import { pickSiteIcon } from "./icon.ts";
 import { RecipeError, readRecipe } from "./parse.ts";
 import { type DeployEvent, decodeRecipe } from "./recipe.ts";
@@ -101,6 +102,10 @@ const TYPES: Record<string, string> = {
   ".xml": "application/xml",
   ".woff2": "font/woff2",
   ".pdf": "application/pdf",
+  ".gif": "image/gif",
+  ".heic": "image/heic",
+  ".gpx": "application/gpx+xml",
+  ".webmanifest": "application/manifest+json",
 };
 
 /** K-805: uploads the built files through the Workers direct upload flow; kitshn deploys them. */
@@ -137,7 +142,14 @@ async function deploy(server: string, dir: string) {
   const manifest: Record<string, { hash: string; size: number }> = {};
   const byHash = new Map<string, { path: string; type: string }>();
   const byPath = new Map<string, string>();
+  // K-805: `_headers` sets response headers of the site; Cloudflare reads it as config, not as a file to serve.
+  let headers: string | null = null;
   for (const path of files(output)) {
+    if (relative(output, path) === "_headers") {
+      headers = readFileSync(path, "utf8");
+      for (const warning of headersWarnings(headers)) console.log(`kitshn: warning: ${warning}`);
+      continue;
+    }
     const bytes = readFileSync(path);
     const extension = extname(path).toLowerCase();
     const hash = createHash("sha256")
@@ -186,7 +198,9 @@ async function deploy(server: string, dir: string) {
     deployId: plan.deployId,
     jwt: completion,
     icon: icon ? Buffer.from(icon.bytes).toString("base64") : null,
+    headers,
   });
+  if (headers !== null) console.log("kitshn: the site sets its own headers with _headers.");
   console.log(
     `kitshn: deployed ${Object.keys(manifest).length} files to https://${done.address} (route check: ${done.status}).`,
   );

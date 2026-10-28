@@ -1,4 +1,4 @@
-import type { Level, Member, ResourceKind } from "../core/model.ts";
+import type { Level, Member, Resource, ResourceKind } from "../core/model.ts";
 
 /**
  * Sticker colours follow tick3d: black text on the light sticker colours, white text on the accent.
@@ -99,3 +99,15 @@ export const LEVEL_COLORS: Record<Level, string> = {
  * it is the selection colour in light mode.
  */
 export const CIRCLE_COLORS = ["#6C5CE7", "#FF5277", "#00B3FF", "#FFB347", "#7CFF8A", "#14B8A6"];
+
+/**
+ * K-807: the pull request of a preview card, from the `pr-<n>` environment at the end of its name. Known limit: a
+ * recipe that names its previews another way gets no number; revisit when cards carry their environment.
+ */
+export function pullRequestOf(resource: Resource): number | null {
+  if (!resource.kind.startsWith("site.")) return null;
+  const last = resource.name.split(" ").at(-1) ?? "";
+  if (!last.startsWith("pr-")) return null;
+  const number = Number(last.slice(3));
+  return Number.isInteger(number) && number > 0 ? number : null;
+}

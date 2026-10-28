@@ -17,7 +17,7 @@ import {
 import type { AccessState, MachineView } from "../core/protocol.ts";
 import { isAgentKey } from "../core/agent.ts";
 import { AGENT_TIP, LEVEL_TIPS, MATCH_TIPS, MEMBER_HELP, PASSKEY_TIP, RightStickers } from "./Circle.tsx";
-import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
+import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS, pullRequestOf } from "./kinds.ts";
 import { KeySticker, PresenceSticker } from "./Machines.tsx";
 import type { MenuTarget } from "./actions.ts";
 import { MoreButton } from "./controls.tsx";
@@ -878,6 +878,7 @@ function CardView(props: {
   const { resource, state } = props;
   const kind = KINDS[resource.kind];
   const holding = circlesHolding(state, resource.id);
+  const pullRequest = pullRequestOf(resource);
   return (
     <div
       class={`card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}${props.flash ? " flash" : ""}`}
@@ -926,6 +927,14 @@ function CardView(props: {
         >
           {resource.kind}
         </span>
+        {pullRequest !== null ? (
+          <span
+            class="sticker info"
+            data-tip={`A preview of pull request #${pullRequest}. It goes when the pull request closes; its panel links the pull request.`}
+          >
+            PR #{pullRequest}
+          </span>
+        ) : null}
         {props.machine ? <PresenceSticker view={props.machine} /> : null}
         {props.machine ? <KeySticker view={props.machine} /> : null}
         {holding.map((circle) => {

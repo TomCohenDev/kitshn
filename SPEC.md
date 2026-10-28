@@ -82,7 +82,7 @@ The architecture, the request paths and the budget are in [docs/architecture.md]
   | `repo` | view | a repo that has a recipe; its environments are its children |
 
 - **K-302** A provider adds kinds through the daemon (K-704). Each kind has an id with the provider prefix (for example `t3.thread`), its levels, and how it is enforced (K-405).
-- **K-303** An environment of an app is its own resource and its own card, for example "riffle" and "riffle pr-41". New environments start in the circle that the recipe names (K-807).
+- **K-303** An environment of an app is its own resource and its own card, for example "riffle" and "riffle pr-41". A preview card shows a "PR #<n>" sticker, and its panel links the pull request on GitHub. New environments start in the circle that the recipe names (K-807).
 - **K-304** Each resource has an id, a kind, a name, an owner machine when it has one, its addresses, and its status. The status is one of: running, stopped, deploying, failed, offline, unknown.
 
 ## 4. Enforcement

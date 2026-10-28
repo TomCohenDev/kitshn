@@ -45,7 +45,7 @@ import type {
   RepoView,
   RevisionView,
 } from "../core/protocol.ts";
-import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
+import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS, pullRequestOf } from "./kinds.ts";
 import {
   CircleEditor,
   type DeviceSecret,
@@ -2186,6 +2186,7 @@ function CardPanel(props: {
   const { resource, state, machine } = props;
   const holding = circlesHolding(state, resource.id);
   const address = resource.addresses[0];
+  const pullRequest = pullRequestOf(resource);
   const stack = [...state.stacks.values()].find((each) => each.members.includes(resource.id));
   const [removing, setRemoving] = useState<{ readonly circle: Circle; readonly anchor: Rect } | null>(null);
   // The stack went while the choice was open (another device, or undo): the choice ends with it.
@@ -2246,6 +2247,19 @@ function CardPanel(props: {
       ) : null}
       {address && props.repo ? (
         <p class="help">Its repo sets this address: change it in kitshn.config.ts.</p>
+      ) : null}
+      {pullRequest !== null && props.repo ? (
+        <div class="row">
+          <a
+            class="btn"
+            href={`https://github.com/${props.repo.name}/pull/${pullRequest}`}
+            target="_blank"
+            rel="noreferrer"
+            data-tip={`Open pull request #${pullRequest} of ${props.repo.name} on GitHub. This preview goes when it closes.`}
+          >
+            Pull request #{pullRequest} ↗
+          </a>
+        </div>
       ) : null}
       {props.repo ? (
         <div class="row">

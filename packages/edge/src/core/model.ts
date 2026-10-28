@@ -199,6 +199,32 @@ export function activeShares(state: State, resource: Resource, now: number): Arr
   });
 }
 
+/** K-1504: what one press of the big red button closes and keeps, in shares that give access now. */
+export interface PauseReach {
+  /** Shares that close in every pause. */
+  readonly closes: number;
+  /** Cards that have such a share. */
+  readonly cards: number;
+  /** Public shares of sites, pages and files that a pause keeps and a lockdown closes. */
+  readonly keptPublic: number;
+}
+
+/** K-1504: the reach of a pause, from the shares the state gives without a pause; works while paused too. */
+export function pauseReach(state: State, now: number): PauseReach {
+  const count = (paused: PauseMode | null, resource: Resource) => activeShares({ ...state, paused }, resource, now).length;
+  let closes = 0;
+  let cards = 0;
+  let keptPublic = 0;
+  for (const resource of state.resources.values()) {
+    const open = count(null, resource);
+    const kept = count("keep-public", resource);
+    closes += open - kept;
+    if (open > kept) cards += 1;
+    keptPublic += kept - count("lockdown", resource);
+  }
+  return { closes, cards, keptPublic };
+}
+
 export const isPublicCircle = (circle: Circle) => circle.members.some((member) => member._tag === "everyone");
 
 export const memberLabel = (member: Member): string => {

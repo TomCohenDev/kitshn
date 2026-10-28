@@ -53,7 +53,9 @@ export type MenuTarget =
   | { readonly _tag: "card"; readonly id: string }
   | { readonly _tag: "stack"; readonly id: string }
   | { readonly _tag: "circle"; readonly id: string }
-  | { readonly _tag: "map"; readonly at: Point };
+  | { readonly _tag: "map"; readonly at: Point }
+  /** K-526: the "+" of the toolbar. */
+  | { readonly _tag: "add" };
 
 export interface ActionContext {
   readonly state: State;
@@ -552,43 +554,60 @@ export function circleActions(ctx: ActionContext, h: ActionHandlers, circle: Cir
   ].filter((group) => group.length > 0);
 }
 
-/** An empty spot of the map, or `at: null` for the palette, which adds in the middle of the view. */
-export function mapActions(_ctx: ActionContext, h: ActionHandlers, at: Point | null): ActionGroups {
+/**
+ * K-526: everything that the owner can add. The toolbar "+" and the menu of an empty spot both show this one
+ * list, so they never differ. `at` is the spot, or null for the middle of the view.
+ */
+export function addActions(ctx: ActionContext, h: ActionHandlers, at: Point | null): ReadonlyArray<Action> {
   const here = at ? " here" : "";
   return [
-    [
-      {
-        id: "new-circle",
-        label: `New circle${here}`,
-        tip: `Make a new circle${at ? " at this spot" : " in the middle of the view"}. It matches nobody until you add members.`,
-        run: () => h.newCircle(at),
-      },
-      {
-        id: "upload",
-        label: `Upload a page or a file${here}`,
-        keywords: "upload html",
-        tip: at
-          ? "Upload files to this spot: they land in exactly the circles here, so they get those shares."
-          : "Upload files: they wait in the tray, private.",
-        run: () => h.upload(at),
-      },
-      {
-        id: "add-site",
-        label: "Add a site",
-        keywords: "live from a machine or static from a repo",
-        tip: "Share a local server of a machine, or set up a static site from a repo. Its card starts in the tray, private.",
-        run: h.addSite,
-      },
-      {
-        id: "add-machine",
-        label: "Add a machine",
-        keywords: "join code",
-        tip: "Make a join command for a new machine. Its card starts in the tray, private.",
-        run: h.addMachine,
-      },
-    ],
-    [{ id: "fit", label: "Fit the map", tip: "Fit every circle and card in the view.", run: h.fit }],
+    {
+      id: "new-circle",
+      label: `New circle${here}`,
+      tip: `Make a new circle${at ? " at this spot" : " in the middle of the view"}. It matches nobody until you add members.`,
+      run: () => h.newCircle(at),
+    },
+    {
+      id: "upload",
+      label: `Upload a page or a file${here}`,
+      keywords: "upload html",
+      tip: at
+        ? "Upload files to this spot: they land in exactly the circles here, so they get those shares. An HTML file becomes a page, any other file stays a file, at most 100 MB."
+        : "Upload files: they wait in the tray, private. An HTML file becomes a page, any other file stays a file, at most 100 MB. You can also drop files on the map.",
+      run: () => h.upload(at),
+    },
+    {
+      id: "add-site",
+      label: "Add a site",
+      keywords: "live from a machine or static from a repo",
+      tip: "Share a local server of a machine, or set up a static site from a repo. Its card starts in the tray, private.",
+      run: h.addSite,
+    },
+    {
+      id: "add-machine",
+      label: "Add a machine",
+      keywords: "join code",
+      tip: "Make a join command for a new machine. Its card starts in the tray, private.",
+      run: h.addMachine,
+    },
+    {
+      id: "add-member",
+      label: "Add a member",
+      keywords: "person domain device network",
+      tip: "Add a person, a domain, a device or a network to a circle.",
+      items: [...ctx.state.circles.values()].map((circle) => ({
+        id: `add-member:${circle.id}`,
+        label: circle.name,
+        tip: `Add a person, a domain, a device or a network to ${circle.name}.`,
+        run: () => h.addMember(circle.id),
+      })),
+    },
   ];
+}
+
+/** An empty spot of the map, or `at: null` for the palette, which adds in the middle of the view. */
+export function mapActions(ctx: ActionContext, h: ActionHandlers, at: Point | null): ActionGroups {
+  return [addActions(ctx, h, at), [{ id: "fit", label: "Fit the map", tip: "Fit every circle and card in the view.", run: h.fit }]];
 }
 
 /** The groups for a menu target, or null when its item is gone. */
@@ -608,6 +627,8 @@ export function actionsFor(ctx: ActionContext, h: ActionHandlers, target: MenuTa
     }
     case "map":
       return mapActions(ctx, h, target.at);
+    case "add":
+      return [addActions(ctx, h, null)];
   }
 }
 

@@ -16,7 +16,8 @@ const darwin = () =>
     getpeereid: { args: [FFIType.i32, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
   }).symbols;
 
-let calls: { linux: ReturnType<typeof linux> } | { darwin: ReturnType<typeof darwin> } | null = null;
+type Calls = { linux: ReturnType<typeof linux> } | { darwin: ReturnType<typeof darwin> };
+let calls: Calls | null = null;
 
 /**
  * The peer user id of a connected Unix socket, or null when the kernel does not give it. Bun has no call for
@@ -24,7 +25,17 @@ let calls: { linux: ReturnType<typeof linux> } | { darwin: ReturnType<typeof dar
  */
 export function peerUid(platform: Platform, fd: unknown): number | null {
   if (typeof fd !== "number" || !Number.isInteger(fd) || fd < 0) return null;
-  calls ??= platform === "linux" ? { linux: linux() } : { darwin: darwin() };
+  // A library that does not load refuses the peer instead of ending the daemon (K-006).
+  try {
+    calls ??= platform === "linux" ? { linux: linux() } : { darwin: darwin() };
+    return readPeer(calls, fd);
+  } catch (error) {
+    console.error(`kitshn: the peer user id cannot be read: ${String(error)}`);
+    return null;
+  }
+}
+
+function readPeer(calls: Calls, fd: number): number | null {
   if ("linux" in calls) {
     // struct ucred { pid_t pid; uid_t uid; gid_t gid; }
     const credentials = new Uint32Array(3);

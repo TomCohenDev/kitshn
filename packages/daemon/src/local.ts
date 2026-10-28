@@ -37,7 +37,12 @@ export async function listenLocal(path: string, options: LocalOptions): Promise<
   // that start in the same moment are a mistake of the service setup.
   const live = await Bun.connect({ unix: path, socket: { data() {} } }).then(
     (socket) => (socket.end(), true),
-    () => false,
+    (error: unknown) => {
+      // Only a missing file or one that no daemon listens on may go; anything else is unknown (K-006).
+      const code = (error as { code?: unknown }).code;
+      if (code === "ENOENT" || code === "ECONNREFUSED") return false;
+      throw error;
+    },
   );
   if (live) throw new Error(`another kitshn daemon listens on ${path}.`);
   rmSync(path, { force: true });
@@ -60,7 +65,11 @@ export async function listenLocal(path: string, options: LocalOptions): Promise<
       await Promise.resolve()
         .then(() => options.handle(request, { uid }))
         .catch(
-        (error: unknown): Answer => ({ id: request.id, type: "error", error: String(error) }),
+        (error: unknown): Answer => ({
+          id: request.id,
+          type: "error",
+          error: error instanceof Error ? error.message : String(error),
+        }),
       ),
     );
   };

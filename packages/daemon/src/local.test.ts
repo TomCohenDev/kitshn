@@ -76,7 +76,7 @@ describe("local socket (K-701, K-702)", () => {
       expect.arrayContaining([
         { id: null, type: "error", error: "The line is not JSON." },
         expect.objectContaining({ id: "7", type: "error" }),
-        { id: "8", type: "error", error: "Error: no rotate-key here" },
+        { id: "8", type: "error", error: "no rotate-key here" },
       ]),
     );
   });

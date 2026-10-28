@@ -247,8 +247,10 @@ function localUsersCommand(action: string | undefined, who: string | undefined) 
   if (action === "add" && uid !== 0)
     fail(`only root can reach the socket of this user, so the user id ${uid} cannot connect (K-701).`);
   const next = action === "add" ? [...new Set([...users, uid])] : users.filter((user) => user !== uid);
-  // In place, so the file keeps its owner and its mode 0600.
-  writeFileSync(paths.config, `${JSON.stringify({ ...machine, localUsers: next }, null, 2)}\n`);
+  // Through a rename, so a stop never leaves half of the file that holds the machine token.
+  const temporary = `${paths.config}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify({ ...machine, localUsers: next }, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temporary, paths.config);
   console.log(`Local users: ${next.length > 0 ? next.join(", ") : "none"}, and the daemon user ${own}.`);
 }
 

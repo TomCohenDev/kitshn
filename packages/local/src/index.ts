@@ -56,7 +56,7 @@ export function readRequest(text: string): { ok: true; request: Request } | { ok
     return { ok: true, request: decodeRequest(value) };
   } catch (error) {
     const id = typeof value === "object" && value !== null && "id" in value && isId(value.id) ? value.id : null;
-    return { ok: false, answer: { id, type: "error", error: `The request does not match K-702: ${String(error)}` } };
+    return { ok: false, answer: { id, type: "error", error: `The request does not match K-702: ${error instanceof Error ? error.message : String(error)}` } };
   }
 }
 

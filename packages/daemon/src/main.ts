@@ -25,6 +25,7 @@ import { type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from ".
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
 import { localUsersOf, peerDecision } from "./peer.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
+import { HELPER_IMAGE, isRootlessInfo, rootTakeover, rootTakeoverPlan } from "./takeover.ts";
 import {
   chmodSync,
   copyFileSync,
@@ -45,6 +46,7 @@ import {
   cpus,
   freemem,
   hostname,
+  userInfo,
   loadavg,
   platform as osPlatform,
   release,
@@ -269,6 +271,23 @@ function localUsersCommand(action: string | undefined, who: string | undefined) 
   console.log(`Local users: ${next.length > 0 ? next.join(", ") : "none"}, and the daemon user ${own}.`);
   if (action === "add")
     console.log(`The user ${who} sets KITSHN_LOCAL_SOCKET=${paths.sharedSocket} to reach the daemon.`);
+}
+
+/** K-1404: the takeover of KitSHn 1 data by root, for a daemon user with rootless Docker. */
+async function kitshn1TakeoverCommand(repo?: string, environment?: string, project?: string, user?: string) {
+  if (!repo || !environment || !project || !user)
+    fail("usage: kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>");
+  if (process.getuid!() !== 0) fail("kitshn1-takeover runs as root: it stops KitSHn 1 and reads /persistent.");
+  const entry = spawnSync("getent", ["passwd", user], { encoding: "utf8" });
+  const [, , uid = "", , , home = ""] = entry.stdout.trim().split(":");
+  if (entry.status !== 0 || !isDigits(uid) || !home) fail(`there is no user ${user}.`);
+  const plan = rootTakeoverPlan({
+    repo, environment, project, home, uid: Number(uid), persistentRoot: KITSHN1_PERSISTENT, exists: existsSync,
+  });
+  if (typeof plan === "string") fail(plan);
+  await rootTakeover(plan, { name: user, uid: Number(uid) }).catch((error: unknown) =>
+    fail(error instanceof Error ? error.message : String(error)),
+  );
 }
 
 /** A user id, from a number or a user name. */
@@ -650,6 +669,16 @@ async function composeUp(
     const config = await readConfig([]);
     refuse(composeRisks(config, command.project, roots, real));
     if (takeover.kind === "take") {
+      // K-1404: rootless Docker sees neither the KitSHn 1 project nor its root-owned files; root takes the data over.
+      const info = await runProgram("docker", ["info", "--format", "{{json .SecurityOptions}}"]);
+      if (info.ok && isRootlessInfo(info.output)) {
+        const self = userInfo();
+        throw new Error(
+          `KitSHn 1 data waits at ${takeover.dataDir}, and this daemon uses rootless Docker. As root, run: ` +
+            `${process.execPath} kitshn1-takeover ${command.repo} ${command.environment} --project ${command.project} --user ${self.username}` +
+            " Then deploy again (K-1404).",
+        );
+      }
       // Set first: a stop that fails half-way still gets its start back.
       stoppedKitshn1 = takeover.project;
       await step("stop the KitSHn 1 app", "docker", ["compose", "-p", takeover.project, "stop"], { cwd: paths.data });
@@ -787,7 +816,6 @@ async function composeUp(
 
 /** Short root jobs on app folders (copy, clean-up); busybox has `cp -a` and `find -delete` and is a few MB. */
 // Pinned by digest, so no app can take the name with an image of its own (K-818).
-const HELPER_IMAGE = "busybox:1.38@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e";
 /** K-818: the source folders of an app: the one of its last deploy, and any of a deploy that failed in `up`. */
 const sourceFolders = (dir: string): Array<string> =>
   existsSync(dir)
@@ -1401,6 +1429,9 @@ switch (command) {
   case "unexpose":
     unexposeCommand(args[0]);
     break;
+  case "kitshn1-takeover":
+    await kitshn1TakeoverCommand(args[0], args[1], flag("--project"), flag("--user"));
+    break;
   default:
     console.log(`kitshn ${VERSION}
 
@@ -1414,5 +1445,7 @@ kitshn status                           the machine, its key, its connection to 
 kitshn local-users list|add|remove <u>  who else may use the local socket, as the daemon user (K-701)
 kitshn expose <port|socket> --name <n>  share a local server at <n>.<zone> (K-1104); --dev sets Host localhost
 kitshn unexpose <name>                  stop sharing it
+kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>
+                                        as root: move KitSHn 1 data into rootless Docker (K-1404)
 kitshn version`);
 }

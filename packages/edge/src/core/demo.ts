@@ -9,11 +9,19 @@ export const DEMO_MACHINES: ReadonlyArray<{ readonly machine: Machine; readonly 
 ];
 
 /** K-1113: the stored icon of the demo static site. */
-export const DEMO_SITE_ICON = {
-  id: "tick3d",
-  type: "image/svg+xml",
-  svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" fill="#FFE14D"/><path d="M7 17l6 6L25 9" fill="none" stroke="#000" stroke-width="5"/></svg>',
-} as const;
+export const DEMO_ICONS = [
+  {
+    id: "tick3d",
+    type: "image/svg+xml",
+    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" fill="#FFE14D"/><path d="M7 17l6 6L25 9" fill="none" stroke="#000" stroke-width="5"/></svg>',
+  },
+  // K-1114: a Compose app with the icon of the running app.
+  {
+    id: "riffle",
+    type: "image/svg+xml",
+    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" fill="#8B5CF6"/><path d="M6 22c4-10 8-10 10 0s6 10 10 0" fill="none" stroke="#fff" stroke-width="4"/></svg>',
+  },
+] as const;
 
 /** Local development only (DEV_DEMO): sample cards and circles, so the map has something to show. */
 export function demo() {

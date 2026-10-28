@@ -1,3 +1,4 @@
+import { lstatSync } from "node:fs";
 import { createConnection } from "node:net";
 
 /** One live site in `sites.json` (K-1104). */
@@ -42,12 +43,24 @@ export function parseSiteFile(value: unknown): Array<SiteEntry> | null {
   return sites;
 }
 
+/** A socket file itself, not a link, so a link in the folder of an app cannot point a check elsewhere. */
+export function isSocketFile(path: string): boolean {
+  try {
+    return lstatSync(path).isSocket();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * K-1107: the daemon tries the port or socket of each site, on the machine only. A port counts as up
  * when it answers on IPv4 or IPv6, because dev servers such as Vite often listen on ::1 only.
  */
 export async function probe(target: string, timeoutMs = 2000): Promise<boolean> {
-  if (target.startsWith("unix:")) return connects({ path: target.slice("unix:".length) }, timeoutMs);
+  if (target.startsWith("unix:")) {
+    const path = target.slice("unix:".length);
+    return isSocketFile(path) && connects({ path }, timeoutMs);
+  }
   const port = Number(new URL(target).port);
   return (
     (await connects({ host: "127.0.0.1", port }, timeoutMs)) || connects({ host: "::1", port }, timeoutMs)

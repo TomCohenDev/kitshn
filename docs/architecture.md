@@ -42,7 +42,7 @@ This page says what the parts are, where each piece of state lives, how requests
 | Job queue and command results | Durable Object SQLite | Expired jobs pruned daily. |
 | App vars and secrets | Durable Object SQLite, secrets encrypted | Key in a Worker secret (K-809). `KITSHN_*` GitHub values win on deploy. |
 | Presence and latest sample | Durable Object memory, presence also in SQLite on change | Samples never written (K-606). Presence keeps the system of the last status (K-524). |
-| Card icons of static sites | Durable Object SQLite, at most 100 KB each | Written only when the bytes change (K-1113). Not R2, so icons work without R2 and need no second check. |
+| Card icons of static sites, Compose apps and live sites | Durable Object SQLite, at most 100 KB each | Written only when the bytes change (K-1113), and from a daemon at most once an hour per site (K-1114). Not R2, so icons work without R2 and need no second check. |
 | Sample history | Daemon disk | 30 days. |
 | Access applications and policies | Cloudflare Access | Compiled from shares. kitshn is the source; Access is the copy. |
 | Tunnel ingress, DNS records, Worker routes | Cloudflare | Compiled from resources. |

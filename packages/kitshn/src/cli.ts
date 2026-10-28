@@ -176,7 +176,7 @@ async function deploy(server: string, dir: string) {
     if (body.result?.jwt) completion = body.result.jwt;
   }
   // K-1112: the card icon comes from the built files; a site without one gets its kind icon.
-  const { icon, notes } = pickSiteIcon((path) => {
+  const { icon, notes } = await pickSiteIcon((path) => {
     const file = byPath.get(path);
     return file === undefined ? null : readFileSync(file);
   });

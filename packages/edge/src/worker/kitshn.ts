@@ -91,7 +91,7 @@ import {
   mayDeployOn,
   publishPlace,
 } from "../core/agent.ts";
-import { DEMO_MACHINES, DEMO_SITE_ICON, demo } from "../core/demo.ts";
+import { DEMO_MACHINES, DEMO_ICONS, demo } from "../core/demo.ts";
 import { type MachineOs, machineOs } from "../core/icons.ts";
 import {
   contentSecurityPolicy,
@@ -248,6 +248,8 @@ export class Kitshn extends DurableObject<Env> {
   private presence = new Map<string, { online: boolean; lastSeen: number; os: MachineOs | null }>();
   /** K-1113: the hash of each stored card icon; the bytes stay in SQLite until a map asks. */
   private iconHashes = new Map<string, string>();
+  /** K-1114: when each stored icon last changed, so a daemon changes one at most once an hour. */
+  private iconChangedAt = new Map<string, number>();
   /** K-1104: live sites of the machines. */
   private liveSites = new Map<string, LiveSite>();
   /** Address checks that failed, and when to try them again. Memory only; a restart retries at once. */
@@ -349,9 +351,11 @@ export class Kitshn extends DurableObject<Env> {
         { online: row.online === 1, lastSeen: row.last_seen, os: row.os as MachineOs | null },
       ]),
     );
-    this.iconHashes = new Map(
-      this.sql<{ id: string; hash: string }>("SELECT id, hash FROM icons").map((row) => [row.id, row.hash]),
+    const icons = this.sql<{ id: string; hash: string; changed_at: number }>(
+      "SELECT id, hash, changed_at FROM icons",
     );
+    this.iconHashes = new Map(icons.map((row) => [row.id, row.hash]));
+    this.iconChangedAt = new Map(icons.map((row) => [row.id, row.changed_at]));
     this.accessWarnings = JSON.parse(this.meta("access_warnings") ?? "[]") as Array<string>;
     this.access = new Map(
       this.sql<{ key: string; cf_id: string; aud: string; body: string; tried: string; error: string | null }>(
@@ -445,14 +449,15 @@ export class Kitshn extends DurableObject<Env> {
             key === null ? null : "Yarden's agents",
             goneAt,
           );
-      // K-524, K-1113: the demo cards show a site icon and the system of each machine.
+      // K-524, K-1113, K-1114: the demo cards show site icons and the system of each machine.
       if (extra.resources.length > 0) {
-        this.sql(
-          "INSERT OR IGNORE INTO icons (id, type, hash, bytes) VALUES (?, ?, 'demo', ?)",
-          DEMO_SITE_ICON.id,
-          DEMO_SITE_ICON.type,
-          new TextEncoder().encode(DEMO_SITE_ICON.svg).slice().buffer,
-        );
+        for (const icon of DEMO_ICONS)
+          this.sql(
+            "INSERT OR IGNORE INTO icons (id, type, hash, bytes) VALUES (?, ?, 'demo', ?)",
+            icon.id,
+            icon.type,
+            new TextEncoder().encode(icon.svg).slice().buffer,
+          );
         for (const { machine, os } of DEMO_MACHINES) {
           this.sql("INSERT OR IGNORE INTO machines (id, body) VALUES (?, ?)", machine.id, JSON.stringify(machine));
           this.sql("INSERT OR IGNORE INTO presence (id, online, last_seen, os) VALUES (?, 0, ?, ?)", machine.id, Date.now() - 3_600_000, os);
@@ -1413,6 +1418,8 @@ export class Kitshn extends DurableObject<Env> {
       this.sendMachine(machine);
     } else if (message.type === "sites") {
       this.updateLiveSites(machine, message.sites);
+    } else if (message.type === "icon") {
+      await this.liveIcon(machine, message.site, message.icon);
     } else if (message.type === "volumes" && Array.isArray(message.volumes)) {
       const volumes = message.volumes
         .filter((item) => isRecord(item) && typeof item["name"] === "string" && typeof item["project"] === "string")
@@ -2560,7 +2567,11 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("DELETE FROM join_codes WHERE expires_at < ?", now);
       this.sql("DELETE FROM rekey_codes WHERE expires_at < ?", now);
       // K-1113: a removed card keeps its icon until this run, so a quick Undo keeps it; a deploy sends it again.
-      this.sql("DELETE FROM icons WHERE id NOT IN (SELECT id FROM resources)");
+      for (const { id } of this.sql<{ id: string }>("DELETE FROM icons WHERE id NOT IN (SELECT id FROM resources) RETURNING id")) {
+        // The same id can get a card again (K-1114), so memory forgets the icon too.
+        this.iconHashes.delete(id);
+        this.iconChangedAt.delete(id);
+      }
       this.sql(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('daily_at', ?)",
         String(nextUtcMidnight(now)),
@@ -3594,23 +3605,46 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ address: row.address, status: check?.status ?? 0, card });
   }
 
-  /** K-1113: one icon per card, written only when its bytes change (K-1302). */
-  private async setIcon(id: string, icon: { readonly bytes: Uint8Array; readonly type: string } | null) {
-    if (icon === null) {
-      if (this.iconHashes.delete(id)) this.sql("DELETE FROM icons WHERE id = ?", id);
-      return;
+  /**
+   * K-1113: one icon per card, written only when its bytes change (K-1302). With `hourly`, a stored icon changes
+   * at most once an hour (K-1114). Returns whether the stored icon changed.
+   */
+  private async setIcon(
+    id: string,
+    icon: { readonly bytes: Uint8Array; readonly type: string } | null,
+    hourly = false,
+  ): Promise<boolean> {
+    const now = Date.now();
+    const hash = icon === null ? null : await iconHash(icon.bytes);
+    if ((this.iconHashes.get(id) ?? null) === hash) return false;
+    const changedAt = this.iconChangedAt.get(id);
+    if (hourly && changedAt !== undefined && now - changedAt < ICON_CHANGE_MS) return false;
+    if (icon === null || hash === null) {
+      this.sql("DELETE FROM icons WHERE id = ?", id);
+      this.iconHashes.delete(id);
+      // A removal counts toward the hour too; its time lives in memory only, so a restart forgets it.
+      this.iconChangedAt.set(id, now);
+      return true;
     }
-    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", icon.bytes));
-    const hash = [...digest.subarray(0, 8)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-    if (this.iconHashes.get(id) === hash) return;
     this.sql(
-      "INSERT OR REPLACE INTO icons (id, type, hash, bytes) VALUES (?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO icons (id, type, hash, bytes, changed_at) VALUES (?, ?, ?, ?, ?)",
       id,
       icon.type,
       hash,
       icon.bytes.slice().buffer,
+      now,
     );
     this.iconHashes.set(id, hash);
+    this.iconChangedAt.set(id, now);
+    return true;
+  }
+
+  /** K-1114: the icon that a daemon read from one of its own sites. */
+  private async liveIcon(machine: Machine, name: unknown, value: unknown) {
+    const site = this.sitesOf(machine.id).find((item) => item.name === name);
+    const icon = parseSiteIcon(value);
+    if (!site || icon === undefined || typeof icon === "string") return;
+    if (await this.setIcon(site.id, icon, true)) this.broadcast();
   }
 
   /** K-1113: the stored icon of a card. Its route sits behind the map's own check (K-104, K-208). */
@@ -4464,3 +4498,12 @@ const AGENT_WORKFLOW = "kitshn.yml";
 const NEVER = Number.MAX_SAFE_INTEGER;
 const NO_GITHUB_APP =
   "This kitshn has no GitHub App. Run the bootstrap with KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY.";
+
+/** K-1114: a daemon changes the stored icon of a site at most once in this time. */
+const ICON_CHANGE_MS = 60 * 60_000;
+
+/** K-1113: the short hash of icon bytes, which versions the icon address. */
+async function iconHash(bytes: Uint8Array) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return [...digest.subarray(0, 8)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}

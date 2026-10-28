@@ -81,6 +81,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   ],
   // 12: what GitHub said about each repo id (K-819): when kitshn last asked, and since when the repo is gone.
   ["ALTER TABLE repos ADD COLUMN checked_at INTEGER", "ALTER TABLE repos ADD COLUMN gone_at INTEGER"],
+  // 13: when each icon last changed; a daemon changes the icon of a site at most once an hour (K-1114).
+  ["ALTER TABLE icons ADD COLUMN changed_at INTEGER NOT NULL DEFAULT 0"],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

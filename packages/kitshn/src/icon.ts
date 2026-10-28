@@ -97,23 +97,26 @@ export interface IconCandidate {
   readonly source: string;
 }
 
+/** Reads one file of a site by its path, or null when the site has no such file. */
+export type SiteReader = (path: string) => Uint8Array | null | Promise<Uint8Array | null>;
+
 /**
- * K-1112: the icon candidates in order: each `<link rel="icon">` of /index.html, then /favicon.ico, then each
- * icon of the web manifest that /index.html links. Known limit: `<base href>` is ignored; revisit when a site
- * with a base element shows the wrong icon.
+ * K-1112: the icon candidates in order: each `<link rel="icon">` of the entry page, then /favicon.ico, then each
+ * icon of the web manifest that the entry page links. The entry page is /index.html of built files, or / of a
+ * running app. Known limit: `<base href>` is ignored; revisit when a site with a base element shows the wrong icon.
  */
-export function iconCandidates(readText: (path: string) => string | null): Array<IconCandidate> {
-  const html = readText("/index.html");
+async function iconCandidates(readText: (path: string) => Promise<string | null>, entry: string): Promise<Array<IconCandidate>> {
+  const html = await readText(entry);
   const links = html === null ? [] : tags(html, "link");
   const candidates: Array<IconCandidate> = [];
   for (const link of links.filter((item) => relHas(item, "icon"))) {
-    const path = sitePath(link.get("href") ?? "", "/index.html");
-    if (path) candidates.push({ path, source: '<link rel="icon"> of /index.html' });
+    const path = sitePath(link.get("href") ?? "", entry);
+    if (path) candidates.push({ path, source: `<link rel="icon"> of ${entry}` });
   }
   candidates.push({ path: "/favicon.ico", source: "/favicon.ico" });
   const manifestLink = links.find((item) => relHas(item, "manifest"));
-  const manifestPath = manifestLink ? sitePath(manifestLink.get("href") ?? "", "/index.html") : null;
-  const manifestText = manifestPath ? readText(manifestPath) : null;
+  const manifestPath = manifestLink ? sitePath(manifestLink.get("href") ?? "", entry) : null;
+  const manifestText = manifestPath ? await readText(manifestPath) : null;
   if (manifestPath && manifestText !== null) {
     let icons: unknown = null;
     try {
@@ -140,19 +143,19 @@ export interface SiteIcon {
  * K-1112, K-1113: the first candidate that exists, is an image and fits the limit. `notes` says why each
  * earlier candidate that exists did not win, for the deploy log; null `icon` means the card shows its kind icon.
  */
-export function pickSiteIcon(read: (path: string) => Uint8Array | null): {
-  readonly icon: SiteIcon | null;
-  readonly notes: ReadonlyArray<string>;
-} {
-  const text = (path: string) => {
-    const bytes = read(path);
+export async function pickSiteIcon(
+  read: SiteReader,
+  entry = "/index.html",
+): Promise<{ readonly icon: SiteIcon | null; readonly notes: ReadonlyArray<string> }> {
+  const text = async (path: string) => {
+    const bytes = await read(path);
     return bytes === null ? null : new TextDecoder().decode(bytes);
   };
   const notes: Array<string> = [];
-  for (const candidate of iconCandidates(text)) {
-    const bytes = read(candidate.path);
+  for (const candidate of await iconCandidates(text, entry)) {
+    const bytes = await read(candidate.path);
     if (bytes === null) {
-      if (candidate.path !== "/favicon.ico") notes.push(`${candidate.path} from ${candidate.source} is not in the output folder.`);
+      if (candidate.path !== "/favicon.ico") notes.push(`${candidate.path} from ${candidate.source} is missing.`);
       continue;
     }
     if (bytes.length > ICON_LIMIT) {

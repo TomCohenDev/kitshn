@@ -60,6 +60,8 @@ html {
 }
 body {
   margin: 0;
+  /* No double-tap zoom on iOS; the map zooms with a pinch (K-516). */
+  touch-action: manipulation;
   height: 100dvh;
   overflow: hidden;
   font: 1rem/1.5 var(--sans);
@@ -307,6 +309,8 @@ input[type="search"]::-webkit-search-cancel-button {
 .viewport {
   position: absolute;
   inset: 0;
+  /* Circles past the screen edge never widen the page; a phone would otherwise lay it out wider. */
+  overflow: clip;
   touch-action: none;
   /* A drag on the map never selects text; panels and inputs stay selectable. */
   user-select: none;
@@ -876,9 +880,56 @@ input[type="search"]::-webkit-search-cancel-button {
   .bar.beside-panel {
     right: 10px;
   }
+  /* K-528: one row on a phone; the tabs and map tools sit in the "☰" menu. */
+  .bar {
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: 4px 6px;
+  }
+  /* The browser tab names the page; on a phone the toolbar needs the room for its buttons. */
+  .bar h1 {
+    display: none;
+  }
+  .tray-head .help {
+    display: none;
+  }
+  .bar .btn {
+    padding: 2px 8px;
+  }
+  .bar .panic.opener .panic-label {
+    display: none;
+  }
+  .bar .panic.opener {
+    --well: 1.9rem;
+    --cap: 1.6rem;
+    --skirt: 4px;
+    margin: 0;
+  }
+  .bar .sticker {
+    font-size: 0.55rem;
+  }
+  .bar > * {
+    flex: none;
+  }
+  /* The shelf is a sheet: closed it shows its count, open it scrolls inside 40% of the screen. */
   .tray {
-    width: 150px;
-    bottom: 50dvh;
+    width: min(16rem, calc(100vw - 20px));
+    max-height: 40dvh;
+  }
+  .tray.closed {
+    width: auto;
+  }
+  .tray.closed .tray-head > :not(.tray-toggle),
+  .tray.closed .tray-list {
+    display: none;
+  }
+  .tray-toggle {
+    font: inherit;
+    background: none;
+    border: 0;
+    padding: 0;
+    color: inherit;
+    cursor: pointer;
   }
   .hint {
     display: none;

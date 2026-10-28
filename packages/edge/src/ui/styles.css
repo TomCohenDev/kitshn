@@ -627,7 +627,7 @@ input[type="search"]::-webkit-search-cancel-button {
 .toast {
   position: fixed;
   left: 50%;
-  bottom: 14px;
+  bottom: calc(var(--hint-height, 0px) + 18px);
   transform: translateX(-50%);
   z-index: 30;
   display: flex;
@@ -641,6 +641,21 @@ input[type="search"]::-webkit-search-cancel-button {
   box-shadow: var(--shadow);
   font-weight: 700;
   font-size: 0.85rem;
+}
+/* Beside a floating panel, the toast centres over the map, so it never runs under the panel. */
+.toast.beside-panel {
+  left: calc((100vw - var(--panel-width) - 24px) / 2);
+  max-width: min(640px, calc(100vw - var(--panel-width) - 44px));
+}
+@media (max-width: 720px) {
+  .toast.beside-panel {
+    left: 50%;
+    max-width: calc(100vw - 20px);
+  }
+}
+.toast .btn {
+  flex: none;
+  white-space: nowrap;
 }
 .toast.error {
   background: var(--error-surface);
@@ -869,23 +884,266 @@ input[type="search"]::-webkit-search-cancel-button {
   }
 }
 
-/* K-1504: the big red button. */
+/* K-1504: the big red button, after the panic button of the machine map (MM-708). It looks the same in
+   both modes, so it never reads as an ordinary action. */
 :root {
-  --hazard: #e5232e;
-  --hazard-dark: #c8101b;
+  --panic: #ff2d3a;
+  --panic-deep: #8c0014;
+  --hazard-stripes: repeating-linear-gradient(-45deg, var(--yellow) 0 10px, #000000 10px 20px);
 }
-/* The big red button. Red in both modes, so it never reads as an ordinary action. */
-.btn.big-red {
-  background: var(--hazard);
-  color: #ffffff;
-  font-weight: 800;
-  letter-spacing: 0.02em;
-  border-color: var(--shadow-ink);
+.panic {
+  /* The well and the cap of the mushroom; the panel's big button scales them. */
+  --well: 2.35rem;
+  --cap: 2.05rem;
+  --skirt: 6px;
+  position: relative;
+  padding: 3px;
+  background: var(--hazard-stripes);
+  border: var(--bw) solid #000000;
+  border-radius: var(--radius);
   box-shadow: 3px 3px 0 0 var(--shadow-ink);
 }
-.btn.big-red:not(:disabled):hover {
-  background: var(--hazard-dark);
+.panic-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px 2px 2px;
+  background: var(--surface);
+  border: var(--bw) solid #000000;
+  border-radius: var(--radius);
 }
+/* In the toolbar the frame reaches into the bar's padding, so the bigger button adds little height. */
+.bar .panic {
+  margin: -6px 0;
+}
+.panic-well {
+  display: grid;
+  place-items: center;
+  width: var(--well);
+  height: var(--well);
+  background: #24203a;
+  border: var(--bw) solid #000000;
+  border-radius: 9px;
+  box-shadow: inset 0 3px 0 0 #000000;
+  /* The lid of the Safety panel sits on it. */
+  position: relative;
+}
+/* A domed cap on a deep skirt: an inner hard rim, and a skirt that the press pushes into the well. */
+.mushroom {
+  width: var(--cap);
+  height: var(--cap);
+  padding: 0;
+  font: inherit;
+  font-size: calc(var(--cap) * 0.3);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #ffffff;
+  background: var(--panic);
+  border: var(--bw) solid #000000;
+  border-radius: 50%;
+  box-shadow:
+    inset 0 calc(var(--skirt) * -0.6) 0 0 #00000040,
+    0 var(--skirt) 0 0 var(--panic-deep);
+  transform: translateY(calc(var(--skirt) * -0.6));
+  transition:
+    transform 80ms,
+    box-shadow 80ms;
+  cursor: pointer;
+}
+.mushroom:not([aria-disabled="true"]):hover {
+  transform: translateY(calc(var(--skirt) * -0.8));
+  box-shadow:
+    inset 0 calc(var(--skirt) * -0.6) 0 0 #00000040,
+    0 calc(var(--skirt) + 1px) 0 0 var(--panic-deep);
+}
+.mushroom:not([aria-disabled="true"]):active {
+  transform: translateY(1px);
+  box-shadow: none;
+}
+/* While paused the button stays down. */
+.panic.is-paused .mushroom {
+  background: var(--panic-deep);
+  transform: translateY(1px);
+  box-shadow: none;
+  cursor: default;
+}
+.panic-label {
+  display: grid;
+  line-height: 1.15;
+}
+.panic-label b {
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.panic-label span {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.panic.is-paused .panic-label span {
+  color: var(--error-fg);
+}
+/* The big one in the Safety panel. */
+.panic.panel {
+  --well: 4.6rem;
+  --cap: 3.8rem;
+  --skirt: 9px;
+  margin: 16px 0 14px;
+}
+.panic.panel .panic-inner {
+  gap: 14px;
+  padding: 10px 14px 10px 10px;
+}
+.panic.panel .panic-well {
+  border-radius: 16px;
+}
+.panic.panel .panic-label {
+  flex: 1;
+  gap: 2px;
+}
+.panic.panel .panic-label b {
+  font-size: 1.15rem;
+}
+.panic.panel .panic-label span {
+  font-size: 0.85rem;
+}
+.hazard-strip {
+  height: 12px;
+  background: var(--hazard-stripes);
+  border-bottom: var(--bw) solid var(--border);
+}
+.sticker.cut,
+.sticker.paused-sticker {
+  background: var(--panic);
+}
+
+/* The toolbar opener: the same frame and mushroom, as one button that opens the Safety panel. */
+.panic.opener {
+  font: inherit;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 80ms,
+    box-shadow 80ms;
+}
+.panic.opener:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 0 var(--shadow-ink);
+}
+.panic.opener:active {
+  transform: translate(3px, 3px);
+  box-shadow: none;
+}
+.panic.opener .mushroom {
+  display: grid;
+  place-items: center;
+}
+.panic.opener[aria-expanded="true"] .panic-inner {
+  background: var(--select);
+  color: var(--select-fg);
+}
+/* The flip-up lid of the big button (MM-708): clear hatched plastic on a top hinge. */
+.lid {
+  position: absolute;
+  inset: -2px;
+  z-index: 2;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0 0 6px;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #000000;
+  background: repeating-linear-gradient(135deg, #ffffffb3 0 7px, #ffffff59 7px 14px);
+  border: var(--bw) solid #000000;
+  border-radius: 16px;
+  /* A top hinge: the lid flips up and stays inside the frame, so a panel edge never cuts it. */
+  transform-origin: center top;
+  transition: transform 120ms;
+  cursor: pointer;
+}
+.lid span {
+  padding: 1px 8px;
+  background: var(--yellow);
+  border: var(--bw) solid #000000;
+  border-radius: 4px;
+}
+.lid.open span {
+  visibility: hidden;
+}
+@media (hover: hover) {
+  .lid:not(.open):hover {
+    transform: perspective(360px) rotateX(18deg);
+  }
+}
+.lid.open {
+  transform: perspective(360px) rotateX(112deg);
+}
+.mushroom[aria-disabled="true"] {
+  cursor: default;
+}
+.panic-note {
+  position: absolute;
+  top: -12px;
+  right: 14px;
+  z-index: 3;
+  --tilt: 3deg;
+  background: var(--yellow);
+}
+.safety-head {
+  margin: 4px 0 0;
+  font-size: 1.3rem;
+  text-transform: uppercase;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lid {
+    transition: none;
+  }
+}
+.pause-info-now {
+  margin: 6px 0 0;
+  font-weight: 700;
+}
+.pause-info-effects {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.pause-info-effects li {
+  display: grid;
+  grid-template-columns: 4rem minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+.pause-info-effects .sticker {
+  justify-self: start;
+}
+.pause-info-effects li:nth-child(even) .sticker {
+  --tilt: 2deg;
+}
+.pause-info-resume {
+  margin: 12px 0 0;
+  padding-top: 8px;
+  font-size: 0.85rem;
+  color: var(--muted);
+  border-top: var(--bw) dashed var(--border);
+}
+.pause-info-resume b {
+  color: var(--ink);
+}
+
+/* The paused state: a hazard frame around the page and a banner with Resume, centred over the map. */
 .btn.resume {
   background: var(--green);
   color: #000000;
@@ -897,49 +1155,105 @@ input[type="search"]::-webkit-search-cancel-button {
   z-index: 30;
   pointer-events: none;
   border: 10px solid transparent;
-  border-image: repeating-linear-gradient(-45deg, var(--hazard) 0 14px, #000000 14px 28px) 10;
+  border-image: var(--hazard-stripes) 10;
 }
-.paused-banner {
+.paused-place {
   position: fixed;
-  top: 112px;
-  /* Centred over the map, left of the side panel. */
-  left: calc(50% - 190px);
-  transform: translateX(-50%);
+  top: calc(var(--bar-bottom, 100px) + 12px);
+  /* Right of the tray (210px at 10px). */
+  left: 240px;
+  right: 20px;
   z-index: 31;
   display: flex;
-  gap: 12px;
-  align-items: center;
-  padding: 6px 8px 6px 14px;
-  color: #ffffff;
-  background: var(--hazard);
-  border: var(--bw) solid var(--shadow-ink);
+  justify-content: center;
+  pointer-events: none;
+}
+.paused-place.beside-panel {
+  right: calc(var(--panel-width) + 24px);
+}
+/* On a phone the panel is a bottom sheet, and the banner may cover the narrow tray. */
+@media (max-width: 720px) {
+  .paused-place,
+  .paused-place.beside-panel {
+    left: 10px;
+    right: 10px;
+  }
+}
+.paused-banner {
+  width: min(36rem, 100%);
+  overflow: hidden;
+  pointer-events: auto;
+  cursor: pointer;
+  background: var(--error-surface);
+  border: var(--bw) solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
 }
-.paused-banner > * {
-  white-space: nowrap;
+.paused-body {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  padding: 10px 14px 12px;
 }
-.paused-banner strong {
+.paused-body h2 {
+  font-size: 1.3rem;
+}
+.paused-body p {
+  margin: 0;
+  font-size: 0.9rem;
+}
+.paused-body .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.paused-head {
+  display: flex;
+  justify-self: stretch;
+  align-items: center;
+  justify-content: space-between;
+}
+.paused-banner.slim {
+  width: auto;
+}
+.paused-banner.slim .hazard-strip {
+  height: 6px;
+}
+.paused-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px 4px 10px;
+}
+.paused-strip b {
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.pause-dialog {
-  max-width: 34rem;
-  border-color: var(--hazard);
-  box-shadow: 6px 6px 0 0 var(--hazard);
+
+/* The one-shot effects of a press; panic.ts adds and removes them. */
+.panic-flash,
+.panic-stamp {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  pointer-events: none;
 }
-.pause-dialog h2 {
-  color: var(--hazard);
+.panic-flash {
+  background: var(--panic);
 }
-.pause-dialog li {
-  margin-bottom: 6px;
-  cursor: default;
+.panic-stamp {
+  display: grid;
+  place-items: center;
 }
-.pause-dialog .row {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
+.panic-stamp .stamp {
+  padding: 6px 28px;
+  font-size: clamp(3rem, 12vw, 7rem);
+  text-transform: uppercase;
+  color: var(--panic);
+  background: #ffffffd9;
+  border: 8px solid var(--panic);
+  transform: none;
 }
 .secret {
   display: flex;

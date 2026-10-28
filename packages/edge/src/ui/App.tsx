@@ -883,7 +883,9 @@ export function App() {
   const newCircleFor = async () => {
     const id = `c-${crypto.randomUUID().slice(0, 8)}`;
     const color = CIRCLE_COLORS[state.circles.size % CIRCLE_COLORS.length] ?? "#6C5CE7";
-    const plan = circleForCards(state, selection.cards, { ...NEW_CIRCLE, id, color });
+    // A card that another device removed while it was selected drops out, as in `selectionActions`.
+    const ids = [...selection.cards].filter((card) => state.resources.has(card));
+    const plan = circleForCards(state, ids, { ...NEW_CIRCLE, id, color });
     if ("refused" in plan) {
       showToast({ text: plan.refused, error: true, undo: null });
       return;
@@ -1171,7 +1173,7 @@ export function App() {
               onRunJob={runJob}
               warnings={store.snapshot.accessWarnings}
               onOpenSafety={openSafety}
-              newCircleFor={selectionActions(actionContext, handlers).find((action) => action.id === "new-circle-for") ?? null}
+              selectionActions={selectionActions(actionContext, handlers)}
               onSignOut={(retry) => void signOut(retry)}
               signOutWarning={store.snapshot.signOutWarning}
               signingOut={signingOut}
@@ -1632,8 +1634,8 @@ function Panel(props: {
   version: string;
   onToast: (text: string, error: boolean) => void;
   onOpenSafety: () => void;
-  /** K-529: the shared action, so the panel shows the same refusal as the menu and the palette. */
-  newCircleFor: Action | null;
+  /** K-521, K-529: the shared selection actions, so the panel shows the same refusals as the menu and the palette. */
+  selectionActions: ReadonlyArray<Action>;
   onSignOut: (retry: boolean) => void;
   signOutWarning: string | null;
   signingOut: boolean;
@@ -1705,28 +1707,21 @@ function Panel(props: {
             </li>
           ))}
         </ul>
-        <button
-          class="btn primary"
-          data-tip="Stack these cards: they sit on one point, move as one and get the same circles."
-          onClick={() =>
-            void props.stacks.stackOnto(
-              cards.map((card) => card.id),
-              cards.find((card) => state.places.has(card.id))?.id ?? cards[0]?.id ?? "",
-            )
-          }
-        >
-          Stack these
-        </button>
-        {props.newCircleFor && "run" in props.newCircleFor ? (
-          <button
-            class="btn"
-            disabled={props.newCircleFor.refused !== undefined}
-            data-tip={props.newCircleFor.refused ?? `${props.newCircleFor.tip} Undo takes it all back.`}
-            onClick={props.newCircleFor.run}
-          >
-            New circle for these
-          </button>
-        ) : null}
+        <div class="row">
+          {props.selectionActions.map((action, index) =>
+            "run" in action ? (
+              <button
+                key={action.id}
+                class={index === 0 ? "btn primary" : "btn"}
+                disabled={action.refused !== undefined}
+                data-tip={action.refused ?? action.tip}
+                onClick={action.run}
+              >
+                {action.short ?? action.label}
+              </button>
+            ) : null,
+          )}
+        </div>
       </section>
     );
     if (stackOfAll) body = (

@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
   type Actor,
   type Edit,
@@ -59,7 +59,6 @@ import {
   type ActionContext,
   type ActionHandlers,
   type MenuTarget,
-  type PaletteEntry,
   type UndoAnswer,
   type UndoCheck,
   actionsFor,
@@ -68,10 +67,6 @@ import {
   slowUndoCheck,
   REMOVE_APP_TIP,
   levelEdit,
-  type PaletteCursor,
-  paletteActive,
-  paletteArrow,
-  paletteEnter,
   paletteEntries,
   reshareEdits,
   type StackPart,
@@ -80,6 +75,7 @@ import {
 } from "./actions.ts";
 import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
+import { Palette } from "./Palette.tsx";
 import { LOCKDOWN_TIP, PAUSE_TIP, PanicOpener, PausedBanner, type PauseView, RESUME_TIP, SafetyView } from "./Pause.tsx";
 import { playResumeSound, pressSound, showPanic, unlockAudio } from "./panic.ts";
 import { GONE_STICKER, REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
@@ -2063,78 +2059,3 @@ function ContextMenu(props: {
   return <ActionMenu label={label} anchor={props.menu.anchor} groups={groups} onClose={props.onClose} />;
 }
 
-function Palette(props: {
-  initialQuery: string;
-  onClose: () => void;
-  entries: ReadonlyArray<PaletteEntry>;
-}) {
-  const [query, setQuery] = useState(props.initialQuery);
-  const [cursor, setCursor] = useState<PaletteCursor>({ label: null, picked: false });
-  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const matches = props.entries
-    .filter((entry) => {
-      const text = `${entry.label} ${entry.keywords ?? ""}`.toLowerCase();
-      return words.every((word) => text.includes(word));
-    })
-    .slice(0, 50);
-  const labels = matches.map((entry) => entry.label);
-  const { index: active, picked } = paletteActive(labels, cursor);
-  const listId = useId();
-  const run = (index: number) => {
-    const entry = matches[index];
-    if (!entry) return;
-    props.onClose();
-    entry.run();
-  };
-  return (
-    <div class="scrim" onClick={(event) => event.target === event.currentTarget && props.onClose()}>
-      <div class="dialog" role="dialog" aria-label="Command palette">
-        <input
-          autoFocus
-          aria-label="Find"
-          role="combobox"
-          aria-expanded="true"
-          aria-controls={listId}
-          aria-activedescendant={matches[active] ? `${listId}-${active}` : undefined}
-          placeholder="Find a card, a circle or an action. Try “share”."
-          value={query}
-          onInput={(event) => {
-            setQuery((event.target as HTMLInputElement).value);
-            setCursor({ label: null, picked: false });
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") props.onClose();
-            else if (event.key === "ArrowDown" || event.key === "ArrowUp")
-              setCursor(paletteArrow(event.key, labels, cursor));
-            else if (event.key === "Enter") {
-              const index = paletteEnter(matches, active, picked);
-              if (index !== null) run(index);
-            } else return;
-            event.preventDefault();
-          }}
-        />
-        <ul role="listbox" id={listId} aria-label="Matches">
-          {matches.map((entry, index) => (
-            <li
-              key={entry.label}
-              id={`${listId}-${index}`}
-              role="option"
-              data-tip={entry.danger && matches.length > 1 ? `${entry.tip} Pick it with the arrows or a click; Enter alone does not run it.` : entry.tip}
-              data-danger={entry.danger || undefined}
-              aria-selected={index === active}
-              onClick={() => run(index)}
-              onMouseEnter={() => setCursor({ label: entry.label, picked: false })}
-            >
-              {entry.label}
-            </li>
-          ))}
-          {matches.length === 0 ? (
-            <li role="option" aria-disabled="true" aria-selected="false">
-              Nothing matches.
-            </li>
-          ) : null}
-        </ul>
-      </div>
-    </div>
-  );
-}

@@ -85,6 +85,17 @@ import {
   logLinesOf,
 } from "../core/logs.ts";
 import { type RunSource, deployRuns, searchWorker, startWorkerTail, stopWorkerTail } from "./logs.ts";
+import {
+  nextBackupAt,
+  pauseLimit,
+  BACKUP_LIMIT_BYTES,
+  type BackupRun,
+  type BucketSize,
+  R2_FREE_BYTES,
+  gigabytes,
+} from "../core/backups.ts";
+import { bucketSize, stateExport, writeExport } from "./backups.ts";
+import { MIGRATIONS } from "./migrations.ts";
 import type {
   DeployNote,
   MachineView,
@@ -1571,6 +1582,396 @@ export class Kitshn extends DurableObject<Env> {
     }
   }
 
+  /** K-1819: the newest backup run of each card, read once per wake and then kept current. */
+  private backupMemory: Map<string, BackupRun> | null = null;
+
+  private latestBackups(): Map<string, BackupRun> {
+    if (this.backupMemory) return this.backupMemory;
+    const memory = new Map<string, BackupRun>();
+    for (const row of this.sql<BackupRow>(
+      "SELECT * FROM backups WHERE (card, at) IN (SELECT card, MAX(at) FROM backups GROUP BY card)",
+    ))
+      memory.set(row.card, backupRun(row));
+    this.backupMemory = memory;
+    return memory;
+  }
+
+  private bucket(): BucketSize | null {
+    const stored = this.meta("r2_bucket");
+    return stored === null ? null : (JSON.parse(stored) as BucketSize);
+  }
+
+  /** K-1814: restic of a machine reaches a card's repository only while that machine runs a job of the card. */
+  private backupAccess(body: { card: string; clientId: string }) {
+    const machine = [...this.state.machines.values()].find((item) => item.clientId === body.clientId);
+    const resource = this.state.resources.get(body.card);
+    const refuse = (error: string) => Response.json({ error }, { status: 403 });
+    if (!machine) return refuse("This service token is no machine of kitshn.");
+    if (resource?.kind !== "site.compose" || resource.machine !== machine.id)
+      return refuse(`${body.card} is no Compose card of ${machine.name} (K-1814).`);
+    // A dropped socket marks the job failed for now; the job keeps its access until it expires (K-1814).
+    const running = this.sql<{ command: string }>(
+      `SELECT command FROM jobs WHERE machine_id = ? AND expires_at > ?
+       AND (state = 'sent' OR (state = 'failed' AND output = '${OFFLINE_OUTPUT}'))`,
+      machine.id,
+      Date.now(),
+    ).some((row) => {
+      const command = JSON.parse(row.command) as Command;
+      return (command.kind === "backup" || command.kind === "backup-restore") && command.card === body.card;
+    });
+    return running
+      ? Response.json({ ok: true })
+      : refuse(`${machine.name} runs no backup of ${body.card} now (K-1814).`);
+  }
+
+  /** K-1817, K-1819, K-1820: why a card cannot back up now, or null. */
+  private backupRefusal(card: string): string | null {
+    const common = this.restoreRefusal(card);
+    if (common) return common;
+    const size = this.bucket();
+    if (size && size.bytes >= BACKUP_LIMIT_BYTES)
+      return `Backups wait: the R2 bucket holds ${gigabytes(size.bytes)} of the ${gigabytes(R2_FREE_BYTES)} of the free plan (K-1818).`;
+    return null;
+  }
+
+  /** K-1818, K-1820: a restore passes the size guard, because it is the step that the owner needs most. */
+  private restoreRefusal(card: string): string | null {
+    const resource = this.state.resources.get(card);
+    if (resource?.kind !== "site.compose") return `The card "${card}" is no Compose app (K-1811).`;
+    if (!resource.machine) return `${resource.name} runs on no machine.`;
+    if (!this.env.BUCKET) return "R2 is off on this account.";
+    if (!this.env.KITSHN_BACKUP_KEY)
+      return "kitshn has no KITSHN_BACKUP_KEY; run the bootstrap again (K-1815).";
+    // K-1817: an online daemon says whether it can back up; an offline one gets the job when it connects.
+    const socket = this.checkedSockets(resource.machine).at(-1);
+    const attachment = socket ? attachmentOf(socket) : null;
+    if (
+      attachment?.kind === "machine" &&
+      attachment.status &&
+      !attachment.status.capabilities?.includes("backup-restore")
+    )
+      return `Update the daemon of ${this.state.machines.get(resource.machine)?.name ?? resource.machine} to back up (K-1817).`;
+    return null;
+  }
+
+  /** K-1816: the hard limit of the next paused pass of a card, from the pause of its last run. */
+  private pauseLimitOf(card: string) {
+    const [row] = this.sql<{ pause_ms: number }>(
+      "SELECT pause_ms FROM backups WHERE card = ? AND state = 'done' AND pause_ms IS NOT NULL ORDER BY at DESC LIMIT 1",
+      card,
+    );
+    return pauseLimit(row?.pause_ms ?? null);
+  }
+
+  /** K-1817: when the nightly backups run next, read once per wake. */
+  private backupAtMemory: number | null = null;
+
+  private backupAt() {
+    if (this.backupAtMemory === null) {
+      const stored = this.meta("backup_at");
+      this.backupAtMemory = stored === null ? nextBackupAt(Date.now()) : Number(stored);
+      if (stored === null) this.setMeta("backup_at", String(this.backupAtMemory));
+    }
+    return this.backupAtMemory;
+  }
+
+  /** K-1817: one backup job and its row. Returns the run. */
+  private queueBackup(card: string, actor: Actor, prune: boolean, now: number) {
+    const resource = this.state.resources.get(card);
+    if (!resource?.machine) throw new Error(`${card} has no machine.`);
+    const run = crypto.randomUUID();
+    this.ctx.storage.transactionSync(() => {
+      const jobId = this.queueKitshnJob(
+        resource.machine!,
+        { kind: "backup", card, run, prune, pauseLimitMs: this.pauseLimitOf(card) },
+        actor,
+        now + DAY,
+      );
+      this.insertBackup(run, card, resource.machine!, now, jobId);
+    });
+    return run;
+  }
+
+  private insertBackup(run: string, card: string, machineId: string, at: number, jobId: number) {
+    this.sql(
+      "INSERT INTO backups (run, card, machine_id, at, state, job_id) VALUES (?, ?, ?, ?, 'running', ?)",
+      run,
+      card,
+      machineId,
+      at,
+      jobId,
+    );
+    this.latestBackups().set(card, {
+      run,
+      card,
+      machineId,
+      at,
+      state: "running",
+      bytes: null,
+      added: null,
+      error: null,
+      pauseMs: null,
+    });
+  }
+
+  private backupList(card: string) {
+    const runs = this.sql<BackupRow>("SELECT * FROM backups WHERE card = ? ORDER BY at DESC LIMIT 50", card);
+    return Response.json({ runs: runs.map(backupRun) });
+  }
+
+  /** K-1817: "Back up now". */
+  private backUpNow(actor: Actor, card: string) {
+    const refusal = this.backupRefusal(card);
+    if (refusal) return Response.json({ error: refusal }, { status: 409 });
+    const run = this.queueBackup(card, actor, false, Date.now());
+    this.deliverJobs();
+    this.broadcast();
+    return Response.json({ run });
+  }
+
+  /** K-1820: a backup as the way back, then the run written back. */
+  private restoreBackup(actor: Actor, card: string, run: string) {
+    const refusal = this.restoreRefusal(card);
+    if (refusal) return Response.json({ error: refusal }, { status: 409 });
+    const [row] = this.sql<BackupRow>("SELECT * FROM backups WHERE run = ? AND card = ?", run, card);
+    if (row?.state !== "done" || row.sources === null)
+      return Response.json({ error: "kitshn has no finished backup run like this." }, { status: 404 });
+    const sources = JSON.parse(row.sources) as Array<string>;
+    const resource = this.state.resources.get(card)!;
+    const before = crypto.randomUUID();
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      const jobId = this.queueKitshnJob(
+        resource.machine!,
+        { kind: "backup-restore", card, run, before, sources, pauseLimitMs: this.pauseLimitOf(card) },
+        actor,
+        now + DAY,
+      );
+      this.insertBackup(before, card, resource.machine!, now, jobId);
+    });
+    this.deliverJobs();
+    this.broadcast();
+    return Response.json({ before });
+  }
+
+  /** K-1817, K-1819, K-1820: the end of a backup or restore job. */
+  private backupResult(
+    command: Extract<Command, { kind: "backup" | "backup-restore" }>,
+    actor: Actor,
+    result: Record<string, unknown>,
+  ) {
+    const run = command.kind === "backup" ? command.run : command.before;
+    const report = isRecord(result["backup"]) ? result["backup"] : null;
+    const bytes = typeof report?.["bytes"] === "number" ? report["bytes"] : null;
+    const added = typeof report?.["added"] === "number" ? report["added"] : null;
+    const pauseMs = typeof report?.["pauseMs"] === "number" ? report["pauseMs"] : null;
+    const sources = Array.isArray(report?.["sources"])
+      ? JSON.stringify(report["sources"].filter((item): item is string => typeof item === "string"))
+      : null;
+    // K-1820: a restore that failed after its first backup still made that backup, the way back.
+    const made = report?.["run"] === run;
+    const error = result["ok"] === true ? null : String(result["output"] ?? "").slice(-2000);
+    this.sql(
+      "UPDATE backups SET state = ?, bytes = ?, added = ?, error = ?, sources = ?, pause_ms = ? WHERE run = ?",
+      made ? "done" : "failed",
+      bytes,
+      added,
+      made ? null : error,
+      sources,
+      pauseMs,
+      run,
+    );
+    // K-1817: a run that the retention removed from the repository loses its row too.
+    if (Array.isArray(report?.["kept"])) {
+      const kept = new Set(report["kept"].filter((item): item is string => typeof item === "string"));
+      for (const row of this.sql<{ run: string }>(
+        "SELECT run FROM backups WHERE card = ? AND state = 'done'",
+        command.card,
+      ))
+        if (!kept.has(row.run)) this.sql("DELETE FROM backups WHERE run = ?", row.run);
+    }
+    this.backupMemory = null;
+    if (command.kind === "backup-restore") {
+      const name = this.state.resources.get(command.card)?.name ?? command.card;
+      const [target] = this.sql<{ at: number }>("SELECT at FROM backups WHERE run = ?", command.run);
+      const when = target ? new Date(target.at).toISOString() : command.run;
+      this.insertRevision(
+        actor,
+        error === null
+          ? `Restored ${name} to its backup of ${when}; the state from before is the backup ${command.before} (K-1820)`
+          : `The restore of ${name} to its backup of ${when} failed: ${error.slice(0, 300)} (K-1820)`,
+        [],
+        null,
+      );
+      this.load();
+    }
+  }
+
+  /** K-1817, K-1818, K-1821: the daily backups, after the daily clean-up. */
+  private async dailyBackups(now: number) {
+    const bucket = this.env.BUCKET;
+    if (!bucket) return;
+    // A job that expired never reports, so its run fails here.
+    this.sql(
+      "UPDATE backups SET state = 'failed', error = 'The machine did not run the job in time.' WHERE state = 'running' AND at < ?",
+      now - 2 * DAY,
+    );
+    // K-1819: failed and old rows go; the monthly retention keeps runs about 100 days.
+    this.sql(
+      "DELETE FROM backups WHERE at < ? OR (state = 'failed' AND at < ?)",
+      now - 100 * DAY,
+      now - 14 * DAY,
+    );
+    this.backupMemory = null;
+    // Each step on its own: a failed export does not stop the backups of the day.
+    const step = async (what: string, work: () => Promise<void>) =>
+      work().catch((error: unknown) =>
+        console.error(`kitshn daily backups: ${what} failed: ${String(error)}`),
+      );
+    await step("the state export (K-1821)", async () => {
+      await writeExport(bucket, stateExport(this.ctx.storage.sql, MIGRATIONS.length, now));
+    });
+    await step("the bucket size (K-1818)", async () => {
+      this.setMeta("r2_bucket", JSON.stringify(await bucketSize(bucket, now)));
+    });
+    await step("the repositories of removed cards (K-1819)", () => this.dropRemovedRepositories(bucket, now));
+    const { deployedCards, previewCards } = this.deployedAndPreviewCards();
+    const previews = new Set(previewCards);
+    const actor: Actor = { _tag: "kitshn", reason: "the daily backup (K-1817)" };
+    // K-1817: prune once a week, on Sundays (UTC).
+    const prune = new Date(now).getUTCDay() === 0;
+    for (const card of deployedCards) {
+      if (previews.has(card) || this.backupRefusal(card) !== null) continue;
+      this.queueBackup(card, actor, prune, now);
+    }
+    this.deliverJobs();
+  }
+
+  /**
+   * K-1819: the repository of a card that is gone for good (no card, and no backup row for 7 days, the Undo window of
+   * a removal) leaves R2, so it counts no more toward K-1818 and a new card of the same id starts empty.
+   */
+  private async dropRemovedRepositories(bucket: R2Bucket, now: number) {
+    const cards = this.sql<{ card: string }>("SELECT DISTINCT card FROM backups").map((row) => row.card);
+    for (const card of cards)
+      if (!this.state.resources.has(card))
+        this.sql("INSERT OR IGNORE INTO backup_gone (card, since) VALUES (?, ?)", card, now);
+    // An Undo that brought the card back keeps its repository.
+    for (const { card } of this.sql<{ card: string }>("SELECT card FROM backup_gone"))
+      if (this.state.resources.has(card)) this.sql("DELETE FROM backup_gone WHERE card = ?", card);
+    const gone = this.sql<{ card: string }>("SELECT card FROM backup_gone WHERE since < ?", now - 7 * DAY);
+    for (const { card } of gone) {
+      let cursor: string | undefined;
+      do {
+        const page = await bucket.list({ prefix: `backups/${card}/`, ...(cursor ? { cursor } : {}) });
+        if (page.objects.length > 0) await bucket.delete(page.objects.map((object) => object.key));
+        cursor = page.truncated ? page.cursor : undefined;
+      } while (cursor);
+      this.sql("DELETE FROM backups WHERE card = ?", card);
+      this.sql("DELETE FROM backup_gone WHERE card = ?", card);
+    }
+  }
+
+  /** K-1822: the Durable Object storage goes back to a time; a restart completes it. */
+  private restoring: { at: number } | null = null;
+
+  private async restoreTime(caller: Caller, body: unknown) {
+    if (!this.authorized(caller))
+      return Response.json(
+        { error: "You have no control level on the kitshn admin (K-104)." },
+        { status: 403 },
+      );
+    const wanted = isRecord(body) ? body : {};
+    const at = typeof wanted["at"] === "number" && wanted["at"] < Date.now() ? wanted["at"] : null;
+    const bookmark =
+      typeof wanted["bookmark"] === "string"
+        ? wanted["bookmark"]
+        : at !== null
+          ? await this.ctx.storage.getBookmarkForTime(at)
+          : null;
+    if (bookmark === null)
+      return Response.json({ error: "Name a time in the past 30 days." }, { status: 400 });
+    // The object, not the browser, names the time in History.
+    const finish: RestoreFinish = {
+      undo: await this.ctx.storage.onNextSessionRestoreBookmark(bookmark),
+      label: at !== null ? new Date(at).toISOString() : "the state before the last restore",
+      // Job ids go on after the highest one before the restore, so a late daemon result finds no other job.
+      jobsAfter:
+        this.sql<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'jobs'")[0]?.seq ?? 0,
+      actor: caller.actor,
+    };
+    // Storage writes from now on are lost with the restore, so the pending finish waits in R2.
+    await this.env.BUCKET?.put(RESTORE_PENDING, JSON.stringify(finish));
+    this.restoring = { at: Date.now() };
+    // The answer goes out first; then the restart restores the storage.
+    setTimeout(() => this.ctx.abort("K-1822: restore to a time"), 100);
+    return Response.json(finish);
+  }
+
+  /**
+   * K-1771, K-1822: the pass key rotation of section 17. It does nothing until section 17 lands; then it runs the
+   * same rule as "Rotate pass key".
+   */
+  private async rotatePassKey(_actor: Actor): Promise<void> {}
+
+  /** K-1822: the Worker's poll after the restart, with the finish that the restore sent it. */
+  private async restored(caller: Caller, body: unknown) {
+    if (!this.authorized(caller))
+      return Response.json(
+        { error: "You have no control level on the kitshn admin (K-104)." },
+        { status: 403 },
+      );
+    if (this.restoring)
+      return Response.json({ error: "The restore did not restart kitshn yet." }, { status: 409 });
+    const finish = restoreFinishOf(body);
+    if (!finish) return Response.json({ error: "Send the finish of the restore." }, { status: 400 });
+    await this.finishRestore(finish);
+    return Response.json({ ok: true });
+  }
+
+  /**
+   * K-1822: History, the job ids and the pass key after a restore to a time. The Worker's poll runs it, or the next
+   * alarm from the copy in R2 when the poll timed out; the copy goes once it ran.
+   */
+  /** K-1822: the poll and the alarm can both find the pending finish; only the first runs it. */
+  private finishing = false;
+
+  private async finishRestore(finish: RestoreFinish) {
+    if (this.finishing) return;
+    this.finishing = true;
+    try {
+      await this.finishRestoreOnce(finish);
+    } finally {
+      this.finishing = false;
+    }
+  }
+
+  private async finishRestoreOnce(finish: RestoreFinish) {
+    const pending = await this.env.BUCKET?.get(RESTORE_PENDING);
+    if (this.env.BUCKET && !pending) return;
+    await this.env.BUCKET?.delete(RESTORE_PENDING);
+    this.sql("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'jobs'", finish.jobsAfter);
+    this.setMeta("restore_undo", finish.undo);
+    this.insertRevision(
+      finish.actor,
+      `Restored kitshn to ${finish.label}; a restore to the bookmark ${finish.undo} undoes it (K-1822)`,
+      [],
+      null,
+    );
+    this.load();
+    this.broadcast();
+    // K-1771: the restored storage can hold a pass key that was retired after that time, so the last step rotates it.
+    await this.rotatePassKey(finish.actor);
+  }
+
+  /** K-1822: a restore whose poll timed out finishes at the next alarm. */
+  private async finishPendingRestore() {
+    if (this.restoring) return;
+    const pending = await this.env.BUCKET?.get(RESTORE_PENDING);
+    const finish = pending ? restoreFinishOf(await pending.json()) : null;
+    if (finish) await this.finishRestore(finish);
+  }
+
   private async rollbackResponse(caller: Caller, card: string, deployId: string) {
     const result = await this.rollbackCard(caller.actor, card, deployId, null);
     if ("error" in result) return Response.json({ error: result.error }, { status: 409 });
@@ -2223,6 +2624,9 @@ export class Kitshn extends DurableObject<Env> {
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
+      backups: Object.fromEntries(this.latestBackups()),
+      r2Bucket: this.bucket(),
+      restoreUndo: this.meta("restore_undo"),
       version: this.env.KITSHN_VERSION,
       accessTeam: this.env.ACCESS_TEAM_DOMAIN,
       zone: this.env.KITSHN_ZONE,
@@ -2310,6 +2714,8 @@ export class Kitshn extends DurableObject<Env> {
       return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
     if (path === "/internal/public-cards") return this.publicCards();
     if (path === "/internal/badge") return this.badge(new URL(request.url).searchParams);
+    if (path === "/internal/backup-access")
+      return this.backupAccess((await request.json()) as { card: string; clientId: string });
     if (path === "/internal/content") return this.contentDecision((await request.json()) as ContentRequest);
     if (path.startsWith("/deploy/")) {
       const header = request.headers.get("x-kitshn-deployer");
@@ -2324,6 +2730,10 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/connect") return this.connectMachine(request, caller);
     // Only the Worker's fresh passkey route sends this path (K-1504).
     if (path === "/fresh/resume" && request.method === "POST") return this.resume(caller);
+    if (path === "/fresh/restore-time" && request.method === "POST")
+      return await this.restoreTime(caller, await request.json().catch(() => null));
+    if (path === "/fresh/restored" && request.method === "POST")
+      return await this.restored(caller, await request.json().catch(() => null));
     if (path.startsWith("/agent/")) return this.agentRequest(path, request, caller);
     if (path.startsWith("/connect/deploys/")) return this.deploySource(path, caller);
     if (!this.authorized(caller)) {
@@ -2376,6 +2786,16 @@ export class Kitshn extends DurableObject<Env> {
         decodeURIComponent(path.slice("/api/apps/".length, -"/logs".length)),
         await request.json().catch(() => null),
       );
+    if (path.startsWith("/api/apps/") && path.includes("/backups")) {
+      const [card = "", , run = "", action = ""] = path
+        .slice("/api/apps/".length)
+        .split("/")
+        .map(decodeURIComponent);
+      if (run === "" && request.method === "GET") return this.backupList(card);
+      if (run === "" && request.method === "POST") return this.backUpNow(caller.actor, card);
+      if (action === "restore" && request.method === "POST")
+        return this.restoreBackup(caller.actor, card, run);
+    }
     if (path.startsWith("/api/apps/") && path.endsWith("/rollbacks") && request.method === "GET")
       return this.rollbackChoicesResponse(
         decodeURIComponent(path.slice("/api/apps/".length, -"/rollbacks".length)),
@@ -2900,6 +3320,8 @@ export class Kitshn extends DurableObject<Env> {
         if (command.kind === "compose-rollback" && command.group)
           this.continueRollback(command.group, result.ok === true ? null : error);
       }
+      if (job && (command?.kind === "backup" || command?.kind === "backup-restore"))
+        this.backupResult(command, JSON.parse(job.actor) as Actor, result);
       if (command?.kind === "compose" && this.env.BUCKET) {
         void this.env.BUCKET.delete([
           deployObject(command.deployId, "source.tgz"),
@@ -3997,7 +4419,7 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1302: one alarm for the next due item. Access work, share end dates, and the daily run. */
   private async scheduleAlarm() {
     const now = Date.now();
-    let next = this.dailyAt();
+    let next = Math.min(this.dailyAt(), this.backupAt());
     for (const socket of this.ctx.getWebSockets("machines")) {
       const attachment = attachmentOf(socket);
       next = Math.min(next, now + LIVENESS_CHECK_MS);
@@ -7656,6 +8078,9 @@ export class Kitshn extends DurableObject<Env> {
 
   override async alarm() {
     const now = Date.now();
+    await this.finishPendingRestore().catch((error: unknown) =>
+      console.error(`kitshn could not finish a restore to a time: ${String(error)}`),
+    );
     this.checkLiveness(now);
     // The alarm runs every 2 minutes while a daemon is connected, so it tells the maps only about real changes.
     let changed = this.expireJobs(now) > 0;
@@ -7669,6 +8094,14 @@ export class Kitshn extends DurableObject<Env> {
     const uptime = await this.checkUptime(now, daily ? 0 : UPTIME_FETCHES_PER_RUN);
     if (uptime.changed) changed = true;
     if (this.bellEnded(now)) changed = true;
+    // K-1817: the nightly backups run at 03:00 UTC, a quiet hour, not with the daily run at midnight.
+    if (this.backupAt() <= now) {
+      this.backupAtMemory = nextBackupAt(now);
+      this.setMeta("backup_at", String(this.backupAtMemory));
+      await this.dailyBackups(now).catch((error: unknown) =>
+        console.error(`kitshn could not run the daily backups: ${String(error)}`),
+      );
+    }
     const api = this.api();
     if (api) {
       const desired = this.desired(now);
@@ -7744,7 +8177,8 @@ function ownerDevices(text: string | undefined): Array<Extract<Member, { _tag: "
 }
 
 /** The output of a job whose machine went offline; a later real result replaces it. */
-const OFFLINE_OUTPUT = "The machine went offline during the job. kitshn takes its result if it comes later.";
+export const OFFLINE_OUTPUT =
+  "The machine went offline during the job. kitshn takes its result if it comes later.";
 
 interface RepoRow extends Record<string, SqlStorageValue> {
   repo_id: string;
@@ -7773,6 +8207,56 @@ const repoGateOf = (row: RepoRow): RepoGate => ({
     row.allowed_by_client === null
       ? null
       : { clientId: row.allowed_by_client, name: row.allowed_by_name ?? "" },
+});
+
+/** K-1819 */
+/** K-1822: what finishes a restore to a time after the restart. */
+interface RestoreFinish {
+  readonly undo: string;
+  readonly label: string;
+  readonly jobsAfter: number;
+  readonly actor: Actor;
+}
+
+/** K-1822: the pending finish lives in R2, because the restore rewinds the storage of the object. */
+const RESTORE_PENDING = "state/restore-pending.json";
+
+function restoreFinishOf(value: unknown): RestoreFinish | null {
+  if (!isRecord(value)) return null;
+  const { undo, label, jobsAfter, actor } = value;
+  return typeof undo === "string" &&
+    typeof label === "string" &&
+    typeof jobsAfter === "number" &&
+    isRecord(actor)
+    ? { undo, label: label.slice(0, 80), jobsAfter, actor: actor as unknown as Actor }
+    : null;
+}
+
+interface BackupRow extends Record<string, SqlStorageValue> {
+  run: string;
+  card: string;
+  machine_id: string;
+  at: number;
+  state: string;
+  bytes: number | null;
+  added: number | null;
+  error: string | null;
+  job_id: number | null;
+  /** K-1820: the sources of the run, as JSON. */
+  sources: string | null;
+  pause_ms: number | null;
+}
+
+const backupRun = (row: BackupRow): BackupRun => ({
+  run: row.run,
+  card: row.card,
+  machineId: row.machine_id,
+  at: row.at,
+  state: row.state === "done" || row.state === "failed" ? row.state : "running",
+  bytes: row.bytes,
+  added: row.added,
+  error: row.error,
+  pauseMs: row.pause_ms,
 });
 
 interface DeployRow extends Record<string, SqlStorageValue> {

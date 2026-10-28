@@ -1,5 +1,6 @@
 import type { Actor, Item, RevisionKind } from "./changes.ts";
 import type { Command, Machine, MachineStatus, ProjectVolume, Sample } from "./machine.ts";
+import type { BackupRun, BucketSize } from "./backups.ts";
 import type { MachineOs } from "./icons.ts";
 import type { LogLine, TailAnswer } from "./logs.ts";
 import type { Circle, PauseMode, Point, Resource, ShareSetting, Stack } from "./model.ts";
@@ -85,6 +86,12 @@ export interface Snapshot {
   readonly machines: ReadonlyArray<MachineView>;
   /** The newest jobs, with their output cut to 4,000 characters. */
   readonly jobs: ReadonlyArray<JobView>;
+  /** K-1819: the newest backup run of each Compose card that has one. */
+  readonly backups: Readonly<Record<string, BackupRun>>;
+  /** K-1818: the size of the `kitshn` bucket at the last daily run; null before the first. */
+  readonly r2Bucket: BucketSize | null;
+  /** K-1822: the bookmark that undoes the last "Restore kitshn to a time"; null when none ran. */
+  readonly restoreUndo: string | null;
   /** K-617: the release of this kitshn; "Update daemon" installs the daemon of this release. */
   readonly version: string;
   /** The Zero Trust team domain; people enroll a passkey at `https://<team>/AddMfaDevice` (K-103). */

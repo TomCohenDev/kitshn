@@ -105,6 +105,8 @@ export interface ActionHandlers {
   readonly editAddress: (resource: Resource) => void;
   /** K-1801: opens the logs of a Compose or Worker card. */
   readonly logs: (resource: Resource) => void;
+  /** K-1819: opens the backups of a Compose card. */
+  readonly backups: (resource: Resource) => void;
   readonly runJob: (view: MachineView, command: Command) => void;
   readonly removeMachine: (view: MachineView) => void;
   readonly editCircle: (circleId: string) => void;
@@ -671,6 +673,16 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
                     run: () => h.rollback(resource, "run"),
                   },
                 ]),
+            ...(resource.kind === "site.compose"
+              ? [
+                  {
+                    id: "backups",
+                    label: "Backups…",
+                    tip: "List the backups of this app, and restore one.",
+                    run: () => h.backups(resource),
+                  },
+                ]
+              : []),
           ]
         : []),
       ...(isAppCard(resource) && ctx.deployed.has(resource.id)

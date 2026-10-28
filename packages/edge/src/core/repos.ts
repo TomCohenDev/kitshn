@@ -9,6 +9,8 @@ export interface RepoGate {
   readonly firstSeen: number;
   /** The first pushed branch that waits; Allow starts the workflow there. Null without a waiting push. */
   readonly branch: string | null;
+  /** K-1120: the workflow file of the run that waits on `branch`; null starts `kitshn.yml`. */
+  readonly workflow: string | null;
   /** The agent key that allowed the repo (K-718), or null when the owner allowed it or nobody did yet. */
   readonly allowedBy: AllowingAgent | null;
 }
@@ -26,7 +28,12 @@ export interface AllowingAgent {
  */
 export function gateDecision(
   gate: RepoGate | undefined,
-  repo: { readonly repoId: string; readonly name: string; readonly branch: string | null },
+  repo: {
+    readonly repoId: string;
+    readonly name: string;
+    readonly branch: string | null;
+    readonly workflow: string | null;
+  },
   now: number,
   /** The agent key that allowed the repo has no agent circle anymore (keyRemoved); the repo then waits. */
   removed = false,
@@ -39,12 +46,16 @@ export function gateDecision(
       record: { ...repo, state: "waiting", firstSeen: now, allowedBy: null },
       error: waiting(repo.name),
     };
+  const branch = gate.state === "waiting" || removed ? (gate.branch ?? repo.branch) : null;
+  // The workflow belongs to the run that waits on the branch, so it changes only with the branch.
   const next: RepoGate = {
     ...gate,
     name: repo.name,
-    branch: gate.state === "waiting" || removed ? (gate.branch ?? repo.branch) : null,
+    branch,
+    workflow: branch === null ? null : gate.branch !== null ? gate.workflow : repo.workflow,
   };
-  const record = next.name !== gate.name || next.branch !== gate.branch ? next : null;
+  const record =
+    next.name !== gate.name || next.branch !== gate.branch || next.workflow !== gate.workflow ? next : null;
   switch (gate.state) {
     case "allowed":
       return removed

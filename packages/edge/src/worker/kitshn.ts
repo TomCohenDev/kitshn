@@ -3540,6 +3540,7 @@ export class Kitshn extends DurableObject<Env> {
         repoId: deployer.repoId,
         name: deployer.repo,
         branch: deployer.eventName === "push" ? deployer.branch : null,
+        workflow: deployer.workflow,
       },
       Date.now(),
       gate !== undefined && this.keyRemoved(gate),
@@ -3553,13 +3554,15 @@ export class Kitshn extends DurableObject<Env> {
     if (record) {
       this.ctx.storage.transactionSync(() => {
         this.sql(
-          `INSERT OR REPLACE INTO repos (repo_id, name, state, first_seen, branch, allowed_by_client, allowed_by_name)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT OR REPLACE INTO repos (repo_id, name, state, first_seen, branch, workflow, allowed_by_client,
+             allowed_by_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           record.repoId,
           record.name,
           record.state,
           record.firstSeen,
           record.branch,
+          record.workflow,
           record.allowedBy?.clientId ?? null,
           record.allowedBy?.name ?? null,
         );
@@ -3717,7 +3720,7 @@ export class Kitshn extends DurableObject<Env> {
     );
     if (!claimed) return Response.json({ repoId, state });
     this.broadcast();
-    const started = await this.agentBuild(caller, repoId, branch);
+    const started = await this.agentBuild(caller, repoId, branch, row.workflow ?? AGENT_WORKFLOW);
     if (started.ok) return Response.json({ repoId, state, dispatched: branch });
     // A failed start gives the branch back, unless the owner blocked or forgot the repo meanwhile.
     this.sql(
@@ -5250,12 +5253,12 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-718, K-812, K-819: a new build runs the kitshn workflow of the repo with this id on one branch. */
-  private async agentBuild(caller: Caller, repoId: string, branch: string) {
+  private async agentBuild(caller: Caller, repoId: string, branch: string, workflow = AGENT_WORKFLOW) {
     if (!this.env.GITHUB_APP_ID || !this.env.GITHUB_APP_KEY)
       return Response.json({ error: NO_GITHUB_APP }, { status: 503 });
     let repo: string;
     try {
-      repo = await this.dispatchBuild(repoId, branch);
+      repo = await this.dispatchBuild(repoId, branch, workflow);
     } catch (error) {
       return Response.json(
         { error: error instanceof Error ? error.message : String(error) },
@@ -5267,15 +5270,15 @@ export class Kitshn extends DurableObject<Env> {
     );
     this.load();
     this.broadcast();
-    return Response.json({ dispatched: { repo, branch, workflow: AGENT_WORKFLOW } });
+    return Response.json({ dispatched: { repo, branch, workflow } });
   }
 
   /** K-718, K-908, K-909: runs the kitshn workflow of a repo on one branch. Returns the repo's current name. */
-  private async dispatchBuild(repoId: string, branch: string) {
+  private async dispatchBuild(repoId: string, branch: string, workflow = AGENT_WORKFLOW) {
     const appId = this.env.GITHUB_APP_ID;
     const key = this.env.GITHUB_APP_KEY;
     if (!appId || !key) throw new Error(NO_GITHUB_APP);
-    const repo = await dispatchDeploy({ id: appId, key }, repoId, branch, AGENT_WORKFLOW);
+    const repo = await dispatchDeploy({ id: appId, key }, repoId, branch, workflow);
     this.sql("UPDATE repos SET name = ?, gone_at = NULL WHERE repo_id = ?", repo, repoId);
     return repo;
   }
@@ -5722,6 +5725,8 @@ interface RepoRow extends Record<string, SqlStorageValue> {
   state: RepoState;
   first_seen: number;
   branch: string | null;
+  /** K-1120: the workflow file of the run that waits on `branch`. */
+  workflow: string | null;
   allowed_by_client: string | null;
   allowed_by_name: string | null;
   /** K-819: when kitshn last got an answer from GitHub about this repo id. */
@@ -5736,6 +5741,7 @@ const repoGateOf = (row: RepoRow): RepoGate => ({
   state: row.state,
   firstSeen: row.first_seen,
   branch: row.branch,
+  workflow: row.workflow,
   allowedBy:
     row.allowed_by_client === null
       ? null

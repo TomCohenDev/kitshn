@@ -212,6 +212,16 @@ export interface Deployer {
   /** The workflow run and its attempt; the deploys of one run are one group for a later rollback (K-820). */
   readonly runId: string;
   readonly runAttempt: string;
+  /** K-1120: the file in `.github/workflows` of the run, from `workflow_ref`; null when the claim names none. */
+  readonly workflow: string | null;
+}
+
+/** K-1120: `owner/repo/.github/workflows/<file>@<ref>` names the workflow file of the caller, also for a reusable one. */
+export function workflowFile(workflowRef: string, repo: string): string | null {
+  const path = workflowRef.split("@")[0] ?? "";
+  const prefix = `${repo}/.github/workflows/`;
+  const file = path.startsWith(prefix) ? path.slice(prefix.length) : "";
+  return file !== "" && !file.includes("/") ? file : null;
 }
 
 const github = createRemoteJWKSet(new URL("https://token.actions.githubusercontent.com/.well-known/jwks"));
@@ -259,6 +269,7 @@ export async function deployerOf(request: Request, env: Env): Promise<Deployer |
       pr: pull ? Number(pull[1]) : null,
       runId: text("run_id"),
       runAttempt: text("run_attempt"),
+      workflow: workflowFile(text("workflow_ref"), repo),
     };
   } catch (error) {
     return `The GitHub token is not valid: ${error instanceof Error ? error.message : String(error)}`;

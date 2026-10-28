@@ -28,21 +28,57 @@ export function iconType(bytes: Uint8Array): IconType | null {
   return null;
 }
 
-/** The attributes of each tag with this name, lower-case names. Enough for `<link>`; not a full HTML parser. */
-function tags(html: string, name: string): Array<Map<string, string>> {
+/**
+ * The attributes of each tag with this name, lower-case names. A `>` inside a quoted value does not end the tag,
+ * and tags inside `<!-- -->` do not count. Enough for `<link>`; not a full HTML parser.
+ */
+function tags(html: string, name: string, limit = Number.POSITIVE_INFINITY): Array<Map<string, string>> {
   const found: Array<Map<string, string>> = [];
   const lower = html.toLowerCase();
-  let at = lower.indexOf(`<${name}`);
-  while (at !== -1) {
-    const end = lower.indexOf(">", at);
+  // One pass from left to right: each search starts at `from`, so a page with many tags stays linear.
+  let from = 0;
+  let comment = lower.indexOf("<!--");
+  for (let at = lower.indexOf(`<${name}`); at !== -1; at = lower.indexOf(`<${name}`, from)) {
+    if (comment !== -1 && comment < at) {
+      const close = lower.indexOf("-->", comment + 4);
+      if (close === -1) break;
+      from = close + 3;
+      comment = lower.indexOf("<!--", from);
+      continue;
+    }
+    const end = tagEnd(html, at + name.length + 1);
     if (end === -1) break;
     const after = lower[at + name.length + 1] ?? "";
     if (after === " " || after === "\t" || after === "\n" || after === "\r" || after === "/")
       found.push(attributes(html.slice(at + name.length + 1, end)));
-    at = lower.indexOf(`<${name}`, end);
+    if (found.length >= limit) break;
+    from = end;
+    if (comment !== -1 && comment < from) comment = lower.indexOf("<!--", from);
   }
   return found;
 }
+
+/** The index of the `>` that ends a tag, outside quoted values, or -1. */
+function tagEnd(html: string, from: number): number {
+  let quote: string | null = null;
+  for (let index = from; index < html.length; index++) {
+    const char = html[index];
+    if (quote !== null) {
+      if (char === quote) quote = null;
+    } else if (char === '"' || char === "'") quote = char;
+    else if (char === ">") return index;
+  }
+  return -1;
+}
+
+/** The character references that hrefs use most; other references stay as they are. */
+const entities = (value: string) =>
+  value
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
 
 function attributes(text: string): Map<string, string> {
   const result = new Map<string, string>();
@@ -68,7 +104,7 @@ function attributes(text: string): Map<string, string> {
         while (index < text.length && !" \t\n\r".includes(text[index] ?? "")) value += text[index++];
       }
     }
-    if (key) result.set(key.toLowerCase(), value);
+    if (key) result.set(key.toLowerCase(), entities(value));
   }
   return result;
 }
@@ -131,6 +167,35 @@ async function iconCandidates(readText: (path: string) => Promise<string | null>
     }
   }
   return candidates;
+}
+
+/** K-1115: a page reads at most this many `<link>` tags for its icon. */
+const PAGE_LINK_LIMIT = 64;
+
+/**
+ * K-1115: the first `<link rel="icon">` of a page whose href is a `data:` URL, as bytes; null when there is none or
+ * it does not decode. A page is one file, so a link to a path names nothing kitshn has.
+ */
+export function pageDataIcon(html: string): Uint8Array | null {
+  // A page links its icon near the top; the limit keeps a page with thousands of links within the CPU budget.
+  const href = tags(html, "link", PAGE_LINK_LIMIT)
+    .filter((item) => relHas(item, "icon"))
+    .map((item) => (item.get("href") ?? "").trim())
+    .find((value) => value.toLowerCase().startsWith("data:"));
+  const comma = href?.indexOf(",") ?? -1;
+  if (href === undefined || comma === -1) return null;
+  const data = href.slice(comma + 1);
+  try {
+    if (!href.slice("data:".length, comma).toLowerCase().endsWith(";base64"))
+      return new TextEncoder().encode(decodeURIComponent(data));
+    // atob skips ASCII whitespace itself; a plain loop is far cheaper than Uint8Array.from with a callback.
+    const text = atob(data);
+    const bytes = new Uint8Array(text.length);
+    for (let index = 0; index < text.length; index++) bytes[index] = text.charCodeAt(index);
+    return bytes;
+  } catch {
+    return null;
+  }
 }
 
 export interface SiteIcon {

@@ -1,3 +1,4 @@
+import { ICON_LIMIT, iconType, pageDataIcon } from "kitshn/icon";
 import { DurableObject } from "cloudflare:workers";
 import { Schema } from "effect";
 import { ACCESS_NAME_PREFIX, ENROLLMENT_KEY, desiredAccess } from "../core/access.ts";
@@ -4064,9 +4065,16 @@ export class Kitshn extends DurableObject<Env> {
         kind === "page" ? "text/html" : request.headers.get("content-type") || "application/octet-stream",
       createdAt,
     };
+    // K-1115: a page may hold a data: icon, and a small file may be an image; read their start beside R2.
+    const [body, sniffed] =
+      kind === "page" || size <= ICON_LIMIT ? request.body.tee() : ([request.body, null] as const);
+    // The icon comes first, before any R2 write, so a CPU limit while it decodes leaves no object behind.
+    const head = sniffed ? await readStart(sniffed, kind === "page" ? PAGE_ICON_SCAN : ICON_LIMIT) : null;
+    const iconBytes = head === null ? null : kind === "page" ? pageDataIcon(new TextDecoder().decode(head)) : head;
+    const iconKind = iconBytes !== null && iconBytes.length <= ICON_LIMIT ? iconType(iconBytes) : null;
     // The stream fails when the body is not exactly Content-Length bytes, so the limit holds.
     const { readable, writable } = new FixedLengthStream(size);
-    const piped = request.body.pipeTo(writable);
+    const piped = body.pipeTo(writable);
     try {
       await bucket.put(objectKey(item), readable, { httpMetadata: { contentType: item.contentType } });
       await piped;
@@ -4087,7 +4095,7 @@ export class Kitshn extends DurableObject<Env> {
       group: null,
       machine: null,
     };
-    const revision = this.ctx.storage.transactionSync(() => {
+    const record = () => this.ctx.storage.transactionSync(() => {
       this.sql(
         `INSERT INTO library (id, kind, title, file_name, thread, machine, size, content_type, created_at, source)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -4110,6 +4118,15 @@ export class Kitshn extends DurableObject<Env> {
       this.persist(changes);
       return this.insertRevision(caller.actor, `Added the ${kind} ${title} on the map`, changes, null);
     });
+    let revision: number;
+    try {
+      revision = record();
+    } catch (error) {
+      // No card names the object, so it goes too (K-1115).
+      await bucket.delete(objectKey(item)).catch(() => undefined);
+      throw error;
+    }
+    if (iconBytes !== null && iconKind !== null) await this.setIcon(item.id, { bytes: iconBytes, type: iconKind });
     this.load();
     this.broadcast();
     return Response.json({ id: item.id, address: resource.addresses[0], revision }, { status: 201 });
@@ -4506,4 +4523,33 @@ const ICON_CHANGE_MS = 60 * 60_000;
 async function iconHash(bytes: Uint8Array) {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return [...digest.subarray(0, 8)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** K-1115: how much of a page kitshn reads for a data: icon; a 100 KB icon is about 137 KB as base64. */
+const PAGE_ICON_SCAN = 256 * 1024;
+
+/** The first `limit` bytes of a stream, or all of a shorter one; it stops reading after that. */
+async function readStart(stream: ReadableStream<Uint8Array>, limit: number): Promise<Uint8Array | null> {
+  const reader = stream.getReader();
+  const chunks: Array<Uint8Array> = [];
+  let size = 0;
+  try {
+    while (size < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      size += value.length;
+    }
+  } catch {
+    return null;
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.length;
+  }
+  return bytes.subarray(0, limit);
 }

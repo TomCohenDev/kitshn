@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ICON_LIMIT, iconType, pickSiteIcon } from "./icon.ts";
+import { ICON_LIMIT, iconType, pageDataIcon, pickSiteIcon } from "./icon.ts";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]);
 const ICO = new Uint8Array([0, 0, 1, 0, 1, 0]);
@@ -68,5 +68,30 @@ describe("site icon (K-1112, K-1113)", () => {
     expect(iconType(PNG)).toBe("image/png");
     expect(iconType(text("<html><svg></svg></html>"))).toBeNull();
     expect(iconType(new Uint8Array())).toBeNull();
+  });
+
+  it("reads the emoji favicon, whose quoted href holds > characters (K-1115)", () => {
+    const html =
+      '<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🍳</text></svg>">';
+    const icon = pageDataIcon(html);
+    expect(icon && iconType(icon)).toBe("image/svg+xml");
+    expect(new TextDecoder().decode(icon!)).toContain("🍳</text></svg>");
+  });
+
+  it("skips links in comments, decodes entities, and takes only the first data: link (K-1115)", () => {
+    const b64 = btoa(String.fromCharCode(...PNG));
+    expect(pageDataIcon(`<!-- <link rel="icon" href="data:image/png;base64,${b64}"> -->`)).toBeNull();
+    expect(pageDataIcon(`<!-- old --><link rel="icon" href="data:image/png;base64,${b64}">`)).toEqual(PNG);
+    const quoted = pageDataIcon('<link rel="icon" href="data:image/svg+xml,<svg xmlns=&quot;http://www.w3.org/2000/svg&quot;></svg>">');
+    expect(new TextDecoder().decode(quoted!)).toBe('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+    expect(pageDataIcon(`<link rel="icon" href="data:image/png;base64,%%%"><link rel="icon" href="data:image/png;base64,${b64}">`)).toBeNull();
+  });
+
+  it("reads a data: icon of a page, as base64 or as text, and ignores a link to a path (K-1115)", () => {
+    const b64 = btoa(String.fromCharCode(...PNG));
+    expect(pageDataIcon(`<link rel="icon" href="/a.png"><link rel="icon" href="data:image/png;base64,${b64}">`)).toEqual(PNG);
+    expect(iconType(pageDataIcon(`<link rel=icon href="data:image/svg+xml,%3Csvg%3E%3C/svg%3E">`)!)).toBe("image/svg+xml");
+    expect(pageDataIcon('<link rel="icon" href="/favicon.ico">')).toBeNull();
+    expect(pageDataIcon('<link rel="icon" href="data:image/png;base64,%%%">')).toBeNull();
   });
 });

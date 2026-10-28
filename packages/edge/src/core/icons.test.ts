@@ -20,7 +20,9 @@ describe("card icon (K-524)", () => {
     });
   });
 
-  it("shows the stored icon of a Compose app and a live site (K-1114)", () => {
+  it("shows the stored icon of a Compose app, a live site, a page and a file (K-1114, K-1115)", () => {
+    expect(cardIcon(card("p", "page"), { p: "f00d" }, null)).toMatchObject({ _tag: "site" });
+    expect(cardIcon(card("f", "file"), { f: "f00d" }, null)).toMatchObject({ _tag: "site" });
     expect(cardIcon(card("app", "site.compose"), { app: "f00d" }, "linux")).toEqual({
       _tag: "site",
       src: "/api/icons/app?v=f00d",
@@ -32,7 +34,6 @@ describe("card icon (K-524)", () => {
     expect(cardIcon(card("site", "site.static"), {}, null)).toEqual({ _tag: "kind" });
     expect(cardIcon(card("mac", "machine"), {}, null)).toEqual({ _tag: "kind" });
     expect(cardIcon(card("r", "repo", "not a repo name"), {}, null)).toEqual({ _tag: "kind" });
-    expect(cardIcon(card("page", "page"), { page: "f00d" }, null)).toEqual({ _tag: "kind" });
   });
 
   it("shows the owner avatar of a repo and the system of a machine", () => {

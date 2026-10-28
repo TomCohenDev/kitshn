@@ -10,6 +10,13 @@ const OS_ICONS: Record<MachineOs, { readonly glyph: string; readonly name: strin
   windows: { glyph: "🪟", name: "Windows" },
 };
 
+/** K-524: where a stored icon comes from, for the tooltip; Compose apps and live sites read it from the app. */
+const ICON_SOURCES: Partial<Record<Resource["kind"], string>> = {
+  "site.static": "its files",
+  page: "the icon link of the page",
+  file: "the image itself",
+};
+
 /**
  * K-524: an icon in an ink tile. It shows `image` when it loads, else `glyph`, so a broken image falls back to the
  * kind icon.
@@ -56,7 +63,7 @@ export function ItemIcon(props: { resource: Resource }) {
   const icon = cardIcon(resource, snapshot?.icons ?? {}, os);
   switch (icon._tag) {
     case "site":
-      return <IconTile image={icon.src} glyph={kind.icon} tip={`The icon of ${resource.name}, from ${resource.kind === "site.static" ? "its files" : "the running app"}.`} />;
+      return <IconTile image={icon.src} glyph={kind.icon} tip={`The icon of ${resource.name}, from ${ICON_SOURCES[resource.kind] ?? "the running app"}.`} />;
     case "avatar":
       return <IconTile image={icon.src} glyph={kind.icon} tip={avatarTip(icon.owner)} />;
     case "os":

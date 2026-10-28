@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1010 290" width="1010" height="290" role="img" aria-label="A deploy: a push runs GitHub Actions, which sends the recipe and its OIDC token to the kitshn Worker; the app goes to Cloudflare or to a machine, and its card gets Access from its circles">
+<title>A deploy: a push runs GitHub Actions, which sends the recipe and its OIDC token to the kitshn Worker; the app goes to Cloudflare or to a machine, and its card gets Access from its circles</title>
+<style>
+  text { font-family: "Bricolage Grotesque", system-ui, sans-serif; font-size: 15px; fill: #000; }
+  .t { font-weight: 800; font-size: 16px; }
+  .s { font-size: 13px; fill: #3d3d5c; }
+  .m { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; fill: #3d3d5c; }
+  .box { fill: #fff; stroke: #000; stroke-width: 2; }
+  .shadow { fill: #000; }
+  .frame { fill: #f1f2ff; stroke: #000; stroke-width: 2; stroke-dasharray: 6 5; }
+  .yellow { fill: #ffe14d; } .green { fill: #7cff8a; } .pink { fill: #ff9eb0; } .blue { fill: #00b3ff; } .lilac { fill: #e4e7ff; }
+  .line { stroke: #000; stroke-width: 2.5; fill: none; }
+  .dash { stroke-dasharray: 7 5; }
+  .head { fill: #000; }
+  .on-color { fill: #000; }
+  @media (prefers-color-scheme: dark) {
+    text { fill: #f3f0ff; } .s, .m { fill: #bdb6e6; }
+    .box { fill: #262147; stroke: #f3f0ff; } .shadow { fill: #b9a8ff; }
+    .frame { fill: #1d1938; stroke: #f3f0ff; }
+    .line { stroke: #f3f0ff; } .head { fill: #f3f0ff; }
+    .on-color, .yellow + text, text.on-color { fill: #000; }
+    .lilac { fill: #15122b; }
+    .box.yellow { fill: #ffe14d; } .box.green { fill: #7cff8a; } .box.pink { fill: #ff9eb0; } .box.blue { fill: #00b3ff; }
+  }
+</style>
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path class="head" d="M0 0 L10 5 L0 10 z" />
+  </marker>
+</defs>
+
+<rect class="shadow" x="24" y="44" width="170" height="70" rx="4"/>
+<rect class="box box" x="20" y="40" width="170" height="70" rx="4" style="stroke-width:2"/>
+<text class="t" x="32" y="64">git push</text>
+<text class="s" x="32" y="84">or a pull request</text>
+<rect class="shadow" x="244" y="44" width="230" height="88" rx="4"/>
+<rect class="box box" x="240" y="40" width="230" height="88" rx="4" style="stroke-width:2"/>
+<text class="t" x="252" y="64">GitHub Actions</text>
+<text class="s" x="252" y="84">kitshn check reads</text>
+<text class="s" x="252" y="102">kitshn.config.ts as data</text>
+<rect class="shadow" x="524" y="44" width="230" height="88" rx="4"/>
+<rect class="box yellow" x="520" y="40" width="230" height="88" rx="4" style="stroke-width:2"/>
+<text class="t on-color" x="532" y="64">kitshn Worker</text>
+<text class="s on-color" x="532" y="84">checks the OIDC token,</text>
+<text class="s on-color" x="532" y="102">the repo gate, the recipe</text>
+<rect class="shadow" x="804" y="14" width="190" height="70" rx="4"/>
+<rect class="box box" x="800" y="10" width="190" height="70" rx="4" style="stroke-width:2"/>
+<text class="t" x="812" y="34">Cloudflare</text>
+<text class="s" x="812" y="54">static or Worker app</text>
+<rect class="shadow" x="804" y="114" width="190" height="70" rx="4"/>
+<rect class="box box" x="800" y="110" width="190" height="70" rx="4" style="stroke-width:2"/>
+<text class="t" x="812" y="134">A machine</text>
+<text class="s" x="812" y="154">daemon builds Compose</text>
+<rect class="shadow" x="524" y="204" width="230" height="70" rx="4"/>
+<rect class="box green" x="520" y="200" width="230" height="70" rx="4" style="stroke-width:2"/>
+<text class="t on-color" x="532" y="224">A card on the map</text>
+<text class="s on-color" x="532" y="244">in its startsIn circle</text>
+<rect class="shadow" x="804" y="204" width="190" height="70" rx="4"/>
+<rect class="box box" x="800" y="200" width="190" height="70" rx="4" style="stroke-width:2"/>
+<text class="t" x="812" y="224">Access</text>
+<text class="s" x="812" y="244">follows the circles</text>
+<polyline class="line" points="194,75 234,75" marker-end="url(#arrow)"/>
+<polyline class="line" points="474,84 514,84" marker-end="url(#arrow)"/><text class="s" x="448" y="150">JSON + token</text>
+<polyline class="line" points="754,70 794,48" marker-end="url(#arrow)"/>
+<polyline class="line" points="754,100 794,142" marker-end="url(#arrow)"/>
+<polyline class="line" points="635,134 635,194" marker-end="url(#arrow)"/>
+<polyline class="line" points="754,235 794,235" marker-end="url(#arrow)"/>
+</svg>

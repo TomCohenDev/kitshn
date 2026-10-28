@@ -33,7 +33,14 @@ import { MAX_UPLOAD_BYTES } from "../core/library.ts";
 import { circleForCards, placeInside } from "../core/place.ts";
 import { awaitsAllow } from "../core/repos.ts";
 import type { Command } from "../core/machine.ts";
-import type { JobView, MachineView, OrphanWorker, RepoView, RevisionView } from "../core/protocol.ts";
+import type {
+  DeployNote,
+  JobView,
+  MachineView,
+  OrphanWorker,
+  RepoView,
+  RevisionView,
+} from "../core/protocol.ts";
 import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
 import {
   CircleEditor,
@@ -1226,6 +1233,7 @@ export function App() {
               orphanWorkers={store.snapshot.orphanWorkers}
               onDeleteOrphanWorker={(orphan) => void deleteOrphanWorker(orphan)}
               deployed={deployed}
+              deployNotes={store.snapshot.deployNotes}
               pause={pauseView}
               machines={machines}
               version={store.snapshot.version}
@@ -1706,6 +1714,7 @@ function Panel(props: {
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
   /** K-909 */
   deployed: ReadonlySet<string>;
+  deployNotes: Readonly<Record<string, DeployNote>>;
   pause: PauseView | null;
   warnings: ReadonlyArray<string>;
   machines: ReadonlyMap<string, MachineView>;
@@ -1762,6 +1771,7 @@ function Panel(props: {
         orphanWorkers={cards[0].id === ADMIN_RESOURCE_ID ? props.orphanWorkers : []}
         onDeleteOrphanWorker={props.onDeleteOrphanWorker}
         deployed={props.deployed.has(cards[0].id)}
+        deployNote={props.deployNotes[cards[0].id] ?? null}
         machine={props.machines.get(cards[0].id) ?? null}
         version={props.version}
         jobs={props.jobs}
@@ -2015,6 +2025,8 @@ function CardPanel(props: {
   onDeleteOrphanWorker: (orphan: OrphanWorker) => void;
   /** K-909: a deploy made this card, so "Remove app" applies. */
   deployed: boolean;
+  /** K-820: the newest deploy of this card failed or did not run. */
+  deployNote: DeployNote | null;
   machine: MachineView | null;
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
@@ -2137,6 +2149,18 @@ function CardPanel(props: {
             </span>
           )}
           {props.access.state === "failed" ? <span class="muted">{props.access.error}</span> : null}
+        </div>
+      ) : null}
+      {props.deployNote ? (
+        <div class="row">
+          <span
+            class="label"
+            data-tip="The newest deploy of this card. The card still serves its last good deploy."
+          >
+            Deploy
+          </span>
+          <span class="sticker">{props.deployNote.state === "skipped" ? "not run" : "failed"}</span>
+          <span class="muted">{props.deployNote.reason}</span>
         </div>
       ) : null}
       {!state.places.has(resource.id) ? (

@@ -2,25 +2,46 @@
 // The kitshn CLI for app repos: `kitshn check` (K-802) and `kitshn deploy` (K-803, K-805, K-811).
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join, relative, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 import { headersWarnings, redirectsWarnings } from "./headers.ts";
 import { pickSiteIcon } from "./icon.ts";
-import { RecipeError, readRecipe } from "./parse.ts";
-import { type DeployEvent, type WorkerApp, decodeRecipe } from "./recipe.ts";
+import { type Artifact, artifactsByApp } from "./artifacts.ts";
+import { RecipeError, readApps } from "./parse.ts";
+import {
+  type AppResult,
+  type Apps,
+  type DeployEvent,
+  type Recipe,
+  type WorkerApp,
+  decodeApps,
+  deployOrder,
+  missingNeeds,
+} from "./recipe.ts";
+
+/** A step that cannot go on. The deploy of one app ends with it; the apps that do not need it go on (K-820). */
+class CliError extends Error {}
 
 const fail = (text: string): never => {
-  console.error(`kitshn: ${text}`);
-  process.exit(1);
+  throw new CliError(text);
 };
 
-function loadRecipe(dir: string) {
+function loadApps(dir: string): Apps {
   const file = join(dir, "kitshn.config.ts");
   if (!existsSync(file)) fail(`${file} does not exist.`);
   try {
-    return decodeRecipe(readRecipe(readFileSync(file, "utf8")));
+    return decodeApps(readApps(readFileSync(file, "utf8")));
   } catch (error) {
     if (error instanceof RecipeError) fail(error.message);
     return fail(`kitshn.config.ts does not match the recipe schema: ${String(error)}`);
@@ -110,34 +131,100 @@ const TYPES: Record<string, string> = {
   ".webmanifest": "application/manifest+json",
 };
 
-/** K-805, K-806: plans the deploy, then deploys the recipe's kind. */
+/**
+ * K-804, K-820: deploys each app of the repo as its own deploy, after the apps that it needs. When an app does not
+ * deploy, the apps that need it do not deploy either, and kitshn records why on their cards. A closed pull request
+ * tears every preview down in the reverse order, and one failed teardown does not stop the others.
+ */
 async function deploy(server: string, dir: string) {
   const env = params();
-  const recipe = loadRecipe(dir);
+  const apps = loadApps(dir);
   const event = githubEvent();
+  const artifacts = artifactsByApp(Object.keys(apps), process.env);
+  if (!(artifacts instanceof Map)) return fail(artifacts.error);
+  const ordered = deployOrder(apps);
+  if ("error" in ordered) return fail(ordered.error);
+  const closing = event.name === "pull_request" && event.action === "closed";
+  const order = closing ? [...ordered.order].reverse() : ordered.order;
+  const results = new Map<string, AppResult>();
+  for (const key of order) {
+    const recipe = apps[key]!;
+    const label = Object.keys(apps).length === 1 ? "" : `[${key}] `;
+    const missing = closing ? [] : missingNeeds(recipe, results);
+    const run: { deployId: string | null } = { deployId: null };
+    try {
+      if (missing.length > 0) {
+        const reason = `not deployed, because it needs ${missing.join(", ")}, which did not deploy (K-820).`;
+        await call(server, "/deploy/plan", { recipe, key, event, skip: reason });
+        console.log(`kitshn: ${label}${reason}`);
+        results.set(key, "skipped");
+        continue;
+      }
+      await deployApp(server, dir, key, label, recipe, event, env, artifacts.get(key) ?? null, run);
+      results.set(key, "done");
+    } catch (error) {
+      const reason = error instanceof CliError ? error.message : String(error);
+      console.error(`kitshn: ${label}${reason}`);
+      results.set(key, "failed");
+      if (run.deployId)
+        await call(server, "/deploy/fail", { deployId: run.deployId, reason }).catch(() => undefined);
+    }
+  }
+  if (order.length > 1)
+    console.log(
+      `kitshn: ${order.map((key) => `${key} ${results.get(key) === "done" ? "ok" : results.get(key)}`).join(", ")}`,
+    );
+  if ([...results.values()].some((result) => result !== "done")) process.exitCode = 1;
+}
+
+/** K-805, K-806, K-812: plans and runs the deploy of one app. `run.deployId` names the deploy once kitshn made it. */
+async function deployApp(
+  server: string,
+  dir: string,
+  key: string,
+  label: string,
+  recipe: Recipe,
+  event: DeployEvent,
+  env: ReadonlyMap<string, string>,
+  artifact: Artifact | null,
+  run: { deployId: string | null },
+) {
   const plan = await call<{
     deployId: string | null;
     plan: { kind: string; reason?: string; address?: string; environment?: string };
-  }>(server, "/deploy/plan", { recipe, event });
+  }>(server, "/deploy/plan", { recipe, key, event });
   if (plan.plan.kind === "skip" || !plan.deployId) {
-    console.log(`kitshn: nothing to do. ${plan.plan.reason ?? ""}`);
+    console.log(`kitshn: ${label}nothing to do. ${plan.plan.reason ?? ""}`);
     return;
   }
+  run.deployId = plan.deployId;
   if (plan.plan.kind === "teardown") {
     await call(server, "/deploy/teardown", { deployId: plan.deployId });
-    console.log(`kitshn: removed ${plan.plan.environment} at https://${plan.plan.address}`);
+    console.log(`kitshn: ${label}removed ${plan.plan.environment} at https://${plan.plan.address}`);
     return;
   }
-  if ("compose" in recipe) return deployCompose(server, dir, plan.deployId, plan.plan.address ?? "", env);
-  if ("worker" in recipe) return deployWorker(server, dir, plan.deployId, recipe.worker, env);
+  if ("compose" in recipe) {
+    if (artifact) fail("an artifact is for a static site; a Compose app builds on its machine.");
+    return deployCompose(server, dir, plan.deployId, plan.plan.address ?? "", env);
+  }
+  if ("worker" in recipe) {
+    if (artifact) fail("an artifact is for a static site; a Worker app builds with `build` (K-806).");
+    return deployWorker(server, dir, plan.deployId, recipe.worker, env);
+  }
   if (recipe.static.build) runBuild(dir, recipe.static.build);
   const output = resolve(dir, recipe.static.output);
-  // K-805: a site that its own job built arrives at artifact-path, which must be the output folder of the recipe.
-  const artifactPath = process.env["KITSHN_ARTIFACT_PATH"];
+  // K-805: a site that its own job built arrives at its artifact path, which must be the output folder of the recipe.
+  const artifactPath = artifact?.path;
+  if (artifactPath && (artifactPath.startsWith("/") || artifactPath.split("/").includes("..")))
+    fail(`the artifact path ${artifactPath} must be a folder inside the repo.`);
   if (artifactPath && resolve(dir, artifactPath) !== output) {
     fail(
-      `the artifact went to ${artifactPath}, but the output folder of the recipe is ${recipe.static.output}. Make artifact-path and output the same folder.`,
+      `the artifact went to ${artifactPath}, but the output folder of the recipe is ${recipe.static.output}. Make the artifact path and output the same folder.`,
     );
+  }
+  if (artifact?.from) {
+    if (!existsSync(artifact.from)) fail(`the artifact of ${key} was not downloaded; check its name.`);
+    cpSync(artifact.from, output, { recursive: true });
   }
   if (artifactPath && recipe.static.build)
     console.log(
@@ -285,8 +372,6 @@ async function deployWorker(
   app: WorkerApp,
   env: ReadonlyMap<string, string>,
 ) {
-  if (process.env["KITSHN_ARTIFACT_PATH"])
-    fail("artifact and artifact-path are for static sites; a Worker app builds with `build` (K-806).");
   if (app.build) runBuild(dir, app.build);
   const main = insideRepo(dir, app.main, "the entry module");
   const work = mkdtempSync(join(tmpdir(), "kitshn-worker-"));
@@ -460,11 +545,15 @@ const flag = (name: string, fallback: string) => {
   return index >= 0 ? (args[index + 1] ?? fallback) : fallback;
 };
 
-if (command === "check") {
-  console.log(JSON.stringify(loadRecipe(flag("--dir", ".")), null, 2));
-} else if (command === "deploy") {
-  await deploy(flag("--server", ""), flag("--dir", "."));
-} else {
+try {
+  if (command === "check") console.log(JSON.stringify(loadApps(flag("--dir", ".")), null, 2));
+  else if (command === "deploy") await deploy(flag("--server", ""), flag("--dir", "."));
+} catch (error) {
+  if (!(error instanceof CliError)) throw error;
+  console.error(`kitshn: ${error.message}`);
+  process.exit(1);
+}
+if (command !== "check" && command !== "deploy") {
   console.log(`kitshn check [--dir <app>]                  check kitshn.config.ts and print it as JSON (K-802)
 kitshn deploy --server <address> [--dir <app>]   deploy from GitHub Actions (K-803)`);
 }

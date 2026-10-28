@@ -69,6 +69,7 @@ import {
 } from "../core/machine.ts";
 import { placeInside } from "../core/place.ts";
 import type {
+  DeployNote,
   MachineView,
   OrphanWorker,
   RepoView,
@@ -161,7 +162,8 @@ import {
   parseConfigFile,
   parseSiteIcon,
 } from "./deploys.ts";
-import { type Recipe, WorkerApp, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
+import { DEFAULT_APP } from "kitshn/names";
+import { AppKey, type Recipe, WorkerApp, decodeRecipe, plan, repoSlug } from "kitshn/recipe";
 import { type Zone, removeStaleDomains, zoneFor, zoneOfAddressIn, zonesOf } from "./zones.ts";
 import {
   type LiveSite,
@@ -978,6 +980,21 @@ export class Kitshn extends DurableObject<Env> {
       .filter((card) => this.state.resources.has(card));
   }
 
+  /** K-820: the cards on the map whose newest deploy failed or was skipped. */
+  private deployNotes(): Record<string, DeployNote> {
+    const notes: Record<string, DeployNote> = {};
+    for (const row of this.sql<{ resource_id: string; state: string; reason: string | null }>(
+      `SELECT resource_id, state, reason FROM deploys AS newest WHERE kind = 'deploy' AND state IN ('failed', 'skipped')
+       AND rowid = (SELECT MAX(rowid) FROM deploys WHERE resource_id = newest.resource_id AND kind = 'deploy')`,
+    ))
+      if (this.state.resources.has(row.resource_id))
+        notes[row.resource_id] = {
+          state: row.state === "skipped" ? "skipped" : "failed",
+          reason: row.reason ?? "The deploy failed; its workflow run has the log.",
+        };
+    return notes;
+  }
+
   /** K-718, K-909: the newest finished deploy of a card, or null. */
   private lastDone(id: string): DeployRow | null {
     const [row] = this.sql<DeployRow>(
@@ -1093,6 +1110,7 @@ export class Kitshn extends DurableObject<Env> {
       repos,
       deployedCards: this.deployedCards(),
       orphanWorkers: this.orphanWorkers(),
+      deployNotes: this.deployNotes(),
       icons: Object.fromEntries([...this.iconHashes].filter(([id]) => this.state.resources.has(id))),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
@@ -3364,6 +3382,21 @@ export class Kitshn extends DurableObject<Env> {
       );
       if (!row || row.repo_id !== deployer.repoId)
         return fail(404, "kitshn knows no such deploy of this repo.");
+      // K-820: the CLI records why a deploy failed, so its card shows it; a deploy that already ended keeps its state.
+      if (path === "/deploy/fail") {
+        const reason =
+          typeof input["reason"] === "string" ? input["reason"].slice(0, 500) : "The deploy failed.";
+        // A running Compose deploy keeps running: its machine job decides the result and still lands, and the deploy
+        // still holds off a second deploy and a removal (deployRuns). The give-up of the CLI stays as its reason.
+        this.sql(
+          `UPDATE deploys SET state = CASE WHEN state = 'running' THEN 'running' ELSE 'failed' END, reason = ?
+           WHERE id = ? AND state IN ('planned', 'running', 'failed')`,
+          reason,
+          row.id,
+        );
+        this.broadcast();
+        return Response.json({ ok: true });
+      }
       if (row.expires_at < Date.now() || row.state !== "planned")
         return fail(410, "This deploy expired or ended. Run it again.");
       // A blocked repo still tears down what it made (K-819).
@@ -3413,6 +3446,19 @@ export class Kitshn extends DurableObject<Env> {
     }
     const event = eventOf(deployer, input["event"]);
     if (typeof event === "string") return Response.json({ error: event }, { status: 400 });
+    // K-804: a CLI from before several apps sends no key; its one app is the app `app`.
+    const key = input["key"] ?? DEFAULT_APP;
+    if (!Schema.is(AppKey)(key))
+      return Response.json(
+        { error: "The app key is a lowercase letter, then up to 19 letters or digits (K-804)." },
+        { status: 400 },
+      );
+    const skip = input["skip"];
+    if (skip !== undefined && (typeof skip !== "string" || skip === "" || skip.length > 500))
+      return Response.json(
+        { error: "A skip reason is text of at most 500 characters (K-820)." },
+        { status: 400 },
+      );
     // A broken KITSHN_ZONES leaves only the kitshn zone, so a deploy there still works (K-1111).
     let zones: Array<Zone>;
     try {
@@ -3427,6 +3473,7 @@ export class Kitshn extends DurableObject<Env> {
       event,
       this.env.KITSHN_ZONE,
       zones.slice(1).map((zone) => zone.name),
+      key,
     );
     if (result.kind === "error") return Response.json({ error: result.reason }, { status: 400 });
     if (result.kind === "skip") return Response.json({ deployId: null, plan: result });
@@ -3439,7 +3486,19 @@ export class Kitshn extends DurableObject<Env> {
     // A blocked repo still tears down what it made (K-819).
     const gate = result.kind === "teardown" ? null : this.repoGate(deployer);
     if (gate) return gate;
-    const { resourceId, script } = environmentNames(deployer.repoId, deployer.repo, result.environment);
+    const { resourceId, script } = environmentNames(deployer.repoId, deployer.repo, result.environment, key);
+    // K-804: a card belongs to one app of its repo; two apps whose long ids hash alike never share it.
+    const [owner] = this.sql<{ app_key: string; repo_id: string | null }>(
+      "SELECT app_key, repo_id FROM deploys WHERE resource_id = ? ORDER BY rowid DESC LIMIT 1",
+      resourceId,
+    );
+    if (owner && (owner.app_key !== key || (owner.repo_id !== null && owner.repo_id !== deployer.repoId)))
+      return Response.json(
+        {
+          error: `The card ${resourceId} belongs to another app (${owner.app_key}); give this app another key.`,
+        },
+        { status: 409 },
+      );
     const existing = this.state.resources.get(resourceId);
     if (this.deletingStorage.has(resourceId))
       return Response.json(
@@ -3474,6 +3533,32 @@ export class Kitshn extends DurableObject<Env> {
           },
         });
       }
+    }
+    // K-820: an app whose needed app did not deploy records why, so its card shows it, and changes nothing.
+    if (typeof skip === "string" && result.kind === "deploy") {
+      this.sql(
+        `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, addresses, app_key, reason, run_id, run_attempt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'deploy', ?, 'skipped', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        crypto.randomUUID(),
+        deployer.repo,
+        deployer.repoId,
+        result.environment,
+        resourceId,
+        result.address,
+        script,
+        result.startsIn,
+        deployer.sha,
+        Date.now() + DEPLOY_MS,
+        event.branch,
+        "compose" in recipe ? "compose" : "worker" in recipe ? "worker" : "static",
+        JSON.stringify(result.addresses),
+        key,
+        skip,
+        deployer.runId,
+        deployer.runAttempt,
+      );
+      this.broadcast();
+      return Response.json({ deployId: null, plan: { kind: "skip", reason: skip } });
     }
     const compose = "compose" in recipe ? recipe.compose : null;
     // K-819: the Compose apps of a repo that an agent key allowed run only where that key may run jobs.
@@ -3643,8 +3728,8 @@ export class Kitshn extends DurableObject<Env> {
     }
     const deployId = crypto.randomUUID();
     this.sql(
-      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file, addresses, worker)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file, addresses, worker, app_key, run_id, run_attempt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       deployId,
       deployer.repo,
       deployer.repoId,
@@ -3663,6 +3748,9 @@ export class Kitshn extends DurableObject<Env> {
       compose?.file ?? null,
       JSON.stringify(result.addresses),
       "worker" in recipe ? JSON.stringify(recipe.worker) : null,
+      key,
+      deployer.runId,
+      deployer.runAttempt,
     );
     return Response.json({ deployId, plan: result });
   }
@@ -3712,7 +3800,8 @@ export class Kitshn extends DurableObject<Env> {
     this.putResource({
       id: row.resource_id,
       kind,
-      name: row.environment === "prod" ? slug : `${slug} ${row.environment}`,
+      // K-804: an app other than `app` has its key in the name, as in its default address.
+      name: `${row.app_key === DEFAULT_APP ? slug : `${slug}-${row.app_key}`}${row.environment === "prod" ? "" : ` ${row.environment}`}`,
       addresses,
       status: "deploying",
       group: slug,
@@ -4057,9 +4146,9 @@ export class Kitshn extends DurableObject<Env> {
   /**
    * K-805, K-806: uploads the Worker of a deploy and publishes it at its addresses. `build` gives the upload metadata
    * and the one module; `afterUpload` runs before the addresses go live.
-   * K-406: at most 42 of the 50 subrequests of the Free plan, with 5 addresses (K-817): the Access sync 20, the script
-   * list 1, the upload 1, workers.dev 1, the schedules 1, a lookup and an attach per address 10, the stale domains
-   * 2 lists and up to 5 deletes, and the route check 1. Keep it under 45 when a step joins.
+   * K-406: at most 43 of the 50 subrequests of the Free plan, with 5 addresses (K-817): the Access sync 20, the script
+   * list 1, the upload 1, its version 1 (K-820), workers.dev 1, the schedules 1, a lookup and an attach per address 10,
+   * the stale domains 2 lists and up to 5 deletes, and the route check 1. Keep it at most 45 when a step joins.
    */
   private async publish(
     api: Api,
@@ -4095,6 +4184,21 @@ export class Kitshn extends DurableObject<Env> {
     );
     const uploaded = (await upload.json()) as { success: boolean; errors?: unknown };
     if (!uploaded.success) throw new Error(`the Worker upload failed: ${JSON.stringify(uploaded.errors)}`);
+    // K-820: the version that this upload made, for a later rollback to it (K-821). The script is live already, so a
+    // failed read only takes the rollback to this deploy away; it logs a warning and stores null.
+    const versionId = await api<{ deployments: Array<{ versions: Array<{ version_id: string }> }> }>(
+      "GET",
+      `${account}/workers/scripts/${row.script}/deployments`,
+    ).then(
+      (result) => result.deployments[0]?.versions[0]?.version_id ?? null,
+      (error: unknown) => {
+        console.warn(`kitshn: the version of ${row.script} is unknown: ${String(error)}`);
+        return null;
+      },
+    );
+    if (versionId === null)
+      console.warn(`kitshn: no version of ${row.script} after the upload; no rollback to it.`);
+    this.sql("UPDATE deploys SET version_id = ? WHERE id = ?", versionId, row.id);
     // The workers.dev address would skip Access. If it cannot be turned off, a new script goes away again.
     try {
       await api("POST", `${account}/workers/scripts/${row.script}/subdomain`, {
@@ -5214,6 +5318,14 @@ interface DeployRow extends Record<string, SqlStorageValue> {
   addresses: string | null;
   /** K-806: the `worker` part of the recipe as JSON, for a Worker app. */
   worker: string | null;
+  /** K-804: the app of the repo; older rows are the app `app`. */
+  app_key: string;
+  /** K-820: why the deploy failed or did not run. */
+  reason: string | null;
+  /** K-820: the Cloudflare version of a static or Worker deploy, and the run that deployed it. */
+  version_id: string | null;
+  run_id: string | null;
+  run_attempt: string | null;
 }
 
 /** K-806: the crons of the Free plan per account. */

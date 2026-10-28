@@ -20,6 +20,12 @@ export interface OrphanWorker {
   readonly kv: ReadonlyArray<string>;
 }
 
+/** K-820: why the newest deploy of a card failed, or did not run because an app before it did not deploy. */
+export interface DeployNote {
+  readonly state: "failed" | "skipped";
+  readonly reason: string;
+}
+
 export interface RevisionView {
   readonly id: number;
   readonly at: number;
@@ -59,6 +65,8 @@ export interface Snapshot {
   readonly deployedCards: ReadonlyArray<string>;
   /** K-909: what removed Worker apps left in Cloudflare: a kept script and KV namespaces, by the removed card. */
   readonly orphanWorkers: ReadonlyArray<OrphanWorker>;
+  /** K-820: the cards whose newest deploy failed or did not run, with why. */
+  readonly deployNotes: Readonly<Record<string, DeployNote>>;
   /** K-1113: the cards with a stored icon, each with the hash of its bytes, which versions its address. */
   readonly icons: Readonly<Record<string, string>>;
   /** K-1504: who paused and when, while paused. */

@@ -1,4 +1,5 @@
 import { ICON_LIMIT, type IconType, iconType } from "kitshn/icon";
+import { DEFAULT_APP } from "kitshn/names";
 import { type DeployEvent, type WorkerApp, workerBindingNames } from "kitshn/recipe";
 
 /** K-903: kitshn refuses a new preview at this many Worker scripts in the account. */
@@ -13,14 +14,23 @@ const id = (text: string) =>
     .replace(/^-+|-+$/g, "");
 
 /**
- * The card id and the Worker script name of one environment of a repo. The repo id keeps two repos with
- * similar names apart (my.site and my-site).
+ * The card id and the Worker script name of one environment of one app of a repo. The repo id keeps two repos with
+ * similar names apart (my.site and my-site). K-804: the app `app` keeps the ids of a repo with one app; every other
+ * app has its key after the repo id. The script name `kitshn-<card id>` stays within the 63 characters of Cloudflare.
  */
-export function environmentNames(repoId: string, repo: string, environment: string) {
+export function environmentNames(
+  repoId: string,
+  repo: string,
+  environment: string,
+  key: string = DEFAULT_APP,
+) {
   const slug = slugOf(repo);
-  const full = id(`app-${slug}-${repoId}-${environment}`);
-  // A long name keeps a hash of the environment instead of cutting it, so two environments never meet.
-  const resourceId = full.length <= 56 ? full : `app-${slug}-${repoId}-${fnv(environment)}`;
+  const named = key === DEFAULT_APP ? environment : `${key}-${environment}`;
+  const full = id(`app-${slug}-${repoId}-${named}`);
+  // A long name keeps a hash instead of cutting it, so two environments never meet. The plan also checks the key of
+  // the card (K-804), so a hash that two apps share fails instead of mixing them.
+  const hashed = key === DEFAULT_APP ? environment : `${key}/${environment}`;
+  const resourceId = full.length <= 56 ? full : `app-${slug}-${repoId}-${fnv(hashed)}`;
   return { resourceId, script: `kitshn-${resourceId}` };
 }
 

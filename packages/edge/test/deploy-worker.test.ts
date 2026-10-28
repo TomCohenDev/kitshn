@@ -103,6 +103,8 @@ function fakeCloudflare(others: Record<string, number> = {}) {
         item.crons = ((await request.json()) as Array<{ cron: string }>).map((entry) => entry.cron);
       return ok({ schedules: item.crons.map((cron) => ({ cron })) });
     }
+    if (/^\/accounts\/acct\/workers\/scripts\/[^/]+\/deployments$/.test(path))
+      return ok({ deployments: [{ versions: [{ version_id: `version-${uploads.length}` }] }] });
     if (path.startsWith("/accounts/acct/workers/scripts/")) return ok({});
     if (path === "/accounts/acct/workers/domains") {
       if (method === "GET")
@@ -211,14 +213,14 @@ const admin = async (path: string, method: string, body?: unknown) =>
     body,
   );
 
-const recipe = (worker: Record<string, unknown> = {}) => ({
+const recipe = (worker: Record<string, unknown> = {}, name = "prod") => ({
   worker: {
     main: "worker.js",
     compatibilityDate: "2026-10-01",
     durableObjects: { ROOMS: "Room" },
     ...worker,
   },
-  deploy: [{ on: "push", branch: "main", name: "prod", startsIn: "Everyone" }],
+  deploy: [{ on: "push", branch: "main", name, startsIn: "Everyone" }],
 });
 
 async function allow(app: ReturnType<typeof repo>) {
@@ -232,8 +234,12 @@ async function allow(app: ReturnType<typeof repo>) {
 }
 
 /** One deploy from the plan to the finish. The Access sync has a budget per step, so a 503 finish runs again. */
-async function deploy(app: ReturnType<typeof repo>, worker: Record<string, unknown> = {}) {
-  const plan = await step(app, "/deploy/plan", { recipe: recipe(worker), event: {} });
+async function deploy(app: ReturnType<typeof repo>, worker: Record<string, unknown> = {}, key?: string) {
+  const plan = await step(app, "/deploy/plan", {
+    recipe: recipe(worker),
+    event: {},
+    ...(key ? { key } : {}),
+  });
   const deployId = plan.body["deployId"];
   expect(deployId, JSON.stringify(plan.body)).toEqual(expect.any(String));
   const storage = await step(app, "/deploy/storage", { deployId });
@@ -354,5 +360,73 @@ describe("Worker deploys (K-806, K-909)", () => {
     expect(String(refused.body["error"])).toMatch(/run 4 crons/);
     expect(cloudflare.uploads).toHaveLength(0);
     expect((await deploy(app, { crons: ["0 * * * *"] })).status).toBe(200);
+  });
+});
+
+describe("several apps per repo (K-804, K-820)", () => {
+  const plan = (app: ReturnType<typeof repo>, body: Record<string, unknown>) =>
+    step(app, "/deploy/plan", { recipe: recipe(), event: {}, ...body });
+  const state = async () =>
+    (await admin("/api/state", "GET")).body as {
+      resources: Array<{ id: string; name: string }>;
+      deployNotes: Record<string, { state: string; reason: string }>;
+    };
+
+  it("refuses a card of another app of the repo, and a key that is not a plain name", async () => {
+    fakeCloudflare();
+    const app = repo("50", "multi");
+    await allow(app);
+    // The app `app` with the environment cv-prod and the app `cv` with prod make the same card id.
+    expect((await step(app, "/deploy/plan", { recipe: recipe({}, "cv-prod"), event: {} })).status).toBe(200);
+    const clash = await plan(app, { key: "cv" });
+    expect(clash.status).toBe(409);
+    expect(String(clash.body["error"])).toMatch(/belongs to another app \(app\)/);
+    expect((await plan(app, { key: "Bad-Key" })).status).toBe(400);
+  });
+
+  it("names the card with its key, and shows a skipped and a failed deploy on it", async () => {
+    fakeCloudflare();
+    const app = repo("51", "shop");
+    await allow(app);
+    expect((await deploy(app, {}, "cv")).status).toBe(200);
+    const card = environmentNames(app.id, `owner/${app.name}`, "prod", "cv").resourceId;
+    expect((await state()).resources.find((item) => item.id === card)?.name).toBe("shop-cv");
+    const skipped = await plan(app, {
+      key: "cv",
+      skip: "not deployed, because it needs api, which did not deploy (K-820).",
+    });
+    expect(skipped.body["plan"]).toMatchObject({ kind: "skip" });
+    expect((await state()).deployNotes[card]).toEqual({
+      state: "skipped",
+      reason: "not deployed, because it needs api, which did not deploy (K-820).",
+    });
+    const planned = await plan(app, { key: "cv" });
+    expect(
+      (await step(app, "/deploy/fail", { deployId: planned.body["deployId"], reason: "the build failed." }))
+        .status,
+    ).toBe(200);
+    expect((await state()).deployNotes[card]).toEqual({ state: "failed", reason: "the build failed." });
+  });
+
+  it("keeps a running deploy running when the CLI gives up, so its machine result still lands", async () => {
+    fakeCloudflare();
+    const app = repo("52", "slow");
+    await allow(app);
+    const planned = await plan(app, {});
+    const deployId = String(planned.body["deployId"]);
+    await runInDurableObject(env.KITSHN.getByName("kitshn"), (_instance, durable) => {
+      durable.storage.sql.exec(
+        "UPDATE deploys SET state = 'running', app = 'compose' WHERE id = ?",
+        deployId,
+      );
+    });
+    expect(
+      (await step(app, "/deploy/fail", { deployId, reason: "the deploy did not end within 38 minutes." }))
+        .status,
+    ).toBe(200);
+    const row = await runInDurableObject(env.KITSHN.getByName("kitshn"), (_instance, durable) =>
+      durable.storage.sql.exec("SELECT state, reason FROM deploys WHERE id = ?", deployId).one(),
+    );
+    expect(row).toEqual({ state: "running", reason: "the deploy did not end within 38 minutes." });
   });
 });

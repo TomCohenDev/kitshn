@@ -32,6 +32,11 @@ name: kitshn 2 deploy
 #       with: { artifact: site, artifact-path: dist }
 #       secrets: inherit
 #
+# A repo with several apps (`defineApps`, K-804) passes the artifacts by app key in `artifacts`, a JSON text:
+#
+#       with:
+#         artifacts: '{"cv": {"name": "cv", "path": "cv/public"}}'
+#
 # A Compose app gets each KITSHN_<NAME> secret and variable as <NAME> (K-808), from the GitHub Environment
 # "prod" for pushes and "pr-<number>" for pull requests, as in KitSHn 1. A Worker app gets them as secret bindings.
 # A repo secret also reaches the previews of pull requests; a secret for production only goes in the Environment "prod".
@@ -53,6 +58,12 @@ on:
         default: ""
       artifact-path:
         description: Where the artifact goes, the output folder of the recipe. Needed with artifact.
+        type: string
+        default: ""
+      artifacts:
+        description: >-
+          Several apps (K-804): the artifact of each app by key, as JSON {"<app>": {"name": "<artifact>", "path":
+          "<output folder>"}}. `artifact` and `artifact-path` stay for the app `app`.
         type: string
         default: ""
 
@@ -87,6 +98,11 @@ jobs:
         with:
           name: ${{ inputs.artifact }}
           path: ${{ inputs.artifact-path }}
+      # K-804: every artifact of the run, each in a folder with its name; the CLI moves each into its app.
+      - if: inputs.artifacts != '' && github.event.action != 'closed'
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/kitshn-artifacts
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -106,6 +122,8 @@ jobs:
           SERVER: ${{ inputs.server }}
           KITSHN_PARAMS_JSON: ${{ runner.temp }}/kitshn-params.json
           KITSHN_ARTIFACT_PATH: ${{ inputs.artifact != '' && inputs.artifact-path || '' }}
+          KITSHN_ARTIFACTS: ${{ github.event.action != 'closed' && inputs.artifacts || '' }}
+          KITSHN_ARTIFACT_DIR: ${{ runner.temp }}/kitshn-artifacts
         # K-617: the CLI of the release that the kitshn server names, checked against its SHA256SUMS.
         run: |
           version=$(curl -fsSL "$SERVER/deploy/version")

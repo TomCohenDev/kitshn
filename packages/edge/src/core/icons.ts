@@ -42,14 +42,16 @@ export type CardIcon =
   | { readonly _tag: "os"; readonly os: MachineOs }
   | { readonly _tag: "kind" };
 
+/** K-1113, K-1114: the kinds whose card shows a stored icon. */
+const STORED_ICON_KINDS: ReadonlySet<Resource["kind"]> = new Set(["site.static", "site.compose", "site.live"]);
+
 /**
  * K-524: the own icon of a card, or its kind icon. `icons` are the stored icon hashes of the snapshot (K-1113),
- * and `os` is the system of the machine with the card's id. Known limit: Compose apps, live sites, pages and
- * files show their kind icon; revisit when the daemon reads app icons.
+ * and `os` is the system of the machine with the card's id. Known limit: pages and files show their kind icon.
  */
 export function cardIcon(resource: Resource, icons: Readonly<Record<string, string>>, os: MachineOs | null): CardIcon {
   const hash = icons[resource.id];
-  if (resource.kind === "site.static" && hash !== undefined)
+  if (STORED_ICON_KINDS.has(resource.kind) && hash !== undefined)
     return { _tag: "site", src: `/api/icons/${encodeURIComponent(resource.id)}?v=${hash}` };
   if (resource.kind === "repo") {
     const owner = repoOwner(resource.name);

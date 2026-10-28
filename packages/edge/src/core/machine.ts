@@ -135,6 +135,8 @@ export type DaemonMessage =
   | { readonly type: "jobResult"; readonly id: number; readonly result: JobResult }
   /** The whole list of live sites, sent on connect and on each change (K-1107). */
   | { readonly type: "sites"; readonly sites: ReadonlyArray<LiveSiteReport> }
+  /** K-1114: the icon of one site of this machine, base64, read from the app; null when it has none. */
+  | { readonly type: "icon"; readonly site: string; readonly icon: string | null }
   /** K-909: the idle volumes of kitshn apps, sent on connect and after each Compose job. */
   | { readonly type: "volumes"; readonly volumes: ReadonlyArray<ProjectVolume> };
 

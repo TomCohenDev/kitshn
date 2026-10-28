@@ -9,6 +9,7 @@ import {
   signText,
   type Command,
   type DaemonMessage,
+  type LiveSiteReport,
   type JoinSecrets,
   type MachinePrivateKey,
   type ProjectVolume,
@@ -21,6 +22,7 @@ import type { Answer, Request } from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { keyPlan } from "./keys.ts";
 import { type LocalOutcome, askLocal, listenLocal } from "./local.ts";
+import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
 import { localUsersOf, peerDecision } from "./peer.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
 import {
@@ -1082,6 +1084,7 @@ function connect(config: JoinSecrets) {
       flushResults();
       report();
       lastSites = "";
+      iconMemory = new Map();
       void checkSites().catch((error: unknown) => log(`site check failed: ${String(error)}`));
       void reportVolumes().catch((error: unknown) => log(`volume report failed: ${String(error)}`));
       ws.send(JSON.stringify({ type: "sample", sample: sample() } satisfies DaemonMessage));
@@ -1215,9 +1218,50 @@ async function checkSites() {
   }
   const reports = await Promise.all(sites.map(async (site) => ({ ...site, up: await probe(site.target) })));
   const text = JSON.stringify({ type: "sites", sites: reports } satisfies DaemonMessage);
-  if (text === lastSites || socket?.readyState !== WebSocket.OPEN) return;
-  lastSites = text;
-  socket.send(text);
+  if (socket?.readyState !== WebSocket.OPEN) return;
+  if (text !== lastSites) {
+    lastSites = text;
+    socket.send(text);
+  }
+  void sendIcons(socket, reports).catch((error: unknown) => log(`icon read failed: ${String(error)}`));
+}
+
+/** K-1114: per site, what this connection read and sent; a new connection starts empty. */
+let iconMemory = new Map<string, IconMemory>();
+let readingIcons = false;
+
+/** K-1114: reads the icons that are due through each site's own target, and sends the ones that changed. */
+async function sendIcons(ws: WebSocket, reports: ReadonlyArray<LiveSiteReport>) {
+  if (readingIcons) return;
+  readingIcons = true;
+  try {
+    const memory = iconMemory;
+    const now = Date.now();
+    const due = new Set(iconsDue(reports, memory, now));
+    for (const report of reports) {
+      const known = memory.get(report.name);
+      if (!due.has(report.name)) {
+        if (known && known.up !== report.up) memory.set(report.name, { ...known, up: report.up });
+        continue;
+      }
+      const icon = await targetIcon(report.target);
+      const hash = icon ? new Bun.CryptoHasher("sha256").update(icon.bytes).digest("hex") : null;
+      const sent = known?.sent ?? null;
+      const send = iconToSend(sent, hash, now) && ws.readyState === WebSocket.OPEN && memory === iconMemory;
+      if (send) {
+        const message: DaemonMessage = {
+          type: "icon",
+          site: report.name,
+          icon: icon ? Buffer.from(icon.bytes).toString("base64") : null,
+        };
+        ws.send(JSON.stringify(message));
+      }
+      memory.set(report.name, { readAt: now, up: true, sent: send ? { hash, at: now } : sent });
+    }
+    for (const name of memory.keys()) if (!reports.some((report) => report.name === name)) memory.delete(name);
+  } finally {
+    readingIcons = false;
+  }
 }
 
 async function runCommand() {

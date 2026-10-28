@@ -961,6 +961,7 @@ export function App() {
     upload: uploadTo,
     addSite: () => setAddingSite(true),
     addMachine: () => setAddingMachine(true),
+    addMemberSomewhere: () => setPalette("add a member to "),
     fit,
     undoItem: (item) => void undoItem(item),
   };
@@ -1170,38 +1171,14 @@ export function App() {
             <span class="sep" />
             <button
               class="btn primary"
-              data-tip="Make a new circle in the middle of the view. It matches nobody until you add members."
-              onClick={() => void newCircle(null)}
+              aria-haspopup="menu"
+              aria-label="Add"
+              data-tip="Add a circle, a page or a file, a site, a machine or a member (K-526)."
+              onClick={(event) =>
+                setMenu({ target: { _tag: "add" }, anchor: event.currentTarget.getBoundingClientRect() })
+              }
             >
-              + Circle
-            </button>
-            <button
-              class="btn"
-              data-tip="Make a join command for a new machine. Its card starts in the tray, private."
-              onClick={() => setAddingMachine(true)}
-            >
-              + Machine
-            </button>
-            <button
-              class="btn"
-              data-tip="Add a person, a domain, a device or a network to a circle."
-              onClick={() => setPalette("add a member to ")}
-            >
-              + Member
-            </button>
-            <button
-              class="btn"
-              data-tip="Share a local server of a machine, or set up a static site from a repo."
-              onClick={() => setAddingSite(true)}
-            >
-              + Site
-            </button>
-            <button
-              class="btn"
-              data-tip="Upload files: an HTML file becomes a page, any other file stays a file (at most 100 MB). They wait in the tray, private. You can also drop files on the map."
-              onClick={() => uploadTo(null)}
-            >
-              Upload
+              +
             </button>
             <button class="btn" data-tip="Fit every circle and card in the view." onClick={fit}>
               Fit
@@ -1972,7 +1949,8 @@ function ContextMenu(props: {
         : target._tag === "circle"
           ? state.circles.get(target.id)?.name
           : "the map";
-  return <ActionMenu label={`Actions for ${name ?? "the map"}`} anchor={props.menu.anchor} groups={groups} onClose={props.onClose} />;
+  const label = target._tag === "add" ? "Add" : `Actions for ${name ?? "the map"}`;
+  return <ActionMenu label={label} anchor={props.menu.anchor} groups={groups} onClose={props.onClose} />;
 }
 
 function Palette(props: {

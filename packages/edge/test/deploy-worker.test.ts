@@ -933,10 +933,25 @@ describe("folder sites (K-1123)", () => {
     expect(moved.status, JSON.stringify(moved.body)).toBe(200);
     expect(cloudflare.served("second.example.com")).toEqual([`kitshn-${card.id}`]);
     expect(cloudflare.served("first.example.com")).toEqual([]);
+    const durable = env.KITSHN.getByName("kitshn");
+    const alarm = () =>
+      runInDurableObject(durable, (instance) => (instance as unknown as { alarm(): Promise<void> }).alarm());
+    const redirectWork = () =>
+      runInDurableObject(durable, (instance) =>
+        (instance as unknown as { redirectWork(): boolean }).redirectWork(),
+      );
+    // A failed upload waits for its retry time instead of running the alarm again at once.
+    cloudflare.state.failUploads = 5;
+    await alarm();
+    expect(cloudflare.served("first.example.com")).toEqual([]);
+    expect(await redirectWork()).toBe(false);
+    cloudflare.state.failUploads = 0;
+    await runInDurableObject(durable, (_instance, storage) => {
+      storage.storage.sql.exec("UPDATE meta SET value = '0' WHERE key = 'redirects_retry_at'");
+    });
+    expect(await redirectWork()).toBe(true);
     // The alarm hands the old address to the redirect Worker, with the map of where it goes.
-    await runInDurableObject(env.KITSHN.getByName("kitshn"), (instance) =>
-      (instance as unknown as { alarm(): Promise<void> }).alarm(),
-    );
+    await alarm();
     expect(cloudflare.served("first.example.com")).toEqual(["kitshn-redirects"]);
     const bindings = (cloudflare.uploads.at(-1)?.["bindings"] ?? []) as Array<{ name: string; text: string }>;
     const map = bindings.find((binding) => binding.name === "MAP");
@@ -947,6 +962,39 @@ describe("folder sites (K-1123)", () => {
       address: "first",
     });
     expect(taken.status).toBe(409);
+
+    // A move back takes the old address off the redirect Worker; the address it leaves becomes the old one.
+    const backAgain = await agentStep("move-key.access", "/agent/cards/moving/address", { address: "first" });
+    expect(backAgain.status, JSON.stringify(backAgain.body)).toBe(200);
+    expect(cloudflare.served("first.example.com")).toEqual([`kitshn-${card.id}`]);
+    expect(cloudflare.served("second.example.com")).toEqual([]);
+    await alarm();
+    expect(cloudflare.served("second.example.com")).toEqual(["kitshn-redirects"]);
+
+    // Removed, the site lets its old address go; another site takes it, and the Undo of the removal then refuses.
+    const removed = await admin(`/api/apps/${card.id}`, "DELETE");
+    expect(removed.status, JSON.stringify(removed.body)).toBe(200);
+    await alarm();
+    const other = await agentStep("move-key.access", "/agent/sites/plan", {
+      folder: "taker",
+      address: "second",
+    });
+    expect(other.status, JSON.stringify(other.body)).toBe(200);
+    const otherId = other.body["deployId"];
+    const manifest = { "/b.html": { hash: "2".repeat(32), size: 1 } };
+    expect(
+      (await agentStep("move-key.access", "/agent/sites/assets", { deployId: otherId, manifest })).status,
+    ).toBe(200);
+    let otherFinish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && otherFinish.status === 503; attempt++)
+      otherFinish = await agentStep("move-key.access", "/agent/sites/finish", {
+        deployId: otherId,
+        jwt: "done",
+      });
+    expect(otherFinish.status, JSON.stringify(otherFinish.body)).toBe(200);
+    const undone = await admin("/api/undo", "POST", { revision: removed.body["revision"] });
+    expect(undone.status).toBe(409);
+    expect(String(undone.body["error"])).toContain("second.example.com is taken");
   });
 
   it("moves a Worker app to a new main address, and the old one sends visitors on (K-817, K-1124)", async () => {

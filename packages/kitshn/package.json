@@ -22,7 +22,8 @@
   "files": [
     "dist/*.js",
     "dist/*.mjs",
-    "dist/*.d.ts"
+    "dist/*.d.ts",
+    "skill/SKILL.md"
   ],
   "bin": {
     "kitshn": "./dist/kitshn.mjs"

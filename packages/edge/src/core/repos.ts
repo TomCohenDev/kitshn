@@ -90,13 +90,21 @@ export function agentAllowRefusal(
 }
 
 /**
- * K-819: why the owner may not forget this repo, or null. Every state can be forgotten, because a forgotten
- * repo waits again on its next deploy. A repo with cards keeps its row, so each card keeps its "Deploys" switch
- * and its agent redeploys stay refused for the right reason; the owner removes the apps first (K-909).
+ * K-819: why the owner may not forget this repo, or null. A forgotten repo waits again on its next deploy. A
+ * repo with cards keeps its row, so each card keeps its "Deploys" switch and its agent redeploys stay refused
+ * for the right reason; the owner removes the apps first (K-909). A blocked repo is forgotten only once GitHub
+ * deleted it: otherwise its next deploy would wait, and an agent key with "adds apps" could then allow a repo
+ * that the owner blocked.
  */
-export function forgetRefusal(gate: RepoGate, cards: ReadonlyArray<string>): string | null {
-  if (cards.length === 0) return null;
-  return `${gate.name} still deploys ${cards.length === 1 ? "1 app" : `${cards.length} apps`}. Remove ${cards.length === 1 ? "it" : "them"} with "Remove app" first (K-909), then forget the repo.`;
+export function forgetRefusal(
+  repo: { readonly name: string; readonly state: RepoState; readonly goneOnGitHub: boolean },
+  cards: number,
+): string | null {
+  if (cards > 0)
+    return `${repo.name} still deploys ${cards === 1 ? "1 app" : `${cards} apps`}. Remove ${cards === 1 ? "it" : "them"} with "Remove app" first (K-909), then forget the repo.`;
+  if (repo.state === "blocked" && !repo.goneOnGitHub)
+    return `${repo.name} is blocked. Allow it first if you want it to wait again; a blocked repo is forgotten only after GitHub deleted it (K-819).`;
+  return null;
 }
 
 /**

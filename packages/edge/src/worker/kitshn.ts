@@ -2863,7 +2863,12 @@ export class Kitshn extends DurableObject<Env> {
     const [row] = this.sql<RepoRow>("SELECT * FROM repos WHERE repo_id = ?", repoId);
     if (!row) return Response.json({ error: `kitshn knows no repo ${repoId}.` }, { status: 404 });
     const forgetError =
-      state === "forget" ? forgetRefusal(repoGateOf(row), this.repoCards().get(repoId) ?? []) : null;
+      state === "forget"
+        ? forgetRefusal(
+            { name: row.name, state: row.state, goneOnGitHub: row.gone_at !== null },
+            (this.repoCards().get(repoId) ?? []).length,
+          )
+        : null;
     if (forgetError) return Response.json({ error: forgetError }, { status: 409 });
     const stopped = this.ctx.storage.transactionSync(() => {
       // K-819: Forget stops what the repo has under way as Block does, then drops the row; the repo waits again.

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import type { RepoView } from "../core/protocol.ts";
-import { type RepoState, awaitsAllow } from "../core/repos.ts";
+import { type RepoState, awaitsAllow, forgetRefusal } from "../core/repos.ts";
 import { RepoIcon } from "./ItemIcon.tsx";
 import { callApi } from "./store.ts";
 
@@ -49,9 +49,8 @@ export const GONE_STICKER = {
 
 /** K-819: the tooltip of Forget, which every repo row offers. */
 function forgetTip(repo: RepoView) {
-  const apps = repo.resourceIds.length;
-  if (apps > 0)
-    return `${repo.name} still deploys ${apps === 1 ? "1 app" : `${apps} apps`}. Remove ${apps === 1 ? "it" : "them"} with "Remove app" first, then forget the repo.`;
+  const refused = forgetRefusal(repo, repo.resourceIds.length);
+  if (refused) return refused;
   if (repo.goneOnGitHub) return `Forget ${repo.name}: it leaves this list.`;
   return `Forget ${repo.name}: it leaves this list. Its next deploy waits for Allow again, and an agent key with "adds apps" can then allow it.`;
 }

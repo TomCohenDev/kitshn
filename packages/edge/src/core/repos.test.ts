@@ -69,18 +69,16 @@ describe("the repo gate (K-819)", () => {
       error: expect.stringMatching(/takes it over/),
     });
   });
-  it("forgets a repo in every state while it has no cards, and a forgotten repo waits again", () => {
-    const agent = { clientId: "agent-1", name: "Builder" };
-    const base = { ...repo, firstSeen: 1, allowedBy: null };
-    for (const gate of [
-      { ...base, state: "waiting" as const },
-      { ...base, state: "allowed" as const },
-      { ...base, state: "allowed" as const, allowedBy: agent },
-      { ...base, state: "blocked" as const },
-    ]) {
-      expect(forgetRefusal(gate, [])).toBeNull();
-      expect(forgetRefusal(gate, ["card-1"])).toMatch(/Remove app/);
+  it("forgets a repo without cards, a blocked one only after GitHub deleted it, and a forgotten repo waits again", () => {
+    const base = { name: "o/new", goneOnGitHub: false };
+    for (const state of ["waiting", "allowed"] as const) {
+      expect(forgetRefusal({ ...base, state }, 0)).toBeNull();
+      expect(forgetRefusal({ ...base, state }, 1)).toMatch(/Remove app/);
     }
+    // Forget would let an agent key with "adds apps" allow a repo that the owner blocked.
+    expect(forgetRefusal({ ...base, state: "blocked" }, 0)).toMatch(/blocked/);
+    expect(forgetRefusal({ ...base, state: "blocked", goneOnGitHub: true }, 0)).toBeNull();
+    expect(forgetRefusal({ ...base, state: "blocked", goneOnGitHub: true }, 2)).toMatch(/Remove app/);
     // Forget drops the row, so the next deploy finds none: it waits, with no agent key.
     expect(gateDecision(undefined, repo, 9)).toMatchObject({
       allow: false,

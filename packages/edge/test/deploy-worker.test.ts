@@ -845,7 +845,7 @@ describe("folder sites (K-1123)", () => {
     const served = cloudflare.served("demo-site.example.com");
     const refused = await admin("/api/undo", "POST", { revision: again.body["revision"] });
     expect(refused.status).toBe(409);
-    expect(String(refused.body["error"])).toMatch(/taken/);
+    expect(String(refused.body["error"])).toContain("is taken");
     expect(cloudflare.served("demo-site.example.com")).toEqual(served);
     const noRight = [
       { _tag: "circle", id: "folders", after: agentCircle("folders", "folder-key.access", false) },

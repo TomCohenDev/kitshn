@@ -41,6 +41,7 @@ import {
   SecretDialog,
 } from "./Circle.tsx";
 import { ActionMenu, Menu, MenuItem, MoreButton, OverlayPanel, TooltipLayer } from "./controls.tsx";
+import { ItemIcon } from "./ItemIcon.tsx";
 import {
   type ActionContext,
   type ActionHandlers,
@@ -1263,7 +1264,8 @@ export function App() {
                 }}
               >
                 <div class="name">
-                  {KINDS[resource.kind].icon} {resource.name}
+                  <ItemIcon resource={resource} />
+                  {resource.name}
                 </div>
                 <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
                 <div class="foot">
@@ -1458,7 +1460,8 @@ function Panel(props: {
         <ul>
           {cards.map((resource) => (
             <li key={resource.id}>
-              {KINDS[resource.kind].icon} {resource.name}
+              <ItemIcon resource={resource} />
+              {resource.name}
             </li>
           ))}
         </ul>
@@ -1621,7 +1624,14 @@ function StackPanel(props: {
                   data-tip="Show this card's panel, with its own level and end date."
                   onClick={() => props.onSelectCard(id)}
                 >
-                  {resource ? `${KINDS[resource.kind].icon} ${resource.name}` : id}
+                  {resource ? (
+                    <>
+                      <ItemIcon resource={resource} />
+                      {resource.name}
+                    </>
+                  ) : (
+                    id
+                  )}
                 </button>
                 <button
                   type="button"
@@ -1676,7 +1686,8 @@ function CardPanel(props: {
         {KINDS[resource.kind].label}
       </div>
       <h2>
-        {KINDS[resource.kind].icon} {resource.name}
+        <ItemIcon resource={resource} />
+        {resource.name}
       </h2>
       {address ? (
         <div class="row">

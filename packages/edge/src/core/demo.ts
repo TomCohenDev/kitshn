@@ -1,4 +1,19 @@
+import type { MachineOs } from "./icons.ts";
+import type { Machine } from "./machine.ts";
 import type { Circle, Point, Resource } from "./model.ts";
+
+/** K-524: the demo machines, offline, with the system of their last status, so their cards show it. */
+export const DEMO_MACHINES: ReadonlyArray<{ readonly machine: Machine; readonly os: MachineOs }> = [
+  { machine: { id: "mac", name: "Mac", labels: ["laptop"], order: 0, serviceTokenId: "demo-mac", clientId: "demo-mac.access", tunnelId: "demo-mac" }, os: "macos" },
+  { machine: { id: "vps", name: "VPS", labels: ["server", "deploy"], order: 1, serviceTokenId: "demo-vps", clientId: "demo-vps.access", tunnelId: "demo-vps" }, os: "linux" },
+];
+
+/** K-1113: the stored icon of the demo static site. */
+export const DEMO_SITE_ICON = {
+  id: "tick3d",
+  type: "image/svg+xml",
+  svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" fill="#FFE14D"/><path d="M7 17l6 6L25 9" fill="none" stroke="#000" stroke-width="5"/></svg>',
+} as const;
 
 /** Local development only (DEV_DEMO): sample cards and circles, so the map has something to show. */
 export function demo() {
@@ -26,6 +41,7 @@ export function demo() {
     resource("tick3d", "site.static", "tick3d", "tick3d.example.com"),
     resource("ci-times", "page", "CI time table", null),
     resource("slides", "file", "slides.pdf", null),
+    resource("kitshn-repo", "repo", "Yarden-zamir/kitshn", null),
   ];
   const places: Array<readonly [string, Point]> = [
     ["mac", { x: -150, y: -120 }],
@@ -34,6 +50,7 @@ export function demo() {
     ["riffle-pr-41", { x: 250, y: 120 }],
     ["riffle-pr-42", { x: 250, y: 120 }],
     ["tick3d", { x: 760, y: 40 }],
+    ["kitshn-repo", { x: 760, y: 200 }],
   ];
   const her: Circle = {
     id: "her",

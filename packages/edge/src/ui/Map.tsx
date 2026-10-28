@@ -20,6 +20,7 @@ import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { KeySticker, PresenceSticker } from "./Machines.tsx";
 import type { MenuTarget } from "./actions.ts";
 import { MoreButton } from "./controls.tsx";
+import { ItemIcon } from "./ItemIcon.tsx";
 import type { Rect } from "./popover.ts";
 import { HOLD_MS, type Press, startPress, stepPress } from "./press.ts";
 import { type View, headAngle, shownCardBoxes } from "./layout.ts";
@@ -824,7 +825,8 @@ function CardView(props: {
         </span>
       ) : null}
       <div class="name">
-        {kind.icon} {resource.name}
+        <ItemIcon resource={resource} />
+        {resource.name}
       </div>
       <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
       <div class="foot">
@@ -936,7 +938,8 @@ function StackCard(props: {
       <ul>
         {props.members.slice(0, 6).map((member) => (
           <li key={member.id}>
-            {KINDS[member.kind].icon} {member.name}
+            <ItemIcon resource={member} />
+            {member.name}
           </li>
         ))}
         {props.members.length > 6 ? <li class="muted">and {props.members.length - 6} more</li> : null}

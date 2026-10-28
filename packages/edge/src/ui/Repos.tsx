@@ -1,6 +1,7 @@
 import { useState } from "preact/hooks";
 import type { RepoView } from "../core/protocol.ts";
 import type { RepoState } from "../core/repos.ts";
+import { RepoIcon } from "./ItemIcon.tsx";
 import { callApi } from "./store.ts";
 
 type RepoAction = Exclude<RepoState, "waiting"> | "forget";
@@ -72,6 +73,7 @@ export function RepoList(props: {
           .sort((a, b) => Number(b.state === "waiting") - Number(a.state === "waiting"))
           .map((repo) => (
             <li key={repo.repoId}>
+              <RepoIcon name={repo.name} />
               <code>{repo.name}</code>
               <span class={`sticker ${REPO_STICKERS[repo.state].style}`} data-tip={REPO_STICKERS[repo.state].tip}>
                 {repo.state}

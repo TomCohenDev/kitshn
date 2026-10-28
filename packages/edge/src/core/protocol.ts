@@ -1,5 +1,6 @@
 import type { Actor, Item, RevisionKind } from "./changes.ts";
 import type { Command, Machine, MachineStatus, ProjectVolume, Sample } from "./machine.ts";
+import type { MachineOs } from "./icons.ts";
 import type { Circle, PauseMode, Point, Resource, ShareSetting, Stack } from "./model.ts";
 import type { RepoGate } from "./repos.ts";
 
@@ -47,6 +48,8 @@ export interface Snapshot {
   readonly repos: ReadonlyArray<RepoView>;
   /** K-909: the cards that a deploy made; only these show "Remove app". */
   readonly deployedCards: ReadonlyArray<string>;
+  /** K-1113: the cards with a stored icon, each with the hash of its bytes, which versions its address. */
+  readonly icons: Readonly<Record<string, string>>;
   /** K-1504: who paused and when, while paused. */
   readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;
@@ -83,6 +86,8 @@ export interface MachineView {
   readonly lastSeen: number | null;
   readonly status: MachineStatus | null;
   readonly sample: Sample | null;
+  /** K-524: the system of the last status, also while offline; null before the first status or for another system. */
+  readonly os: MachineOs | null;
   /** K-1708: the last failed challenge since kitshn started, until the next one passes. */
   readonly keyFailure: { readonly at: number; readonly reason: string } | null;
   /** K-909: idle volumes of kitshn apps that have no card; each has its own delete. */

@@ -16,11 +16,12 @@ import {
   shareKey,
   shareLevel,
 } from "../core/model.ts";
-import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
+import { CIRCLE_COLORS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { TYPED_KINDS, type TypedKind, memberFrom } from "./members.ts";
 import { isAgentKey } from "../core/agent.ts";
 import { callApi } from "./store.ts";
 import { Check, Switch } from "./controls.tsx";
+import { ItemIcon } from "./ItemIcon.tsx";
 import { levelEdit } from "./actions.ts";
 
 /** The sticker of each member kind: its name and a light sticker colour with black text. */
@@ -763,7 +764,8 @@ export function CircleEditor(props: {
                 onClick={() => props.onSelectCard(resource.id)}
               >
                 <span class="name">
-                  {KINDS[resource.kind].icon} {resource.name}
+                  <ItemIcon resource={resource} />
+                  {resource.name}
                 </span>
                 <span
                   class="sticker"

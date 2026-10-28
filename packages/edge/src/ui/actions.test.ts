@@ -92,6 +92,7 @@ function context(version = "0123456789ab"): ActionContext {
     lastSeen: null,
     status: null,
     sample: null,
+    os: null,
     keyFailure: null,
     orphanVolumes: [],
   };

@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { extname, join, relative, resolve, sep } from "node:path";
+import { pickSiteIcon } from "./icon.ts";
 import { RecipeError, readRecipe } from "./parse.ts";
 import { type DeployEvent, decodeRecipe } from "./recipe.ts";
 
@@ -135,6 +136,7 @@ async function deploy(server: string, dir: string) {
   if (!existsSync(output)) fail(`the output folder ${recipe.static.output} does not exist after the build.`);
   const manifest: Record<string, { hash: string; size: number }> = {};
   const byHash = new Map<string, { path: string; type: string }>();
+  const byPath = new Map<string, string>();
   for (const path of files(output)) {
     const bytes = readFileSync(path);
     const extension = extname(path).toLowerCase();
@@ -142,7 +144,9 @@ async function deploy(server: string, dir: string) {
       .update(bytes.toString("base64") + extension.slice(1))
       .digest("hex")
       .slice(0, 32);
-    manifest[`/${relative(output, path).split("\\").join("/")}`] = { hash, size: bytes.length };
+    const sitePath = `/${relative(output, path).split("\\").join("/")}`;
+    manifest[sitePath] = { hash, size: bytes.length };
+    byPath.set(sitePath, path);
     byHash.set(hash, { path, type: TYPES[extension] ?? "application/octet-stream" });
   }
   if (Object.keys(manifest).length === 0) fail(`the output folder ${recipe.static.output} is empty.`);
@@ -171,9 +175,17 @@ async function deploy(server: string, dir: string) {
     if (!body.success) fail(`the file upload failed: ${JSON.stringify(body.errors)}`);
     if (body.result?.jwt) completion = body.result.jwt;
   }
+  // K-1112: the card icon comes from the built files; a site without one gets its kind icon.
+  const { icon, notes } = pickSiteIcon((path) => {
+    const file = byPath.get(path);
+    return file === undefined ? null : readFileSync(file);
+  });
+  for (const note of notes) console.log(`kitshn: icon: ${note}`);
+  console.log(icon ? `kitshn: the card icon is ${icon.path}.` : "kitshn: the site has no icon; the card shows the kind icon.");
   const done = await call<{ address: string; status: number; card: string }>(server, "/deploy/finish", {
     deployId: plan.deployId,
     jwt: completion,
+    icon: icon ? Buffer.from(icon.bytes).toString("base64") : null,
   });
   console.log(
     `kitshn: deployed ${Object.keys(manifest).length} files to https://${done.address} (route check: ${done.status}).`,

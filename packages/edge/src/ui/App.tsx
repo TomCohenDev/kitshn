@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 import {
   type Actor,
   type Edit,
@@ -1637,6 +1637,7 @@ function Palette(props: {
   const matches = entries
     .filter((entry) => words.every((word) => entry.label.toLowerCase().includes(word)))
     .slice(0, 50);
+  const listId = useId();
   const run = (index: number) => {
     const entry = matches[index];
     if (!entry) return;
@@ -1649,6 +1650,10 @@ function Palette(props: {
         <input
           autoFocus
           aria-label="Find"
+          role="combobox"
+          aria-expanded="true"
+          aria-controls={listId}
+          aria-activedescendant={matches[active] ? `${listId}-${active}` : undefined}
           placeholder="Find a card, a circle or an action. Try “share”."
           value={query}
           onInput={(event) => {
@@ -1663,10 +1668,11 @@ function Palette(props: {
             event.preventDefault();
           }}
         />
-        <ul role="listbox" aria-label="Matches">
+        <ul role="listbox" id={listId} aria-label="Matches">
           {matches.map((entry, index) => (
             <li
               key={entry.label}
+              id={`${listId}-${index}`}
               role="option"
               data-tip={entry.tip}
               aria-selected={index === active}

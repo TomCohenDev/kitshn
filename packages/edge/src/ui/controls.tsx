@@ -190,7 +190,9 @@ export function Menu(props: {
 }) {
   const menu = useRef<HTMLDivElement>(null);
   const onClose = useRef(props.onClose);
-  onClose.current = props.onClose;
+  useLayoutEffect(() => {
+    onClose.current = props.onClose;
+  });
   const items = () => [...(menu.current?.querySelectorAll<HTMLElement>(ITEMS) ?? [])];
 
   useLayoutEffect(() => {

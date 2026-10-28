@@ -271,7 +271,15 @@ const API_MESSAGES: Readonly<Record<string, ClientMessage["type"]>> = {
 /** K-003: the one Durable Object. It holds all state in SQLite and a copy in memory. */
 export class Kitshn extends DurableObject<Env> {
   private state!: State;
-  private revisions: Array<RevisionView> = [];
+  /**
+   * K-1302: the recent History, read on first use. A wake for a daemon message or an alarm never reads it; it
+   * costs about 4 rows per revision. Writers change it only when it is loaded, because SQL has their row.
+   */
+  private revisionCache: Array<RevisionView> | null = null;
+  private get revisions(): Array<RevisionView> {
+    this.revisionCache ??= this.loadRevisions();
+    return this.revisionCache;
+  }
   /**
    * K-909: the cards whose orphaned Worker storage kitshn deletes now; their deploys and Undo wait. Known limit: it
    * lives in memory. A restart in the middle of a delete ends the delete with no History entry for the part that went,
@@ -420,6 +428,10 @@ export class Kitshn extends DurableObject<Env> {
         { key: row.key, cfId: row.cf_id, aud: row.aud, body: row.body, tried: row.tried, error: row.error },
       ]),
     );
+    this.revisionCache = null;
+  }
+
+  private loadRevisions(): Array<RevisionView> {
     const rows = this.sql<{
       id: number;
       at: number;
@@ -443,7 +455,7 @@ export class Kitshn extends DurableObject<Env> {
     const undone = new Map(
       rows.flatMap((row) => (row.undoes === null ? [] : [[row.undoes, row.id] as const])),
     );
-    this.revisions = rows.map((row) => ({
+    return rows.map((row) => ({
       id: row.id,
       at: row.at,
       actor: JSON.parse(row.actor) as Actor,
@@ -691,7 +703,7 @@ export class Kitshn extends DurableObject<Env> {
     }
     if (merge) {
       const targets = revisionTargets(merge.changes.map(targetOf));
-      this.revisions = this.revisions.map((revision) =>
+      this.revisionCache &&= this.revisionCache.map((revision) =>
         revision.id === id ? { ...revision, at: now, summary, ...targets } : revision,
       );
       this.broadcast();
@@ -3521,9 +3533,11 @@ export class Kitshn extends DurableObject<Env> {
 
   /** Puts a new revision at the top of the in-memory History (K-519), marks what it undoes, and tells everyone. */
   private showRevision(revision: RevisionView) {
-    this.revisions = [
+    this.revisionCache &&= [
       revision,
-      ...this.revisions.map((old) => (old.id === revision.undoes ? { ...old, undoneBy: revision.id } : old)),
+      ...this.revisionCache.map((old) =>
+        old.id === revision.undoes ? { ...old, undoneBy: revision.id } : old,
+      ),
     ].slice(0, RECENT_REVISIONS);
     this.broadcast();
   }

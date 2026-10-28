@@ -1,6 +1,8 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, expect, it, vi } from "vitest";
+import type { Circle } from "../src/core/model.ts";
+import type { RevisionView } from "../src/core/protocol.ts";
 import { accessToken, send, stubAccessCerts } from "./access.ts";
 
 afterEach(() => vi.restoreAllMocks());
@@ -52,8 +54,54 @@ it("reads few rows on a wake and on each snapshot", async () => {
   const firstSnapshot = rowsRead;
   rowsRead = 0;
   await send("/api/state", { headers });
-  // The load reads the 200 recent revisions and the small tables; one snapshot scans the deploys once.
-  expect(load).toBeLessThan(1000);
-  expect(firstSnapshot).toBeLessThan(500 + 100);
+  // A wake reads the small tables only; the first snapshot reads the 200 recent revisions and scans the deploys once.
+  expect(load).toBeLessThan(100);
+  expect(firstSnapshot).toBeLessThan(1000 + 500);
   expect(rowsRead).toBeLessThan(100);
+});
+
+/** What a wake does: the load, which leaves History unread. */
+const wake = (stub: DurableObjectStub) =>
+  runInDurableObject(stub, (instance) => (instance as unknown as { load(): void }).load());
+
+it("applies and undoes right after a wake, before History is read", async () => {
+  stubAccessCerts();
+  const stub = env.KITSHN.getByName("kitshn");
+  const headers = {
+    "cf-access-jwt-assertion": await accessToken("admin-aud", { email: "owner@example.com" }),
+    "content-type": "application/json",
+  };
+  const circle: Circle = {
+    id: "wake",
+    name: "Wake",
+    color: "#7c3aed",
+    level: "view",
+    members: [],
+    match: "any",
+    needsPasskey: false,
+    endsAt: null,
+    x: 3000,
+    y: 3000,
+    r: 200,
+  };
+  await wake(stub);
+  const applied = await send("/api/apply", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ edits: [{ _tag: "circle", id: circle.id, after: circle }] }),
+  });
+  expect(applied.status).toBe(200);
+  const { revision } = (await applied.json()) as { revision: number };
+  await wake(stub);
+  const undone = await send("/api/undo", { method: "POST", headers, body: JSON.stringify({ revision }) });
+  expect(undone.status).toBe(200);
+  const state = (await (await send("/api/state", { headers })).json()) as {
+    revisions: ReadonlyArray<RevisionView>;
+    circles: ReadonlyArray<{ id: string }>;
+  };
+  expect(state.circles.map((item) => item.id)).not.toContain("wake");
+  const [undo, ...older] = state.revisions;
+  expect(undo?.undoes).toBe(revision);
+  expect(older.find((item) => item.id === revision)?.undoneBy).toBe(undo?.id);
+  expect(new Set(state.revisions.map((item) => item.id)).size).toBe(state.revisions.length);
 });

@@ -195,6 +195,8 @@ app "$KITSHN_HOST/join" "kitshn join (public)" 24h "$public_policy" >/dev/null
 app "$KITSHN_HOST/deploy" "kitshn deploy (public)" 24h "$public_policy" >/dev/null
 # K-1118: the list of public app cards, for sites such as kitshn.com.
 app "$KITSHN_HOST/public/cards.json" "kitshn public cards (public)" 24h "$public_policy" >/dev/null
+# K-1119: deploy badges for READMEs. The path covers every badge below it.
+app "$KITSHN_HOST/public/badges" "kitshn badges (public)" 24h "$public_policy" >/dev/null
 CONNECT_AUD=$(app "$KITSHN_HOST/connect" "kitshn connect" 24h "$machines_policy")
 # K-718: agent keys reach /agent with their service token; the Worker decides what each key may do.
 AGENT_AUD=$(app "$KITSHN_HOST/agent" "kitshn agent keys" 24h "$machines_policy")

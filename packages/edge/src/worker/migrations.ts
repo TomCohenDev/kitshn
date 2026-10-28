@@ -126,6 +126,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   // 19: the workflow file of the run that waits at the repo gate, which Allow starts again, and of the run of each
   // deploy, which a restore from the trash and an agent key build start again (K-1121).
   ["ALTER TABLE repos ADD COLUMN workflow TEXT", "ALTER TABLE deploys ADD COLUMN workflow TEXT"],
+  // 20: the badge reads the newest deploy of a repo by name in any case (K-1119); anyone can ask for any name.
+  ["CREATE INDEX deploys_badge ON deploys (lower(repo), app_key, environment)"],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

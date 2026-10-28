@@ -306,3 +306,10 @@ export function keptImages(value: unknown): string | null {
 export function jobError(output: string): string {
   return /\[kitshn: ([^\]]{1,400})\]\s*$/.exec(output)?.[1] ?? "The machine job failed.";
 }
+
+/**
+ * K-1119: the newest deploy of a repo (any case), app and environment that was not skipped. Anyone can ask for any
+ * name, so the index deploys_badge (migration 20) serves it; public-cards.test.ts checks the plan of this query.
+ */
+export const BADGE_DEPLOY_QUERY = `SELECT resource_id, state, expires_at FROM deploys WHERE lower(repo) = lower(?)
+  AND app_key = ? AND environment = ? AND kind = 'deploy' AND state != 'skipped' ORDER BY rowid DESC LIMIT 1`;

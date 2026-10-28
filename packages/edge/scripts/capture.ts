@@ -1,6 +1,8 @@
 // Screenshots and clips of the UI for pull requests, from one scenario file:
 //
-//   pnpm --filter @kitshn/edge capture scripts/captures/pause.ts [--out <dir>]
+//   pnpm --filter @kitshn/edge capture packages/edge/scripts/captures/pause.ts [--out <dir>]
+//
+// Paths are relative to the folder where you run pnpm. The Worker needs DEV_IDENTITY in packages/edge/.dev.vars.
 //
 // For each view and colour scheme the scenario names, it starts `vite dev` on fresh local state (never yours,
 // see KITSHN_DEV_STATE in vite.config.ts), runs the scenario in Chromium, and stops the server. A scenario
@@ -8,24 +10,40 @@
 // --out, by default ~/.cache/kitshn-captures/<scenario>, as `<view>-<name>-<scheme>.png` and `<view>-<scheme>.mp4`.
 // Chromium comes once with `pnpm --filter @kitshn/edge exec playwright install chromium`.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { parseArgs } from "node:util";
 import { type BrowserContext, type CDPSession, chromium, devices } from "playwright";
 import type { Helpers, Scenario, Scheme, View } from "./capture-views.ts";
 
-const args = process.argv.slice(2);
-const file = args.find((arg) => !arg.startsWith("--"));
-if (!file) throw new Error("Name a scenario file, for example scripts/captures/pause.ts.");
-const outFlag = args.indexOf("--out");
-const name = basename(file).replace(/\.[^.]+$/, "");
-const out = resolve(
-  outFlag === -1 ? join(homedir(), ".cache", "kitshn-captures", name) : (args[outFlag + 1] ?? ""),
-);
+const { values, positionals } = parseArgs({
+  options: { out: { type: "string" } },
+  allowPositionals: true,
+  strict: true,
+});
+const [file, ...extra] = positionals;
+if (!file || extra.length > 0)
+  throw new Error("Name one scenario file, for example packages/edge/scripts/captures/pause.ts.");
+// pnpm runs the script in packages/edge; INIT_CWD is the folder where you typed the command.
+const here = process.env["INIT_CWD"] ?? process.cwd();
+const name = basename(file, extname(file));
+const out = resolve(here, values.out ?? join(homedir(), ".cache", "kitshn-captures", name));
+const edge = resolve(import.meta.dirname, "..");
+const devVars = join(edge, ".dev.vars");
+const identity =
+  existsSync(devVars) &&
+  readFileSync(devVars, "utf8")
+    .split("\n")
+    .some((line) => line.startsWith("DEV_IDENTITY=") && line.slice("DEV_IDENTITY=".length).trim() !== "");
+if (!identity)
+  throw new Error(`Set DEV_IDENTITY=<your email> in ${devVars}; the local Worker answers no one without it.`);
+const scenario = ((await import(pathToFileURL(resolve(here, file)).href)) as { default: Scenario }).default;
+if (scenario.clip && spawnSync("ffmpeg", ["-version"]).status !== 0)
+  throw new Error("This scenario records a clip, which needs ffmpeg on the path.");
 mkdirSync(out, { recursive: true });
-const scenario = ((await import(pathToFileURL(resolve(file)).href)) as { default: Scenario }).default;
 
 const freePort = () =>
   new Promise<number>((done, fail) => {
@@ -39,27 +57,63 @@ const freePort = () =>
     });
   });
 
-/** `vite dev` in its own process group on a fresh state folder; the returned stop ends the whole group. */
+/** The dev servers that run now, so Ctrl-C, a kill or a crash still stops them and deletes their state. */
+const running = new Set<{ readonly pid: number; readonly state: string }>();
+const killGroup = (pid: number, signal: NodeJS.Signals) => {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // The group ended already.
+  }
+};
+process.on("exit", () => {
+  for (const server of running) {
+    killGroup(server.pid, "SIGKILL");
+    rmSync(server.state, { recursive: true, force: true });
+  }
+});
+for (const signal of ["SIGINT", "SIGTERM"] as const)
+  process.on(signal, () => process.exit(signal === "SIGINT" ? 130 : 143));
+
+/** `vite dev` in its own process group on a fresh state folder; `stop` ends the whole group, then deletes it. */
 async function devServer() {
   const port = await freePort();
   const state = mkdtempSync(join(tmpdir(), "kitshn-capture-"));
   const child = spawn("npx", ["--no", "vite", "dev", "--port", String(port), "--strictPort"], {
-    cwd: resolve(import.meta.dirname, ".."),
+    cwd: edge,
     env: { ...process.env, KITSHN_DEV_STATE: state },
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
   });
   const pid = child.pid;
   if (pid === undefined) throw new Error("vite dev did not start.");
-  const stop = () => {
-    try {
-      process.kill(-pid, "SIGTERM");
-    } catch {
-      // The group ended already.
-    }
+  const server = { pid, state };
+  running.add(server);
+  let errors = "";
+  child.stderr.on("data", (chunk: Buffer) => {
+    errors = (errors + chunk.toString()).slice(-2000);
+  });
+  const exited = new Promise<void>((done) => child.once("exit", () => done()));
+  let gone = false;
+  void exited.then(() => {
+    gone = true;
+  });
+  const stop = async () => {
+    killGroup(pid, "SIGTERM");
+    // workerd writes its state until it exits, so the folder goes only after the group did.
+    const late = await Promise.race([
+      exited.then(() => false),
+      new Promise<boolean>((done) => setTimeout(() => done(true), 5000)),
+    ]);
+    if (late) killGroup(pid, "SIGKILL");
     rmSync(state, { recursive: true, force: true });
+    running.delete(server);
   };
   for (let tries = 0; tries < 120; tries++) {
+    if (gone) {
+      await stop();
+      throw new Error(`vite dev exited before it answered:\n${errors}`);
+    }
     const up = await fetch(`http://localhost:${port}/`).then(
       (answer) => answer.ok,
       () => false,
@@ -67,8 +121,8 @@ async function devServer() {
     if (up) return { url: `http://localhost:${port}/`, stop };
     await new Promise((done) => setTimeout(done, 500));
   }
-  stop();
-  throw new Error("vite dev did not answer within a minute.");
+  await stop();
+  throw new Error(`vite dev did not answer within a minute:\n${errors}`);
 }
 
 /** Copies every sound of the page into a recorder, so a clip has the audio that the speakers would play. */
@@ -135,7 +189,9 @@ async function runOnce(view: View, scheme: Scheme, url: string) {
                   headers: { "content-type": "application/json" },
                   body: JSON.stringify(body),
                 };
-          return (await fetch(path, init)).json();
+          const answer = await fetch(path, init);
+          if (!answer.ok) throw new Error(`${path} answered ${answer.status}: ${await answer.text()}`);
+          return answer.json();
         },
         [path, body] as const,
       ),
@@ -211,7 +267,7 @@ async function runOnce(view: View, scheme: Scheme, url: string) {
     ],
     { stdio: "inherit" },
   );
-  if (result.status !== 0) throw new Error("ffmpeg failed; is it installed?");
+  if (result.status !== 0) throw new Error("ffmpeg failed.");
   rmSync(raw, { force: true });
   if (audio) rmSync(join(out, `${view.name}-${scheme}.webm`), { force: true });
 }
@@ -222,7 +278,7 @@ for (const view of scenario.views) {
     try {
       await runOnce(view, scheme, server.url);
     } finally {
-      server.stop();
+      await server.stop();
     }
     console.log(`${view.name} ${scheme}: done`);
   }

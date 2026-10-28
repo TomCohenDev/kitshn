@@ -18,6 +18,7 @@ import {
   signOutSummary,
   signOutWarning,
   syncAccess,
+  syncApprovers,
   syncLauncher,
   loginHeld,
   loginHeldAfter,
@@ -819,5 +820,73 @@ describe("sign out everywhere (K-110)", () => {
     expect(signOutWarning(outcome)).toContain("ended no Access session");
     expect(signOutSummary(outcome, false)).toContain("could not list");
     expect(signOutWarning(null)).toBeNull();
+  });
+});
+
+describe("approver policies on the fresh passkey application (K-1723)", () => {
+  /** The owner circle asks for the deploys of a machine in an agent circle. */
+  const asking = (paused: State["paused"] = null): State => {
+    const state = start();
+    const agents = {
+      ...state.circles.get("owner")!,
+      id: "agents",
+      name: "Agents",
+      members: [
+        {
+          _tag: "machine" as const,
+          machineId: "vps",
+          rights: { deploys: { mode: "ask" as const, circleId: "owner" } },
+        },
+      ],
+    };
+    return { ...state, paused, circles: new Map(state.circles).set("agents", agents) };
+  };
+
+  it("lets the people of each approver circle pass, with a 10-minute passkey when the circle needs one", () => {
+    const desired = desiredAccess(asking(), 0);
+    expect(desired.approvers).toEqual(["policy:approve:owner"]);
+    expect(desired.policies.get("policy:approve:owner")).toMatchObject({
+      include: [{ email: { email: "owner@example.com" } }],
+      mfa_config: { session_duration: "10m" },
+    });
+    // No ask runs during a pause, so no approver passes.
+    expect(desiredAccess(asking("keep-public"), 0).approvers).toEqual([]);
+    expect(desiredAccess(start(), 0).approvers).toEqual([]);
+  });
+
+  it("goes after the bootstrap's own policy and takes back only its own", async () => {
+    const cf = fakeCloudflare();
+    const puts: Array<unknown> = [];
+    const fresh = {
+      id: "fresh",
+      name: "kitshn fresh passkey",
+      policies: [{ id: "owner-fresh", precedence: 1 }],
+    };
+    const api: Api = async <T>(method: string, path: string, body?: unknown) => {
+      if (path.endsWith("/apps/fresh") && method === "GET") return fresh as T;
+      if (path.includes("/apps?")) return [{ id: "other", name: "other" }, fresh] as T;
+      if (method === "PUT" && path.endsWith("/apps/fresh")) {
+        puts.push(body);
+        return {} as T;
+      }
+      return cf.api(method as "GET", path, body);
+    };
+    const state = asking();
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    const approver = cf.rows.get("policy:approve:owner")!.cfId;
+    const added = await syncApprovers(desiredAccess(state, 0), cf.store, api, "a", []);
+    expect(added.attached).toEqual([approver]);
+    expect(puts).toEqual([
+      expect.objectContaining({
+        policies: [
+          { id: "owner-fresh", precedence: 1 },
+          { id: approver, precedence: 2 },
+        ],
+      }),
+    ]);
+    expect(await syncApprovers(desiredAccess(state, 0), cf.store, api, "a", [approver])).toEqual({
+      attached: [approver],
+      calls: 0,
+    });
   });
 });

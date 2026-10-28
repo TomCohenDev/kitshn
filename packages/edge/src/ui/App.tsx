@@ -109,7 +109,7 @@ import {
 } from "./Pause.tsx";
 import { playResumeSound, pressSound, showPanic, unlockAudio } from "./panic.ts";
 import { GONE_STICKER, REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
-import { AskList, approveFromHash } from "./Asks.tsx";
+import { AskEvents, AskList, approveFromHash } from "./Asks.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
@@ -830,6 +830,7 @@ export function App() {
           state={state}
           onUndo={(id) => historyUndo.current(id)}
           onShow={(revision) => historyShow.current(revision)}
+          askEvents={<AskEvents events={store.snapshot.askEvents} />}
         />
       ) : null,
     [store.snapshot, state],

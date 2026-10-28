@@ -1,6 +1,6 @@
 import { useState } from "preact/hooks";
 import { MACHINE_RIGHT_NAMES } from "../core/model.ts";
-import type { ProposalView } from "../core/protocol.ts";
+import type { AskEventView, ProposalView } from "../core/protocol.ts";
 import { callApi } from "./store.ts";
 
 /**
@@ -88,3 +88,45 @@ export function AskList(props: {
 /** K-1723: the id of an approval that the fresh passkey check sent back, from `#approve/<id>`. */
 export const approveFromHash = (hash: string) =>
   hash.startsWith("#approve/") ? decodeURIComponent(hash.slice("#approve/".length)) : null;
+
+const OUTCOME_TEXT: Record<AskEventView["outcome"], string> = {
+  done: "ran",
+  waiting: "waits",
+  refused: "refused",
+};
+
+/** K-1717: the asks of agents as History events, newest first; they have no Undo. */
+export function AskEvents(props: { readonly events: ReadonlyArray<AskEventView> }) {
+  if (props.events.length === 0) return null;
+  return (
+    <section class="ask-events">
+      <h3
+        class="label"
+        data-tip="Asks of agents on machines: events, not changes, so they have no Undo (K-1717)."
+      >
+        Asks of agents
+      </h3>
+      <ul class="repo-list">
+        {props.events.map((event) => (
+          <li key={event.id}>
+            <span class="muted">
+              {new Date(event.at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
+            </span>
+            <span class="name">
+              {event.machineName}: <code>{`${event.action} ${event.target}`.trim()}</code>{" "}
+              {OUTCOME_TEXT[event.outcome]}
+              {event.outcome === "refused" ? <span class="muted"> · {event.detail}</span> : null}
+              {event.reason ? <span class="muted"> · {event.reason}</span> : null}
+              {Object.entries(event.labels).map(([key, value]) => (
+                <span key={key} class="muted">
+                  {" "}
+                  · {key}={value}
+                </span>
+              ))}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}

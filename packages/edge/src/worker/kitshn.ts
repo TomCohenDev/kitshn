@@ -93,6 +93,7 @@ import type {
   DeployNote,
   MachineView,
   OrphanWorker,
+  AskEventView,
   ProposalView,
   RepoView,
   RevisionView,
@@ -207,6 +208,7 @@ import {
   signOutWarning,
   syncAccess,
   syncLauncher,
+  syncApprovers,
   LOGIN_CALLS,
   loginHeld,
   loginHeldAfter,
@@ -2243,6 +2245,7 @@ export class Kitshn extends DurableObject<Env> {
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       proposals: this.openProposals(),
+      askEvents: this.recentAskEvents(),
       jobs: this.recentJobs(10, 2000),
       version: this.env.KITSHN_VERSION,
       accessTeam: this.env.ACCESS_TEAM_DOMAIN,
@@ -4074,6 +4077,7 @@ export class Kitshn extends DurableObject<Env> {
         loginHeld(this.meta("login_held") ?? ""),
       ) ||
         this.launcherWork() ||
+        this.approversWork() ||
         this.loginWork() ||
         this.redirectWork())
     )
@@ -4166,6 +4170,7 @@ export class Kitshn extends DurableObject<Env> {
       // K-408: retry what failed once a day.
       this.sql("UPDATE access_objects SET error = NULL WHERE error IS NOT NULL");
       this.sql("DELETE FROM meta WHERE key = 'launcher_failed'");
+      this.sql("DELETE FROM meta WHERE key = 'approvers_failed'");
       this.sql("DELETE FROM meta WHERE key = 'login_failed'");
       this.sql("INSERT OR REPLACE INTO meta (key, value) VALUES ('login_check', 'due')");
       // A refused address may be free now, for example after the other machine let it go.
@@ -6543,6 +6548,31 @@ export class Kitshn extends DurableObject<Env> {
     );
   }
 
+  /** K-1717: the newest 50 ask events, for History; a snapshot reads at most 50 rows for them. */
+  private recentAskEvents(): Array<AskEventView> {
+    return this.sql<{
+      id: number;
+      at: number;
+      machine_id: string;
+      action: string;
+      target: string;
+      reason: string | null;
+      labels: string;
+      outcome: string;
+      detail: string;
+    }>("SELECT * FROM ask_events ORDER BY id DESC LIMIT 50").map((row) => ({
+      id: row.id,
+      at: row.at,
+      machineName: this.state.machines.get(row.machine_id)?.name ?? row.machine_id,
+      action: row.action,
+      target: row.target,
+      reason: row.reason,
+      labels: JSON.parse(row.labels) as Record<string, string>,
+      outcome: row.outcome as AskEventView["outcome"],
+      detail: row.detail,
+    }));
+  }
+
   /** K-1722: the open proposals, for the Asks list of the map. */
   private openProposals(): Array<ProposalView> {
     return this.sql<ProposalRow>("SELECT * FROM proposals WHERE state = 'pending' ORDER BY created_at").map(
@@ -7610,6 +7640,42 @@ export class Kitshn extends DurableObject<Env> {
     }
   }
 
+  /** K-1723: puts the approver policies on the fresh passkey application; a failure waits for the next change. */
+  private async syncApprovers(api: Api) {
+    const attached = JSON.parse(this.meta("approver_policies") ?? "[]") as Array<string>;
+    if (this.meta("approvers_failed") === JSON.stringify(this.approversWant())) return 0;
+    try {
+      const result = await syncApprovers(
+        this.desired(Date.now()),
+        this.accessStore(),
+        api,
+        this.env.CLOUDFLARE_ACCOUNT_ID,
+        attached,
+      );
+      this.setMeta("approver_policies", JSON.stringify(result.attached));
+      this.sql("DELETE FROM meta WHERE key = 'approvers_failed'");
+      return result.calls;
+    } catch (error) {
+      console.warn(`kitshn could not update the fresh passkey application: ${String(error)}`);
+      this.setMeta("approvers_failed", JSON.stringify(this.approversWant()));
+      return 3;
+    }
+  }
+
+  /** K-1723: the fresh passkey application lacks the wanted approver policies, and that did not fail. */
+  private approversWork() {
+    const want = JSON.stringify([...this.approversWant()].sort());
+    const attached = JSON.stringify(
+      [...(JSON.parse(this.meta("approver_policies") ?? "[]") as Array<string>)].sort(),
+    );
+    return want !== attached && this.meta("approvers_failed") !== JSON.stringify(this.approversWant());
+  }
+
+  /** K-1723: the approver policy ids that the fresh passkey application should have. */
+  private approversWant() {
+    return this.desired(Date.now()).approvers.flatMap((key) => this.access.get(key)?.cfId || []);
+  }
+
   /** K-113: the enrollment policy id that the App Launcher should have, or "" for none. */
   private launcherWant() {
     return this.desired(Date.now()).policies.has(ENROLLMENT_KEY)
@@ -8147,13 +8213,17 @@ export class Kitshn extends DurableObject<Env> {
         }
       // K-113: take an unwanted enrollment policy off the App Launcher before the sync deletes it.
       spent += await this.syncLauncher(api, daily);
+      // K-1723: the same for an approver policy on the fresh passkey application.
+      spent += await this.syncApprovers(api);
       // K-406: at most 40 calls. `spent` counts the daily compare (12), the site checks (6), the redirect step (5)
       // and the launcher step (3); the tunnels, DNS records and offline routes above made at most 6 + 5 + 5, and the launcher
       // step after the sync needs 3. The login step and the sync share what is left. A policy that the sync
       // makes goes on the login applications in the next alarm, which runs at once (loginWork).
-      await this.syncAccessLocked(api, CALLS_PER_RUN - spent - 16 - 3);
+      await this.syncAccessLocked(api, CALLS_PER_RUN - spent - 16 - 3 - 3);
       // A policy that the sync just made goes on the App Launcher in the same run.
       await this.syncLauncher(api, false);
+      // K-1723: approver policies on the fresh passkey application; 0 calls while nothing changed.
+      await this.syncApprovers(api);
 
       changed ||= daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
     }

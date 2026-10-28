@@ -44,6 +44,8 @@ export interface DesiredAccess {
   readonly apps: ReadonlyMap<string, AppBody>;
   /** K-1004: keys of `policies` for the login applications of pages and files, in precedence order. */
   readonly logins: { readonly login: ReadonlyArray<string>; readonly passkey: ReadonlyArray<string> };
+  /** K-1723: keys of `policies` for the people of approver circles, on the `/api/fresh` application. */
+  readonly approvers: ReadonlyArray<string>;
 }
 
 export const PASSKEY_MFA = {
@@ -298,5 +300,36 @@ export function desiredAccess(
       exclude: [],
     });
   }
-  return { policies, apps, logins: { login, passkey } };
+  // K-1723: the people of each approver circle of a machine right pass the Access check of `/api/fresh`, with the
+  // passkey check of 10 minutes when the circle needs a passkey. "All must match" is left out, as for K-113. During
+  // a pause no ask runs, so no approver passes.
+  const approvers: Array<string> = [];
+  const asked = new Set(
+    [...state.circles.values()].flatMap((circle) =>
+      circle.members.flatMap((member) =>
+        member._tag === "machine"
+          ? Object.values(member.rights ?? {}).flatMap((mode) =>
+              mode?.mode === "ask" ? [mode.circleId] : [],
+            )
+          : [],
+      ),
+    ),
+  );
+  for (const id of state.paused ? [] : asked) {
+    const circle = state.circles.get(id);
+    if (!circle || circle.match === "all" || (circle.endsAt !== null && circle.endsAt <= now)) continue;
+    const include = present(circle.members.map(personRule));
+    if (include.length === 0) continue;
+    const key = `policy:approve:${circle.id}`;
+    policies.set(key, {
+      name: `${ACCESS_NAME_PREFIX}approvers ${circle.name}`,
+      decision: "allow",
+      include,
+      require: [],
+      exclude: [],
+      ...(circle.needsPasskey ? { mfa_config: { ...PASSKEY_MFA, session_duration: "10m" } } : {}),
+    });
+    approvers.push(key);
+  }
+  return { policies, apps, logins: { login, passkey }, approvers };
 }

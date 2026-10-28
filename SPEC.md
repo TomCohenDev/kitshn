@@ -467,7 +467,7 @@ Planned, PR 4, after PR 3 works end to end (K-1741).
 
 ### 18.3 State export
 
-- **K-1831** The state export is one JSON file: `{"format": "kitshn-state", "version": 1, "schemaVersion": <n>, "exportedAt": <ms>, "tables": {<table>: [<row>, ...]}}`. It holds every table of the Durable Object except the one-time codes (`join_codes`, `rekey_codes`), the jobs, and each secret that the constant `SECRET_ROWS` (`packages/edge/src/worker/backups.ts`) names: today the pass key of section 17 (the table `pass_keys` and each `meta` key that starts with `pass_key`, K-1771). A new secret, such as the VAPID private key of notifications, is one line there, and a test checks each line. A BLOB value is `{"base64": <text>}`. The tables hold no secret: tokens stay on the machines and in Cloudflare (K-602). The daily copy of K-1821 uses this format, and so does the import of a later step.
+- **K-1831** The state export is one JSON file: `{"format": "kitshn-state", "version": 1, "schemaVersion": <n>, "exportedAt": <ms>, "tables": {<table>: [<row>, ...]}}`. It holds every table of the Durable Object except the one-time codes (`join_codes`, `rekey_codes`), the jobs, and each secret that the constant `SECRET_ROWS` (`packages/edge/src/worker/backups.ts`) names: the pass key of section 17 (the table `pass_keys` and each `meta` key that starts with `pass_key`, K-1771) and the VAPID private key of Web Push (the `meta` key `push_vapid_jwk`). A new secret is one line there, and a test checks each line. A BLOB value is `{"base64": <text>}`. The tables hold no secret: tokens stay on the machines and in Cloudflare (K-602). The daily copy of K-1821 uses this format, and so does the import of a later step.
 
 ## 19. Notifications
 

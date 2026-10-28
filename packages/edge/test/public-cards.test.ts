@@ -49,8 +49,9 @@ async function setup(change: Partial<Circle> = {}, paused: string | null = null)
       if (environment === null) return;
       sql.exec(
         `INSERT OR REPLACE INTO deploys (id, repo, environment, resource_id, address, script, kind, sha, state, expires_at)
-         VALUES (?, 'o/r', ?, ?, '', '', 'deploy', 'abc', 'done', 0)`,
+         VALUES (?, ?, ?, ?, '', '', 'deploy', 'abc', 'done', 0)`,
         `deploy-${id}`,
+        `o/${id}`,
         environment,
         id,
       );
@@ -72,6 +73,14 @@ async function setup(change: Partial<Circle> = {}, paused: string | null = null)
   await evictDurableObject(stub);
   return stub;
 }
+
+/** The badge state from the Durable Object, past the Worker's cache. */
+const badgeOf = async (stub: DurableObjectStub, repo: string) =>
+  (
+    (await (await stub.fetch(`https://kitshn.internal/internal/badge?repo=${repo}`)).json()) as {
+      state: string;
+    }
+  ).state;
 
 /** The Durable Object's answer, past the Worker's cache, which the route test fills. */
 const listed = async (stub: DurableObjectStub) =>
@@ -111,4 +120,34 @@ it("lists nothing when the Everyone circle has ended (K-1118)", async () => {
 
 it("lists nothing during a lockdown (K-1504, K-1118)", async () => {
   expect(await listed(await setup({}, "lockdown"))).toEqual([]);
+});
+
+it("draws the newest deploy of a card that anyone may open, and unknown for every other case (K-1119)", async () => {
+  const stub = await setup();
+  const response = await send("/public/badges/O/Tick3d.svg");
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("image/svg+xml");
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(await response.text()).toContain("kitshn: deployed");
+  // A card that is down still shows its deploy; the list of K-1118 leaves it out.
+  expect(await badgeOf(stub, "o/down-app")).toBe("deployed");
+  for (const repo of ["o/private-app", "o/office-app", "o/never-deployed", "o/nothing-here"])
+    expect(await badgeOf(stub, repo)).toBe("unknown");
+  await runInDurableObject(stub, (_, state) => {
+    const add = (id: string, deployState: string) =>
+      state.storage.sql.exec(
+        `INSERT OR REPLACE INTO deploys (id, repo, environment, resource_id, address, script, kind, sha, state, expires_at)
+         VALUES (?, 'o/brew', 'prod', 'brew', '', '', 'deploy', 'def', ?, 0)`,
+        id,
+        deployState,
+      );
+    add("deploy-brew-2", "failed");
+    // A skipped deploy changed nothing, so the badge keeps the failure before it.
+    add("deploy-brew-3", "skipped");
+  });
+  expect(await badgeOf(stub, "o/brew")).toBe("failed");
+});
+
+it("draws unknown during a lockdown (K-1504, K-1119)", async () => {
+  expect(await badgeOf(await setup({}, "lockdown"), "o/tick3d")).toBe("unknown");
 });

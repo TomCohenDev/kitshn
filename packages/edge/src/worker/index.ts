@@ -15,6 +15,7 @@ import {
   stepCookie,
   stepToken,
 } from "./auth.ts";
+import { type BadgeState, badgeSvg } from "../core/badge.ts";
 import { escapeHtml, originDown, seenText } from "./live.ts";
 import type { Env } from "./env.ts";
 import { zoneFor, zonesOf } from "./zones.ts";
@@ -211,37 +212,75 @@ function onOtherZone(host: string, env: Env) {
 }
 
 /**
- * K-1118: public in Access. Any site may read it. The Worker asks the Durable Object at most every 5 minutes, and
- * after a fault at most every 30 seconds. Browsers get `no-store`: the zone's Browser Cache TTL raises any lower
- * `max-age` to its own 4 hours, and it leaves `no-store` alone.
+ * K-1118, K-1119: a public answer that the edge keeps for `seconds`, and a fault for 30 seconds, such as a 500 during a
+ * version switch. Browsers get `no-store`: the zone's Browser Cache TTL raises any lower `max-age` to its own 4 hours,
+ * and it leaves `no-store` alone.
  */
-async function publicCards(request: Request, env: Env, ctx: ExecutionContext) {
+async function edgeCached(
+  request: Request,
+  ctx: ExecutionContext,
+  key: string,
+  seconds: number,
+  load: () => Promise<Response>,
+) {
   const cache = caches.default;
-  // The query string does not split the cache.
-  const key = new Request(`${new URL(request.url).origin}/public/cards.json`);
+  const cacheKey = new Request(key);
   const toBrowser = (answer: Response) => {
     const response = new Response(request.method === "HEAD" ? null : answer.body, answer);
     response.headers.set("cache-control", "no-store");
     response.headers.delete("age");
     return response;
   };
-  const cached = await cache.match(key);
+  const cached = await cache.match(cacheKey);
   if (cached) return toBrowser(cached);
-  const answer = await env.KITSHN.getByName("kitshn")
-    .fetch("https://kitshn.internal/internal/public-cards")
-    .catch(() => Response.json({ error: "kitshn could not read its cards." }, { status: 503 }));
-  // Only the edge copy keeps a lifetime, so a fault, such as a 500 during a version switch, lasts 30 seconds.
-  const stored = new Response(await answer.text(), {
-    status: answer.status,
-    headers: {
-      "content-type": "application/json",
-      "cache-control": `public, max-age=${answer.ok ? 300 : 30}`,
-      "access-control-allow-origin": "*",
-      "x-content-type-options": "nosniff",
-    },
-  });
-  ctx.waitUntil(cache.put(key, stored.clone()));
+  const answer = await load();
+  const stored = new Response(await answer.arrayBuffer(), answer);
+  stored.headers.set("cache-control", `public, max-age=${answer.ok ? seconds : 30}`);
+  ctx.waitUntil(cache.put(cacheKey, stored.clone()));
   return toBrowser(stored);
+}
+
+const publicHeaders = (contentType: string) => ({
+  "content-type": contentType,
+  "access-control-allow-origin": "*",
+  "x-content-type-options": "nosniff",
+});
+
+/** K-1118: public in Access. Any site may read it. The query string does not split the cache. */
+function publicCards(request: Request, env: Env, ctx: ExecutionContext) {
+  return edgeCached(request, ctx, `${new URL(request.url).origin}/public/cards.json`, 300, async () => {
+    const answer = await env.KITSHN.getByName("kitshn")
+      .fetch("https://kitshn.internal/internal/public-cards")
+      .catch(() => Response.json({ error: "kitshn could not read its cards." }, { status: 503 }));
+    return new Response(answer.body, { status: answer.status, headers: publicHeaders("application/json") });
+  });
+}
+
+/**
+ * K-1119: `/public/badges/<owner>/<repo>.svg`, public in Access, with `app` and `env` as the only query keys that
+ * count. Null for any other path.
+ */
+function badge(request: Request, env: Env, ctx: ExecutionContext) {
+  const url = new URL(request.url);
+  const rest = url.pathname.slice("/public/badges/".length);
+  if (!rest.endsWith(".svg")) return null;
+  const parts = rest.slice(0, -".svg".length).split("/");
+  if (parts.length !== 2 || parts.some((part) => part === "" || part.length > 100)) return null;
+  const query = new URLSearchParams({
+    repo: parts.join("/").toLowerCase(),
+    app: url.searchParams.get("app") ?? "app",
+    env: url.searchParams.get("env") ?? "prod",
+  });
+  return edgeCached(request, ctx, `${url.origin}/public/badges?${query}`, 60, async () => {
+    const answer = await env.KITSHN.getByName("kitshn")
+      .fetch(`https://kitshn.internal/internal/badge?${query}`)
+      .catch(() => null);
+    const state = answer?.ok ? ((await answer.json()) as { state: BadgeState }).state : "unknown";
+    return new Response(badgeSvg(state), {
+      status: answer?.ok ? 200 : 503,
+      headers: publicHeaders("image/svg+xml"),
+    });
+  });
 }
 
 export default {
@@ -338,6 +377,13 @@ export default {
     }
     if (url.pathname === "/public/cards.json" && (request.method === "GET" || request.method === "HEAD"))
       return publicCards(request, env, ctx);
+    if (
+      url.pathname.startsWith("/public/badges/") &&
+      (request.method === "GET" || request.method === "HEAD")
+    ) {
+      const answer = badge(request, env, ctx);
+      if (answer) return answer;
+    }
     // K-1706: "kitshn rekey" trades its one-time code in the same way.
     if ((url.pathname === "/join/exchange" || url.pathname === "/join/rekey") && request.method === "POST") {
       // A cheap shape check keeps junk away from the Durable Object; the code itself is the secret.

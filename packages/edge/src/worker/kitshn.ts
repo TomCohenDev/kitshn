@@ -113,6 +113,7 @@ import {
   newLibraryId,
   objectKey,
 } from "../core/library.ts";
+import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
 import { seed } from "../core/seed.ts";
 import { type Visitor, visitorLevel } from "../core/visitor.ts";
@@ -1591,6 +1592,7 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/internal/offline")
       return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
     if (path === "/internal/public-cards") return this.publicCards();
+    if (path === "/internal/badge") return this.badge(new URL(request.url).searchParams);
     if (path === "/internal/content") return this.contentDecision((await request.json()) as ContentRequest);
     if (path.startsWith("/deploy/")) {
       const header = request.headers.get("x-kitshn-deployer");
@@ -3206,6 +3208,21 @@ export class Kitshn extends DurableObject<Env> {
       };
     });
     return Response.json({ cards });
+  }
+
+  /** K-1119: the badge state of the newest deploy of one repo, app and environment. Skipped deploys do not count. */
+  private badge(query: URLSearchParams) {
+    // Limit: lower(repo) reads every deploy row; the edge asks at most once a minute per badge. Revisit with an index
+    // on lower(repo) if the deploys table grows past some 100 000 rows.
+    const [row] = this.sql<{ resource_id: string; state: string }>(
+      `SELECT resource_id, state FROM deploys WHERE lower(repo) = lower(?) AND app_key = ? AND environment = ?
+       AND kind = 'deploy' AND state != 'skipped' ORDER BY rowid DESC LIMIT 1`,
+      query.get("repo") ?? "",
+      query.get("app") ?? "app",
+      query.get("env") ?? "prod",
+    );
+    const resource = row ? this.state.resources.get(row.resource_id) : undefined;
+    return Response.json({ state: badgeState(this.state, resource, row?.state ?? null, Date.now()) });
   }
 
   /** K-1302: one alarm for the next due item. Access work, share end dates, and the daily run. */

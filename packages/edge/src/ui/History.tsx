@@ -109,10 +109,10 @@ export function HistoryView(props: {
         <button
           type="button"
           aria-pressed={filter.actor === null}
-          data-tip="Changes by everyone."
+          data-tip="Changes by anyone."
           onClick={() => setFilter({ ...filter, actor: null })}
         >
-          Everyone
+          Anyone
         </button>
         {actors.map((actor) => (
           <button

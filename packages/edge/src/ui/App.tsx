@@ -75,10 +75,9 @@ import {
   type Box,
   cardBox,
   circleBox,
-  fitView,
+  fitMap,
   headAngle,
   headBox,
-  mapBox,
   openArea,
   panInto,
   shownCardBoxes,
@@ -100,8 +99,8 @@ import {
 
 const PREVIEWS_KEY = "kitshn.previews";
 /**
- * On a wide screen the fit and a saved view stay at least this close, so card names stay readable on a
- * laptop. A bigger map is then centred, not shown whole; the wheel still zooms out to 0.15.
+ * On a wide screen a saved view stays at least this close, so card names stay readable on a laptop. A fit
+ * zooms out further when the map needs it (layout.ts fitMap).
  */
 const FIT_MIN_SCALE = 0.85;
 const wideScreen = () => innerWidth > 720;
@@ -682,16 +681,17 @@ export function App() {
   const mapArea = (withPanel: boolean): Box =>
     openArea({
       width: innerWidth,
-      height: innerHeight,
+      // The hint line at the bottom shows only on a wide screen; the map stays above it.
+      height: wideScreen() ? (document.querySelector(".hint")?.getBoundingClientRect().top ?? innerHeight) : innerHeight,
       top: document.querySelector("header.bar")?.getBoundingClientRect().bottom ?? 70,
-      left: tray.length > 0 ? (wideScreen() ? 220 : 160) : 0,
+      left: document.querySelector(".tray")?.getBoundingClientRect().right ?? 0,
       panelLeft: withPanel ? panelLeft() : null,
       narrow: !wideScreen(),
     });
 
   const fit = () => {
-    const box = mapBox(state.circles.values(), state.places.values());
-    if (box) changeView(fitView(box, mapArea(floating), wideScreen() ? FIT_MIN_SCALE : 0.15, 2));
+    const next = fitMap(state.circles.values(), state.places.values(), mapArea(floating));
+    if (next) changeView(next);
   };
 
   fitRef.current = fit;

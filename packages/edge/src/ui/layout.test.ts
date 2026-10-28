@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Circle } from "../core/model.ts";
-import { type Box, cardBox, fitView, headAngle, headBox, mapBox, openArea, panInto } from "./layout.ts";
+import { type Box, cardBox, circleBox, fitMap, fitView, headAngle, headBox, mapBox, openArea, panInto } from "./layout.ts";
 
 const circle = (x: number, y: number, r: number, name = "Agents"): Circle => ({
   id: name,
@@ -36,7 +36,32 @@ describe("fit and pan leave an open panel free", () => {
     expect(inside(cardBox({ x: 1100, y: 100 }), area, view)).toBe(true);
   });
 
-  it("keeps the minimum zoom, so a big map is centred in the area instead of shown whole", () => {
+  it("fits a map wider than the free area whole: every head and card is left of the panel and right of the tray", () => {
+    // The demo map on a 1512×982 laptop, with the tray, a two-row toolbar and the panel open.
+    const circles = [
+      circle(-200, 0, 520, "Owner"),
+      circle(1150, -150, 380, "Everyone"),
+      circle(500, 600, 400, "Her"),
+      circle(-900, 900, 450, "Qlik"),
+      circle(1250, 900, 300, "Agents"),
+    ];
+    const places = [
+      { x: -500, y: -300 },
+      { x: 0, y: -350 },
+      { x: 1100, y: -100 },
+      { x: 300, y: 100 },
+    ];
+    const area = openArea({ width: 1512, height: 982, top: 104, left: 220, panelLeft: 1032, narrow: false });
+    const view = fitMap(circles, places, area);
+    if (!view) throw new Error("A map with circles fits.");
+    expect(view.s).toBeLessThan(0.85);
+    for (const item of circles) expect(inside(circleBox(item), area, view)).toBe(true);
+    for (const place of places) expect(inside(cardBox(place), area, view)).toBe(true);
+    expect(area.left).toBeGreaterThan(220);
+    expect(area.right).toBeLessThan(1032);
+  });
+
+  it("keeps a given minimum zoom, so a big map is centred in the area instead of shown whole", () => {
     const box = mapBox([circle(0, 0, 3000)], []);
     if (!box) throw new Error("A map with circles has a box.");
     const area = openArea({ ...screen, panelLeft: 960 });

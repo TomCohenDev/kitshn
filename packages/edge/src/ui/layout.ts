@@ -109,6 +109,15 @@ export function openArea(screen: {
   };
 }
 
+/** The zoom range of a fit (K-514): it zooms out as far as the map needs, down to the wheel's 0.15. */
+const FIT_SCALE = { min: 0.15, max: 2 } as const;
+
+/** K-514: the view that shows every circle with its heads and every card whole in the free `area`. */
+export function fitMap(circles: Iterable<Circle>, places: Iterable<Point>, area: Box): View | null {
+  const box = mapBox(circles, places);
+  return box && fitView(box, area, FIT_SCALE.min, FIT_SCALE.max);
+}
+
 /** The view that shows `box` whole and centred in `area`, at a scale between `min` and `max`. */
 export function fitView(box: Box, area: Box, min: number, max: number): View {
   const width = Math.max(area.right - area.left, 100);

@@ -173,6 +173,8 @@ it("draws the newest deploy of a card that anyone may open, and unknown for ever
   expect(bad.status).toBe(200);
   expect(await bad.text()).toContain("kitshn: unknown");
   expect((await send("/public/badges/o/tick3d")).status).toBe(404);
+  expect((await send("/public/other")).status).toBe(404);
+  expect((await send("/public/cards.json", { method: "POST" })).status).toBe(404);
 });
 
 it("draws unknown during a lockdown (K-1504, K-1119)", async () => {

@@ -406,6 +406,9 @@ export default {
     ) {
       return badge(request, env, ctx);
     }
+    // K-1118, K-1119: only these public paths exist; any other one is not found, never the app shell.
+    if (url.pathname.startsWith("/public/"))
+      return new Response("Not found.", { status: 404, headers: { "cache-control": "no-store" } });
     // K-1706: "kitshn rekey" trades its one-time code in the same way.
     if ((url.pathname === "/join/exchange" || url.pathname === "/join/rekey") && request.method === "POST") {
       // A cheap shape check keeps junk away from the Durable Object; the code itself is the secret.

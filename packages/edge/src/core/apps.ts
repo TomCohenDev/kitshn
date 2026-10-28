@@ -24,7 +24,7 @@ export const FOLDER_SITE_PREFIX = "folder-";
  * K-909, K-1123: a removal keeps the script of a Worker app and of a folder site, so Undo puts its domains back;
  * a folder site has no repo that could build it again.
  */
-export const keepsScript = (card: Pick<AppCard, "id" | "kind">) =>
+export const keepsScript = (card: { readonly id: string; readonly kind: string }) =>
   card.kind === "site.worker" || card.id.startsWith(FOLDER_SITE_PREFIX);
 
 export function appTeardown(card: AppCard, zone: string): Teardown {

@@ -785,6 +785,12 @@ describe("folder sites (K-1123)", () => {
       updated: false,
     });
     const deployId = plan.body["deployId"];
+    // While the plan waits for its files, the same folder and the same address are held.
+    expect((await agentStep("folder-key.access", "/agent/sites/plan", { folder: "demo" })).status).toBe(409);
+    expect(
+      (await agentStep("folder-key.access", "/agent/sites/plan", { folder: "other", address: "demo-site" }))
+        .status,
+    ).toBe(409);
     const manifest = { "/index.html": { hash: "0".repeat(32), size: 5 } };
     expect((await agentStep("folder-key.access", "/agent/sites/assets", { deployId, manifest })).status).toBe(
       200,
@@ -816,9 +822,28 @@ describe("folder sites (K-1123)", () => {
     expect(undone.status, JSON.stringify(undone.body)).toBe(200);
     expect(cloudflare.served("demo-site.example.com")).toEqual([script]);
 
-    // A key has at most 10 folder sites; this one has 1, and 9 more fill it.
+    // Removed again, the site counts for nothing: a new publish of the folder is a first publish, with the right.
+    const again = await admin(`/api/apps/${card.id}`, "DELETE");
+    expect(again.status, JSON.stringify(again.body)).toBe(200);
+    const noRight = [
+      { _tag: "circle", id: "folders", after: agentCircle("folders", "folder-key.access", false) },
+    ];
+    expect((await admin("/api/apply", "POST", { edits: noRight })).status).toBe(200);
+    expect((await agentStep("folder-key.access", "/agent/sites/plan", { folder: "demo" })).status).toBe(403);
+    const right = [
+      { _tag: "circle", id: "folders", after: agentCircle("folders", "folder-key.access", true) },
+    ];
+    expect((await admin("/api/apply", "POST", { edits: right })).status).toBe(200);
+    expect(
+      (await agentStep("folder-key.access", "/agent/sites/plan", { folder: "demo" })).body,
+    ).toMatchObject({
+      updated: false,
+    });
+
+    // A key has at most 10 folder sites: the new plan holds 1, and 9 live plans fill it. Rows without a card or a
+    // live plan count for nothing.
     await runInDurableObject(env.KITSHN.getByName("kitshn"), (_instance, durable) => {
-      for (let index = 0; index < 9; index++)
+      for (let index = 0; index < 12; index++) {
         durable.storage.sql.exec(
           `INSERT INTO agent_sites (card_id, client_id, folder, address, created_at)
            VALUES (?, 'folder-key.access', ?, ?, 0)`,
@@ -826,6 +851,16 @@ describe("folder sites (K-1123)", () => {
           `fill${index}`,
           `fill${index}.example.com`,
         );
+        if (index < 9)
+          durable.storage.sql.exec(
+            `INSERT INTO deploys (id, repo, environment, resource_id, address, script, kind, sha, state, expires_at)
+             VALUES (?, 'folder fill', 'folder', ?, ?, 'kitshn-fill', 'deploy', 'folder', 'planned', ?)`,
+            `fill-plan-${index}`,
+            `folder-fill${index}`,
+            `fill${index}.example.com`,
+            Date.now() + 60_000,
+          );
+      }
     });
     expect((await agentStep("folder-key.access", "/agent/sites/plan", { folder: "one-more" })).status).toBe(
       409,

@@ -959,6 +959,8 @@ export class Kitshn extends DurableObject<Env> {
               run: async () => {
                 await api("DELETE", `${account}/workers/scripts/${orphan.script}?force=true`).catch(gone);
                 this.sql("DELETE FROM worker_storage WHERE card_id = ? AND kind = 'script'", card);
+                // K-1123: with its script gone, a folder site frees its slot and its folder name.
+                this.sql("DELETE FROM agent_sites WHERE card_id = ?", card);
               },
             },
           ]
@@ -1660,7 +1662,7 @@ export class Kitshn extends DurableObject<Env> {
       after?.kind === "site.compose" && !this.closedPreview(after.id) ? [after] : [],
     );
     for (const { after } of apps)
-      if (after?.kind === "site.worker" && this.deletingStorage.has(after.id))
+      if (after && keepsScript(after) && this.deletingStorage.has(after.id))
         throw new RuleError(
           `kitshn deletes the storage of ${after.name} now; undo after it finishes (K-909).`,
         );
@@ -1668,6 +1670,15 @@ export class Kitshn extends DurableObject<Env> {
       if (composeUndo(removalDown(this.query, card.id)) === "refuse")
         throw new RuleError(`The machine is stopping ${card.name} now; undo after it finishes (K-909).`);
     const revision = this.commit(actor, changes, undo);
+    // K-1123: a removed folder site ends the plans that wait for its files, so it counts for nothing and its next
+    // publish is a first publish.
+    for (const { before, after } of apps)
+      if (before && !after && before.id.startsWith(FOLDER_SITE_PREFIX))
+        this.sql(
+          "UPDATE deploys SET state = 'failed', reason = ? WHERE resource_id = ? AND state = 'planned'",
+          "The owner removed the site.",
+          before.id,
+        );
     // A stop that still waits goes, and the app starts again (a short restart where it never stopped).
     for (const card of restored) {
       failQueuedDowns(this.query, card.id, "The undo of the removal replaced this job (K-909).");
@@ -1692,7 +1703,8 @@ export class Kitshn extends DurableObject<Env> {
    */
   private deployedCards(id: string): Array<string> {
     return this.sql<{ resource_id: string }>(
-      `SELECT DISTINCT resource_id FROM deploys WHERE kind = 'deploy' AND (repo_id IS NOT NULL OR state = 'done')
+      `SELECT DISTINCT resource_id FROM deploys WHERE kind = 'deploy'
+       AND (repo_id IS NOT NULL OR state = 'done' OR resource_id LIKE 'folder-%')
        AND resource_id = ?`,
       id,
     )
@@ -4340,6 +4352,16 @@ export class Kitshn extends DurableObject<Env> {
       );
       if (other)
         return Response.json({ error: `${address} belongs to the card ${other.name}.` }, { status: 409 });
+      // K-1123: a folder site plan holds its address until its files arrive or the plan expires.
+      if (
+        this.heldSiteAddresses(Date.now()).some(
+          (row) => row.address === address && row.card_id !== resourceId,
+        )
+      )
+        return Response.json(
+          { error: `${address} is held by a folder site that is being published (K-1123).` },
+          { status: 409 },
+        );
     }
     if (!onCloudflare) return null;
     // Never take over a hostname that another Worker serves, or that a foreign Access app covers (K-408).
@@ -6016,10 +6038,16 @@ export class Kitshn extends DurableObject<Env> {
         return fail(410, "This deploy expired or ended. Publish the folder again.");
       if (step === "assets") return await this.deployAssets(api, row, input["manifest"]);
       if (step !== "finish") return fail(404, `kitshn has no folder site step ${step}.`);
+      // K-909: the owner deletes the kept script of this site now.
+      if (this.deletingStorage.has(site.card_id))
+        return fail(409, `kitshn deletes the script of ${site.folder} now; publish again after it finishes.`);
       if (this.state.resources.has(site.card_id)) {
         const refusal = this.agentSiteMayChange(agent, site.card_id, now);
         if (refusal) return fail(403, refusal);
       } else {
+        // The right can go between the plan and the files.
+        if (!agentHas(this.state, agent.visitor, "addsApps", now))
+          return fail(403, 'A folder site needs the right "may add apps" (K-718, K-1123).');
         // The rights and the circles can change between the plan and the files, so the spot counts now.
         const spot = agentUploadPlace(this.state, agent.visitor, site.circle, site.public === 1, now);
         if (typeof spot === "string") return fail(403, spot);
@@ -6033,6 +6061,10 @@ export class Kitshn extends DurableObject<Env> {
           machine: null,
         };
         this.ctx.storage.transactionSync(() => {
+          const other = [...this.state.resources.values()].find((card) =>
+            card.addresses.includes(site.address),
+          );
+          if (other) throw new RuleError(`${site.address} belongs to the card ${other.name} now.`);
           if (!spot) this.sql("UPDATE agent_sites SET agent_tray = 1 WHERE card_id = ?", site.card_id);
           this.addCard(agent.actor, resource, spot, `the folder site ${site.folder}`);
         });
@@ -6069,12 +6101,29 @@ export class Kitshn extends DurableObject<Env> {
     const open = input["public"] === true;
     const wanted = text("address") || null;
     const zoneName = text("zone") || this.env.KITSHN_ZONE;
-    const [known] = this.sql<AgentSiteRow>(
+    const [stored] = this.sql<AgentSiteRow>(
       "SELECT * FROM agent_sites WHERE client_id = ? AND folder = ?",
       clientId,
       folder,
     );
-    let site: AgentSiteRow;
+    // K-1123: a site whose card went (Remove app, a delete) and whose plan expired counts for nothing; a publish of the
+    // same folder is a first publish again.
+    const known = stored && this.siteLive(stored, now) ? stored : undefined;
+    const planned = (site: AgentSiteRow, address: string) => {
+      const deployId = crypto.randomUUID();
+      this.sql(
+        `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, addresses, app_key)
+         VALUES (?, ?, NULL, 'folder', ?, ?, ?, NULL, 'deploy', 'folder', 'planned', ?, '', 'static', ?, 'app')`,
+        deployId,
+        `folder ${site.folder}`,
+        site.card_id,
+        address,
+        `kitshn-${site.card_id}`,
+        now + DEPLOY_MS,
+        JSON.stringify([address]),
+      );
+      return deployId;
+    };
     if (known) {
       // K-1123, as K-1117: a second publish deploys the same card; a move goes through /agent/apply.
       if (circle !== null || open || wanted !== null || text("zone"))
@@ -6082,47 +6131,41 @@ export class Kitshn extends DurableObject<Env> {
           409,
           `${folder} exists already, and --circle, --public, --address and --zone apply only to a first publish.`,
         );
+      if (!this.state.resources.has(known.card_id))
+        return fail(409, `A first publish of ${folder} runs now; publish again after it ends.`);
       const refusal = this.agentSiteMayChange(agent, known.card_id, now);
       if (refusal) return fail(403, refusal);
-      site = known;
-    } else {
-      if (!agentHas(this.state, agent.visitor, "addsApps", now))
-        return fail(403, 'A folder site needs the right "may add apps" (K-718, K-1123).');
-      const [count] = this.sql<{ n: number }>(
-        "SELECT COUNT(*) AS n FROM agent_sites WHERE client_id = ?",
-        clientId,
-      );
-      if ((count?.n ?? 0) >= FOLDER_SITES_PER_KEY)
-        return fail(409, `A key has at most ${FOLDER_SITES_PER_KEY} folder sites (K-1123).`);
-      const spot = agentUploadPlace(this.state, agent.visitor, circle, open, now);
-      if (typeof spot === "string") return fail(403, spot);
-      if (!zonesOf(this.env).some((zone) => zone.name === zoneName))
-        return fail(409, `kitshn does not publish on ${zoneName} (K-1111).`);
-      const name = this.folderSiteName(wanted, zoneName);
-      if (typeof name !== "string") return fail(name.status, name.error);
-      const address = `${name}.${zoneName}`;
-      const scripts = await api<Array<unknown>>(
-        "GET",
-        `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/scripts`,
-      );
-      if (scripts.length >= SCRIPT_LIMIT)
-        return fail(
-          409,
-          `The account has ${scripts.length} Worker scripts; kitshn makes no new site at ${SCRIPT_LIMIT} (K-903, K-1123).`,
-        );
-      const cardId = `${FOLDER_SITE_PREFIX}${newLibraryId()}`;
-      const refused = await this.addressRefusal(api, [address], cardId, `kitshn-${cardId}`, undefined, true);
-      if (refused) return refused;
-      site = {
-        card_id: cardId,
-        client_id: clientId,
-        folder,
-        address,
-        circle,
-        public: open ? 1 : 0,
-        agent_tray: 0,
-        created_at: now,
-      };
+      const address = this.state.resources.get(known.card_id)?.addresses[0] ?? known.address;
+      return Response.json({ deployId: planned(known, address), address, updated: true });
+    }
+    if (!agentHas(this.state, agent.visitor, "addsApps", now))
+      return fail(403, 'A folder site needs the right "may add apps" (K-718, K-1123).');
+    const spot = agentUploadPlace(this.state, agent.visitor, circle, open, now);
+    if (typeof spot === "string") return fail(403, spot);
+    if (!zonesOf(this.env).some((zone) => zone.name === zoneName))
+      return fail(409, `kitshn does not publish on ${zoneName} (K-1111).`);
+    // The count, the name and the row in one step with no await, so two plans at once cannot both pass.
+    const live = this.sql<AgentSiteRow>("SELECT * FROM agent_sites WHERE client_id = ?", clientId).filter(
+      (row) => this.siteLive(row, now),
+    );
+    if (live.length >= FOLDER_SITES_PER_KEY)
+      return fail(409, `A key has at most ${FOLDER_SITES_PER_KEY} folder sites (K-1123).`);
+    const name = this.folderSiteName(wanted, zoneName);
+    if (typeof name !== "string") return fail(name.status, name.error);
+    const address = `${name}.${zoneName}`;
+    const cardId = `${FOLDER_SITE_PREFIX}${newLibraryId()}`;
+    const site: AgentSiteRow = {
+      card_id: cardId,
+      client_id: clientId,
+      folder,
+      address,
+      circle,
+      public: open ? 1 : 0,
+      agent_tray: 0,
+      created_at: now,
+    };
+    const deployId = this.ctx.storage.transactionSync(() => {
+      if (stored) this.sql("DELETE FROM agent_sites WHERE card_id = ?", stored.card_id);
       this.sql(
         `INSERT INTO agent_sites (card_id, client_id, folder, address, circle, public, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -6134,21 +6177,32 @@ export class Kitshn extends DurableObject<Env> {
         site.public,
         site.created_at,
       );
-    }
-    const address = this.state.resources.get(site.card_id)?.addresses[0] ?? site.address;
-    const deployId = crypto.randomUUID();
-    this.sql(
-      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, addresses, app_key)
-       VALUES (?, ?, NULL, 'folder', ?, ?, ?, NULL, 'deploy', 'folder', 'planned', ?, '', 'static', ?, 'app')`,
-      deployId,
-      `folder ${site.folder}`,
-      site.card_id,
-      address,
-      `kitshn-${site.card_id}`,
-      now + DEPLOY_MS,
-      JSON.stringify([address]),
+      return planned(site, address);
+    });
+    // The plan holds its address from here; a refusal below lets it go again.
+    const release = (response: Response) => {
+      this.sql("DELETE FROM agent_sites WHERE card_id = ?", cardId);
+      this.sql(
+        "UPDATE deploys SET state = 'failed', reason = ? WHERE id = ?",
+        "The plan was refused.",
+        deployId,
+      );
+      return response;
+    };
+    const scripts = await api<Array<unknown>>(
+      "GET",
+      `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/scripts`,
     );
-    return Response.json({ deployId, address, updated: known !== undefined });
+    if (scripts.length >= SCRIPT_LIMIT)
+      return release(
+        fail(
+          409,
+          `The account has ${scripts.length} Worker scripts; kitshn makes no new site at ${SCRIPT_LIMIT} (K-903, K-1123).`,
+        ),
+      );
+    const refused = await this.addressRefusal(api, [address], cardId, `kitshn-${cardId}`, undefined, true);
+    if (refused) return release(refused);
+    return Response.json({ deployId, address, updated: false });
   }
 
   /**
@@ -6159,9 +6213,11 @@ export class Kitshn extends DurableObject<Env> {
     wanted: string | null,
     zone: string,
   ): string | { readonly error: string; readonly status: number } {
+    const held = this.heldSiteAddresses(Date.now()).map((row) => row.address);
     const used = (name: string) =>
       RESERVED_SITE_NAMES.has(name) ||
       `${name}.${zone}` === this.env.KITSHN_HOST ||
+      held.includes(`${name}.${zone}`) ||
       [...this.state.resources.values()].some((resource) => resource.addresses.includes(`${name}.${zone}`));
     if (wanted !== null) {
       const error = addressNameError(wanted);
@@ -6174,6 +6230,23 @@ export class Kitshn extends DurableObject<Env> {
       if (!used(name)) return name;
     }
     return { error: "kitshn found no free random name; give one with --address.", status: 409 };
+  }
+
+  /** K-1123: a folder site row counts while its card exists or a plan of it waits for its files. */
+  private siteLive(row: Pick<AgentSiteRow, "card_id">, now: number) {
+    if (this.state.resources.has(row.card_id)) return true;
+    return (
+      this.sql(
+        "SELECT 1 FROM deploys WHERE resource_id = ? AND kind = 'deploy' AND state = 'planned' AND expires_at > ?",
+        row.card_id,
+        now,
+      ).length > 0
+    );
+  }
+
+  /** K-1123: the addresses that live folder site rows hold, also while their first files have not arrived. */
+  private heldSiteAddresses(now: number) {
+    return this.sql<AgentSiteRow>("SELECT * FROM agent_sites").filter((row) => this.siteLive(row, now));
   }
 
   /** K-1123: as K-1117 for pages: the key that published the site, while it controls the card or it waits in the tray. */

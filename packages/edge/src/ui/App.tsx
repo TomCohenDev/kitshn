@@ -67,6 +67,7 @@ import {
   useStoredWidth,
 } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
+import { FOLDER_SITE_PREFIX } from "../core/apps.ts";
 import { peekable } from "./frames.ts";
 import { PeekArrow } from "./Peek.tsx";
 import {
@@ -2330,13 +2331,16 @@ function CardPanel(props: {
           >
             Roll back…
           </button>
-          <button
-            class="btn"
-            data-tip={`Roll back every card of the workflow run that made this deploy. ${ROLLBACK_DATA}`}
-            onClick={() => props.onRollback(resource, "run")}
-          >
-            Roll back this run…
-          </button>
+          {/* K-1123: a folder site comes from no workflow run. */}
+          {resource.id.startsWith(FOLDER_SITE_PREFIX) ? null : (
+            <button
+              class="btn"
+              data-tip={`Roll back every card of the workflow run that made this deploy. ${ROLLBACK_DATA}`}
+              onClick={() => props.onRollback(resource, "run")}
+            >
+              Roll back this run…
+            </button>
+          )}
         </div>
       ) : null}
       {props.onRestorePrevious ? (
@@ -2351,7 +2355,7 @@ function CardPanel(props: {
       {isAppCard(resource) && props.deployed ? (
         <button
           class="btn danger"
-          data-tip={removeAppTip(resource.kind)}
+          data-tip={removeAppTip(resource)}
           onClick={() => props.onRemoveApp(resource)}
         >
           Remove app

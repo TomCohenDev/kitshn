@@ -8,6 +8,7 @@ import {
   resolveEdits,
   ruleViolation,
 } from "../core/changes.ts";
+import { FOLDER_SITE_PREFIX, keepsScript } from "../core/apps.ts";
 import type { Command } from "../core/machine.ts";
 import {
   ADMIN_RESOURCE_ID,
@@ -173,10 +174,12 @@ export const MACHINE_TIPS = {
 } as const;
 
 /** K-523, K-909: the label of "Remove app" names what goes and what stays, by the kind of the card. */
-export const removeAppTip = (kind: Resource["kind"]) =>
-  kind === "site.worker"
+export const removeAppTip = (resource: Pick<Resource, "id" | "kind">) =>
+  resource.kind === "site.worker"
     ? "Remove app: take its addresses off and keep the Worker, its Durable Objects and its KV. Undo puts the addresses back."
-    : "Remove app: take down what the deploy made and keep the volumes. Undo starts it again.";
+    : keepsScript(resource)
+      ? "Remove app: take its address off and keep its files in the Worker. Undo puts the address back."
+      : "Remove app: take down what the deploy made and keep the volumes. Undo starts it again.";
 
 /** K-205: the edit that gives a card its own level in a circle, or with null follows the circle again. */
 export function levelEdit(state: State, resource: Resource, circle: Circle, level: Level | null): Edit {
@@ -645,12 +648,17 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
               tip: `Roll back: serve an earlier deploy of this card again. ${ROLLBACK_DATA}`,
               run: () => h.rollback(resource, "card"),
             },
-            {
-              id: "rollback-run",
-              label: "Roll back this run…",
-              tip: `Roll back every card of the workflow run that made this deploy. ${ROLLBACK_DATA}`,
-              run: () => h.rollback(resource, "run"),
-            },
+            // K-1123: a folder site comes from no workflow run.
+            ...(resource.id.startsWith(FOLDER_SITE_PREFIX)
+              ? []
+              : [
+                  {
+                    id: "rollback-run",
+                    label: "Roll back this run…",
+                    tip: `Roll back every card of the workflow run that made this deploy. ${ROLLBACK_DATA}`,
+                    run: () => h.rollback(resource, "run"),
+                  },
+                ]),
           ]
         : []),
       ...(isAppCard(resource) && ctx.deployed.has(resource.id)
@@ -658,7 +666,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
             {
               id: "remove-app",
               label: "Remove app",
-              tip: removeAppTip(resource.kind),
+              tip: removeAppTip(resource),
               danger: true as const,
               run: () => h.removeApp(resource),
             },

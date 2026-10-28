@@ -182,6 +182,19 @@ export function parseConfigFile(
  */
 export const STATIC_WORKER = `export default { fetch(request, env) { return env.ASSETS.fetch(request); } };\n`;
 
+/** K-1124: the one Worker that sends old site addresses on; `MAP` is a JSON object of old host to main address. */
+export const REDIRECT_SCRIPT = "kitshn-redirects";
+
+export const REDIRECT_WORKER = `export default {
+  fetch(request, env) {
+    const url = new URL(request.url);
+    const to = JSON.parse(env.MAP)[url.hostname];
+    if (!to) return new Response("kitshn has no site here.", { status: 404 });
+    return Response.redirect("https://" + to + url.pathname + url.search, 302);
+  },
+};
+`;
+
 /** K-806: the largest bundle that kitshn takes; the Free plan limit of 3 MB applies after gzip, which the CLI checks. */
 export const WORKER_MODULE_LIMIT = 10 * 1024 * 1024;
 

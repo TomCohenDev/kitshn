@@ -444,6 +444,11 @@ describe("Access compile (K-401 to K-403)", () => {
       resolveEdits(state, [{ _tag: "place", id: "riffle", after: { x: 3000, y: 3000 } }]),
     );
     expect(desiredAccess(moved, 0).apps.get("app:riffle:riffle.example.com")?.policyKeys).toEqual([]);
+    // K-1124: an old address keeps the policies of its card, so its redirect asks the same people.
+    const old = [{ cardId: "riffle", address: "old-riffle.example.com" }];
+    expect(
+      desiredAccess(state, 0, [], old).apps.get("app:riffle:old-riffle.example.com")?.policyKeys,
+    ).toEqual(["policy:owner:people"]);
   });
 });
 

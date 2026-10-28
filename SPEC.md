@@ -269,7 +269,7 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
   - The response is status 503 with `Retry-After: 60` and `Cache-Control: no-store`.
   - The Worker serves it from its own static assets, with no call to the machine.
 - **K-1107** kitshn detects a down origin in two ways, and acts on either:
-  - The machine is off: its daemon socket closes, or misses pings for 30 seconds.
+  - The machine is off: its daemon socket closes, or misses pings for 30 seconds. kitshn checks the pings on each daemon sample and at least every 2 minutes, so a silent machine counts as offline after 30 seconds to 2.5 minutes (K-1302).
   - The machine is on, but the local server is off: the daemon tries the socket or port of each exposed site every 10 seconds, on the machine only, and reports a change.
 - **K-1108** While an origin is down, kitshn adds a Worker route for the site address to the kitshn Worker. When the origin is back, it removes the route. So visits to a healthy site never run the Worker and cost no Worker request. Custom error rules would do this with no Worker, but the free plan has none ([Custom Errors](https://developers.cloudflare.com/rules/custom-errors/)).
 - **K-1109** While the route exists, the Worker first passes the request to the origin. It shows the offline page only when the answer is status 502 or 530, or a Cloudflare 1033 error. So a site that comes back before kitshn removes the route works at once. Checked on 2026-10-27: the offline route was still on the hostname, and the restarted origin answered 200 through the Worker. So the fetch did not run the Worker again.

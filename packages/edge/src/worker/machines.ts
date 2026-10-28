@@ -5,6 +5,11 @@ import type { JobView } from "../core/protocol.ts";
 export const JOB_EXPIRY_MS = 24 * 60 * 60 * 1000;
 /** K-1107: a machine that answered no ping for this long counts as offline. */
 export const PING_TIMEOUT_MS = 30_000;
+/**
+ * K-1107, K-1302: the alarm checks the pings at least this often; each daemon sample checks them too. Each alarm
+ * wakes the Durable Object, and a wake reads rows, so a 30-second alarm cost about 2,880 wakes a day.
+ */
+export const LIVENESS_CHECK_MS = 120_000;
 /** K-602 */
 export const JOIN_CODE_MS = 10 * 60 * 1000;
 /** Job output that kitshn keeps, at most. The daemon caps it too. */

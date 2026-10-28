@@ -190,6 +190,7 @@ import {
   JOIN_CODE_MS,
   type Job,
   OUTPUT_LIMIT,
+  LIVENESS_CHECK_MS,
   PING_TIMEOUT_MS,
   machineIdFor,
   parseCommand,
@@ -287,7 +288,24 @@ export class Kitshn extends DurableObject<Env> {
    * row and makes the namespace again. Revisit when a delete must survive a restart, for example with a row per delete.
    */
   private readonly deletingStorage = new Set<string>();
-  private access = new Map<string, AccessRow>();
+  /** K-1302: the Access rows, read on first use; a wake for a daemon sample never needs them. */
+  private accessCache: Map<string, AccessRow> | null = null;
+  private get access(): Map<string, AccessRow> {
+    this.accessCache ??= new Map(
+      this.sql<{
+        key: string;
+        cf_id: string;
+        aud: string;
+        body: string;
+        tried: string;
+        error: string | null;
+      }>("SELECT key, cf_id, aud, body, tried, error FROM access_objects").map((row) => [
+        row.key,
+        { key: row.key, cfId: row.cf_id, aud: row.aud, body: row.body, tried: row.tried, error: row.error },
+      ]),
+    );
+    return this.accessCache;
+  }
   /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
   private stuckShares = new Set<string>();
   private accessWarnings: Array<string> = [];
@@ -295,10 +313,29 @@ export class Kitshn extends DurableObject<Env> {
   private checkingRepos = false;
   /** K-606: presence is stored on change; status and the latest sample live on the socket. */
   private presence = new Map<string, { online: boolean; lastSeen: number; os: MachineOs | null }>();
-  /** K-1113: the hash of each stored card icon; the bytes stay in SQLite until a map asks. */
-  private iconHashes = new Map<string, string>();
-  /** K-1114: when each stored icon last changed, so a daemon changes one at most once an hour. */
-  private iconChangedAt = new Map<string, number>();
+  /**
+   * K-1113: the hash of each stored card icon, the bytes stay in SQLite until a map asks. K-1114: when each icon
+   * last changed, so a daemon changes one at most once an hour. Read on first use (K-1302).
+   */
+  private iconCache: { hashes: Map<string, string>; changedAt: Map<string, number> } | null = null;
+  private get icons() {
+    if (!this.iconCache) {
+      const rows = this.sql<{ id: string; hash: string; changed_at: number }>(
+        "SELECT id, hash, changed_at FROM icons",
+      );
+      this.iconCache = {
+        hashes: new Map(rows.map((row) => [row.id, row.hash])),
+        changedAt: new Map(rows.map((row) => [row.id, row.changed_at])),
+      };
+    }
+    return this.iconCache;
+  }
+  private get iconHashes() {
+    return this.icons.hashes;
+  }
+  private get iconChangedAt() {
+    return this.icons.changedAt;
+  }
   /** K-1104: live sites of the machines. */
   private liveSites = new Map<string, LiveSite>();
   /** Address checks that failed, and when to try them again. Memory only; a restart retries at once. */
@@ -409,25 +446,9 @@ export class Kitshn extends DurableObject<Env> {
         { online: row.online === 1, lastSeen: row.last_seen, os: row.os as MachineOs | null },
       ]),
     );
-    const icons = this.sql<{ id: string; hash: string; changed_at: number }>(
-      "SELECT id, hash, changed_at FROM icons",
-    );
-    this.iconHashes = new Map(icons.map((row) => [row.id, row.hash]));
-    this.iconChangedAt = new Map(icons.map((row) => [row.id, row.changed_at]));
+    this.iconCache = null;
     this.accessWarnings = JSON.parse(this.meta("access_warnings") ?? "[]") as Array<string>;
-    this.access = new Map(
-      this.sql<{
-        key: string;
-        cf_id: string;
-        aud: string;
-        body: string;
-        tried: string;
-        error: string | null;
-      }>("SELECT key, cf_id, aud, body, tried, error FROM access_objects").map((row) => [
-        row.key,
-        { key: row.key, cfId: row.cf_id, aud: row.aud, body: row.body, tried: row.tried, error: row.error },
-      ]),
-    );
+    this.accessCache = null;
     this.revisionCache = null;
   }
 
@@ -2127,6 +2148,8 @@ export class Kitshn extends DurableObject<Env> {
       };
       socket.serializeAttachment({ ...attachment, sample } satisfies Attachment);
       this.sendMachine(machine);
+      // K-1107: the sample woke the Durable Object anyway, so it checks the pings of every machine now.
+      this.checkLiveness(Date.now());
     } else if (message.type === "sites") {
       this.updateLiveSites(machine, message.sites);
     } else if (message.type === "icon") {
@@ -3287,7 +3310,7 @@ export class Kitshn extends DurableObject<Env> {
     let next = this.dailyAt();
     for (const socket of this.ctx.getWebSockets("machines")) {
       const attachment = attachmentOf(socket);
-      next = Math.min(next, now + PING_TIMEOUT_MS);
+      next = Math.min(next, now + LIVENESS_CHECK_MS);
       // K-1704: a socket without an answer closes after 10 seconds.
       if (attachment?.kind === "machine" && attachment.check === "waiting")
         next = Math.min(next, attachment.since + CHALLENGE_MS);
@@ -5725,7 +5748,7 @@ export class Kitshn extends DurableObject<Env> {
   override async alarm() {
     const now = Date.now();
     this.checkLiveness(now);
-    // The alarm runs every 30 s while a daemon is connected, so it tells the maps only about real changes.
+    // The alarm runs every 2 minutes while a daemon is connected, so it tells the maps only about real changes.
     let changed = this.expireJobs(now) > 0;
     if (this.settleRollbacks() > 0) changed = true;
     const before = JSON.stringify(accessStates(this.desired(now), this.access));

@@ -32,6 +32,17 @@ it("reads few rows on a wake and on each snapshot", async () => {
         `rows-read-${i}`,
         now,
       );
+    // Access rows and icons only the alarm and a snapshot read; a wake for a daemon sample reads neither.
+    for (let i = 0; i < 300; i++)
+      sql.exec(
+        "INSERT INTO access_objects (key, cf_id, body, tried) VALUES (?, 'cf', '{}', '{}')",
+        `rows-read-${i}`,
+      );
+    for (let i = 0; i < 100; i++)
+      sql.exec(
+        "INSERT INTO icons (id, type, hash, bytes) VALUES (?, 'image/png', 'h', x'00')",
+        `rows-read-${i}`,
+      );
     const exec = sql.exec.bind(sql);
     sql.exec = ((query: string, ...bindings: Array<SqlStorageValue>) => {
       const cursor = exec(query, ...bindings);
@@ -56,7 +67,7 @@ it("reads few rows on a wake and on each snapshot", async () => {
   await send("/api/state", { headers });
   // A wake reads the small tables only; the first snapshot reads the 200 recent revisions and scans the deploys once.
   expect(load).toBeLessThan(100);
-  expect(firstSnapshot).toBeLessThan(1000 + 500);
+  expect(firstSnapshot).toBeLessThan(1000 + 500 + 300 + 100);
   expect(rowsRead).toBeLessThan(100);
 });
 

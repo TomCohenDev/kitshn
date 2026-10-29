@@ -30,6 +30,8 @@ export const ASK_ACTIONS = [
   "approve",
   "deny",
   "history",
+  "backup",
+  "restore",
 ] as const;
 export type AskAction = (typeof ASK_ACTIONS)[number];
 
@@ -61,8 +63,6 @@ const Ask = Schema.Struct({
   attestations: Schema.optionalKey(
     Schema.Record(Schema.String, Schema.String.check(Schema.isMaxLength(4096))),
   ),
-  /** K-1776: a right that is off sends this one call to the Owner for approval instead of refusing it. */
-  askOwner: Schema.optionalKey(Schema.Boolean),
 });
 export type Ask = typeof Ask.Type;
 
@@ -145,7 +145,7 @@ export const Answer = Schema.Union([
     type: Schema.Literal("ask"),
     outcome: Schema.Literal("refused"),
     reason: Schema.String,
-    /** K-1776: the right that is off; the command offers to send the same call to the Owner. */
+    /** K-1776: the right that is off. */
     need: Schema.optionalKey(Schema.String),
   }),
   /** K-1760: the repo's owner is "not kitshn", so the machine uses its own login. */

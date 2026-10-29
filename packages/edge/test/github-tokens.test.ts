@@ -189,9 +189,9 @@ it("opens the one-hour window on approval with no token; the next ask of the mac
   expect(await askToken(stub, "Yarden-zamir/riffle")).toMatchObject({ outcome: "waiting" });
 });
 
-it("answers not kitshn for another owner, and refuses an App owner's repo without a right (K-1760, K-1733)", async () => {
+it("answers not kitshn for another owner, and refuses an App owner's repo whose code rights are off (K-1760, K-1733)", async () => {
   fakeGitHub();
-  const stub = await setup({});
+  const stub = await setup({ readsCode: { mode: "off" }, writesCode: { mode: "off" } });
   expect(await askToken(stub, "qlik-trial/app")).toMatchObject({ outcome: "not-kitshn" });
   expect(await askToken(stub, "Yarden-zamir/riffle")).toMatchObject({
     outcome: "refused",
@@ -200,13 +200,11 @@ it("answers not kitshn for another owner, and refuses an App owner's repo withou
   });
 });
 
-it("sends a call whose right is off to the Owner with askOwner; the approval opens the hour for it (K-1776)", async () => {
+it("asks the Owner for a token when no code right is set; the approval opens the hour for git's auto ask (K-1776)", async () => {
   fakeGitHub();
   const stub = await setup({});
-  const waiting = await askToken(stub, "Yarden-zamir/riffle", {
-    body: { permission: "write" },
-    askOwner: true,
-  });
+  // git asks "auto"; with no code right set, the Owner approves write.
+  const waiting = await askToken(stub, "Yarden-zamir/riffle");
   if (waiting.outcome !== "waiting") throw new Error(`The ask did not wait: ${waiting.outcome}`);
   const decided = await runInDurableObject(stub, async (instance, state) => {
     const kitshn = instance as unknown as {

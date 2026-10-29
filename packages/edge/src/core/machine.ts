@@ -190,15 +190,13 @@ export interface AskWire {
   readonly labels?: Readonly<Record<string, string>>;
   /** K-1752: the labels that an attester of the machine set; only these count for rights (K-1754). */
   readonly attested?: Readonly<Record<string, string>>;
-  /** K-1776: a right that is off sends this one call to the Owner instead of a refusal. */
-  readonly askOwner?: boolean;
 }
 
 /** K-1710, K-1722: kitshn's answer to one ask. */
 export type AskOutcome =
   | { readonly outcome: "done"; readonly result: unknown }
   | { readonly outcome: "waiting"; readonly proposalId: string }
-  /** K-1776: `need` names the right that is off, so the CLI can offer the ask to the Owner. */
+  /** K-1776: `need` names the right that refused the call. */
   | { readonly outcome: "refused"; readonly reason: string; readonly need?: MachineRight }
   /** K-1760: the owner of the repo is "not kitshn"; the machine uses its own login. */
   | { readonly outcome: "not-kitshn"; readonly reason: string };

@@ -24,6 +24,8 @@ const RIGHT_HELP: Record<MachineRight, string> = {
   getsPasses: "Gets passes: a 5-minute pass for an outside service of the audience list.",
   addsPages:
     "Adds pages: the machine publishes pages, files and folder sites into its agent circles, and sets their addresses and redirects.",
+  restores:
+    "Restores: the machine writes a backup run of a Compose card back, after a backup of the current data (K-1820).",
 };
 
 /**
@@ -49,9 +51,16 @@ export function MachineRights(props: {
             <Radio
               name={name}
               checked={mode === null}
-              label="off"
-              tip={`Off: the machine never ${MACHINE_RIGHT_NAMES[right]}.`}
+              label="default"
+              tip="Default: each call asks the Owner, and one approval runs that call (K-1776)."
               onSelect={() => props.onChange(right, null)}
+            />
+            <Radio
+              name={name}
+              checked={mode?.mode === "off"}
+              label="off"
+              tip={`Off: the machine never ${MACHINE_RIGHT_NAMES[right]}, and no call asks.`}
+              onSelect={() => props.onChange(right, { mode: "off" })}
             />
             <Radio
               name={name}
@@ -70,7 +79,7 @@ export function MachineRights(props: {
                 onSelect={() => props.onChange(right, { mode: "ask", circleId: circle.id })}
               />
             ))}
-            {mode ? (
+            {mode && mode.mode !== "off" ? (
               <input
                 aria-label={`Conditions of ${MACHINE_RIGHT_NAMES[right]}`}
                 placeholder="t3.project.name=kitshn,riffle; t3.subagent=false"
@@ -111,7 +120,7 @@ export function MachineRightStickers(props: { readonly member: MachineMember }) 
     <>
       {MACHINE_RIGHTS.flatMap((right) => {
         const mode = props.member.rights?.[right];
-        if (!mode) return [];
+        if (!mode || mode.mode === "off") return [];
         return [
           <span
             key={right}

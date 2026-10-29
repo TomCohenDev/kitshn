@@ -797,7 +797,11 @@ function rightChanges(before: Circle | null, after: Circle | null): Array<string
       return MACHINE_RIGHTS.filter((right) => !deepEqual(old.rights?.[right], member.rights?.[right])).map(
         (right) => {
           const mode = member.rights?.[right];
-          const text = !mode ? "off" : mode.mode === "automatic" ? "automatic" : `ask ${mode.circleId}`;
+          const text = !mode
+            ? "default (asks the Owner)"
+            : mode.mode === "ask"
+              ? `ask ${mode.circleId}`
+              : mode.mode;
           return `Set ${MACHINE_RIGHT_NAMES[right]} of ${member.machineId} to ${text} in ${after.name}`;
         },
       );

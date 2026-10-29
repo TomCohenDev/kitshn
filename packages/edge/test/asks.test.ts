@@ -107,14 +107,22 @@ const owner = {
   reason: null,
 };
 
-it("refuses a right that is off, and names it (K-1720)", async () => {
-  // One right makes the circle an agent circle of the machine (K-1730); "adds apps" stays off.
-  const stub = await setup({ deploys: { mode: "automatic" } });
+it("refuses a right that is off and names it; a right that no circle sets asks the Owner (K-1720, K-1776)", async () => {
+  const stub = await setup({ deploys: { mode: "automatic" }, addsApps: { mode: "off" } });
   expect(await ask(stub, "allow", "123")).toEqual({
     outcome: "refused",
     reason: expect.stringContaining('"adds apps" is off'),
     need: "addsApps",
   });
+  const unset = await setup({ deploys: { mode: "automatic" } });
+  const waiting = await ask(unset, "allow", "123");
+  expect(waiting).toMatchObject({ outcome: "waiting" });
+  const circle = await runInDurableObject(
+    unset,
+    (_, state) =>
+      state.storage.sql.exec<{ circle_id: string }>("SELECT circle_id FROM proposals").one().circle_id,
+  );
+  expect(circle).toBe("owner");
   // `state` needs no right, and names the newest deploy, backup and uptime of each managed card (K-718).
   await runInDurableObject(stub, (_, state) => {
     const card = {
@@ -139,6 +147,14 @@ it("refuses a right that is off, and names it (K-1720)", async () => {
   await evictDurableObject(stub);
   const answer = await ask(stub, "state");
   expect(answer).toMatchObject({ outcome: "done" });
+  // K-1819: "back up now" of a managed card runs under "deploys"; a card that the machine does not manage refuses.
+  expect(await ask(stub, "backup", "elsewhere")).toEqual({
+    outcome: "refused",
+    reason: expect.stringContaining("does not manage"),
+  });
+  expect(await ask(stub, "backup", "money")).not.toMatchObject({
+    reason: expect.stringContaining("does not manage"),
+  });
   const cards =
     answer.outcome === "done" ? (answer.result as { cards: Array<Record<string, unknown>> }).cards : [];
   expect(cards.find((card) => card["id"] === "money")).toMatchObject({
@@ -219,7 +235,7 @@ it("expires a proposal after its time, so no later answer runs it (K-1724)", asy
 });
 
 it("writes one ask event for each ask, not a revision (K-1717)", async () => {
-  const stub = await setup({});
+  const stub = await setup({ addsApps: { mode: "off" } });
   await ask(stub, "allow", "123");
   const events = await runInDurableObject(stub, (_, state) =>
     state.storage.sql
@@ -230,7 +246,7 @@ it("writes one ask event for each ask, not a revision (K-1717)", async () => {
 });
 
 it("reads only what its own event write reads for a refused ask, and a few rows for a new proposal (K-1715)", async () => {
-  const stub = await setup({ deploys: { mode: "ask", circleId: "owner" } });
+  const stub = await setup({ deploys: { mode: "ask", circleId: "owner" }, addsApps: { mode: "off" } });
   // Wake the object first, so its load does not count.
   await ask(stub, "allow", "123");
   const counted = async (run: (instance: Instance) => Promise<unknown>) =>

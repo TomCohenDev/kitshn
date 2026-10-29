@@ -150,8 +150,10 @@ import {
   mayDeployOn,
   agentUploadPlace,
   codeRightMode,
+  codeRightOff,
   machineOf,
   machineRightMode,
+  machineRightOff,
 } from "../core/agent.ts";
 import { DEMO_MACHINES, DEMO_ICONS, demo, demoUsage } from "../core/demo.ts";
 import { type Usage, type UsageRow, usageLevel } from "../core/usage.ts";
@@ -7183,14 +7185,15 @@ export class Kitshn extends DurableObject<Env> {
         return refuse(403, `A machine forwards no call to ${request.method} ${path} (K-1714).`);
       if (right !== null) {
         const mode = machineRightMode(this.state, machine.id, right, now);
-        if (mode === null) {
-          // A forwarded call carries a body that a proposal does not keep, so it cannot wait for an approval.
+        // A forwarded call carries a body that a proposal does not keep, so it cannot wait for the Owner (K-1776).
+        if (mode === null)
           return refuse(
             403,
-            `The right "${MACHINE_RIGHT_NAMES[right]}" is off for this machine (K-1720). To ask the Owner, ask them to turn it on for this machine.`,
+            machineRightOff(this.state, machine.id, right, now)
+              ? `The right "${MACHINE_RIGHT_NAMES[right]}" is off for this machine (K-1720). Ask the owner to turn it on.`
+              : `The right "${MACHINE_RIGHT_NAMES[right]}" is not set for this machine, and this call cannot wait for an approval. Ask the owner to set it to automatic (K-1776).`,
             right,
           );
-        }
         if (mode.mode === "ask")
           return refuse(
             409,
@@ -7596,17 +7599,7 @@ export class Kitshn extends DurableObject<Env> {
       );
     }
     if (action === "github-token")
-      return event(
-        await this.askGitHubToken(
-          machine,
-          target,
-          raw["body"],
-          reason,
-          labels,
-          now,
-          raw["askOwner"] === true,
-        ),
-      );
+      return event(await this.askGitHubToken(machine, target, raw["body"], reason, labels, now));
     // K-1773: an agent removes an audience that its machine added at once, because that lowers access (K-715).
     if (action === "audience-remove") {
       const [row] = this.sql<{ added_by: string | null }>(
@@ -7651,18 +7644,18 @@ export class Kitshn extends DurableObject<Env> {
         result: this.askEventsWithLabel(target.slice(0, equals), target.slice(equals + 1), machine.id),
       };
     }
-    const askOwner = raw["askOwner"] === true;
     const needs = ASK_RIGHT[action];
     if (needs === "member")
       throw new Error(`The action ${action} needs membership, and only approve and deny do.`);
     if (needs !== "none" && needs !== "apply") {
       const mode = machineRightMode(this.state, machine.id, needs, now);
-      // K-1776: a right that is off refuses and names itself; `askOwner` sends this one call to the Owner instead.
+      // K-1776: a right that no circle sets asks the Owner for this one call; a right set to "off" refuses.
       if (mode === null) {
+        if (machineRightOff(this.state, machine.id, needs, now)) return event(offRight(needs));
         const owned =
           WINDOW_ACTIONS.has(action) &&
           this.inApprovedWindow(machine.id, action, target, needs, OWNER_CIRCLE_ID, now);
-        if (!owned && askOwner)
+        if (!owned)
           return event(
             await this.propose(
               machine,
@@ -7676,7 +7669,6 @@ export class Kitshn extends DurableObject<Env> {
               now,
             ),
           );
-        if (!owned) return event(offRight(needs));
         return event(await this.runAsk(machine, action, target, raw["body"], needs, labels));
       }
       const failed = conditionProblem(mode.conditions, labels, prefixes);
@@ -7714,10 +7706,10 @@ export class Kitshn extends DurableObject<Env> {
               now,
             ),
           );
-        // K-1776: only "publishes" stands in the way, and it is off.
+        // K-1776: only "publishes" stands in the way, and no circle sets it.
         if (mode === null && typeof withApproval !== "string")
           return event(
-            askOwner
+            !machineRightOff(this.state, machine.id, "publishes", now)
               ? await this.propose(
                   machine,
                   action,
@@ -7811,6 +7803,26 @@ export class Kitshn extends DurableObject<Env> {
     labels: Readonly<Record<string, string>> = {},
   ): Promise<AskOutcome> {
     if (action === "pass") return this.issuePass(machine, target, labels);
+    // K-1819, K-1820: a backup now or a restore of a Compose card that the machine manages.
+    if (action === "backup" || action === "restore") {
+      const visitor = { email: null, clientId: machine.clientId, ip: null };
+      if (!cardsControlledBy(this.state, visitor, Date.now()).has(target))
+        return { outcome: "refused", reason: `This machine does not manage the card ${target} (K-718).` };
+      const actor: Actor = { _tag: "machine", machineId: machine.id, name: machine.name };
+      const run = isRecord(body) && typeof body["run"] === "string" ? body["run"] : "";
+      const response =
+        action === "backup" ? this.backUpNow(actor, target) : this.restoreBackup(actor, target, run);
+      const answer: unknown = await response.json();
+      return response.ok
+        ? { outcome: "done", result: answer }
+        : {
+            outcome: "refused",
+            reason:
+              isRecord(answer) && typeof answer["error"] === "string"
+                ? answer["error"]
+                : `answered ${response.status}`,
+          };
+    }
     if (action === "audience-add")
       return this.addAudience(target, { machineId: machine.id, name: machine.name });
     if (action === "github-token") {
@@ -8087,7 +8099,6 @@ export class Kitshn extends DurableObject<Env> {
     reason: string | null,
     labels: Readonly<Record<string, string>>,
     now: number,
-    askOwner: boolean,
   ): Promise<AskOutcome> {
     const owner = fullName.split("/")[0] ?? "";
     if (matchProblem(fullName) !== null || !fullName.includes("/") || fullName.includes("*"))
@@ -8098,37 +8109,41 @@ export class Kitshn extends DurableObject<Env> {
         reason: `${owner} is "not kitshn"; the machine uses its own login (K-1760).`,
       };
     const wanted = isRecord(body) ? body["permission"] : "auto";
+    // K-1763, K-1776: git cannot say push or fetch, so "auto" asks for write when the machine may write, when an Owner
+    // approval of write is open, and when no code right is set at all (the Owner then approves write).
+    const unset =
+      codeRightMode(this.state, machine.id, "readsCode", fullName, now) === null &&
+      !codeRightOff(this.state, machine.id, "readsCode", fullName, now) &&
+      !codeRightOff(this.state, machine.id, "writesCode", fullName, now);
     const write =
       wanted === "write" ||
       (wanted !== "read" &&
         (codeRightMode(this.state, machine.id, "writesCode", fullName, now) !== null ||
-          this.inApprovedWindow(machine.id, "github-token", fullName, "writesCode", OWNER_CIRCLE_ID, now)));
+          this.inApprovedWindow(machine.id, "github-token", fullName, "writesCode", OWNER_CIRCLE_ID, now) ||
+          unset));
     const right: MachineRight = write ? "writesCode" : "readsCode";
     const mode = codeRightMode(this.state, machine.id, right, fullName, now);
     const failed = mode
       ? conditionProblem(mode.conditions, labels, this.attesterPrefixesOf(machine.id))
       : null;
     if (failed) return { outcome: "refused", reason: failed };
-    // K-1776: an off right names itself, and `askOwner` sends this one token ask to the Owner.
+    // K-1776: a code right that no card sets asks the Owner for this token; one set to "off" refuses.
     if (mode === null) {
       const permission = write ? "write" : "read";
+      if (codeRightOff(this.state, machine.id, right, fullName, now))
+        return offRight(right, `for ${fullName} (K-1733)`);
       if (this.inApprovedWindow(machine.id, "github-token", fullName, right, OWNER_CIRCLE_ID, now))
         return this.mintToken(machine, fullName, permission);
-      if (askOwner)
-        return this.propose(
-          machine,
-          "github-token",
-          fullName,
-          { permission },
-          reason,
-          labels,
-          right,
-          OWNER_CIRCLE_ID,
-          now,
-        );
-      return offRight(
+      return this.propose(
+        machine,
+        "github-token",
+        fullName,
+        { permission },
+        reason,
+        labels,
         right,
-        `for ${fullName}: a repo group or repo card in its agent circle gives it (K-1733)`,
+        OWNER_CIRCLE_ID,
+        now,
       );
     }
     if (
@@ -8476,7 +8491,10 @@ export class Kitshn extends DurableObject<Env> {
     if (!circle || (circle.endsAt !== null && circle.endsAt <= now)) return "the approver circle ended.";
     if (!this.state.machines.has(proposal.machineId)) return "the machine that asked is gone.";
     if (
-      (proposal.action === "deploy" || proposal.action === "publish") &&
+      (proposal.action === "deploy" ||
+        proposal.action === "publish" ||
+        proposal.action === "backup" ||
+        proposal.action === "restore") &&
       !this.state.resources.has(proposal.target)
     )
       return `the card ${proposal.target} is gone.`;
@@ -11644,7 +11662,7 @@ const sha256Hex = async (text: string) =>
 /** K-1776: the refusal of a right that is off: one line that names the right, and the right for the CLI's offer. */
 const offRight = (right: MachineRight, scope = "for this machine (K-1720)"): AskOutcome => ({
   outcome: "refused",
-  reason: `The right "${MACHINE_RIGHT_NAMES[right]}" is off ${scope}.`,
+  reason: `The right "${MACHINE_RIGHT_NAMES[right]}" is off ${scope}. Ask the owner to turn it on.`,
   need: right,
 });
 

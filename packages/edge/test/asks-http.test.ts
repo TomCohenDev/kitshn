@@ -87,8 +87,9 @@ it("takes a call that the daemon forwarded and signed, with the right of its pat
   const address = "/agent/cards/no-such-card/address";
   const off = await forwarded(key, "POST", address, "nonce-off-0123456789");
   expect(off.status).toBe(403);
+  // A forwarded call cannot wait for the Owner, so an unset right refuses it too, and says how to fix it.
   expect(await off.json()).toEqual({
-    error: expect.stringContaining('"adds pages" is off'),
+    error: expect.stringContaining('"adds pages" is not set'),
     need: "addsPages",
   });
   await setup({ deploys: { mode: "automatic" }, addsPages: { mode: "automatic" } }, key);

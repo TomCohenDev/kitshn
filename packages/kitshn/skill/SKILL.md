@@ -75,13 +75,13 @@ A Compose app listens on the Unix socket `$KITSHN_DEFAULT_SOCKET` and publishes 
 Call `kitshn` on the machine where you run. kitshn knows the machine and your thread, and gives you the access that the owner gave them. You set nothing yourself.
 
 - `kitshn agent state`: the cards that you manage, with the newest deploy, backup and uptime of each, and your rights.
-- `kitshn agent deploy <card> --body '{"mode":"redeploy"}'`: redeploy a card (`"build"` runs its workflow again).
+- `kitshn agent deploy <card> --body '{"mode":"redeploy"}'`: redeploy a card (`"build"` runs its workflow again). `kitshn agent backup <card>` backs it up now.
 - `kitshn agent job <machine> --body '{"command": ...}'` runs a job; `kitshn agent history t3.thread.id=<id>` lists what a thread asked.
 - `kitshn publish <file|folder> [--name <name>] [--address <name>] [--circle <circle>] [--public]` puts a page, a file or a folder site on the map (K-1116, K-1123). The same name again updates its card.
 - `kitshn address <card> <name>`, `kitshn redirect <card> <address> [--remove]`, `kitshn logs <card> [text] [--since 1h] [--deploys]` and `kitshn repo <card> --repo <owner/name>` do what their names say (K-1120, K-1128, K-1809, K-1127).
 - `git push` to github.com works after `kitshn setup-git` once on the machine (K-1763).
 
-When kitshn says no, its one line names the right that you need and how to ask the owner, often "run the same command again with --ask". A call that waits for an approval prints `waiting:` and ends when the owner answers. `--reason <text>` tells the approver why.
+When a call needs the owner, kitshn asks the owner and prints `waiting:`; the call ends when the owner answers. `--reason <text>` tells the owner why. When kitshn says no, its one line names the right and what to ask the owner.
 
 If `kitshn` says that no daemon runs, the machine is not joined: tell the user.
 

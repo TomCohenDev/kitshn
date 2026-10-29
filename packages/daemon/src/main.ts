@@ -410,12 +410,7 @@ async function gitCredentialCommand(operation: string | undefined) {
   }
   const why =
     answer.outcome === "refused"
-      ? answer.need
-        ? offerLine(
-            answer.reason,
-            `run kitshn agent github-token ${repo} --body '{"permission":"write"}' --ask, then push again after the approval`,
-          )
-        : answer.reason
+      ? answer.reason
       : answer.outcome === "waiting"
         ? `the token waits for an approval (proposal ${answer.proposalId}); push again after it`
         : "kitshn gave no token";
@@ -480,13 +475,10 @@ async function ghCommand(argv: ReadonlyArray<string>) {
   process.exit(run.status ?? 1);
 }
 
-/** K-1776: one line for a right that is off: why, and how to send the same call to the Owner. */
-const offerLine = (reason: string, how: string) => `${reason} To ask the Owner, ${how}.`;
-
 /**
- * K-1710: `kitshn agent <action> [target] [--reason <text>] [--label <key>=<value>]... [--body <json>] [--ask]` asks
+ * K-1710: `kitshn agent <action> [target] [--reason <text>] [--label <key>=<value>]... [--body <json>]` asks
  * kitshn through the daemon and prints the result as JSON. A waiting ask follows its proposal to the end (K-1722).
- * `--ask` sends a call whose right is off to the Owner (K-1776).
+ * A right that no circle sets asks the Owner first (K-1776).
  */
 async function agentCommand(argv: ReadonlyArray<string>) {
   const [action, ...rest] = argv;
@@ -495,13 +487,11 @@ async function agentCommand(argv: ReadonlyArray<string>) {
   let target = "";
   let reason: string | undefined;
   let body: unknown;
-  let askOwner = false;
   const labels: Record<string, string> = {};
   for (let index = 0; index < rest.length; index++) {
     const word = rest[index] ?? "";
     const value = () => rest[++index] ?? fail(`${word} needs a value.`);
     if (word === "--reason") reason = value();
-    else if (word === "--ask") askOwner = true;
     // K-1774: `--aud` is the alias of the JWT claim name.
     else if (word === "--audience" || word === "--aud") target = value();
     else if (word === "--body") {
@@ -529,7 +519,6 @@ async function agentCommand(argv: ReadonlyArray<string>) {
     ...(body === undefined ? {} : { body }),
     ...(reason === undefined ? {} : { reason }),
     ...(Object.keys(labels).length === 0 ? {} : { labels }),
-    ...(askOwner ? { askOwner } : {}),
     attestations: await attestationsFromEnv(),
   };
   const outcome = await askLocal(
@@ -546,8 +535,7 @@ async function agentCommand(argv: ReadonlyArray<string>) {
   if (outcome.kind === "not-running") fail(notRunning());
   const answer = outcome.answer;
   if (answer.type === "error") fail(answer.error);
-  if (answer.type === "ask" && answer.outcome === "refused")
-    fail(answer.need ? offerLine(answer.reason, "run the same command again with --ask") : answer.reason);
+  if (answer.type === "ask" && answer.outcome === "refused") fail(answer.reason);
   if (answer.type === "ask-result" && answer.outcome !== "approved")
     fail(`${answer.outcome}: proposal ${answer.proposalId}${answer.reason ? ` (${answer.reason})` : ""}.`);
   const result =
@@ -2310,7 +2298,6 @@ kitshn rekey <code>                     make a new machine key with the key code
 kitshn status                           the machine, its key, its connection to kitshn and its tunnel
 kitshn local-users list|add|remove <u>  who else may use the local socket, as the daemon user (K-701)
 kitshn agent <action> [target]          ask kitshn as this machine (K-1710): --reason, --label k=v, --body json
-kitshn agent ... --ask                  send a call whose right is off to the Owner (K-1776)
 ${AGENT_USAGE}
 kitshn setup-git                        git asks kitshn first for github.com tokens (K-1763)
 kitshn gh <args>                        gh with a kitshn token for this repo (K-1764)

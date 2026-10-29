@@ -12766,8 +12766,14 @@ const missingFeature = (
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
-const send = (socket: WebSocket, message: ServerMessage | ServerToDaemon) =>
+/**
+ * A socket that is closing still shows in `getWebSockets` until its close is handled, and a send to it throws. It
+ * gets nothing: its close handler does the clean-up (K-1805).
+ */
+const send = (socket: WebSocket, message: ServerMessage | ServerToDaemon) => {
+  if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) return;
   socket.send(JSON.stringify(message));
+};
 
 /** K-2003: a request of the join page. */
 interface GameRequest {

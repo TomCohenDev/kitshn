@@ -29,7 +29,7 @@ export default {
       await zoomTo(card);
       await card.click();
     }
-    const arrow = page.getByRole("button", { name: "▾ Preview" });
+    const arrow = page.getByRole("button", { name: /▾ Preview|show the preview/ });
     await arrow.waitFor();
     await shot("closed");
     await arrow.click();
@@ -50,7 +50,7 @@ export default {
     await page.locator('[data-card="riffle"]').first().click();
     await page.waitForTimeout(200);
     await page.locator('[data-card="riffle"]').first().click();
-    await page.getByRole("button", { name: "▾ Preview" }).click();
+    await page.getByRole("button", { name: /▾ Preview|show the preview/ }).click();
     await page.locator(".preview-frame .help").waitFor();
     await shot("private");
   },

@@ -2,6 +2,7 @@ import { createPortal } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { type Resource, type State, activeShares, isPublicCircle } from "../core/model.ts";
 import { frameSandbox } from "./frames.ts";
+import { KINDS } from "./kinds.ts";
 
 /** K-520: a card that opens without a login; any other card needs an Access session, which a frame cannot start. */
 const opensForAnyone = (state: State, resource: Resource) =>
@@ -136,41 +137,92 @@ export function CardPreview(props: {
   );
 }
 
-/**
- * K-520: the arrow under a selected card. The frame mounts only while it is open, and the arrow starts closed for
- * every card, because its parent mounts it again for each selection.
- */
-export function PeekArrow(props: { resource: Resource; state: State; zone: string }) {
+/** K-520: whether a selected card's preview is open, and large. It closes when the card loses the selection. */
+export function usePeek(offered: boolean) {
   const [open, setOpen] = useState(false);
   const [large, setLarge] = useState(false);
   const toggle = useRef<HTMLButtonElement>(null);
+  if (!offered && (open || large)) {
+    setOpen(false);
+    setLarge(false);
+  }
+  return {
+    offered,
+    open: offered && open,
+    large: offered && large,
+    toggle,
+    flip: () => {
+      setOpen(!open);
+      setLarge(false);
+    },
+    enlarge: () => setLarge(true),
+    shrink: () => {
+      setLarge(false);
+      toggle.current?.focus();
+    },
+  };
+}
+
+export type Peek = ReturnType<typeof usePeek>;
+
+/**
+ * K-524, K-520: the kind sticker of a card. When the card offers a preview, the sticker is also its toggle: a ▾ at
+ * its end opens and closes the frame, by click or keyboard. Otherwise it is the plain sticker.
+ */
+export function KindSticker(props: { resource: Resource; peek: Peek | null }) {
+  const kind = KINDS[props.resource.kind];
+  const style = { "--tilt": kind.tilt, background: kind.color, color: kind.ink };
+  const peek = props.peek;
+  if (!peek?.offered)
+    return (
+      <span class="sticker" data-tip={kind.help} style={style}>
+        {props.resource.kind}
+      </span>
+    );
+  return (
+    <button
+      type="button"
+      ref={peek.toggle}
+      class="sticker kind-toggle"
+      aria-expanded={peek.open}
+      aria-label={`${props.resource.kind}: ${peek.open ? "hide" : "show"} the preview`}
+      data-tip={`${peek.open ? "Hide the preview." : "Show the preview."} ${kind.help}`}
+      style={style}
+      // The map starts a drag on a press; this press only opens or closes the preview.
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={peek.flip}
+    >
+      {props.resource.kind}
+      <span aria-hidden="true">{peek.open ? " ▴" : " ▾"}</span>
+    </button>
+  );
+}
+
+/** K-520: the frame that the kind sticker opens; it mounts only while open, so it loads only then. */
+export function PeekFrame(props: { peek: Peek; resource: Resource; state: State; zone: string }) {
+  const { peek, ...rest } = props;
+  if (!peek.open) return null;
   return (
     <div class="peek">
-      <button
-        type="button"
-        ref={toggle}
-        class="btn peek-toggle"
-        aria-expanded={open}
-        data-tip={open ? "Close the preview." : "Open a small preview of the address."}
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={() => {
-          setOpen(!open);
-          setLarge(false);
-        }}
-      >
-        {open ? "▴ Preview" : "▾ Preview"}
-      </button>
-      {open && !large ? <CardPreview {...props} onEnlarge={() => setLarge(true)} /> : null}
-      {open && large ? (
-        <LargePreview
-          {...props}
-          onClose={() => {
-            setLarge(false);
-            toggle.current?.focus();
-          }}
-        />
-      ) : null}
+      {peek.large ? (
+        <LargePreview {...rest} onClose={peek.shrink} />
+      ) : (
+        <CardPreview {...rest} onEnlarge={peek.enlarge} />
+      )}
     </div>
+  );
+}
+
+/** K-520: the kind sticker with its preview in the card sheet of a phone; keyed by card, so each starts closed. */
+export function PeekRow(props: { resource: Resource; state: State; zone: string }) {
+  const peek = usePeek(true);
+  return (
+    <>
+      <div class="row">
+        <KindSticker resource={props.resource} peek={peek} />
+      </div>
+      <PeekFrame peek={peek} {...props} />
+    </>
   );
 }
 

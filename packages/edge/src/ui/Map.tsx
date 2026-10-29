@@ -24,7 +24,7 @@ import { type MenuTarget, USER_STACK } from "./actions.ts";
 import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import { FRAMED_KINDS, peekable } from "./frames.ts";
-import { CardPreview, type FramePhase, PeekArrow } from "./Peek.tsx";
+import { CardPreview, type FramePhase, KindSticker, PeekFrame, usePeek } from "./Peek.tsx";
 import type { Rect } from "./popover.ts";
 import { HOLD_MS, type Press, fingerDown, startPress, stepPress } from "./press.ts";
 import {
@@ -114,7 +114,7 @@ interface Props {
   readonly view: View;
   /** Live previews of site and page cards (when the zoom allows). */
   readonly previews: boolean;
-  /** K-520: the preview arrow under the selected card (a wide screen; a phone has it in the card sheet). */
+  /** K-520: the selected card offers its preview on its kind sticker (a wide screen; a phone has it in the card sheet). */
   readonly peek: boolean;
   readonly zone: string;
   readonly onView: (view: View) => void;
@@ -980,14 +980,17 @@ export function CardView(props: {
   preview: boolean;
   /** A fixed phase of its preview frame, for the style guide (`/neo-brutalism`). */
   previewStill?: FramePhase;
-  /** K-520: the selected card offers the preview arrow; a phone has it in the card sheet instead. */
+  /** K-520: the selected card offers its preview on its kind sticker; a phone has it in the card sheet instead. */
   peek: boolean;
   zone: string;
   onMenu: (anchor: Rect) => void;
   onClose: () => void;
 }) {
   const { resource, state } = props;
-  const kind = KINDS[resource.kind];
+  // K-520: the selected card offers its preview on its kind sticker, unless a live preview already shows.
+  const peek = usePeek(
+    props.selected && props.peek && peekable(resource) && !(props.preview && resource.addresses[0]),
+  );
   const holding = circlesHolding(state, resource.id);
   return (
     <div
@@ -1052,13 +1055,7 @@ export function CardView(props: {
       </div>
       <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
       <div class="foot">
-        <span
-          class="sticker"
-          data-tip={kind.help}
-          style={{ "--tilt": kind.tilt, background: kind.color, color: kind.ink }}
-        >
-          {resource.kind}
-        </span>
+        <KindSticker resource={resource} peek={peek} />
         {props.pullRequest !== null ? (
           <span
             class="sticker info"
@@ -1103,9 +1100,9 @@ export function CardView(props: {
           zone={props.zone}
           {...(props.previewStill ? { still: props.previewStill } : {})}
         />
-      ) : props.selected && props.peek && peekable(resource) ? (
-        <PeekArrow resource={resource} state={state} zone={props.zone} />
-      ) : null}
+      ) : (
+        <PeekFrame peek={peek} resource={resource} state={state} zone={props.zone} />
+      )}
     </div>
   );
 }

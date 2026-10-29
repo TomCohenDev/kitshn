@@ -85,7 +85,7 @@ import { ItemIcon } from "./ItemIcon.tsx";
 import { FOLDER_SITE_PREFIX } from "../core/apps.ts";
 import { peekable } from "./frames.ts";
 import { type FolderFiles, droppedFolder, pickedFolder, uploadFolder } from "./folders.ts";
-import { PeekArrow } from "./Peek.tsx";
+import { PeekRow } from "./Peek.tsx";
 import {
   type Action,
   type ActionContext,
@@ -2120,7 +2120,7 @@ export function App() {
 function Panel(props: {
   state: State;
   zone: string;
-  /** K-520: a phone has the preview arrow in the card sheet, not under the card on the map. */
+  /** K-520: a phone offers the preview on the kind sticker in the card sheet, not on the card on the map. */
   peek: boolean;
   /** K-819: the repos that deploy or wait to deploy. */
   repos: ReadonlyArray<RepoView>;
@@ -2694,7 +2694,7 @@ function CardPanel(props: {
         </div>
       ) : null}
       {props.peek && peekable(resource) ? (
-        <PeekArrow resource={resource} state={state} zone={props.zone} />
+        <PeekRow key={resource.id} resource={resource} state={state} zone={props.zone} />
       ) : null}
       {address &&
       (resource.kind === "page" ||

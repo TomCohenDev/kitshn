@@ -111,6 +111,25 @@ describe("self-approval (K-1727)", () => {
     ]);
     expect(selfApprovers(circles, bots)).toEqual(["vps"]);
     expect(selfApprovers(circles, agents)).toEqual([]);
+    // In a passkey circle, a machine approves only with "machines may approve", and the rule warning names it.
+    const locked: Circle = { ...bots, needsPasskey: true };
+    const lockedCircles = new Map<string, Circle>([
+      [locked.id, locked],
+      [agents.id, agents],
+    ]);
+    expect(selfApprovers(lockedCircles, locked)).toEqual([]);
+    expect(rightWarnings(lockedCircles, "vps", { deploys: { mode: "ask", circleId: "bots" } })).toEqual([
+      expect.stringContaining("no person"),
+    ]);
+    const open: Circle = { ...locked, machinesMayApprove: true };
+    const openCircles = new Map<string, Circle>([
+      [open.id, open],
+      [agents.id, agents],
+    ]);
+    expect(selfApprovers(openCircles, open)).toEqual(["vps"]);
+    expect(
+      rightWarnings(openCircles, "vps", { deploys: { mode: "ask", circleId: "bots" } }).join(" "),
+    ).toMatch(/"machines may approve" is on/);
   });
 });
 

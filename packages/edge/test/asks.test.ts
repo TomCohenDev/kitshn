@@ -36,7 +36,7 @@ const daemonSocket = (sent: Array<ServerToDaemon>) =>
   }) as unknown as WebSocket;
 
 /** One map where the machine vps sits in the agent circle "agents" with these rights. */
-async function setup(rights: Partial<Record<string, RightMode>>) {
+async function setup(rights: Partial<Record<string, RightMode>>, circle: Partial<Circle> = {}) {
   const stub = env.KITSHN.getByName("kitshn");
   const agents: Circle = {
     id: "agents",
@@ -50,6 +50,7 @@ async function setup(rights: Partial<Record<string, RightMode>>) {
     x: 5000,
     y: 5000,
     r: 200,
+    ...circle,
   };
   await runInDurableObject(stub, (_, state) => {
     // The tests share one Durable Object, so each starts from the same machine, circle and empty asks.
@@ -148,6 +149,25 @@ it("waits for one answer of its approver circle; a second answer gets already de
     state.storage.sql.exec<{ state: string }>("SELECT state FROM proposals").toArray(),
   );
   expect(states).toEqual([{ state: "denied" }]);
+  // K-1727: in a passkey circle, a member machine answers only while "machines may approve" is on.
+  const locked = await setup({ deploys: { mode: "ask", circleId: "agents" } }, { needsPasskey: true });
+  const asked = await ask(locked, "deploy", "card");
+  const machineAnswer = () =>
+    runInDurableObject(locked, (instance) =>
+      (instance as unknown as Instance).decide(
+        asked.outcome === "waiting" ? asked.proposalId : "",
+        "denied",
+        {
+          ...owner,
+          visitor: { email: null, clientId: "vps.access", ip: null },
+          machineId: "vps",
+        },
+      ),
+    );
+  expect(await machineAnswer()).toMatchObject({
+    ok: false,
+    error: expect.stringContaining("machines may approve"),
+  });
 });
 
 it("expires a proposal after its time, so no later answer runs it (K-1724)", async () => {

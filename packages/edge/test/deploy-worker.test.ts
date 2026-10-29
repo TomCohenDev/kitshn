@@ -461,6 +461,22 @@ describe("several apps per repo (K-804, K-820)", () => {
     // Another bot, such as Dependabot, deploys as before.
     app.run.actor = "dependabot[bot]";
     expect((await step(app, "/deploy/plan", { recipe: recipe(), event: {} })).status).toBe(200);
+    // With an App whose bot name GitHub does not give, every bot run waits, because it can be the App's.
+    const withApp = (on: boolean) =>
+      runInDurableObject(env.KITSHN.getByName("kitshn"), (instance, durable) => {
+        const own = (instance as unknown as { env: Record<string, string | undefined> }).env;
+        own["GITHUB_APP_ID"] = on ? "1" : undefined;
+        own["GITHUB_APP_KEY"] = on ? "not a key" : undefined;
+        durable.storage.sql.exec("DELETE FROM meta WHERE key = 'github_app_bot'");
+      });
+    await withApp(true);
+    try {
+      const unknown = await step(app, "/deploy/plan", { recipe: recipe(), event: {} });
+      expect(unknown.status).toBe(409);
+      expect(String(unknown.body["error"])).toMatch(/cannot read the bot name/);
+    } finally {
+      await withApp(false);
+    }
   });
 
   it("refuses an admin host as the main or an extra address, also the old host during the move (K-817, K-1209)", async () => {

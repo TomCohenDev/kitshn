@@ -773,6 +773,14 @@ export function CircleEditor(props: {
               </a>
             </p>
           ) : null}
+          {circle.needsPasskey && circle.members.some((member) => member._tag === "machine") ? (
+            <Switch
+              checked={circle.machinesMayApprove === true}
+              label="Machines may approve"
+              tip="Machines may approve: a machine of this circle approves asks with no passkey. Off: only people approve (K-1727)."
+              onChange={(machinesMayApprove) => void put({ machinesMayApprove })}
+            />
+          ) : null}
         </div>
       </div>
       <div class="field-row">

@@ -110,6 +110,8 @@ export interface Circle {
   readonly members: ReadonlyArray<Member>;
   readonly match: "any" | "all";
   readonly needsPasskey: boolean;
+  /** K-1727: in a circle that needs a passkey, a machine approves asks only while this is on. Off by default. */
+  readonly machinesMayApprove?: boolean;
   readonly endsAt: Time | null;
   readonly x: number;
   readonly y: number;

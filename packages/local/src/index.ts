@@ -26,6 +26,9 @@ export const ASK_ACTIONS = [
 ] as const;
 export type AskAction = (typeof ASK_ACTIONS)[number];
 
+/** K-1723: the asks whose approval only opens a window; the daemon asks again to get the secret. */
+export const WINDOW_ACTIONS: ReadonlySet<AskAction> = new Set(["github-token", "pass"]);
+
 /** K-1750: at most 10 labels; a key of `a-z`, `0-9`, `.` and `-` with a prefix, a value of at most 256 characters. */
 export const MAX_LABELS = 10;
 const LABEL_KEY_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789.-";

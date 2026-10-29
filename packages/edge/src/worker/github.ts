@@ -252,6 +252,8 @@ export async function repoToken(
   fullName: string,
   permission: "read" | "write",
   installationId: number | null,
+  /** The repo id when kitshn knows it, so a rename or a new repo with the old name gets no token (K-819). */
+  repoId: string | null,
 ): Promise<{ readonly token: string; readonly expiresAt: string; readonly installationId: number }> {
   const [owner, name] = fullName.split("/");
   if (!owner || !name) throw new Error(`${fullName} is not owner/name.`);
@@ -270,13 +272,57 @@ export async function repoToken(
   }
   const access = record(
     await call(jwt, "POST", `/app/installations/${id}/access_tokens`, {
-      repositories: [name],
+      ...(repoId === null ? { repositories: [name] } : { repository_ids: [repositoryId(repoId)] }),
       permissions: TOKEN_PERMISSIONS[permission],
     }),
   );
   if (typeof access["token"] !== "string" || typeof access["expires_at"] !== "string")
     throw new Error("GitHub sent no installation token.");
   return { token: access["token"], expiresAt: access["expires_at"], installationId: id };
+}
+
+/**
+ * K-1716: a token sealed with AES-GCM under a key that HKDF derives from the App private key, a Worker secret. Revoking
+ * needs the token itself, so `github_tokens` keeps this sealed copy; backups leave the table out (K-1831).
+ */
+async function tokenKey(appKey: string) {
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(appKey), "HKDF", false, [
+    "deriveKey",
+  ]);
+  return crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: new Uint8Array(),
+      info: new TextEncoder().encode("kitshn github_tokens"),
+    },
+    base,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+export async function sealToken(appKey: string, token: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      await tokenKey(appKey),
+      new TextEncoder().encode(token),
+    ),
+  );
+  return `${btoa(String.fromCharCode(...iv))}.${btoa(String.fromCharCode(...sealed))}`;
+}
+
+export async function openToken(appKey: string, sealed: string): Promise<string> {
+  const [iv, data] = sealed
+    .split(".")
+    .map((part) => Uint8Array.from(atob(part), (char) => char.charCodeAt(0)));
+  if (!iv || !data) throw new Error("A sealed token is not iv.data.");
+  return new TextDecoder().decode(
+    await crypto.subtle.decrypt({ name: "AES-GCM", iv }, await tokenKey(appKey), data),
+  );
 }
 
 /** K-1716: ends an installation token before its hour; a token that is gone already counts as ended. */

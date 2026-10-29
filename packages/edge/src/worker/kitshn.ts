@@ -174,6 +174,8 @@ import {
   labelProblem,
   shownAsk,
   shownHash,
+  WINDOW_ACTIONS,
+  machinesApprove,
 } from "../core/asks.ts";
 import { type MachineOs, machineOs } from "../core/icons.ts";
 import {
@@ -253,6 +255,8 @@ import {
   repoToken,
   reposOnGitHub,
   revokeToken,
+  sealToken,
+  openToken,
 } from "./github.ts";
 import { REPLACED, dropLiveSite, failQueuedDowns, removalDown, requeueDowns } from "./downs.ts";
 import { REPO_GATE_MIGRATION, migrate } from "./migrations.ts";
@@ -528,21 +532,6 @@ export class Kitshn extends DurableObject<Env> {
   }
   /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
   private stuckShares = new Set<string>();
-  /**
-   * K-1716, K-1762: the GitHub tokens that kitshn gave, by machine, only in memory, so a reset, a removal, the pause or a
-   * right turned off revokes them. Known limit: a token that a wake lost from memory lives until it expires.
-   */
-  private liveTokens = new Map<
-    string,
-    Array<{
-      readonly token: string;
-      readonly expiresAt: number;
-      readonly fullName: string;
-      readonly right: MachineRight;
-    }>
-  >();
-  /** K-1760: the owner ways that the daemons have, so kitshn sends them only after a change. */
-  private sentWays = "";
   private accessWarnings: Array<string> = [];
   /** K-819: a GitHub check of the repos runs, so a second open tab starts none. */
   private checkingRepos = false;
@@ -2745,9 +2734,8 @@ export class Kitshn extends DurableObject<Env> {
   private broadcast() {
     // K-1904: the sources that kitshn derives from its own state follow each change before the maps hear of it.
     this.reconcileNotifications();
-    // K-1716, K-1760: a change can take a code right away or change an owner way.
+    // K-1716: a change can take a code right away.
     this.revokeTokens(null, true);
-    this.sendGitHubWays();
     const repos = this.repoViews();
     for (const socket of this.ctx.getWebSockets("map")) {
       const attachment = attachmentOf(socket);
@@ -3310,7 +3298,6 @@ export class Kitshn extends DurableObject<Env> {
       this.keyFailures.delete(machine.id);
       if (machine.key?.kind !== "public") throw new Error(`${machine.name} signed without a key.`);
       send(socket, { type: "accepted", fingerprint: machine.key.fingerprint } satisfies ServerToDaemon);
-      send(socket, this.githubWaysMessage());
     }
     if (this.presence.get(machine.id)?.online) this.sendMachine(machine);
     else this.setPresence(machine.id, true);
@@ -5522,11 +5509,19 @@ export class Kitshn extends DurableObject<Env> {
     if (typeof event === "string") return Response.json({ error: event }, { status: 400 });
     // K-1767: a push or a pull request of the kitshn App never deploys by itself. A push waits for a deploy ask, which
     // builds by workflow_dispatch; a pull request waits for the owner's Deploy of its run's commit.
-    if (
-      deployer.actor.endsWith("[bot]") &&
-      deployer.eventName !== "workflow_dispatch" &&
-      deployer.actor === (await this.appBot())
-    ) {
+    const bot =
+      deployer.actor.endsWith("[bot]") && deployer.eventName !== "workflow_dispatch"
+        ? await this.appBot()
+        : null;
+    // Fails closed: with an App but no known bot name, any bot push or pull request waits.
+    if (bot === "unknown")
+      return Response.json(
+        {
+          error: "kitshn cannot read the bot name of its App, so a bot run waits. Try again later (K-1767).",
+        },
+        { status: 409 },
+      );
+    if (bot !== null && deployer.actor === bot) {
       if (deployer.eventName === "pull_request" && deployer.pr !== null) {
         const [run] = this.sql<{ approved: number }>(
           "SELECT approved FROM bot_runs WHERE repo_id = ? AND pr = ? AND sha = ?",
@@ -7035,7 +7030,13 @@ export class Kitshn extends DurableObject<Env> {
         });
       const failed = conditionProblem(mode.conditions, labels, prefixes);
       if (failed) return event({ outcome: "refused", reason: failed });
-      if (mode.mode === "ask")
+      if (
+        mode.mode === "ask" &&
+        !(
+          WINDOW_ACTIONS.has(action) &&
+          this.inApprovedWindow(machine.id, action, target, needs, mode.circleId, now)
+        )
+      )
         return event(
           await this.propose(machine, action, target, raw["body"], reason, labels, needs, mode.circleId, now),
         );
@@ -7240,7 +7241,10 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ githubWay: way });
   }
 
-  /** K-1767: the bot login of the kitshn App, asked once and kept; null without the App. */
+  /**
+   * K-1767: the bot login of the kitshn App, asked once and kept. Null without the App, because then no bot run is
+   * kitshn's; "unknown" when GitHub does not answer.
+   */
   private async appBot(): Promise<string | null> {
     const kept = this.meta("github_app_bot");
     if (kept) return kept;
@@ -7249,7 +7253,7 @@ export class Kitshn extends DurableObject<Env> {
       () => null,
     );
     if (login) this.setMeta("github_app_bot", login);
-    return login;
+    return login ?? "unknown";
   }
 
   /** K-1751: the label prefixes of the attesters that the machine reports now; none while it is offline. */
@@ -7436,33 +7440,51 @@ export class Kitshn extends DurableObject<Env> {
         outcome: "refused",
         reason: `The right "${MACHINE_RIGHT_NAMES[right]}" is off for ${fullName} on this machine: a repo group or repo card in its agent circle gives it (K-1733).`,
       };
-    if (mode.mode === "ask") {
-      // K-1723: a token never waits in a queue; the same ask within an hour after an approval runs at once.
-      const [approved] = this.sql<{ id: string }>(
-        `SELECT id FROM proposals WHERE machine_id = ? AND action = 'github-token' AND target = ? AND right_name = ?
-         AND state = 'approved' AND decided_at > ? LIMIT 1`,
-        machine.id,
+    if (
+      mode.mode === "ask" &&
+      !this.inApprovedWindow(machine.id, "github-token", fullName, right, mode.circleId, now)
+    )
+      return this.propose(
+        machine,
+        "github-token",
         fullName,
+        { permission: write ? "write" : "read" },
+        reason,
+        labels,
         right,
-        now - APPROVED_WINDOW_MS,
+        mode.circleId,
+        now,
       );
-      if (!approved)
-        return this.propose(
-          machine,
-          "github-token",
-          fullName,
-          { permission: write ? "write" : "read" },
-          reason,
-          labels,
-          right,
-          mode.circleId,
-          now,
-        );
-    }
     return this.mintToken(machine, fullName, write ? "write" : "read");
   }
 
-  /** K-1762: makes the token through the App, keeps it in memory for revocation, and gives it to the daemon. */
+  /**
+   * K-1723: the same ask of this machine, approved by the circle that the right asks now, within the last hour. A
+   * token never waits in a queue, so the approval opens this window and the next ask gets the token.
+   */
+  private inApprovedWindow(
+    machineId: string,
+    action: AskAction,
+    target: string,
+    right: MachineRight,
+    circleId: string,
+    now: number,
+  ) {
+    return (
+      this.sql(
+        `SELECT 1 AS one FROM proposals WHERE machine_id = ? AND action = ? AND target = ? AND right_name = ?
+         AND circle_id = ? AND state = 'approved' AND decided_at > ? LIMIT 1`,
+        machineId,
+        action,
+        target,
+        right,
+        circleId,
+        now - APPROVED_WINDOW_MS,
+      ).length > 0
+    );
+  }
+
+  /** K-1762: makes the token through the App, keeps a sealed copy for revocation (K-1716), and gives it to the daemon. */
   private async mintToken(
     machine: Machine,
     fullName: string,
@@ -7482,6 +7504,10 @@ export class Kitshn extends DurableObject<Env> {
         fullName,
         permission,
         known?.installation_id ?? null,
+        this.sql<{ repo_id: string }>(
+          "SELECT repo_id FROM repos WHERE name = ? COLLATE NOCASE AND gone_at IS NULL LIMIT 1",
+          fullName,
+        )[0]?.repo_id ?? null,
       );
       if (minted.installationId !== known?.installation_id)
         this.sql(
@@ -7489,14 +7515,15 @@ export class Kitshn extends DurableObject<Env> {
           owner,
           minted.installationId,
         );
-      const live = (this.liveTokens.get(machine.id) ?? []).filter((item) => item.expiresAt > Date.now());
-      live.push({
-        token: minted.token,
-        expiresAt: Date.parse(minted.expiresAt),
+      this.sql(
+        "INSERT INTO github_tokens (id, machine_id, repo, right_name, expires_at, sealed) VALUES (?, ?, ?, ?, ?, ?)",
+        crypto.randomUUID(),
+        machine.id,
         fullName,
-        right: permission === "write" ? "writesCode" : "readsCode",
-      });
-      this.liveTokens.set(machine.id, live);
+        permission === "write" ? "writesCode" : "readsCode",
+        Date.parse(minted.expiresAt),
+        await sealToken(key, minted.token),
+      );
       return { outcome: "done", result: { token: minted.token, expiresAt: minted.expiresAt, permission } };
     } catch (error) {
       if (error instanceof NotInstalled) return { outcome: "refused", reason: error.message };
@@ -7512,62 +7539,26 @@ export class Kitshn extends DurableObject<Env> {
    */
   private revokeTokens(machineId: string | null, onlyLost: boolean) {
     const now = Date.now();
-    for (const [id, tokens] of this.liveTokens) {
-      if (machineId !== null && id !== machineId) continue;
-      const keep = tokens.filter(
-        (item) =>
-          item.expiresAt > now &&
-          onlyLost &&
-          codeRightMode(
-            this.state,
-            id,
-            item.right === "writesCode" ? "writesCode" : "readsCode",
-            item.fullName,
-            now,
-          ) !== null,
+    this.sql("DELETE FROM github_tokens WHERE expires_at <= ?", now);
+    const rows = this.sql<{
+      id: string;
+      machine_id: string;
+      repo: string;
+      right_name: string;
+      sealed: string;
+    }>("SELECT id, machine_id, repo, right_name, sealed FROM github_tokens");
+    const key = this.env.GITHUB_APP_KEY;
+    for (const row of rows) {
+      if (machineId !== null && row.machine_id !== machineId) continue;
+      const right = row.right_name === "writesCode" ? "writesCode" : "readsCode";
+      if (onlyLost && codeRightMode(this.state, row.machine_id, right, row.repo, now) !== null) continue;
+      this.sql("DELETE FROM github_tokens WHERE id = ?", row.id);
+      if (!key) continue;
+      this.ctx.waitUntil(
+        openToken(key, row.sealed)
+          .then(revokeToken)
+          .catch((error: unknown) => console.warn(`kitshn could not revoke a token: ${String(error)}`)),
       );
-      for (const item of tokens)
-        if (!keep.includes(item) && item.expiresAt > now)
-          this.ctx.waitUntil(
-            revokeToken(item.token).catch((error: unknown) =>
-              console.warn(`kitshn could not revoke a token: ${String(error)}`),
-            ),
-          );
-      if (keep.length === 0) this.liveTokens.delete(id);
-      else this.liveTokens.set(id, keep);
-    }
-  }
-
-  /** K-1760: the owner ways for the daemons. */
-  private githubWaysMessage(): Extract<ServerToDaemon, { type: "githubWays" }> {
-    const fallback: GitHubWay = this.meta("github_default_way") === "app" ? "app" : "not-kitshn";
-    const owners = Object.fromEntries(
-      [...this.state.resources.values()].flatMap((resource) =>
-        resource.kind === "repo.group" &&
-        resource.match &&
-        !resource.match.includes("/") &&
-        resource.githubWay
-          ? [[resource.match.toLowerCase(), resource.githubWay]]
-          : [],
-      ),
-    );
-    return { type: "githubWays", fallback, owners };
-  }
-
-  /** K-1760: sends the owner ways to the daemons after a change, so a "not kitshn" owner never reaches kitshn. */
-  private sendGitHubWays() {
-    const message = this.githubWaysMessage();
-    const text = JSON.stringify(message);
-    if (text === this.sentWays) return;
-    this.sentWays = text;
-    for (const socket of this.ctx.getWebSockets("machines")) {
-      const attachment = attachmentOf(socket);
-      if (
-        attachment?.kind === "machine" &&
-        attachment.check === "signed" &&
-        socket.readyState === WebSocket.OPEN
-      )
-        send(socket, message);
     }
   }
 
@@ -7651,6 +7642,11 @@ export class Kitshn extends DurableObject<Env> {
         ok: false,
         error: `Only a member of the approver circle ${circle?.name ?? proposal.circleId} answers this ask (K-1723).`,
       };
+    if (by.machineId !== null && !machinesApprove(circle))
+      return {
+        ok: false,
+        error: `${circle.name} needs a passkey, and "machines may approve" is off, so a machine does not answer its asks (K-1727).`,
+      };
     // K-1723: a passkey circle approves only through the passkey application, whose token proves a fresh passkey.
     if (decision === "approved" && via === "login" && circle.needsPasskey)
       return {
@@ -7708,6 +7704,12 @@ export class Kitshn extends DurableObject<Env> {
         outcome: "denied",
         ...(by.reason ? { reason: by.reason } : {}),
       });
+      this.broadcast();
+      return { ok: true };
+    }
+    // K-1723: the approval of a token opens the window; the daemon asks again and gets the token, so no row holds it.
+    if (WINDOW_ACTIONS.has(proposal.action)) {
+      this.sendAskResult(proposal.machineId, { proposalId, outcome: "approved" });
       this.broadcast();
       return { ok: true };
     }

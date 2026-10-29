@@ -212,6 +212,10 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `CREATE TABLE bot_runs (repo_id TEXT NOT NULL, repo TEXT NOT NULL, pr INTEGER NOT NULL, sha TEXT NOT NULL,
       run_id TEXT NOT NULL, at INTEGER NOT NULL, approved INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (repo_id, pr, sha))`,
     "CREATE TABLE pass_audiences (address TEXT PRIMARY KEY, labels INTEGER NOT NULL, added_by TEXT, added_at INTEGER NOT NULL)",
+    // K-1716: the live GitHub tokens, so a reset, a removal, the pause or a lost right revokes them after a sleep.
+    // `sealed` is the token under a key from a Worker secret (github.ts); backups leave the table out.
+    `CREATE TABLE github_tokens (id TEXT PRIMARY KEY, machine_id TEXT NOT NULL, repo TEXT NOT NULL,
+      right_name TEXT NOT NULL, expires_at INTEGER NOT NULL, sealed TEXT NOT NULL)`,
   ],
 ];
 

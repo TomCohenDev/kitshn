@@ -1,4 +1,3 @@
-import type { GitHubWay } from "./model.ts";
 import type { LogAnswer, LogLine, LogSearch } from "./logs.ts";
 import type { BackupReport } from "./backups.ts";
 /** A joined machine (K-602). Its resource card has the same id and the kind `machine`. */
@@ -249,12 +248,6 @@ export type ServerToDaemon =
   /** K-1705: "Rotate key" in the machine panel. */
   | { readonly type: "rotateKey" }
   | { readonly type: "job"; readonly id: number; readonly command: Command }
-  /** K-1760: the GitHub way of each owner group and the default, so the daemon answers "not kitshn" itself. */
-  | {
-      readonly type: "githubWays";
-      readonly fallback: GitHubWay;
-      readonly owners: Readonly<Record<string, GitHubWay>>;
-    }
   /** K-1804: search the logs of the Compose app `project`. */
   | { readonly type: "logs"; readonly id: string; readonly project: string; readonly search: LogSearch }
   /** K-1805: follow the logs of the Compose app `project` until `tailStop`. */

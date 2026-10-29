@@ -49,6 +49,8 @@ async function setup(rights: Partial<Record<string, RightMode>>) {
     sql.exec("INSERT OR REPLACE INTO circles (id, body) VALUES (?, ?)", "agents", JSON.stringify(agents));
     sql.exec("INSERT OR REPLACE INTO resources (id, body) VALUES (?, ?)", group.id, JSON.stringify(group));
     sql.exec("INSERT OR REPLACE INTO places (id, x, y) VALUES (?, 5000, 5000)", group.id);
+    sql.exec("DELETE FROM proposals");
+    sql.exec("DELETE FROM github_tokens");
   });
   await evictDurableObject(stub);
   return stub;
@@ -118,6 +120,13 @@ it("gives a write token for one repo of an App owner, and revokes it when the ke
     result: { token: "ghs_test", expiresAt: expect.any(String), permission: "write" },
   });
   expect(calls).toContain("POST /app/installations/7/access_tokens");
+  // The sealed copy survives a sleep of the Durable Object, so the reset still revokes the token.
+  const stored = await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec<{ sealed: string }>("SELECT sealed FROM github_tokens").toArray(),
+  );
+  expect(stored).toHaveLength(1);
+  expect(stored[0]?.sealed).not.toContain("ghs_test");
+  await evictDurableObject(stub);
   await runInDurableObject(stub, (instance) =>
     (instance as unknown as { denyOpenProposals(id: string, why: string): void }).denyOpenProposals(
       "vps",
@@ -125,6 +134,54 @@ it("gives a write token for one repo of an App owner, and revokes it when the ke
     ),
   );
   expect(calls).toContain("DELETE /installation/token");
+});
+
+it("opens the one-hour window on approval with no token; the next ask of the machine gets it (K-1723)", async () => {
+  fakeGitHub();
+  const stub = await setup({ writesCode: { mode: "ask", circleId: "owner" } });
+  const waiting = await askToken(stub, "Yarden-zamir/riffle");
+  if (waiting.outcome !== "waiting") throw new Error(`The ask did not wait: ${waiting.outcome}`);
+  const sent: Array<ServerToDaemon> = [];
+  await runInDurableObject(stub, async (instance) => {
+    const kitshn = instance as unknown as {
+      openSocket(id: string): WebSocket | null;
+      decide(id: string, d: string, by: object): Promise<{ ok: boolean; result?: unknown }>;
+    };
+    kitshn.openSocket = () => daemonSocket(sent);
+    expect(
+      await kitshn.decide(waiting.proposalId, "approved", {
+        actor: { _tag: "person", email: "owner@example.com" },
+        visitor: { email: "owner@example.com", clientId: null, ip: null },
+        machineId: null,
+        reason: null,
+      }),
+    ).toEqual({ ok: true });
+  });
+  expect(sent).toEqual([{ type: "askResult", proposalId: waiting.proposalId, outcome: "approved" }]);
+  const rows = await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec<{ result: string | null }>("SELECT result FROM proposals").toArray(),
+  );
+  expect(rows).toEqual([{ result: null }]);
+  expect(await askToken(stub, "Yarden-zamir/riffle")).toMatchObject({
+    outcome: "done",
+    result: { token: "ghs_test" },
+  });
+  // An approval of another circle opens no window: the right now asks "agents", so the ask waits again.
+  await runInDurableObject(stub, (_, state) => {
+    const [row] = state.storage.sql
+      .exec<{ body: string }>("SELECT body FROM circles WHERE id = 'agents'")
+      .toArray();
+    const agents = JSON.parse(row?.body ?? "null") as Circle;
+    const members = [
+      { _tag: "machine", machineId: "vps", rights: { writesCode: { mode: "ask", circleId: "agents" } } },
+    ];
+    state.storage.sql.exec(
+      "UPDATE circles SET body = ? WHERE id = 'agents'",
+      JSON.stringify({ ...agents, members }),
+    );
+  });
+  await evictDurableObject(stub);
+  expect(await askToken(stub, "Yarden-zamir/riffle")).toMatchObject({ outcome: "waiting" });
 });
 
 it("answers not kitshn for another owner, and refuses an App owner's repo without a right (K-1760, K-1733)", async () => {

@@ -68,6 +68,7 @@ export const Circle = Schema.Struct({
   members: Schema.Array(Member).check(Schema.isMaxLength(200)),
   match: Schema.Literals(["any", "all"]),
   needsPasskey: Schema.Boolean,
+  machinesMayApprove: Schema.optionalKey(Schema.Boolean),
   endsAt: Schema.NullOr(Time),
   x: Coordinate,
   y: Coordinate,

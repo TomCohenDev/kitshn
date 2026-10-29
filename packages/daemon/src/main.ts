@@ -20,7 +20,7 @@ import type { BackupReport } from "@kitshn/edge/backups";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { ASK_ACTIONS, type Answer, type AskAction, type Request } from "@kitshn/local";
+import { ASK_ACTIONS, type Answer, type AskAction, type Request, WINDOW_ACTIONS } from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { backup, finishRestores, restore, unpauseMarked } from "./backup.ts";
 import { keyPlan } from "./keys.ts";
@@ -1534,11 +1534,6 @@ async function answerChallenge(
 type RotationOutcome = { readonly fingerprint: string } | { readonly error: string };
 /** K-1705: the `rotate-key` requests of the local socket that wait for kitshn to store the new key. */
 const rotationWaiters: Array<(outcome: RotationOutcome) => void> = [];
-/** K-1760: the GitHub way of each owner group, and the default, as kitshn sent them; "not kitshn" until then. */
-let githubWays: { fallback: string; owners: Readonly<Record<string, string>> } = {
-  fallback: "not-kitshn",
-  owners: {},
-};
 /** K-1762: the GitHub tokens that the daemon keeps in memory, by repo and attested thread, never on disk. */
 const keptTokens = new Map<string, { token: string; expiresAt: string; permission: "read" | "write" }>();
 /** K-1710: the asks that wait for kitshn's answer, by request id. */
@@ -1546,22 +1541,36 @@ const askWaiters = new Map<string, (outcome: AskOutcome) => void>();
 /** K-1722: the local connections that wait for the answer to a proposal, by proposal id. */
 const proposalWaiters = new Map<string, Array<(event: Answer) => void>>();
 
+/** K-1723: after an approval of a token, the same ask runs once more, and its answer becomes the approved result. */
+async function askAgain(
+  request: Extract<Request, { type: "ask" }>,
+  event: Answer,
+  emit: (event: Answer) => void,
+) {
+  if (event.type !== "ask-result" || event.outcome !== "approved") return emit(event);
+  const again = await askKitshn(request, () => {}).catch((error: unknown) => ({
+    type: "ask" as const,
+    outcome: "refused" as const,
+    reason: String(error),
+  }));
+  emit(
+    again.type === "ask" && again.outcome === "done"
+      ? { ...event, result: again.result }
+      : {
+          type: "ask-result",
+          proposalId: event.proposalId,
+          outcome: "denied",
+          reason:
+            again.type === "ask" && again.outcome === "refused" ? again.reason : "kitshn gave no token.",
+        },
+  );
+}
+
 /** K-1710: sends an ask of a local agent over the signed connection, and gives the answer back on the socket. */
 async function askKitshn(
   request: Extract<Request, { type: "ask" }>,
   emit: (event: Answer) => void,
 ): Promise<Answer> {
-  // K-1760: a "not kitshn" owner never reaches kitshn, so kitshn sees no repo name of it.
-  if (request.action === "github-token") {
-    const owner = (request.target.split("/")[0] ?? "").toLowerCase();
-    if ((githubWays.owners[owner] ?? githubWays.fallback) !== "app")
-      return {
-        id: request.id,
-        type: "ask",
-        outcome: "not-kitshn",
-        reason: `${owner} is "not kitshn" (K-1760).`,
-      };
-  }
   const ws = socket;
   if (ws === null || challenge === null)
     throw new Error(
@@ -1600,7 +1609,10 @@ async function askKitshn(
     ws.send(JSON.stringify({ type: "ask", requestId, ask } satisfies DaemonMessage));
   });
   if (outcome.outcome === "waiting")
-    proposalWaiters.set(outcome.proposalId, [...(proposalWaiters.get(outcome.proposalId) ?? []), emit]);
+    proposalWaiters.set(outcome.proposalId, [
+      ...(proposalWaiters.get(outcome.proposalId) ?? []),
+      WINDOW_ACTIONS.has(request.action) ? (event) => void askAgain(request, event, emit) : emit,
+    ]);
   if (
     cacheKey &&
     outcome.outcome === "done" &&
@@ -1758,8 +1770,6 @@ function connect(config: JoinSecrets) {
       } else if (message.type === "tailStop") {
         tails.get(message.id)?.();
         tails.delete(message.id);
-      } else if (message.type === "githubWays") {
-        githubWays = { fallback: message.fallback, owners: message.owners };
       } else if (message.type === "askAnswer") {
         const { type: _type, requestId, ...outcome } = message;
         askWaiters.get(requestId)?.(outcome);

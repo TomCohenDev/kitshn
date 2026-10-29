@@ -877,6 +877,7 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
       // In an "all must match" circle, a member that goes lets more visitors in.
       (old.match === "all" && old.members.some((member) => !has.has(key(member)))) ||
       (old.needsPasskey && !circle.needsPasskey) ||
+      (old.machinesMayApprove !== true && circle.machinesMayApprove === true) ||
       (old.match === "all" && circle.match === "any") ||
       ends(circle.endsAt) > ends(old.endsAt) ||
       levelRank(circle.level) > levelRank(old.level)

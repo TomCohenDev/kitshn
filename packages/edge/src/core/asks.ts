@@ -176,6 +176,15 @@ export const PROPOSAL_MS = 24 * 60 * 60_000;
 /** K-1723: after an approval of a token, the same ask of that machine runs at once for this long. */
 export const APPROVED_WINDOW_MS = 60 * 60_000;
 
+/**
+ * K-1723: the actions whose answer is a secret. Their approval only opens the window above, and the next ask of the
+ * machine gets the secret, so no proposal row ever holds one.
+ */
+export const WINDOW_ACTIONS: ReadonlySet<AskAction> = new Set(["github-token", "pass"]);
+
+/** K-1727: a machine of this circle approves asks; in a circle that needs a passkey only with "machines may approve". */
+export const machinesApprove = (circle: Circle) => !circle.needsPasskey || circle.machinesMayApprove === true;
+
 /** K-1717: ask events stay 30 days, at most 5,000, as K-1610. */
 export const ASK_EVENT_DAYS = 30;
 export const ASK_EVENT_COUNT = 5000;
@@ -205,7 +214,12 @@ export function rightWarnings(
       warnings.push(`"${name}" asks a circle that is gone, so no one can approve it.`);
       continue;
     }
-    if (circle.members.some((member) => member._tag === "machine" && member.machineId === machineId))
+    const machinesHere =
+      machinesApprove(circle) && circle.members.some((member) => member._tag === "machine");
+    if (
+      machinesApprove(circle) &&
+      circle.members.some((member) => member._tag === "machine" && member.machineId === machineId)
+    )
       warnings.push(`"${name}" asks ${circle.name}, which holds this machine, so it can approve itself.`);
     if (
       HIGH_RISK_RIGHTS.has(right) &&
@@ -214,9 +228,13 @@ export function rightWarnings(
       warnings.push(
         `"${name}" asks ${circle.name}, which has no person, so no person sees it before it runs.`,
       );
-    if (circle.members.some((member) => member._tag === "machine"))
+    if (machinesHere)
       warnings.push(
         `${circle.name} has machines: their agents read the reason and the labels, which the asking agent writes.`,
+      );
+    if (machinesHere && circle.needsPasskey)
+      warnings.push(
+        `${circle.name} needs a passkey, but "machines may approve" is on, so its machines approve with no passkey.`,
       );
   }
   return [...new Set(warnings)];
@@ -227,6 +245,7 @@ export function rightWarnings(
  * this circle. The circle editor warns at once, when the owner adds the machine or sets the rule.
  */
 export function selfApprovers(circles: ReadonlyMap<string, Circle>, circle: Circle): Array<string> {
+  if (!machinesApprove(circle)) return [];
   return circle.members.flatMap((member) => {
     if (member._tag !== "machine") return [];
     const asks = [...circles.values()].some((other) =>

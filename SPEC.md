@@ -56,6 +56,7 @@ The architecture, the request paths and the budget are in [docs/architecture.md]
   - "All must match": the visitor matches every member, for example the domain `qlik.com` and the IP range of the Qlik network. In Access, the members are require rules. This replaces the "required IP ranges" of the machine map Guests view.
 
   With "needs passkey", the visitor must also pass a passkey check in both modes.
+
 - **K-204** A card is shared with every circle that it sits inside. Circles overlap freely, and there is no limit on their number.
 - **K-205** A share uses the default level of its circle. One card can override the level for one circle. The override shows as a chip on the card.
 - **K-206** A level that the resource kind does not have becomes the highest level of that kind that is lower. A circle with the default `control` thus gives a file `view`.
@@ -69,17 +70,17 @@ The architecture, the request paths and the budget are in [docs/architecture.md]
 
 - **K-301** Built-in resource kinds and their levels:
 
-  | Kind | Levels | What it is |
-  | --- | --- | --- |
-  | `kitshn.admin` | control | kitshn administration (K-104) |
-  | `machine` | view, use, control | a machine with a daemon (section 6) |
-  | `site.static` | view | a static site on Workers static assets |
-  | `site.worker` | view | a Worker app |
-  | `site.compose` | view | a Compose app on a machine |
-  | `site.live` | view | a local site of a machine, through its tunnel (K-1104) |
-  | `page` | view | an HTML page in the library (section 10) |
-  | `file` | view | a file in R2 |
-  | `repo` | view | a repo that has a recipe; its environments are its children |
+  | Kind           | Levels             | What it is                                                  |
+  | -------------- | ------------------ | ----------------------------------------------------------- |
+  | `kitshn.admin` | control            | kitshn administration (K-104)                               |
+  | `machine`      | view, use, control | a machine with a daemon (section 6)                         |
+  | `site.static`  | view               | a static site on Workers static assets                      |
+  | `site.worker`  | view               | a Worker app                                                |
+  | `site.compose` | view               | a Compose app on a machine                                  |
+  | `site.live`    | view               | a local site of a machine, through its tunnel (K-1104)      |
+  | `page`         | view               | an HTML page in the library (section 10)                    |
+  | `file`         | view               | a file in R2                                                |
+  | `repo`         | view               | a repo that has a recipe; its environments are its children |
 
 - **K-302** A provider adds kinds through the daemon (K-704). Each kind has an id with the provider prefix (for example `t3.thread`), its levels, and how it is enforced (K-405).
 - **K-303** An environment of an app is its own resource and its own card, for example "riffle" and "riffle pr-41". A preview card (a deploy of a `pr-<n>` environment, K-821) shows a "PR #<n>" sticker with the number of that environment, and its panel links the pull request on GitHub. New environments start in the circle that the recipe names (K-807).
@@ -169,28 +170,28 @@ The map is the main view. These requirements improve the demo of 2026-10-26.
 - **K-712** T3 Code side: the fork adds the interface in its own files, with one-line hooks in upstream files. It never breaks upstream code paths when the daemon is missing: then T3 Code runs as upstream.
 - **K-713** T3 Code adds these kinds through the interface:
 
-  | Kind | Levels | Notes |
-  | --- | --- | --- |
-  | `t3.app` | view, use, control | The T3 web app, desktop app connection and phone app connection of one machine. Levels map to the T3 scopes `read`, `standard`, `admin` of MM-302. |
-  | `t3.thread` | view, send | One thread through upstream guest links. The circle is the guest list. |
-  | `t3.agents` | use, exec | What agents on another machine may do on this machine. A machine member of a circle gets it. `use` means agent tools; `exec` adds `kitshn_exec` (MM-1908). |
-  | `t3.settings` | none | Shared settings and themes as desired state (K-709). Not shareable; the map hides it. |
+  | Kind          | Levels             | Notes                                                                                                                                                      |
+  | ------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `t3.app`      | view, use, control | The T3 web app, desktop app connection and phone app connection of one machine. Levels map to the T3 scopes `read`, `standard`, `admin` of MM-302.         |
+  | `t3.thread`   | view, send         | One thread through upstream guest links. The circle is the guest list.                                                                                     |
+  | `t3.agents`   | use, exec          | What agents on another machine may do on this machine. A machine member of a circle gets it. `use` means agent tools; `exec` adds `kitshn_exec` (MM-1908). |
+  | `t3.settings` | none               | Shared settings and themes as desired state (K-709). Not shareable; the map hides it.                                                                      |
 
 - **K-714** The T3 fork MCP tools get new names:
 
-  | Machine map tool | kitshn tool |
-  | --- | --- |
-  | `machines_read` | `kitshn_read` |
-  | `machines_set_access` | `kitshn_share` (put a card in or out of a circle, with a level) and `kitshn_circle` (create or change a circle) |
-  | `machines_set_setting` | `kitshn_set_setting` |
-  | `machines_command` | `kitshn_command` |
-  | `machines_queue_cancel` | `kitshn_queue_cancel` |
-  | `machines_undo` | `kitshn_undo` |
-  | `machines_preset` | `kitshn_preset` (save, list or apply a preset, K-716) |
-  | `machines_join` | `kitshn_join` |
-  | `machines_resources` | `kitshn_resources` |
-  | `machine_exec` | `kitshn_exec` |
-  | (new) | `kitshn_publish` (planned in the T3 Code fork; it calls the route of K-1116), `kitshn_expose` (a live site), `kitshn_deploy` (run a deploy) |
+  | Machine map tool        | kitshn tool                                                                                                                                 |
+  | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `machines_read`         | `kitshn_read`                                                                                                                               |
+  | `machines_set_access`   | `kitshn_share` (put a card in or out of a circle, with a level) and `kitshn_circle` (create or change a circle)                             |
+  | `machines_set_setting`  | `kitshn_set_setting`                                                                                                                        |
+  | `machines_command`      | `kitshn_command`                                                                                                                            |
+  | `machines_queue_cancel` | `kitshn_queue_cancel`                                                                                                                       |
+  | `machines_undo`         | `kitshn_undo`                                                                                                                               |
+  | `machines_preset`       | `kitshn_preset` (save, list or apply a preset, K-716)                                                                                       |
+  | `machines_join`         | `kitshn_join`                                                                                                                               |
+  | `machines_resources`    | `kitshn_resources`                                                                                                                          |
+  | `machine_exec`          | `kitshn_exec`                                                                                                                               |
+  | (new)                   | `kitshn_publish` (planned in the T3 Code fork; it calls the route of K-1116), `kitshn_expose` (a live site), `kitshn_deploy` (run a deploy) |
 
 - **K-715** Agents never raise access. An agent change that adds a card to a circle, raises a level, or adds a circle member becomes a proposal for the owner. Changes that lower access apply at once. This keeps MM-803. For agents on a machine, K-1612 applies.
 - **K-716** A preset is a saved map layout: the circles, their members and the shares, with a name. Apply a preset from the History view or with `kitshn_preset`. An apply is one revision with Undo, runs the guard of K-105, and follows K-715 for agents.
@@ -493,6 +494,7 @@ Planned. kitshn's own actions never use passes (K-1710). Passes stay off until t
   - Rows read: the rows of one wake (bounded in `test/rows-read.test.ts`) for each ask that wakes a hibernated object, at most 300 wakes, plus History searches of at most 50 events each (K-1756).
 
   Every daily limit stays under 10%. [docs/architecture.md](docs/architecture.md) holds the table.
+
 - **K-1741** The end-to-end test runs from the Oracle VPS through the owner's `machine_exec` tool, after the PR deploys:
   1. The Oracle card shows a fingerprint and no "needs a key" sticker. A reconnect of the daemon passes the challenge.
   2. The owner puts the Oracle machine in an agent circle at `control`, with "adds apps", "deploys" and "publishes" set to "automatic". The machine also gets "runs commands" on itself.
@@ -537,7 +539,7 @@ Planned. kitshn's own actions never use passes (K-1710). Passes stay off until t
   3. writes the run into a new folder `.kitshn-restore` in each volume and the data folder, while the app runs;
   4. stops the app, moves the files of now into `.kitshn-before`, and moves the restored files in, writing the name of each one to `.kitshn-moved-in` before it moves;
   5. starts the app, and deletes `.kitshn-before` and `.kitshn-moved-in`.
-  Each move in step 4 stops the swap when it fails (`set -e`). A failure in steps 1 to 3 leaves the data as it is. A failure in step 4, or a start in step 5 that fails, stops what started, removes only the entries that moved in, moves the files of now back, and starts the app on them. The point of no return is a swap whose app started: after it, a failed clean-up is only a note, and the next daemon start does it. A marker file names the phase of a restore (writing, swapping, cleaning), so a daemon that stops in the middle finishes it at its next start: it deletes the new copy, takes the swap back, or cleans up. A run of step 2 stays "done" also when the restore fails, so the way back always works. History records the restore with the run that it wrote and the run that holds the state from before. Undo cannot run a restore; the way back is "Restore" on that earlier run. Known limits: step 3 needs free disk space for a second copy of the data of the run, and the app sees `.kitshn-restore` in its own folder while step 3 runs. kitshn writes it there because a rename inside one volume is the swap; a folder outside the volume would need a copy across file systems in step 4, while the app is stopped.
+     Each move in step 4 stops the swap when it fails (`set -e`). A failure in steps 1 to 3 leaves the data as it is. A failure in step 4, or a start in step 5 that fails, stops what started, removes only the entries that moved in, moves the files of now back, and starts the app on them. The point of no return is a swap whose app started: after it, a failed clean-up is only a note, and the next daemon start does it. A marker file names the phase of a restore (writing, swapping, cleaning), so a daemon that stops in the middle finishes it at its next start: it deletes the new copy, takes the swap back, or cleans up. A run of step 2 stays "done" also when the restore fails, so the way back always works. History records the restore with the run that it wrote and the run that holds the state from before. Undo cannot run a restore; the way back is "Restore" on that earlier run. Known limits: step 3 needs free disk space for a second copy of the data of the run, and the app sees `.kitshn-restore` in its own folder while step 3 runs. kitshn writes it there because a rename inside one volume is the swap; a folder outside the volume would need a copy across file systems in step 4, while the app is stopped.
 - **K-1821** The Durable Object data has two copies. Point-in-time recovery of the Durable Object keeps 30 days without a cost in rows or R2. Checked on 2026-10-28 with a probe namespace on this account: a restore to a time between two writes brought back the older value. And the 03:00 run (K-1817) writes the state export of K-1831 to R2 as `state/<date>.json.gz`; it keeps 30 of them. It holds no secret (K-1831), and the restic repositories need `KITSHN_BACKUP_KEY` (K-1815). The daily export reads each row of the Durable Object once, about 15,000 rows.
 - **K-1822** "Restore kitshn to a time…" in the Safety panel needs a fresh passkey (K-1504) and a confirm that names the time and what goes out of step: a machine that joined later loses its card, a removed machine comes back, and deploy files that R2 already deleted stay gone. It rewinds everything in the Durable Object to that time: cards, circles, shares, History, rollbacks, jobs and repos. It does not rewind Cloudflare (Access, DNS, Workers, R2); the next alarm makes Cloudflare match the restored state again (K-408). Writes after the restore point are lost, so the restore keeps its finish in R2 (`state/restore-pending.json`): the undo bookmark, the time label that the Durable Object makes, and the highest job id so far. After the restart, the Worker's poll runs the finish; when the poll times out, the next alarm runs it from R2. Only one of the two runs it. The finish sets the job ids to go on after the old highest one, so a late result of a daemon finds no other job; records the restore in History with the bookmark from before, and a second restore to that bookmark undoes it; and as its last step rotates the pass key of section 17 (K-1771), because the restored storage can hold a key that was retired after that time. Until section 17 lands, that step is an empty hook.
 
@@ -549,7 +551,7 @@ Planned. kitshn's own actions never use passes (K-1710). Passes stay off until t
   1. an install that is not empty: it has a machine, a deploy, a library item, a repo, a revision, or a card other than the admin card;
   2. an export of another Cloudflare account (`account`), or one without an account;
   3. an export of a newer schema than this kitshn (`schemaVersion`), or a table that this kitshn does not know.
-  Then, in one transaction, it drops every table, runs the migrations up to the schema of the export, writes each row (a `{"base64"}` value back as a BLOB), runs the later migrations, records the import in History, and stores the status `done`, so a later error or a restart never reports a done import as refused. After the transaction, kitshn deletes the file and rotates the pass key (K-1834); a failure there goes to the server log, and the next start tries again. A refused import also deletes the file at once, because it holds the whole state; a failure there goes to the server log. After the answer `done` or `refused`, the bootstrap uploads the Worker again without `KITSHN_IMPORT_AT`, so no later start reads the import again. A done import whose last steps failed still finishes at a later start without the variable. A table that the export does not hold (the jobs, the one-time codes and each secret of `SECRET_ROWS`) starts empty. An import writes each row once, about 15,000 rows, under the 100,000 rows a day.
+     Then, in one transaction, it drops every table, runs the migrations up to the schema of the export, writes each row (a `{"base64"}` value back as a BLOB), runs the later migrations, records the import in History, and stores the status `done`, so a later error or a restart never reports a done import as refused. After the transaction, kitshn deletes the file and rotates the pass key (K-1834); a failure there goes to the server log, and the next start tries again. A refused import also deletes the file at once, because it holds the whole state; a failure there goes to the server log. `KITSHN_IMPORT_AT` stays set until the next bootstrap without `KITSHN_IMPORT` drops it; that is harmless, because the Durable Object keeps the `import_at` of the last import and never reads the same one twice. A done import whose last steps failed still finishes at a later start without the variable. A table that the export does not hold (the jobs, the one-time codes and each secret of `SECRET_ROWS`) starts empty. An import writes each row once, about 15,000 rows, under the 100,000 rows a day.
 - **K-1834** After an import, kitshn makes what the export does not hold: the next alarm compares Access with the shares and writes what Cloudflare lacks (K-408), each daemon connects again with its own machine token, and the export holds no pass key of section 17, so the import ends with the pass key rotation of K-1771. Known limits of v1: an import works only into the same Cloudflare account, so the tunnels, service tokens, Workers, DNS records and R2 objects that the rows name still exist; and the import rebuilds no R2 object, so pages, files and backups are there only when the bucket still holds them. Revisit with a move to another account, which needs a new join of each machine, a new deploy of each Worker and a copy of R2.
 
 ## 19. Notifications

@@ -10,7 +10,7 @@ import { send } from "./access.ts";
 /** K-1833: an empty install takes a state export of the same account; anything else is refused and changes nothing. */
 
 type Instance = {
-  importIfDue(at: string): Promise<void>;
+  importIfDue(at: string | undefined): Promise<void>;
   runImport(at: string): Promise<{ code: string; detail: string } | null>;
   finishImport(): Promise<void>;
   rotatePassKey(actor: unknown): Promise<void>;
@@ -164,6 +164,17 @@ describe("refused import file (K-1833)", () => {
     });
     expect(JSON.parse(status ?? "null")).toEqual({ state: "refused", code: "not_empty" });
     expect(await env.BUCKET!.head(IMPORT_OBJECT)).toBeNull();
+  });
+
+  it("finishes a due import at a start without KITSHN_IMPORT_AT", async () => {
+    const due = await runInDurableObject(env.KITSHN.getByName("target-u"), async (object, durable) => {
+      const instance = object as unknown as Instance;
+      const rotate = vi.spyOn(instance, "rotatePassKey").mockResolvedValue();
+      durable.storage.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('import_finish', 'due')");
+      await instance.importIfDue(undefined);
+      return { due: meta(durable.storage.sql, "import_finish"), calls: rotate.mock.calls.length };
+    });
+    expect(due).toEqual({ due: null, calls: 1 });
   });
 });
 

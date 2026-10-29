@@ -762,7 +762,7 @@ export class Kitshn extends DurableObject<Env> {
       });
       this.load();
       // K-1833: a bootstrap with KITSHN_IMPORT asks for one import, before the start steps, so they run on the
-      // imported state; a start reads one meta row for it, and only while the variable is set.
+      // imported state. Each start reads the meta row of a due finish, and one more while the variable is set.
       await this.importIfDue();
       if (this.state.circles.size === 0) this.seed();
       this.syncAdminAddress();

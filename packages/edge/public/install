@@ -70,8 +70,8 @@ api() {
   if [ "$(jq -r '.success // false' "$WORK/out" 2>/dev/null)" != "true" ]; then
     errors=$(jq -r '[.errors[]? | "\(.code): \(.message)" + ([.error_chain[]?.message] | if length > 0 then " (" + join("; ") + ")" else "" end)] | join("; ")' "$WORK/out" 2>/dev/null || head -c 300 "$WORK/out")
     hint=""
-    # Only a 403 says that the token lacks a permission.
-    [ -n "$NEED" ] && [ "$http_status" = 403 ] && hint=" The token needs \"$NEED\". Make a new token with this link: $TOKEN_LINK"
+    # Only a 401 or a 403 says that the token lacks a permission.
+    case "$http_status" in 401 | 403) if [ -n "$NEED" ]; then hint=" The token needs \"$NEED\". Make a new token with this link: $TOKEN_LINK"; fi ;; esac
     die "$method $path failed ($http_status): $errors.$hint"
   fi
   jq -c '.result' "$WORK/out"
@@ -453,6 +453,21 @@ esac
 mkdir "$WORK/bundle"
 tar -xzf "$WORK/bundle.tar.gz" -C "$WORK/bundle"
 say "  bundle version $(cat "$WORK/bundle/version")"
+manifest=$(jq -c 'map_values({hash, size})' "$WORK/bundle/assets.json")
+session=$(api POST "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/assets-upload-session" "$(jq -nc --argjson m "$manifest" '{manifest:$m}')")
+assets_jwt=$(printf '%s' "$session" | jq -r .jwt)
+for bucket in $(printf '%s' "$session" | jq -r '.buckets[]? | join(",")'); do
+  set --
+  for hash in $(printf '%s' "$bucket" | tr ',' ' '); do
+    type=$(jq -r --arg h "$hash" 'to_entries[] | select(.value.hash == $h) | .value.type' "$WORK/bundle/assets.json" | head -1)
+    base64 <"$WORK/bundle/assets/$(printf '%s' "$hash" | cut -c1-2)/$hash" | tr -d '\n' >"$WORK/$hash.b64"
+    set -- "$@" -F "$hash=@$WORK/$hash.b64;filename=$hash;type=$type"
+  done
+  curl -sS -X POST "$API/accounts/$ACCOUNT/workers/assets/upload?base64=true" -H "Authorization: Bearer $assets_jwt" "$@" >"$WORK/out"
+  [ "$(jq -r .success "$WORK/out")" = true ] || die "the asset upload failed: $(head -c 300 "$WORK/out")"
+  next=$(jq -r '.result.jwt // empty' "$WORK/out")
+  if [ -n "$next" ]; then assets_jwt=$next; fi
+done
 migrations='{"new_tag":"v1","new_sqlite_classes":["Kitshn"]}'
 settings="{}"
 scripts=$(api GET "/accounts/$ACCOUNT/workers/scripts")
@@ -491,74 +506,52 @@ fi
 if [ "$(printf '%s' "$scripts" | jq -r --arg s "$SCRIPT" 'map(select(.id == $s)) | .[0].migration_tag // empty')" = v1 ]; then
   migrations=null
 fi
-# upload_worker IMPORT_AT: uploads the bundle with its assets and bindings. An empty IMPORT_AT leaves the import out.
-upload_worker() {
-  import_at=$1
-  manifest=$(jq -c 'map_values({hash, size})' "$WORK/bundle/assets.json")
-  session=$(api POST "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/assets-upload-session" "$(jq -nc --argjson m "$manifest" '{manifest:$m}')")
-  assets_jwt=$(printf '%s' "$session" | jq -r .jwt)
-  for bucket in $(printf '%s' "$session" | jq -r '.buckets[]? | join(",")'); do
-    set --
-    for hash in $(printf '%s' "$bucket" | tr ',' ' '); do
-      type=$(jq -r --arg h "$hash" 'to_entries[] | select(.value.hash == $h) | .value.type' "$WORK/bundle/assets.json" | head -1)
-      base64 <"$WORK/bundle/assets/$(printf '%s' "$hash" | cut -c1-2)/$hash" | tr -d '\n' >"$WORK/$hash.b64"
-      set -- "$@" -F "$hash=@$WORK/$hash.b64;filename=$hash;type=$type"
-    done
-    curl -sS -X POST "$API/accounts/$ACCOUNT/workers/assets/upload?base64=true" -H "Authorization: Bearer $assets_jwt" "$@" >"$WORK/out"
-    [ "$(jq -r .success "$WORK/out")" = true ] || die "the asset upload failed: $(head -c 300 "$WORK/out")"
-    next=$(jq -r '.result.jwt // empty' "$WORK/out")
-    if [ -n "$next" ]; then assets_jwt=$next; fi
-  done
-  # run_worker_first: the offline routes of live sites (K-1108) need the Worker before the map's assets.
-  metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --argjson migrations "$migrations" \
-    --arg host "$KITSHN_HOST" --arg old_host "$KITSHN_OLD_HOST" --arg login_pages "$LOGIN_PAGES" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" --arg agent_aud "$AGENT_AUD" --arg fresh_aud "$FRESH_AUD" \
-    --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" \
-    --arg zone "$ZONE" --arg zone_name "$ZONE_NAME" --arg zones "$ZONES_JSON" --arg deployers "$DEPLOY_OWNER_IDS" \
-    --arg version "$(cat "$WORK/bundle/version")" --arg r2 "$R2" --arg pages_login "$PAGES_LOGIN_AUD" \
-    --arg pages_passkey "$PAGES_PASSKEY_AUD" --arg files_login "$FILES_LOGIN_AUD" --arg files_passkey "$FILES_PASSKEY_AUD" \
-    --arg import_at "$import_at" '
-    {
-      main_module: "worker.js",
-      compatibility_date: $date,
-      compatibility_flags: ["nodejs_compat"],
-      assets: {jwt: $jwt, config: {not_found_handling: "single-page-application", run_worker_first: true}},
-      bindings: [
-        {type: "assets", name: "ASSETS"},
-        {type: "durable_object_namespace", name: "KITSHN", class_name: "Kitshn"},
-        {type: "plain_text", name: "KITSHN_HOST", text: $host},
-        {type: "plain_text", name: "ACCESS_TEAM_DOMAIN", text: $team},
-        {type: "plain_text", name: "ACCESS_ADMIN_AUD", text: $admin_aud},
-        {type: "plain_text", name: "ACCESS_CONNECT_AUD", text: $connect_aud},
-        {type: "plain_text", name: "ACCESS_AGENT_AUD", text: $agent_aud},
-        {type: "plain_text", name: "ACCESS_FRESH_AUD", text: $fresh_aud},
-        {type: "plain_text", name: "OWNER_EMAILS", text: $owners},
-        {type: "plain_text", name: "OWNER_DEVICES", text: $devices},
-        {type: "plain_text", name: "CLOUDFLARE_ACCOUNT_ID", text: $account},
-        {type: "plain_text", name: "CLOUDFLARE_ZONE_ID", text: $zone},
-        {type: "plain_text", name: "KITSHN_ZONE", text: $zone_name},
-        {type: "plain_text", name: "KITSHN_ZONES", text: $zones},
-        {type: "plain_text", name: "DEPLOY_OWNER_IDS", text: $deployers},
-        {type: "plain_text", name: "KITSHN_VERSION", text: $version},
-        {type: "plain_text", name: "PAGES_LOGIN_AUD", text: $pages_login},
-        {type: "plain_text", name: "PAGES_PASSKEY_AUD", text: $pages_passkey},
-        {type: "plain_text", name: "FILES_LOGIN_AUD", text: $files_login},
-        {type: "plain_text", name: "FILES_PASSKEY_AUD", text: $files_passkey}
-      ] + (if $old_host == "" then [] else [{type: "plain_text", name: "KITSHN_OLD_HOST", text: $old_host}] end)
-        + (if $login_pages == "" then [] else [{type: "plain_text", name: "KITSHN_LOGIN_PAGES", text: $login_pages}] end)
-        + (if $r2 == "" then [] else [{type: "r2_bucket", name: "BUCKET", bucket_name: $r2}] end)
-        + (if $import_at == "" then [] else [{type: "plain_text", name: "KITSHN_IMPORT_AT", text: $import_at}] end),
-      keep_bindings: ["secret_text"]
-    } + (if $migrations == null then {} else {migrations: $migrations} end)')
-  printf '%s' "$metadata" >"$WORK/metadata.json"
-  curl -sS -X PUT "$API/accounts/$ACCOUNT/workers/scripts/$SCRIPT" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-    -F "metadata=@$WORK/metadata.json;type=application/json" \
-    -F "worker.js=@$WORK/bundle/worker.js;type=application/javascript+module" >"$WORK/out"
-  [ "$(jq -r .success "$WORK/out")" = true ] || die "the Worker upload failed: $(jq -r '[.errors[]? | "\(.code): \(.message)"] | join("; ")' "$WORK/out")"
-  changed "uploaded the Worker $SCRIPT"
-  # The Durable Object class exists after the first upload.
-  migrations=null
-}
-upload_worker "${IMPORT_AT:-}"
+# run_worker_first: the offline routes of live sites (K-1108) need the Worker before the map's assets.
+metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --argjson migrations "$migrations" \
+  --arg host "$KITSHN_HOST" --arg old_host "$KITSHN_OLD_HOST" --arg login_pages "$LOGIN_PAGES" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" --arg agent_aud "$AGENT_AUD" --arg fresh_aud "$FRESH_AUD" \
+  --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" \
+  --arg zone "$ZONE" --arg zone_name "$ZONE_NAME" --arg zones "$ZONES_JSON" --arg deployers "$DEPLOY_OWNER_IDS" \
+  --arg version "$(cat "$WORK/bundle/version")" --arg r2 "$R2" --arg pages_login "$PAGES_LOGIN_AUD" \
+  --arg pages_passkey "$PAGES_PASSKEY_AUD" --arg files_login "$FILES_LOGIN_AUD" --arg files_passkey "$FILES_PASSKEY_AUD" \
+  --arg import_at "${IMPORT_AT:-}" '
+  {
+    main_module: "worker.js",
+    compatibility_date: $date,
+    compatibility_flags: ["nodejs_compat"],
+    assets: {jwt: $jwt, config: {not_found_handling: "single-page-application", run_worker_first: true}},
+    bindings: [
+      {type: "assets", name: "ASSETS"},
+      {type: "durable_object_namespace", name: "KITSHN", class_name: "Kitshn"},
+      {type: "plain_text", name: "KITSHN_HOST", text: $host},
+      {type: "plain_text", name: "ACCESS_TEAM_DOMAIN", text: $team},
+      {type: "plain_text", name: "ACCESS_ADMIN_AUD", text: $admin_aud},
+      {type: "plain_text", name: "ACCESS_CONNECT_AUD", text: $connect_aud},
+      {type: "plain_text", name: "ACCESS_AGENT_AUD", text: $agent_aud},
+      {type: "plain_text", name: "ACCESS_FRESH_AUD", text: $fresh_aud},
+      {type: "plain_text", name: "OWNER_EMAILS", text: $owners},
+      {type: "plain_text", name: "OWNER_DEVICES", text: $devices},
+      {type: "plain_text", name: "CLOUDFLARE_ACCOUNT_ID", text: $account},
+      {type: "plain_text", name: "CLOUDFLARE_ZONE_ID", text: $zone},
+      {type: "plain_text", name: "KITSHN_ZONE", text: $zone_name},
+      {type: "plain_text", name: "KITSHN_ZONES", text: $zones},
+      {type: "plain_text", name: "DEPLOY_OWNER_IDS", text: $deployers},
+      {type: "plain_text", name: "KITSHN_VERSION", text: $version},
+      {type: "plain_text", name: "PAGES_LOGIN_AUD", text: $pages_login},
+      {type: "plain_text", name: "PAGES_PASSKEY_AUD", text: $pages_passkey},
+      {type: "plain_text", name: "FILES_LOGIN_AUD", text: $files_login},
+      {type: "plain_text", name: "FILES_PASSKEY_AUD", text: $files_passkey}
+    ] + (if $old_host == "" then [] else [{type: "plain_text", name: "KITSHN_OLD_HOST", text: $old_host}] end)
+      + (if $login_pages == "" then [] else [{type: "plain_text", name: "KITSHN_LOGIN_PAGES", text: $login_pages}] end)
+      + (if $r2 == "" then [] else [{type: "r2_bucket", name: "BUCKET", bucket_name: $r2}] end)
+      + (if $import_at == "" then [] else [{type: "plain_text", name: "KITSHN_IMPORT_AT", text: $import_at}] end),
+    keep_bindings: ["secret_text"]
+  } + (if $migrations == null then {} else {migrations: $migrations} end)')
+printf '%s' "$metadata" >"$WORK/metadata.json"
+curl -sS -X PUT "$API/accounts/$ACCOUNT/workers/scripts/$SCRIPT" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  -F "metadata=@$WORK/metadata.json;type=application/json" \
+  -F "worker.js=@$WORK/bundle/worker.js;type=application/javascript+module" >"$WORK/out"
+[ "$(jq -r .success "$WORK/out")" = true ] || die "the Worker upload failed: $(jq -r '[.errors[]? | "\(.code): \(.message)"] | join("; ")' "$WORK/out")"
+changed "uploaded the Worker $SCRIPT"
 secrets=$(api GET "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/secrets")
 if printf '%s' "$secrets" | jq -e 'any(.[]; .name == "CLOUDFLARE_API_TOKEN")' >/dev/null && [ "${KITSHN_SET_TOKEN:-}" != 1 ]; then
   kept "Worker secret CLOUDFLARE_API_TOKEN (set KITSHN_SET_TOKEN=1 to replace it)"
@@ -626,13 +619,7 @@ if [ -n "${IMPORT_AT:-}" ]; then
   answer=""
   for _ in $(seq 1 24); do
     answer=$(curl -fsS "https://$KITSHN_HOST/join/import-status" 2>/dev/null || true)
-    state=$(printf '%s' "$answer" | jq -r '.state // empty' 2>/dev/null)
-    # K-1833: the Worker drops KITSHN_IMPORT_AT once kitshn answered, so no later start reads the import again.
-    if [ "$state" = done ] || [ "$state" = refused ]; then
-      upload_worker ""
-      changed "removed KITSHN_IMPORT_AT from the Worker"
-    fi
-    case "$state" in
+    case "$(printf '%s' "$answer" | jq -r '.state // empty' 2>/dev/null)" in
     done)
       changed "imported $KITSHN_IMPORT; History names the import"
       break

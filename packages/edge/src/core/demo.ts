@@ -75,7 +75,7 @@ export function demo() {
     resource("kitshn-repo", "repo", "Yarden-zamir/kitshn", null),
   ];
   const places: Array<readonly [string, Point]> = [
-    ["mac", { x: -150, y: -165 }],
+    ["mac", { x: -175, y: -190 }],
     ["vps", { x: 120, y: -190 }],
     ["riffle", { x: 250, y: 120 }],
     ["riffle-pr-41", { x: 250, y: 120 }],

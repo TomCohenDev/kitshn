@@ -24,14 +24,15 @@ const JOB_TIPS: Record<JobView["state"], string> = {
 const percent = (value: number | undefined) => (value === undefined ? "–" : `${Math.round(value * 100)}%`);
 
 /** K-515: the presence sticker of a machine card. */
-export function PresenceSticker(props: { view: MachineView }) {
+/** `time` off on a machine card: its live row says "seen … ago", and the shorter sticker keeps the foot on one line (K-515). */
+export function PresenceSticker(props: { view: MachineView; time?: boolean }) {
   return props.view.online ? (
     <span class="sticker ok presence" data-tip="Online: the daemon has a connection to kitshn now.">
       online
     </span>
   ) : (
     <span class="sticker presence" data-tip="Offline: the time since kitshn last heard from the daemon.">
-      offline · {ago(props.view.lastSeen)}
+      {props.time === false ? "offline" : `offline · ${ago(props.view.lastSeen)}`}
     </span>
   );
 }
@@ -84,8 +85,9 @@ function Meter(props: { label: string; value: number }) {
 const keepPress = (event: PointerEvent) => event.stopPropagation();
 
 /**
- * K-515, K-1616, K-1902: the daemon against the release of the Worker, the jobs that wait, and the asks that the
- * viewer may answer. Each is a link where it acts: the version to the panel with "Update daemon" (K-612).
+ * K-515, K-1616, K-1902: the asks that the viewer may answer, the jobs that wait, and the daemon against the release
+ * of the Worker. The ask comes first, so it stays in view on a narrow card. Each is a link where it acts: the version
+ * to the panel with "Update daemon" (K-612).
  */
 function MachineStickers(props: { view: MachineView }) {
   const { snapshot } = useStore();
@@ -125,17 +127,6 @@ function MachineStickers(props: { view: MachineView }) {
     );
   return (
     <>
-      {version}
-      {queued > 0 ? (
-        <a
-          class="sticker info"
-          href="#machines"
-          onPointerDown={keepPress}
-          data-tip={`${queued} ${queued === 1 ? "job waits" : "jobs wait"} for this machine. The Machines view lists them.`}
-        >
-          {queued} queued
-        </a>
-      ) : null}
       {asks > 0 ? (
         <a
           class="sticker wait"
@@ -146,6 +137,17 @@ function MachineStickers(props: { view: MachineView }) {
           {asks} needs you
         </a>
       ) : null}
+      {queued > 0 ? (
+        <a
+          class="sticker info"
+          href="#machines"
+          onPointerDown={keepPress}
+          data-tip={`${queued} ${queued === 1 ? "job waits" : "jobs wait"} for this machine. The Machines view lists them.`}
+        >
+          {queued} queued
+        </a>
+      ) : null}
+      {version}
     </>
   );
 }

@@ -1148,7 +1148,7 @@ export function CardView(props: {
             PR #{props.pullRequest}
           </span>
         ) : null}
-        {props.machine ? <PresenceSticker view={props.machine} /> : null}
+        {props.machine ? <PresenceSticker view={props.machine} time={false} /> : null}
         {props.machine ? <KeySticker view={props.machine} /> : null}
         {holding.map((circle) => {
           const level = shareLevel(state, resource, circle);

@@ -4042,12 +4042,14 @@ export class Kitshn extends DurableObject<Env> {
       this.pushGrants();
       this.sendForgotten(machine.id);
     }
-    if (this.presence.get(machine.id)?.online) this.sendMachine(machine);
-    else this.setPresence(machine.id, true);
     // K-909: after a fast reconnect the old socket's close finds this one and requeues nothing, and a removal
     // down never expires, so its result that may never come must not keep it sent.
     requeueDowns(this.query, machine.id);
-    this.deliverJobs();
+    // The jobs go first, so the map update below counts them as sent (K-515). Delivery reads sockets, not presence.
+    const sent = this.deliverJobs();
+    if (!this.presence.get(machine.id)?.online) this.setPresence(machine.id, true);
+    else if (sent > 0) this.broadcast();
+    else this.sendMachine(machine);
     void this.scheduleAlarm();
   }
 
@@ -4215,9 +4217,9 @@ export class Kitshn extends DurableObject<Env> {
       };
       saveMachine(socket, { ...attachment, status });
       this.setMachineOs(machine.id, machineOs(status.os));
-      this.sendMachine(machine);
       // An update job waits for the status; it can go now.
-      this.deliverJobs();
+      if (this.deliverJobs() > 0) this.broadcast();
+      else this.sendMachine(machine);
     } else if (message.type === "sample" && isRecord(message.sample)) {
       const share = (value: unknown) => (typeof value === "number" && value >= 0 && value <= 1 ? value : 0);
       const sample: Sample = {
@@ -4880,7 +4882,9 @@ export class Kitshn extends DurableObject<Env> {
    * Sends each queued job to its machine when that machine is online (K-613 "when online"). A label job
    * goes to the first fitting machine in the order on which its sender has control (K-610, K-614).
    */
-  private deliverJobs() {
+  /** Returns the number of jobs sent. A caller that does not broadcast anyway broadcasts when it is over 0 (K-515). */
+  private deliverJobs(): number {
+    let sent = 0;
     const online = this.jobMachines();
     const queued = this.sql<{
       id: number;
@@ -4965,7 +4969,9 @@ export class Kitshn extends DurableObject<Env> {
           : undefined;
       send(socket, { type: "job", id: job.id, command, ...(notify ? { notify } : {}) });
       this.sql("UPDATE jobs SET state = 'sent', machine_id = ? WHERE id = ?", machine.id, job.id);
+      sent++;
     }
+    return sent;
   }
 
   /** K-609: the owner sets the labels and the order of a machine. */
@@ -11877,6 +11883,8 @@ export class Kitshn extends DurableObject<Env> {
       await this.dailyBackups(now).catch((error: unknown) =>
         console.error(`kitshn could not run the daily backups: ${String(error)}`),
       );
+      // The backups queue and send jobs, so the maps get the new counts (K-515).
+      changed = true;
     }
     const api = this.api();
     if (api) {

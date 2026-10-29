@@ -61,36 +61,39 @@ export default {
             exitCode: null,
             output: "",
           }));
+          // The widest sets of the review: BEHIND, 12 queued and 2 asks on mac; 3 queued and 10 asks on vps.
+          const ask = (machineId: string, index: number) => ({
+            id: `p-${machineId}-${index}`,
+            machineId,
+            machineName: machineId === "mac" ? "Mac" : "VPS",
+            action: "publish",
+            target: `page-${index}`,
+            body: {},
+            reason: "share the design page",
+            labels: {},
+            right: "publishes",
+            circleId: "owner",
+            shown: `${machineId} wants to publish page-${index} to Everyone.`,
+            shownHash: "x",
+            state: "pending",
+            createdAt: now - 60_000 - index,
+            expiresAt: now + 3600_000,
+            verified: [],
+          });
           snapshot.proposals = [
-            {
-              id: "p1",
-              machineId: "mac",
-              machineName: "Mac",
-              action: "publish",
-              target: "portal-lessons",
-              body: {},
-              reason: "share the design page",
-              labels: {},
-              right: "publishes",
-              circleId: "owner",
-              shown: "Mac wants to publish portal-lessons to Everyone.",
-              shownHash: "x",
-              state: "pending",
-              createdAt: now - 60_000,
-              expiresAt: now + 3600_000,
-              verified: [],
-            },
+            ...Array.from({ length: 2 }, (_, index) => ask("mac", index)),
+            ...Array.from({ length: 10 }, (_, index) => ask("vps", index)),
           ];
-          snapshot.queuedJobs = { vps: 7 };
+          snapshot.queuedJobs = { mac: 12, vps: 3 };
         }
         socket.send(JSON.stringify(data));
       });
     });
     await page.reload();
     await page.locator('[data-card="mac"]').first().waitFor();
-    await page.getByText("1 needs you").first().waitFor();
+    await page.getByText("2 needs you").first().waitFor();
     await shot("cards");
-    await page.getByText("1 needs you").first().click();
+    await page.getByText("2 needs you").first().click();
     await page.getByText("Show every ask").waitFor();
     await shot("inbox");
   },

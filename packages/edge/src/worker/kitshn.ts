@@ -265,7 +265,6 @@ import {
 import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
 import { commandsFor, machineBusy, providerCards, providerPushes } from "../core/providers.ts";
-import { type AuditOutcome, type AuditSide, type LinkReport, pairLinkReports } from "../core/links.ts";
 import {
   type LinkAudit,
   LinkAudit as LinkAuditSchema,
@@ -9647,9 +9646,9 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /**
-   * K-1610: one report of a call between machines. The reporting machine is always one side: the source of a call
-   * that it sent, or the target of a call that it served. A target names its caller by the Access client id of the
-   * call, and kitshn finds the machine; an unknown client id stays as it is. A report that does not decode is dropped.
+   * K-1610: one call that a source machine reports. The source is always the machine of the connection, so a machine
+   * cannot report for another one. A report that does not decode is dropped and logged. Known limit: only the source
+   * reports (see `LinkAudit`).
    */
   private recordLinkEvent(machine: Machine, value: unknown) {
     let audit: LinkAudit;
@@ -9659,69 +9658,51 @@ export class Kitshn extends DurableObject<Env> {
       console.warn(`kitshn dropped an audit report of ${machine.name}: ${String(error)}`);
       return;
     }
-    const caller =
-      audit.side === "target"
-        ? ([...this.state.machines.values()].find((item) => item.clientId === audit.caller)?.id ??
-          `client:${audit.caller}`)
-        : null;
     this.sql(
-      `INSERT INTO link_events (at, side, source, target, kind, thread, name, cwd, outcome, exit_code)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      // The time of the report, not the claim of the machine, orders History and pairs the two sides.
+      `INSERT INTO link_events (at, source, target, kind, thread, name, cwd, outcome, exit_code)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      // The time of the report, not the claim of the machine, orders History.
       Date.now(),
-      audit.side,
-      caller ?? machine.id,
-      audit.side === "target" ? machine.id : audit.target,
+      machine.id,
+      audit.target,
       audit.kind,
-      audit.side === "source" ? audit.thread : null,
+      audit.thread,
       audit.name,
-      audit.side === "source" ? audit.cwd : null,
+      audit.cwd,
       audit.outcome,
       audit.exitCode,
     );
-    // Both sides count toward the limit of 2,000.
     this.sql(
       "DELETE FROM link_events WHERE id <= (SELECT id FROM link_events ORDER BY id DESC LIMIT 1 OFFSET 2000)",
     );
     this.broadcast();
   }
 
-  /**
-   * K-1610: the newest 50 calls between machines, of one machine or of all, each with the report of the other side or
-   * a mark that it is missing. It reads twice as many rows, so most pairs at the edge stay whole.
-   */
+  /** K-1610: the newest 50 link events, of one machine or of all, with machine names. */
   private recentLinkEvents(machineId: string | null = null): Array<LinkEventView> {
     const name = (id: string) => this.state.machines.get(id)?.name ?? id;
-    const rows = this.sql<{
+    return this.sql<{
       id: number;
       at: number;
-      side: AuditSide;
       source: string;
       target: string;
       kind: "exec" | "tool";
       thread: string | null;
       name: string;
       cwd: string | null;
-      outcome: AuditOutcome;
+      outcome: LinkEventView["outcome"];
       exit_code: number | null;
     }>(
       machineId === null
-        ? "SELECT * FROM link_events ORDER BY id DESC LIMIT 100"
-        : "SELECT * FROM link_events WHERE source = ? OR target = ? ORDER BY id DESC LIMIT 100",
+        ? "SELECT * FROM link_events ORDER BY id DESC LIMIT 50"
+        : "SELECT * FROM link_events WHERE source = ? OR target = ? ORDER BY id DESC LIMIT 50",
       ...(machineId === null ? [] : [machineId, machineId]),
-    ).map(({ exit_code, ...row }): LinkReport => ({ ...row, exitCode: exit_code }));
-    const named = (report: LinkReport): LinkReport => ({
-      ...report,
-      source: name(report.source),
-      target: name(report.target),
-    });
-    return pairLinkReports(rows, Date.now())
-      .slice(0, 50)
-      .map(({ report, partner, check }) => ({
-        ...named(report),
-        partner: partner && named(partner),
-        check,
-      }));
+    ).map(({ exit_code, ...row }) => ({
+      ...row,
+      source: name(row.source),
+      target: name(row.target),
+      exitCode: exit_code,
+    }));
   }
 
   /** K-1717: the newest 50 ask events, for History; a snapshot reads at most 50 rows for them. */

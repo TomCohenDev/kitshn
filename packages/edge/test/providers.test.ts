@@ -253,8 +253,8 @@ it("counts the pushes that a machine has not applied, takes applied only for its
       .map((row) => row.key),
   );
   expect(keys).toEqual(["grants:t3"]);
-  // Two pushes wait: the grant tables, with a stale hash, and the card settings, with none.
-  expect(await queued()).toBe(2);
+  // Three pushes wait: the grant tables, with a stale hash, and the reach and the card settings, with none.
+  expect(await queued()).toBe(3);
   // A report that can end busy sends the jobs that wait for an idle machine.
   const delivered = await runInDurableObject(stub, async (instance) => {
     const spy = vi.spyOn(instance as unknown as Internals, "deliverJobs");
@@ -270,12 +270,9 @@ it("counts the pushes that a machine has not applied, takes applied only for its
   expect(delivered).toBeGreaterThan(0);
 });
 
-it("records both sides of a call, each as the machine that reported it (K-1610)", async () => {
-  const { stub, sql } = await setup();
-  const mac: Machine = { ...machine, id: "mac", name: "mac", clientId: "mac.access" };
-  await sql("INSERT OR REPLACE INTO machines (id, body) VALUES ('mac', ?)", JSON.stringify(mac));
-  const source = {
-    side: "source",
+it("records the calls that a machine reports on other machines, as its own and only on a signed connection (K-1610)", async () => {
+  const { stub } = await setup();
+  const audit = {
     kind: "exec",
     target: "mac",
     thread: "thread-1",
@@ -285,35 +282,21 @@ it("records both sides of a call, each as the machine that reported it (K-1610)"
     exitCode: 0,
     at: 0,
   };
-  const target = {
-    side: "target",
-    kind: "exec",
-    caller: "mac.access",
-    name: "exec",
-    outcome: "succeeded",
-    exitCode: 0,
-    at: 0,
-  };
   const raw = (check: "signed" | "token", message: object) =>
     runInDurableObject(stub, (instance) =>
       instance.webSocketMessage(daemonSocket(check), JSON.stringify(message)),
     );
   await runInDurableObject(stub, (_, state) => void state.storage.sql.exec("DELETE FROM link_events"));
-  await raw("token", { type: "audit", audit: source });
-  await raw("signed", { type: "audit", audit: { ...source, outcome: "maybe" } });
-  // vps sends a call to mac, and vps serves a call of mac: the reporter is always one side.
-  await raw("signed", { type: "audit", audit: source });
-  await raw("signed", { type: "audit", audit: target });
-  await raw("signed", { type: "audit", audit: { ...target, caller: "stranger.access" } });
+  await raw("token", { type: "audit", audit });
+  await raw("signed", { type: "audit", audit: { ...audit, outcome: "maybe" } });
+  await raw("signed", { type: "audit", audit });
   const rows = await runInDurableObject(stub, (_, state) =>
     state.storage.sql
-      .exec("SELECT side, source, target, thread, name FROM link_events ORDER BY id")
+      .exec("SELECT source, target, kind, name, outcome, exit_code FROM link_events")
       .toArray(),
   );
   expect(rows).toEqual([
-    { side: "source", source: "vps", target: "mac", thread: "thread-1", name: "git" },
-    { side: "target", source: "mac", target: "vps", thread: null, name: "exec" },
-    { side: "target", source: "client:stranger.access", target: "vps", thread: null, name: "exec" },
+    { source: "vps", target: "mac", kind: "exec", name: "git", outcome: "succeeded", exit_code: 0 },
   ]);
 });
 

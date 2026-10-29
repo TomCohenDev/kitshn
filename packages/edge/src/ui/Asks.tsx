@@ -251,21 +251,7 @@ export function AskRow(props: {
   );
 }
 
-const CHECK_CLASSES: Record<LinkEventView["check"], string> = {
-  paired: "ok",
-  waiting: "info",
-  "no target report": "",
-  "no source report": "",
-};
-const CHECK_TIPS: Record<LinkEventView["check"], string> = {
-  paired: "Both machines reported this call.",
-  waiting: "The report of the other machine can still come.",
-  "no target report": "The calling machine reported this call, but the target never did.",
-  "no source report":
-    "The target served this call, but the calling machine never reported it. A source that skips its reports shows here.",
-};
-
-/** K-1610: exec runs and forwarded tool calls between machines, as both machines report them. */
+/** K-1610: exec runs and forwarded tool calls between machines, as the source machines report them. */
 export function LinkEvents(props: { readonly events: ReadonlyArray<LinkEventView> }) {
   if (props.events.length === 0) return null;
   return (
@@ -287,10 +273,7 @@ export function LinkEvents(props: { readonly events: ReadonlyArray<LinkEventView
               <code>{event.name}</code> {event.outcome}
               {event.exitCode !== null ? <span class="muted"> · exit {event.exitCode}</span> : null}
               {event.cwd ? <span class="muted"> · in {event.cwd}</span> : null}
-              {event.thread ? <span class="muted"> · thread {event.thread}</span> : null}{" "}
-              <span class={`sticker ${CHECK_CLASSES[event.check]}`} data-tip={CHECK_TIPS[event.check]}>
-                {event.check}
-              </span>
+              {event.thread ? <span class="muted"> · thread {event.thread}</span> : null}
             </span>
           </li>
         ))}

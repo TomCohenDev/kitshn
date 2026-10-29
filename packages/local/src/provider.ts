@@ -401,35 +401,21 @@ export const ReachedCard = Schema.Struct({
 export type ReachedCard = typeof ReachedCard.Type;
 
 /**
- * K-1610: what a machine reports of one call between machines; never its arguments or its output. The source reports
- * the call that it sent, with its thread and, for exec, the command name. The target reports what it served, with the
- * Access client id of the caller, from the JWT of the call; kitshn names the caller's machine from it.
+ * K-1610: what the source machine reports of one call on another machine; never its arguments or its output. Known
+ * limit: only the source reports, so a source that misbehaves can skip its own reports. Revisit with reports of the
+ * target when the audit must hold against a dishonest source.
  */
 export const AUDIT_OUTCOMES = ["succeeded", "refused", "failed"] as const;
-export const LinkAudit = Schema.Union([
-  Schema.Struct({
-    side: Schema.Literal("source"),
-    kind: Schema.Literals(["exec", "tool"]),
-    /** The machine id of the target. */
-    target: Schema.String.check(Schema.isMaxLength(64)),
-    thread: Schema.NullOr(Schema.String.check(Schema.isMaxLength(200))),
-    /** The command name of an exec run (`machine_exec`), or the name of the tool. */
-    name: Schema.String.check(Schema.isMaxLength(500)),
-    cwd: Schema.NullOr(Schema.String.check(Schema.isMaxLength(500))),
-    outcome: Schema.Literals(AUDIT_OUTCOMES),
-    exitCode: Schema.NullOr(Schema.Int),
-    at: Schema.Number,
-  }),
-  Schema.Struct({
-    side: Schema.Literal("target"),
-    kind: Schema.Literals(["exec", "tool"]),
-    /** The Access client id of the caller (`common_name` of its JWT). */
-    caller: Schema.String.check(Schema.isMaxLength(200)),
-    /** "exec", or the name of the tool. */
-    name: Schema.String.check(Schema.isMaxLength(500)),
-    outcome: Schema.Literals(AUDIT_OUTCOMES),
-    exitCode: Schema.NullOr(Schema.Int),
-    at: Schema.Number,
-  }),
-]);
+export const LinkAudit = Schema.Struct({
+  kind: Schema.Literals(["exec", "tool"]),
+  /** The machine id of the target. */
+  target: Schema.String.check(Schema.isMaxLength(64)),
+  thread: Schema.NullOr(Schema.String.check(Schema.isMaxLength(200))),
+  /** The command name of a `machine_exec` run, or the name of the tool. */
+  name: Schema.String.check(Schema.isMaxLength(500)),
+  cwd: Schema.NullOr(Schema.String.check(Schema.isMaxLength(500))),
+  outcome: Schema.Literals(AUDIT_OUTCOMES),
+  exitCode: Schema.NullOr(Schema.Int),
+  at: Schema.Number,
+});
 export type LinkAudit = typeof LinkAudit.Type;

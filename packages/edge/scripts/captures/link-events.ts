@@ -1,5 +1,5 @@
 // Cross-machine work (K-1610): the History view with exec runs and forwarded tool calls that source machines report.
-// The scenario adds two events to the demo snapshot: one that both machines reported, and one without the target's report.
+// The scenario adds two events to the demo snapshot.
 import { DESKTOP, type Scenario } from "../capture-views.ts";
 
 const events = [
@@ -10,13 +10,10 @@ const events = [
     target: "vps",
     kind: "exec",
     thread: "Fix the login page",
-    side: "source",
     name: "git",
     cwd: "/home/kcw/riffle",
     outcome: "succeeded",
     exitCode: 0,
-    partner: { side: "target", name: "exec", outcome: "succeeded", exitCode: 0 },
-    check: "paired",
   },
   {
     id: 1,
@@ -25,13 +22,10 @@ const events = [
     target: "vps",
     kind: "tool",
     thread: "Fix the login page",
-    side: "source",
     name: "t3_thread_read",
     cwd: null,
     outcome: "refused",
     exitCode: null,
-    partner: null,
-    check: "no target report",
   },
 ];
 

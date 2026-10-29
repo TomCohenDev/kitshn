@@ -16,7 +16,6 @@ import type {
 } from "./model.ts";
 import type { RepoGate } from "./repos.ts";
 import type { Proposal } from "./asks.ts";
-import type { LinkCheck, LinkReport } from "./links.ts";
 import type { ProviderCommand } from "@kitshn/local";
 
 /** K-1717: one ask of an agent on a machine, as History shows it: an event, with no Undo. */
@@ -35,11 +34,19 @@ export interface AskEventView {
   readonly verified: ReadonlyArray<string>;
 }
 
-/**
- * K-1610: one call between machines, as History shows it: an event, with no Undo. It is the report of the source, or
- * of the target when the source sent none, with the report of the other side and whether it came.
- */
-export type LinkEventView = LinkReport & { readonly partner: LinkReport | null; readonly check: LinkCheck };
+/** K-1610: one call of a source machine on a target machine, as History shows it: an event, with no Undo. */
+export interface LinkEventView {
+  readonly id: number;
+  readonly at: number;
+  readonly source: string;
+  readonly target: string;
+  readonly kind: "exec" | "tool";
+  readonly thread: string | null;
+  readonly name: string;
+  readonly cwd: string | null;
+  readonly outcome: "succeeded" | "refused" | "failed";
+  readonly exitCode: number | null;
+}
 
 /** K-1722: an open proposal, with the name of the machine that asked, for the Asks list. */
 export type ProposalView = Proposal & {

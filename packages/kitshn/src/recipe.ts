@@ -284,18 +284,6 @@ export function zoneOfAddress(address: string, zones: ReadonlyArray<string>): st
   return null;
 }
 
-/** K-807: the first deploy entry that matches the event. */
-const entryOf = (recipe: Recipe, event: DeployEvent) =>
-  recipe.deploy.find(
-    (item) =>
-      item.on === event.name &&
-      (item.on !== "push" || item.branch === undefined || item.branch === event.branch),
-  );
-
-/** K-807: the environment that an event deploys to, or null when no deploy entry matches it. */
-export const environmentOf = (recipe: Recipe, event: DeployEvent) =>
-  entryOf(recipe, event)?.name.replaceAll("{pr}", String(event.pr ?? "")) ?? null;
-
 /**
  * K-807, K-901, K-817: the environment and addresses of an event, or why kitshn skips it. `zone` is the kitshn
  * zone; `otherZones` are the further zones of K-1111, which only the extra addresses of a `push` entry may use.
@@ -308,7 +296,11 @@ export function plan(
   otherZones: ReadonlyArray<string> = [],
   key: string = DEFAULT_APP,
 ): Plan {
-  const entry = entryOf(recipe, event);
+  const entry = recipe.deploy.find(
+    (item) =>
+      item.on === event.name &&
+      (item.on !== "push" || item.branch === undefined || item.branch === event.branch),
+  );
   if (!entry) return { kind: "skip", reason: `No deploy entry matches ${event.name} on ${event.branch}.` };
   if (event.name === "pull_request" && event.pr === null)
     return { kind: "skip", reason: "The pull request has no number." };

@@ -3625,11 +3625,11 @@ export class Kitshn extends DurableObject<Env> {
         for (const { site, card } of waiting) {
           this.sql("UPDATE live_sites SET id = ? WHERE id = ?", card.id, site.id);
           if (!this.state.resources.has(site.id)) continue;
-          this.forgetCard(site.id);
+          const forgotten = this.forgetCard(site.id);
           this.insertRevision(
             { _tag: "kitshn", reason: `providers on ${machine.name}` },
             `${site.address} belongs to the provider card ${card.name}, so its own card went`,
-            [],
+            [forgotten],
             null,
           );
         }

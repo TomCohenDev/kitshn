@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readApps } from "./parse.ts";
-import { decodeApps, decodeRecipe, deployOrder, missingNeeds, plan } from "./recipe.ts";
+import { decodeApps, decodeRecipe, deployOrder, environmentOf, missingNeeds, plan } from "./recipe.ts";
 
 /** The recipe of a `defineApp` file: the app `app` (K-804). */
 const readRecipe = (source: string) => (readApps(source) as { readonly app: unknown }).app;
@@ -71,6 +71,16 @@ describe("plan (K-807, K-901, K-904)", () => {
     expect(plan(recipe, "me/hello", { name: "push", branch: "dev", pr: null, action: null }, zone).kind).toBe(
       "skip",
     );
+  });
+
+  it("names the environment of a branch push for the workflow, or none (K-807)", () => {
+    const branches = decodeRecipe({
+      ...recipe,
+      deploy: [{ on: "push", branch: "dev", name: "staging" }, ...recipe.deploy],
+    });
+    const push = (branch: string) => ({ name: "push" as const, branch, pr: null, action: null });
+    expect([branches, recipe].map((item) => environmentOf(item, push("dev")))).toEqual(["staging", null]);
+    expect(environmentOf(recipe, push("main"))).toBe("prod");
   });
 
   it("refuses an address outside the zone or two levels deep", () => {

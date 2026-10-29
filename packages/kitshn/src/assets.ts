@@ -21,6 +21,15 @@ const files = (dir: string): Array<string> =>
     return stat.isDirectory() ? files(path) : [path];
   });
 
+/** The JSON of an answer, or its first 200 characters when it is no JSON (an error page). */
+export function jsonOf<T>(text: string): { ok: true; value: T } | { ok: false; text: string } {
+  try {
+    return { ok: true, value: JSON.parse(text) as T };
+  } catch {
+    return { ok: false, text: text.slice(0, 200) };
+  }
+}
+
 /**
  * K-805: uploads a folder of files through the Workers direct upload flow, and picks the card icon (K-1112).
  * `_headers` and `_redirects` are config that Cloudflare reads, not files to serve.
@@ -34,6 +43,7 @@ export type AssetSession = { jwt: string; buckets: Array<Array<string>>; uploadU
 export async function uploadAssets(
   output: string,
   open: (manifest: Record<string, { hash: string; size: number }>) => Promise<AssetSession>,
+  wait: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 ) {
   const manifest: Record<string, { hash: string; size: number }> = {};
   const byHash = new Map<string, { path: string; type: string }>();
@@ -72,14 +82,28 @@ export async function uploadAssets(
       if (!file) fail(`Cloudflare asked for an unknown file ${hash}.`);
       form.append(hash, new Blob([readFileSync(file!.path).toString("base64")], { type: file!.type }), hash);
     }
-    const response = await fetch(session.uploadUrl, {
-      method: "POST",
-      headers: { authorization: `Bearer ${session.jwt}` },
-      body: form,
-    });
-    const body = (await response.json()) as { success: boolean; result?: { jwt?: string }; errors?: unknown };
-    if (!body.success) fail(`the file upload failed: ${JSON.stringify(body.errors)}`);
-    if (body.result?.jwt) completion = body.result.jwt;
+    // Files are keyed by their hash, so a failed upload is safe to repeat; Cloudflare refuses it now and then.
+    let failure = "";
+    for (const pause of [5_000, 15_000, null]) {
+      const response = await fetch(session.uploadUrl, {
+        method: "POST",
+        headers: { authorization: `Bearer ${session.jwt}` },
+        body: form,
+      });
+      const body = jsonOf<{ success?: boolean; result?: { jwt?: string }; errors?: unknown }>(
+        await response.text(),
+      );
+      if (body.ok && body.value.success === true) {
+        if (body.value.result?.jwt) completion = body.value.result.jwt;
+        failure = "";
+        break;
+      }
+      failure = `the file upload answered ${response.status}: ${body.ok ? JSON.stringify(body.value.errors) : body.text}`;
+      if (pause === null) break;
+      console.log(`kitshn: ${failure}; it tries again in ${pause / 1000} s.`);
+      await wait(pause);
+    }
+    if (failure) fail(failure);
   }
   // K-1112: the card icon comes from the files; a site without one gets its kind icon.
   const { icon, notes } = await pickSiteIcon((path) => {

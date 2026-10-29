@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 import { AGENT_USAGE, isAgentCommand, keyTransport, runAgentCommand } from "./agent.ts";
-import { type AssetSession, uploadAssets } from "./assets.ts";
+import { type AssetSession, jsonOf, uploadAssets } from "./assets.ts";
 import { CliError, fail } from "./cli-error.ts";
 import { errorOutput } from "./output.ts";
 import { type Artifact, artifactsByApp } from "./artifacts.ts";
@@ -19,6 +19,7 @@ import {
   type WorkerApp,
   decodeApps,
   deployOrder,
+  environmentOf,
   missingNeeds,
 } from "./recipe.ts";
 
@@ -45,10 +46,11 @@ async function oidcToken(audience: string): Promise<string> {
   const response = await fetch(`${url}&audience=${encodeURIComponent(audience)}`, {
     headers: { authorization: `bearer ${token}` },
   });
-  const body = (await response.json()) as { value?: string };
-  if (!body.value) fail(`GitHub gave no OIDC token (${response.status}).`);
-  cachedToken = { value: body.value as string, until: Date.now() + 4 * 60_000 };
-  return body.value as string;
+  const body = jsonOf<{ value?: string }>(await response.text());
+  const value = body.ok ? body.value.value : undefined;
+  if (!value) fail(`GitHub gave no OIDC token (${response.status})${body.ok ? "" : `: ${body.text}`}.`);
+  cachedToken = { value: value as string, until: Date.now() + 4 * 60_000 };
+  return value as string;
 }
 
 function githubEvent(): DeployEvent {
@@ -79,6 +81,22 @@ async function call<T>(server: string, path: string, body: object): Promise<T> {
   const data = (await response.json().catch(() => null)) as (T & { error?: string }) | null;
   if (!response.ok || !data) fail(data?.error ?? `${path} answered ${response.status}.`);
   return data as T;
+}
+
+/**
+ * K-807: the one environment that this GitHub event deploys the apps of the repo to, or "" when it deploys none.
+ * The workflow asks for it before the deploy job, because one GitHub job takes one environment.
+ */
+function deployEnvironment(dir: string) {
+  const event = githubEvent();
+  const names = [
+    ...new Set(Object.values(loadApps(dir)).flatMap((recipe) => environmentOf(recipe, event) ?? [])),
+  ];
+  if (names.length > 1)
+    fail(
+      `the apps deploy ${event.branch} to different environments (${names.join(", ")}); one GitHub job takes one.`,
+    );
+  return names[0] ?? "";
 }
 
 /**
@@ -435,6 +453,7 @@ else {
   try {
     if (command === "check") console.log(JSON.stringify(loadApps(flag("--dir", ".")), null, 2));
     else if (command === "deploy") await deploy(flag("--server", ""), flag("--dir", "."));
+    else if (command === "environment") console.log(deployEnvironment(flag("--dir", ".")));
   } catch (error) {
     if (json) {
       process.stdout.write(errorOutput(error instanceof Error ? error.message : String(error)));
@@ -445,8 +464,9 @@ else {
     process.exit(1);
   }
 }
-if (command !== "check" && command !== "deploy" && !isAgentCommand(command)) {
+if (command !== "check" && command !== "deploy" && command !== "environment" && !isAgentCommand(command)) {
   console.log(`kitshn check [--dir <app>]                  check kitshn.config.ts and print it as JSON (K-802)
+kitshn environment [--dir <app>]            the environment of this GitHub event, or nothing (K-807)
 kitshn deploy --server <address> [--dir <app>]   deploy from GitHub Actions (K-803)
 ${AGENT_USAGE}
                                              with an agent key: --server or KITSHN_SERVER, and CF_ACCESS_CLIENT_ID and _SECRET`);

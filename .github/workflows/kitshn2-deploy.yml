@@ -68,12 +68,52 @@ on:
         default: ""
 
 jobs:
+  # K-807: a push or dispatch of a branch other than the default one deploys that branch's push environment, never
+  # prod. One GitHub job takes one environment, so this job asks the recipe first; with none, nothing deploys.
+  branch-environment:
+    if: github.event_name != 'pull_request' && github.ref_name != github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      name: ${{ steps.pick.outputs.name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - id: pick
+        env:
+          SERVER: ${{ inputs.server }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          version=$(curl -fsSL "$SERVER/deploy/version")
+          [[ "$version" =~ ^[0-9a-f]{12}$ ]] || { echo "kitshn: $SERVER names no release ($version)."; exit 1; }
+          base="https://github.com/Yarden-zamir/kitshn/releases/download/edge-$version"
+          cd "$RUNNER_TEMP"
+          curl -fsSL "$base/kitshn.mjs" -o kitshn.mjs
+          curl -fsSL "$base/SHA256SUMS" | grep ' kitshn.mjs$' | sha256sum -c -
+          cd "$GITHUB_WORKSPACE"
+          name=$(node "$RUNNER_TEMP/kitshn.mjs" environment)
+          if [ -z "$name" ]; then
+            echo "::notice::kitshn deploys nothing for the branch $BRANCH, so no deploy runs."
+          elif [[ ! "$name" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+            echo "kitshn: the CLI of edge-$version names no environment for $BRANCH; deploy a newer kitshn first."
+            exit 1
+          fi
+          echo "name=$name" >>"$GITHUB_OUTPUT"
   deploy:
-    # A pull request from a fork gets no OIDC token, so kitshn cannot deploy it.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: branch-environment
+    # A pull request from a fork gets no OIDC token, so kitshn cannot deploy it. A branch without an environment skips.
+    if: >-
+      !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name ==
+      github.repository) && (needs.branch-environment.result == 'skipped' || needs.branch-environment.outputs.name != '')
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    environment: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'prod' }}
+    environment: >-
+      ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) ||
+      needs.branch-environment.outputs.name || 'prod' }}
     # One deploy at a time per pull request and per branch; kitshn binds each push environment to one branch.
     concurrency:
       group: kitshn-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}

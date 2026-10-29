@@ -4665,6 +4665,7 @@ export class Kitshn extends DurableObject<Env> {
         { status: 502 },
       );
     }
+    const relaysLeft = new Set<string>();
     this.ctx.storage.transactionSync(() => {
       for (const table of ["machines", "presence"]) this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
       const forgotten = [this.forgetCard(id)];
@@ -4681,12 +4682,23 @@ export class Kitshn extends DurableObject<Env> {
       for (const card of this.state.resources.values())
         if (card.machine === id && card.provider && !this.sitesOf(id).some((site) => site.id === card.id))
           forgotten.push(this.forgetCard(card.id));
+      // K-2001: the game cards of the machine, or that it relays, go too, with their doors; the alarm removes their
+      // records, so no name keeps pointing at an address that the provider may give to someone else.
+      for (const row of this.gameRows("machine_id = ? OR relay_id = ?", id, id)) {
+        this.sql("DELETE FROM games WHERE card_id = ?", row.card_id);
+        this.sql("DELETE FROM doors WHERE card_id = ?", row.card_id);
+        forgotten.push(this.forgetCard(row.card_id));
+        const other = doorMachine(gameOf(row));
+        if (other !== id) relaysLeft.add(other);
+      }
       const key = machine.key?.kind === "public" ? ` and its key ${machine.key.fingerprint}` : "";
       this.insertRevision(caller.actor, `Removed machine ${machine.name}${key}`, forgotten, null);
     });
     this.presence.delete(id);
     this.keyFailures.delete(id);
     this.load();
+    // A relay machine that stays drops the ports of the removed machine's games.
+    for (const relay of relaysLeft) this.queueDoors(relay, caller.actor, Date.now());
     this.broadcast();
     void this.scheduleAlarm();
     return Response.json({ removed: id });
@@ -8123,6 +8135,34 @@ export class Kitshn extends DurableObject<Env> {
         );
       return this.createGame(agent.actor, body);
     }
+    // K-2006: an agent removes a game card on a machine that it controls, with "adds apps", as it adds one.
+    if (
+      path.startsWith("/agent/cards/") &&
+      request.method === "DELETE" &&
+      !path.slice("/agent/cards/".length).includes("/")
+    ) {
+      const card = path.slice("/agent/cards/".length);
+      const [row] = this.gameRows("card_id = ?", card);
+      if (!row)
+        return Response.json(
+          { error: `An agent removes only game cards; ${card} is none.` },
+          { status: 404 },
+        );
+      if (!agentHas(this.state, caller.visitor, "addsApps", now, approved))
+        return Response.json(
+          {
+            error: 'The right "adds apps" is off for this agent. Ask the owner to turn it on.',
+            need: "addsApps",
+          },
+          { status: 403 },
+        );
+      if (!managed.has(row.machine_id) || (row.relay_id !== null && !managed.has(row.relay_id)))
+        return Response.json(
+          { error: "An agent removes a game only on machines that it controls (K-2006)." },
+          { status: 403 },
+        );
+      return this.deleteGame(agent.actor, card);
+    }
     if (path.startsWith("/agent/cards/") && path.includes("/doors")) {
       const [card = "", address] = path.slice("/agent/cards/".length).split("/doors");
       const [row] = this.gameRows("card_id = ?", card);
@@ -11191,12 +11231,15 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-2005: a door whose person lost the card's share closes at once; a door of a removed card goes too. */
   private closeLostDoors(now: number) {
-    const lost = this.openDoors(now).filter((door) => {
-      const resource = this.state.resources.get(door.card);
-      if (!resource) return true;
-      const visitor = { email: door.person, clientId: null, ip: null, passkey: true, issuedAt: null };
-      return contentAccess(this.state, resource, visitor, now) !== "allow";
-    });
+    // The check uses the address that opened the door, so a circle with an address condition keeps it open.
+    const lost = this.sql<DoorRow>("SELECT * FROM doors WHERE ends_at > ?", now)
+      .filter((row) => {
+        const resource = this.state.resources.get(row.card_id);
+        if (!resource) return true;
+        const visitor = { email: row.person, clientId: null, ip: row.seen_ip, passkey: true, issuedAt: null };
+        return contentAccess(this.state, resource, visitor, now) !== "allow";
+      })
+      .map(doorOf);
     if (lost.length === 0) return false;
     this.closeDoors({ _tag: "kitshn", reason: "share lost (K-2005)" }, lost, "the share ended", now);
     this.load();
@@ -11220,23 +11263,19 @@ export class Kitshn extends DurableObject<Env> {
     const actor: Actor = { _tag: "person", email: person };
     let error: string | null = null;
     if (input.action === "open") {
-      // The address that kitshn sees wins its family; the browser adds the other family (K-2004).
-      const seen = visitor.ip === null ? null : doorAddress(visitor.ip);
-      const wanted = [...(seen && !("error" in seen) ? [seen.address] : []), ...(input.addresses ?? [])]
-        .slice(0, 3)
-        .map((address) => doorAddress(String(address)));
-      const refused = wanted.find((door) => "error" in door);
-      const addresses = [
-        ...new Map(
-          wanted.flatMap((door) => ("error" in door ? [] : [[door.family, door.address] as const])).reverse(),
-        ).values(),
-      ];
+      // K-2004: the address that kitshn sees is the door; the browser may add only the other family to it.
+      const seen = doorAddress(visitor.ip ?? "");
+      const other = (input.addresses ?? [])
+        .map((address) => doorAddress(String(address)))
+        .find((door) => !("error" in door) && !("error" in seen) && door.family !== seen.family);
+      const addresses =
+        "error" in seen ? [] : [seen.address, ...(other && !("error" in other) ? [other.address] : [])];
+      const mine = this.openDoors(now, game.card).filter((door) => door.person === person);
       error =
-        (refused && "error" in refused ? refused.error : null) ??
-        (addresses.length === 0
-          ? seen && "error" in seen
-            ? seen.error
-            : "kitshn found no address to open."
+        ("error" in seen ? `kitshn sees your address as ${visitor.ip ?? "none"}: ${seen.error}` : null) ??
+        // A loop of opens would fill History and the job queue of the machine.
+        (mine.some((door) => door.openedAt > now - 10_000)
+          ? "You opened a door a few seconds ago. Wait a moment."
           : null) ??
         // An offline machine gets the plan when it connects; an online one must hold doors now.
         (this.state.machines.has(machine) && !this.machineView(this.state.machines.get(machine)!).online
@@ -11255,12 +11294,13 @@ export class Kitshn extends DurableObject<Env> {
             );
           for (const door of open)
             this.sql(
-              "INSERT OR REPLACE INTO doors (card_id, person, address, opened_at, ends_at) VALUES (?, ?, ?, ?, ?)",
+              "INSERT OR REPLACE INTO doors (card_id, person, address, opened_at, ends_at, seen_ip) VALUES (?, ?, ?, ?, ?, ?)",
               door.card,
               door.person,
               door.address,
               door.openedAt,
               door.endsAt,
+              visitor.ip,
             );
           this.insertRevision(
             actor,
@@ -12957,6 +12997,7 @@ export function forwardRight(path: string, method: string): MachineRight | null 
     return "addsPages";
   if (card !== null && card.endsWith("/handover") && method === "POST") return "addsApps";
   if (path === "/agent/games" && method === "POST") return "addsApps";
+  if (card !== null && !card.includes("/") && method === "DELETE") return "addsApps";
   if (card !== null && card.includes("/doors") && (method === "GET" || method === "DELETE")) return null;
   if (path === "/agent/logs" && method === "POST") return null;
   return undefined;

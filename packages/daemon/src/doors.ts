@@ -9,6 +9,25 @@ import { type DoorPlan, doorAddress, portKey } from "@kitshn/edge/game";
 export const HELPER_PATH = "/usr/local/lib/kitshn/doors";
 export const SUDOERS_PATH = "/etc/sudoers.d/kitshn-doors";
 export const TABLE = "kitshn_doors";
+export const STATE_PATH = "/var/lib/kitshn/doors.ports";
+export const BOOT_UNIT_PATH = "/etc/systemd/system/kitshn-doors.service";
+
+/** K-2005: loads the last game ports with no door before the network and Docker start, so a reboot opens nothing. */
+export const BOOT_UNIT = `[Unit]
+Description=kitshn game doors: game ports start closed (K-2005)
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target docker.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=${HELPER_PATH} boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+`;
 
 /**
  * K-2005: the root helper. It reads `port`, `open4` and `open6` lines, checks each field, and replaces the table
@@ -16,16 +35,20 @@ export const TABLE = "kitshn_doors";
  */
 export const HELPER = `#!/bin/sh
 # kitshn doors (K-2005): the one root step of kitshn game servers. Installed by \`kitshn doors install\`.
-# Usage: doors apply < lines | doors off. It changes only the nftables table inet ${TABLE}.
+# Usage: doors apply < lines | doors boot | doors off. It changes only the nftables table inet ${TABLE}.
+# \`boot\` runs before the network at each start: it loads the last game ports with no door, so they start closed.
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 table=${TABLE}
+# The traffic test (test/doors-netns.sh) sets its own file; sudo's env_reset drops the variable for the daemon user.
+state=\${KITSHN_DOORS_STATE:-${STATE_PATH}}
 fail() { echo "doors: $*" >&2; exit 2; }
 remove() { if nft list table inet "$table" >/dev/null 2>&1; then nft delete table inet "$table"; fi; }
 case "\${1:-}" in
-off) remove; exit 0 ;;
+off) remove; rm -f "$state"; exit 0 ;;
+boot) [ -f "$state" ] || exit 0; exec <"$state" ;;
 apply) ;;
-*) fail "usage: doors apply < lines | doors off" ;;
+*) fail "usage: doors apply < lines | doors boot | doors off" ;;
 esac
 number() { case "$1" in "" | *[!0-9]*) return 1 ;; esac; [ "\${#1}" -le 6 ]; }
 port() { number "$1" && [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]; }
@@ -46,7 +69,7 @@ ipv6net() {
   [ "$#" -eq 4 ] || return 1
   for group in "$@"; do case "$group" in "" | ?????*) return 1 ;; esac; done
 }
-ports="" open4="" open6="" lines=0
+ports="" portlines="" open4="" open6="" lines=0
 while IFS=' ' read -r kind a b c d extra; do
   lines=$((lines + 1))
   [ "$lines" -le 4000 ] || fail "too many lines"
@@ -54,7 +77,9 @@ while IFS=' ' read -r kind a b c d extra; do
   case "$kind" in
   port)
     proto "$a" && port "$b" && [ -z "\${c:-}" ] || fail "line $lines is no port"
-    ports="$ports\${ports:+, }$a . $b" ;;
+    ports="$ports\${ports:+, }$a . $b"
+    portlines="\${portlines}port $a $b
+" ;;
   open4)
     ipv4 "$a" && proto "$b" && port "$c" && seconds "$d" || fail "line $lines is no IPv4 door"
     open4="$open4\${open4:+, }$a . $b . $c timeout \${d}s" ;;
@@ -66,7 +91,7 @@ while IFS=' ' read -r kind a b c d extra; do
   *) fail "line $lines is unknown" ;;
   esac
 done
-if [ -z "$ports" ]; then remove; exit 0; fi
+if [ -z "$ports" ]; then remove; rm -f "$state"; exit 0; fi
 elements4="" elements6=""
 [ -z "$open4" ] || elements4="elements = { $open4 }"
 [ -z "$open6" ] || elements6="elements = { $open6 }"
@@ -101,7 +126,7 @@ table inet $table {
   # A port that system Docker publishes goes DNAT and through here, in both directions.
   chain forward {
     type filter hook forward priority filter - 10; policy accept;
-    ct status != dnat accept
+    ct status & dnat == 0 accept
     meta l4proto != { tcp, udp } accept
     ct direction original ip saddr . meta l4proto . ct original proto-dst @open4 accept
     ct direction original ip6 saddr and ffff:ffff:ffff:ffff:0:0:0:0 . meta l4proto . ct original proto-dst @open6 accept
@@ -113,9 +138,17 @@ table inet $table {
 EOF
 nft -c -f "$script"
 nft -f "$script"
+# The game ports alone, for \`boot\`; root's file, so the daemon user cannot change what loads before the network.
+if [ "\${1:-}" = apply ]; then
+  mkdir -p "\${state%/*}"
+  umask 077
+  printf '%s' "$portlines" >"$state.new"
+  mv "$state.new" "$state"
+fi
 `;
 
-export const sudoersLine = (user: string) => `${user} ALL=(root) NOPASSWD: ${HELPER_PATH}\n`;
+/** The daemon only applies plans; `off` and `boot` run as root through the install command and the boot unit. */
+export const sudoersLine = (user: string) => `${user} ALL=(root) NOPASSWD: ${HELPER_PATH} apply\n`;
 
 /** K-2005: the helper's input for a plan. A door that has ended is left out; the kernel ends the rest. */
 export function helperInput(plan: DoorPlan, now: number): string {
@@ -142,6 +175,13 @@ export class Relays {
     private readonly log: (line: string) => void,
     private readonly restartMs = 5000,
   ) {}
+
+  /** K-2008: the relays end with the daemon; a service manager that kills only the daemon leaves no listener. */
+  stopAll() {
+    this.wanted = new Set();
+    for (const child of this.running.values()) child.kill();
+    this.running.clear();
+  }
 
   sync(
     relays: DoorPlan["relays"] | undefined,
@@ -223,7 +263,7 @@ export function doorsProblem(platform: NodeJS.Platform): string | null {
   if (platform !== "linux") return "game servers need a Linux machine with nftables";
   if (!existsSync(HELPER_PATH))
     return `the door helper is not installed; run \`kitshn doors install\` as root`;
-  const check = spawnSync("sudo", ["-n", "-l", HELPER_PATH], { encoding: "utf8" });
+  const check = spawnSync("sudo", ["-n", "-l", HELPER_PATH, "apply"], { encoding: "utf8" });
   if (check.status !== 0) return "the daemon user may not run the door helper (sudoers)";
   const { v4, v6 } = publicAddresses();
   if (v4 === null && v6 === null)
@@ -267,9 +307,14 @@ export function doorsCommand(action: string | undefined, user: string | undefine
   if (process.getuid?.() !== 0) throw new Error("run `kitshn doors install|uninstall` as root");
   if (action === "uninstall") {
     spawnSync("/bin/sh", ["-c", `[ -x ${HELPER_PATH} ] && ${HELPER_PATH} off || true`], { stdio: "inherit" });
+    spawnSync("systemctl", ["disable", "kitshn-doors.service"], { stdio: "inherit" });
+    rmSync(BOOT_UNIT_PATH, { force: true });
+    spawnSync("systemctl", ["daemon-reload"], { stdio: "inherit" });
     rmSync(SUDOERS_PATH, { force: true });
     rmSync(HELPER_PATH, { force: true });
-    console.log(`kitshn: removed ${HELPER_PATH}, ${SUDOERS_PATH} and the table inet ${TABLE}.`);
+    console.log(
+      `kitshn: removed ${HELPER_PATH}, ${SUDOERS_PATH}, ${BOOT_UNIT_PATH}, ${STATE_PATH} and the table inet ${TABLE}.`,
+    );
     return;
   }
   if (action !== "install" || !user || !/^[a-z_][a-z0-9_-]{0,31}$/.test(user))
@@ -285,7 +330,13 @@ export function doorsCommand(action: string | undefined, user: string | undefine
     throw new Error(`visudo refused the sudoers line: ${check.stdout}${check.stderr}`);
   }
   renameSync(staged, SUDOERS_PATH);
+  writeFileSync(BOOT_UNIT_PATH, BOOT_UNIT, { mode: 0o644 });
+  for (const argv of [["daemon-reload"], ["enable", "kitshn-doors.service"]]) {
+    const step = spawnSync("systemctl", argv, { encoding: "utf8" });
+    if (step.status !== 0)
+      throw new Error(`systemctl ${argv.join(" ")} failed: ${step.stdout}${step.stderr}`);
+  }
   console.log(
-    `kitshn: installed ${HELPER_PATH} and ${SUDOERS_PATH} for ${user}. Restart the daemon to report doors.`,
+    `kitshn: installed ${HELPER_PATH}, ${SUDOERS_PATH} for ${user} and ${BOOT_UNIT_PATH}. Restart the daemon to report doors.`,
   );
 }

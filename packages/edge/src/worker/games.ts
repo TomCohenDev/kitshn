@@ -20,6 +20,8 @@ export interface DoorRow extends Record<string, SqlStorageValue> {
   address: string;
   opened_at: number;
   ends_at: number;
+  /** K-2005: the address that opened the door, for the share check of `closeLostDoors`. */
+  seen_ip: string | null;
 }
 
 export interface GameRecordRow extends Record<string, SqlStorageValue> {

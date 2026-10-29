@@ -1737,6 +1737,7 @@ const doorState: { problem: string | null; listening: ReadonlySet<string> } = {
 };
 const doorsFile = () => join(paths.data, "doors.json");
 const relays = new Relays(log);
+process.on("exit", () => relays.stopAll());
 
 /** K-2008: the relays of a plan, after its doors are in the table. */
 function syncRelays(plan: DoorPlan) {
@@ -1765,15 +1766,31 @@ function checkListening() {
 /** K-2005: after a restart or a reboot the table is empty or old; the kept plan goes in again before kitshn sends one. */
 function startDoors() {
   doorState.problem = doorsProblem(platform);
-  if (doorState.problem !== null) return;
+  checkListening();
+  setInterval(checkListening, 30_000);
+  if (doorState.problem !== null) {
+    if (platform !== "linux") return;
+    // K-2005: a start problem can pass (the network was not up yet, or sudo failed once), so check again.
+    const again = setInterval(() => {
+      doorState.problem = doorsProblem(platform);
+      if (doorState.problem !== null) return;
+      clearInterval(again);
+      applyKeptPlan();
+      report();
+    }, 60_000);
+    return;
+  }
+  applyKeptPlan();
+}
+
+/** K-2005: the plan that this daemon wrote last goes into the table again before kitshn sends a new one. */
+function applyKeptPlan() {
   const plan = keptPlan(doorsFile());
   if (plan) {
     const outcome = applyDoors(plan, doorsFile(), Date.now());
     log(outcome.ok ? `kept ${outcome.output}` : `the kept door plan failed: ${outcome.output}`);
     if (outcome.ok) syncRelays(plan);
   }
-  checkListening();
-  setInterval(checkListening, 30_000);
 }
 
 /** K-605: the tunnel state comes from its service manager; a change goes out in the status. */

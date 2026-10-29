@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { helperInput, listening } from "./doors.ts";
+import { helperInput, listening, sudoersLine } from "./doors.ts";
 
 it("gives the root helper one line per port and per open door and port, without ended doors (K-2005)", () => {
   const plan = {
@@ -30,4 +30,8 @@ it("reads the listening ports from ss, for IPv4 and IPv6 sockets (K-2006)", () =
     "tcp   LISTEN 0      4096   127.0.0.1:2019  0.0.0.0:*",
   ].join("\n");
   expect([...listening(output)].sort()).toEqual(["19132/udp", "2019/tcp", "25565/tcp"]);
+});
+
+it("lets the daemon user run only `apply` of the helper as root (K-2002)", () => {
+  expect(sudoersLine("kitshn")).toBe("kitshn ALL=(root) NOPASSWD: /usr/local/lib/kitshn/doors apply\n");
 });

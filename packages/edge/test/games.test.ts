@@ -147,3 +147,43 @@ it("opens one door per family for a person of the card, and closes it when the p
   );
   expect(left).toEqual([]);
 });
+
+it("keeps a door when its circle checks the address, and refuses a second open within 10 s (K-2004, K-2005)", async () => {
+  stubAccessCerts();
+  const stub = await setup();
+  const office: Circle = {
+    ...friends,
+    match: "all",
+    members: [
+      { _tag: "email", email: "friend@example.com" },
+      { _tag: "ip", range: "203.0.113.0/24" },
+    ],
+  };
+  await runInDurableObject(stub, (_, state) => {
+    state.storage.sql.exec("UPDATE circles SET body = ? WHERE id = 'friends'", JSON.stringify(office));
+  });
+  await evictDurableObject(stub);
+  const opened = await game(stub, {
+    name: "mc",
+    action: "open",
+    visitor: visitor("friend@example.com", "203.0.113.9"),
+  });
+  expect(opened.error).toBeNull();
+  // Any commit runs the share check of the open doors; it uses the address that opened the door.
+  const edited = await send("/api/apply", {
+    method: "POST",
+    headers: {
+      "cf-access-jwt-assertion": await accessToken("admin-aud", { email: "owner@example.com" }),
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ edits: [{ _tag: "circle", id: "friends", after: { ...office, x: 9001 } }] }),
+  });
+  expect(edited.status, await edited.clone().text()).toBe(200);
+  const again = await game(stub, {
+    name: "mc",
+    action: "open",
+    visitor: visitor("friend@example.com", "203.0.113.9"),
+  });
+  expect(again.doors.map((door) => door.address)).toEqual(["203.0.113.9"]);
+  expect(again.error).toMatch(/Wait a moment/);
+});

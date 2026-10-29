@@ -39,6 +39,8 @@ export interface AppBody {
   readonly path_cookie_attribute?: true;
   /** Keys of `DesiredAccess.policies`, in precedence order. */
   readonly policyKeys: ReadonlyArray<string>;
+  /** K-1130: the closed login page for a card in no circle, `[]` for every other card; absent without that page. */
+  readonly custom_pages?: ReadonlyArray<string>;
 }
 
 export interface DesiredAccess {
@@ -209,13 +211,17 @@ export function desiredAccess(
   now: number,
   removed: ReadonlyArray<RemovedSite> = [],
   old: ReadonlyArray<OldAddress> = [],
+  closedPage: string | null = null,
 ): DesiredAccess {
   const policies = new Map<string, PolicyBody>();
   const apps = new Map<string, AppBody>();
   for (const resource of state.resources.values()) {
     if (WORKER_CHECKED.has(resource.kind) || resource.addresses.length === 0) continue;
     const policyKeys: Array<string> = [];
-    for (const share of activeShares(state, resource, now)) {
+    const shares = activeShares(state, resource, now);
+    // K-1130: a card that no circle opens now shows kitshn's closed page instead of the Cloudflare login.
+    const closed = closedPage === null ? {} : { custom_pages: shares.length === 0 ? [closedPage] : [] };
+    for (const share of shares) {
       for (const [key, body] of circlePolicies(share.circle, state.machines)) {
         // K-1504: during a pause only people pass; the devices and networks policy of Owner drops out.
         if (state.paused && !key.endsWith(":people")) continue;
@@ -238,6 +244,7 @@ export function desiredAccess(
         session_duration: resource.id === ADMIN_RESOURCE_ID ? "24h" : "720h",
         same_site_cookie_attribute: "lax",
         policyKeys,
+        ...closed,
       });
     }
   }

@@ -471,6 +471,14 @@ describe("Access compile (K-401 to K-403)", () => {
     expect(
       desiredAccess(state, 0, [], old).apps.get("app:riffle:old-riffle.example.com")?.policyKeys,
     ).toEqual(["policy:owner:people"]);
+    // K-1130: with the closed page, a card in no circle names it on each address, and a card in a circle clears it.
+    const withPage = (from: typeof state) => desiredAccess(from, 0, [], old, "closed-page-id").apps;
+    expect(withPage(moved).get("app:riffle:riffle.example.com")?.custom_pages).toEqual(["closed-page-id"]);
+    expect(withPage(moved).get("app:riffle:old-riffle.example.com")?.custom_pages).toEqual([
+      "closed-page-id",
+    ]);
+    expect(withPage(state).get("app:riffle:riffle.example.com")?.custom_pages).toEqual([]);
+    expect(access.apps.get("app:riffle:riffle.example.com")).not.toHaveProperty("custom_pages");
   });
 });
 

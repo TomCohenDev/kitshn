@@ -1258,7 +1258,13 @@ export class Kitshn extends DurableObject<Env> {
     const going = attached
       .filter((row) => row.going === 1 && this.state.resources.has(row.card_id))
       .map((row) => ({ cardId: row.card_id, address: row.address }));
-    return desiredAccess(this.state, now, [...removed, ...leaving], [...this.oldAddresses(), ...going]);
+    return desiredAccess(
+      this.state,
+      now,
+      [...removed, ...leaving],
+      [...this.oldAddresses(), ...going],
+      this.env.KITSHN_CLOSED_PAGE?.trim() || null,
+    );
   }
 
   /** The rules that every write keeps (K-105, K-1504). Returns the state after the changes. */

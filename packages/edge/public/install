@@ -203,6 +203,84 @@ if ! printf '%s' "$APPS" | jq -e --arg d "$KITSHN_HOST" 'any(.[]; .domain == $d)
 fi
 public_policy=$(policy "kitshn public paths" '{"name":"kitshn public paths","decision":"bypass","include":[{"everyone":{}}],"require":[],"exclude":[]}')
 machines_policy=$(policy "kitshn machines" '{"name":"kitshn machines","decision":"non_identity","include":[{"any_valid_service_token":{}}],"require":[],"exclude":[]}')
+# K-1130: the login page of a card in no circle, in the kitshn look. Optional: without "Access: Custom Pages Edit",
+# or on a plan that refuses login pages, closed cards keep the Cloudflare login, and the run goes on.
+CLOSED_NAME="kitshn closed"
+closed_html() {
+  cat <<'HTML'
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ app_domain }} is closed</title>
+<style>
+:root { color-scheme: light; --canvas: #E4E7FF; --dots: #00000026; --surface: #FFFFFF; --ink: #000000; --muted: #3D3D5C;
+  --border: #000000; --shadow-ink: #000000; --select: #FFE14D; --pink: #FF9EB0;
+  --sans: "Bricolage Grotesque", system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, monospace; }
+@media (prefers-color-scheme: dark) {
+  :root { color-scheme: dark; --canvas: #15122B; --dots: #F3F0FF22; --surface: #262147; --ink: #F3F0FF;
+    --muted: #BDB6E6; --border: #F3F0FF; --shadow-ink: #B9A8FF; --select: #6C5CE7; }
+}
+* { box-sizing: border-box; }
+html { font-size: 18px; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; font: 1rem/1.5 var(--sans);
+  color: var(--ink); background-color: var(--canvas); background-size: 16px 16px;
+  background-image: radial-gradient(var(--dots) 1.2px, transparent 1.2px); }
+main { width: min(30rem, 100%); padding: 24px; background: var(--surface); border: 2px solid var(--border);
+  border-radius: 0.25rem; box-shadow: 4px 4px 0 0 var(--shadow-ink); }
+.sticker { display: inline-block; padding: 0 6px; font-size: 0.65rem; font-weight: 800; letter-spacing: 0.04em;
+  text-transform: uppercase; color: #000000; background: var(--pink); border: 2px solid var(--shadow-ink);
+  border-radius: 4px; box-shadow: 2px 2px 0 0 var(--shadow-ink); transform: rotate(-3deg); }
+code { font-family: var(--mono); font-size: 0.85em; padding: 0 2px;
+  background: linear-gradient(transparent 35%, var(--select) 35%, var(--select) 88%, transparent 88%); }
+h1 { margin: 16px 0 4px; font-size: 1.6rem; font-weight: 800; letter-spacing: -0.01em; }
+p { margin: 0 0 16px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+<span class="sticker">closed</span> <code>{{ app_domain }}</code>
+<h1>Let me in, I'm the chef</h1>
+<p>This place is closed. Only the chef gets in.</p>
+<cf-access-authbox></cf-access-authbox>
+</main>
+</body>
+</html>
+HTML
+}
+CLOSED_HTML=$(closed_html)
+CLOSED_PAGE=""
+closed_hint="           To add it, edit the token at https://dash.cloudflare.com/profile/api-tokens:
+           add \"Account\", \"Access: Custom Pages\", \"Edit\", then Update token."
+if ! try GET "/accounts/$ACCOUNT/access/custom_pages"; then
+  say "  warning: the token has no \"Access: Custom Pages Edit\", so a card in no circle shows the Cloudflare login (K-1130)."
+  say "$closed_hint"
+else
+  CLOSED_PAGE=$(jq -r --arg name "$CLOSED_NAME" '[.result[] | select(.name == $name and .type == "login")] | .[0] | (.uid // .id) // empty' "$WORK/out")
+  closed_body=$(jq -nc --arg name "$CLOSED_NAME" --arg html "$CLOSED_HTML" '{name:$name,type:"login",custom_html:$html}')
+  printf '%s' "$closed_body" >"$WORK/body"
+  if [ -z "$CLOSED_PAGE" ]; then
+    closed_call="POST /accounts/$ACCOUNT/access/custom_pages"
+  elif try GET "/accounts/$ACCOUNT/access/custom_pages/$CLOSED_PAGE" &&
+    [ "$(jq -r '.result.custom_html' "$WORK/out")" = "$CLOSED_HTML" ]; then
+    closed_call=""
+    kept "login page \"$CLOSED_NAME\""
+  else
+    closed_call="PUT /accounts/$ACCOUNT/access/custom_pages/$CLOSED_PAGE"
+  fi
+  if [ -n "$closed_call" ]; then
+    curl -sS -X "${closed_call%% *}" "$API${closed_call#* }" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+      -H "Content-Type: application/json" --data-binary "@$WORK/body" >"$WORK/out" 2>/dev/null || true
+    if [ "$(jq -r '.success // false' "$WORK/out" 2>/dev/null)" = true ]; then
+      CLOSED_PAGE=$(jq -r '.result | (.uid // .id)' "$WORK/out")
+      changed "wrote the login page \"$CLOSED_NAME\" (K-1130)"
+    else
+      say "  warning: Cloudflare refused the login page \"$CLOSED_NAME\": $(jq -r '[.errors[]? | "\(.code): \(.message)"] | join("; ")' "$WORK/out" 2>/dev/null || head -c 200 "$WORK/out")"
+      say "           A card in no circle keeps the Cloudflare login (K-1130)."
+    fi
+  fi
+fi
 # K-1209: during the host move the Worker also takes the old host and the audience tags of its applications. A run
 # without KITSHN_OLD_HOST keeps the value of the running Worker, and KITSHN_OLD_HOST=none ends the move.
 if [ -z "${KITSHN_OLD_HOST:-}" ] && try GET "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/settings"; then
@@ -368,7 +446,7 @@ if [ "$(printf '%s' "$scripts" | jq -r --arg s "$SCRIPT" 'map(select(.id == $s))
 fi
 # run_worker_first: the offline routes of live sites (K-1108) need the Worker before the map's assets.
 metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --argjson migrations "$migrations" \
-  --arg host "$KITSHN_HOST" --arg old_host "$KITSHN_OLD_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" --arg agent_aud "$AGENT_AUD" --arg fresh_aud "$FRESH_AUD" \
+  --arg host "$KITSHN_HOST" --arg old_host "$KITSHN_OLD_HOST" --arg closed_page "$CLOSED_PAGE" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" --arg agent_aud "$AGENT_AUD" --arg fresh_aud "$FRESH_AUD" \
   --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" \
   --arg zone "$ZONE" --arg zone_name "$ZONE_NAME" --arg zones "$ZONES_JSON" --arg deployers "$DEPLOY_OWNER_IDS" \
   --arg version "$(cat "$WORK/bundle/version")" --arg r2 "$R2" --arg pages_login "$PAGES_LOGIN_AUD" \
@@ -401,6 +479,7 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
       {type: "plain_text", name: "FILES_LOGIN_AUD", text: $files_login},
       {type: "plain_text", name: "FILES_PASSKEY_AUD", text: $files_passkey}
     ] + (if $old_host == "" then [] else [{type: "plain_text", name: "KITSHN_OLD_HOST", text: $old_host}] end)
+      + (if $closed_page == "" then [] else [{type: "plain_text", name: "KITSHN_CLOSED_PAGE", text: $closed_page}] end)
       + (if $r2 == "" then [] else [{type: "r2_bucket", name: "BUCKET", bucket_name: $r2}] end)
       + (if $import_at == "" then [] else [{type: "plain_text", name: "KITSHN_IMPORT_AT", text: $import_at}] end),
     keep_bindings: ["secret_text"]

@@ -7,6 +7,8 @@ export interface Env {
   readonly KITSHN_HOST: string;
   /** K-1209: the old admin host, set by the bootstrap only during the host move. */
   readonly KITSHN_OLD_HOST?: string;
+  /** K-1130: the id of the Access login page "kitshn closed", which the bootstrap makes when the token may. */
+  readonly KITSHN_CLOSED_PAGE?: string;
   /** The Zero Trust team domain, for example `team.cloudflareaccess.com`. */
   readonly ACCESS_TEAM_DOMAIN: string;
   /** The audience tag of the admin Access application (the map and `/api`). */

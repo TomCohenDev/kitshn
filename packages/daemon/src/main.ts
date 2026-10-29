@@ -31,6 +31,7 @@ import {
   WINDOW_ACTIONS,
 } from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
+import { withNotify } from "./notify.ts";
 import { backup, finishRestores, restore, unpauseMarked } from "./backup.ts";
 import { keyPlan } from "./keys.ts";
 import {
@@ -1130,7 +1131,8 @@ async function composeUp(
     for (const folder of [data, env.KITSHN_LOG_DIR]) mkdirSync(folder, { recursive: true });
     // Build and start from the checked config itself, so the repo's files are not read again. It stays with
     // the last good build, so a teardown reads the same services.
-    writeFileSync(checked, JSON.stringify(withLogLimits(config)), { mode: 0o600 });
+    // K-1908: the token stays out of this file, which stays with the last good build.
+    writeFileSync(checked, JSON.stringify(withNotify(withLogLimits(config), notify)), { mode: 0o600 });
     // The params file again: without it Compose reads the repo's `.env`, and `COMPOSE_PROFILES` is lost.
     const run = [
       "compose",

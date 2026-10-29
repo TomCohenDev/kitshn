@@ -5,7 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MAX_LINE_LENGTH, type Request } from "@kitshn/local";
 import { describe, expect, it } from "vitest";
-import { type Caller, type LocalOptions, askLocal, listenLocal, sharedFolderProblem } from "./local.ts";
+import {
+  type Caller,
+  type LocalOptions,
+  askLocal,
+  bridgeLocal,
+  listenLocal,
+  sharedFolderProblem,
+} from "./local.ts";
 import type { Platform } from "./service.ts";
 
 const platform: Platform = process.platform === "darwin" ? "darwin" : "linux";
@@ -22,8 +29,10 @@ async function daemon(decide: LocalOptions["decide"], access: LocalOptions["acce
   const path = join(folder, "kitshn.sock");
   const peers: Array<number | null> = [];
   const callers: Array<Caller> = [];
+  const closed = Promise.withResolvers<number>();
   const server = await listenLocal(path, {
     platform,
+    closed: closed.resolve,
     decide: (peer) => {
       peers.push(peer);
       return decide(peer);
@@ -50,7 +59,7 @@ async function daemon(decide: LocalOptions["decide"], access: LocalOptions["acce
     server.stop();
     if (access === "shared") rmSync(folder, { recursive: true, force: true });
   };
-  return { path, peers, callers, [Symbol.dispose]: stop };
+  return { path, peers, callers, closed: closed.promise, [Symbol.dispose]: stop };
 }
 
 /** Sends raw lines, as a provider with a bug would, and collects the answer lines. node:net buffers a long write. */
@@ -73,6 +82,27 @@ function raw(path: string, text: string, answers: number): Promise<Array<unknown
 const status: Request = { id: "1", type: "status" };
 
 describe("local socket (K-701, K-702)", () => {
+  it("joins a provider's stdin and stdout to one connection, line by line (K-704)", async () => {
+    using local = await daemon(() => ({ accept: true }));
+    // A provider keeps stdin open while it runs; it ends here after the answer, as a provider that exits.
+    const answered = Promise.withResolvers<void>();
+    async function* input() {
+      yield new TextEncoder().encode(`${JSON.stringify(status)}\n`);
+      await answered.promise;
+    }
+    let output = "";
+    const bridge = bridgeLocal(local.path, daemonPeer, input(), (text) => {
+      output += text;
+      if (output.endsWith("\n")) answered.resolve();
+    });
+    expect(await bridge).toBe("closed");
+    expect(JSON.parse(output.trim())).toMatchObject({ id: "1", type: "status" });
+    // A socket of another user gets no line (K-701).
+    await expect(
+      bridgeLocal(local.path, { platform, daemonUid: own + 1 }, input(), () => {}),
+    ).rejects.toThrow(/kitshn sent nothing/);
+  });
+
   it("reads the real peer user id of a client of the same user, and answers with the request id", async () => {
     using local = await daemon(() => ({ accept: true }));
     expect(statSync(local.path).mode & 0o777).toBe(0o600);
@@ -80,7 +110,9 @@ describe("local socket (K-701, K-702)", () => {
     const outcome = await askLocal(local.path, status, 5000, daemonPeer);
     expect(outcome).toMatchObject({ kind: "answer", answer: { id: "1", type: "status" } });
     expect(local.peers).toEqual([own]);
-    expect(local.callers).toEqual([{ uid: own }]);
+    expect(local.callers).toEqual([{ uid: own, connection: expect.any(Number) }]);
+    // K-704: the daemon hears which connection closed, so its providers go offline.
+    expect(await local.closed).toBe(local.callers[0]?.connection);
   });
 
   it("closes a refused connection before it reads a request", async () => {

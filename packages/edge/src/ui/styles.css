@@ -2459,3 +2459,11 @@ a > code {
   gap: 8px;
   margin-top: 6px;
 }
+
+/* K-1625: the facts of a provider card. */
+.facts {
+  margin: 0;
+}
+.facts dd {
+  margin: 0;
+}

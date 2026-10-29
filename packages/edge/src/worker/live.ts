@@ -1,6 +1,6 @@
 import { RESERVED_SITE_NAMES } from "../core/library.ts";
 import type { LiveSiteReport } from "../core/machine.ts";
-import type { Resource } from "../core/model.ts";
+import { type Resource, fnv } from "../core/model.ts";
 import { type AccessRow, appliesBypass } from "./access-sync.ts";
 
 /** One live site of a machine (K-1104), as the Durable Object keeps it. */
@@ -22,13 +22,6 @@ export interface LiveSite {
 
 const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 const TARGET = /^(http:\/\/localhost:(\d{1,5})|unix:\/[^\s]{1,200})$/;
-
-/** FNV-1a, 32 bits, as 8 hex characters. */
-const fnv = (text: string) => {
-  let hash = 0x811c9dc5;
-  for (const char of text) hash = Math.imul(hash ^ char.charCodeAt(0), 0x01000193) >>> 0;
-  return hash.toString(16).padStart(8, "0");
-};
 
 /** A long id keeps a hash of the machine and the name instead of being cut, so two sites never meet. */
 export const liveSiteId = (machineId: string, name: string) => {

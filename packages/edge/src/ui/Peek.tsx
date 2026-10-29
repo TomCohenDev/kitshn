@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { type Resource, type State, activeShares, isPublicCircle } from "../core/model.ts";
 import { ResizeIcon } from "./controls.tsx";
 import { frameSandbox } from "./frames.ts";
-import { KINDS } from "./kinds.ts";
+import { kindInfo } from "./kinds.ts";
 
 /** K-520: a card that opens without a login; any other card needs an Access session, which a frame cannot start. */
 const opensForAnyone = (state: State, resource: Resource) =>
@@ -173,7 +173,7 @@ export type Peek = ReturnType<typeof usePeek>;
  * there still selects or drags it.
  */
 export function KindSticker(props: { resource: Resource; peek: Peek | null }) {
-  const kind = KINDS[props.resource.kind];
+  const kind = kindInfo(props.resource);
   const peek = props.peek;
   return (
     <span

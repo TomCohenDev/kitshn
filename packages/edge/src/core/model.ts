@@ -1,4 +1,5 @@
 import type { Machine } from "./machine.ts";
+import type { ProviderFact, ProviderLevels, ProviderSticker } from "@kitshn/local";
 
 /** All levels in one order, lowest first. A resource kind uses a subset (K-301, K-206). */
 export const LEVELS = ["view", "use", "control"] as const;
@@ -18,6 +19,39 @@ export const RESOURCE_KINDS = {
   "repo.group": ["view"],
 } as const satisfies Record<string, ReadonlyArray<Level>>;
 export type ResourceKind = keyof typeof RESOURCE_KINDS;
+/** K-302: a kind of a provider has the provider prefix, for example `t3.thread`. */
+export type CardKind = ResourceKind | `${string}.${string}`;
+
+/**
+ * K-704, K-705: what a provider card carries beyond a card: the provider, its own id of the resource, the names of
+ * the levels of its kind (K-713), and its facts and stickers (K-1625).
+ */
+export interface ProviderCard {
+  readonly name: string;
+  readonly localId: string;
+  readonly kindName: string;
+  readonly levels: ProviderLevels;
+  readonly facts: ReadonlyArray<ProviderFact>;
+  readonly stickers: ReadonlyArray<ProviderSticker>;
+  /** K-705: the live site name of the card on its machine, or null. */
+  readonly site: string | null;
+}
+
+/** FNV-1a, 32 bits, as 8 hex characters; `seed` gives a second, independent hash. */
+export const fnv = (text: string, seed = 0x811c9dc5) => {
+  let hash = seed;
+  for (const char of text) hash = Math.imul(hash ^ char.charCodeAt(0), 0x01000193) >>> 0;
+  return hash.toString(16).padStart(8, "0");
+};
+
+/**
+ * K-704: the id of a provider card: 64 bits of hash of the machine, the provider and its own id, so it fits the card
+ * id pattern of the map and two cards never meet.
+ */
+export const providerCardId = (machineId: string, provider: string, localId: string) => {
+  const key = `${machineId}/${provider}/${localId}`;
+  return `p-${fnv(key)}${fnv(key, 0x050c5d1f)}`;
+};
 
 export const ADMIN_RESOURCE_ID = "kitshn-admin";
 
@@ -137,7 +171,7 @@ export const RESOURCE_STATUSES = ["running", "stopped", "deploying", "failed", "
 
 export interface Resource {
   readonly id: string;
-  readonly kind: ResourceKind;
+  readonly kind: CardKind;
   readonly name: string;
   readonly addresses: ReadonlyArray<string>;
   readonly status: (typeof RESOURCE_STATUSES)[number];
@@ -148,7 +182,22 @@ export interface Resource {
   readonly match?: string;
   /** K-1760: the GitHub way of an owner group (a match with no `/`). */
   readonly githubWay?: GitHubWay;
+  /** K-704: present on the card of a provider resource. */
+  readonly provider?: ProviderCard;
 }
+
+/** K-301, K-713: the levels of a card's kind, lowest first; a provider kind names which of them it has. */
+export function levelsOf(resource: Pick<Resource, "kind" | "provider">): ReadonlyArray<Level> {
+  if (resource.provider) {
+    const named = resource.provider.levels;
+    return LEVELS.filter((level) => named[level] !== undefined);
+  }
+  return RESOURCE_KINDS[resource.kind as ResourceKind] ?? [];
+}
+
+/** K-713: the name that a card's kind gives a level: its own name for a provider kind. */
+export const levelName = (resource: Pick<Resource, "provider">, level: Level) =>
+  resource.provider?.levels[level] ?? level;
 
 /** K-1760: kitshn makes App tokens for the repos of an owner, or the machine uses its own login. */
 export type GitHubWay = "app" | "not-kitshn";
@@ -207,7 +256,7 @@ export function pauseModeOf(stored: string | null): PauseMode | null {
 }
 
 /** K-1504: the kinds whose public shares a pause keeps open; machines, repos and the admin always close. */
-const KEPT_PUBLIC: ReadonlySet<ResourceKind> = new Set([
+const KEPT_PUBLIC: ReadonlySet<CardKind> = new Set([
   "site.static",
   "site.worker",
   "site.compose",
@@ -219,8 +268,11 @@ const KEPT_PUBLIC: ReadonlySet<ResourceKind> = new Set([
 export const levelRank = (level: Level) => LEVELS.indexOf(level);
 
 /** K-206: the highest level of the kind that is not above the wanted level, or null for none. */
-export function levelForKind(kind: ResourceKind, wanted: Level): Level | null {
-  const levels: ReadonlyArray<Level> = RESOURCE_KINDS[kind];
+export function levelForKind(
+  kind: Pick<Resource, "kind" | "provider"> | ResourceKind,
+  wanted: Level,
+): Level | null {
+  const levels = levelsOf(typeof kind === "string" ? { kind } : kind);
   let best: Level | null = null;
   for (const level of levels) if (levelRank(level) <= levelRank(wanted)) best = level;
   return best;
@@ -255,7 +307,7 @@ export function circlesHolding(state: State, resourceId: string): Array<Circle> 
 /** The level that one circle gives on one resource (K-205, K-206), or null for none. */
 export function shareLevel(state: State, resource: Resource, circle: Circle): Level | null {
   const override = state.shareSettings.get(shareKey(resource.id, circle.id))?.level;
-  return levelForKind(resource.kind, override ?? circle.level);
+  return levelForKind(resource, override ?? circle.level);
 }
 
 export interface Share {

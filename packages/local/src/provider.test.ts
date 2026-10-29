@@ -1,0 +1,64 @@
+import { describe, expect, it } from "vitest";
+import { type ProviderReport, readRequest, reportProblem } from "./index.ts";
+
+const t3 = (resources: ProviderReport["resources"], extra: Partial<ProviderReport> = {}): ProviderReport => ({
+  name: "t3",
+  online: true,
+  kinds: [
+    { id: "t3.app", name: "T3 app", levels: { view: "view", use: "use", control: "control" } },
+    { id: "t3.thread", name: "thread", levels: { view: "view", use: "send" } },
+    { id: "t3.settings", name: "settings", levels: {} },
+  ],
+  commands: [{ id: "restart", title: "Restart server", kinds: ["t3.app"], confirm: true }],
+  resources,
+  ...extra,
+});
+const app = { id: "app", kind: "t3.app", name: "T3 on vps", status: "running" } as const;
+
+describe("provider reports (K-704, K-705)", () => {
+  it("takes kinds with the provider prefix, known parents and free site names", () => {
+    const thread = { id: "th-1", kind: "t3.thread", name: "Fix", status: "running", parent: "app" } as const;
+    expect(
+      reportProblem(t3([{ ...app, site: { name: "t3-vps", port: 3773 } }, thread]), [], new Set()),
+    ).toBeNull();
+  });
+
+  it.each([
+    [
+      "a kind of another prefix",
+      t3([], { kinds: [{ id: "other.app", name: "x", levels: { view: "view" } }] }),
+    ],
+    [
+      "a command of an unknown kind",
+      t3([], { commands: [{ id: "x", title: "X", kinds: ["t3.nope"], confirm: false }] }),
+    ],
+    ["a resource of an unknown kind", t3([{ ...app, kind: "t3.nope" }])],
+    ["a card of a kind without levels (K-709)", t3([{ ...app, kind: "t3.settings" }])],
+    ["an unknown parent", t3([{ ...app, parent: "gone" }])],
+    ["two resources with one id", t3([app, app])],
+  ])("refuses %s", (_, report) => {
+    expect(reportProblem(report, [], new Set())).not.toBeNull();
+  });
+
+  it("refuses a site name that sites.json or another provider holds", () => {
+    const withSite = t3([{ ...app, site: { name: "shared", port: 3773 } }]);
+    expect(reportProblem(withSite, [], new Set(["shared"]))).toMatch(/in use/);
+    const other = { ...withSite, name: "other", kinds: [], commands: [] };
+    expect(reportProblem(withSite, [other], new Set())).toMatch(/belongs to the provider other/);
+  });
+
+  it("refuses more than 500 cards on one machine", () => {
+    const many = Array.from({ length: 300 }, (_, index) => ({ ...app, id: `a${index}` }));
+    expect(reportProblem(t3(many), [{ ...t3(many), name: "other" }], new Set())).toMatch(/more than 500/);
+  });
+
+  it("decodes a register line and refuses a provider name that kitshn's kinds use (K-302)", () => {
+    const line = (provider: string) =>
+      JSON.stringify({ id: "1", type: "register", provider, kinds: [], commands: [], resources: [] });
+    expect(readRequest(line("t3"))).toMatchObject({
+      ok: true,
+      request: { type: "register", provider: "t3" },
+    });
+    expect(readRequest(line("site"))).toMatchObject({ ok: false, answer: { id: "1", type: "error" } });
+  });
+});

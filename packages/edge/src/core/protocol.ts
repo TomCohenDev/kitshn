@@ -15,6 +15,7 @@ import type {
 } from "./model.ts";
 import type { RepoGate } from "./repos.ts";
 import type { Proposal } from "./asks.ts";
+import type { ProviderCommand } from "@kitshn/local";
 
 /** K-1717: one ask of an agent on a machine, as History shows it: an event, with no Undo. */
 export interface AskEventView {
@@ -127,6 +128,13 @@ export interface Snapshot {
   /** K-1504: who paused and when, while paused. */
   readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;
+  /** K-707: the commands of the providers of each machine, by machine id. */
+  readonly providerCommands: Readonly<
+    Record<
+      string,
+      ReadonlyArray<{ readonly name: string; readonly commands: ReadonlyArray<ProviderCommand> }>
+    >
+  >;
   /** K-1722: the asks that wait for an approver circle, oldest first. */
   readonly proposals: ReadonlyArray<ProposalView>;
   /** K-1767: runs of pull requests of the kitshn App that wait for the owner's Deploy. */

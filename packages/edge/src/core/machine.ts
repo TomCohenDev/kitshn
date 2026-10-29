@@ -1,6 +1,7 @@
 import type { LogAnswer, LogLine, LogSearch } from "./logs.ts";
 import type { BackupReport } from "./backups.ts";
 import type { MachineRight } from "./model.ts";
+import type { GrantTables, ProviderReport } from "@kitshn/local";
 /** A joined machine (K-602). Its resource card has the same id and the kind `machine`. */
 export interface Machine {
   readonly id: string;
@@ -145,6 +146,16 @@ export type Command =
       /** K-1816: the hard limit of the paused pass, from the pause of the last run. */
       readonly pauseLimitMs: number;
     }
+  /**
+   * K-707: a command of a provider on this machine. `resource` is the provider's id of the card, null for a command
+   * of the machine card. The daemon passes it to the provider and waits for its result.
+   */
+  | {
+      readonly kind: "provider";
+      readonly provider: string;
+      readonly command: string;
+      readonly resource: string | null;
+    }
   /** K-1820: back up as the run `before` first, then write the run `run` back. Only kitshn makes this job. */
   | {
       readonly kind: "backup-restore";
@@ -235,7 +246,9 @@ export type DaemonMessage =
   /** K-1805: a tail stopped on the daemon, with why. */
   | { readonly type: "tailEnd"; readonly id: string; readonly reason: string }
   /** K-1710: an ask of a local agent; kitshn answers with `askAnswer` and the same `requestId`. */
-  | { readonly type: "ask"; readonly requestId: string; readonly ask: AskWire };
+  | { readonly type: "ask"; readonly requestId: string; readonly ask: AskWire }
+  /** K-704: every provider of the machine with its kinds, commands and resources, on connect and on each change. */
+  | { readonly type: "providers"; readonly providers: ReadonlyArray<ProviderReport> };
 
 /** Messages from kitshn to a daemon. */
 export type ServerToDaemon =
@@ -249,6 +262,8 @@ export type ServerToDaemon =
   | { readonly type: "accepted"; readonly fingerprint: string }
   /** K-1705: "Rotate key" in the machine panel. */
   | { readonly type: "rotateKey" }
+  /** K-706: the grant table of each resource of one provider, on connect and on each change. */
+  | { readonly type: "grants"; readonly provider: string; readonly tables: GrantTables }
   /** K-1762: the daemon drops its kept GitHub tokens of one repo, or all with null, because kitshn revoked them. */
   | { readonly type: "dropTokens"; readonly repo: string | null }
   | {

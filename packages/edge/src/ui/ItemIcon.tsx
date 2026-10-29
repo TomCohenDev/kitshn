@@ -1,7 +1,7 @@
 import { useState } from "preact/hooks";
 import { type MachineOs, avatarUrl, cardIcon, repoOwner } from "../core/icons.ts";
 import type { Resource } from "../core/model.ts";
-import { KINDS } from "./kinds.ts";
+import { KINDS, kindInfo } from "./kinds.ts";
 import { useStore } from "./store.ts";
 
 const OS_ICONS: Record<MachineOs, { readonly glyph: string; readonly name: string }> = {
@@ -59,7 +59,7 @@ export function RepoIcon(props: { name: string }) {
 export function ItemIcon(props: { resource: Resource }) {
   const { snapshot } = useStore();
   const { resource } = props;
-  const kind = KINDS[resource.kind];
+  const kind = kindInfo(resource);
   const os = snapshot?.machines.find((view) => view.machine.id === resource.id)?.os ?? null;
   const icon = cardIcon(resource, snapshot?.icons ?? {}, os);
   switch (icon._tag) {

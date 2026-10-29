@@ -1,7 +1,7 @@
 import { isPreview } from "./agent.ts";
-import { type Resource, type ResourceKind, type State, activeShares, isPublicCircle } from "./model.ts";
+import { type CardKind, type Resource, type State, activeShares, isPublicCircle } from "./model.ts";
 
-const LISTED_KINDS: ReadonlySet<ResourceKind> = new Set(["site.static", "site.worker", "site.compose"]);
+const LISTED_KINDS: ReadonlySet<CardKind> = new Set(["site.static", "site.worker", "site.compose"]);
 const DOWN: ReadonlySet<Resource["status"]> = new Set(["offline", "stopped", "failed"]);
 
 /** K-1118, K-1119: anyone may open the card now. As in contentAccess: in an "all must match" circle, "everyone" adds nothing. */

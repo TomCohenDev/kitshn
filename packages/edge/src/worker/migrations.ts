@@ -251,6 +251,11 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   ["CREATE TABLE forward_nonces (nonce TEXT PRIMARY KEY, at INTEGER NOT NULL)"],
   // 34: where a whole-revision Undo came from (K-1509): its toast, History, or the HTTP API; null before.
   ["ALTER TABLE revisions ADD COLUMN undo_source TEXT"],
+  // 35: the providers of each machine (K-704): the kinds and commands of their last registration, as JSON. Their
+  // cards are rows of `resources`.
+  [
+    "CREATE TABLE providers (machine_id TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (machine_id, name))",
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

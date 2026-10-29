@@ -8,10 +8,13 @@ import type { Platform } from "./service.ts";
 /** The local user that sent a request. Each request records it (K-701). */
 export interface Caller {
   readonly uid: number;
+  /** K-704: the connection that sent the request; a provider belongs to the connection that registered it. */
+  readonly connection: number;
 }
 
 interface Connection {
   readonly uid: number;
+  readonly key: number;
   readonly decoder: TextDecoder;
   buffer: string;
 }
@@ -23,6 +26,8 @@ export interface LocalOptions {
   /** Answers with the id of the request. `emit` sends a later event on the same connection (K-703, K-1722). */
   readonly handle: (request: Request, caller: Caller, emit: (event: Answer) => void) => Promise<Answer>;
   readonly log: (text: string) => void;
+  /** K-704: a connection closed; its providers go offline. */
+  readonly closed?: (connection: number) => void;
   /**
    * K-701: "private" is a folder of 0700 and a socket of 0600. "shared" is a folder of 0711 and a socket of 0666, for
    * the users in `localUsers`; the peer check is then the only guard.
@@ -94,7 +99,12 @@ export async function listenLocal(
     socket.end();
   };
   const lastRefusal = new Map<number | null, number>();
-  const answer = async (socket: Bun.Socket<Connection | undefined>, uid: number, text: string) => {
+  let connections = 0;
+  const answer = async (
+    socket: Bun.Socket<Connection | undefined>,
+    { uid, key }: Connection,
+    text: string,
+  ) => {
     const read = readRequest(text);
     if (!read.ok) return send(socket, read.answer);
     const { request } = read;
@@ -110,7 +120,7 @@ export async function listenLocal(
     send(
       socket,
       await Promise.resolve()
-        .then(() => options.handle(request, { uid }, (event) => send(socket, event)))
+        .then(() => options.handle(request, { uid, connection: key }, (event) => send(socket, event)))
         .catch((error: unknown): Answer => ({
           id: request.id,
           type: "error",
@@ -136,7 +146,10 @@ export async function listenLocal(
         if (peer === null) return refuse("the peer user id cannot be read (K-006)");
         const decision = options.decide(peer);
         if (!decision.accept) return refuse(decision.reason);
-        socket.data = { uid: peer, decoder: new TextDecoder(), buffer: "" };
+        socket.data = { uid: peer, key: ++connections, decoder: new TextDecoder(), buffer: "" };
+      },
+      close(socket) {
+        if (socket.data) options.closed?.(socket.data.key);
       },
       data(socket, chunk) {
         const connection = socket.data;
@@ -146,7 +159,7 @@ export async function listenLocal(
           const text = connection.buffer.slice(0, end);
           connection.buffer = connection.buffer.slice(end + 1);
           if (text.length > MAX_LINE_LENGTH) return tooLong(socket);
-          void answer(socket, connection.uid, text);
+          void answer(socket, connection, text);
         }
         if (connection.buffer.length > MAX_LINE_LENGTH) tooLong(socket);
       },
@@ -249,6 +262,51 @@ export function askLocal(
       finish(() =>
         code === "ENOENT" || code === "ECONNREFUSED" ? resolve({ kind: "not-running" }) : reject(error),
       );
+    });
+  });
+}
+
+/**
+ * K-704: `kitshn provider` joins stdin and stdout to one connection, line by line, so a provider needs no socket code.
+ * It checks the peer as `askLocal` does before it sends anything, and ends when either side ends.
+ */
+export function bridgeLocal(
+  path: string,
+  peer: { readonly platform: Platform; readonly daemonUid: number },
+  input: AsyncIterable<Uint8Array>,
+  output: (text: string) => void,
+): Promise<LocalOutcome | "closed"> {
+  return new Promise((resolve, reject) => {
+    Bun.connect({
+      unix: path,
+      socket: {
+        open(socket) {
+          const uid = peerUid(peer.platform, (socket as { fd?: unknown }).fd);
+          if (uid !== peer.daemonUid) {
+            // Reject before the close, so the close cannot report a clean end first.
+            reject(
+              new Error(
+                `${path} does not belong to the daemon user ${peer.daemonUid}; kitshn sent nothing (K-701).`,
+              ),
+            );
+            socket.end();
+            return;
+          }
+          void (async () => {
+            for await (const chunk of input) socket.write(chunk);
+            socket.end();
+          })().catch(reject);
+        },
+        data(_socket, chunk) {
+          output(new TextDecoder().decode(chunk));
+        },
+        close: () => resolve("closed"),
+        error: (_socket, error) => reject(error),
+      },
+    }).catch((error: unknown) => {
+      const code = (error as { code?: unknown }).code;
+      if (code === "ENOENT" || code === "ECONNREFUSED") resolve({ kind: "not-running" });
+      else reject(error);
     });
   });
 }

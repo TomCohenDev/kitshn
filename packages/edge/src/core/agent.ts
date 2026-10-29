@@ -11,12 +11,12 @@ import {
   type OpenRightMode,
   type Point,
   type RightMode,
-  type ResourceKind,
   type State,
   activeShares,
   circlesHolding,
   isPublicCircle,
   shareKey,
+  type CardKind,
 } from "./model.ts";
 import { placeInside } from "./place.ts";
 import { coveringCards } from "./repoGroups.ts";
@@ -192,7 +192,7 @@ export function agentMayRunOn(state: State, visitor: Visitor, machineId: string,
 
 /** K-718: the kinds that an agent key may publish. A live site serves a dev server on a machine, so never. */
 // K-1116: a page or a file that the key published itself may become public too, as an app of a repo that it allowed.
-const PUBLISHABLE: ReadonlySet<ResourceKind> = new Set([
+const PUBLISHABLE: ReadonlySet<CardKind> = new Set([
   "site.static",
   "site.worker",
   "site.compose",

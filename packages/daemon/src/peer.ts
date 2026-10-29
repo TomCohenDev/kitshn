@@ -65,6 +65,11 @@ const REQUEST_SENDERS: Record<Request["type"], "local-users" | "daemon-user-or-r
   forward: "local-users",
   // K-1751: an attester vouches for threads, so only the daemon user and root register one.
   "attester-set": "daemon-user-or-root",
+  // K-704: a provider adds cards that circles share and enforces their grants, so it acts for the machine.
+  register: "daemon-user-or-root",
+  upsert: "daemon-user-or-root",
+  remove: "daemon-user-or-root",
+  "command-result": "daemon-user-or-root",
 };
 
 export const requestAllowed = (type: Request["type"], uid: number, own: number) =>

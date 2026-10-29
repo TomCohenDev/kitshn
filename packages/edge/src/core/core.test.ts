@@ -471,13 +471,27 @@ describe("Access compile (K-401 to K-403)", () => {
     expect(
       desiredAccess(state, 0, [], old).apps.get("app:riffle:old-riffle.example.com")?.policyKeys,
     ).toEqual(["policy:owner:people"]);
-    // K-1130: with the closed page, a card in no circle names it on each address, and a card in a circle clears it.
+    // K-1130: a card that only the Owner circle's people open shows the chef page on each address.
     const withPage = (from: typeof state) => desiredAccess(from, 0, [], old, "closed-page-id").apps;
-    expect(withPage(moved).get("app:riffle:riffle.example.com")?.custom_pages).toEqual(["closed-page-id"]);
-    expect(withPage(moved).get("app:riffle:old-riffle.example.com")?.custom_pages).toEqual([
+    expect(withPage(state).get("app:riffle:riffle.example.com")?.custom_pages).toEqual(["closed-page-id"]);
+    expect(withPage(state).get("app:riffle:old-riffle.example.com")?.custom_pages).toEqual([
       "closed-page-id",
     ]);
-    expect(withPage(state).get("app:riffle:riffle.example.com")?.custom_pages).toEqual([]);
+    // A card in no circle keeps no policy and the Cloudflare page, so nobody gets in, not even the owner (K-208).
+    expect(withPage(moved).get("app:riffle:riffle.example.com")).toMatchObject({
+      policyKeys: [],
+      custom_pages: [],
+    });
+    // Another people circle on the card takes the page away.
+    const spot = state.places.get("riffle")!;
+    const shared = applyChanges(
+      state,
+      resolveEdits(state, [
+        { _tag: "circle", id: "her", after: { ...circle(state, "her"), x: spot.x, y: spot.y, r: 400 } },
+      ]),
+    );
+    expect(withPage(shared).get("app:riffle:riffle.example.com")?.policyKeys).toContain("policy:her:people");
+    expect(withPage(shared).get("app:riffle:riffle.example.com")?.custom_pages).toEqual([]);
     expect(access.apps.get("app:riffle:riffle.example.com")).not.toHaveProperty("custom_pages");
   });
 });

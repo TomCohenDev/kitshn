@@ -203,8 +203,8 @@ if ! printf '%s' "$APPS" | jq -e --arg d "$KITSHN_HOST" 'any(.[]; .domain == $d)
 fi
 public_policy=$(policy "kitshn public paths" '{"name":"kitshn public paths","decision":"bypass","include":[{"everyone":{}}],"require":[],"exclude":[]}')
 machines_policy=$(policy "kitshn machines" '{"name":"kitshn machines","decision":"non_identity","include":[{"any_valid_service_token":{}}],"require":[],"exclude":[]}')
-# K-1130: the login page of a card in no circle, in the kitshn look. Optional: without "Access: Custom Pages Edit",
-# or on a plan that refuses login pages, closed cards keep the Cloudflare login, and the run goes on.
+# K-1130: the login page of a card that only the Owner circle opens, in the kitshn look. Optional: without "Access:
+# Custom Pages Edit", or on a plan that refuses login pages, those cards keep the Cloudflare login, and the run goes on.
 CLOSED_NAME="kitshn closed"
 closed_html() {
   cat <<'HTML'
@@ -254,7 +254,7 @@ CLOSED_PAGE=""
 closed_hint="           To add it, edit the token at https://dash.cloudflare.com/profile/api-tokens:
            add \"Account\", \"Access: Custom Pages\", \"Edit\", then Update token."
 if ! try GET "/accounts/$ACCOUNT/access/custom_pages"; then
-  say "  warning: the token has no \"Access: Custom Pages Edit\", so a card in no circle shows the Cloudflare login (K-1130)."
+  say "  warning: the token has no \"Access: Custom Pages Edit\", so an Owner-only card shows the Cloudflare login (K-1130)."
   say "$closed_hint"
 else
   CLOSED_PAGE=$(jq -r --arg name "$CLOSED_NAME" '[.result[] | select(.name == $name and .type == "login")] | .[0] | (.uid // .id) // empty' "$WORK/out")
@@ -277,7 +277,7 @@ else
       changed "wrote the login page \"$CLOSED_NAME\" (K-1130)"
     else
       say "  warning: Cloudflare refused the login page \"$CLOSED_NAME\": $(jq -r '[.errors[]? | "\(.code): \(.message)"] | join("; ")' "$WORK/out" 2>/dev/null || head -c 200 "$WORK/out")"
-      say "           A card in no circle keeps the Cloudflare login (K-1130)."
+      say "           An Owner-only card keeps the Cloudflare login (K-1130)."
     fi
   fi
 fi

@@ -39,7 +39,7 @@ export interface AppBody {
   readonly path_cookie_attribute?: true;
   /** Keys of `DesiredAccess.policies`, in precedence order. */
   readonly policyKeys: ReadonlyArray<string>;
-  /** K-1130: the closed login page for a card in no circle, `[]` for every other card; absent without that page. */
+  /** K-1130: the chef login page for a card that only the Owner circle's people open, else `[]`; absent without it. */
   readonly custom_pages?: ReadonlyArray<string>;
 }
 
@@ -219,8 +219,12 @@ export function desiredAccess(
     if (WORKER_CHECKED.has(resource.kind) || resource.addresses.length === 0) continue;
     const policyKeys: Array<string> = [];
     const shares = activeShares(state, resource, now);
-    // K-1130: a card that no circle opens now shows kitshn's closed page instead of the Cloudflare login.
-    const closed = closedPage === null ? {} : { custom_pages: shares.length === 0 ? [closedPage] : [] };
+    // K-1130: a card whose people are the Owner circle's only shows kitshn's chef page instead of the Cloudflare login.
+    const people = shares.filter((share) =>
+      circlePolicies(share.circle, state.machines).has(`policy:${share.circle.id}:people`),
+    );
+    const chef = people.length > 0 && people.every((share) => share.circle.id === OWNER_CIRCLE_ID);
+    const closed = closedPage === null ? {} : { custom_pages: chef ? [closedPage] : [] };
     for (const share of shares) {
       for (const [key, body] of circlePolicies(share.circle, state.machines)) {
         // K-1504: during a pause only people pass; the devices and networks policy of Owner drops out.

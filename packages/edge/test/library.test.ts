@@ -34,21 +34,21 @@ async function apply(edits: ReadonlyArray<Edit>) {
   expect(answer.status, await answer.clone().text()).toBe(200);
 }
 
-async function publish(
-  clientId: string,
-  name: string,
-  body: string | ReadableStream<Uint8Array>,
-  extra: Record<string, string> = {},
-) {
+/** A stream body says its length, as a client must; a wrong one would leave the upload waiting for bytes. */
+type Body = string | { readonly stream: ReadableStream<Uint8Array>; readonly length: number };
+
+async function publish(clientId: string, name: string, body: Body, extra: Record<string, string> = {}) {
   return send("/agent/library", {
     method: "POST",
     headers: {
       "cf-access-jwt-assertion": await agent(clientId),
       "x-kitshn-name": encodeURIComponent(name),
-      "content-length": String(typeof body === "string" ? new TextEncoder().encode(body).length : 64),
+      "content-length": String(
+        typeof body === "string" ? new TextEncoder().encode(body).length : body.length,
+      ),
       ...extra,
     },
-    body,
+    body: typeof body === "string" ? body : body.stream,
   });
 }
 
@@ -167,7 +167,8 @@ describe("agent publish (K-1116, K-1117)", () => {
         controller.error(new Error("the connection dropped"));
       },
     });
-    expect((await publish("agent-1.access", "kept.html", broken)).status).toBe(502);
+    // The connection drops after 8 of the 15 bytes that it announced.
+    expect((await publish("agent-1.access", "kept.html", { stream: broken, length: 15 })).status).toBe(502);
     expect(await content(id)).toBe("<html>v1</html>");
     expect((await state()).previousVersions).not.toContain(id);
 
@@ -207,7 +208,7 @@ describe("agent publish (K-1116, K-1117)", () => {
         };
       },
     });
-    const update = publish("agent-1.access", "race.html", slow, { "content-length": String(last.length) });
+    const update = publish("agent-1.access", "race.html", { stream: slow, length: last.length });
     const { circles } = (await (
       await send("/api/state", { headers: { "cf-access-jwt-assertion": await owner() } })
     ).json()) as { circles: ReadonlyArray<Circle> };

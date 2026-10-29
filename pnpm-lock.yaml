@@ -218,6 +218,9 @@ importers:
       preact:
         specifier: 11.0.2
         version: 11.0.2
+      uqr:
+        specifier: 0.1.3
+        version: 0.1.3
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: 1.65.0
@@ -1685,6 +1688,9 @@ packages:
     peerDependencies:
       browserslist: '>= 4.21.0'
 
+  uqr@0.1.3:
+    resolution: {integrity: sha512-0rjE8iEJe4YmT9TOhwsZtqCMRLc5DXZUI2UEYUUg63ikBkqqE5EYWaI0etFe/5KUcmcYwLih2RND1kq+hrUJXA==}
+
   vite-prerender-plugin@0.5.14:
     resolution: {integrity: sha512-X2w9AS1OhwEUec9HSryGAmEnEQJGhW6eFoiCVJv8BfOTVpM8SOjk75cEw/IC28APDHZudeIRbP8Sp7wfABq+Aw==}
     peerDependencies:
@@ -2975,6 +2981,8 @@ snapshots:
       browserslist: 4.29.4
       escalade: 3.2.0
       picocolors: 1.1.1
+
+  uqr@0.1.3: {}
 
   vite-prerender-plugin@0.5.14(vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.2)):
     dependencies:

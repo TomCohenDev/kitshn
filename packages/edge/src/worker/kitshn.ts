@@ -89,6 +89,7 @@ import {
   parsePublicKey,
   joinLookup,
   newChallenge,
+  newInviteCode,
   newJoinCode,
   rotateText,
   sealJoin,
@@ -394,6 +395,7 @@ import {
 } from "./live.ts";
 import {
   JOB_EXPIRY_MS,
+  DEVICE_INVITE_MS,
   JOIN_CODE_MS,
   type Job,
   OUTPUT_LIMIT,
@@ -3763,6 +3765,8 @@ export class Kitshn extends DurableObject<Env> {
     // The join exchange is public: the join code itself is the secret (K-602).
     if (path === "/join/exchange" && request.method === "POST") return this.exchangeJoin(request);
     if (path === "/join/rekey" && request.method === "POST") return this.rekey(request);
+    // K-1601: public too; the invite code is the secret.
+    if (path === "/join/device" && request.method === "POST") return this.exchangeInvite(request);
     if (path === "/internal/offline")
       return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
     if (path === "/internal/public-cards") return this.publicCards();
@@ -3825,7 +3829,7 @@ export class Kitshn extends DurableObject<Env> {
       return await this.restored(caller, await request.json().catch(() => null));
     if (path.startsWith("/agent/")) return this.agentRequest(path, request, caller);
     if (path === "/device/machines" && request.method === "GET")
-      return Response.json(this.deviceMachines(caller));
+      return Response.json(this.deviceMachines(caller.visitor));
     if (path.startsWith("/connect/deploys/")) return this.deploySource(path, caller);
     if (!this.authorized(caller)) {
       return Response.json(
@@ -4145,6 +4149,8 @@ export class Kitshn extends DurableObject<Env> {
       return this.restorePrevious(caller, path.slice("/api/library/".length, -"/previous".length), "owner");
     if (path === "/api/devices" && request.method === "POST")
       return this.addDevice(await request.json().catch(() => null));
+    if (path === "/api/devices/invites" || path.startsWith("/api/devices/invites/"))
+      return this.inviteRequest(path, request, caller);
     if (path === "/api/undo-item" && request.method === "GET") {
       // K-1507: the menu asks before it offers the per-item undo; the same rule over the whole History.
       const query = new URL(request.url).searchParams;
@@ -5157,14 +5163,14 @@ export class Kitshn extends DurableObject<Env> {
    * K-1601, K-1617: the machines that a device reaches: each provider card with an address that its token opens, with
    * its machine. The shape of the portal's `/client/machines`, plus the card, its kind and the level.
    */
-  private deviceMachines(caller: Caller) {
+  private deviceMachines(visitor: Visitor) {
     const now = Date.now();
     return {
       machines: [...this.state.resources.values()].flatMap((card) => {
         const address = card.addresses[0];
         const machine = card.machine === null ? undefined : this.state.machines.get(card.machine);
         if (!card.provider || !address || !machine) return [];
-        const level = visitorLevel(this.state, card, caller.visitor, now);
+        const level = visitorLevel(this.state, card, visitor, now);
         return level === null
           ? []
           : [
@@ -6318,6 +6324,7 @@ export class Kitshn extends DurableObject<Env> {
         "DELETE FROM jobs WHERE state NOT IN ('queued', 'sent') AND id <= (SELECT id FROM jobs ORDER BY id DESC LIMIT 1 OFFSET 1000)",
       );
       this.sql("DELETE FROM join_codes WHERE expires_at < ?", now);
+      this.sql("DELETE FROM device_invites WHERE expires_at < ?", now);
       // K-1610: link events stay 30 days, at most 2,000.
       this.sql(
         "DELETE FROM link_events WHERE at < ? OR id <= (SELECT id FROM link_events ORDER BY id DESC LIMIT 1 OFFSET 2000)",
@@ -6542,7 +6549,7 @@ export class Kitshn extends DurableObject<Env> {
       const token = await api<{ id: string; client_id: string; client_secret: string }>(
         "POST",
         `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/service_tokens`,
-        { name: `kitshn device ${name}`, duration: "8760h" },
+        { name: `${DEVICE_TOKEN_PREFIX}${name}`, duration: "8760h" },
       );
       return Response.json({
         tokenId: token.id,
@@ -6553,6 +6560,176 @@ export class Kitshn extends DurableObject<Env> {
     } catch (error) {
       return Response.json({ error: String(error) }, { status: 502 });
     }
+  }
+
+  /**
+   * K-1601: invites of phone and desktop apps, for the Owner circle only. An invite makes no secret that kitshn keeps:
+   * a new device token drops its secret, and the exchange rotates it. A cancel never touches a token.
+   */
+  private async inviteRequest(path: string, request: Request, caller: Caller): Promise<Response> {
+    if (!this.isOwner(caller.visitor))
+      return Response.json(
+        { error: "Only the owner makes or cancels a device invite (K-1601)." },
+        { status: 403 },
+      );
+    if (path === "/api/devices/invites" && request.method === "POST")
+      return this.addInvite(caller, await request.json().catch(() => null));
+    if (path.startsWith("/api/devices/invites/") && request.method === "DELETE") {
+      const tokenId = decodeURIComponent(path.slice("/api/devices/invites/".length));
+      const [row] = this.sql<{ name: string }>("SELECT name FROM device_invites WHERE token_id = ?", tokenId);
+      if (!row) return Response.json({ error: "No invite of this device waits." }, { status: 404 });
+      this.ctx.storage.transactionSync(() => {
+        this.sql("DELETE FROM device_invites WHERE token_id = ?", tokenId);
+        this.insertRevision(caller.actor, `Cancelled the invite of ${row.name}`, [], null);
+      });
+      this.load();
+      this.broadcast();
+      return Response.json({ ok: true });
+    }
+    return new Response("Not found.", { status: 404 });
+  }
+
+  /** K-1601: a new device token and its invite (`name`), or a new invite of a kitshn device token (`tokenId`). */
+  private async addInvite(caller: Caller, body: unknown) {
+    const api = this.api();
+    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    const fields = isRecord(body) ? body : {};
+    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/service_tokens`;
+    let token: { id: string; client_id: string; name: string };
+    let name: string;
+    try {
+      if (typeof fields.tokenId === "string" && fields.tokenId !== "") {
+        token = await api<{ id: string; client_id: string; name: string }>(
+          "GET",
+          `${account}/${encodeURIComponent(fields.tokenId)}`,
+        );
+        // A machine token or a token of someone else never moves to an app.
+        if (!token.name.startsWith(DEVICE_TOKEN_PREFIX))
+          return Response.json({ error: "This token is no kitshn device token." }, { status: 400 });
+        name = token.name.slice(DEVICE_TOKEN_PREFIX.length);
+      } else {
+        name = typeof fields.name === "string" ? fields.name.trim() : "";
+        if (!name || name.length > 60)
+          return Response.json({ error: "Give the device a name of 1 to 60 characters." }, { status: 400 });
+        // The secret of the new token is dropped here; the exchange rotates it.
+        token = await api<{ id: string; client_id: string; name: string }>("POST", account, {
+          name: `${DEVICE_TOKEN_PREFIX}${name}`,
+          duration: "8760h",
+        });
+      }
+    } catch (error) {
+      return Response.json({ error: String(error) }, { status: 502 });
+    }
+    const code = newInviteCode();
+    const expiresAt = Date.now() + DEVICE_INVITE_MS;
+    const lookup = await joinLookup(code);
+    this.ctx.storage.transactionSync(() => {
+      // One invite per token: a new one ends the one that waits.
+      this.sql("DELETE FROM device_invites WHERE token_id = ?", token.id);
+      this.sql(
+        "INSERT INTO device_invites (lookup, token_id, client_id, name, expires_at) VALUES (?, ?, ?, ?, ?)",
+        lookup,
+        token.id,
+        token.client_id,
+        name,
+        expiresAt,
+      );
+      this.insertRevision(caller.actor, `Invited an app as ${name}`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    return Response.json({
+      tokenId: token.id,
+      clientId: token.client_id,
+      name,
+      link: `https://${this.env.KITSHN_HOST}/join/device#code=${code}`,
+      expiresAt,
+    });
+  }
+
+  /**
+   * K-1601: trades an invite code, once and within 15 minutes, for a new secret of its device token. The secret is
+   * only in this answer. The row goes before the rotate, so two exchanges of one code never both get a secret.
+   */
+  private async exchangeInvite(request: Request) {
+    const body = (await request.json().catch(() => null)) as { code?: unknown; device?: unknown } | null;
+    const code = typeof body?.code === "string" ? body.code.trim() : "";
+    if (!code) return Response.json({ error: "Send the invite code." }, { status: 400 });
+    const device = typeof body?.device === "string" ? body.device.trim().slice(0, 200) : "";
+    const lookup = await joinLookup(code);
+    const [row] = this.sql<InviteRow>("SELECT * FROM device_invites WHERE lookup = ?", lookup);
+    if (!row)
+      return Response.json(
+        {
+          error:
+            "This invite code is used, cancelled or unknown. A code works once, also when its answer got lost. Ask the owner for a new invite.",
+        },
+        { status: 404 },
+      );
+    if (row.expires_at < Date.now()) {
+      this.sql("DELETE FROM device_invites WHERE lookup = ?", lookup);
+      return Response.json({ error: "This invite expired. Ask for a new one." }, { status: 410 });
+    }
+    if (this.state.paused)
+      return Response.json(
+        { error: "kitshn is paused. Try the invite again after Resume." },
+        { status: 423 },
+      );
+    const api = this.api();
+    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    this.sql("DELETE FROM device_invites WHERE lookup = ?", lookup);
+    let secret: string;
+    try {
+      // No grace period: the secret of an older invite of this device ends now.
+      secret = (
+        await api<{ client_secret: string }>(
+          "POST",
+          `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/service_tokens/${encodeURIComponent(row.token_id)}/rotate`,
+          {},
+        )
+      ).client_secret;
+    } catch (error) {
+      // The code stays good, unless a newer invite of the device took its place meanwhile.
+      this.sql(
+        "INSERT OR IGNORE INTO device_invites (lookup, token_id, client_id, name, expires_at) VALUES (?, ?, ?, ?, ?)",
+        row.lookup,
+        row.token_id,
+        row.client_id,
+        row.name,
+        row.expires_at,
+      );
+      return Response.json({ error: `Cloudflare made no new secret: ${String(error)}` }, { status: 502 });
+    }
+    // The secret is out, so a failed refresh must not lose it; the token then keeps its old expiry.
+    let refreshed = true;
+    try {
+      // A new invite of an old token gives the app a full year, not what is left of the token's first year.
+      await api(
+        "POST",
+        `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/service_tokens/${encodeURIComponent(row.token_id)}/refresh`,
+      );
+    } catch (error) {
+      refreshed = false;
+      console.error(`K-1601: the refresh of the device token ${row.token_id} failed: ${String(error)}`);
+    }
+    const actor: Actor = { _tag: "device", clientId: row.client_id, name: row.name };
+    // `device` comes from the anonymous caller, so History marks it as the app's own words.
+    this.insertRevision(
+      actor,
+      `${row.name} joined with an invite${device ? ` (the app says: ${device})` : ""}${refreshed ? "" : "; the token expiry did not refresh"}`,
+      [],
+      null,
+    );
+    this.load();
+    this.broadcast();
+    const visitor: Visitor = { email: null, clientId: row.client_id, ip: null };
+    return Response.json({
+      clientId: row.client_id,
+      name: row.name,
+      serviceToken: { clientId: row.client_id, clientSecret: secret },
+      machines: this.deviceMachines(visitor).machines,
+      machinesUrl: `https://${this.env.KITSHN_HOST}/device/machines`,
+    });
   }
 
   /**
@@ -13280,6 +13457,18 @@ const DAY_MS = 24 * 3_600_000;
 
 /** K-819: GitHub calls of one repo check; a Free plan request may make 50 subrequests. */
 const GITHUB_CALLS_PER_CHECK = 40;
+
+/** K-106: the Cloudflare name of each device token that kitshn makes. */
+const DEVICE_TOKEN_PREFIX = "kitshn device ";
+
+/** K-1601: a waiting device invite. */
+type InviteRow = {
+  lookup: string;
+  token_id: string;
+  client_id: string;
+  name: string;
+  expires_at: number;
+};
 
 /** A machine as the actor of what its daemon does, such as a key rotation (K-1705). */
 const deviceActor = (machine: Machine): Actor => ({

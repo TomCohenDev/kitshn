@@ -8575,13 +8575,14 @@ export class Kitshn extends DurableObject<Env> {
 
   /**
    * K-1907: pushes wait until the change commits. Each entry is one notification for every device (`device` null),
-   * or one send that waits or failed once. Known limit: the queue lives in memory, so a wake drops what waits; the
-   * alarm runs within a second while it holds anything. Revisit if pushes get lost.
+   * or one send that waits or failed once. Only the alarm sends, once at its end, so one invocation sends at most
+   * PUSH_SENDS_PER_RUN (K-406). Known limit: the queue lives in memory, so a wake drops what waits; the alarm runs
+   * within a second while it holds anything. Revisit if pushes get lost.
    */
   private pushQueue: Array<{ notification: Notification; device: number | null; tries: number }> = [];
   private queuePush(notification: Notification) {
     this.pushQueue.push({ notification, device: null, tries: 0 });
-    if (this.pushQueue.length === 1) this.ctx.waitUntil(Promise.resolve().then(() => this.flushPushes()));
+    if (this.pushQueue.length === 1) void this.scheduleAlarm();
   }
 
   /** K-1907: sends at most PUSH_SENDS_PER_RUN pushes; the rest, and a send that failed once, wait for the alarm. */
@@ -8636,6 +8637,10 @@ export class Kitshn extends DurableObject<Env> {
     );
     for (const { row, notification, tries, result } of results) {
       if (result === "gone") this.sql("DELETE FROM push_subscriptions WHERE id = ?", row.id);
+      else if (result === "refused")
+        console.warn(
+          `The push service refused the key of kitshn for device ${row.id} (401 or 403); Rotate push key.`,
+        );
       else if (result === "delivered")
         this.sql("UPDATE push_subscriptions SET last_ok_at = ? WHERE id = ?", now, row.id);
       // One retry on the next alarm, then kitshn drops the push; the warning above names the device.
@@ -8750,8 +8755,6 @@ export class Kitshn extends DurableObject<Env> {
     const uptime = await this.checkUptime(now, daily ? 0 : UPTIME_FETCHES_PER_RUN);
     if (uptime.changed) changed = true;
     if (this.bellEnded(now)) changed = true;
-    // K-1907, K-406: the waiting pushes count against this run; PUSH_SENDS_PER_RUN keeps them inside the 50.
-    await this.flushPushes();
     // K-1817: the nightly backups run at 03:00 UTC, a quiet hour, not with the daily run at midnight.
     if (this.backupAt() <= now) {
       this.backupAtMemory = nextBackupAt(now);
@@ -8812,6 +8815,8 @@ export class Kitshn extends DurableObject<Env> {
       changed ||= daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
     }
     if (changed) this.broadcast();
+    // K-1907, K-406: the pushes go out once, at the end, after the reconcile of broadcast queued its own.
+    await this.flushPushes();
     await this.scheduleAlarm();
   }
 }

@@ -19,7 +19,7 @@ export interface VapidKey {
 }
 
 /** `delivered`, or `gone` when the push service no longer takes the subscription. */
-export type PushResult = "delivered" | "gone";
+export type PushResult = "delivered" | "gone" | "refused";
 
 /** A push service keeps a message this long for a device that is offline. */
 const TTL_SECONDS = 24 * 60 * 60;
@@ -187,10 +187,15 @@ export async function sendPush(
     },
     body: await encrypt(target, plain),
   });
-  // 401 and 403 too: the subscription belongs to another key, for example after a restore or a rotation.
-  if ([401, 403, 404, 410].includes(response.status)) {
+  if (response.status === 404 || response.status === 410) {
     await response.body?.cancel();
     return "gone";
+  }
+  // 401 and 403: the push service does not take this key, for example after a VAPID bug or a clock skew. The device
+  // stays; "Rotate push key" is the way out (K-1907).
+  if (response.status === 401 || response.status === 403) {
+    await response.body?.cancel();
+    return "refused";
   }
   if (!response.ok) {
     throw new Error(`The push service answered ${response.status}: ${await response.text()}`);

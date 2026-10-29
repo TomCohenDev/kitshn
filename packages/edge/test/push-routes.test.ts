@@ -1,4 +1,4 @@
-import { runInDurableObject } from "cloudflare:test";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Notification } from "../src/core/notifications.ts";
@@ -91,19 +91,24 @@ it("keeps the VAPID key out of the snapshot, checks the keys, limits the test pu
   expect(after.devices).toEqual([]);
 });
 
-it("deletes a device that the push service no longer takes (K-1907)", async () => {
+it("deletes a device on 404 or 410, and keeps it on 401 or 403 (K-1907)", async () => {
   stubAccessCerts();
   expect((await call("/api/push/subscribe", await browserDevice())).status).toBe(200);
-  vi.restoreAllMocks();
-  // 403: the subscription belongs to another key, for example after a restore (K-1831).
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(null, { status: 403 }));
-  const left = await runInDurableObject(env.KITSHN.getByName("kitshn"), async (instance, state) => {
-    const kitshn = instance as unknown as Pushes;
-    kitshn.pushQueue = [{ notification: failed, device: null, tries: 0 }];
-    await kitshn.flushPushes();
-    return state.storage.sql.exec("SELECT id FROM push_subscriptions").toArray().length;
-  });
-  expect(left).toBe(0);
+  const left = async (status: number) => {
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(null, { status }));
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    return runInDurableObject(env.KITSHN.getByName("kitshn"), async (instance, state) => {
+      const kitshn = instance as unknown as Pushes;
+      kitshn.scheduleAlarm = async () => {};
+      kitshn.pushQueue = [{ notification: failed, device: null, tries: 0 }];
+      await kitshn.flushPushes();
+      return state.storage.sql.exec("SELECT id FROM push_subscriptions").toArray().length;
+    });
+  };
+  // 403: the push service does not take kitshn's key; Rotate push key is the way out, not a silent delete.
+  expect(await left(403)).toBe(1);
+  expect(await left(410)).toBe(0);
 });
 
 it("sends at most 5 pushes in one run and keeps the rest for the next alarm (K-1907, K-406)", async () => {
@@ -125,4 +130,57 @@ it("sends at most 5 pushes in one run and keeps the rest for the next alarm (K-1
   });
   expect(sent).toHaveBeenCalledTimes(5);
   expect(waiting).toBe(2);
+});
+
+it("sends at most 5 pushes in one alarm run, also when its reconcile opens another notification (K-1907, K-406)", async () => {
+  stubAccessCerts();
+  // Exactly 5 devices: a first flush empties the queue, so before the fix the reconcile's push started a second one.
+  await runInDurableObject(env.KITSHN.getByName("kitshn"), (_i, state) => {
+    state.storage.sql.exec("DELETE FROM push_subscriptions");
+  });
+  for (const n of [11, 12, 13, 14, 15])
+    expect(
+      (await call("/api/push/subscribe", await browserDevice(`https://push.example.com/send/${n}`))).status,
+    ).toBe(200);
+  vi.restoreAllMocks();
+  const sent = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(async () => new Response(null, { status: 201 }));
+  const stub = env.KITSHN.getByName("kitshn");
+  await runInDurableObject(stub, (instance) => {
+    const kitshn = instance as unknown as Pushes & {
+      sql(query: string, ...bindings: Array<string | number | null>): unknown;
+      load(): void;
+    };
+    // A push waits already, and the alarm's broadcast (an ended mute changes the bell) opens a deploy notification.
+    kitshn.sql(
+      "INSERT INTO resources (id, body) VALUES ('shop', ?)",
+      JSON.stringify({
+        id: "shop",
+        kind: "site.static",
+        name: "shop",
+        addresses: [],
+        status: "running",
+        group: null,
+        machine: null,
+      }),
+    );
+    kitshn.sql(
+      `INSERT INTO deploys (id, repo, environment, resource_id, address, script, kind, sha, state, expires_at, reason)
+       VALUES ('d-shop', 'o/shop', 'prod', 'shop', 'shop.example.com', 'kitshn-shop', 'deploy', 'abc', 'failed', 0, 'x')`,
+    );
+    kitshn.sql(
+      "INSERT INTO notification_mutes (card_id, source, until) VALUES ('shop', 'uptime', ?)",
+      Date.now() - 1,
+    );
+    kitshn.load();
+    kitshn.pushQueue = [{ notification: failed, device: null, tries: 0 }];
+  });
+  await runDurableObjectAlarm(stub);
+  // One more call into the object, so a push that the alarm left running in the background ends before the count.
+  await runInDurableObject(stub, () => Promise.resolve());
+  const pushes = sent.mock.calls.filter(([input]) =>
+    String(input instanceof Request ? input.url : input).includes("push.example.com"),
+  );
+  expect(pushes).toHaveLength(5);
 });

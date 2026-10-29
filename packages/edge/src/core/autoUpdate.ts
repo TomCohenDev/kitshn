@@ -52,37 +52,55 @@ const withUpdated = (rollout: Rollout, machineId: string): Rollout => ({
 });
 
 /**
- * K-627: moves the rollout on from what kitshn sees now. A step ends only when its machine is online and runs the
- * release, or fails; a machine that stays offline holds the rest, also after a `done` job. A failed machine that runs
- * the release later (a retry with "Update daemon") ends the failure.
+ * K-627: moves the rollout on from what kitshn sees now. A step ends well only when its job is done and its machine is
+ * online on the release: a K-629 daemon sends `done` only after its connection stayed up, so a release that crashes
+ * just after kitshn accepts it never counts. A machine that stays offline holds the rest.
  */
 export function advanceRollout(
   rollout: Rollout,
   job: StepJob | null,
   statusOf: (machineId: string) => LiveStatus,
 ): Rollout {
-  let next = rollout;
-  const step = next.step;
-  if (step) {
-    const status = statusOf(step.machineId);
-    // A connection that started after the job went out, so not the one that ran it.
-    const later = status !== null && step.sentAt !== null && status.connectedAt > step.sentAt;
-    if (job === null || job.state === "gone") next = { ...next, step: null };
-    else if (job.state === "failed")
-      next = { ...next, step: null, failed: { machineId: step.machineId, reason: lastLine(job.output) } };
-    else if (status !== null && status.version === next.version)
-      next = withUpdated({ ...next, step: null }, step.machineId);
-    else if (status !== null && later && (job.state === "done" || job.state === "closed"))
-      next = {
-        ...next,
-        step: null,
-        failed: { machineId: step.machineId, reason: `The daemon came back on edge-${status.version}.` },
-      };
-  }
-  const failed = next.failed;
-  if (failed && statusOf(failed.machineId)?.version === next.version)
-    next = withUpdated({ ...next, failed: null }, failed.machineId);
-  return next;
+  const step = rollout.step;
+  if (!step) return rollout;
+  const status = statusOf(step.machineId);
+  // A connection that started after the job went out, so not the one that ran it.
+  const later = status !== null && step.sentAt !== null && status.connectedAt > step.sentAt;
+  if (job === null || job.state === "gone") return { ...rollout, step: null };
+  if (job.state === "failed")
+    return { ...rollout, step: null, failed: { machineId: step.machineId, reason: lastLine(job.output) } };
+  if (status !== null && status.version === rollout.version && job.state === "done")
+    return withUpdated({ ...rollout, step: null }, step.machineId);
+  if (
+    status !== null &&
+    status.version !== rollout.version &&
+    later &&
+    (job.state === "done" || job.state === "closed")
+  )
+    return {
+      ...rollout,
+      step: null,
+      failed: { machineId: step.machineId, reason: `The daemon came back on edge-${status.version}.` },
+    };
+  return rollout;
+}
+
+/** K-626: the owner turned the setting off, so that machine neither holds nor stops the rollout. */
+export const withoutMachine = (rollout: Rollout, machineId: string): Rollout => ({
+  ...rollout,
+  step: rollout.step?.machineId === machineId ? null : rollout.step,
+  failed: rollout.failed?.machineId === machineId ? null : rollout.failed,
+});
+
+/**
+ * K-627: the owner sent "Update daemon" to a machine that holds or stopped the rollout. That job becomes the step, so
+ * the hold or the failure ends when it succeeds, and fails again when it does not.
+ */
+export function manualStep(rollout: Rollout, machineId: string, jobId: number): Rollout {
+  const holds = rollout.step?.machineId === machineId;
+  const stopped = rollout.step === null && rollout.failed?.machineId === machineId;
+  if (!holds && !stopped) return rollout;
+  return { ...rollout, failed: null, step: { machineId, jobId, sentAt: null } };
 }
 
 export interface AutoUpdateMachine {

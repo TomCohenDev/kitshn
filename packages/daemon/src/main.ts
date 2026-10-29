@@ -106,7 +106,9 @@ import {
 import { basename, dirname, join } from "node:path";
 import { restartSoon } from "./restart.ts";
 import {
+  UPDATE_STABLE_MS,
   type UpdateMarker,
+  dropStep,
   installUpdate,
   markerPath,
   nextBinaryName,
@@ -907,8 +909,31 @@ function pruneSamples() {
  * one must pass a start check first, the previous one stays beside it, and the new one sends the job result once
  * kitshn accepts it, so this returns null after a swap.
  */
+/** K-629: an update that runs now; a second one is refused, so two never share the `.new` file. */
+let updating = false;
+
 async function updateDaemon(jobId: number, version: string): Promise<JobOutcome | null> {
   const failed = (output: string) => ({ ok: false, exitCode: null, output });
+  if (updating) return failed("Another update of this daemon runs now.");
+  // An unconfirmed update keeps the previous binary as its way back, so no other update replaces it.
+  if (updateWatch) return failed(`The update to edge-${updateWatch.marker.to} waits for its confirmation.`);
+  updating = true;
+  try {
+    const outcome = await installRelease(jobId, version, failed);
+    // After a swap the daemon restarts, so the lock stays until it exits.
+    if (outcome !== null) updating = false;
+    return outcome;
+  } catch (error) {
+    updating = false;
+    throw error;
+  }
+}
+
+async function installRelease(
+  jobId: number,
+  version: string,
+  failed: (output: string) => JobOutcome,
+): Promise<JobOutcome | null> {
   if (!/^[0-9a-f]{12}$/.test(version)) return failed(`kitshn named no valid release (${version}).`);
   // A daemon run from source has the runtime as its execPath; replacing that would break the runtime.
   if (VERSION === "dev") return failed("This daemon runs from source; update it from the repo.");
@@ -974,34 +999,79 @@ async function updateDaemon(jobId: number, version: string): Promise<JobOutcome 
   return null;
 }
 
-/** K-629: the timer that rolls a new daemon back when kitshn has not accepted it by the deadline. */
-let updateWatch: { readonly marker: UpdateMarker; readonly timer: ReturnType<typeof setTimeout> } | null =
-  null;
+/**
+ * K-629: the watch of a new daemon. Until kitshn accepts a connection, a timer rolls it back at the deadline; after
+ * that, the connection must stay up for UPDATE_STABLE_MS before the daemon confirms the update.
+ */
+let updateWatch: { marker: UpdateMarker; timer: ReturnType<typeof setTimeout> } | null = null;
 
-/** K-629: called when kitshn accepts the connection. The result of the update goes out with the other results. */
-function confirmUpdate() {
-  if (!updateWatch) return;
-  clearTimeout(updateWatch.timer);
-  rmSync(markerPath(paths.data), { force: true });
-  log(
-    `kitshn accepted edge-${updateWatch.marker.to}; edge-${updateWatch.marker.from} stays at ${updateWatch.marker.previous}`,
+function deadlineTimer(marker: UpdateMarker) {
+  return setTimeout(
+    () => void rollBackUpdate(marker, "The new daemon did not reach kitshn within 5 minutes."),
+    Math.max(0, marker.deadline - Date.now()),
   );
-  updateWatch = null;
 }
 
-/**
- * K-629: puts the previous daemon back and restarts; that daemon reports the reason to kitshn. First the watch ends
- * and the queued "updated" result goes, so an accepted connection during the restore confirms nothing.
- */
+/** K-629: kitshn accepted a connection; the update counts once it stayed up for UPDATE_STABLE_MS. */
+function updateAccepted() {
+  const watch = updateWatch;
+  if (!watch) return;
+  clearTimeout(watch.timer);
+  watch.timer = setTimeout(confirmUpdate, UPDATE_STABLE_MS);
+}
+
+/** K-629: the accepted connection closed too soon, which counts as a failed start. */
+function updateDropped() {
+  const watch = updateWatch;
+  if (!watch) return;
+  clearTimeout(watch.timer);
+  const step = dropStep(watch.marker, Date.now());
+  if (step.kind === "roll-back") {
+    void rollBackUpdate(watch.marker, step.reason);
+    return;
+  }
+  watch.marker = step.marker;
+  try {
+    writeMarker(paths.data, step.marker);
+  } catch (error) {
+    void rollBackUpdate(watch.marker, `kitshn could not write update.json (${String(error)}).`);
+    return;
+  }
+  watch.timer = deadlineTimer(step.marker);
+}
+
+/** K-629: the connection stayed up, so the update holds: the marker goes, and kitshn gets the result. */
+function confirmUpdate() {
+  const watch = updateWatch;
+  if (!watch) return;
+  updateWatch = null;
+  rmSync(markerPath(paths.data), { force: true });
+  log(
+    `edge-${watch.marker.to} stayed connected; edge-${watch.marker.from} stays at ${watch.marker.previous}`,
+  );
+  pendingResults.push({
+    type: "jobResult",
+    id: watch.marker.jobId,
+    result: {
+      ok: true,
+      exitCode: 0,
+      output: `Updated ${watch.marker.from} to ${watch.marker.to}; the new daemon stayed connected to kitshn.`,
+    },
+  });
+  flushResults();
+}
+
+/** K-629: puts the previous daemon back and restarts; that daemon reports the reason to kitshn. */
 async function rollBackUpdate(marker: UpdateMarker, reason: string) {
   if (updateWatch) clearTimeout(updateWatch.timer);
   updateWatch = null;
-  const queued = pendingResults.findIndex(
-    (message) => message.type === "jobResult" && message.id === marker.jobId,
-  );
-  if (queued >= 0) pendingResults.splice(queued, 1);
   log(`the update to edge-${marker.to} failed: ${reason} edge-${marker.from} comes back.`);
-  writeMarker(paths.data, { ...marker, state: "rolled-back", reason });
+  try {
+    writeMarker(paths.data, { ...marker, state: "rolled-back", reason });
+  } catch (error) {
+    // The previous daemon then reports that it started on another release than the marker names.
+    log(`update.json was not written: ${String(error)}`);
+  }
   try {
     await restorePrevious(
       { rename: renameSync },
@@ -1043,22 +1113,7 @@ function checkUpdate() {
     });
     return;
   }
-  pendingResults.push({
-    type: "jobResult",
-    id: step.jobId,
-    result: {
-      ok: true,
-      exitCode: 0,
-      output: `Updated ${marker.from} to ${marker.to}; kitshn accepted the new daemon.`,
-    },
-  });
-  updateWatch = {
-    marker,
-    timer: setTimeout(
-      () => void rollBackUpdate(marker, "The new daemon did not reach kitshn within 5 minutes."),
-      Math.max(0, step.deadline - Date.now()),
-    ),
-  };
+  updateWatch = { marker, timer: deadlineTimer(marker) };
 }
 
 /**
@@ -2360,7 +2415,7 @@ function connect(config: JoinSecrets) {
       socket = ws;
       delay = 1000;
       stopped = false;
-      confirmUpdate();
+      updateAccepted();
       flushResults();
       report();
       sendProviders();
@@ -2503,6 +2558,8 @@ function connect(config: JoinSecrets) {
     };
     ws.onclose = (event) => {
       if (ping) clearInterval(ping);
+      // K-629: only the accepted connection counts; a refused one never started the stable time.
+      if (socket === ws) updateDropped();
       // K-1805: kitshn forgets the tails of a closed connection.
       if (socket === ws) stopTails();
       if (socket === ws) socket = null;

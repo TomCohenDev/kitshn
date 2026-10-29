@@ -51,6 +51,8 @@ import {
   type StepJob,
   advanceRollout,
   daemonUpdate,
+  manualStep,
+  withoutMachine,
   isRelease,
   nextAutoUpdate,
   parseRollout,
@@ -1571,6 +1573,10 @@ export class Kitshn extends DurableObject<Env> {
     });
     this.state = after;
     // K-627: Resume or the setting can let the next automatic update go.
+    // K-626: a machine whose setting goes off neither holds nor stops the rollout.
+    for (const change of changes)
+      if (change._tag === "autoUpdate" && !change.after)
+        this.saveRollout(withoutMachine(this.rollout(), change.id));
     if (changes.some((change) => change._tag === "pause" || change._tag === "autoUpdate")) this.autoUpdate();
     this.clearAccessFailures();
     this.closeLostDoors(now);
@@ -5674,8 +5680,19 @@ export class Kitshn extends DurableObject<Env> {
       return inserted;
     });
     if (command.kind === "shell") this.load();
-    // K-627: an update that the owner sends is the way out of a failed one, and the next machine waits for it.
-    if (command.kind === "update") this.autoUpdate();
+    // K-627: "Update daemon" replaces a queued automatic update of the machine, and becomes the step of a machine that
+    // holds or stopped the rollout, so its success ends that.
+    if (command.kind === "update" && machineId !== null && typeof row?.id === "number") {
+      this.sql(
+        `UPDATE jobs SET state = 'failed', output = ? WHERE machine_id = ? AND state = 'queued' AND id != ?
+         AND json_extract(command, '$.kind') = 'update' AND json_extract(visitor, '$.kitshn') = 1`,
+        "The owner sent Update daemon, so kitshn dropped this automatic update.",
+        machineId,
+        row.id,
+      );
+      this.saveRollout(manualStep(this.rollout(), machineId, row.id));
+      this.autoUpdate();
+    }
     this.deliverJobs();
     this.broadcast();
     void this.scheduleAlarm();
@@ -5720,6 +5737,16 @@ export class Kitshn extends DurableObject<Env> {
         continue;
       }
       if (automatic && this.state.paused) continue;
+      // K-627: a daemon that runs the release already needs no automatic update; the step ends as done.
+      const running = automatic && job.machine_id !== null ? this.liveStatus(job.machine_id) : null;
+      if (running?.version === this.env.KITSHN_VERSION) {
+        this.sql(
+          "UPDATE jobs SET state = 'done', output = ? WHERE id = ?",
+          `The daemon runs edge-${running.version} already.`,
+          job.id,
+        );
+        continue;
+      }
       // K-718: a redeploy that an agent key asked for goes out only while every check of its start still holds.
       if (visitor.kitshn && visitor.clientId !== null) {
         const reason =

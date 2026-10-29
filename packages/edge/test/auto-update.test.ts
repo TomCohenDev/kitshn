@@ -89,6 +89,8 @@ async function withDaemon(
     readonly daemon: (message: object) => Promise<void>;
     readonly jobs: () => Array<{ state: string; command: string; when_idle: number; output: string }>;
     readonly kitshn: { commit(actor: object, changes: Array<object>, undo: null): number | null };
+    /** K-627: the stored rollout. */
+    readonly rollout: () => unknown;
   }) => Promise<void>,
 ) {
   const stub = await setup();
@@ -127,6 +129,12 @@ async function withDaemon(
             )
             .toArray(),
         kitshn,
+        rollout: () =>
+          JSON.parse(
+            state.storage.sql
+              .exec<{ value: string }>("SELECT value FROM meta WHERE key = 'daemon_rollout'")
+              .one().value,
+          ),
       });
     } finally {
       pair[1].close(1000, "test over");
@@ -160,9 +168,10 @@ it("queues one update for a BEHIND daemon that connects, and it waits while a pr
 });
 
 it("drops a waiting automatic update when the owner turns the setting off (K-626)", async () => {
-  await withDaemon(async ({ daemon, jobs, kitshn }) => {
+  await withDaemon(async ({ daemon, jobs, kitshn, rollout }) => {
     await daemon({ type: "providers", providers: [busyReport(true)] });
     await daemon(behindStatus);
+    expect(rollout()).toMatchObject({ version: NEW, step: { machineId: machine.id } });
     kitshn.commit(
       { _tag: "person", email: "owner@example.com" },
       [{ _tag: "autoUpdate", id: machine.id, before: true, after: false }],
@@ -174,6 +183,8 @@ it("drops a waiting automatic update when the owner turns the setting off (K-626
         "Update daemon automatically is off on this machine, so kitshn dropped this update (K-626).",
       ],
     ]);
+    // The machine no longer holds the rollout.
+    expect(rollout()).toMatchObject({ step: null, failed: null });
   });
 });
 

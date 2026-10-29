@@ -34,6 +34,8 @@ export const nextBinaryName = (binary: string, windows: boolean) =>
 export const UPDATE_DEADLINE_MS = 5 * 60_000;
 /** K-629: starts of the new daemon without an accepted connection, after which the next start rolls back. */
 export const UPDATE_MAX_STARTS = 3;
+/** K-629: how long the first accepted connection of a new daemon must stay up before it confirms the update. */
+export const UPDATE_STABLE_MS = 3 * 60_000;
 
 /** K-629: `<data>/update.json`, written before the swap and read by each start until kitshn accepts the new daemon. */
 export interface UpdateMarker {
@@ -181,6 +183,11 @@ export async function installUpdate(
     readonly now: number;
   },
 ): Promise<string | null> {
+  // The previous binary is the way back, so the running release never replaces it.
+  if (input.to === input.from) {
+    files.remove(input.next);
+    return `The daemon runs edge-${input.to} already.`;
+  }
   const check = files.version(input.next);
   if (!check.ok || check.version !== input.to) {
     files.remove(input.next);
@@ -244,4 +251,88 @@ export async function swapBinary(
   throw new Error(
     `the new binary did not go in place (${String(failed)}), and the old one could not go back: it is at ${old}.`,
   );
+}
+
+/**
+ * K-629: the connection of a new daemon closed before it stayed up for UPDATE_STABLE_MS. That counts as a failed start:
+ * after UPDATE_MAX_STARTS of them it rolls back, else it has 5 more minutes to reach kitshn.
+ */
+export function dropStep(
+  marker: UpdateMarker,
+  now: number,
+):
+  | { readonly kind: "roll-back"; readonly reason: string }
+  | { readonly kind: "wait"; readonly marker: UpdateMarker } {
+  const starts = marker.starts + 1;
+  if (starts >= UPDATE_MAX_STARTS)
+    return {
+      kind: "roll-back",
+      reason: `The connection of the new daemon to kitshn dropped ${starts} times within ${UPDATE_STABLE_MS / 60_000} minutes.`,
+    };
+  return { kind: "wait", marker: { ...marker, starts, deadline: now + UPDATE_DEADLINE_MS } };
+}
+
+/** K-629: the file work of the start gate, so a test runs it on a fake folder. */
+export interface GateFiles extends SwapFiles {
+  readonly read: () => UpdateMarker | null;
+  readonly write: (marker: UpdateMarker) => void;
+  readonly exists: (path: string) => boolean;
+}
+
+/**
+ * K-629: the start gate of `kitshn run`. Returns "restart" when the previous daemon is back in place, so this start
+ * ends; "start" otherwise. A marker that cannot be written (a full disk) restores the previous binary at once when it
+ * exists, so the gate never loops on the same failed write.
+ */
+export async function runGate(
+  files: GateFiles,
+  input: {
+    readonly binary: string;
+    readonly version: string;
+    readonly windows: boolean;
+    readonly now: number;
+    readonly log: (text: string) => void;
+  },
+): Promise<"start" | "restart"> {
+  const marker = files.read();
+  const step = gateStep(marker, input.version, input.now);
+  if (step.kind === "none" || marker === null) return "start";
+  let reason: string;
+  if (step.kind === "count") {
+    try {
+      files.write(step.marker);
+      return "start";
+    } catch (error) {
+      reason = `kitshn could not write update.json (${String(error)}).`;
+    }
+  } else reason = step.reason;
+  if (!files.exists(marker.previous)) {
+    input.log(
+      `the update to edge-${marker.to} failed: ${reason} No previous daemon is at ${marker.previous}.`,
+    );
+    return "start";
+  }
+  input.log(`the update to edge-${marker.to} failed: ${reason} edge-${marker.from} comes back.`);
+  try {
+    files.write({ ...marker, state: "rolled-back", reason });
+  } catch (error) {
+    // The previous daemon then reports that it started on another release than the marker names.
+    input.log(`update.json was not written: ${String(error)}`);
+  }
+  try {
+    await restorePrevious(files, input.binary, marker.previous, input.windows, input.now);
+  } catch (error) {
+    input.log(`the previous daemon could not come back: ${String(error)}`);
+    try {
+      files.write({
+        ...marker,
+        state: "rolled-back",
+        reason: `${reason} The previous daemon could not come back: ${String(error)}`,
+      });
+    } catch {
+      // Logged above; this daemon keeps running.
+    }
+    return "start";
+  }
+  return "restart";
 }

@@ -6,9 +6,11 @@ import {
   type Rollout,
   advanceRollout,
   daemonUpdate,
+  manualStep,
   nextAutoUpdate,
   startStep,
   stepSent,
+  withoutMachine,
 } from "./autoUpdate.ts";
 
 const NEW = "aaaaaaaaaaaa";
@@ -97,14 +99,28 @@ describe("a step of the rollout (K-627)", () => {
       reason: "The new daemon failed its start check.",
     });
   });
-  it("drops an expired step without a failure, and ends a failure when a retry runs the release", () => {
+  it("holds while a daemon on the release has not confirmed it, so a crash just after acceptance never counts", () => {
+    expect(advanceRollout(sent, job("closed"), () => online(NEW, 20))).toEqual(sent);
+  });
+  it("drops an expired step without a failure", () => {
     expect(advanceRollout(sent, job("gone"), () => null)).toEqual({ ...sent, step: null });
+  });
+  it("lets the owner end a hold or a failure: setting off, or Update daemon that succeeds (K-626)", () => {
+    const held = advanceRollout(sent, job("done"), () => null);
+    expect(withoutMachine(held, "a")).toEqual({ ...held, step: null });
     const failed: Rollout = { ...NO_ROLLOUT, version: NEW, failed: { machineId: "a", reason: "x" } };
-    expect(advanceRollout(failed, null, () => online(NEW))).toEqual({
-      ...failed,
-      failed: null,
-      updated: ["a"],
-    });
+    expect(withoutMachine(failed, "a").failed).toBeNull();
+    for (const before of [held, failed]) {
+      const retry = manualStep(before, "a", 9);
+      expect(retry).toMatchObject({ failed: null, step: { machineId: "a", jobId: 9 } });
+      expect(advanceRollout(retry, job("done"), () => online(NEW, 20))).toMatchObject({
+        step: null,
+        failed: null,
+        updated: ["a"],
+      });
+    }
+    // An update of another machine changes nothing.
+    expect(manualStep(held, "b", 9)).toEqual(held);
   });
   it("follows the release that delivery names after a deploy", () => {
     const queued = startStep(NO_ROLLOUT, NEW, "a", 1);

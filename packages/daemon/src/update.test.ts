@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  type GateFiles,
   type InstallFiles,
   type UpdateMarker,
+  dropStep,
   gateStep,
   installUpdate,
   oldBinaries,
   restorePrevious,
+  runGate,
   runStep,
   swapBinary,
 } from "./update.ts";
@@ -94,6 +97,35 @@ describe("the way back of an update (K-629)", () => {
     });
   });
 
+  it("counts a connection that dropped within 3 minutes as a failed start, and rolls back at the third", () => {
+    expect(dropStep({ ...marker, starts: 1 }, 50)).toEqual({
+      kind: "wait",
+      marker: { ...marker, starts: 2, deadline: 50 + 5 * 60_000 },
+    });
+    expect(dropStep({ ...marker, starts: 2 }, 50)).toEqual({
+      kind: "roll-back",
+      reason: "The connection of the new daemon to kitshn dropped 3 times within 3 minutes.",
+    });
+  });
+
+  it("restores the previous binary at once when the gate cannot write update.json", async () => {
+    const files = folder(["/p/kitshn", "/p/kitshn.old"]);
+    const gate: GateFiles = {
+      ...files,
+      read: () => marker,
+      write: () => {
+        throw new Error("ENOSPC");
+      },
+      exists: (path) => files.files.has(path),
+    };
+    const input = { binary: "/p/kitshn", version: marker.to, windows: false, now: 0, log: () => {} };
+    expect(await runGate(gate, input)).toBe("restart");
+    expect([...files.files]).toEqual(["/p/kitshn"]);
+    // Without a previous binary, the daemon starts; there is nothing to go back to.
+    const bare = folder(["/p/kitshn"]);
+    expect(await runGate({ ...gate, ...bare, exists: (path) => bare.files.has(path) }, input)).toBe("start");
+  });
+
   it("lets the previous daemon start, which reports why", () => {
     const back = { ...marker, state: "rolled-back" as const, reason: "The new daemon crashed." };
     expect(gateStep(back, marker.from, 2000)).toEqual({ kind: "none" });
@@ -119,7 +151,7 @@ describe("the way back of an update (K-629)", () => {
 
 describe("the install of an update (K-629)", () => {
   /** The fake folder, with a start check that prints `printed` or fails, and the marker writes. */
-  function install(printed: string | null) {
+  function install(printed: string | null, from = "bbbbbbbbbbbb") {
     const files = folder(["/p/kitshn", "/p/kitshn.new"]);
     const markers: Array<UpdateMarker | null> = [];
     const ops: InstallFiles = {
@@ -137,7 +169,7 @@ describe("the install of an update (K-629)", () => {
         next: "/p/kitshn.new",
         windows: false,
         jobId: 7,
-        from: "bbbbbbbbbbbb",
+        from,
         to: "aaaaaaaaaaaa",
         now: 0,
       });
@@ -151,6 +183,13 @@ describe("the install of an update (K-629)", () => {
       expect([...files.files]).toEqual(["/p/kitshn"]);
       expect(markers).toEqual([]);
     }
+  });
+
+  it("never puts the running release in place of kitshn.old", async () => {
+    const { files, markers, run } = install("aaaaaaaaaaaa", "aaaaaaaaaaaa");
+    expect(await run()).toBe("The daemon runs edge-aaaaaaaaaaaa already.");
+    expect([...files.files]).toEqual(["/p/kitshn"]);
+    expect(markers).toEqual([]);
   });
 
   it("keeps the previous binary as kitshn.old and writes the marker before the swap", async () => {

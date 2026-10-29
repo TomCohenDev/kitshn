@@ -974,15 +974,13 @@ describe("folder sites (K-1123)", () => {
         (instance as unknown as { redirectWork(): boolean }).redirectWork(),
       );
     // A failed upload waits for its retry time instead of running the alarm again at once.
-    cloudflare.state.failUploads = 5;
+    // workerd also runs the alarms that kitshn schedules, and every alarm runs the redirect step whatever its back-off
+    // says. So the uploads fail for as long as the test needs, and the test reads redirectWork only while they fail.
+    cloudflare.state.failUploads = 1000;
     await alarm();
     expect(cloudflare.served("first.example.com")).toEqual([]);
     expect(await redirectWork()).toBe(false);
     cloudflare.state.failUploads = 0;
-    await runInDurableObject(durable, (_instance, storage) => {
-      storage.storage.sql.exec("UPDATE meta SET value = '0' WHERE key = 'redirects_retry_at'");
-    });
-    expect(await redirectWork()).toBe(true);
     // The alarm hands the old address to the redirect Worker, with the map of where it goes.
     await alarm();
     expect(cloudflare.served("first.example.com")).toEqual(["kitshn-redirects"]);

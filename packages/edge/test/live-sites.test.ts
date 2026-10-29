@@ -1,0 +1,239 @@
+import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { afterEach, expect, it, vi } from "vitest";
+import type { Machine } from "../src/core/machine.ts";
+import { type Circle, OWNER_CIRCLE_ID, type Resource } from "../src/core/model.ts";
+import { accessToken, send, stubAccessCerts } from "./access.ts";
+
+/** K-1131: the site wizard only makes new sites, through one service that queues `kitshn expose --new`. */
+
+const machine: Machine = {
+  id: "vps",
+  name: "vps",
+  labels: [],
+  order: 0,
+  serviceTokenId: "token-vps",
+  clientId: "vps.access",
+  tunnelId: "tunnel-vps",
+};
+
+afterEach(() => vi.restoreAllMocks());
+
+/** The machine and its card in the Owner circle, so the owner has control on it (K-614). */
+async function setup() {
+  const stub = env.KITSHN.getByName("kitshn");
+  await runInDurableObject(stub, (_, state) => {
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO machines (id, body) VALUES (?, ?)",
+      "vps",
+      JSON.stringify(machine),
+    );
+    const owner = JSON.parse(
+      state.storage.sql.exec<{ body: string }>("SELECT body FROM circles WHERE id = ?", OWNER_CIRCLE_ID).one()
+        .body,
+    ) as Circle;
+    const card: Resource = {
+      id: "vps",
+      kind: "machine",
+      name: "vps",
+      addresses: [],
+      status: "running",
+      group: null,
+      machine: "vps",
+    };
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO resources (id, body) VALUES (?, ?)",
+      "vps",
+      JSON.stringify(card),
+    );
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO places (id, x, y) VALUES (?, ?, ?)",
+      "vps",
+      owner.x,
+      owner.y,
+    );
+  });
+  await evictDurableObject(stub);
+  return () =>
+    runInDurableObject(stub, (_, state) =>
+      state.storage.sql
+        .exec<{ command: string }>("SELECT command FROM jobs ORDER BY id DESC LIMIT 1")
+        .toArray()
+        .map((row) => (JSON.parse(row.command) as { script: string }).script)
+        .at(0),
+    );
+}
+
+it("queues expose --new for a new name, and refuses a taken address or a bad server (K-1131)", async () => {
+  stubAccessCerts();
+  const lastScript = await setup();
+  const token = await accessToken("admin-aud", { email: "owner@example.com" });
+  const add = (body: object) =>
+    send("/api/sites/live", {
+      method: "POST",
+      headers: { "cf-access-jwt-assertion": token, "content-type": "application/json" },
+      body: JSON.stringify({ machineId: "vps", dev: false, endsAt: null, ...body }),
+    });
+  const state = (await (
+    await send("/api/state", { headers: { "cf-access-jwt-assertion": token } })
+  ).json()) as {
+    resources: ReadonlyArray<Resource>;
+  };
+  // A static site card that holds busy.<zone> already.
+  const zone = state.resources
+    .find((resource) => resource.kind === "kitshn.admin")
+    ?.addresses[0]?.split(".")
+    .slice(1)
+    .join(".");
+  if (!zone) throw new Error("no admin address");
+  const busy: Resource = {
+    id: "busy",
+    kind: "site.static",
+    name: "busy",
+    addresses: [`busy.${zone}`],
+    status: "running",
+    group: null,
+    machine: null,
+  };
+  await runInDurableObject(env.KITSHN.getByName("kitshn"), (_, storage) => {
+    storage.storage.sql.exec(
+      "INSERT OR REPLACE INTO resources (id, body) VALUES (?, ?)",
+      "busy",
+      JSON.stringify(busy),
+    );
+  });
+  await evictDurableObject(env.KITSHN.getByName("kitshn"));
+  const taken = "busy";
+
+  const ok = await add({ server: "http://localhost:5173/app", name: "trek", endsAt: Date.now() + 3_600_000 });
+  expect(ok.status, await ok.clone().text()).toBe(200);
+  expect(await lastScript()).toContain("expose '5173' --name 'trek' --new");
+  expect((await add({ server: "5174", name: taken })).status).toBe(409);
+  expect((await add({ server: "http://localhost:0", name: "zero" })).status).toBe(400);
+  expect((await add({ server: "https://foo.example.org", name: "far" })).status).toBe(400);
+});
+
+/** A daemon socket of the machine that passed its key check (K-1704). */
+const daemonSocket = () =>
+  ({
+    deserializeAttachment: () => ({
+      kind: "machine",
+      machineId: "vps",
+      since: 0,
+      challenge: "",
+      check: "signed",
+      answered: true,
+      rotateBy: null,
+      status: null,
+      sample: null,
+    }),
+    serializeAttachment() {},
+    send() {},
+    close() {},
+  }) as unknown as WebSocket;
+
+it("ends a wizard site as the owner who asked, who can undo it; a failed request of another owner leaves nothing (K-1131, K-212)", async () => {
+  stubAccessCerts();
+  await setup();
+  const stub = env.KITSHN.getByName("kitshn");
+  const owner = await accessToken("admin-aud", { email: "owner@example.com" });
+  const other = await accessToken("admin-aud", { email: "other@example.com" });
+  const post = (token: string, path: string, body: object) =>
+    send(path, {
+      method: "POST",
+      headers: { "cf-access-jwt-assertion": token, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const ask = async (token: string, endsAt: number | null) => {
+    const response = await post(token, "/api/sites/live", {
+      machineId: "vps",
+      server: "5173",
+      name: "trek",
+      dev: false,
+      endsAt,
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    return ((await response.json()) as { id: number }).id;
+  };
+  const daemon = (message: object) =>
+    runInDurableObject(stub, (instance) =>
+      instance.webSocketMessage(daemonSocket(), JSON.stringify(message)),
+    );
+  const result = async (id: number, ok: boolean) => {
+    await runInDurableObject(
+      stub,
+      (_, state) => void state.storage.sql.exec("UPDATE jobs SET state = 'sent' WHERE id = ?", id),
+    );
+    await daemon({ type: "jobResult", id, result: { ok, exitCode: ok ? 0 : 1, output: "" } });
+  };
+  const seen = async () =>
+    (await (await send("/api/state", { headers: { "cf-access-jwt-assertion": owner } })).json()) as {
+      places: Record<string, { x: number; y: number }>;
+      ends: Record<string, number>;
+      resources: ReadonlyArray<Resource>;
+      revisions: ReadonlyArray<{ id: number; summary: string; actor: unknown }>;
+    };
+
+  // A second person of the Owner circle, who may add sites too.
+  const circles = (
+    (await (await send("/api/state", { headers: { "cf-access-jwt-assertion": owner } })).json()) as {
+      circles: ReadonlyArray<Circle>;
+    }
+  ).circles;
+  const ownerCircle = circles.find((circle) => circle.id === OWNER_CIRCLE_ID);
+  if (!ownerCircle) throw new Error("no Owner circle");
+  const joined = await post(owner, "/api/apply", {
+    edits: [
+      {
+        _tag: "circle",
+        id: OWNER_CIRCLE_ID,
+        after: {
+          ...ownerCircle,
+          members: [...ownerCircle.members, { _tag: "email", email: "other@example.com" }],
+        },
+      },
+    ],
+  });
+  expect(joined.status, await joined.clone().text()).toBe(200);
+  // The owner asks for an hour; another owner asks for the same name for two hours, and `expose --new` fails.
+  const endsAt = Date.now() + 3_600_000;
+  const mine = await ask(owner, endsAt);
+  const theirs = await ask(other, endsAt + 3_600_000);
+  await result(mine, true);
+  await result(theirs, false);
+  await daemon({
+    type: "sites",
+    sites: [{ name: "trek", target: "http://localhost:5173", dev: false, up: true, endsAt }],
+  });
+  // The address check finds the name free (no DNS record, no Worker domain), so kitshn makes the card.
+  await runInDurableObject(stub, async (instance) => {
+    await (
+      instance as unknown as { checkSites(api: () => Promise<[]>, budget: number): Promise<number> }
+    ).checkSites(async () => [], 6);
+  });
+  const made = await seen();
+  const card = made.resources.find((resource) => resource.addresses[0]?.startsWith("trek."));
+  if (!card) throw new Error("no card for trek");
+  expect(made.ends[card.id]).toBe(endsAt);
+
+  // On the map in the Owner circle, the hour passes, and the end runs as the owner, who undoes it.
+  const vps = made.places["vps"];
+  if (!vps) throw new Error("no machine place");
+  expect(
+    (await post(owner, "/api/apply", { edits: [{ _tag: "place", id: card.id, after: vps }] })).status,
+  ).toBe(200);
+  await runInDurableObject(stub, (instance, state) => {
+    state.storage.sql.exec("UPDATE card_ends SET ends_at = 1 WHERE id = ?", card.id);
+    const kitshn = instance as unknown as { state: { ends: Map<string, number> } };
+    kitshn.state = { ...kitshn.state, ends: new Map(kitshn.state.ends).set(card.id, 1) };
+  });
+  await runDurableObjectAlarm(stub);
+  const ended = await seen();
+  const [expiry] = ended.revisions;
+  expect([ended.places[card.id], expiry?.actor]).toEqual([
+    undefined,
+    { _tag: "person", email: "owner@example.com" },
+  ]);
+  expect((await post(owner, "/api/undo", { revision: expiry?.id })).status).toBe(200);
+  expect((await seen()).places[card.id]).toEqual(vps);
+});

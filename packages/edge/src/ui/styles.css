@@ -1954,6 +1954,10 @@ a > code {
   gap: 4px;
   margin-top: 4px;
 }
+/* K-1131: the preview of a port in the site wizard stays small, so Share it stays in view. */
+.site-preview {
+  max-width: 320px;
+}
 .preview-frame .btn {
   font-size: 0.75rem;
   padding: 1px 6px;

@@ -20,7 +20,8 @@ export interface LiveSite {
   readonly state: "checking" | "ok" | "refused";
 }
 
-const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+/** K-1104: a site name, one DNS label. */
+export const LIVE_LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 const TARGET = /^(http:\/\/localhost:(\d{1,5})|unix:\/[^\s]{1,200})$/;
 
 /** A long id keeps a hash of the machine and the name instead of being cut, so two sites never meet. */
@@ -36,13 +37,20 @@ export function parseSites(value: unknown): { sites: Array<LiveSiteReport>; refu
   if (!Array.isArray(value)) return { sites, refused: ["The site list is not a list."] };
   for (const item of value.slice(0, 50)) {
     const site = item as Partial<Record<keyof LiveSiteReport, unknown>>;
-    if (typeof site.name !== "string" || !LABEL.test(site.name))
+    if (typeof site.name !== "string" || !LIVE_LABEL.test(site.name))
       refused.push(`The name ${String(site.name)} is not valid.`);
     else if (RESERVED_SITE_NAMES.has(site.name))
       refused.push(`${site.name}: kitshn itself uses this name on the zone.`);
     else if (typeof site.target !== "string" || !validTarget(site.target))
       refused.push(`${site.name}: the target is not valid.`);
-    else sites.push({ name: site.name, target: site.target, dev: site.dev === true, up: site.up === true });
+    else
+      sites.push({
+        name: site.name,
+        target: site.target,
+        dev: site.dev === true,
+        up: site.up === true,
+        ...(typeof site.endsAt === "number" && Number.isFinite(site.endsAt) ? { endsAt: site.endsAt } : {}),
+      });
   }
   return { sites, refused };
 }
@@ -263,4 +271,41 @@ export function wantedRecords(
       wanted.set(site.address, { content: `${tunnel}.cfargotunnel.com`, cardId: site.id });
   }
   return wanted;
+}
+
+/**
+ * K-619, K-909: an estimate of the bytes that a value takes as a structured clone, as workerd stores an attachment. A
+ * string with any character above U+00FF takes two bytes for each of its characters, so neither JSON characters nor
+ * UTF-8 bytes measure it.
+ */
+export function cloneBytes(value: unknown): number {
+  if (typeof value === "string")
+    return 5 + value.length * ([...value].some((c) => (c.codePointAt(0) ?? 0) > 0xff) ? 2 : 1);
+  if (typeof value === "number") return 9;
+  if (value === null || value === undefined || typeof value === "boolean") return 1;
+  if (Array.isArray(value)) return 5 + value.reduce((sum: number, item) => sum + cloneBytes(item), 0);
+  if (typeof value === "object")
+    return Object.entries(value).reduce((sum, [key, item]) => sum + cloneBytes(key) + cloneBytes(item), 5);
+  throw new Error(`cloneBytes: a ${typeof value} has no size here.`);
+}
+
+/**
+ * K-619, K-909: Cloudflare keeps at most 16,384 bytes on a socket attachment. A machine's attachment keeps its status,
+ * sample, volumes and servers, so the lists that only inform lose their last entries, servers first, until the clone
+ * estimate fits this budget, which keeps a margin under the limit.
+ */
+export const ATTACHMENT_BUDGET = 15_000;
+
+export function fitAttachment<
+  T extends { readonly servers?: ReadonlyArray<unknown>; readonly volumes?: ReadonlyArray<unknown> },
+>(attachment: T): T {
+  let fitted = attachment;
+  while (cloneBytes(fitted) > ATTACHMENT_BUDGET) {
+    if (fitted.servers && fitted.servers.length > 0)
+      fitted = { ...fitted, servers: fitted.servers.slice(0, -1) };
+    else if (fitted.volumes && fitted.volumes.length > 0)
+      fitted = { ...fitted, volumes: fitted.volumes.slice(0, -1) };
+    else throw new Error("fitAttachment: the attachment is too big without servers and volumes.");
+  }
+  return fitted;
 }

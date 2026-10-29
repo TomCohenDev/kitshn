@@ -1,3 +1,4 @@
+import { parseSiteInput } from "@kitshn/edge/sites";
 import { lstatSync } from "node:fs";
 import { createConnection } from "node:net";
 
@@ -6,16 +7,30 @@ export interface SiteEntry {
   readonly name: string;
   readonly target: string;
   readonly dev: boolean;
+  /** K-212: `kitshn expose --time`: the end time that the new card gets, in milliseconds. */
+  readonly endsAt?: number;
 }
 
 const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
-/** `kitshn expose 5173` or `kitshn expose /run/app.sock`: the target that the tunnel sends to (K-607). */
-export function targetOf(value: string): string | null {
-  if (/^\d{1,5}$/.test(value) && Number(value) > 0 && Number(value) < 65536)
-    return `http://localhost:${value}`;
-  if (value.startsWith("/")) return `unix:${value}`;
-  return null;
+/**
+ * `kitshn expose 5173`, `localhost:5173`, `http://127.0.0.1:5173/` or `/run/app.sock`: the target that the tunnel
+ * sends to (K-607), or why not (K-1131).
+ */
+export function targetOf(value: string): string | { readonly error: string } {
+  const input = parseSiteInput(value);
+  switch (input.kind) {
+    case "port":
+      return `http://localhost:${input.port}`;
+    case "socket":
+      return `unix:${input.path}`;
+    case "remote":
+      return {
+        error: `${input.host} is another host; kitshn exposes servers of this machine, such as localhost:5173.`,
+      };
+    case "invalid":
+      return { error: input.reason };
+  }
 }
 
 export function addSite(sites: ReadonlyArray<SiteEntry>, entry: SiteEntry): Array<SiteEntry> | string {
@@ -38,7 +53,13 @@ export function parseSiteFile(value: unknown): Array<SiteEntry> | null {
     ) {
       return null;
     }
-    sites.push({ name: entry.name, target: entry.target, dev: entry.dev === true });
+    const endsAt = entry.endsAt;
+    sites.push({
+      name: entry.name,
+      target: entry.target,
+      dev: entry.dev === true,
+      ...(typeof endsAt === "number" && Number.isFinite(endsAt) ? { endsAt } : {}),
+    });
   }
   return sites;
 }

@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { PolicyBody } from "../core/access.ts";
 import type { AccessRow } from "./access-sync.ts";
 import {
+  ATTACHMENT_BUDGET,
+  cloneBytes,
+  fitAttachment,
   type IngressAccess,
   type LiveSite,
   wantedRecords,
@@ -297,5 +300,31 @@ describe("DNS records of a Compose deploy before its site is live (K-817, K-901)
     // After it expires, the live site of the card holds the main address.
     const site = { id: "app-a", machineId: "m", address: "a.example.com" };
     expect([...wantedRecords([run(100)], [site], tunnelOf, 200)]).toEqual([["a.example.com", record]]);
+  });
+});
+
+describe("fitAttachment (K-619, K-909)", () => {
+  const volumes = Array.from({ length: 100 }, (_, i) => ({
+    name: `kitshn-app-${i}_data-${"x".repeat(60)}`,
+    project: `kitshn-app-${i}`,
+  }));
+  const servers = Array.from({ length: 32 }, (_, i) => ({
+    port: 3000 + i,
+    process: "node".repeat(10),
+    status: 200,
+    title: "t".repeat(80),
+  }));
+  const base = { kind: "machine", machineId: "vps", status: null, sample: null };
+
+  it("keeps the whole attachment in budget, whichever report came first, servers first to go", () => {
+    for (const attachment of [
+      fitAttachment({ ...fitAttachment({ ...base, volumes }), servers }),
+      fitAttachment({ ...fitAttachment({ ...base, servers }), volumes }),
+    ]) {
+      expect(cloneBytes(attachment)).toBeLessThanOrEqual(ATTACHMENT_BUDGET);
+      expect(attachment.volumes.length).toBeGreaterThan(0);
+    }
+    const small = { ...base, servers: servers.slice(0, 2), volumes: volumes.slice(0, 2) };
+    expect(fitAttachment(small)).toBe(small);
   });
 });

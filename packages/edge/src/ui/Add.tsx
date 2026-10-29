@@ -2,7 +2,10 @@ import { deployWorkflow } from "kitshn/templates";
 import { useState } from "preact/hooks";
 import type { MachineView } from "../core/protocol.ts";
 import { RESERVED_SITE_NAMES } from "../core/library.ts";
+import type { Resource } from "../core/model.ts";
+import { type ServerReport, type SiteInput, parseSiteInput } from "../core/sites.ts";
 import { Radio, Switch } from "./controls.tsx";
+import { LiveFrame } from "./Peek.tsx";
 import { callApi } from "./store.ts";
 
 const isName = (name: string) =>
@@ -11,18 +14,6 @@ const isName = (name: string) =>
   !name.startsWith("-") &&
   !name.endsWith("-") &&
   [...name].every((c) => c === "-" || (c >= "a" && c <= "z") || (c >= "0" && c <= "9"));
-
-/** A port, or an absolute socket path that a shell can take in single quotes. */
-function targetError(target: string): string | null {
-  if (target.startsWith("/"))
-    return target.includes("'") || target.includes(" ")
-      ? "A socket path cannot have a quote or a space."
-      : null;
-  const port = Number(target);
-  return Number.isInteger(port) && port > 0 && port < 65536 && String(port) === target
-    ? null
-    : "Type a port, for example 5173, or a socket path, for example /run/app.sock.";
-}
 
 const RECIPE = `import { defineApp } from "kitshn";
 
@@ -54,45 +45,87 @@ function Snippet(props: { file: string; text: string }) {
   );
 }
 
-/** K-805, K-1104: a static site from a repo, or a live site from a machine. */
+/** K-1131: a name for the site from the page title or the process: lowercase letters, digits and dashes. */
+const nameFrom = (text: string) =>
+  [...text.toLowerCase()]
+    .map((c) => ((c >= "a" && c <= "z") || (c >= "0" && c <= "9") ? c : "-"))
+    .join("")
+    .split("-")
+    .filter((part) => part !== "")
+    .join("-")
+    .slice(0, 40);
+
+/** K-1131, K-212: the end choices of a new site; a local preview starts with 1 h. */
+const HOUR = 60 * 60 * 1000;
+const SITE_TIMES = [
+  { label: "1 h", flag: "1h", ms: HOUR },
+  { label: "4 h", flag: "4h", ms: 4 * HOUR },
+  { label: "1 day", flag: "1d", ms: 24 * HOUR },
+  { label: "Until I stop it", flag: null, ms: null },
+] as const;
+
+/** K-805, K-1104, K-1131, K-619: a static site from a repo, or a live site from a running server of a machine. */
 export function AddSite(props: {
   zone: string;
   machines: ReadonlyArray<MachineView>;
+  /** K-1131: the address or port that a drop on the map brought, or "". */
+  initial: string;
+  /** K-1131: the card whose address an https URL names, if any. */
+  cardOf: (host: string) => Resource | null;
+  onShowCard: (card: Resource) => void;
   onClose: () => void;
   onDone: (text: string) => void;
 }) {
   const [kind, setKind] = useState<"live" | "static">("live");
   const online = props.machines.filter((view) => view.online);
+  const [text, setText] = useState(props.initial);
+  const input = parseSiteInput(text);
+  const port = input.kind === "port" ? input.port : null;
   const [picked, setPicked] = useState("");
-  // A machine that comes online while the dialog is open becomes the default.
+  // The machine that the owner picked while it is online; else the one where the port listens; else the first.
   const machineId = online.some((view) => view.machine.id === picked)
     ? picked
-    : (online[0]?.machine.id ?? "");
-  const [target, setTarget] = useState("");
+    : (online.find((view) => view.servers.some((server) => server.port === port))?.machine.id ??
+      online[0]?.machine.id ??
+      "");
+  const machine = online.find((view) => view.machine.id === machineId) ?? null;
+  const server = machine?.servers.find((each) => each.port === port) ?? null;
   const [name, setName] = useState("");
+  const shownName = name || nameFrom(server?.title ?? server?.process ?? "");
   const [dev, setDev] = useState(false);
+  const [time, setTime] = useState<(typeof SITE_TIMES)[number]["flag"]>("1h");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const remote = input.kind === "remote" ? props.cardOf(input.host) : null;
+  const taken = props.cardOf(`${shownName}.${props.zone}`);
   const share = async () => {
     const problem = !machineId
       ? "Pick a machine that is online."
-      : !isName(name)
-        ? "A name has 1 to 40 lowercase letters, digits and dashes."
-        : RESERVED_SITE_NAMES.has(name)
-          ? `${name}.${props.zone} belongs to kitshn itself. Pick another name.`
-          : targetError(target.trim());
+      : input.kind !== "port" && input.kind !== "socket"
+        ? input.kind === "invalid"
+          ? input.reason
+          : "kitshn shares servers of joined machines. Type a port of one, such as 5173."
+        : !isName(shownName)
+          ? "A name has 1 to 40 lowercase letters, digits and dashes."
+          : RESERVED_SITE_NAMES.has(shownName)
+            ? `${shownName}.${props.zone} belongs to kitshn itself. Pick another name.`
+            : taken
+              ? `${shownName}.${props.zone} is the card ${taken.name} already. Pick another name.`
+              : null;
     if (problem) return setError(problem);
     setBusy(true);
-    // An older daemon has no $KITSHN; the join script installs the binary in ~/.local/bin.
-    const script = `"\${KITSHN:-$HOME/.local/bin/kitshn}" expose '${target.trim()}' --name '${name}'${dev ? " --dev" : ""}`;
-    const result = await callApi<{ id: number }>("POST", "/api/jobs", {
+    const after = SITE_TIMES.find((each) => each.flag === time)?.ms ?? null;
+    const result = await callApi<{ id: number }>("POST", "/api/sites/live", {
       machineId,
-      command: { kind: "shell", script },
+      server: text,
+      name: shownName,
+      dev,
+      endsAt: after === null ? null : Date.now() + after,
     });
     setBusy(false);
     if ("error" in result) return setError(result.error);
     props.onDone(
-      `The machine shares ${name}.${props.zone} when its daemon picks it up. The card waits in the tray.`,
+      `The machine shares ${shownName}.${props.zone} when its daemon picks it up. The card waits in the tray${after === null ? "" : `, and leaves every circle after ${SITE_TIMES.find((each) => each.flag === time)?.label ?? ""}`}.`,
     );
     props.onClose();
   };
@@ -129,6 +162,43 @@ export function AddSite(props: {
               A local server of a machine, through its tunnel. It is live only while the machine is on.
             </p>
             <div class="field-row">
+              <span
+                class="label"
+                data-tip="Server: a port, an address such as localhost:5173, or a socket path."
+              >
+                Server
+              </span>
+              <div>
+                <input
+                  class="field"
+                  value={text}
+                  aria-label="Server"
+                  data-tip="A port, an address such as localhost:5173 or http://127.0.0.1:5173/, or a socket path."
+                  placeholder="5173, localhost:5173 or /run/app.sock"
+                  onInput={(event) => {
+                    setText(event.currentTarget.value);
+                    setError(null);
+                  }}
+                />
+                <SiteUnderstood
+                  input={input}
+                  machine={machine?.machine.name ?? null}
+                  remote={remote}
+                  onShowCard={props.onShowCard}
+                />
+              </div>
+            </div>
+            <RunningServers
+              machines={online}
+              port={port}
+              machineId={machineId}
+              onPick={(view, picked) => {
+                setText(String(picked.port));
+                setPicked(view.machine.id);
+                setError(null);
+              }}
+            />
+            <div class="field-row">
               <span class="label" data-tip="Machine: the online machine that runs the local server.">
                 Machine
               </span>
@@ -149,19 +219,7 @@ export function AddSite(props: {
                 </div>
               )}
             </div>
-            <div class="field-row">
-              <span class="label" data-tip="Server: the port or the Unix socket of the local server.">
-                Server
-              </span>
-              <input
-                class="field"
-                value={target}
-                aria-label="Server"
-                data-tip="The port or the Unix socket of the local server on the machine."
-                placeholder="5173 or /run/app.sock"
-                onInput={(event) => setTarget((event.target as HTMLInputElement).value)}
-              />
-            </div>
+            {port !== null && machine ? <SitePreview port={port} machine={machine} server={server} /> : null}
             <div class="field-row">
               <span class="label" data-tip="Name: the first part of the address of the site.">
                 Name
@@ -169,15 +227,40 @@ export function AddSite(props: {
               <div>
                 <input
                   class="field"
-                  value={name}
+                  value={shownName}
                   aria-label="Name"
                   data-tip="The name of the site: 1 to 40 lowercase letters, digits and dashes. It is the first part of the address."
                   placeholder="my-app"
-                  onInput={(event) => setName((event.target as HTMLInputElement).value.toLowerCase())}
+                  onInput={(event) => setName(event.currentTarget.value.toLowerCase())}
                 />
                 <p class="help">
-                  At <code>{(name || "name") + "." + props.zone}</code>
+                  At <code>{(shownName || "name") + "." + props.zone}</code>
                 </p>
+              </div>
+            </div>
+            <div class="field-row">
+              <span
+                class="label"
+                data-tip="Time: at the end, the card leaves every circle for the tray (K-212)."
+              >
+                Time
+              </span>
+              <div class="pills" role="radiogroup" aria-label="Time">
+                {SITE_TIMES.map((each) => (
+                  <button
+                    key={each.label}
+                    type="button"
+                    aria-pressed={time === each.flag}
+                    data-tip={
+                      each.flag
+                        ? `${each.label}: after ${each.label}, the card leaves every circle for the tray.`
+                        : "Until I stop it: no end time."
+                    }
+                    onClick={() => setTime(each.flag)}
+                  >
+                    {each.label}
+                  </button>
+                ))}
               </div>
             </div>
             <div class="field-row">
@@ -230,6 +313,122 @@ export function AddSite(props: {
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** K-1131: what kitshn understood from the Server field, in words, with what it left out. */
+function SiteUnderstood(props: {
+  input: SiteInput;
+  machine: string | null;
+  remote: Resource | null;
+  onShowCard: (card: Resource) => void;
+}) {
+  const { input } = props;
+  if (input.kind === "invalid") return <p class="help">{input.reason}</p>;
+  if (input.kind === "socket") return <p class="help">The Unix socket {input.path}.</p>;
+  if (input.kind === "remote")
+    return props.remote ? (
+      <p class="help">
+        {input.host} is the card {props.remote.name}.{" "}
+        <button
+          type="button"
+          class="btn"
+          data-tip={`Close this dialog and show ${props.remote.name} on the map.`}
+          onClick={() => props.remote && props.onShowCard(props.remote)}
+        >
+          Show it
+        </button>
+      </p>
+    ) : (
+      <p class="error">
+        {input.host} is another host. kitshn shares servers of joined machines, such as localhost:5173.
+      </p>
+    );
+  return (
+    <p class="help">
+      Port {input.port}
+      {props.machine ? ` on ${props.machine}` : ""}. {input.notes.join(" ")}
+    </p>
+  );
+}
+
+/** K-619: the servers that listen on each online machine, by its last scan; a click picks one. */
+function RunningServers(props: {
+  machines: ReadonlyArray<MachineView>;
+  port: number | null;
+  machineId: string;
+  onPick: (view: MachineView, server: ServerReport) => void;
+}) {
+  const withServers = props.machines.filter((view) => view.servers.length > 0);
+  if (withServers.length === 0)
+    return (
+      <p class="help">
+        No running servers to pick from: the daemons report none, or they are older than this list.
+      </p>
+    );
+  return (
+    <div class="field-row">
+      <span class="label" data-tip="Running: the servers that listen on each machine, from its daemon.">
+        Running
+      </span>
+      <div>
+        {withServers.map((view) => (
+          <div key={view.machine.id}>
+            <div class="help">{view.machine.name}</div>
+            <div class="pills">
+              {view.servers.map((server) => (
+                <button
+                  key={server.port}
+                  type="button"
+                  aria-pressed={view.machine.id === props.machineId && server.port === props.port}
+                  data-tip={`Share port ${server.port} of ${view.machine.name}: ${server.process ?? "a process of another user"}${server.status === null ? ", no web answer" : `, answers ${server.status}`}.`}
+                  onClick={() => props.onPick(view, server)}
+                >
+                  {server.port} · {server.title ?? server.process ?? "?"}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * K-1131: before the save, what the daemon saw on the port, and a K-520 frame of it. The frame loads the port in
+ * this browser, so it shows the server only when the browser runs on that machine.
+ */
+function SitePreview(props: { port: number; machine: MachineView; server: ServerReport | null }) {
+  const url = `http://localhost:${props.port}/`;
+  const { server } = props;
+  return (
+    <div class="field-row">
+      <span class="label" data-tip="Preview: the page on the port, before kitshn shares it.">
+        Preview
+      </span>
+      <div>
+        <p class="help">
+          {server
+            ? `${props.machine.machine.name} answers ${server.status ?? "with no web page"}${server.title ? `: ${server.title}` : ""}.`
+            : `Nothing listens on port ${props.port} of ${props.machine.machine.name} at its last scan.`}
+        </p>
+        <div class="preview-frame site-preview">
+          <div class="thumb">
+            <LiveFrame
+              key={url}
+              url={url}
+              label={`Preview of port ${props.port}`}
+              sandbox="allow-scripts"
+              interact={false}
+            />
+          </div>
+        </div>
+        <p class="help">
+          This frame shows the server only when this browser runs on {props.machine.machine.name}.
+        </p>
       </div>
     </div>
   );

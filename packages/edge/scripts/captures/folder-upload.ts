@@ -1,5 +1,6 @@
 // The owner's folder upload (K-1129): "Upload a folder" in the "+" menu, "Upload a new version…" on a folder site,
-// and the progress line. The demo has no folder site, so tick3d counts as one, and the scenario answers the upload.
+// and the progress line with the hidden files that it skipped. The demo has no folder site, so tick3d counts as
+// one, and the scenario answers the upload.
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,6 +48,10 @@ export default {
     mkdirSync(join(folder, "css"), { recursive: true });
     writeFileSync(join(folder, "index.html"), "<!doctype html><title>tick3d</title>");
     writeFileSync(join(folder, "css", "site.css"), "body { margin: 0 }");
+    // Hidden files stay out, as the CLI leaves them out (K-805).
+    mkdirSync(join(folder, ".git"));
+    writeFileSync(join(folder, ".git", "config"), "[core]");
+    writeFileSync(join(folder, ".env"), "SECRET=1");
     const chooser = page.waitForEvent("filechooser");
     await page.getByRole("menuitem", { name: "Upload a new version…" }).click();
     await (await chooser).setFiles(folder);

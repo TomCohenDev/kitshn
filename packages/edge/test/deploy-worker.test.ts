@@ -1233,6 +1233,76 @@ describe("owner folder sites (K-1129)", () => {
     // Only a folder site takes a new version from a folder.
     expect((await admin("/api/sites/plan", "POST", { card: "no-such-card" })).status).toBe(409);
   });
+
+  it("replaces a key's folder site, and ends an upload that fails or that a repo took over", async () => {
+    const cloudflare = fakeCloudflare();
+    const edits = [
+      { _tag: "circle", id: "folders", after: agentCircle("folders", "owned-key.access", true) },
+    ];
+    expect((await admin("/api/apply", "POST", { edits })).status).toBe(200);
+    const published = await agentStep("owned-key.access", "/agent/sites/plan", { folder: "keysite" });
+    const keyDeploy = published.body["deployId"];
+    const manifest = { "/index.html": { hash: "d".repeat(32), size: 4 } };
+    expect(
+      (await agentStep("owned-key.access", "/agent/sites/assets", { deployId: keyDeploy, manifest })).status,
+    ).toBe(200);
+    let keyFinish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && keyFinish.status === 503; attempt++)
+      keyFinish = await agentStep("owned-key.access", "/agent/sites/finish", {
+        deployId: keyDeploy,
+        jwt: "done",
+      });
+    expect(keyFinish.status, JSON.stringify(keyFinish.body)).toBe(200);
+    const card = String(published.body["card"]);
+    const durable = env.KITSHN.getByName("kitshn");
+    const deployState = (id: string) =>
+      runInDurableObject(durable, (_instance, storage) =>
+        storage.storage.sql.exec("SELECT state FROM deploys WHERE id = ?", id).toArray(),
+      );
+
+    // The owner owns every card, so a new version of the key's site goes through all three steps.
+    const version = async () => {
+      const plan = await admin("/api/sites/plan", "POST", { card });
+      expect(plan.body).toMatchObject({ card, updated: true });
+      const deployId = String(plan.body["deployId"]);
+      expect((await admin("/api/sites/assets", "POST", { deployId, manifest })).status).toBe(200);
+      expect((await ownerPart(deployId, { ["d".repeat(32)]: "page" })).status).toBe(200);
+      return deployId;
+    };
+    const replaced = await version();
+    let finish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && finish.status === 503; attempt++)
+      finish = await admin("/api/sites/finish", "POST", { deployId: replaced });
+    expect(finish.status, JSON.stringify(finish.body)).toBe(200);
+    expect(cloudflare.served(String(published.body["address"]))).toEqual([`kitshn-${card}`]);
+
+    // A failed upload ends its plan, and a new site that has no card yet lets its name go.
+    const fresh = await admin("/api/sites/plan", "POST", { folder: "never" });
+    const freshId = String(fresh.body["deployId"]);
+    expect((await admin("/api/sites/cancel", "POST", { deployId: freshId })).status).toBe(200);
+    expect(await deployState(freshId)).toEqual([{ state: "failed" }]);
+    const kept = await runInDurableObject(durable, (_instance, storage) =>
+      storage.storage.sql
+        .exec("SELECT 1 FROM agent_sites WHERE card_id = ?", String(fresh.body["card"]))
+        .toArray(),
+    );
+    expect(kept).toEqual([]);
+    expect((await admin("/api/sites/cancel", "POST", { deployId: freshId })).status).toBe(404);
+
+    // A repo that takes the site over during an upload stops its finish (K-1127).
+    const late = await version();
+    await runInDurableObject(durable, (_instance, storage) =>
+      storage.storage.sql.exec(
+        "INSERT INTO repo_cards (repo_id, app_key, environment, card_id) VALUES ('99', 'app', 'prod', ?)",
+        card,
+      ),
+    );
+    expect((await admin("/api/sites/finish", "POST", { deployId: late })).status).toBe(409);
+    expect(await deployState(late)).toEqual([{ state: "failed" }]);
+    await runInDurableObject(durable, (_instance, storage) =>
+      storage.storage.sql.exec("DELETE FROM repo_cards WHERE card_id = ?", card),
+    );
+  });
 });
 
 describe("make it a repo (K-1127)", () => {

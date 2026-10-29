@@ -8710,15 +8710,17 @@ export class Kitshn extends DurableObject<Env> {
     try {
       if (step === "plan") return await this.ownerSitePlan(api, body, now);
       const [row] = this.sql<DeployRow>("SELECT * FROM deploys WHERE id = ?", String(body["deployId"] ?? ""));
+      // Any folder site, also one that a key published: the owner owns every card (K-1129).
       const [site] = row
-        ? this.sql<AgentSiteRow>(
-            "SELECT * FROM agent_sites WHERE card_id = ? AND client_id LIKE 'owner:%'",
-            row.resource_id,
-          )
+        ? this.sql<AgentSiteRow>("SELECT * FROM agent_sites WHERE card_id = ?", row.resource_id)
         : [];
       if (!row || !site || row.repo_id !== null) return fail(404, "kitshn knows no such folder upload.");
       if (row.expires_at < now || row.state !== "planned")
         return fail(410, "This upload expired or ended. Upload the folder again.");
+      if (step === "cancel") {
+        this.endOwnerUpload(row, site, "The upload in the browser failed or stopped.");
+        return Response.json({ ok: true });
+      }
       if (step === "assets") {
         const manifest = parseManifest(body["manifest"]);
         if (typeof manifest === "string") return fail(400, manifest);
@@ -8733,6 +8735,14 @@ export class Kitshn extends DurableObject<Env> {
         return Response.json({ buckets: session.buckets });
       }
       if (step !== "finish") return fail(404, `kitshn has no folder site step ${step}.`);
+      // A repo can take the site over while its files go up (K-1127).
+      if (!this.isFolderSite(site.card_id)) {
+        this.endOwnerUpload(row, site, "A repo took the site over during the upload.");
+        return fail(
+          409,
+          `A repo deploys ${site.folder} now, so a folder no longer gives it a new version (K-1127).`,
+        );
+      }
       const upload = this.folderUploads.get(row.id);
       if (!upload) return fail(409, "kitshn lost this upload while it ran; upload the folder again.");
       if (this.deletingStorage.has(site.card_id))
@@ -8756,6 +8766,20 @@ export class Kitshn extends DurableObject<Env> {
       if (error instanceof RuleError) return fail(409, error.message);
       return fail(502, `kitshn could not finish the step: ${String(error)}`);
     }
+  }
+
+  /**
+   * K-1129: ends an owner upload that will not finish, so its deploy row does not wait until it expires. A new site
+   * that has no card yet lets its name go again.
+   */
+  private endOwnerUpload(row: DeployRow, site: AgentSiteRow, reason: string) {
+    this.ctx.storage.transactionSync(() => {
+      this.sql("UPDATE deploys SET state = 'failed', reason = ? WHERE id = ?", reason, row.id);
+      if (site.client_id.startsWith("owner:") && !this.state.resources.has(site.card_id))
+        this.sql("DELETE FROM agent_sites WHERE card_id = ?", site.card_id);
+    });
+    this.folderUploads.delete(row.id);
+    this.folderDrops.delete(site.card_id);
   }
 
   /** K-1129: a new folder site of the owner, at the drop point or in the tray, or a new version of a folder site. */

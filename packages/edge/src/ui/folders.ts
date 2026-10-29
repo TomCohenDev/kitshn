@@ -1,5 +1,6 @@
 import { pickSiteIcon } from "kitshn/icon";
 import { contentType } from "kitshn/media";
+import { isHiddenName } from "kitshn/names";
 import { callApi } from "./store.ts";
 
 /** One file of a dropped or picked folder, with its path in the site, such as `/css/site.css`. */
@@ -16,9 +17,16 @@ const PART_BYTES = 30 * 1024 * 1024;
 /** Workers static assets take a file of at most 25 MiB. */
 const FILE_BYTES = 25 * 1024 * 1024;
 
+/** The files of a folder, and how many hidden files and folders it left out, as the CLI does (K-805). */
+export interface FolderFiles {
+  readonly files: Array<FolderFile>;
+  readonly skipped: number;
+}
+
 /** The files of a folder that the owner dropped, from its entry, with paths from the folder's root. */
-export async function droppedFolder(entry: FileSystemDirectoryEntry): Promise<Array<FolderFile>> {
+export async function droppedFolder(entry: FileSystemDirectoryEntry): Promise<FolderFiles> {
   const found: Array<FolderFile> = [];
+  let skipped = 0;
   const walk = async (directory: FileSystemDirectoryEntry, prefix: string): Promise<void> => {
     const reader = directory.createReader();
     // readEntries gives at most 100 entries a call; an empty answer ends the folder.
@@ -28,7 +36,9 @@ export async function droppedFolder(entry: FileSystemDirectoryEntry): Promise<Ar
       );
       if (entries.length === 0) return;
       for (const child of entries) {
-        if (child.isDirectory) await walk(child as FileSystemDirectoryEntry, `${prefix}/${child.name}`);
+        // A hidden folder such as .git is not read at all; it counts once.
+        if (isHiddenName(child.name)) skipped++;
+        else if (child.isDirectory) await walk(child as FileSystemDirectoryEntry, `${prefix}/${child.name}`);
         else {
           const file = await new Promise<File>((resolve, reject) =>
             (child as FileSystemFileEntry).file(resolve, reject),
@@ -39,16 +49,15 @@ export async function droppedFolder(entry: FileSystemDirectoryEntry): Promise<Ar
     }
   };
   await walk(entry, "");
-  return found;
+  return { files: found, skipped };
 }
 
 /** The files of a folder that the owner picked with a folder input; each path starts with the folder name. */
-export function pickedFolder(files: ReadonlyArray<File>): { folder: string; files: Array<FolderFile> } {
+export function pickedFolder(files: ReadonlyArray<File>): FolderFiles & { folder: string } {
   const folder = files[0]?.webkitRelativePath.split("/")[0] ?? "";
-  return {
-    folder,
-    files: files.map((file) => ({ path: file.webkitRelativePath.slice(folder.length), file })),
-  };
+  const all = files.map((file) => ({ path: file.webkitRelativePath.slice(folder.length), file }));
+  const shown = all.filter((item) => !item.path.split("/").some(isHiddenName));
+  return { folder, files: shown, skipped: all.length - shown.length };
 }
 
 const base64 = (bytes: Uint8Array) => {
@@ -76,9 +85,11 @@ async function assetHash(content: string, path: string) {
 export async function uploadFolder(
   target:
     { readonly folder: string; readonly at: { x: number; y: number } | null } | { readonly card: string },
-  files: ReadonlyArray<FolderFile>,
-  onProgress: (text: string) => void,
+  { files, skipped }: FolderFiles,
+  progress: (text: string) => void,
 ): Promise<{ card: string; address: string; updated: boolean } | { error: string }> {
+  const hidden = skipped === 0 ? "" : ` · skipped ${skipped} hidden ${skipped === 1 ? "file" : "files"}`;
+  const onProgress = (text: string) => progress(`${text}${hidden}`);
   const tooBig = files.filter((item) => item.file.size > FILE_BYTES);
   if (tooBig.length > 0)
     return { error: `${tooBig.map((item) => item.path).join(", ")}: a site file is at most 25 MB.` };
@@ -108,8 +119,30 @@ export async function uploadFolder(
       : { folder: target.folder, ...(target.at ? { x: target.at.x, y: target.at.y } : {}) },
   );
   if ("error" in plan) return plan;
+  const sent = await sendPlanned(plan.deployId, manifest, content, bytesOf, special, onProgress);
+  if (sent) {
+    // The deploy row and a new site's name do not wait until the plan expires.
+    await post(
+      "/api/sites/cancel",
+      { "content-type": "application/json" },
+      JSON.stringify({ deployId: plan.deployId }),
+    );
+    return sent;
+  }
+  return { card: plan.card, address: plan.address, updated: plan.updated };
+}
+
+/** The steps after the plan: the files, then the finish. Null when the site is published. */
+async function sendPlanned(
+  deployId: string,
+  manifest: Record<string, { hash: string; size: number }>,
+  content: ReadonlyMap<string, { base64: string; path: string; type: string }>,
+  bytesOf: ReadonlyMap<string, Uint8Array>,
+  special: ReadonlyMap<string, string>,
+  onProgress: (text: string) => void,
+): Promise<{ error: string } | null> {
   const assets = await callApi<{ buckets: Array<Array<string>> }>("POST", "/api/sites/assets", {
-    deployId: plan.deployId,
+    deployId,
     manifest,
   });
   if ("error" in assets) return assets;
@@ -128,7 +161,7 @@ export async function uploadFolder(
         form.append(hash, new Blob([file.base64], { type: file.type }), hash);
       }
       onProgress(`Uploading ${sent + part.length} of ${wanted.length} files`);
-      const answer = await post("/api/sites/upload", { "x-kitshn-deploy": plan.deployId }, form);
+      const answer = await post("/api/sites/upload", { "x-kitshn-deploy": deployId }, form);
       sent += part.length;
       part = [];
       size = 0;
@@ -149,7 +182,7 @@ export async function uploadFolder(
   onProgress("Publishing the site");
   const { icon } = await pickSiteIcon((path) => bytesOf.get(path) ?? null);
   const finishBody = JSON.stringify({
-    deployId: plan.deployId,
+    deployId,
     icon: icon ? base64(icon.bytes) : null,
     headers: special.get("/_headers") ?? null,
     redirects: special.get("/_redirects") ?? null,
@@ -157,11 +190,10 @@ export async function uploadFolder(
   // A 503 says that the Access application of the new address is not made yet; it comes in a few seconds.
   for (let attempt = 1; ; attempt++) {
     const finish = await post("/api/sites/finish", { "content-type": "application/json" }, finishBody);
-    if (!("error" in finish)) break;
+    if (!("error" in finish)) return null;
     if (finish.status !== 503 || attempt === 5) return finish;
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
-  return { card: plan.card, address: plan.address, updated: plan.updated };
 }
 
 /** A POST whose failure keeps its status, so the caller can tell "try again" from a refusal. */

@@ -82,7 +82,7 @@ import {
 import { ItemIcon } from "./ItemIcon.tsx";
 import { FOLDER_SITE_PREFIX } from "../core/apps.ts";
 import { peekable } from "./frames.ts";
-import { type FolderFile, droppedFolder, pickedFolder, uploadFolder } from "./folders.ts";
+import { type FolderFiles, droppedFolder, pickedFolder, uploadFolder } from "./folders.ts";
 import { PeekArrow } from "./Peek.tsx";
 import {
   type Action,
@@ -1303,7 +1303,7 @@ export function App() {
    * (a public circle asks first, K-210) or waits in the tray; `card` gets a new version at its address.
    */
   const uploadFolders = async (
-    folders: ReadonlyArray<{ readonly folder: string; readonly files: ReadonlyArray<FolderFile> }>,
+    folders: ReadonlyArray<FolderFiles & { readonly folder: string }>,
     target: { readonly at: Point | null } | { readonly card: Resource },
   ) => {
     if (!state || folders.length === 0) return;
@@ -1315,7 +1315,7 @@ export function App() {
     const done: Array<string> = [];
     const errors: Array<string> = [];
     const added: Array<string> = [];
-    for (const [index, { folder, files }] of folders.entries()) {
+    for (const [index, { folder, ...files }] of folders.entries()) {
       const spot = at
         ? (placeInside(state, { x: at.x + index * 30, y: at.y + index * 90 }, wanted) ?? at)
         : null;
@@ -1469,7 +1469,7 @@ export function App() {
           onDropFiles={(files, at) => void uploadFiles(files, at)}
           onDropFolders={(entries, at) =>
             void Promise.all(
-              entries.map(async (entry) => ({ folder: entry.name, files: await droppedFolder(entry) })),
+              entries.map(async (entry) => ({ folder: entry.name, ...(await droppedFolder(entry)) })),
             ).then(
               (folders) => uploadFolders(folders, { at }),
               (error: unknown) =>

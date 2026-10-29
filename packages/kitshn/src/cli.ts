@@ -21,6 +21,7 @@ import { gzipSync } from "node:zlib";
 import { headersWarnings, redirectsWarnings } from "./headers.ts";
 import { pickSiteIcon } from "./icon.ts";
 import { contentType } from "./media.ts";
+import { isHiddenName } from "./names.ts";
 import { cardOutput, errorOutput } from "./output.ts";
 import { type DeployRun, type LogAnswer, logArgs, logLineText, logRange } from "./logs.ts";
 import { type HandoverAnswer, repoFiles } from "./repo-files.ts";
@@ -109,7 +110,7 @@ async function call<T>(server: string, path: string, body: object): Promise<T> {
  */
 const files = (dir: string): Array<string> =>
   readdirSync(dir).flatMap((name) => {
-    if (name.startsWith(".")) return [];
+    if (isHiddenName(name)) return [];
     const path = join(dir, name);
     const stat = lstatSync(path);
     if (stat.isSymbolicLink()) return [];

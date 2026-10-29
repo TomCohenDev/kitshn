@@ -26,6 +26,8 @@ export interface AccessRow {
   readonly retryAt?: number;
   /** K-408: in memory only, the failed tries in a row, for the backoff. */
   readonly attempts?: number;
+  /** K-409: in memory only, the applications whose sessions the write of `tried` already ended. */
+  readonly ended?: ReadonlyArray<string>;
 }
 
 export interface AccessStore {
@@ -611,6 +613,8 @@ export async function syncAccess(
   const base = `/accounts/${accountId}/access`;
   let existingPolicies: ReadonlyArray<Named> | null = null;
   let existingApps: ReadonlyArray<Named> | null = null;
+  // K-409: the session ends that run while the sync goes on; the sync waits for them before it returns.
+  const revoking: Array<Promise<void>> = [];
 
   const write = async (
     key: string,
@@ -672,27 +676,48 @@ export async function syncAccess(
           : narrowsPolicy(before, body)
             ? appsUsing(store.rows, result.id)
             : [];
-      for (const appId of ending) {
-        if (!spend()) {
-          store.put({ key, cfId: result.id, aud, body: before, tried: "", error: null });
-          return false;
-        }
-        try {
-          await api("POST", `${base}/apps/${appId}/revoke_tokens`);
-        } catch (error) {
-          // An application that is gone has no sessions left.
-          if (isNotFound(error)) continue;
-          store.put({
-            key,
-            cfId: result.id,
-            aud,
-            body: before,
-            tried: body,
-            error: `sessions not ended: ${message(error)}`,
-            ...backoff(row, Date.now()),
-          });
-          return true;
-        }
+      // Sessions that an earlier run of this same write already ended (`tried` is this body).
+      const ended = row?.tried === body ? (row.ended ?? []) : [];
+      const left = ending.filter((appId) => !ended.includes(appId));
+      if (left.length > 0) {
+        // K-406: each revoke counts before it starts. They run together, while the run goes on (K-409); what does not
+        // fit in this run's budget waits for the next run.
+        const now = left.slice(0, Math.max(0, budget - calls));
+        calls += now.length;
+        const id = result.id;
+        // Later writes of this run see the new id; the old body stays until every session ended.
+        store.put({ key, cfId: id, aud, body: before, tried: body, error: null, ended });
+        revoking.push(
+          Promise.allSettled(now.map((appId) => api("POST", `${base}/apps/${appId}/revoke_tokens`))).then(
+            (results) => {
+              // An application that is gone has no sessions left.
+              const done = [
+                ...ended,
+                ...now.filter((_, index) => {
+                  const result = results[index];
+                  return result?.status === "fulfilled" || isNotFound(result?.reason);
+                }),
+              ];
+              const failed = results.find(
+                (item): item is PromiseRejectedResult =>
+                  item.status === "rejected" && !isNotFound(item.reason),
+              );
+              const waiting = { key, cfId: id, aud, body: before, tried: body, ended: done };
+              store.put(
+                failed
+                  ? {
+                      ...waiting,
+                      error: `sessions not ended: ${message(failed.reason)}`,
+                      ...backoff(row, Date.now()),
+                    }
+                  : done.length < ended.length + left.length
+                    ? { ...waiting, error: null }
+                    : { key, cfId: id, aud, body, tried: body, error: null },
+              );
+            },
+          ),
+        );
+        return now.length === left.length;
       }
       store.put({ key, cfId: result.id, aud, body, tried: body, error: null });
     } catch (error) {
@@ -728,46 +753,54 @@ export async function syncAccess(
     return true;
   };
 
-  for (const [key, policy] of desired.policies) {
-    const found = (list: ReadonlyArray<Named>) => list.find((item) => item.name === policy.name);
-    if (!(await write(key, "policies", policyBody(policy), found))) return false;
+  try {
+    return await syncObjects();
+  } finally {
+    await Promise.all(revoking);
   }
-  for (const [key, app] of desired.apps) {
-    const body = appBody(key, app, store.rows);
-    if (body === null) continue;
-    const found = (list: ReadonlyArray<Named>) => list.find((item) => item.domain === app.domain);
-    if (!(await write(key, "apps", body, found))) return false;
-  }
-  const kept = withHeld(keptPolicies(desired, store.rows, reachable), held);
-  const stale = [...store.rows.values()].filter((row) => isStale(desired, row, reachable, kept));
-  // Applications first: Access refuses to delete a policy that an application still uses.
-  stale.sort((a, b) => Number(a.key.startsWith("policy:")) - Number(b.key.startsWith("policy:")));
-  for (const row of stale) {
-    // A row without an object, or one whose object another row now holds, goes without a call.
-    const shared = [...store.rows.values()].some((item) => item.key !== row.key && item.cfId === row.cfId);
-    if (!row.cfId || shared) {
-      store.remove(row.key);
-      continue;
+
+  async function syncObjects() {
+    for (const [key, policy] of desired.policies) {
+      const found = (list: ReadonlyArray<Named>) => list.find((item) => item.name === policy.name);
+      if (!(await write(key, "policies", policyBody(policy), found))) return false;
     }
-    if (!spend()) return false;
-    const kind = row.key.startsWith("policy:") ? "policies" : "apps";
-    try {
-      await api("DELETE", `${base}/${kind}/${row.cfId}`);
-      store.remove(row.key);
-    } catch (error) {
-      if (isNotFound(error)) store.remove(row.key);
-      else {
-        const { retryAt: _, ...failed } = row;
-        // An unclear answer, or the delete of an application, which lowers access, tries again in five minutes.
-        store.put(
-          unclearAnswer(error) || row.key.startsWith("app:")
-            ? { ...failed, tried: "", error: message(error), ...backoff(row, Date.now()) }
-            : { ...failed, tried: "", error: message(error) },
-        );
+    for (const [key, app] of desired.apps) {
+      const body = appBody(key, app, store.rows);
+      if (body === null) continue;
+      const found = (list: ReadonlyArray<Named>) => list.find((item) => item.domain === app.domain);
+      if (!(await write(key, "apps", body, found))) return false;
+    }
+    const kept = withHeld(keptPolicies(desired, store.rows, reachable), held);
+    const stale = [...store.rows.values()].filter((row) => isStale(desired, row, reachable, kept));
+    // Applications first: Access refuses to delete a policy that an application still uses.
+    stale.sort((a, b) => Number(a.key.startsWith("policy:")) - Number(b.key.startsWith("policy:")));
+    for (const row of stale) {
+      // A row without an object, or one whose object another row now holds, goes without a call.
+      const shared = [...store.rows.values()].some((item) => item.key !== row.key && item.cfId === row.cfId);
+      if (!row.cfId || shared) {
+        store.remove(row.key);
+        continue;
+      }
+      if (!spend()) return false;
+      const kind = row.key.startsWith("policy:") ? "policies" : "apps";
+      try {
+        await api("DELETE", `${base}/${kind}/${row.cfId}`);
+        store.remove(row.key);
+      } catch (error) {
+        if (isNotFound(error)) store.remove(row.key);
+        else {
+          const { retryAt: _, ...failed } = row;
+          // An unclear answer, or the delete of an application, which lowers access, tries again in five minutes.
+          store.put(
+            unclearAnswer(error) || row.key.startsWith("app:")
+              ? { ...failed, tried: "", error: message(error), ...backoff(row, Date.now()) }
+              : { ...failed, tried: "", error: message(error) },
+          );
+        }
       }
     }
+    return true;
   }
-  return true;
 }
 
 interface LauncherApp {

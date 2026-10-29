@@ -11145,7 +11145,7 @@ export class Kitshn extends DurableObject<Env> {
           this.setMeta("access_warnings", JSON.stringify(this.accessWarnings));
         } catch (error) {
           console.warn(`kitshn could not compare Access with the shares: ${String(error)}`);
-          spent = 12;
+          spent += 12;
         }
       }
       spent += await this.fillAudiences(api, now);

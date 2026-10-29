@@ -149,6 +149,7 @@ import {
   keptPlan,
   listening,
   publicAddresses,
+  systemTool,
 } from "./doors.ts";
 import { AGENT_USAGE, type AgentTransport, runAgentCommand, timeBody } from "kitshn/agent";
 import { CliError } from "kitshn/cli-error";
@@ -1799,9 +1800,9 @@ function checkListening() {
     wanted.size === 0
       ? new Set<string>()
       : new Set(
-          [...listening(spawnSync("ss", ["-H", "-ltnu"], { encoding: "utf8" }).stdout ?? "")].filter((key) =>
-            wanted.has(key),
-          ),
+          [
+            ...listening(spawnSync(systemTool("ss"), ["-H", "-ltnu"], { encoding: "utf8" }).stdout ?? ""),
+          ].filter((key) => wanted.has(key)),
         );
   if ([...found].sort().join() === [...doorState.listening].sort().join()) return;
   doorState.listening = found;

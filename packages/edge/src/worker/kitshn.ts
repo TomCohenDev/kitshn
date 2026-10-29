@@ -6530,6 +6530,9 @@ export class Kitshn extends DurableObject<Env> {
     // K-1124: the redirect step that waits tries again at its time; a finished step stores 0.
     const redirectRetry = Number(this.meta("redirects_retry_at") ?? 0);
     if (this.env.CLOUDFLARE_API_TOKEN && redirectRetry > now) next = Math.min(next, redirectRetry);
+    // K-406: a step of the alarm that threw tries again at its time.
+    const stepRetry = Number(this.meta("alarm_retry_at") ?? 0);
+    if (stepRetry > now) next = Math.min(next, stepRetry);
     if (this.env.CLOUDFLARE_API_TOKEN && rowsWithoutAud(this.access).length > 0)
       next = Math.min(next, Math.max(this.audRetryAt, now));
     const ends = [
@@ -12954,6 +12957,49 @@ export class Kitshn extends DurableObject<Env> {
       this.queuePush({ ...before, state, closedAt: now });
   }
 
+  /**
+   * K-406: a step of the alarm that throws logs, opens an `alarm` notification (K-1910) and tries again after
+   * five minutes, and the next steps still run. `onError` is what the step counts then, such as its whole budget.
+   */
+  private async alarmStep<T>(step: AlarmStep, onError: T, run: () => T | Promise<T>): Promise<T> {
+    try {
+      const result = await run();
+      this.alarmFailingSince.delete(step);
+      this.setNotificationState("alarm", step, "closed");
+      return result;
+    } catch (error) {
+      const now = Date.now();
+      console.error(`kitshn alarm step "${step}" failed: ${String(error)}`);
+      const since = this.alarmFailingSince.get(step) ?? now;
+      this.alarmFailingSince.set(step, since);
+      this.setMeta("alarm_retry_at", String(now + RETRY_MS));
+      this.notify({
+        source: "alarm",
+        key: step,
+        episode: String(since),
+        card: null,
+        recipients: { _tag: "owner" },
+        level: "error",
+        priority: "normal",
+        title: clip(`kitshn could not run the alarm step "${step}"`, TITLE_MAX),
+        text: clip(`${String(error)} kitshn tries again in five minutes.`, TEXT_MAX),
+        actions: [],
+      });
+      return onError;
+    }
+  }
+
+  /** The open `alarm` notifications, so the maps hear of a step that failed or works again. */
+  private failedAlarmSteps() {
+    return [...this.openNotifications.values()]
+      .filter((notification) => notification.source === "alarm")
+      .map((notification) => `${notification.key}: ${notification.text}`)
+      .join("\n");
+  }
+
+  /** Known limit: in memory, so a wake makes a new episode of a step that still fails; revisit if that reopens dismissed ones too often. */
+  private alarmFailingSince = new Map<AlarmStep, number>();
+
   /** K-1904: the sources that kitshn derives from its own state. */
   /** K-1910: limits at 80% or more of the last hourly read, and machines that stay offline 15 minutes. */
   private reconcileOwnSources(now: number) {
@@ -13549,6 +13595,7 @@ export class Kitshn extends DurableObject<Env> {
 
   override async alarm() {
     const now = Date.now();
+    const failedBefore = this.failedAlarmSteps();
     await this.finishPendingRestore().catch((error: unknown) =>
       console.error(`kitshn could not finish a restore to a time: ${String(error)}`),
     );
@@ -13558,9 +13605,9 @@ export class Kitshn extends DurableObject<Env> {
     if (this.settleRollbacks() > 0) changed = true;
     this.expireProposals(now);
     const before = JSON.stringify(accessStates(this.desired(now), this.access));
-    this.endShares(now);
-    if (this.closeLostDoors(now)) changed = true;
-    this.syncOpenGames(now);
+    await this.alarmStep("share ends", undefined, () => this.endShares(now));
+    if (await this.alarmStep("doors", false, () => this.closeLostDoors(now))) changed = true;
+    await this.alarmStep("open games", undefined, () => this.syncOpenGames(now));
     const daily = this.dailyAt() <= now;
     if (daily) this.daily(now);
     // K-1126: the uptime fetches count against the 40 calls of this run (K-406). The daily run spends 40 already,
@@ -13616,15 +13663,15 @@ export class Kitshn extends DurableObject<Env> {
           spent += 12;
         }
       }
-      spent += await this.fillAudiences(api, now);
+      spent += await this.alarmStep("audiences", 1, () => this.fillAudiences(api, now));
       // Removals first: ingress and DNS go before an Access application does. Additions wait for the next
       // run, because ingress and DNS need the application that the Access sync makes (K-410).
-      spent += await this.refreshForeignPaths(api, now);
-      await this.syncTunnels(api, 6);
-      spent += await this.checkSites(api, 6);
-      await this.syncDns(api, 5);
-      spent += await this.syncGameDns(api, 4);
-      await this.syncRoutes(api, 5);
+      spent += await this.alarmStep("foreign paths", 1, () => this.refreshForeignPaths(api, now));
+      await this.alarmStep("tunnels", undefined, () => this.syncTunnels(api, 6));
+      spent += await this.alarmStep("site checks", 6, () => this.checkSites(api, 6));
+      await this.alarmStep("DNS", undefined, () => this.syncDns(api, 5));
+      spent += await this.alarmStep("game DNS", 4, () => this.syncGameDns(api, 4));
+      await this.alarmStep("routes", undefined, () => this.syncRoutes(api, 5));
       // K-1124: after the tunnel and DNS steps, so an old Compose address has lost its record. The daily run spends
       // its calls on the compare; redirectWork asks for the next run at once.
       if (!daily)
@@ -13637,19 +13684,20 @@ export class Kitshn extends DurableObject<Env> {
           spent += 5;
         }
       // K-113: take an unwanted enrollment policy off the App Launcher before the sync deletes it.
-      spent += await this.syncLauncher(api, daily);
+      spent += await this.alarmStep("launcher", 3, () => this.syncLauncher(api, daily));
       // K-406: at most 40 calls. `spent` counts the daily compare (12), the site checks (6), the redirect step (5),
       // the game records (4), the launcher step (3) and the path read of taken addresses (1); the tunnels, DNS records and offline routes above made at most 6 + 5 + 5, and the launcher
       // step after the sync needs 3. The login step and the sync share what is left. A policy that the sync
       // makes goes on the login applications in the next alarm, which runs at once (loginWork).
-      await this.syncAccessLocked(api, CALLS_PER_RUN - spent - 16 - 3);
+      await this.alarmStep("Access", 0, () => this.syncAccessLocked(api, CALLS_PER_RUN - spent - 16 - 3));
       // A policy that the sync just made goes on the App Launcher in the same run.
-      await this.syncLauncher(api, false);
+      await this.alarmStep("launcher after Access", 0, () => this.syncLauncher(api, false));
       // K-1623: an application that the sync made or made again changes the audiences of its provider.
-      this.pushGrants();
+      await this.alarmStep("grants", undefined, () => this.pushGrants());
 
       changed ||= daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
     }
+    if (this.failedAlarmSteps() !== failedBefore) changed = true;
     if (changed) this.broadcast();
     // K-1907, K-406: the pushes go out once, at the end, after the reconcile of broadcast queued its own.
     await this.flushPushes();
@@ -13846,6 +13894,23 @@ function rowAddresses(row: Pick<DeployRow, "address" | "addresses">): Array<stri
 
 /** A failed tunnel, DNS or route write tries again after this time. */
 const RETRY_MS = 5 * 60_000;
+
+/** K-406: the steps of the alarm that run on their own, so one that throws stops no other. */
+type AlarmStep =
+  | "share ends"
+  | "doors"
+  | "open games"
+  | "audiences"
+  | "foreign paths"
+  | "tunnels"
+  | "site checks"
+  | "DNS"
+  | "game DNS"
+  | "routes"
+  | "launcher"
+  | "Access"
+  | "launcher after Access"
+  | "grants";
 /** K-1623: cloudflared takes a new ingress within seconds; a taken address moves its record a minute after. */
 const HANDOVER_INGRESS_MS = 60_000;
 /** K-705: the sticker of a provider card whose address something else serves. */

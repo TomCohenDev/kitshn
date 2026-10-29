@@ -127,3 +127,59 @@ it("refuses a mute of a card that does not exist or of an unknown source (K-1905
   expect((await mute({ card: "no-such-card", source: "deploy", until: null })).status).toBe(400);
   expect((await mute({ card: ADMIN_RESOURCE_ID, source: "anything", until: null })).status).toBe(400);
 });
+
+it("runs the later alarm steps when one throws, and tells the owner until it works again (K-406, K-1910)", async () => {
+  const stub = env.KITSHN.getByName("alarm-steps");
+  const result = await runInDurableObject(stub, async (instance) => {
+    const kitshn = instance as unknown as Kitshn & Record<string, unknown> & { alarm(): Promise<void> };
+    const ran: Array<string> = [];
+    let gameDnsFails = true;
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    kitshn["api"] = () => async () => [];
+    const step = (name: string, calls: number) => async () => {
+      ran.push(name);
+      if (name === "syncGameDns" && gameDnsFails) throw new Error("zonePath takes one label.");
+      return calls;
+    };
+    for (const name of ["fillAudiences", "refreshForeignPaths", "syncTunnels", "checkSites", "syncDns"])
+      kitshn[name] = step(name, 0);
+    kitshn["syncGameDns"] = step("syncGameDns", 4);
+    kitshn["syncRoutes"] = step("syncRoutes", 0);
+    kitshn["syncRedirects"] = step("syncRedirects", 0);
+    kitshn["syncLauncher"] = step("syncLauncher", 0);
+    let accessBudget = 0;
+    kitshn["syncAccessLocked"] = async (_api: unknown, budget: number) => {
+      ran.push("syncAccessLocked");
+      accessBudget = budget;
+    };
+    const read = () => kitshn.sql("SELECT key, state FROM notifications WHERE source = 'alarm' ORDER BY id");
+    await kitshn.alarm();
+    const failed = {
+      ran: [...ran],
+      accessBudget,
+      rows: read(),
+      retryAt: kitshn.sql("SELECT value FROM meta WHERE key = 'alarm_retry_at'"),
+    };
+    gameDnsFails = false;
+    await kitshn.alarm();
+    return { failed, after: read() };
+  });
+  expect(result.failed.ran).toEqual([
+    "fillAudiences",
+    "refreshForeignPaths",
+    "syncTunnels",
+    "checkSites",
+    "syncDns",
+    "syncGameDns",
+    "syncRoutes",
+    "syncRedirects",
+    "syncLauncher",
+    "syncAccessLocked",
+    "syncLauncher",
+  ]);
+  // The failed step counts its whole budget of 4, so Access keeps 40 - 4 - 16 - 3.
+  expect(result.failed.accessBudget).toBe(17);
+  expect(result.failed.rows).toEqual([{ key: "game DNS", state: "open" }]);
+  expect(result.failed.retryAt).toHaveLength(1);
+  expect(result.after).toEqual([{ key: "game DNS", state: "closed" }]);
+});

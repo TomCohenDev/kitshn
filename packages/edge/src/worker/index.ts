@@ -546,6 +546,15 @@ export default {
         headers: { "content-type": "text/plain", "cache-control": "no-store" },
       });
     }
+    // K-1908: app events. Access lets the path through (a Bypass application); the token is the only check.
+    if (url.pathname === "/notify" && request.method === "POST")
+      return env.KITSHN.getByName("kitshn").fetch(
+        new Request("https://kitshn.internal/internal/notify", {
+          method: "POST",
+          headers: { authorization: request.headers.get("authorization") ?? "" },
+          body: request.body,
+        }),
+      );
     if (url.pathname.startsWith("/deploy/") && request.method === "POST") {
       // K-811: GitHub Actions deploys here with its OIDC token; Access lets the path through.
       const deployer = await deployerOf(request, env);

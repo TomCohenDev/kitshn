@@ -121,7 +121,7 @@ import {
 } from "./Pause.tsx";
 import { playResumeSound, pressSound, showPanic, unlockAudio } from "./panic.ts";
 import { GONE_STICKER, REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
-import { AskEvents, AskList, BotRuns, approveFromHash } from "./Asks.tsx";
+import { AskEvents, BotRuns, approveFromHash } from "./Asks.tsx";
 import { PassSettingsPanel } from "./Passes.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
@@ -722,7 +722,7 @@ export function App() {
     if (!proposal) return showToast({ text: "This ask is no longer open.", error: true, undo: null });
     if (proposal.shownHash !== seen)
       return showToast({
-        text: "This ask changed since you opened it. Read it again in Asks.",
+        text: "This ask changed since you opened it. Read it again in the Inbox.",
         error: true,
         undo: null,
       });
@@ -1582,6 +1582,7 @@ export function App() {
             <NotificationsView
               state={state}
               bell={store.snapshot.bell}
+              proposals={store.snapshot.proposals}
               onToast={(text, error) => showToast({ text, error, undo: null })}
             />
           ) : (
@@ -1591,6 +1592,7 @@ export function App() {
               peek={!wide}
               repos={store.snapshot.repos}
               proposals={store.snapshot.proposals}
+              onOpenInbox={() => openTab("notifications")}
               githubDefaultWay={store.snapshot.githubDefaultWay}
               botRuns={store.snapshot.botRuns}
               selection={selection}
@@ -2157,6 +2159,8 @@ function Panel(props: {
   repos: ReadonlyArray<RepoView>;
   /** K-1722: the asks that wait for an approver circle. */
   proposals: ReadonlyArray<ProposalView>;
+  /** K-1607: the asks wait in the Inbox of the Notifications view; the map panel only points there. */
+  onOpenInbox: () => void;
   /** K-1760: the GitHub way of owners with no owner group. */
   githubDefaultWay: GitHubWay;
   /** K-1767: App pull request runs that wait for Deploy. */
@@ -2362,12 +2366,17 @@ function Panel(props: {
         <GitHubDefaultWay way={props.githubDefaultWay} onToast={props.onToast} />
         <PassSettingsPanel onToast={props.onToast} />
         <BotRuns runs={props.botRuns} onToast={props.onToast} />
-        <AskList
-          proposals={props.proposals}
-          circleName={(id) => props.state.circles.get(id)?.name ?? id}
-          needsPasskey={(id) => props.state.circles.get(id)?.needsPasskey === true}
-          onToast={props.onToast}
-        />
+        {props.proposals.length > 0 ? (
+          <button
+            class="btn"
+            data-tip="Agents wait for an answer. The Inbox shows each ask with Approve and Deny."
+            onClick={props.onOpenInbox}
+          >
+            <span class="sticker wait">
+              {props.proposals.length === 1 ? "1 ask waits" : `${props.proposals.length} asks wait`}
+            </span>
+          </button>
+        ) : null}
         <RepoList repos={props.repos} onToast={props.onToast} />
         <p class="muted">You are {actorLabel(props.me)}.</p>
         {props.warnings.length > 0 || props.signOutWarning ? (

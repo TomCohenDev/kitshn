@@ -1,5 +1,6 @@
 import { ICON_LIMIT, iconType, pageDataIcon } from "kitshn/icon";
 import { DurableObject } from "cloudflare:workers";
+import { createHash, randomBytes } from "node:crypto";
 import { Schema } from "effect";
 import { ACCESS_NAME_PREFIX, ENROLLMENT_KEY, type OldAddress, desiredAccess } from "../core/access.ts";
 import {
@@ -150,7 +151,15 @@ import {
   machineRightMode,
 } from "../core/agent.ts";
 import { DEMO_MACHINES, DEMO_ICONS, demo, demoUsage } from "../core/demo.ts";
-import type { Usage } from "../core/usage.ts";
+import { type Usage, type UsageRow, usageLevel } from "../core/usage.ts";
+import {
+  HOUR_MS,
+  MACHINE_OFFLINE_MS,
+  NOTIFY_PER_HOUR,
+  NOTIFY_TOKENS_KEPT,
+  appEvent,
+  takeSlot,
+} from "../core/notify.ts";
 import { readUsage } from "./usage.ts";
 import {
   FAILING_FOR_MS,
@@ -3107,6 +3116,7 @@ export class Kitshn extends DurableObject<Env> {
       return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
     if (path === "/internal/public-cards") return this.publicCards();
     if (path === "/internal/badge") return this.badge(new URL(request.url).searchParams);
+    if (path === "/internal/notify" && request.method === "POST") return this.appNotify(request);
     if (path === "/internal/import-status") return Response.json(this.importStatus());
     if (path === "/internal/backup-access")
       return this.backupAccess((await request.json()) as { card: string; clientId: string });
@@ -4405,7 +4415,14 @@ export class Kitshn extends DurableObject<Env> {
           command = { kind: "shell", script };
         }
       }
-      send(socket, { type: "job", id: job.id, command });
+      // K-1908: each Compose job of an app gets a new notify token.
+      const notify =
+        command.kind === "compose" ||
+        command.kind === "compose-redeploy" ||
+        command.kind === "compose-rollback"
+          ? { url: this.notifyUrl(), token: this.mintNotifyToken(command.project) }
+          : undefined;
+      send(socket, { type: "job", id: job.id, command, ...(notify ? { notify } : {}) });
       this.sql("UPDATE jobs SET state = 'sent', machine_id = ? WHERE id = ?", machine.id, job.id);
     }
   }
@@ -5084,6 +5101,10 @@ export class Kitshn extends DurableObject<Env> {
     if (this.uptimeTargets().length > 0) next = Math.min(next, now + UPTIME_IDLE_MS);
     // K-1907: pushes that wait go out in the next second.
     if (this.pushQueue.length > 0) next = Math.min(next, now + 1000);
+    // K-1910: the next machine that reaches 15 minutes offline, and the next hourly check of the limits.
+    const offlineAt = this.nextOfflineAt(now);
+    if (offlineAt !== null) next = Math.min(next, offlineAt);
+    if (this.env.CLOUDFLARE_API_TOKEN) next = Math.min(next, Math.max(now, this.limitsCheckAt()));
     const bellEnd = this.nextBellEnd(now);
     if (bellEnd !== null) next = Math.min(next, bellEnd);
     // Never move a pending alarm later: frequent wake-ups would otherwise push it away for good.
@@ -5181,6 +5202,8 @@ export class Kitshn extends DurableObject<Env> {
         NOTIFICATIONS_MAX,
       );
       this.sql("DELETE FROM notification_mutes WHERE until IS NOT NULL AND until < ?", now);
+      // K-1908: a removed app card loses its notify tokens here, so a quick Undo keeps them.
+      this.sql("DELETE FROM notify_tokens WHERE card_id NOT IN (SELECT id FROM resources)");
       this.muteCache = null;
       // K-1113: a removed card keeps its icon until this run, so a quick Undo keeps it; a deploy sends it again.
       for (const { id } of this.sql<{ id: string }>(
@@ -6582,7 +6605,12 @@ export class Kitshn extends DurableObject<Env> {
       async () => {
         const metadata = workerMetadata(app, {
           kv,
-          secrets: secrets.secrets,
+          // K-1908: the app gets a new notify token with each deploy.
+          secrets: {
+            ...secrets.secrets,
+            KITSHN_NOTIFY_URL: this.notifyUrl(),
+            KITSHN_NOTIFY_TOKEN: this.mintNotifyToken(row.resource_id),
+          },
           assets:
             app.assets === undefined
               ? null
@@ -10256,7 +10284,179 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-1904: the sources that kitshn derives from its own state. */
+  /** K-1910: limits at 80% or more of the last hourly read, and machines that stay offline 15 minutes. */
+  private reconcileOwnSources(now: number) {
+    const full = new Map<string, UsageRow>();
+    for (const row of this.limitsUsage?.rows ?? []) {
+      const level = usageLevel(row);
+      if (level === "warn" || level === "full") full.set(row.label, row);
+    }
+    for (const [label, row] of full)
+      this.notify({
+        source: "limits",
+        key: label,
+        episode: usageLevel(row),
+        card: null,
+        recipients: { _tag: "owner" },
+        level: usageLevel(row) === "full" ? "error" : "warn",
+        priority: "normal",
+        title: clip(
+          `${label} at ${Math.round(((row.used ?? 0) / row.limit) * 100)}% of the free plan`,
+          TITLE_MAX,
+        ),
+        text: "The Usage view shows the value, its limit and when it resets.",
+        actions: [{ id: "show", label: "Show usage", kind: "link", path: "#usage" }],
+      });
+    // Only a value that kitshn read again and found under 80% closes; an unknown value keeps what is open.
+    if (this.limitsUsage)
+      for (const notification of this.openNotifications.values())
+        if (notification.source === "limits" && !full.has(notification.key)) {
+          const row = this.limitsUsage.rows.find((each) => each.label === notification.key);
+          if (row && row.used !== null) this.setNotificationState("limits", notification.key, "closed");
+        }
+    const offline = new Map(this.offlineSince().filter(([, since]) => since + MACHINE_OFFLINE_MS <= now));
+    for (const [id, since] of offline) {
+      const machine = this.state.machines.get(id);
+      if (!machine) continue;
+      this.notify({
+        source: "machine",
+        key: id,
+        episode: String(since),
+        card: id,
+        recipients: { _tag: "owner" },
+        level: "error",
+        priority: "normal",
+        title: clip(`${machine.name} is offline`, TITLE_MAX),
+        text: `No connection since ${new Date(since).toISOString().slice(0, 16).replace("T", " ")} UTC.`,
+        actions: [{ id: "show", label: "Show machine", kind: "link", path: `#map/${id}` }],
+      });
+    }
+    for (const notification of this.openNotifications.values())
+      if (notification.source === "machine" && !offline.has(notification.key)) {
+        this.setNotificationState("machine", notification.key, "closed");
+        this.offlineNotified.delete(notification.key);
+      }
+  }
+
+  /** K-1908: the address that an app sends its notifications to. */
+  private notifyUrl() {
+    return `https://${this.env.KITSHN_HOST}/notify`;
+  }
+
+  /**
+   * K-1908: a new notify token for a card. kitshn keeps only its SHA-256, the newest NOTIFY_TOKENS_KEPT per card, so
+   * a rollback brings back a build whose token still works.
+   */
+  private mintNotifyToken(card: string): string {
+    const token = randomBytes(32).toString("base64url");
+    this.sql(
+      "INSERT INTO notify_tokens (hash, card_id, created_at) VALUES (?, ?, ?)",
+      createHash("sha256").update(token).digest("hex"),
+      card,
+      Date.now(),
+    );
+    this.sql(
+      `DELETE FROM notify_tokens WHERE card_id = ? AND hash NOT IN
+       (SELECT hash FROM notify_tokens WHERE card_id = ? ORDER BY created_at DESC LIMIT ?)`,
+      card,
+      card,
+      NOTIFY_TOKENS_KEPT,
+    );
+    return token;
+  }
+
+  /** K-1908: the hourly windows of app notifications, per card and for all cards together. Memory only. */
+  private readonly appWindows = new Map<string, Array<number>>();
+  private readonly appWindowAll: Array<number> = [];
+
+  /** K-1908: `POST /notify` from an app; the Worker passes the token on, and only its hash finds the card. */
+  private async appNotify(request: Request): Promise<Response> {
+    const header = request.headers.get("authorization") ?? "";
+    const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
+    const [row] =
+      token === ""
+        ? []
+        : this.sql<{ card_id: string }>(
+            "SELECT card_id FROM notify_tokens WHERE hash = ?",
+            createHash("sha256").update(token).digest("hex"),
+          );
+    const card = row ? this.state.resources.get(row.card_id) : undefined;
+    if (!card)
+      return Response.json({ error: "kitshn knows no app with this notify token." }, { status: 401 });
+    const event = appEvent(await request.json().catch(() => null));
+    if (typeof event === "string") return Response.json({ error: event }, { status: 400 });
+    const now = Date.now();
+    const key = `${card.id}:${event.key}`;
+    if (event.resolved) {
+      this.setNotificationState("app", key, "closed", now);
+      this.broadcast();
+      return Response.json({ ok: true });
+    }
+    const window = this.appWindows.get(card.id) ?? [];
+    this.appWindows.set(card.id, window);
+    // Both windows must have room; a refused call takes a slot of neither.
+    const wait =
+      takeSlot([...window], now, NOTIFY_PER_HOUR) ?? takeSlot([...this.appWindowAll], now, NOTIFY_PER_HOUR);
+    if (wait !== null)
+      return Response.json(
+        { error: `kitshn takes ${NOTIFY_PER_HOUR} app notifications an hour; try again in ${wait} seconds.` },
+        { status: 429, headers: { "retry-after": String(wait) } },
+      );
+    takeSlot(window, now, NOTIFY_PER_HOUR);
+    takeSlot(this.appWindowAll, now, NOTIFY_PER_HOUR);
+    this.notify(
+      {
+        source: "app",
+        key,
+        episode: String(now),
+        card: card.id,
+        recipients: { _tag: "owner" },
+        level: event.level,
+        priority: "normal",
+        title: event.title,
+        text: event.text,
+        actions: [{ id: "show", label: "Show card", kind: "link", path: `#map/${card.id}` }],
+      },
+      now,
+    );
+    this.broadcast();
+    return Response.json({ ok: true });
+  }
+
+  /** K-1910: the last use of the account that the hourly check read, kept in memory for the reconcile. */
+  private limitsUsage: Usage | null = null;
+  private limitsCheckAt() {
+    return Number(this.meta("limits_check_at") ?? 0);
+  }
+
+  /** K-1910: when the next machine reaches 15 minutes offline, or null. */
+  private nextOfflineAt(now: number): number | null {
+    const times = this.offlineSince()
+      .map(([, since]) => since + MACHINE_OFFLINE_MS)
+      .filter((at) => at > now);
+    return times.length === 0 ? null : Math.min(...times);
+  }
+
+  /** The machines that are offline, with the time each one was last seen. */
+  private offlineSince(): Array<[string, number]> {
+    return [...this.state.machines.keys()].flatMap((id) => {
+      const presence = this.presence.get(id);
+      return presence && !presence.online ? [[id, presence.lastSeen] as [string, number]] : [];
+    });
+  }
+
+  /** K-1910: true once per machine when it reaches 15 minutes offline, in memory; a wake checks again. */
+  private offlineNotified = new Set<string>();
+  private offlineChanged(now: number) {
+    const due = this.offlineSince().filter(
+      ([id, since]) => since + MACHINE_OFFLINE_MS <= now && !this.offlineNotified.has(id),
+    );
+    for (const [id] of due) this.offlineNotified.add(id);
+    return due.length > 0;
+  }
+
   private reconcileNotifications() {
+    this.reconcileOwnSources(Date.now());
     const notes = new Map(
       this.deploys()
         .notes.filter((note) => this.state.resources.has(note.resource_id))
@@ -10665,6 +10865,22 @@ export class Kitshn extends DurableObject<Env> {
     const uptime = await this.checkUptime(now, daily ? 0 : UPTIME_FETCHES_PER_RUN);
     if (uptime.changed) changed = true;
     if (this.bellEnded(now)) changed = true;
+    // K-1910: the use of the account once an hour, never in the daily run; the next reconcile notifies.
+    if (!daily && this.env.CLOUDFLARE_API_TOKEN && this.limitsCheckAt() <= now) {
+      this.setMeta("limits_check_at", String(now + HOUR_MS));
+      this.limitsUsage = await readUsage(
+        this.env.CLOUDFLARE_API_TOKEN,
+        this.env.CLOUDFLARE_ACCOUNT_ID,
+        zonesOrMain(this.env),
+        now,
+      ).catch((error: unknown) => {
+        console.warn(`kitshn could not read the use of the account: ${String(error)}`);
+        return this.limitsUsage;
+      });
+      changed = true;
+    }
+    // K-1910: a machine that reached 15 minutes offline since the last run.
+    if (this.offlineChanged(now)) changed = true;
     // K-1817: the nightly backups run at 03:00 UTC, a quiet hour, not with the daily run at midnight.
     if (this.backupAt() <= now) {
       this.backupAtMemory = nextBackupAt(now);

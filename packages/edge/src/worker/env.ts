@@ -44,6 +44,8 @@ export interface Env {
   /** K-718, K-908: the kitshn GitHub App id and its private key (PEM), to start repo workflows. */
   readonly GITHUB_APP_ID?: string;
   readonly GITHUB_APP_KEY?: string;
+  /** K-1833: the time of a bootstrap run with `KITSHN_IMPORT`; a new value makes the Durable Object import once. */
+  readonly KITSHN_IMPORT_AT?: string;
   /** K-1815: the key of the backup passwords. Without it, kitshn makes no backup. */
   readonly KITSHN_BACKUP_KEY?: string;
   /** Local development only: the email to act as. The Worker honours it only on localhost. */

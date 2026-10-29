@@ -1,0 +1,161 @@
+import { runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { describe, expect, it, vi } from "vitest";
+import type { Circle } from "../src/core/model.ts";
+import { type StateExport, stateExport } from "../src/worker/backups.ts";
+import { MIGRATIONS } from "../src/worker/migrations.ts";
+import { IMPORT_OBJECT } from "../src/worker/state-import.ts";
+import { send } from "./access.ts";
+
+/** K-1833: an empty install takes a state export of the same account; anything else is refused and changes nothing. */
+
+type Instance = {
+  runImport(at: string): Promise<{ code: string; detail: string } | null>;
+  finishImport(): Promise<void>;
+  rotatePassKey(actor: unknown): Promise<void>;
+  load(): void;
+};
+
+const circle: Circle = {
+  id: "friends",
+  name: "Friends",
+  color: "#7c3aed",
+  level: "view",
+  members: [{ _tag: "email", email: "friend@example.com" }],
+  match: "any",
+  needsPasskey: false,
+  endsAt: null,
+  x: 900,
+  y: 900,
+  r: 200,
+};
+const ICON = new Uint8Array([0, 1, 2, 250, 255]);
+
+/** An export of the install `name`, with one more circle and one icon than the first start. */
+const exportOf = (name: string) =>
+  runInDurableObject(env.KITSHN.getByName(name), (instance, durable) => {
+    durable.storage.sql.exec(
+      "INSERT INTO circles (id, body) VALUES (?, ?)",
+      circle.id,
+      JSON.stringify(circle),
+    );
+    durable.storage.sql.exec(
+      "INSERT INTO icons (id, type, hash, bytes) VALUES ('c', 'image/png', 'h', ?)",
+      ICON,
+    );
+    (instance as unknown as Instance).load();
+    return stateExport(durable.storage.sql, env.CLOUDFLARE_ACCOUNT_ID, MIGRATIONS.length, 1_000);
+  });
+
+const upload = async (state: unknown) =>
+  env.BUCKET!.put(
+    IMPORT_OBJECT,
+    await new Response(
+      new Blob([JSON.stringify(state)]).stream().pipeThrough(new CompressionStream("gzip")),
+    ).arrayBuffer(),
+  );
+
+const meta = (sql: SqlStorage, key: string) =>
+  sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = ?", key).toArray()[0]?.value ?? null;
+
+/** Runs the import into the install `name`, and reads what it holds after. */
+const importInto = (name: string, before?: (sql: SqlStorage, instance: Instance) => void) =>
+  runInDurableObject(env.KITSHN.getByName(name), async (object, durable) => {
+    const instance = object as unknown as Instance;
+    before?.(durable.storage.sql, instance);
+    const refused = await instance.runImport("run-1");
+    const sql = durable.storage.sql;
+    return {
+      refused,
+      status: meta(sql, "import_status"),
+      circles: sql
+        .exec<{ id: string }>("SELECT id FROM circles ORDER BY id")
+        .toArray()
+        .map((row) => row.id),
+      icon:
+        sql.exec<{ bytes: ArrayBuffer }>("SELECT bytes FROM icons WHERE id = 'c'").toArray()[0]?.bytes ??
+        null,
+      history: sql
+        .exec<{ summary: string }>("SELECT summary FROM revisions")
+        .toArray()
+        .map((row) => row.summary),
+      version: meta(sql, "schema_version"),
+    };
+  });
+
+describe("state import (K-1833)", () => {
+  it("rebuilds an empty install with its BLOBs, and stores done with the rows", async () => {
+    await upload(await exportOf("source-a"));
+    const after = await importInto("target-a");
+    expect(after.refused).toBeNull();
+    expect(JSON.parse(after.status ?? "null")).toEqual({ state: "done" });
+    expect(after.circles).toContain("friends");
+    expect(new Uint8Array(after.icon!)).toEqual(ICON);
+    // The History of the export comes along, and the import is its newest row.
+    expect(after.history.at(-1)).toMatch(/^Imported the state of 1970-01-01T00:00:01.000Z/);
+    expect(after.version).toBe(String(MIGRATIONS.length));
+  });
+
+  it("stays done when a step after the import fails, and the next start finishes it", async () => {
+    await upload(await exportOf("source-f"));
+    const result = await runInDurableObject(env.KITSHN.getByName("target-f"), async (object, durable) => {
+      const instance = object as unknown as Instance;
+      const rotate = vi.spyOn(instance, "rotatePassKey").mockRejectedValueOnce(new Error("no key yet"));
+      expect(await instance.runImport("run-1")).toBeNull();
+      await instance.finishImport();
+      const failed = {
+        status: meta(durable.storage.sql, "import_status"),
+        due: meta(durable.storage.sql, "import_finish"),
+      };
+      await instance.finishImport();
+      return { failed, due: meta(durable.storage.sql, "import_finish"), calls: rotate.mock.calls.length };
+    });
+    expect(JSON.parse(result.failed.status ?? "null")).toEqual({ state: "done" });
+    expect(result.failed.due).toBe("due");
+    expect([result.due, result.calls]).toEqual([null, 2]);
+    expect(await env.BUCKET!.head(IMPORT_OBJECT)).toBeNull();
+  });
+
+  it("imports an export of an older schema and runs the later migrations", async () => {
+    const full = await exportOf("source-b");
+    const old: StateExport = {
+      ...full,
+      schemaVersion: 20,
+      tables: {
+        circles: full.tables["circles"]!,
+        resources: full.tables["resources"]!,
+        places: full.tables["places"]!,
+        meta: [{ key: "schema_version", value: "20" }],
+      },
+    };
+    await upload(old);
+    const after = await importInto("target-b");
+    expect(after.refused).toBeNull();
+    expect(after.version).toBe(String(MIGRATIONS.length));
+  });
+
+  it("refuses with a fixed code, and changes nothing", async () => {
+    const state = await exportOf("source-c");
+    const refusals: Array<[unknown, string, ((sql: SqlStorage) => void)?]> = [
+      [{ ...state, account: "another-account" }, "other_account"],
+      [{ ...state, schemaVersion: MIGRATIONS.length + 1 }, "newer_schema"],
+      [state, "not_empty", (sql) => sql.exec("INSERT INTO machines (id, body) VALUES ('m', '{}')")],
+      [{ ...state, tables: { ...state.tables, strange: [{ id: "x" }] } }, "unknown_table"],
+      [{ format: "something else" }, "bad_file"],
+    ];
+    for (const [index, [file, code, before]] of refusals.entries()) {
+      await upload(file);
+      const after = await importInto(`target-c${index}`, before);
+      expect(after.refused?.code, after.refused?.detail).toBe(code);
+      expect(after.circles).not.toContain("friends");
+      expect(after.history).not.toContainEqual(expect.stringMatching(/^Imported/));
+    }
+  });
+});
+
+describe("import status (K-1833)", () => {
+  it("answers without a login with the state alone", async () => {
+    const response = await send("/join/import-status");
+    expect([response.status, await response.json()]).toEqual([200, { state: "none" }]);
+  });
+});

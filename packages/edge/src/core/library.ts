@@ -252,6 +252,12 @@ function passkeyNeeded(circle: Circle, visitor: ContentVisitor, state: State): b
  *
  * The admin (K-104) opens every item, also a private one in the tray (K-1002).
  */
+/** K-2004: a card with an active share in an "any" circle with everyone lets in a visitor with no login. */
+export const openToAll = (state: State, resource: Resource, now: number) =>
+  activeShares(state, resource, now).some(
+    (share) => isPublicCircle(share.circle) && share.circle.match === "any",
+  );
+
 export function contentAccess(
   state: State,
   resource: Resource,
@@ -260,13 +266,9 @@ export function contentAccess(
 ): "allow" | "login" | "passkey" | "deny" {
   const admin = state.resources.get(ADMIN_RESOURCE_ID);
   const decisions = [resource, ...(admin ? [admin] : [])].map((target) => {
-    const shares = activeShares(state, target, now);
     // In an "all must match" circle, "everyone" adds nothing, as in Access (access.ts).
-    if (
-      target === resource &&
-      shares.some((share) => isPublicCircle(share.circle) && share.circle.match === "any")
-    )
-      return "allow";
+    if (target === resource && openToAll(state, resource, now)) return "allow";
+    const shares = activeShares(state, target, now);
     // K-1504: during a pause Access keeps only the people policies, so only an email can match.
     if (state.paused && visitor.email === null) return "deny";
     const who = state.paused ? { ...visitor, ip: null, clientId: null } : visitor;

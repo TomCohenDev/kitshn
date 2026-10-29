@@ -147,6 +147,7 @@ import {
 import {
   DEFAULT_DOOR_MS,
   type Door,
+  DOOR_LIMITS,
   doorAddress,
   doorMachine,
   doorPlan,
@@ -263,6 +264,7 @@ import {
   newLibraryId,
   randomAddressName,
   objectKey,
+  openToAll,
   slotKey,
   uploadKind,
 } from "../core/library.ts";
@@ -793,6 +795,8 @@ export class Kitshn extends DurableObject<Env> {
   private presence = new Map<string, { online: boolean; lastSeen: number; os: MachineOs | null }>();
   /** K-2004: the last open or close of a door, by card and person. */
   private doorTurns = new Map<string, number>();
+  /** K-2004: the open-to-all game cards of the last door plans; null after a restart, so the next check sends all. */
+  private openGamesSent: string | null = null;
   /**
    * K-1113: the hash of each stored card icon, the bytes stay in SQLite until a map asks. K-1114: when each icon
    * last changed, so a daemon changes one at most once an hour. Read on first use (K-1302).
@@ -1543,6 +1547,7 @@ export class Kitshn extends DurableObject<Env> {
     this.state = after;
     this.clearAccessFailures();
     this.closeLostDoors(now);
+    this.syncOpenGames(now);
     for (const change of changes) {
       if (change._tag === "shareSetting" || change._tag === "cardEnd" || change._tag === "place")
         this.stuckShares.delete(change.id);
@@ -12126,6 +12131,7 @@ export class Kitshn extends DurableObject<Env> {
       this.openDoors(now),
       now,
       this.env.KITSHN_ZONE,
+      this.openGames(now),
     );
     this.queueKitshnJob(machineId, { kind: "doors", plan }, actor, now + HOUR_MS);
     this.deliverJobs();
@@ -12262,6 +12268,28 @@ export class Kitshn extends DurableObject<Env> {
     for (const machine of machines) this.queueDoors(machine, actor, now);
   }
 
+  /** K-2004: the game cards with an active share in Everyone, whose ports are open to every address. */
+  private openGames(now: number) {
+    return new Set(
+      this.gameRows()
+        .map((row) => row.card_id)
+        .filter((card) => {
+          const resource = this.state.resources.get(card);
+          return resource !== undefined && openToAll(this.state, resource, now);
+        }),
+    );
+  }
+
+  /** K-2005: a share in Everyone that starts or ends sends new plans, so the ports open or close for all. */
+  private syncOpenGames(now: number) {
+    const open = [...this.openGames(now)].sort().join(" ");
+    if (open === this.openGamesSent) return;
+    this.openGamesSent = open;
+    const games = this.gameRows().map(gameOf);
+    const actor: Actor = { _tag: "kitshn", reason: "Everyone share of a game (K-2004)" };
+    for (const machine of new Set(games.map(doorMachine))) this.queueDoors(machine, actor, now);
+  }
+
   /** K-2005: a door whose person lost the card's share closes at once; a door of a removed card goes too. */
   private closeLostDoors(now: number) {
     // The check uses the address that opened the door, so a circle with an address condition keeps it open.
@@ -12288,11 +12316,31 @@ export class Kitshn extends DurableObject<Env> {
     const resource = row ? this.state.resources.get(row.card_id) : undefined;
     if (!row || !resource) return Response.json({ decision: "missing", stale });
     // A door belongs to a person, so the join page needs a login, also on a card in Everyone.
+    const game = gameOf(row);
+    const machine = doorMachine(game);
+    const status = this.state.machines.get(machine);
+    const gameView = {
+      name: game.name,
+      address: joinAddress(game, resource.addresses[0] ?? ""),
+      ports: game.ports.map(portKey),
+      doorHours: game.doorMs / HOUR_MS,
+      reachable: row.v4 !== null || row.v6 !== null,
+      machineOnline: status ? this.machineView(status).online : false,
+    };
+    // K-2004: a game in Everyone has no doors, so its page needs no login.
+    if (openToAll(this.state, resource, now))
+      return Response.json({
+        decision: "allow",
+        stale,
+        error: input.action === "view" ? null : "This game is open to everyone, so it needs no door.",
+        game: gameView,
+        openToAll: true,
+        doors: [],
+        seen: visitor.ip,
+      });
     const decision = visitor.email === null ? "login" : contentAccess(this.state, resource, visitor, now);
     if (decision !== "allow" || visitor.email === null) return Response.json({ decision, stale });
     const person = visitor.email;
-    const game = gameOf(row);
-    const machine = doorMachine(game);
     const actor: Actor = { _tag: "person", email: person };
     let error: string | null = null;
     // K-2004: one open or close per person and card in 10 s, so a loop cannot fill History or the machine's jobs.
@@ -12307,13 +12355,14 @@ export class Kitshn extends DurableObject<Env> {
         for (const [key, at] of this.doorTurns) if (at <= now - 10_000) this.doorTurns.delete(key);
     };
     if (input.action === "open" && !waiting) {
-      // K-2004: the address that kitshn sees is the door; the browser may add only the other family to it.
+      // K-2004: the address that kitshn sees is always a door; the browser adds the other addresses that it found,
+      // within the limits of openDoors. A refused browser address is left out.
       const seen = doorAddress(visitor.ip ?? "");
-      const other = (input.addresses ?? [])
+      const found = (input.addresses ?? [])
+        .slice(0, DOOR_LIMITS[4] + DOOR_LIMITS[6])
         .map((address) => doorAddress(String(address)))
-        .find((door) => !("error" in door) && !("error" in seen) && door.family !== seen.family);
-      const addresses =
-        "error" in seen ? [] : [seen.address, ...(other && !("error" in other) ? [other.address] : [])];
+        .flatMap((door) => ("error" in door ? [] : [door.address]));
+      const addresses = "error" in seen ? [] : [...new Set([seen.address, ...found])];
       error =
         ("error" in seen ? `kitshn sees your address as ${visitor.ip ?? "none"}: ${seen.error}` : null) ??
         // An offline machine gets the plan when it connects; an online one must hold doors now.
@@ -12343,7 +12392,7 @@ export class Kitshn extends DurableObject<Env> {
             );
           this.insertRevision(
             actor,
-            `${person} opened ${game.name} for ${addresses.join(" and ")} until ${ends} UTC`,
+            `${person} opened ${game.name} for ${open.map((door) => door.address).join(", ")} until ${ends} UTC`,
             [],
             null,
           );
@@ -12355,29 +12404,21 @@ export class Kitshn extends DurableObject<Env> {
       }
     }
     if (input.action === "close" && !waiting) {
-      const door = this.openDoors(now, game.card).find(
-        (item) => item.person === person && item.address === input.address,
-      );
-      if (door) {
-        this.closeDoors(actor, [door], "End now", now);
+      // K-2004: End now closes every door of this person on the card.
+      const doors = this.openDoors(now, game.card).filter((item) => item.person === person);
+      if (doors.length > 0) {
+        this.closeDoors(actor, doors, "End now", now);
         tookTurn();
         this.load();
         this.broadcast();
-      } else error = "You have no open door for this address.";
+      } else error = "You have no open door on this game.";
     }
-    const status = this.state.machines.get(machine);
     return Response.json({
       decision,
       stale,
       error,
-      game: {
-        name: game.name,
-        address: joinAddress(game, resource.addresses[0] ?? ""),
-        ports: game.ports.map(portKey),
-        doorHours: game.doorMs / HOUR_MS,
-        reachable: row.v4 !== null || row.v6 !== null,
-        machineOnline: status ? this.machineView(status).online : false,
-      },
+      game: gameView,
+      openToAll: false,
       doors: this.openDoors(now, game.card).filter((door) => door.person === person),
       seen: visitor.ip,
     });
@@ -13470,6 +13511,7 @@ export class Kitshn extends DurableObject<Env> {
     const before = JSON.stringify(accessStates(this.desired(now), this.access));
     this.endShares(now);
     if (this.closeLostDoors(now)) changed = true;
+    this.syncOpenGames(now);
     const daily = this.dailyAt() <= now;
     if (daily) this.daily(now);
     // K-1126: the uptime fetches count against the 40 calls of this run (K-406). The daily run spends 40 already,
@@ -13849,8 +13891,6 @@ interface GameRequest {
   readonly action: "view" | "open" | "close";
   /** `open`: the addresses that the browser found (K-2004). */
   readonly addresses?: ReadonlyArray<unknown>;
-  /** `close`: the door address. */
-  readonly address?: string;
 }
 
 interface ContentRequest {

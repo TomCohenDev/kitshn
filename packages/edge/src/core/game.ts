@@ -186,9 +186,16 @@ export function doorAddress(seen: string): { address: string; family: 4 | 6 } | 
 export const doorFamily = (address: string): 4 | 6 => (address.includes(":") ? 6 : 4);
 
 /**
- * K-2004: the doors after a person opens `addresses` on a card: at most one door per family and person, so a new
- * address replaces the older one of its family. Returns the doors to add and the addresses that close. A share that
- * ends closes the door through K-2005, so the door time does not look at the card's end.
+ * K-2004: the doors that a person keeps per card and family. A home network can leave through more than one public
+ * IPv4 address, chosen per destination, so one door per family is not enough.
+ */
+export const DOOR_LIMITS: Readonly<Record<4 | 6, number>> = { 4: 4, 6: 2 };
+
+/**
+ * K-2004: the doors after a person opens `addresses` on a card. A new address adds a door, and an address that is
+ * open already gets a new end. Past the limit of its family, the oldest door of that family closes. `addresses` come
+ * first in the order that they win, so the address that kitshn sees goes first. A share that ends closes the door
+ * through K-2005, so the door time does not look at the card's end.
  */
 export function openDoors(
   current: ReadonlyArray<Door>,
@@ -198,15 +205,29 @@ export function openDoors(
   now: number,
 ): { readonly open: ReadonlyArray<Door>; readonly close: ReadonlyArray<string> } {
   const endsAt = now + game.doorMs;
-  const mine = current.filter(
-    (door) => door.card === game.card && door.person === person && door.endsAt > now,
-  );
-  const open = addresses.map((address) => ({ card: game.card, person, address, openedAt: now, endsAt }));
-  const families = new Set(addresses.map(doorFamily));
-  const close = mine
-    .filter((door) => families.has(doorFamily(door.address)) && !addresses.includes(door.address))
+  const fresh = [...new Set(addresses)];
+  const older = current
+    .filter(
+      (door) =>
+        door.card === game.card &&
+        door.person === person &&
+        door.endsAt > now &&
+        !fresh.includes(door.address),
+    )
+    .sort((a, b) => b.openedAt - a.openedAt)
     .map((door) => door.address);
-  return { open, close };
+  const kept = new Set<string>();
+  for (const family of [4, 6] as const)
+    [...fresh, ...older]
+      .filter((address) => doorFamily(address) === family)
+      .slice(0, DOOR_LIMITS[family])
+      .forEach((address) => kept.add(address));
+  return {
+    open: fresh
+      .filter((address) => kept.has(address))
+      .map((address) => ({ card: game.card, person, address, openedAt: now, endsAt })),
+    close: older.filter((address) => !kept.has(address)),
+  };
 }
 
 /** K-2005: what the daemon of a machine puts into its firewall: the game ports, and each open door with its end. */
@@ -221,19 +242,25 @@ export interface DoorPlan {
   }>;
 }
 
+/**
+ * K-2005: the plan of one machine. The ports of a game in `openToAll` (K-2004) leave the gated set, so every address
+ * reaches them; a port that a gated game also names stays gated, so the plan still fails closed.
+ */
 export function doorPlan(
   machine: string,
   games: ReadonlyArray<Game>,
   doors: ReadonlyArray<Door>,
   now: number,
   zone: string,
+  openToAll: ReadonlySet<string>,
 ): DoorPlan {
   const mine = games.filter((game) => doorMachine(game) === machine);
-  const ports = new Map(mine.flatMap((game) => game.ports).map((port) => [portKey(port), port]));
+  const gated = mine.filter((game) => !openToAll.has(game.card));
+  const ports = new Map(gated.flatMap((game) => game.ports).map((port) => [portKey(port), port]));
   // One entry per address and port; two people behind one address, or two cards, keep the later end.
   const open = new Map<string, { address: string; port: GamePort; endsAt: number }>();
   for (const door of doors) {
-    const game = mine.find((item) => item.card === door.card);
+    const game = gated.find((item) => item.card === door.card);
     if (!game || door.endsAt <= now) continue;
     for (const port of game.ports) {
       const key = `${door.address} ${portKey(port)}`;

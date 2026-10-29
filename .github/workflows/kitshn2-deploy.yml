@@ -117,6 +117,22 @@ jobs:
             const pick = (text) => Object.fromEntries(Object.entries(JSON.parse(text || "{}")).filter(([key]) => key.startsWith("KITSHN_")));
             require("fs").writeFileSync(process.argv[1], JSON.stringify({ secrets: pick(process.env.SECRETS), vars: pick(process.env.VARS) }));
           ' "$RUNNER_TEMP/kitshn-params.json"
+      # K-618: the repo copy of the kitshn skill follows the release. An old or missing copy warns; the deploy goes on.
+      - name: kitshn skill
+        if: github.event.action != 'closed'
+        env:
+          SERVER: ${{ inputs.server }}
+        run: |
+          version=$(curl -fsSL --max-time 20 "$SERVER/deploy/version" || true)
+          copy=.claude/skills/kitshn/SKILL.md
+          if [ ! -f "$copy" ]; then
+            echo "::warning::This repo has no copy of the kitshn skill. Add it with: kitshn skill install --repo"
+          elif [ -n "$version" ]; then
+            named=$(sed -n 's/^<!-- kitshn edge-\([^.]*\)\..*/\1/p' "$copy" | head -n 1)
+            if [ "$named" != "$version" ]; then
+              echo "::warning::$copy is edge-${named:-unknown}, not edge-$version (the release of kitshn). Update it with: kitshn skill install --repo"
+            fi
+          fi
       - name: kitshn deploy
         env:
           SERVER: ${{ inputs.server }}

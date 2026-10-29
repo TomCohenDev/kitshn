@@ -67,6 +67,7 @@ import {
   arch,
   cpus,
   freemem,
+  homedir,
   hostname,
   userInfo,
   loadavg,
@@ -100,6 +101,7 @@ import { TokenCache } from "./tokens.ts";
 import { MAX_FORWARDS, forwardTarget, passedHeaders, readBounded } from "./forward.ts";
 import { AGENT_USAGE, type AgentTransport, runAgentCommand } from "kitshn/agent";
 import { CliError } from "kitshn/cli-error";
+import { checkSkill, installGlobalSkill, installRepoSkill, refreshGlobalSkill } from "./skill.ts";
 
 declare const KITSHN_VERSION: string;
 const VERSION = typeof KITSHN_VERSION === "string" ? KITSHN_VERSION : "dev";
@@ -2127,9 +2129,31 @@ async function sendIcons(ws: WebSocket, reports: ReadonlyArray<LiveSiteReport>) 
   }
 }
 
+/** K-618: `kitshn skill install [--repo]` and `kitshn skill check`. */
+function skillCommand(action: string | undefined, repo: boolean) {
+  try {
+    if (action === "install")
+      console.log(repo ? installRepoSkill(process.cwd(), VERSION) : installGlobalSkill(homedir(), VERSION));
+    else if (action === "check") {
+      const result = checkSkill(homedir(), process.cwd(), VERSION);
+      for (const line of result.lines) console.log(line);
+      if (!result.ok) process.exit(1);
+    } else fail("usage: kitshn skill install [--repo] | kitshn skill check");
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
+}
+
 async function runCommand() {
   const config = readConfig();
   log(`kitshn ${VERSION} starts as machine ${config.machineId}`);
+  // K-618: after an update, the global skill follows the new release.
+  try {
+    const refreshed = refreshGlobalSkill(homedir(), VERSION);
+    if (refreshed) log(refreshed);
+  } catch (error) {
+    log(`the global kitshn skill was not written again: ${String(error)}`);
+  }
   // Before the socket opens, so `status` answers from the first request.
   joined = config;
   // K-1816: an app that a stopped daemon left paused in the middle of a backup runs again.
@@ -2285,6 +2309,9 @@ switch (command) {
   case "version":
     console.log(args.includes("--json") ? versionJson(VERSION) : VERSION);
     break;
+  case "skill":
+    skillCommand(args[0], args.includes("--repo"));
+    break;
   case "expose":
     exposeCommand(args[0], flag("--name"), args.includes("--dev"));
     break;
@@ -2313,5 +2340,7 @@ kitshn expose <port|socket> --name <n>  share a local server at <n>.<zone> (K-11
 kitshn unexpose <name>                  stop sharing it
 kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>
                                         as root: move KitSHn 1 data into rootless Docker (K-1404)
+kitshn skill install [--repo]            the skill for coding agents, global or in this repo (K-618)
+kitshn skill check                      exit 1 when a copy of the skill is from another release
 kitshn version [--json]                 the version; --json: {"product":"kitshn","generation":2,"version"}`);
 }

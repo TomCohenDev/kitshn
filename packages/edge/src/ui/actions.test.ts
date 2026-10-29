@@ -117,6 +117,7 @@ function context(version = "0123456789ab"): ActionContext {
     selected: new Set(),
     previousVersions: new Set(),
     handoverCards: new Set(),
+    openStacks: new Set(),
   };
 }
 
@@ -244,11 +245,20 @@ describe("card actions", () => {
 });
 
 describe("stack, circle and map actions", () => {
-  it("lists each card of a stack under Pull out", () => {
-    const { handlers } = recorder();
+  it("lists each card of a stack under Pull out, and opens or closes it without a click (K-521)", () => {
+    const { handlers, calls } = recorder();
     const groups = actionsFor(context(), handlers, { _tag: "stack", id: "s1" });
-    expect(ids(groups)).toEqual(expect.arrayContaining(["details", "rename", "pull-out", "unstack"]));
+    expect(ids(groups)).toEqual(
+      expect.arrayContaining(["details", "rename", "open-stack", "pull-out", "unstack"]),
+    );
     expect(items(find(groups, "pull-out")).map((item) => item.id)).toEqual(["pull-out:a", "pull-out:b"]);
+    expect(find(groups, "open-stack").label).toBe("Open as a column");
+    run(find(groups, "open-stack"));
+    expect(calls.at(-1)).toEqual(["toggleStack", "stack:s1"]);
+    const open = { ...context(), openStacks: new Set(["stack:s1"]) };
+    expect(find(actionsFor(open, handlers, { _tag: "stack", id: "s1" }), "open-stack").label).toBe(
+      "Close the column",
+    );
   });
 
   it("never offers to delete the Owner circle (K-211), and deletes another at once", () => {

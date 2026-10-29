@@ -273,7 +273,15 @@ export function App() {
   /** The first fit check ran; it fits only a device without a saved view. */
   const loaded = useRef(false);
   const [openStacks, setOpenStacks] = useState<ReadonlySet<string>>(new Set());
-  const [toast, setToast] = useState<Toast | null>(null);
+  const toggleStack = (key: string) => {
+    const next = new Set(openStacks);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setOpenStacks(next);
+  };
+  const [toast, setToast] = useState<(Toast & { readonly top: boolean }) | null>(null);
+  /** Where the last press ended; a toast shows away from it, so it never covers what the owner just touched. */
+  const lastPressY = useRef(0);
   /** The palette's first query, or null while it is closed. */
   const [palette, setPalette] = useState<string | null>(null);
   const [addingMachine, setAddingMachine] = useState(false);
@@ -422,11 +430,16 @@ export function App() {
     if (location.hash === "#restore-time") void finishRestoreTime();
     addEventListener("hashchange", onHash);
     addEventListener("keydown", onKey);
+    const notePress = (event: PointerEvent) => {
+      lastPressY.current = event.clientY;
+    };
+    addEventListener("pointerup", notePress, true);
     addEventListener("dragover", keepFiles);
     addEventListener("drop", keepFiles);
     return () => {
       removeEventListener("hashchange", onHash);
       removeEventListener("keydown", onKey);
+      removeEventListener("pointerup", notePress, true);
       removeEventListener("dragover", keepFiles);
       removeEventListener("drop", keepFiles);
     };
@@ -750,7 +763,8 @@ export function App() {
 
   const showToast = (next: Toast) => {
     toastShownAt.current = Date.now();
-    setToast(next);
+    // A phone's card sheet fills the bottom; on a wide screen the toast keeps clear of a card just dropped there.
+    setToast({ ...next, top: !wideScreen() || lastPressY.current > innerHeight / 2 });
     if (toastTimer.current !== null) clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(null), UNDO_MS);
   };
@@ -1296,6 +1310,7 @@ export function App() {
     stackOnto: (ids, target) => void stacks.stackOnto(ids, target),
     pullOut: (stackId, id) => void stacks.pullOut(stackId, id),
     unstack: (stackId) => void stacks.unstack(stackId),
+    toggleStack,
     renameStack: (stackId) =>
       selectAndFocus(
         { cards: new Set(state.stacks.get(stackId)?.members ?? []), circle: null },
@@ -1337,6 +1352,7 @@ export function App() {
     selected: selection.cards,
     previousVersions,
     handoverCards,
+    openStacks,
   };
 
   const waitingRepos = store.snapshot?.repos.filter(awaitsAllow).length ?? 0;
@@ -1366,12 +1382,7 @@ export function App() {
           flash={groupFlash.size > 0 ? new Set([...flash, ...groupFlash]) : flash}
           openStacks={openStacks}
           pullRequests={pullRequests}
-          onToggleStack={(key) => {
-            const next = new Set(openStacks);
-            if (next.has(key)) next.delete(key);
-            else next.add(key);
-            setOpenStacks(next);
-          }}
+          onToggleStack={toggleStack}
           onCommit={(edits, diffs) => void commit(edits, diffs)}
           machines={machines}
           onMenu={setMenu}
@@ -1941,7 +1952,10 @@ export function App() {
         </div>
       ) : null}
       {toast ? (
-        <div class={`toast${toast.error ? " error" : ""}${floating ? " beside-panel" : ""}`} role="status">
+        <div
+          class={`toast${toast.error ? " error" : ""}${floating ? " beside-panel" : ""}${toast.top ? " top" : ""}`}
+          role="status"
+        >
           <span>{toast.text}</span>
           {toast.undo !== null ? (
             <button

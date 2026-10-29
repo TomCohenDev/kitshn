@@ -682,12 +682,13 @@ button.count {
   left: calc((100vw - var(--panel-width) - 24px) / 2);
   max-width: min(640px, calc(100vw - var(--panel-width) - 44px));
 }
-/* A phone's card sheet fills the bottom, so a toast there would sit on the button that made it: it goes on top. */
+/* A toast at the top, under the toolbar: on a phone, and on a wide screen after a press in the lower half. */
+.toast.top {
+  top: calc(var(--bar-bottom, 102px) + 10px);
+  bottom: auto;
+}
 @media (max-width: 720px) {
-  .toast,
   .toast.beside-panel {
-    top: calc(var(--bar-bottom, 102px) + 10px);
-    bottom: auto;
     left: 50%;
     max-width: calc(100vw - 20px);
   }
@@ -700,11 +701,13 @@ button.count {
   background: var(--error-surface);
   color: var(--error-fg);
 }
+/* Plain text over the map: a press goes through it to a card or circle under it. */
 .hint {
   position: fixed;
   bottom: 10px;
   left: 10px;
   z-index: 8;
+  pointer-events: none;
   font-size: 0.7rem;
   color: var(--muted);
   background: var(--surface);

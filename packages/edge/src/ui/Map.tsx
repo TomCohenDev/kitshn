@@ -20,7 +20,7 @@ import { AGENT_TIP, LEVEL_TIPS, MATCH_TIPS, MEMBER_HELP, PASSKEY_TIP, RightStick
 import { MachineRightStickers } from "./MachineRights.tsx";
 import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { KeySticker, PresenceSticker } from "./Machines.tsx";
-import type { MenuTarget } from "./actions.ts";
+import { type MenuTarget, USER_STACK } from "./actions.ts";
 import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import { FRAMED_KINDS, peekable } from "./frames.ts";
@@ -78,9 +78,6 @@ export function stacksOf(state: State): Map<string, Array<string>> {
   for (const [key, ids] of stacks) if (ids.length < 2) stacks.delete(key);
   return stacks;
 }
-
-/** The key prefix of a stack that the owner made, as opposed to a stack by group (K-508). */
-export const USER_STACK = "stack:";
 
 /** K-407 */
 export const ACCESS_TIPS = {

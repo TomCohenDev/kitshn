@@ -756,3 +756,118 @@ it("lets a machine cancel only the queued jobs that it queued itself (K-1612)", 
   );
   expect(state).toEqual({ state: "failed", output: "Cancelled by vps." });
 });
+
+it("takes over a provider site's address with its application first, then ingress, then the kept record, and gives it back (K-1623)", async () => {
+  const { stub, message, card, sql, site } = await setup();
+  await sql("INSERT OR REPLACE INTO places (id, x, y) SELECT ?, x, y FROM places WHERE id = 'vps'", appId);
+  await message("signed", [report([{ ...app, site: { name: "t3-vps", port: 3773 } }])]);
+  await site("t3-vps", true);
+  const calls: Array<string> = [];
+  const api = async (method: string, path: string, body?: unknown) => {
+    const content = isRecordLike(body) && typeof body["content"] === "string" ? ` ${body["content"]}` : "";
+    const ingress =
+      path.includes("cfd_tunnel") && JSON.stringify(body).includes("t3-vps.example.com")
+        ? " with the host"
+        : "";
+    calls.push(`${method} ${path.split("?")[0]}${content}${ingress}`);
+    if (method === "GET" && path.includes("/dns_records?name="))
+      return [
+        {
+          id: "portal-record",
+          type: "CNAME",
+          content: "portal.cfargotunnel.com",
+          proxied: true,
+          comment: "T3",
+        },
+      ];
+    if (method === "GET") return [];
+    return { id: "portal-record" };
+  };
+  const person = (email: string) => ({
+    visitor: { kitshn: false, email, clientId: null, ip: null },
+    actor: { _tag: "person" as const, email },
+  });
+  type Internals = {
+    takeAddress(caller: unknown, id: string, api: unknown): Promise<Response>;
+    giveAddressBack(caller: unknown, id: string, api: unknown): Promise<Response>;
+    syncTunnels(api: unknown, budget: number): Promise<void>;
+    syncDns(api: unknown, budget: number): Promise<void>;
+    handoverOf(id: string): { ingressAt: number | null; switched: boolean } | null;
+    setHandover(id: string, value: unknown): void;
+    desired(now: number): { apps: ReadonlyMap<string, { domain: string }> };
+  };
+  const run = <T>(fn: (instance: Internals) => T) =>
+    runInDurableObject(stub, async (instance) => await fn(instance as unknown as Internals));
+  const state = () =>
+    runInDurableObject(stub, (_, storage) => ({
+      site: storage.storage.sql
+        .exec<{ state: string }>("SELECT state FROM live_sites WHERE id = ?", appId)
+        .one().state,
+      records: storage.storage.sql
+        .exec<{ record_id: string }>("SELECT record_id FROM dns_objects WHERE address = 't3-vps.example.com'")
+        .toArray()
+        .map((row) => row.record_id),
+    }));
+
+  expect(
+    await statusOf(run((instance) => instance.takeAddress(person("someone@example.com"), appId, api))),
+  ).toBe(403);
+  expect(
+    await statusOf(run((instance) => instance.takeAddress(person("owner@example.com"), appId, api))),
+  ).toBe(200);
+  expect(await card()).toMatchObject({ addresses: ["t3-vps.example.com"], provider: { stickers: [] } });
+  // The application covers `<host>/*`, which Cloudflare takes next to the application that holds the host now.
+  expect(
+    await run((instance) => [...instance.desired(Date.now()).apps.values()].map((item) => item.domain)),
+  ).toContain("t3-vps.example.com/*");
+
+  // No ingress before the application exists, and no record before an earlier run gave the tunnel its ingress.
+  await run((instance) => instance.syncTunnels(api, 6));
+  expect(calls.some((call) => call.endsWith("with the host"))).toBe(false);
+  expect(await run((instance) => instance.handoverOf(appId)?.ingressAt)).toBeNull();
+  await sql(
+    "INSERT OR REPLACE INTO access_objects (key, cf_id, aud, body, tried, error) VALUES (?, 'cf-app', 'aud', '{}', '', NULL)",
+    `app:${appId}:t3-vps.example.com`,
+  );
+  await run((instance) => instance.syncTunnels(api, 6));
+  expect(calls.at(-1)?.endsWith("/cfd_tunnel/tunnel-vps/configurations with the host")).toBe(true);
+  expect(await run((instance) => instance.handoverOf(appId)?.ingressAt)).not.toBeNull();
+  // The zone's records path, as kitshn asked for the record of the address.
+  const records = calls
+    .find((call) => call.startsWith("GET") && call.includes("/dns_records"))!
+    .slice("GET ".length);
+  await run((instance) => instance.syncDns(api, 5));
+  expect(calls.some((call) => call.includes("dns_records/"))).toBe(false);
+  await run((instance) =>
+    instance.setHandover(appId, { ...instance.handoverOf(appId), ingressAt: Date.now() - 61_000 }),
+  );
+  await run((instance) => instance.syncDns(api, 5));
+  // The kept record changes in place; kitshn makes no second one and deletes none.
+  expect(calls.filter((call) => call.includes("dns_records") && !call.startsWith("GET"))).toEqual([
+    `PUT ${records}/portal-record tunnel-vps.cfargotunnel.com`,
+  ]);
+  expect(await state()).toEqual({ site: "ok", records: ["portal-record"] });
+  expect(await run((instance) => instance.handoverOf(appId)?.switched)).toBe(true);
+
+  // Giving it back points the record at what served it, forgets the record, and takes the address off the card.
+  calls.length = 0;
+  expect(
+    await statusOf(run((instance) => instance.giveAddressBack(person("owner@example.com"), appId, api))),
+  ).toBe(200);
+  expect(calls).toEqual([`PUT ${records}/portal-record portal.cfargotunnel.com`]);
+  expect(await state()).toEqual({ site: "refused", records: [] });
+  expect(await card()).toMatchObject({ addresses: [], provider: { stickers: [{ text: "address in use" }] } });
+  await sql("DELETE FROM access_objects WHERE key LIKE 'app:p-%'");
+  await sql("DELETE FROM places WHERE id LIKE 'p-%'");
+});
+
+/** A Response from the Durable Object, read whole, so a later eviction does not wait for its body. */
+const statusOf = async (answer: Promise<unknown>) => {
+  const response = await answer;
+  if (!(response instanceof Response)) throw new Error("The Durable Object gave no Response.");
+  await response.text();
+  return response.status;
+};
+
+const isRecordLike = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;

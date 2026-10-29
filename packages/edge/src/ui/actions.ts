@@ -85,6 +85,8 @@ export interface ActionContext {
   readonly previousVersions: ReadonlySet<string>;
   /** K-1127: the cards that an agent key can hand over to a repo. */
   readonly handoverCards: ReadonlySet<string>;
+  /** K-1623: provider cards whose address something else serves, or that kitshn takes over or took over. */
+  readonly addressHolds: Snapshot["addressHolds"];
   /** K-508, K-521: the stacks that show as a column on the map now, by their key (`USER_STACK` and the id). */
   readonly openStacks: ReadonlySet<string>;
   /** K-1129: the folder sites that a folder from the owner can give a new version. */
@@ -115,6 +117,10 @@ export interface ActionHandlers {
   readonly removeApp: (resource: Resource) => void;
   /** K-534: removes a game card with its doors and records, after a confirm. */
   readonly removeGame: (resource: Resource) => void;
+  /** K-1623: moves the address of a provider card from what serves it now to kitshn, after a confirm. */
+  readonly takeAddress: (resource: Resource) => void;
+  /** K-1623: gives a taken address back to what served it before, after a confirm. */
+  readonly giveAddressBack: (resource: Resource) => void;
   /** K-704: forgets the provider of a card on its machine, or with `card` only that dropped card (K-705), with Undo. */
   readonly forgetProvider: (machineId: string, provider: string, card: Resource | null) => void;
   /** K-821: opens the rollback of one card, or of the run that made its current deploy. */
@@ -845,6 +851,27 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
             },
           ]
         : []),
+      // K-1623: the owner takes over an address that something else serves, and gives it back while that waits.
+      ...(ctx.addressHolds[resource.id] === "in-use"
+        ? [
+            {
+              id: "take-address",
+              label: "Take the address…",
+              tip: `Move the address of ${resource.name} from what serves it now to kitshn. kitshn asks first; "Give the address back" undoes it.`,
+              run: () => h.takeAddress(resource),
+            },
+          ]
+        : ctx.addressHolds[resource.id] !== undefined
+          ? [
+              {
+                id: "give-address-back",
+                label: "Give the address back…",
+                tip: `Point ${resource.addresses[0] ?? "the address"} at what served it before, and let kitshn let go of it.`,
+                danger: true as const,
+                run: () => h.giveAddressBack(resource),
+              },
+            ]
+          : []),
       // K-705: a card that its provider dropped goes alone, also while the provider runs.
       ...(resource.provider?.droppedAt !== undefined && resource.machine !== null
         ? [

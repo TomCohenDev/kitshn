@@ -17,7 +17,8 @@ export interface LiveSite {
   /** When the site or its machine was last seen up. */
   readonly lastUp: number;
   /** "checking" until kitshn knows that nothing else uses the address; "refused" when something does. */
-  readonly state: "checking" | "ok" | "refused";
+  /** `handover`: the owner takes over an address that something else serves (K-1623); it ends as `ok`. */
+  readonly state: "checking" | "ok" | "refused" | "handover";
 }
 
 /** K-1104: a site name, one DNS label. */

@@ -159,6 +159,7 @@ import {
   relayHost,
 } from "../core/game.ts";
 import type {
+  AddressHold,
   DeployNote,
   MachineView,
   OrphanWorker,
@@ -861,6 +862,17 @@ export class Kitshn extends DurableObject<Env> {
   private setMeta(key: string, value: string) {
     if (this.meta(key) !== value)
       this.sql("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", key, value);
+  }
+
+  /** K-1623: the record that served a taken address before, kept until the owner gives the address back. */
+  private handoverOf(siteId: string): AddressHandover | null {
+    const value = this.meta(`address-handover:${siteId}`);
+    return value === null ? null : (JSON.parse(value) as AddressHandover);
+  }
+
+  private setHandover(siteId: string, value: AddressHandover | null) {
+    if (value === null) this.sql("DELETE FROM meta WHERE key = ?", `address-handover:${siteId}`);
+    else this.setMeta(`address-handover:${siteId}`, JSON.stringify(value));
   }
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -3245,6 +3257,14 @@ export class Kitshn extends DurableObject<Env> {
       previousVersions: this.sql<{ id: string }>(
         "SELECT id FROM library WHERE previous_size IS NOT NULL",
       ).map((row) => row.id),
+      addressHolds: Object.fromEntries(
+        [...this.liveSites.values()].flatMap((site): Array<[string, AddressHold]> => {
+          if (!this.state.resources.get(site.id)?.provider) return [];
+          if (site.state === "refused") return [[site.id, "in-use"]];
+          if (site.state === "handover") return [[site.id, "taking"]];
+          return site.state === "ok" && this.handoverOf(site.id) ? [[site.id, "taken"]] : [];
+        }),
+      ),
       handoverCards: this.sql<{ id: string }>(
         `SELECT id FROM library WHERE added_by IS NOT NULL AND kind = 'page'
          UNION SELECT card_id AS id FROM agent_sites
@@ -3628,7 +3648,8 @@ export class Kitshn extends DurableObject<Env> {
       // K-705, K-1111: the site's address goes on the card only after its check found it free, so no Access
       // application, DNS record or ingress rule takes a host that something else still serves (K-1623).
       const site = this.liveSites.get(id);
-      const held = card.addresses.filter((address) => site?.state !== "ok" || site.address !== address);
+      const serves = site?.state === "ok" || site?.state === "handover";
+      const held = card.addresses.filter((address) => !serves || site.address !== address);
       if (refusals.length === 0 && held.length === 0) continue;
       const off = new Set([...refusals.map((item) => item.address), ...held]);
       const inUse = site?.state === "refused" && held.includes(site.address);
@@ -3865,6 +3886,24 @@ export class Kitshn extends DurableObject<Env> {
         decodeURIComponent(path.slice("/api/cards/".length, -"/settings".length)),
         await request.json().catch(() => null),
       );
+    if (path.startsWith("/api/cards/") && path.endsWith("/take-address") && request.method === "POST") {
+      const api = this.api();
+      if (!api) return Response.json({ error: "kitshn has no Cloudflare token." }, { status: 503 });
+      return this.takeAddress(
+        caller,
+        decodeURIComponent(path.slice("/api/cards/".length, -"/take-address".length)),
+        api,
+      );
+    }
+    if (path.startsWith("/api/cards/") && path.endsWith("/give-address-back") && request.method === "POST") {
+      const api = this.api();
+      if (!api) return Response.json({ error: "kitshn has no Cloudflare token." }, { status: 503 });
+      return this.giveAddressBack(
+        caller,
+        decodeURIComponent(path.slice("/api/cards/".length, -"/give-address-back".length)),
+        api,
+      );
+    }
     if (path.startsWith("/api/machines/") && path.includes("/providers/") && path.endsWith("/forget")) {
       const [machineId = "", name = ""] = path
         .slice("/api/machines/".length, -"/forget".length)
@@ -5098,6 +5137,85 @@ export class Kitshn extends DurableObject<Env> {
    * K-704: "Forget provider" removes the cards of a provider that does not run, with their shares, as one revision
    * with Undo, and its registration. A running provider would bring its cards back at once, so kitshn refuses it.
    */
+  /**
+   * K-1623: the owner moves the address of a provider site, which something else serves now, to kitshn. kitshn keeps
+   * the one proxied CNAME record of the address, makes its application, then its ingress, and changes the record
+   * only after that (`dnsWork`), so the address always has an application and a route.
+   */
+  private async takeAddress(caller: Caller, id: string, api: Api) {
+    if (!this.isOwner(caller.visitor))
+      return Response.json({ error: "Only the owner takes an address over." }, { status: 403 });
+    const card = this.state.resources.get(id);
+    const site = this.liveSites.get(id);
+    if (!card?.provider || site?.state !== "refused")
+      return Response.json(
+        { error: "Only a provider card whose address is in use takes it over." },
+        { status: 409 },
+      );
+    const records = await api<
+      Array<{ id: string; type: string; content: string; proxied: boolean; comment?: string | null }>
+    >("GET", `${this.zonePath(site.address)}/dns_records?name=${encodeURIComponent(site.address)}`);
+    const domains = await api<Array<unknown>>(
+      "GET",
+      `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/domains?hostname=${encodeURIComponent(site.address)}`,
+    );
+    const [record] = records;
+    if (records.length !== 1 || record?.type !== "CNAME" || !record.proxied || domains.length > 0)
+      return Response.json(
+        {
+          error: `kitshn takes over only an address with one proxied CNAME record and no Worker; ${site.address} has ${records.length} records and ${domains.length} Workers.`,
+        },
+        { status: 409 },
+      );
+    this.ctx.storage.transactionSync(() => {
+      this.sql("UPDATE live_sites SET state = 'handover' WHERE id = ?", id);
+      this.setHandover(id, {
+        recordId: record.id,
+        content: record.content,
+        comment: record.comment ?? null,
+        ingressAt: null,
+        switched: false,
+      });
+      this.putResource(withAddressInUse({ ...card, addresses: [site.address] }, false));
+      this.insertRevision(caller.actor, `Took over ${site.address} for ${card.name}`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    void this.scheduleAlarm();
+    return Response.json({});
+  }
+
+  /** K-1623: the owner gives a taken address back: its record serves what it served before, and kitshn lets go. */
+  private async giveAddressBack(caller: Caller, id: string, api: Api) {
+    if (!this.isOwner(caller.visitor))
+      return Response.json({ error: "Only the owner gives an address back." }, { status: 403 });
+    const card = this.state.resources.get(id);
+    const site = this.liveSites.get(id);
+    const handover = this.handoverOf(id);
+    if (!card?.provider || !site || !handover)
+      return Response.json({ error: "kitshn took over no address of this card." }, { status: 409 });
+    if (handover.switched)
+      await api("PUT", `${this.zonePath(site.address)}/dns_records/${handover.recordId}`, {
+        type: "CNAME",
+        name: site.address,
+        content: handover.content,
+        proxied: true,
+        comment: handover.comment ?? "",
+      });
+    this.ctx.storage.transactionSync(() => {
+      // The record goes back to what it served; kitshn forgets it and never deletes it.
+      this.sql("DELETE FROM dns_objects WHERE address = ?", site.address);
+      this.sql("UPDATE live_sites SET state = 'refused' WHERE id = ?", id);
+      this.setHandover(id, null);
+      this.putResource(withAddressInUse({ ...card, addresses: [] }, true));
+      this.insertRevision(caller.actor, `Gave ${site.address} back from ${card.name}`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    void this.scheduleAlarm();
+    return Response.json({});
+  }
+
   private forgetProvider(caller: Caller, machineId: string, name: string, card: string | null) {
     const machine = this.state.machines.get(machineId);
     if (!machine) return Response.json({ error: `No machine "${machineId}" exists.` }, { status: 404 });
@@ -5559,11 +5677,11 @@ export class Kitshn extends DurableObject<Env> {
     for (const machine of this.state.machines.values()) {
       const row = rows.get(machine.id);
       if (row?.error && row.retry_at > now) continue;
-      const config = tunnelConfig(this.protectedSites(machine.id), accessOf);
+      const config = tunnelConfig(this.ingressSites(machine.id), accessOf);
       const body = JSON.stringify(config);
       if (row?.applied === body && row.error === null) continue;
       if (calls++ >= budget) return;
-      for (const site of this.protectedSites(machine.id)) {
+      for (const site of this.ingressSites(machine.id)) {
         const access = accessOf(site);
         if (access.kind === "pending")
           console.warn(
@@ -5582,6 +5700,10 @@ export class Kitshn extends DurableObject<Env> {
           body,
           body,
         );
+        for (const site of this.ingressSites(machine.id)) {
+          const handover = site.state === "handover" ? this.handoverOf(site.id) : null;
+          if (handover?.ingressAt === null) this.setHandover(site.id, { ...handover, ingressAt: now });
+        }
       } catch (error) {
         this.sql(
           "INSERT OR REPLACE INTO tunnel_objects (machine_id, body, applied, error, retry_at) VALUES (?, ?, ?, ?, ?)",
@@ -5625,7 +5747,7 @@ export class Kitshn extends DurableObject<Env> {
     const stale = [...this.state.machines.values()].some((machine) => {
       const row = tunnels.get(machine.id);
       if (row?.error && row.retry_at > now) return false;
-      return row?.applied !== JSON.stringify(tunnelConfig(this.protectedSites(machine.id), accessOf));
+      return row?.applied !== JSON.stringify(tunnelConfig(this.ingressSites(machine.id), accessOf));
     });
     const checking = [...this.liveSites.values()].some(
       (site) => site.state === "checking" && (this.checkRetryAt.get(site.id) ?? 0) <= Date.now(),
@@ -5691,6 +5813,17 @@ export class Kitshn extends DurableObject<Env> {
         },
       ];
     });
+  }
+
+  /** K-1623: the ingress of a machine: its protected sites, and an address that it takes over once its application exists. */
+  private ingressSites(machineId: string) {
+    const taking = [...this.liveSites.values()].filter(
+      (site) =>
+        site.machineId === machineId &&
+        site.state === "handover" &&
+        Boolean(this.access.get(`app:${site.id}:${site.address}`)?.cfId),
+    );
+    return [...this.protectedSites(machineId), ...taking];
   }
 
   private protectedSites(machineId?: string) {
@@ -5919,6 +6052,18 @@ export class Kitshn extends DurableObject<Env> {
       (machineId) => this.state.machines.get(machineId)?.tunnelId,
       now,
     );
+    // K-1623: a taken address moves its kept record to this tunnel only after an earlier run gave the tunnel its
+    // ingress, so cloudflared has the rule before the first visit comes.
+    for (const site of this.liveSites.values()) {
+      const handover = site.state === "handover" ? this.handoverOf(site.id) : null;
+      const tunnel = this.state.machines.get(site.machineId)?.tunnelId;
+      if (
+        handover?.ingressAt != null &&
+        now - handover.ingressAt >= HANDOVER_INGRESS_MS &&
+        tunnel !== undefined
+      )
+        wanted.set(site.address, { content: `${tunnel}.cfargotunnel.com`, cardId: site.id });
+    }
     const routed = reachableAddresses({
       ingress: this.tunnelRows().map((row) => row.applied),
       records: [],
@@ -5996,16 +6141,27 @@ export class Kitshn extends DurableObject<Env> {
             proxied: true,
             comment: "kitshn live site (K-1104)",
           };
-          const record = row?.record_id
-            ? await api<{ id: string }>("PUT", `${zone}/${row.record_id}`, body)
+          const handover = work.cardId === null ? null : this.handoverOf(work.cardId);
+          const site = work.cardId === null ? undefined : this.liveSites.get(work.cardId);
+          // K-1623: a taken address changes the record that served it, never makes a second one.
+          const recordId = row?.record_id || (site?.state === "handover" ? handover?.recordId : undefined);
+          const record = recordId
+            ? await api<{ id: string }>("PUT", `${zone}/${recordId}`, body)
             : await api<{ id: string }>("POST", zone, body);
-          this.sql(
-            "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error, retry_at, card_id) VALUES (?, ?, ?, NULL, 0, ?)",
-            work.address,
-            record.id,
-            work.content,
-            work.cardId,
-          );
+          this.ctx.storage.transactionSync(() => {
+            this.sql(
+              "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error, retry_at, card_id) VALUES (?, ?, ?, NULL, 0, ?)",
+              work.address,
+              record.id,
+              work.content,
+              work.cardId,
+            );
+            if (site?.state === "handover" && handover) {
+              this.sql("UPDATE live_sites SET state = 'ok' WHERE id = ?", site.id);
+              this.setHandover(site.id, { ...handover, switched: true });
+              this.load();
+            }
+          });
         } else {
           if (row?.record_id) {
             await api("DELETE", `${zone}/${row.record_id}`).catch((error: unknown) =>
@@ -13436,9 +13592,21 @@ function rowAddresses(row: Pick<DeployRow, "address" | "addresses">): Array<stri
 
 /** A failed tunnel, DNS or route write tries again after this time. */
 const RETRY_MS = 5 * 60_000;
-
+/** K-1623: cloudflared takes a new ingress within seconds; a taken address moves its record a minute after. */
+const HANDOVER_INGRESS_MS = 60_000;
 /** K-705: the sticker of a provider card whose address something else serves. */
 const ADDRESS_IN_USE = "address in use";
+
+/** K-1623: the record of a taken address as it was, for "Give the address back". */
+interface AddressHandover {
+  readonly recordId: string;
+  readonly content: string;
+  readonly comment: string | null;
+  /** When the tunnel first got the address's ingress; the record moves `HANDOVER_INGRESS_MS` after. */
+  readonly ingressAt: number | null;
+  /** The record serves kitshn's tunnel now. */
+  readonly switched: boolean;
+}
 
 /** K-705: a provider card with or without the sticker of an address that something else serves. */
 function withAddressInUse(card: Resource, inUse: boolean): Resource {

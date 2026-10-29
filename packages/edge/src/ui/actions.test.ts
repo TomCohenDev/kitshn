@@ -120,6 +120,7 @@ function context(version = "0123456789ab"): ActionContext {
     selected: new Set(),
     previousVersions: new Set(),
     handoverCards: new Set(),
+    addressHolds: {},
     openStacks: new Set(),
     folderSites: new Set(),
     providerCommands: {},

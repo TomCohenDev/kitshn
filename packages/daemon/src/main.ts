@@ -1768,29 +1768,32 @@ function startDoors() {
   doorState.problem = doorsProblem(platform);
   checkListening();
   setInterval(checkListening, 30_000);
-  if (doorState.problem !== null) {
-    if (platform !== "linux") return;
-    // K-2005: a start problem can pass (the network was not up yet, or sudo failed once), so check again.
-    const again = setInterval(() => {
-      doorState.problem = doorsProblem(platform);
-      if (doorState.problem !== null) return;
-      clearInterval(again);
-      applyKeptPlan();
-      report();
-    }, 60_000);
-    return;
-  }
-  applyKeptPlan();
+  if (platform !== "linux") return;
+  if (doorState.problem === null) applyKeptPlan();
+  // K-2005: each minute, a start problem is checked again (the network was not up yet, or sudo failed once), and
+  // the kept plan goes in again, because a \`flush ruleset\` (nftables.service, a reload) can delete the table at
+  // any time and the daemon user cannot list it. The apply is idempotent.
+  setInterval(() => {
+    if (doorState.problem === null) return applyKeptPlan(true);
+    doorState.problem = doorsProblem(platform);
+    if (doorState.problem !== null) return;
+    applyKeptPlan();
+    report();
+  }, 60_000);
 }
 
 /** K-2005: the plan that this daemon wrote last goes into the table again before kitshn sends a new one. */
-function applyKeptPlan() {
+function applyKeptPlan(quiet = false) {
   const plan = keptPlan(doorsFile());
-  if (plan) {
-    const outcome = applyDoors(plan, doorsFile(), Date.now());
-    log(outcome.ok ? `kept ${outcome.output}` : `the kept door plan failed: ${outcome.output}`);
-    if (outcome.ok) syncRelays(plan);
+  if (plan === null) {
+    if (!quiet && existsSync(doorsFile()))
+      log("the kept door plan is not readable; waiting for kitshn's plan");
+    return;
   }
+  const outcome = applyDoors(plan, doorsFile(), Date.now());
+  if (!outcome.ok) log(`the kept door plan failed: ${outcome.output}`);
+  else if (!quiet) log(`kept ${outcome.output}`);
+  if (outcome.ok) syncRelays(plan);
 }
 
 /** K-605: the tunnel state comes from its service manager; a change goes out in the status. */

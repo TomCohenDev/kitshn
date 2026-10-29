@@ -4,9 +4,12 @@
 # kc is a player (10.9.0.2, fd09::2), kh the machine with the game ports, kd a container behind Docker-style DNAT.
 set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-helper=${1:?usage: doors-netns.sh <helper file>}
 work=$(mktemp -d)
-export KITSHN_DOORS_STATE="$work/doors.ports"
+state="$work/doors.ports"
+# A copy of the helper that keeps its state here, never in the machine's /var/lib/kitshn.
+helper="$work/doors"
+sed "s|^state=/var/lib/kitshn/doors.ports$|state=$state|" "${1:?usage: doors-netns.sh <helper file>}" >"$helper"
+grep -q "^state=$state$" "$helper" || { echo "FAIL the helper has no state line to replace"; exit 1; }
 failures=0
 cleanup() {
   for pid in $(cat "$work/pids" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done
@@ -71,11 +74,16 @@ ip netns exec kh nft delete table inet kitshn_doors
 expect open 10.9.0.1 25565 "after a reboot, before boot"
 ip netns exec kh sh "$helper" boot
 expect closed 10.9.0.1 25565 "after a reboot, after boot"
+# A damaged port file: the bad line is skipped, and the good port still loads closed.
+ip netns exec kh nft delete table inet kitshn_doors
+printf 'port tcp 25565\nport tcp 80\ngarbage\n' >"$state"
+ip netns exec kh sh "$helper" boot 2>/dev/null
+expect closed 10.9.0.1 25565 "a damaged port file at boot"
 for bad in 'port tcp 80' 'open4 10.9.0.2;x tcp 25565 60' 'open6 fd09::1 tcp 25565 60' 'port tcp 25565 extra' 'open4 10.9.0.2 tcp 25565 999999'; do
   if printf '%s\n' "$bad" | apply 2>/dev/null; then echo "FAIL took: $bad"; failures=$((failures + 1)); else echo "ok   refused: $bad"; fi
 done
 ip netns exec kh sh "$helper" off
 expect open 10.9.0.1 25565 "off: game port"
-[ ! -e "$KITSHN_DOORS_STATE" ] || { echo "FAIL off left the state file"; failures=$((failures + 1)); }
+[ ! -e "$state" ] || { echo "FAIL off left the state file"; failures=$((failures + 1)); }
 echo "$failures failures"
 [ "$failures" -eq 0 ]

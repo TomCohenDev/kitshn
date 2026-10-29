@@ -44,6 +44,15 @@ export const MAX_DOOR_MS = 7 * 24 * HOUR_MS;
 export const MAX_GAME_PORTS = 4;
 
 /**
+ * K-2001: ports that machines use for kitshn and its neighbours, which a door must never close. Known limit: other
+ * services of the machine are not known here; revisit with the running servers report of K-619 (#175).
+ */
+export const RESERVED_GAME_PORTS: ReadonlyArray<GamePort & { readonly by: string }> = [
+  { port: 41641, proto: "udp", by: "Tailscale" },
+  { port: 3773, proto: "tcp", by: "T3 Code" },
+];
+
+/**
  * K-2001: a game name is one DNS label, 1 to 63 characters, so `mc` works. `join` stays free for the join path of
  * K-2003, and an id-shaped name for the ids of K-1003.
  */
@@ -77,6 +86,8 @@ export function gameError(input: {
   }
   const keys = input.ports.map(portKey);
   if (new Set(keys).size !== keys.length) return "A game card names each port once.";
+  const reserved = RESERVED_GAME_PORTS.find((port) => keys.includes(portKey(port)));
+  if (reserved) return `${portKey(reserved)} belongs to ${reserved.by}, so a game card cannot close it.`;
   if (!Number.isInteger(input.doorMs) || input.doorMs < HOUR_MS || input.doorMs > MAX_DOOR_MS)
     return "A door stays open from 1 hour to 7 days.";
   if (input.srv !== null && !/^[a-z0-9][a-z0-9-]{0,29}$/.test(input.srv))

@@ -4,7 +4,7 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { dirname } from "node:path";
-import { type DoorPlan, doorAddress, portKey } from "@kitshn/edge/game";
+import { type DoorPlan, type GamePort, doorAddress, portKey } from "@kitshn/edge/game";
 
 export const HELPER_PATH = "/usr/local/lib/kitshn/doors";
 export const SUDOERS_PATH = "/etc/sudoers.d/kitshn-doors";
@@ -16,7 +16,8 @@ export const BOOT_UNIT_PATH = "/etc/systemd/system/kitshn-doors.service";
 export const BOOT_UNIT = `[Unit]
 Description=kitshn game doors: game ports start closed (K-2005)
 DefaultDependencies=no
-After=local-fs.target
+# After nftables.service, whose \`flush ruleset\` would delete the table again.
+After=local-fs.target nftables.service
 Before=network-pre.target docker.service
 Wants=network-pre.target
 
@@ -40,8 +41,9 @@ export const HELPER = `#!/bin/sh
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 table=${TABLE}
-# The traffic test (test/doors-netns.sh) sets its own file; sudo's env_reset drops the variable for the daemon user.
-state=\${KITSHN_DOORS_STATE:-${STATE_PATH}}
+# A fixed path: nothing from the caller's environment decides where root writes. The traffic test edits a copy.
+state=${STATE_PATH}
+mode=\${1:-}
 fail() { echo "doors: $*" >&2; exit 2; }
 remove() { if nft list table inet "$table" >/dev/null 2>&1; then nft delete table inet "$table"; fi; }
 case "\${1:-}" in
@@ -72,6 +74,18 @@ ipv6net() {
 ports="" portlines="" open4="" open6="" lines=0
 while IFS=' ' read -r kind a b c d extra; do
   lines=$((lines + 1))
+  # At boot a bad line costs only itself: the good game ports still load, so a damaged file fails closed.
+  if [ "$mode" = boot ]; then
+    [ "$lines" -le 4000 ] || break
+    if [ "$kind" = port ] && proto "$a" && port "$b" && [ -z "\${c:-}" ] && [ -z "\${extra:-}" ]; then
+      ports="$ports\${ports:+, }$a . $b"
+      portlines="\${portlines}port $a $b
+"
+    else
+      echo "doors: skipped line $lines of $state" >&2
+    fi
+    continue
+  fi
   [ "$lines" -le 4000 ] || fail "too many lines"
   [ -z "\${extra:-}" ] || fail "line $lines has too many fields"
   case "$kind" in
@@ -139,7 +153,7 @@ EOF
 nft -c -f "$script"
 nft -f "$script"
 # The game ports alone, for \`boot\`; root's file, so the daemon user cannot change what loads before the network.
-if [ "\${1:-}" = apply ]; then
+if [ "$mode" = apply ]; then
   mkdir -p "\${state%/*}"
   umask 077
   printf '%s' "$portlines" >"$state.new"
@@ -292,11 +306,54 @@ export function applyDoors(plan: DoorPlan, keptFile: string, now: number): { ok:
 
 /** K-2005: the plan that this daemon wrote last, or null. A reboot empties the table; the daemon writes it again. */
 export function keptPlan(keptFile: string): DoorPlan | null {
+  let text: string;
   try {
-    return JSON.parse(readFileSync(keptFile, "utf8")) as DoorPlan;
+    text = readFileSync(keptFile, "utf8");
   } catch {
     return null;
   }
+  try {
+    return planOf(JSON.parse(text));
+  } catch {
+    return null;
+  }
+}
+
+const isGamePort = (value: unknown): value is GamePort =>
+  typeof value === "object" &&
+  value !== null &&
+  Number.isInteger((value as GamePort).port) &&
+  ((value as GamePort).proto === "tcp" || (value as GamePort).proto === "udp");
+
+/**
+ * K-2005: a door plan from JSON, or null when its shape is not this daemon's, such as a plan that an older daemon
+ * kept. The daemon then waits for kitshn's plan instead of stopping.
+ */
+export function planOf(value: unknown): DoorPlan | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { ports, doors, relays } = value as Record<string, unknown>;
+  if (!Array.isArray(ports) || !ports.every(isGamePort) || !Array.isArray(doors)) return null;
+  const doorsOk = doors.every(
+    (door: unknown) =>
+      typeof door === "object" &&
+      door !== null &&
+      typeof (door as { address?: unknown }).address === "string" &&
+      typeof (door as { endsAt?: unknown }).endsAt === "number" &&
+      Array.isArray((door as { ports?: unknown }).ports) &&
+      (door as { ports: Array<unknown> }).ports.every(isGamePort),
+  );
+  const relaysOk =
+    relays === undefined ||
+    (Array.isArray(relays) &&
+      relays.every(
+        (relay: unknown) =>
+          typeof relay === "object" &&
+          relay !== null &&
+          typeof (relay as { hostname?: unknown }).hostname === "string" &&
+          Number.isInteger((relay as { port?: unknown }).port),
+      ));
+  if (!doorsOk || !relaysOk) return null;
+  return { ports, doors, relays: relays ?? [] } as DoorPlan;
 }
 
 /**

@@ -45,6 +45,7 @@ describe("gameError (K-2001, K-2008)", () => {
     [{ srv: "Mine craft" }, /SRV service/],
     [{ srv: "minecraft", ports: [{ port: 19132, proto: "udp" }] }, /needs a TCP port/],
     [{ relay: "vps", ports: [{ port: 19132, proto: "udp" }] }, /one TCP port/],
+    [{ ports: [{ port: 41641, proto: "udp" }] }, /belongs to Tailscale/],
   ])("%o gives %s", (change, error) => {
     const result = gameError({ ...ok, ...change } as typeof ok);
     if (error === null) expect(result).toBeNull();

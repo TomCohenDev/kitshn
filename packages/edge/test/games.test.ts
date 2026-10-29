@@ -106,6 +106,15 @@ it("opens one door per family for a person of the card, and closes it when the p
     ).decision,
   ).toBe("deny");
 
+  // A private address never opens a door.
+  const refused = await game(stub, {
+    name: "mc",
+    action: "open",
+    visitor: visitor("friend@example.com", "10.1.2.3"),
+    addresses: [],
+  });
+  expect(refused.error).toMatch(/private/);
+
   // The seen IPv4 address wins its family; the browser adds the IPv6 one, which opens its /64.
   const opened = await game(stub, {
     name: "mc",
@@ -118,15 +127,6 @@ it("opens one door per family for a person of the card, and closes it when the p
   const [first] = await doorJobs(stub);
   expect(first?.plan.ports).toEqual([{ port: 25565, proto: "tcp" }]);
   expect(first?.plan.doors.map((door) => door.address).sort()).toEqual(["2001:db8:1:2::/64", "203.0.113.9"]);
-
-  // A private address never opens a door.
-  const refused = await game(stub, {
-    name: "mc",
-    action: "open",
-    visitor: visitor("friend@example.com", "10.1.2.3"),
-    addresses: [],
-  });
-  expect(refused.error).toMatch(/private/);
 
   // The owner takes the friend out of the circle: the doors close at once, with a new plan.
   const edited = await send("/api/apply", {
@@ -186,4 +186,42 @@ it("keeps a door when its circle checks the address, and refuses a second open w
   });
   expect(again.doors.map((door) => door.address)).toEqual(["203.0.113.9"]);
   expect(again.error).toMatch(/Wait a moment/);
+});
+
+it("counts End now as a door change, so open and close in a loop wait 10 s (K-2004)", async () => {
+  stubAccessCerts();
+  const stub = await setup();
+  const friend = visitor("friend@example.com", "203.0.113.9");
+  expect((await game(stub, { name: "mc", action: "open", visitor: friend })).error).toBeNull();
+  const closed = await game(stub, { name: "mc", action: "close", visitor: friend, address: "203.0.113.9" });
+  expect(closed.error).toMatch(/Wait a moment/);
+  expect(closed.doors.map((door) => door.address)).toEqual(["203.0.113.9"]);
+});
+
+it("removes the game cards, doors and wanted records of a removed machine (K-2001, K-2007)", async () => {
+  stubAccessCerts();
+  const stub = await setup();
+  await game(stub, { name: "mc", action: "open", visitor: visitor("friend@example.com", "203.0.113.9") });
+  const left = await runInDurableObject(stub, async (instance) => {
+    const kitshn = instance as unknown as {
+      api: () => unknown;
+      removeMachine: (caller: unknown, id: string) => Promise<Response>;
+      sql: (query: string) => Array<unknown>;
+      state: { resources: Map<string, unknown> };
+    };
+    // The Cloudflare side of a removal is not what this test checks.
+    kitshn.api = () => async () => ({});
+    const caller = {
+      actor: { _tag: "person", email: "owner@example.com" },
+      visitor: { email: "owner@example.com", clientId: null, ip: null },
+    };
+    const removed = await kitshn.removeMachine(caller, "vps");
+    return {
+      status: removed.status,
+      games: kitshn.sql("SELECT * FROM games").length,
+      doors: kitshn.sql("SELECT * FROM doors").length,
+      card: kitshn.state.resources.has("game1"),
+    };
+  });
+  expect(left).toEqual({ status: 200, games: 0, doors: 0, card: false });
 });

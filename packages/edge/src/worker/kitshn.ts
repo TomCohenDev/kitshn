@@ -770,6 +770,8 @@ export class Kitshn extends DurableObject<Env> {
   private checkingRepos = false;
   /** K-606: presence is stored on change; status and the latest sample live on the socket. */
   private presence = new Map<string, { online: boolean; lastSeen: number; os: MachineOs | null }>();
+  /** K-2004: the last open or close of a door, by card and person. */
+  private doorTurns = new Map<string, number>();
   /**
    * K-1113: the hash of each stored card icon, the bytes stay in SQLite until a map asks. K-1114: when each icon
    * last changed, so a daemon changes one at most once an hour. Read on first use (K-1302).
@@ -4254,14 +4256,10 @@ export class Kitshn extends DurableObject<Env> {
       };
       saveMachine(socket, { ...attachment, status });
       this.updateGameAddresses(machine.id, status.publicAddresses);
-      // K-2005: a daemon that connects gets its door plan again; the kernel may have lost the table in a reboot.
+      // K-2005: a daemon that connects gets its door plan, also an empty one: the last card may have gone while it was
+      // offline for longer than a plan job waits, and only an empty plan removes its table and its boot ports.
       if (attachment.status === null && status.capabilities?.includes("doors"))
-        if (this.gameRows().some((row) => doorMachine(gameOf(row)) === machine.id))
-          this.queueDoors(
-            machine.id,
-            { _tag: "kitshn", reason: "door plan on connect (K-2005)" },
-            Date.now(),
-          );
+        this.queueDoors(machine.id, { _tag: "kitshn", reason: "door plan on connect (K-2005)" }, Date.now());
       this.setMachineOs(machine.id, machineOs(status.os));
       // An update job waits for the status; it can go now.
       if (this.deliverJobs() > 0) this.broadcast();
@@ -11141,6 +11139,17 @@ export class Kitshn extends DurableObject<Env> {
     if (relay === machineId) return refuse("A machine does not relay its own game.");
     const problem = this.doorsProblem(relay ?? machineId);
     if (problem) return refuse(problem, 409);
+    // K-2001: a door must not close a port that a kitshn site of the door machine serves.
+    const site = [...this.liveSites.values()].find(
+      (item) =>
+        item.machineId === (relay ?? machineId) &&
+        game.ports.some((port) => port.proto === "tcp" && item.target === `http://localhost:${port.port}`),
+    );
+    if (site)
+      return refuse(
+        `${site.address} serves from ${site.target} on this machine, so a game card cannot close it.`,
+        409,
+      );
     const host = `${name}.${this.env.KITSHN_ZONE}`;
     const addresses = relay ? [host, relayHost(name, this.env.KITSHN_ZONE)] : [host];
     const taken = (address: string) =>
@@ -11262,7 +11271,18 @@ export class Kitshn extends DurableObject<Env> {
     const machine = doorMachine(game);
     const actor: Actor = { _tag: "person", email: person };
     let error: string | null = null;
-    if (input.action === "open") {
+    // K-2004: one open or close per person and card in 10 s, so a loop cannot fill History or the machine's jobs.
+    // In memory, as the limits of K-1908: a restart of the Durable Object only resets the wait.
+    const turn = `${game.card} ${person}`;
+    const waiting =
+      (input.action === "open" || input.action === "close") && (this.doorTurns.get(turn) ?? 0) > now - 10_000;
+    if (waiting) error = "You changed a door a few seconds ago. Wait a moment.";
+    const tookTurn = () => {
+      this.doorTurns.set(turn, now);
+      if (this.doorTurns.size > 1000)
+        for (const [key, at] of this.doorTurns) if (at <= now - 10_000) this.doorTurns.delete(key);
+    };
+    if (input.action === "open" && !waiting) {
       // K-2004: the address that kitshn sees is the door; the browser may add only the other family to it.
       const seen = doorAddress(visitor.ip ?? "");
       const other = (input.addresses ?? [])
@@ -11270,13 +11290,8 @@ export class Kitshn extends DurableObject<Env> {
         .find((door) => !("error" in door) && !("error" in seen) && door.family !== seen.family);
       const addresses =
         "error" in seen ? [] : [seen.address, ...(other && !("error" in other) ? [other.address] : [])];
-      const mine = this.openDoors(now, game.card).filter((door) => door.person === person);
       error =
         ("error" in seen ? `kitshn sees your address as ${visitor.ip ?? "none"}: ${seen.error}` : null) ??
-        // A loop of opens would fill History and the job queue of the machine.
-        (mine.some((door) => door.openedAt > now - 10_000)
-          ? "You opened a door a few seconds ago. Wait a moment."
-          : null) ??
         // An offline machine gets the plan when it connects; an online one must hold doors now.
         (this.state.machines.has(machine) && !this.machineView(this.state.machines.get(machine)!).online
           ? null
@@ -11310,16 +11325,18 @@ export class Kitshn extends DurableObject<Env> {
           );
         });
         this.queueDoors(machine, actor, now);
+        tookTurn();
         this.load();
         this.broadcast();
       }
     }
-    if (input.action === "close") {
+    if (input.action === "close" && !waiting) {
       const door = this.openDoors(now, game.card).find(
         (item) => item.person === person && item.address === input.address,
       );
       if (door) {
         this.closeDoors(actor, [door], "End now", now);
+        tookTurn();
         this.load();
         this.broadcast();
       } else error = "You have no open door for this address.";

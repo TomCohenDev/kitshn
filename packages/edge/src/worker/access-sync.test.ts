@@ -46,18 +46,27 @@ function start(): State {
 function fakeCloudflare(existing: { policies?: Array<object>; apps?: Array<object> } = {}) {
   const calls: Array<string> = [];
   let next = 0;
-  // What Cloudflare holds: each object that a POST or PUT wrote, which a GET of that one object reads back.
+  // What Cloudflare holds: each object that a POST or PUT wrote, which a GET of that one object and the lists read back.
   const objects = new Map<string, object>();
+  const kinds = new Map<string, "policies" | "apps">();
+  const listed = (kind: "policies" | "apps") =>
+    [...objects.entries()].filter(([id]) => kinds.get(id) === kind).map(([, item]) => item);
   const api: Api = async <T>(method: string, path: string, body?: unknown) => {
     calls.push(`${method} ${path.replace("/accounts/a/access", "")}`);
     const last = path.split("/").pop() ?? "";
     if (method === "GET" && objects.has(last)) return objects.get(last) as T;
     if (method === "GET")
-      return (path.includes("/policies") ? (existing.policies ?? []) : (existing.apps ?? [])) as T;
+      return (
+        path.includes("/policies")
+          ? [...(existing.policies ?? []), ...listed("policies")]
+          : [...(existing.apps ?? []), ...listed("apps")]
+      ) as T;
     const id = method === "PUT" ? last : `id${++next}`;
     const result = path.includes("/apps") ? { id, aud: `aud-${id}` } : { id };
-    if (method === "PUT" || (method === "POST" && !path.endsWith("/revoke_tokens")))
+    if (method === "PUT" || (method === "POST" && !path.endsWith("/revoke_tokens"))) {
       objects.set(id, { ...(body as object), ...result });
+      kinds.set(id, path.includes("/apps") ? "apps" : "policies");
+    }
     return result as T;
   };
   const rows = new Map<string, AccessRow>();
@@ -184,7 +193,7 @@ describe("Access sync (K-406, K-408)", () => {
     expect(hasAccessWork(desired, cf.rows)).toBe(false);
   });
 
-  it("tries a write again 5 minutes after Cloudflare gave no clear answer, and shows it as still applying", async () => {
+  it("tries a write again 5 minutes after Cloudflare gave no clear answer, and shows it as retrying", async () => {
     vi.useFakeTimers({ now: 1_000_000, toFake: ["Date"] });
     try {
       const cf = fakeCloudflare();
@@ -245,6 +254,83 @@ describe("Access sync (K-406, K-408)", () => {
       vi.setSystemTime(1_000_000 + RETRY_AFTER_MS);
       await syncAccess(narrow, cf.store, landsThen504, "a");
       expect(writes.at(-1)).toEqual({ path: expect.any(String), policies: 0 });
+      expect(cf.calls.some((call) => call.endsWith("/revoke_tokens"))).toBe(true);
+      expect(accessStates(narrow, cf.rows)["kitshn-admin"]).toEqual({ state: "applied" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a write and ends the sessions when the revoke after a read-back fails (K-409)", async () => {
+    vi.useFakeTimers({ now: 1_000_000, toFake: ["Date"] });
+    try {
+      const cf = fakeCloudflare();
+      const state = start();
+      const narrow = desiredAccess(
+        applyChanges(
+          state,
+          resolveEdits(state, [{ _tag: "place", id: "kitshn-admin", after: { x: 9000, y: 9000 } }]),
+        ),
+        0,
+      );
+      await syncAccess(narrow, cf.store, cf.api, "a");
+      // The owner widens the card; Cloudflare stores the write but answers 504.
+      let puts = 0;
+      let revokes = 0;
+      const flaky: Api = async <T>(method: Parameters<Api>[0], path: string, body?: unknown) => {
+        if (path.endsWith("/revoke_tokens") && revokes++ === 0)
+          throw new CloudflareError(500, `POST ${path} failed (500): error`);
+        const answer = await cf.api<T>(method, path, body);
+        if (method === "PUT" && path.includes("/apps/") && puts++ === 0)
+          throw new CloudflareError(504, `PUT ${path} failed (504): error code: 504`);
+        return answer;
+      };
+      await syncAccess(desiredAccess(state, 0), cf.store, flaky, "a");
+      // The owner moves it back: kitshn reads back the wide body, writes the narrow one, and the revoke fails.
+      vi.setSystemTime(1_000_000 + RETRY_AFTER_MS);
+      await syncAccess(narrow, cf.store, flaky, "a");
+      expect(revokes).toBe(1);
+      expect(accessStates(narrow, cf.rows)["kitshn-admin"]).toMatchObject({ state: "failed" });
+      // The next try writes again and ends the sessions, though Cloudflare already serves the narrow body.
+      vi.setSystemTime(1_000_000 + 2 * 60 * 60_000);
+      cf.calls.length = 0;
+      await syncAccess(narrow, cf.store, flaky, "a");
+      expect(cf.calls.filter((call) => !call.startsWith("GET"))).toEqual([
+        expect.stringMatching(/^PUT \/apps\//),
+        expect.stringMatching(/^POST \/apps\/.*\/revoke_tokens$/),
+      ]);
+      expect(accessStates(narrow, cf.rows)["kitshn-admin"]).toEqual({ state: "applied" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends the sessions of an application whose create landed after a 504 (K-409)", async () => {
+    vi.useFakeTimers({ now: 1_000_000, toFake: ["Date"] });
+    try {
+      const cf = fakeCloudflare();
+      const state = start();
+      // The create of the wide application lands, but Cloudflare answers 504.
+      let posts = 0;
+      const flaky: Api = async <T>(method: Parameters<Api>[0], path: string, body?: unknown) => {
+        const answer = await cf.api<T>(method, path, body);
+        if (method === "POST" && path.endsWith("/apps") && posts++ === 0)
+          throw new CloudflareError(504, `POST ${path} failed (504): error code: 504`);
+        return answer;
+      };
+      await syncAccess(desiredAccess(state, 0), cf.store, flaky, "a");
+      expect(cf.rows.get("app:kitshn-admin:kit.example.com")).toMatchObject({ cfId: "", body: "" });
+      // The owner takes the card out of every circle: kitshn finds the application by name and ends its sessions.
+      const narrow = desiredAccess(
+        applyChanges(
+          state,
+          resolveEdits(state, [{ _tag: "place", id: "kitshn-admin", after: { x: 9000, y: 9000 } }]),
+        ),
+        0,
+      );
+      vi.setSystemTime(1_000_000 + RETRY_AFTER_MS);
+      cf.calls.length = 0;
+      await syncAccess(narrow, cf.store, flaky, "a");
       expect(cf.calls.some((call) => call.endsWith("/revoke_tokens"))).toBe(true);
       expect(accessStates(narrow, cf.rows)["kitshn-admin"]).toEqual({ state: "applied" });
     } finally {
@@ -578,7 +664,7 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
     ]);
   });
 
-  it("keeps a reachable app also after the daily compare cleared its body (K-410)", async () => {
+  it("keeps a reachable app also after an unclear answer left its body unknown (K-410)", async () => {
     const cf = fakeCloudflare();
     const state = start();
     await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");

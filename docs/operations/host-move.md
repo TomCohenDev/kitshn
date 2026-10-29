@@ -7,7 +7,7 @@ Passkeys survive the move, because they belong to the Access team domain (K-113)
 ## Before
 
 1. Merge and deploy the section 17 pull request.
-2. Stop the KitSHn 1 redirect of `kitshn.<zone>` to `kitshn-legacy.<zone>`: remove it from the `kitshn-meta` Caddyfile and remove its DNS record.
+2. Done on 2026-10-29: the KitSHn 1 redirect of `kitshn.<zone>` to `kitshn-legacy.<zone>` and its DNS record are gone with `kitshn-meta`.
 3. Check that `https://kitshn.<zone>` no longer answers.
 
 ## Move

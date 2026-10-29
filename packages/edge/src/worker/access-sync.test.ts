@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { desiredAccess } from "../core/access.ts";
 import { applyChanges, resolveEdits } from "../core/changes.ts";
-import type { Circle, State } from "../core/model.ts";
+import type { Circle, Resource, State } from "../core/model.ts";
 import { seed } from "../core/seed.ts";
 import { CloudflareError } from "./cloudflare.ts";
 import {
@@ -542,6 +542,119 @@ describe("Access sync (K-406, K-408)", () => {
       `PUT /policies/${cf.rows.get("policy:owner:login-passkey")!.cfId}`,
       `PUT /policies/${cf.rows.get("policy:enrollment")!.cfId}`,
     ]);
+  });
+
+  it("ends the sessions of every application of a narrowed policy at once (K-409)", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    const owner = state.circles.get("owner")!;
+    const card: Resource = {
+      id: "two",
+      kind: "site.static",
+      name: "two",
+      addresses: ["two.example.com"],
+      status: "running",
+      group: null,
+      machine: null,
+    };
+    const both: State = {
+      ...state,
+      resources: new Map([...state.resources, ["two", card]]),
+      places: new Map([...state.places, ["two", state.places.get("kitshn-admin")!]]),
+    };
+    const domain = { _tag: "domain" as const, domain: "x.com" };
+    const withX = applyChanges(
+      both,
+      resolveEdits(both, [
+        { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, domain] } },
+      ]),
+    );
+    await syncAccess(desiredAccess(withX, 0), cf.store, cf.api, "a");
+    let inFlight = 0;
+    let most = 0;
+    const counting: Api = async <T>(method: Parameters<Api>[0], path: string, body?: unknown) => {
+      if (!path.endsWith("/revoke_tokens")) return cf.api<T>(method, path, body);
+      most = Math.max(most, ++inFlight);
+      await Promise.resolve();
+      inFlight--;
+      return cf.api<T>(method, path, body);
+    };
+    cf.calls.length = 0;
+    await syncAccess(desiredAccess(both, 0), cf.store, counting, "a");
+    expect(cf.calls.filter((call) => call.endsWith("/revoke_tokens"))).toHaveLength(2);
+    expect(most).toBe(2);
+  });
+
+  it("ends the sessions of more applications than one run reaches over several runs, each once (K-406, K-409)", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    const owner = state.circles.get("owner")!;
+    const cards: Array<Resource> = ["two", "three"].map((id) => ({
+      id,
+      kind: "site.static",
+      name: id,
+      addresses: [`${id}.example.com`],
+      status: "running",
+      group: null,
+      machine: null,
+    }));
+    const all: State = {
+      ...state,
+      resources: new Map([...state.resources, ...cards.map((card) => [card.id, card] as const)]),
+      places: new Map([
+        ...state.places,
+        ...cards.map((card) => [card.id, state.places.get("kitshn-admin")!] as const),
+      ]),
+    };
+    const domain = { _tag: "domain" as const, domain: "x.com" };
+    const withX = applyChanges(
+      all,
+      resolveEdits(all, [
+        { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, domain] } },
+      ]),
+    );
+    await syncAccess(desiredAccess(withX, 0), cf.store, cf.api, "a");
+    cf.calls.length = 0;
+    // Each run has room for the policy write and one revoke; the circle's other policies take later runs.
+    const desired = desiredAccess(all, 0);
+    let runs = 0;
+    while (!(await syncAccess(desired, cf.store, cf.api, "a", 2)) && runs < 10) runs++;
+    expect(runs).toBeLessThan(10);
+    const revokes = cf.calls.filter((call) => call.endsWith("/revoke_tokens"));
+    expect(new Set(revokes).size).toBe(3);
+    expect(revokes).toHaveLength(3);
+    expect(cf.rows.get("policy:owner:people")).toMatchObject({
+      body: cf.rows.get("policy:owner:people")!.tried,
+    });
+  });
+
+  it("writes the application before it ends sessions and deletes the policy that it dropped (K-409, K-410)", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    const owner = state.circles.get("owner")!;
+    const b: Circle = { ...owner, id: "b", name: "B", needsPasskey: false, x: 5000, y: 5000, r: 100 };
+    const inB = applyChanges(
+      state,
+      resolveEdits(state, [
+        { _tag: "circle", id: "b", after: b },
+        { _tag: "place", id: "kitshn-admin", after: { x: 5000, y: 5000 } },
+      ]),
+    );
+    await syncAccess(desiredAccess(inB, 0), cf.store, cf.api, "a");
+    const app = cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId;
+    const policy = cf.rows.get("policy:b:people")!.cfId;
+    const out = applyChanges(
+      inB,
+      resolveEdits(inB, [{ _tag: "place", id: "kitshn-admin", after: { x: 9000, y: 9000 } }]),
+    );
+    cf.calls.length = 0;
+    await syncAccess(desiredAccess(out, 0), cf.store, cf.api, "a");
+    const write = cf.calls.indexOf(`PUT /apps/${app}`);
+    expect(write).toBeGreaterThanOrEqual(0);
+    expect(cf.calls.indexOf(`POST /apps/${app}/revoke_tokens`)).toBeGreaterThan(write);
+    expect(cf.calls.indexOf(`DELETE /policies/${policy}`)).toBeGreaterThan(write);
+    expect(cf.rows.has("policy:b:people")).toBe(false);
+    expect(cf.rows.get("app:kitshn-admin:kit.example.com")).toMatchObject({ error: null });
   });
 
   it.each([

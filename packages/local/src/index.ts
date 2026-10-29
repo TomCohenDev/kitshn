@@ -2,6 +2,8 @@
 // its answer the same id. An event carries no id (K-703): the result of an ask that waited (K-1722).
 import { Schema } from "effect";
 import {
+  CardSettingValues,
+  DesiredParts,
   GrantTables,
   PROVIDER_LIMITS,
   ProviderCommand,
@@ -146,6 +148,18 @@ export const Request = Schema.Union([
   }),
   /** K-704: `kitshn provider forget <name>`: the daemon drops a provider that does not run, so it no longer reports it. */
   Schema.Struct({ id: Id, type: Schema.Literal("provider-forget"), provider: ProviderName }),
+  /**
+   * K-709: a provider sets the part of a desired state of this machine, or the shared part. kitshn stores it and pushes
+   * it to every machine of the provider. Only the connection that registered the provider sends it.
+   */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("desired-set"),
+    provider: ProviderName,
+    kind: Schema.String.check(Schema.isMaxLength(64)),
+    part: Schema.Literals(["shared", "machine"]),
+    value: Schema.Unknown,
+  }),
   /** K-707: the result of a `command` event. */
   Schema.Struct({
     id: Id,
@@ -239,7 +253,21 @@ export const Answer = Schema.Union([
     type: Schema.Literal("register"),
     machineId: Schema.String,
     grants: GrantTables,
+    /** K-709, K-1608: the saved desired state of each kind of the provider, from before kitshn answers. */
+    desired: Schema.Record(Schema.String, DesiredParts),
+    /** K-717: the saved value of each card setting, by resource id and setting id. */
+    settings: CardSettingValues,
   }),
+  Schema.Struct({ id: Id, type: Schema.Literal("desired-set") }),
+  /** K-709: an event: the desired state of one kind, on each change. */
+  Schema.Struct({
+    type: Schema.Literal("desired"),
+    provider: Schema.String,
+    kind: Schema.String,
+    state: DesiredParts,
+  }),
+  /** K-717: an event: the card settings of the provider's cards, on each change. */
+  Schema.Struct({ type: Schema.Literal("settings"), provider: Schema.String, values: CardSettingValues }),
   Schema.Struct({ id: Id, type: Schema.Literal("upsert") }),
   Schema.Struct({ id: Id, type: Schema.Literal("remove") }),
   Schema.Struct({ id: Id, type: Schema.Literal("command-result") }),
@@ -256,6 +284,8 @@ export const Answer = Schema.Union([
     commandId: Schema.Int,
     command: Schema.String,
     resource: Schema.NullOr(Schema.String),
+    /** K-1625: the row of a list that the command is for. */
+    row: Schema.optionalKey(Schema.String),
   }),
   /** The id is null when the line has no valid id. */
   Schema.Struct({ id: Schema.NullOr(Id), type: Schema.Literal("error"), error: Schema.String }),

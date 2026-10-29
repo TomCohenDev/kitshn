@@ -1,7 +1,7 @@
 import type { LogAnswer, LogLine, LogSearch } from "./logs.ts";
 import type { BackupReport } from "./backups.ts";
 import type { MachineRight } from "./model.ts";
-import type { GrantTables, ProviderReport } from "@kitshn/local";
+import type { CardSettingValues, DesiredParts, GrantTables, ProviderReport } from "@kitshn/local";
 import type { ServerReport } from "./sites.ts";
 import type { DoorPlan } from "./game.ts";
 /** A joined machine (K-602). Its resource card has the same id and the kind `machine`. */
@@ -163,6 +163,8 @@ export type Command =
       readonly provider: string;
       readonly command: string;
       readonly resource: string | null;
+      /** K-1625: the row of a list that the command is for. */
+      readonly row?: string;
     }
   /** K-1820: back up as the run `before` first, then write the run `run` back. Only kitshn makes this job. */
   /** K-2005: the game ports of this machine and their open doors; the whole list each time. Only kitshn makes it. */
@@ -262,7 +264,19 @@ export type DaemonMessage =
   /** K-1710: an ask of a local agent; kitshn answers with `askAnswer` and the same `requestId`. */
   | { readonly type: "ask"; readonly requestId: string; readonly ask: AskWire }
   /** K-704: every provider of the machine with its kinds, commands and resources, on connect and on each change. */
-  | { readonly type: "providers"; readonly providers: ReadonlyArray<ProviderReport> };
+  | { readonly type: "providers"; readonly providers: ReadonlyArray<ProviderReport> }
+  /** K-709: a provider set a part of a desired state; kitshn stores it and pushes it to every machine. */
+  | {
+      readonly type: "desiredSet";
+      /** kitshn answers with `requestAnswer` and this id. */
+      readonly requestId: string;
+      readonly provider: string;
+      readonly kind: string;
+      readonly part: "shared" | "machine";
+      readonly value: unknown;
+    }
+  /** K-1608: the daemon saved the push with this key and hash and gave it to its provider. */
+  | { readonly type: "applied"; readonly key: string; readonly hash: string };
 
 /** Messages from kitshn to a daemon. */
 export type ServerToDaemon =
@@ -279,7 +293,29 @@ export type ServerToDaemon =
   /** K-704: the owner forgot this provider on the map; the daemon drops it unless a connection holds it. */
   | { readonly type: "forgetProvider"; readonly provider: string }
   /** K-706: the grant table of each resource of one provider, on connect and on each change. */
-  | { readonly type: "grants"; readonly provider: string; readonly tables: GrantTables }
+  | {
+      readonly type: "grants";
+      readonly provider: string;
+      readonly tables: GrantTables;
+      readonly hash: string;
+    }
+  /** The answer to a request of the daemon that names a `requestId`: null, or why kitshn refused. */
+  | { readonly type: "requestAnswer"; readonly requestId: string; readonly error: string | null }
+  /** K-709: the shared part and this machine's part of one desired state. */
+  | {
+      readonly type: "desired";
+      readonly provider: string;
+      readonly kind: string;
+      readonly state: DesiredParts;
+      readonly hash: string;
+    }
+  /** K-717: the card settings of one provider's cards on this machine. */
+  | {
+      readonly type: "settings";
+      readonly provider: string;
+      readonly values: CardSettingValues;
+      readonly hash: string;
+    }
   /** K-1762: the daemon drops its kept GitHub tokens of one repo, or all with null, because kitshn revoked them. */
   | { readonly type: "dropTokens"; readonly repo: string | null }
   | {

@@ -125,6 +125,8 @@ import { RUNNING_FORMAT, VOLUME_FORMAT, idleVolumes, volumeRemoveRefusal } from 
 import { keepBuild, keptId, keptTag, rollbackOverride, serviceImages, staleTags } from "./keep.ts";
 import { TokenCache } from "./tokens.ts";
 import { Providers, parseSaved } from "./providers.ts";
+import { desiredProblem } from "@kitshn/local";
+import { pushKey } from "@kitshn/local";
 import { listenerUid, portOf } from "./listener.ts";
 import { MAX_FORWARDS, forwardTarget, passedHeaders, readBounded } from "./forward.ts";
 import {
@@ -2240,13 +2242,27 @@ function connect(config: JoinSecrets) {
         accepted(`with the key ${message.fingerprint}`);
       } else if (message.type === "rotateKey") {
         void rotateKey(ws);
-      } else if (message.type === "grants") {
-        // K-706: the provider gets each change at once, and the saved copy after a restart (K-1608).
-        if (registry().setGrants(message.provider, message.tables)) {
+      } else if (message.type === "grants" || message.type === "desired" || message.type === "settings") {
+        // K-1608: the daemon saves each push, gives it to the provider, and tells kitshn that it applied it.
+        const key =
+          message.type === "grants"
+            ? pushKey.grants(message.provider)
+            : message.type === "settings"
+              ? pushKey.settings(message.provider)
+              : pushKey.desired(message.provider, message.kind);
+        const { hash: _hash, ...event } = message;
+        const value =
+          message.type === "grants"
+            ? message.tables
+            : message.type === "settings"
+              ? message.values
+              : message.state;
+        if (registry().setPushed(key, value)) {
           const connection = registry().connectionOf(message.provider);
           const emit = connection === null ? undefined : providerEmitters.get(connection);
-          emit?.({ type: "grants", provider: message.provider, tables: message.tables });
+          emit?.(event);
         }
+        sendOn(ws, { type: "applied", key, hash: message.hash });
       } else if (message.type === "forgetProvider") {
         // K-704: a provider that a connection holds runs, so the forget does not apply to it.
         if (
@@ -2254,6 +2270,9 @@ function connect(config: JoinSecrets) {
           registry().forget(message.provider) === null
         )
           sendProviders();
+      } else if (message.type === "requestAnswer") {
+        answerWaiters.get(message.requestId)?.(message.error);
+        answerWaiters.delete(message.requestId);
       } else if (message.type === "dropTokens") {
         keptTokens.drop(message.repo);
       } else if (message.type === "logs") {
@@ -2317,6 +2336,11 @@ function connect(config: JoinSecrets) {
       // K-1805: kitshn forgets the tails of a closed connection.
       if (socket === ws) stopTails();
       if (socket === ws) socket = null;
+      // K-709: a request in flight gets no answer from a closed connection.
+      for (const [requestId, settle] of answerWaiters) {
+        settle(`the connection to kitshn closed (${event.code}) before its answer.`);
+        answerWaiters.delete(requestId);
+      }
       // K-1716: an ask in flight gets no result from a closed connection; its proposal stays.
       for (const [requestId, settle] of askWaiters) {
         settle({
@@ -2622,6 +2646,9 @@ function readMachineFile(): unknown {
   }
 }
 
+/** The requests to kitshn that wait for its `answer`, by request id: null, or why kitshn refused. */
+const answerWaiters = new Map<string, (error: string | null) => void>();
+
 /** K-704: the providers of this machine, saved in `providers.json`. */
 const providersFile = () => join(paths.data, "providers.json");
 let providerRegistry: Providers | null = null;
@@ -2735,6 +2762,7 @@ async function runProviderCommand(
       commandId: jobId,
       command: command.command,
       resource: command.resource,
+      ...(command.row === undefined ? {} : { row: command.row }),
     });
   });
 }
@@ -2773,6 +2801,29 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
     waiter.settle({ ok: request.ok, exitCode: request.ok ? 0 : 1, output: request.output });
     return { id, type: "command-result" };
   }
+  if (request.type === "desired-set") {
+    // K-709: only the connection that registered the provider, and only over a signed connection to kitshn.
+    if (registry().connectionOf(request.provider) !== caller.connection)
+      throw new Error(`register ${request.provider} on this connection first (K-704).`);
+    const ws = socket;
+    if (ws === null || challenge === null)
+      throw new Error("the daemon has no signed connection to kitshn, so kitshn cannot store the state now.");
+    const kinds =
+      registry()
+        .reports()
+        .find((report) => report.name === request.provider)?.kinds ?? [];
+    const problem = desiredProblem(kinds, request.kind, request.value);
+    if (problem) throw new Error(problem);
+    // kitshn checks again when it writes; the provider gets that answer, not only the daemon's.
+    const { id: _id, type: _type, ...change } = request;
+    const requestId = crypto.randomUUID();
+    const error = await new Promise<string | null>((resolve) => {
+      answerWaiters.set(requestId, resolve);
+      sendOn(ws, { type: "desiredSet", requestId, ...change });
+    });
+    if (error !== null) throw new Error(error);
+    return { id, type: "desired-set" };
+  }
   if (request.type === "provider-forget") {
     const problem = registry().forget(request.provider);
     if (problem) throw new Error(problem);
@@ -2797,7 +2848,7 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
       id,
       type: "register",
       machineId: joined.machineId,
-      grants: registry().grantsOf(request.provider),
+      ...registry().savedFor(request.provider),
     };
   }
   if (request.type === "attester-set") return setAttester(request, caller);

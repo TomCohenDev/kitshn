@@ -1,5 +1,11 @@
 import type { Machine } from "./machine.ts";
-import type { ProviderFact, ProviderLevels, ProviderSticker } from "@kitshn/local";
+import type {
+  ProviderCardSetting,
+  ProviderFact,
+  ProviderLevels,
+  ProviderList,
+  ProviderSticker,
+} from "@kitshn/local";
 
 /** All levels in one order, lowest first. A resource kind uses a subset (K-301, K-206). */
 export const LEVELS = ["view", "use", "control"] as const;
@@ -35,6 +41,10 @@ export interface ProviderCard {
   readonly levels: ProviderLevels;
   readonly facts: ReadonlyArray<ProviderFact>;
   readonly stickers: ReadonlyArray<ProviderSticker>;
+  /** K-1625: the lists of the card, such as tasks or sessions. */
+  readonly lists: ReadonlyArray<ProviderList>;
+  /** K-717: the settings of its kind; their values live outside the card (`cardSettings` of the snapshot). */
+  readonly settings: ReadonlyArray<ProviderCardSetting>;
   /** K-705: the live site name of the card on its machine, or null. */
   readonly site: string | null;
   /** K-705: when its provider's report dropped it; kitshn forgets it a day later unless it comes back. */

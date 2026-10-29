@@ -3,7 +3,14 @@ import { describe, expect, it } from "vitest";
 import type { Machine } from "./machine.ts";
 import { type Circle, type Resource, type State, levelForKind, shareKey } from "./model.ts";
 import { applyChanges, forgetProviderChanges, invert } from "./changes.ts";
-import { commandsFor, grantTables, grantsOf, providerCards } from "./providers.ts";
+import {
+  commandsFor,
+  grantTables,
+  grantsOf,
+  machineBusy,
+  providerCards,
+  providerPushes,
+} from "./providers.ts";
 
 const report: ProviderReport = {
   name: "t3",
@@ -188,5 +195,78 @@ describe("forget provider (K-704)", () => {
     const dropped = { ...card, provider: { ...card.provider!, droppedAt: 1 } };
     const waiting = { ...value, resources: new Map([...value.resources, [card.id, dropped]]) };
     expect(Object.keys(grantTables(waiting, "vps", "t3", 0))).toEqual(["app"]);
+  });
+});
+
+describe("pushes to a machine (K-709, K-717, K-1608)", () => {
+  it("gives each provider its grants and card settings, and each state kind the shared and own part", () => {
+    const kinds = [
+      {
+        id: "t3.app",
+        name: "T3 app",
+        levels: { view: "view" },
+        settings: [
+          { id: "updateChannel", title: "Update channel", values: ["nightly", "daily"], default: "nightly" },
+        ],
+      },
+      { id: "t3.settings", name: "settings", levels: {}, state: {} },
+    ];
+    const withSettings = providerCards(
+      machine,
+      [{ ...report, kinds: [...kinds, report.kinds[1]!] }],
+      "example.com",
+    );
+    const value: State = { ...state([]), resources: withSettings };
+    const app = [...withSettings.values()].find((card) => card.kind === "t3.app")!;
+    const desired = new Map([
+      [
+        "t3.settings",
+        new Map<string, unknown>([
+          ["", { theme: "dark" }],
+          ["other", { x: 1 }],
+        ]),
+      ],
+    ]);
+    const pushes = providerPushes(
+      value,
+      "vps",
+      [{ name: "t3", kinds }],
+      desired,
+      new Map([[app.id, { updateChannel: "daily" }]]),
+      0,
+    );
+    expect(pushes.map((push) => push.key)).toEqual(["grants:t3", "settings:t3", "desired:t3:t3.settings"]);
+    expect(pushes[1]).toMatchObject({ values: { app: { updateChannel: "daily" } } });
+    // Another machine's part never reaches this one.
+    expect(pushes[2]).toMatchObject({ state: { shared: { theme: "dark" }, machine: null } });
+    // A stored value that the kind no longer offers falls back to the default.
+    const stale = providerPushes(
+      value,
+      "vps",
+      [{ name: "t3", kinds }],
+      desired,
+      new Map([[app.id, { updateChannel: "weekly" }]]),
+      0,
+    );
+    expect(stale[1]).toMatchObject({ values: { app: { updateChannel: "nightly" } } });
+  });
+});
+
+describe("a busy machine (K-1608)", () => {
+  it("is busy only while a running card of a provider reports busy, not an offline or dropped one", () => {
+    const value = state([]);
+    const app = [...value.resources.values()].find((card) => card.kind === "t3.app")!;
+    const with_ = (card: Resource) => ({
+      ...value,
+      resources: new Map([...value.resources, [app.id, card]]),
+    });
+    const busy = {
+      ...app,
+      provider: { ...app.provider!, facts: [{ label: "busy", value: "true", role: "busy" as const }] },
+    };
+    expect(machineBusy(with_(busy), "vps")).toBe(true);
+    expect(machineBusy(with_({ ...busy, status: "offline" }), "vps")).toBe(false);
+    expect(machineBusy(with_({ ...busy, provider: { ...busy.provider, droppedAt: 1 } }), "vps")).toBe(false);
+    expect(machineBusy(value, "vps")).toBe(false);
   });
 });

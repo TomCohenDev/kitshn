@@ -111,6 +111,8 @@ export interface ActionHandlers {
   readonly toggleStack: (key: string) => void;
   readonly renameStack: (stackId: string) => void;
   readonly removeApp: (resource: Resource) => void;
+  /** K-704: forgets the provider of a card on its machine, with Undo. */
+  readonly forgetProvider: (machineId: string, provider: string) => void;
   /** K-821: opens the rollback of one card, or of the run that made its current deploy. */
   readonly rollback: (resource: Resource, mode: "card" | "run") => void;
   /** K-1117: swaps a page or a file with its previous version. */
@@ -754,6 +756,18 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
                   },
                 ]
               : []),
+          ]
+        : []),
+      // K-704: only a provider that does not run can go; a running one brings its cards back at once.
+      ...(resource.provider && resource.machine !== null && resource.status === "offline"
+        ? [
+            {
+              id: "forget-provider",
+              label: `Forget provider ${resource.provider.name}`,
+              tip: `Remove every card of ${resource.provider.name} on this machine, with their shares. Undo brings them back.`,
+              danger: true as const,
+              run: () => h.forgetProvider(resource.machine!, resource.provider!.name),
+            },
           ]
         : []),
       ...(isAppCard(resource) && ctx.deployed.has(resource.id)

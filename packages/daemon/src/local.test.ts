@@ -39,6 +39,15 @@ async function daemon(decide: LocalOptions["decide"], access: LocalOptions["acce
     },
     handle: (request, caller) => {
       callers.push(caller);
+      // A forward comes back as it went, so a test sends a long line each way.
+      if (request.type === "forward")
+        return Promise.resolve({
+          id: request.id,
+          type: "forward",
+          status: 200,
+          contentType: "",
+          body: request.body ?? "",
+        });
       if (request.type !== "status") throw new Error(`no ${request.type} here`);
       return Promise.resolve({
         id: request.id,
@@ -82,6 +91,18 @@ function raw(path: string, text: string, answers: number): Promise<Array<unknown
 const status: Request = { id: "1", type: "status" };
 
 describe("local socket (K-701, K-702)", () => {
+  it("sends a line far longer than the socket buffer whole, both ways", async () => {
+    using local = await daemon(() => ({ accept: true }));
+    const body = Buffer.alloc(1024 * 1024, "kitshn ✓ ").toString("base64");
+    const outcome = await askLocal(
+      local.path,
+      { id: "1", type: "forward", method: "POST", path: "/agent/library", body },
+      5000,
+      daemonPeer,
+    );
+    expect(outcome).toMatchObject({ kind: "answer", answer: { type: "forward", body } });
+  });
+
   it("joins a provider's stdin and stdout to one connection, line by line (K-704)", async () => {
     using local = await daemon(() => ({ accept: true }));
     // A provider keeps stdin open while it runs; it ends here after the answer, as a provider that exits.
@@ -91,8 +112,9 @@ describe("local socket (K-701, K-702)", () => {
       await answered.promise;
     }
     let output = "";
+    const decoder = new TextDecoder();
     const bridge = bridgeLocal(local.path, daemonPeer, input(), (text) => {
-      output += text;
+      output += decoder.decode(text, { stream: true });
       if (output.endsWith("\n")) answered.resolve();
     });
     expect(await bridge).toBe("closed");

@@ -19,7 +19,7 @@ describe("provider reports (K-704, K-705)", () => {
   it("takes kinds with the provider prefix, known parents and free site names", () => {
     const thread = { id: "th-1", kind: "t3.thread", name: "Fix", status: "running", parent: "app" } as const;
     expect(
-      reportProblem(t3([{ ...app, site: { name: "t3-vps", port: 3773 } }, thread]), [], new Set()),
+      reportProblem(t3([{ ...app, site: { name: "t3-vps", port: 3773 } }, thread]), [], new Set(), new Set()),
     ).toBeNull();
   });
 
@@ -37,19 +37,23 @@ describe("provider reports (K-704, K-705)", () => {
     ["an unknown parent", t3([{ ...app, parent: "gone" }])],
     ["two resources with one id", t3([app, app])],
   ])("refuses %s", (_, report) => {
-    expect(reportProblem(report, [], new Set())).not.toBeNull();
+    expect(reportProblem(report, [], new Set(), new Set())).not.toBeNull();
   });
 
-  it("refuses a site name that sites.json or another provider holds", () => {
+  it("refuses a site name that kitshn, sites.json or another provider holds", () => {
     const withSite = t3([{ ...app, site: { name: "shared", port: 3773 } }]);
-    expect(reportProblem(withSite, [], new Set(["shared"]))).toMatch(/in use/);
+    expect(reportProblem(withSite, [], new Set(["shared"]), new Set())).toMatch(/in use/);
+    // K-817: a name of kitshn itself would put a second Access app on that host.
+    expect(reportProblem(withSite, [], new Set(), new Set(["shared"]))).toMatch(/name of kitshn itself/);
     const other = { ...withSite, name: "other", kinds: [], commands: [] };
-    expect(reportProblem(withSite, [other], new Set())).toMatch(/belongs to the provider other/);
+    expect(reportProblem(withSite, [other], new Set(), new Set())).toMatch(/belongs to the provider other/);
   });
 
   it("refuses more than 500 cards on one machine", () => {
     const many = Array.from({ length: 300 }, (_, index) => ({ ...app, id: `a${index}` }));
-    expect(reportProblem(t3(many), [{ ...t3(many), name: "other" }], new Set())).toMatch(/more than 500/);
+    expect(reportProblem(t3(many), [{ ...t3(many), name: "other" }], new Set(), new Set())).toMatch(
+      /more than 500/,
+    );
   });
 
   it("decodes a register line and refuses a provider name that kitshn's kinds use (K-302)", () => {

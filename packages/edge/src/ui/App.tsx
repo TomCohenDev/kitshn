@@ -961,6 +961,24 @@ export function App() {
     });
   };
 
+  /** K-704: no confirm; the toast and History undo it. */
+  const forgetProvider = async (machineId: string, provider: string) => {
+    const result = await callApi<{ revision: number | null }>(
+      "POST",
+      `/api/machines/${encodeURIComponent(machineId)}/providers/${encodeURIComponent(provider)}/forget`,
+    );
+    if ("error" in result) {
+      showToast({ text: result.error, error: true, undo: null });
+      return;
+    }
+    setSelection({ cards: new Set(), circle: null });
+    showToast({
+      text: `Forgot the provider ${provider} and its cards.`,
+      error: false,
+      undo: result.revision,
+    });
+  };
+
   const fullPage = route.tab !== "map";
   const shownPanel: PanelKind | null = fullPage ? route.tab : panel;
   const large = fullPage || ((panel === "details" || panel === "safety") && detailsLarge);
@@ -1421,6 +1439,7 @@ export function App() {
         'input[aria-label="Stack name"]',
       ),
     removeApp: (resource) => void removeApp(resource),
+    forgetProvider: (machineId, provider) => void forgetProvider(machineId, provider),
     rollback: (resource, mode) => setRollback({ card: resource, mode }),
     restorePrevious: (resource) => void restorePrevious(resource),
     editAddress: (resource) =>
@@ -3169,6 +3188,13 @@ function ProviderFacts(props: { card: ProviderCard }) {
   const { card } = props;
   return (
     <>
+      {card.droppedAt !== undefined ? (
+        <p class="help">
+          {card.name} no longer reports this card. kitshn keeps its place and shares until{" "}
+          {new Date(card.droppedAt + 24 * 60 * 60_000).toLocaleString()}, then forgets it, unless it comes
+          back.
+        </p>
+      ) : null}
       {card.stickers.length > 0 ? (
         <div class="row">
           {card.stickers.map((sticker, index) => {

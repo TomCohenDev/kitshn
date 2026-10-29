@@ -52,6 +52,10 @@ afterEach(() => {
 async function setup() {
   const stub = env.KITSHN.getByName("kitshn");
   await runInDurableObject(stub, (_, state) => {
+    // The tests of this file share one Durable Object, so each starts without the cards of the one before.
+    state.storage.sql.exec("DELETE FROM resources WHERE id LIKE 'p-%' OR id = 'other'");
+    state.storage.sql.exec("DELETE FROM places WHERE id LIKE 'p-%'");
+    state.storage.sql.exec("DELETE FROM providers");
     state.storage.sql.exec(
       "INSERT OR REPLACE INTO machines (id, body) VALUES (?, ?)",
       "vps",
@@ -96,11 +100,23 @@ async function setup() {
         .map((row) => JSON.parse(row.body) as Resource)
         .at(0),
     );
-  return { stub, message, card };
+  const sql = async (query: string, ...values: Array<string | number>) => {
+    await runInDurableObject(stub, (_, state) => void state.storage.sql.exec(query, ...values));
+    await evictDurableObject(stub);
+  };
+  const lastSummary = () =>
+    runInDurableObject(
+      stub,
+      (_, state) =>
+        state.storage.sql
+          .exec<{ summary: string }>("SELECT summary FROM revisions ORDER BY id DESC LIMIT 1")
+          .one().summary,
+    );
+  return { stub, message, card, sql, lastSummary };
 }
 
 it("makes cards from a signed report only, shows an offline provider, and records a removal (K-704, K-705)", async () => {
-  const { stub, message, card } = await setup();
+  const { stub, message, card, sql, lastSummary } = await setup();
   await message("token", [report([app])]);
   expect(await card()).toBeUndefined();
 
@@ -117,21 +133,54 @@ it("makes cards from a signed report only, shows an offline provider, and record
   await message("signed", []);
   expect(await card()).toBeDefined();
 
+  // K-705: a dropped card keeps its place and shares for a day, offline, and comes back whole.
+  await sql("INSERT OR REPLACE INTO places (id, x, y) VALUES (?, 0, 0)", appId);
+  await message("signed", [report([])]);
+  expect(await card()).toMatchObject({ status: "offline", provider: { droppedAt: expect.any(Number) } });
+  await message("signed", [report([app])]);
+  expect((await card())?.provider?.droppedAt).toBeUndefined();
+  expect(
+    await runInDurableObject(stub, (_, state) =>
+      state.storage.sql.exec("SELECT 1 FROM places WHERE id = ?", appId).toArray(),
+    ),
+  ).toHaveLength(1);
+
+  // After the day, the next report forgets it.
+  await message("signed", [report([])]);
+  const dropped = await card();
+  await sql(
+    "UPDATE resources SET body = ? WHERE id = ?",
+    JSON.stringify({ ...dropped, provider: { ...dropped!.provider, droppedAt: 0 } }),
+    appId,
+  );
   await message("signed", [report([])]);
   expect(await card()).toBeUndefined();
-  const summary = await runInDurableObject(
-    stub,
-    (_, state) =>
-      state.storage.sql
-        .exec<{ summary: string }>("SELECT summary FROM revisions ORDER BY id DESC LIMIT 1")
-        .one().summary,
-  );
-  expect(summary).toBe("The providers of vps removed T3 on vps");
+  expect(await lastSummary()).toBe("The providers of vps forgot T3 on vps, which they dropped a day ago");
 });
 
-it("queues only a command that the card's provider has (K-707)", async () => {
+it("keeps an address that another card holds, or a name of kitshn, off a provider card (K-705)", async () => {
+  const { message, card, sql } = await setup();
+  const other: Resource = {
+    id: "other",
+    kind: "site.static",
+    name: "other",
+    addresses: ["t3-vps.example.com"],
+    status: "running",
+    group: null,
+    machine: null,
+  };
+  await sql("INSERT OR REPLACE INTO resources (id, body) VALUES ('other', ?)", JSON.stringify(other));
+  await message("signed", [report([{ ...app, site: { name: "t3-vps", port: 3773 } }])]);
+  expect((await card())?.addresses).toEqual([]);
+  await sql("DELETE FROM resources WHERE id LIKE 'p-%'");
+  await message("signed", [report([{ ...app, site: { name: "pages", port: 3773 } }])]);
+  expect(await card()).toBeUndefined();
+});
+
+// One test for the HTTP routes: a second HTTP test in this file waits for the Durable Object until its timeout.
+it("queues only a command that the card's provider has, and forgets only a provider that does not run (K-704, K-707)", async () => {
   stubAccessCerts();
-  const { message } = await setup();
+  const { message, card, lastSummary } = await setup();
   await message("signed", [report([app])]);
   const token = await accessToken("admin-aud", { email: "owner@example.com" });
   const job = (command: object) =>
@@ -156,4 +205,17 @@ it("queues only a command that the card's provider has (K-707)", async () => {
     command: "restart",
     resource: "app",
   });
+
+  // K-704: Forget provider, with one revision.
+  const forget = () =>
+    send("/api/machines/vps/providers/t3/forget", {
+      method: "POST",
+      headers: { "cf-access-jwt-assertion": token, "content-type": "application/json" },
+      body: "{}",
+    });
+  expect((await forget()).status).toBe(409);
+  await message("signed", [report([app], false)]);
+  expect((await forget()).status).toBe(200);
+  expect(await card()).toBeUndefined();
+  expect(await lastSummary()).toBe("Forgot the provider t3 and its 1 cards (K-704)");
 });

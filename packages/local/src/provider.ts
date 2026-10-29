@@ -205,6 +205,8 @@ export function reportProblem(
   report: ProviderReport,
   others: ReadonlyArray<ProviderReport>,
   takenSites: ReadonlySet<string>,
+  /** The site names of kitshn itself, such as `pages` (K-817). */
+  reserved: ReadonlySet<string>,
 ): string | null {
   const kinds = new Map(report.kinds.map((kind) => [kind.id, kind]));
   if (kinds.size !== report.kinds.length) return "two kinds have the same id.";
@@ -228,6 +230,7 @@ export function reportProblem(
       return `the resource ${resource.id} names the unknown parent ${resource.parent}.`;
     if (resource.site) {
       const name = resource.site.name;
+      if (reserved.has(name)) return `the site name ${name} is a name of kitshn itself.`;
       if (sites.has(name) || takenSites.has(name)) return `the site name ${name} is in use on this machine.`;
       sites.add(name);
     }

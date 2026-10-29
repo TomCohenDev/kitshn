@@ -71,6 +71,17 @@ describe("the providers of a machine (K-704, K-705)", () => {
     expect(registry.grantsOf("t3")).toEqual({ a: [] });
   });
 
+  it("forgets only a provider that no connection holds (K-704)", () => {
+    const { registry, saves } = providers();
+    registry.apply(register([thread("a")]), 1, new Set());
+    expect(registry.forget("t3")).toMatch(/connected/);
+    registry.disconnect(1);
+    expect(registry.forget("t3")).toBeNull();
+    expect(registry.reports()).toEqual([]);
+    expect(saves.at(-1)).toEqual([]);
+    expect(registry.forget("t3")).toMatch(/no provider/);
+  });
+
   it("starts empty from a broken file and says why (K-006)", () => {
     expect(parseSaved({ providers: [{ name: "site" }] }).problem).not.toBeNull();
     expect(parseSaved(null)).toEqual({ saved: { providers: [], grants: {} }, problem: null });

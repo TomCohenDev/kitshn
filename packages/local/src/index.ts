@@ -143,6 +143,8 @@ export const Request = Schema.Union([
       Schema.isMaxLength(PROVIDER_LIMITS.resources),
     ),
   }),
+  /** K-704: `kitshn provider forget <name>`: the daemon drops a provider that does not run, so it no longer reports it. */
+  Schema.Struct({ id: Id, type: Schema.Literal("provider-forget"), provider: ProviderName }),
   /** K-707: the result of a `command` event. */
   Schema.Struct({
     id: Id,
@@ -240,6 +242,7 @@ export const Answer = Schema.Union([
   Schema.Struct({ id: Id, type: Schema.Literal("upsert") }),
   Schema.Struct({ id: Id, type: Schema.Literal("remove") }),
   Schema.Struct({ id: Id, type: Schema.Literal("command-result") }),
+  Schema.Struct({ id: Id, type: Schema.Literal("provider-forget") }),
   /** K-706: an event: the grant tables of every resource of the provider, sent on each change. */
   Schema.Struct({ type: Schema.Literal("grants"), provider: Schema.String, tables: GrantTables }),
   /**

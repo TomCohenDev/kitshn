@@ -2,6 +2,7 @@ import type { ProviderReport } from "@kitshn/local";
 import { describe, expect, it } from "vitest";
 import type { Machine } from "./machine.ts";
 import { type Circle, type Resource, type State, levelForKind, shareKey } from "./model.ts";
+import { applyChanges, forgetProviderChanges, invert } from "./changes.ts";
 import { commandsFor, grantTables, grantsOf, providerCards } from "./providers.ts";
 
 const report: ProviderReport = {
@@ -157,5 +158,34 @@ describe("provider commands (K-707)", () => {
     expect(commandsFor([report], thread(value))).toEqual([]);
     const machineCard = { kind: "machine" } as const;
     expect(commandsFor([report], machineCard).map((item) => item.command.id)).toEqual(["stop-agents"]);
+  });
+});
+
+describe("forget provider (K-704)", () => {
+  it("removes the provider's cards with their places and overrides, and undo brings them back offline", () => {
+    const her = circle("her", [{ _tag: "email", email: "a@b.c" }]);
+    const value = state([her]);
+    const card = thread(value);
+    const withOverride = {
+      ...value,
+      shareSettings: new Map([[shareKey(card.id, "her"), { level: "view" as const, endsAt: null }]]),
+    };
+    const changes = forgetProviderChanges(withOverride, "vps", "t3");
+    const after = applyChanges(withOverride, changes);
+    expect([...after.resources.values()].some((item) => item.provider)).toBe(false);
+    expect(after.places.size).toBe(0);
+    expect(after.shareSettings.size).toBe(0);
+    const undone = applyChanges(after, invert(changes));
+    expect(undone.resources.get(card.id)?.status).toBe("offline");
+    expect(undone.places.get(card.id)).toEqual(withOverride.places.get(card.id));
+    expect(undone.shareSettings.get(shareKey(card.id, "her"))?.level).toBe("view");
+  });
+
+  it("gives a dropped card no grants while it waits (K-705)", () => {
+    const value = state([circle("her", [{ _tag: "email", email: "a@b.c" }])]);
+    const card = thread(value);
+    const dropped = { ...card, provider: { ...card.provider!, droppedAt: 1 } };
+    const waiting = { ...value, resources: new Map([...value.resources, [card.id, dropped]]) };
+    expect(Object.keys(grantTables(waiting, "vps", "t3", 0))).toEqual(["app"]);
   });
 });

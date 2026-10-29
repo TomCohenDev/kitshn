@@ -311,14 +311,28 @@ function notRunning(): string {
   return `the daemon is not running (no daemon listens on ${socketPath}). Start it with: kitshn service install`;
 }
 
-/** K-704: `kitshn provider`: stdin and stdout become one connection to the daemon, for a provider such as T3 Code. */
-async function providerCommand() {
+/**
+ * K-704: `kitshn provider`: stdin and stdout become one connection to the daemon, for a provider such as T3 Code.
+ * `kitshn provider forget <name>` drops a provider that does not run.
+ */
+async function providerCommand(argv: ReadonlyArray<string>) {
+  if (argv[0] === "forget") {
+    const name = argv[1];
+    if (!name) fail("usage: kitshn provider forget <name>");
+    const answer = await ask({ id: "1", type: "provider-forget", provider: name! });
+    if (answer === null) fail(notRunning());
+    console.log(
+      `Forgot the provider ${name}. Its cards stay on the map, offline, until you use "Forget provider" there.`,
+    );
+    return;
+  }
+  if (argv.length > 0) fail("usage: kitshn provider [forget <name>]");
   if (typeof daemonUid === "string") fail(daemonUid);
   const outcome = await bridgeLocal(
     socketPath,
     { platform, daemonUid: daemonUid as number },
     process.stdin,
-    (text) => process.stdout.write(text),
+    (bytes) => process.stdout.write(bytes),
   ).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   if (outcome !== "closed") fail(notRunning());
 }
@@ -2401,18 +2415,35 @@ function providerClosed(connection: number) {
   sendProviders();
 }
 
+/** K-707: who waits for a provider to register; a queued job reaches a restarted daemon before its provider does. */
+const registerWaiters = new Map<string, Array<() => void>>();
+const PROVIDER_WAIT_MS = 60_000;
+
+function registered(provider: string): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, PROVIDER_WAIT_MS);
+    const waiters = registerWaiters.get(provider) ?? [];
+    waiters.push(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+    registerWaiters.set(provider, waiters);
+  });
+}
+
 /** K-707: passes a provider command to the provider's connection, and waits for its result. */
-function runProviderCommand(
+async function runProviderCommand(
   command: Extract<Command, { kind: "provider" }>,
   jobId: number,
 ): Promise<JobOutcome> {
+  if (registry().connectionOf(command.provider) === null) await registered(command.provider);
   const connection = registry().connectionOf(command.provider);
   const emit = connection === null ? undefined : providerEmitters.get(connection);
   if (!emit)
     return Promise.resolve({
       ok: false,
       exitCode: null,
-      output: `The provider ${command.provider} is not running on this machine.`,
+      output: `The provider ${command.provider} did not connect within 60 seconds.`,
     });
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -2474,6 +2505,12 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
     waiter.settle({ ok: request.ok, exitCode: request.ok ? 0 : 1, output: request.output });
     return { id, type: "command-result" };
   }
+  if (request.type === "provider-forget") {
+    const problem = registry().forget(request.provider);
+    if (problem) throw new Error(problem);
+    sendProviders();
+    return { id, type: "provider-forget" };
+  }
   if (request.type === "register" || request.type === "upsert" || request.type === "remove") {
     if (!joined) throw new Error("the daemon has not read machine.json yet.");
     const handMade = readSites() ?? [];
@@ -2485,6 +2522,8 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
     }
     if (request.type !== "register") return { id, type: request.type };
     providerEmitters.set(caller.connection, emit);
+    for (const wake of registerWaiters.get(request.provider) ?? []) wake();
+    registerWaiters.delete(request.provider);
     log(`provider ${request.provider} registered with ${request.resources.length} resources`);
     return {
       id,
@@ -2557,7 +2596,7 @@ switch (command) {
     await attesterCommand(args);
     break;
   case "provider":
-    await providerCommand();
+    await providerCommand(args);
     break;
   case "publish":
   case "address":
@@ -2598,6 +2637,7 @@ kitshn local-users list|add|remove <u>  who else may use the local socket, as th
 kitshn attester set --prefix <p.> --url <loopback url> --token-env <NAME>
                                         register an attester of thread labels, as the daemon user or root (K-1751)
 kitshn provider                         join stdin and stdout to the local socket, for a provider (K-704)
+kitshn provider forget <name>           drop a provider that does not run, as the daemon user or root (K-704)
 kitshn agent <action> [target]          ask kitshn as this machine (K-1710): --reason, --label k=v, --body json
 ${AGENT_USAGE}
 kitshn setup-git                        git asks kitshn first for github.com tokens (K-1763)

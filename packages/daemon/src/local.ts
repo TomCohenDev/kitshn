@@ -12,9 +12,46 @@ export interface Caller {
   readonly connection: number;
 }
 
+/**
+ * Bun writes only what fits in the socket buffer and returns that count; it keeps nothing. This keeps the rest in
+ * order and writes it on each `drain`, so a long line arrives whole. `end` waits for the rest.
+ */
+export class SocketWriter {
+  private readonly pending: Array<Uint8Array> = [];
+  private ending = false;
+  constructor(private readonly socket: Pick<Bun.Socket<unknown>, "write" | "end">) {}
+
+  write(data: string | Uint8Array) {
+    const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+    if (this.ending || bytes.length === 0) return;
+    this.pending.push(bytes);
+    this.drain();
+  }
+
+  /** Call from the socket's `drain` handler. */
+  drain() {
+    while (this.pending.length > 0) {
+      const head = this.pending[0]!;
+      const written = Math.max(this.socket.write(head), 0);
+      if (written < head.length) {
+        this.pending[0] = head.subarray(written);
+        return;
+      }
+      this.pending.shift();
+    }
+    if (this.ending) this.socket.end();
+  }
+
+  end() {
+    this.ending = true;
+    if (this.pending.length === 0) this.socket.end();
+  }
+}
+
 interface Connection {
   readonly uid: number;
   readonly key: number;
+  readonly writer: SocketWriter;
   readonly decoder: TextDecoder;
   buffer: string;
 }
@@ -89,14 +126,11 @@ export async function listenLocal(
   );
   if (live) throw new Error(`another kitshn daemon listens on ${path}.`);
   rmSync(path, { force: true });
-  const send = (socket: Bun.Socket<Connection | undefined>, answer: Answer) => {
-    const text = line(answer);
-    // Answers are small, so a short write means a broken connection, not back-pressure.
-    if (socket.write(text) < Buffer.byteLength(text)) socket.end();
-  };
+  const send = (socket: Bun.Socket<Connection | undefined>, answer: Answer) =>
+    socket.data?.writer.write(line(answer));
   const tooLong = (socket: Bun.Socket<Connection | undefined>) => {
     send(socket, { id: null, type: "error", error: `A line is longer than ${MAX_LINE_LENGTH} characters.` });
-    socket.end();
+    socket.data?.writer.end();
   };
   const lastRefusal = new Map<number | null, number>();
   let connections = 0;
@@ -146,10 +180,19 @@ export async function listenLocal(
         if (peer === null) return refuse("the peer user id cannot be read (K-006)");
         const decision = options.decide(peer);
         if (!decision.accept) return refuse(decision.reason);
-        socket.data = { uid: peer, key: ++connections, decoder: new TextDecoder(), buffer: "" };
+        socket.data = {
+          uid: peer,
+          key: ++connections,
+          writer: new SocketWriter(socket),
+          decoder: new TextDecoder(),
+          buffer: "",
+        };
       },
       close(socket) {
         if (socket.data) options.closed?.(socket.data.key);
+      },
+      drain(socket) {
+        socket.data?.writer.drain();
       },
       data(socket, chunk) {
         const connection = socket.data;
@@ -196,6 +239,7 @@ export function askLocal(
   return new Promise((resolve, reject) => {
     let done = false;
     let buffer = "";
+    let writer: SocketWriter | null = null;
     const decoder = new TextDecoder();
     const finish = (settle: () => void) => {
       if (done) return;
@@ -224,8 +268,10 @@ export function askLocal(
             socket.end();
             return;
           }
-          socket.write(line(request));
+          writer = new SocketWriter(socket);
+          writer.write(line(request));
         },
+        drain: () => writer?.drain(),
         data(socket, chunk) {
           buffer += decoder.decode(chunk, { stream: true });
           for (let end = buffer.indexOf("\n"); end >= 0 && !done; end = buffer.indexOf("\n")) {
@@ -274,8 +320,10 @@ export function bridgeLocal(
   path: string,
   peer: { readonly platform: Platform; readonly daemonUid: number },
   input: AsyncIterable<Uint8Array>,
-  output: (text: string) => void,
+  /** The bytes as they come: a character split across chunks stays whole for the reader. */
+  output: (bytes: Uint8Array) => void,
 ): Promise<LocalOutcome | "closed"> {
+  let writer: SocketWriter | null = null;
   return new Promise((resolve, reject) => {
     Bun.connect({
       unix: path,
@@ -292,13 +340,16 @@ export function bridgeLocal(
             socket.end();
             return;
           }
+          const own = new SocketWriter(socket);
+          writer = own;
           void (async () => {
-            for await (const chunk of input) socket.write(chunk);
-            socket.end();
+            for await (const chunk of input) own.write(chunk);
+            own.end();
           })().catch(reject);
         },
+        drain: () => writer?.drain(),
         data(_socket, chunk) {
-          output(new TextDecoder().decode(chunk));
+          output(chunk);
         },
         close: () => resolve("closed"),
         error: (_socket, error) => reject(error),

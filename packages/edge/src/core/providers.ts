@@ -104,7 +104,12 @@ export function grantsOf(state: State, card: Resource, now: number): Array<Grant
 export function grantTables(state: State, machineId: string, provider: string, now: number): GrantTables {
   const tables: Record<string, Array<Grant>> = {};
   for (const card of state.resources.values())
-    if (card.machine === machineId && card.provider?.name === provider)
+    // K-705: a dropped card waits with no grants; the provider no longer has it.
+    if (
+      card.machine === machineId &&
+      card.provider?.name === provider &&
+      card.provider.droppedAt === undefined
+    )
       tables[card.provider.localId] = grantsOf(state, card, now);
   return tables;
 }

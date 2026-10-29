@@ -9,6 +9,7 @@ import {
   reportProblem,
 } from "@kitshn/local";
 import { Schema } from "effect";
+import { RESERVED_SITE_NAMES } from "kitshn/names";
 
 interface Entry {
   readonly report: ProviderReport;
@@ -79,12 +80,23 @@ export class Providers {
     const others = [...this.entries.values()]
       .map((entry) => entry.report)
       .filter((other) => other.name !== request.provider);
-    const problem = reportProblem(report, others, takenSites);
+    const problem = reportProblem(report, others, takenSites, RESERVED_SITE_NAMES);
     if (problem) return { ok: false, error: `${request.provider}: ${problem}` };
     this.entries.set(request.provider, { report, connection });
     const changed = JSON.stringify(old?.report) !== JSON.stringify(report);
     if (changed) this.persist();
     return { ok: true, changed };
+  }
+
+  /** K-704: drops a provider that no connection holds, so the daemon no longer reports it; or says why not. */
+  forget(provider: string): string | null {
+    const entry = this.entries.get(provider);
+    if (!entry) return `this machine has no provider ${provider}.`;
+    if (entry.connection !== null) return `${provider} is connected; stop it first.`;
+    this.entries.delete(provider);
+    delete this.grants[provider];
+    this.persist();
+    return null;
   }
 
   /** K-704: the providers of a closed connection go offline; their cards stay. Returns true when one did. */

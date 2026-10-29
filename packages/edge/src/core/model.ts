@@ -35,6 +35,8 @@ export interface ProviderCard {
   readonly stickers: ReadonlyArray<ProviderSticker>;
   /** K-705: the live site name of the card on its machine, or null. */
   readonly site: string | null;
+  /** K-705: when its provider's report dropped it; kitshn forgets it a day later unless it comes back. */
+  readonly droppedAt?: number;
 }
 
 /** FNV-1a, 32 bits, as 8 hex characters; `seed` gives a second, independent hash. */

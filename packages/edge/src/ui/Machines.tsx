@@ -173,15 +173,26 @@ export function KeySticker(props: { view: MachineView }) {
   return null;
 }
 
-/** K-1608: the pushes of state that an offline machine gets when it connects. */
+/**
+ * K-1608: the pushes of state that an offline machine gets when it connects. An online machine applies them at once,
+ * so it shows none; a daemon that does not report what it applied shows "queued ?".
+ */
 export function QueuedSticker(props: { view: MachineView }) {
-  if (props.view.queued === 0) return null;
-  return (
+  const { online, queued } = props.view;
+  if (online || queued === 0) return null;
+  return queued === null ? (
     <span
       class="sticker wait"
-      data-tip={`Queued: ${props.view.queued} changes of grants, settings or shared state wait for this machine. It applies the current state when it connects.`}
+      data-tip="Queued: this daemon does not report what it applied, so kitshn cannot count the changes that wait. Update the daemon."
     >
-      queued {props.view.queued}
+      queued ?
+    </span>
+  ) : (
+    <span
+      class="sticker wait"
+      data-tip={`Queued: ${queued} changes of grants, settings or shared state wait for this machine. It applies the current state when it connects.`}
+    >
+      queued {queued}
     </span>
   );
 }

@@ -173,12 +173,28 @@ it("stores desired state from a provider, and runs a provider command that an ag
   });
   await raw({
     type: "desiredSet",
+    requestId: "d1",
     provider: "t3",
     kind: "t3.settings",
     part: "shared",
     value: { theme: "dark" },
   });
-  await raw({ type: "desiredSet", provider: "t3", kind: "t3.nope", part: "machine", value: 1 });
+  await raw({
+    type: "desiredSet",
+    requestId: "d2",
+    provider: "t3",
+    kind: "t3.nope",
+    part: "machine",
+    value: 1,
+  });
+  // The provider gets kitshn's own answer: stored, or why not.
+  const answers = (sent as Array<{ type: string; requestId?: string; error?: string | null }>).filter(
+    (item) => item.type === "requestAnswer",
+  );
+  expect(answers).toEqual([
+    { type: "requestAnswer", requestId: "d1", error: null },
+    { type: "requestAnswer", requestId: "d2", error: expect.stringMatching(/no desired state/) },
+  ]);
   const rows = await runInDurableObject(stub, (_, state) =>
     state.storage.sql.exec("SELECT kind, machine_id, body FROM desired_state").toArray(),
   );
@@ -212,6 +228,46 @@ it("stores desired state from a provider, and runs a provider command that an ag
   );
   expect(JSON.parse(job.command)).toMatchObject({ kind: "provider", command: "restart", resource: "app" });
   await sql("DELETE FROM circles WHERE id = 'agents'");
+});
+
+it("counts the pushes that a machine has not applied, takes applied only for its own keys, and sends idle jobs after a report (K-1608)", async () => {
+  const { stub, message } = await setup();
+  type Internals = { queuedFor(id: string): number | null; deliverJobs(): void };
+  await message("signed", [report([app])]);
+  await runInDurableObject(stub, (_, state) => void state.storage.sql.exec("DELETE FROM applied_state"));
+  await evictDurableObject(stub);
+  const queued = () =>
+    runInDurableObject(stub, (instance) => (instance as unknown as Internals).queuedFor("vps"));
+  // A daemon that never answered applied has an unknown count, not a growing one.
+  expect(await queued()).toBeNull();
+  const raw = (body: object) =>
+    runInDurableObject(stub, (instance) =>
+      instance.webSocketMessage(daemonSocket("signed"), JSON.stringify(body)),
+    );
+  await raw({ type: "applied", key: "made:up", hash: "x" });
+  await raw({ type: "applied", key: "grants:t3", hash: "stale" });
+  const keys = await runInDurableObject(stub, (_, state) =>
+    state.storage.sql
+      .exec<{ key: string }>("SELECT key FROM applied_state")
+      .toArray()
+      .map((row) => row.key),
+  );
+  expect(keys).toEqual(["grants:t3"]);
+  // Two pushes wait: the grant tables, with a stale hash, and the card settings, with none.
+  expect(await queued()).toBe(2);
+  // A report that can end busy sends the jobs that wait for an idle machine.
+  const delivered = await runInDurableObject(stub, async (instance) => {
+    const spy = vi.spyOn(instance as unknown as Internals, "deliverJobs");
+    await instance.webSocketMessage(
+      daemonSocket("signed"),
+      JSON.stringify({
+        type: "providers",
+        providers: [report([{ ...app, facts: [{ label: "busy", value: "false", role: "busy" }] }])],
+      }),
+    );
+    return spy.mock.calls.length;
+  });
+  expect(delivered).toBeGreaterThan(0);
 });
 
 it("keeps an address that another card holds, or a name of kitshn, off a provider card (K-705)", async () => {

@@ -263,10 +263,10 @@ import {
 } from "../core/library.ts";
 import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
-import { commandsFor, providerCards, providerPushes } from "../core/providers.ts";
+import { commandsFor, machineBusy, providerCards, providerPushes } from "../core/providers.ts";
 import {
-  PROVIDER_LIMITS,
   type ProviderCommand,
+  desiredProblem,
   type ProviderKind,
   type ProviderReport,
   decodeProviderReports,
@@ -3454,46 +3454,46 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-1608, K-1625: a provider card of the machine reports the fact `busy` as "true". */
   private busy(machineId: string) {
-    return [...this.state.resources.values()].some(
-      (card) =>
-        card.machine === machineId &&
-        card.provider?.facts.some((fact) => fact.role === "busy" && fact.value === "true") === true,
-    );
+    return machineBusy(this.state, machineId);
   }
 
-  /** K-1608: how many pushes a machine has not applied yet; a machine without providers has none. */
-  private queuedFor(machineId: string) {
-    return this.pushesOf(machineId).filter(
-      ({ key, hash }) => this.applied.get(`${machineId}/${key}`) !== hash,
-    ).length;
+  /**
+   * K-1608: how many pushes a machine has not applied yet; a machine without providers has none. Null when it never
+   * answered `applied`: a daemon from before K-1608 does not, so its count is unknown, not a growing number.
+   */
+  private queuedFor(machineId: string): number | null {
+    const pushes = this.pushesOf(machineId);
+    if (pushes.length === 0) return 0;
+    if (!pushes.some(({ key }) => this.applied.has(`${machineId}/${key}`))) return null;
+    return pushes.filter(({ key, hash }) => this.applied.get(`${machineId}/${key}`) !== hash).length;
   }
 
   /**
    * K-709: a provider of the machine sets its part of a desired state, or the shared part. kitshn stores it and pushes
    * it to every machine of the provider; History records it without Undo.
    */
-  private setDesiredFromMachine(machine: Machine, message: Extract<DaemonMessage, { type: "desiredSet" }>) {
-    const reg = this.providerRegs.get(machine.id)?.find((item) => item.name === message.provider);
-    const kind = reg?.kinds.find((item) => item.id === message.kind && item.state !== undefined);
-    if (!kind) {
-      console.warn(
-        `kitshn refused desired state of ${machine.name}: ${message.provider} has no state kind ${message.kind}.`,
-      );
-      return;
-    }
-    const refusal = this.writeDesired(kind.id, message.part === "shared" ? "" : machine.id, message.value, {
-      _tag: "machine",
-      machineId: machine.id,
-      name: machine.name,
-    });
-    if (refusal) console.warn(`kitshn refused desired state of ${machine.name}: ${refusal}`);
+  private setDesiredFromMachine(
+    machine: Machine,
+    message: Extract<DaemonMessage, { type: "desiredSet" }>,
+  ): string | null {
+    const kinds =
+      this.providerRegs.get(machine.id)?.find((item) => item.name === message.provider)?.kinds ?? [];
+    return (
+      desiredProblem(kinds, message.kind, message.value) ??
+      this.writeDesired(message.kind, message.part === "shared" ? "" : machine.id, message.value, {
+        _tag: "machine",
+        machineId: machine.id,
+        name: machine.name,
+      })
+    );
   }
 
   /** K-709: stores one part of a desired state, or says why not. A part of null clears it. */
   private writeDesired(kind: string, machineId: string, value: unknown, actor: Actor): string | null {
     const text = JSON.stringify(value ?? null);
-    if (new TextEncoder().encode(text).length > PROVIDER_LIMITS.stateBytes)
-      return `a desired state holds at most ${PROVIDER_LIMITS.stateBytes} bytes (K-709).`;
+    const kinds = [...this.providerRegs.values()].flatMap((regs) => regs.flatMap((reg) => reg.kinds));
+    const problem = desiredProblem(kinds, kind, value);
+    if (problem) return problem;
     if (deepEqual(this.desiredState.get(kind)?.get(machineId) ?? null, value ?? null)) return null;
     const where =
       machineId === ""
@@ -3637,6 +3637,8 @@ export class Kitshn extends DurableObject<Env> {
     });
     this.load();
     this.broadcast();
+    // K-1608: a report can end `busy`, so a job that waits for an idle machine goes now.
+    this.deliverJobs();
     void this.scheduleAlarm();
   }
 
@@ -4478,15 +4480,24 @@ export class Kitshn extends DurableObject<Env> {
     } else if (message.type === "providers") {
       this.updateProviders(machine, message.providers);
     } else if (message.type === "desiredSet" && typeof message.kind === "string") {
-      this.setDesiredFromMachine(machine, message);
+      // K-709: the provider gets kitshn's own answer, also a refusal.
+      const error = this.setDesiredFromMachine(machine, message);
+      if (typeof message.requestId === "string")
+        send(socket, {
+          type: "requestAnswer",
+          requestId: message.requestId.slice(0, 64),
+          error,
+        } satisfies ServerToDaemon);
     } else if (
       message.type === "applied" &&
       typeof message.key === "string" &&
       typeof message.hash === "string"
     ) {
-      // K-1608: written only when it changes, so a machine that applied everything writes nothing.
+      // K-1608: written only when it changes, so a machine that applied everything writes nothing, and only for a key
+      // that kitshn pushes to it now, so a daemon cannot fill the table.
       const id = `${machine.id}/${message.key}`;
-      if (this.applied.get(id) !== message.hash) {
+      const known = this.pushesOf(machine.id).some((push) => push.key === message.key);
+      if (known && this.applied.get(id) !== message.hash) {
         this.sql(
           "INSERT OR REPLACE INTO applied_state (machine_id, key, hash) VALUES (?, ?, ?)",
           machine.id,
@@ -4891,8 +4902,11 @@ export class Kitshn extends DurableObject<Env> {
         this.sql("DELETE FROM live_sites WHERE id = ?", site.id);
         forgotten.push(this.forgetCard(site.id));
       }
-      // K-615, K-704: the providers of the machine and their cards go with it.
+      // K-615, K-704: the providers of the machine and their cards go with it, and its desired state part and what it
+      // applied (K-709, K-1608).
       this.sql("DELETE FROM providers WHERE machine_id = ?", id);
+      this.sql("DELETE FROM desired_state WHERE machine_id = ?", id);
+      this.sql("DELETE FROM applied_state WHERE machine_id = ?", id);
       for (const card of this.state.resources.values())
         if (card.machine === id && card.provider && !this.sitesOf(id).some((site) => site.id === card.id))
           forgotten.push(this.forgetCard(card.id));

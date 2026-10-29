@@ -217,8 +217,8 @@ export interface MachineView {
   readonly orphanVolumes: ReadonlyArray<ProjectVolume>;
   /** K-619: the listening ports of the machine while it is online, for the site wizard. */
   readonly servers: ReadonlyArray<ServerReport>;
-  /** K-1608: the pushes of state that the machine has not applied yet. */
-  readonly queued: number;
+  /** K-1608: the pushes of state that the machine has not applied yet; null when its daemon does not report it. */
+  readonly queued: number | null;
 }
 
 export interface JobView {

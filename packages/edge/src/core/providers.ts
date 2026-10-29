@@ -210,3 +210,17 @@ const settingValue = (
   setting: { readonly values: ReadonlyArray<string>; readonly default: string },
   stored?: string,
 ) => (stored !== undefined && setting.values.includes(stored) ? stored : setting.default);
+
+/**
+ * K-1608, K-1625: a provider card of the machine reports the fact `busy` = "true" and runs: a card that is offline or
+ * that its provider dropped keeps its last facts (K-705), so it never holds a job.
+ */
+export function machineBusy(state: State, machineId: string): boolean {
+  return [...state.resources.values()].some(
+    (card) =>
+      card.machine === machineId &&
+      card.status !== "offline" &&
+      card.provider?.droppedAt === undefined &&
+      card.provider?.facts.some((fact) => fact.role === "busy" && fact.value === "true") === true,
+  );
+}

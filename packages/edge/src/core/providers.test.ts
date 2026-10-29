@@ -3,7 +3,14 @@ import { describe, expect, it } from "vitest";
 import type { Machine } from "./machine.ts";
 import { type Circle, type Resource, type State, levelForKind, shareKey } from "./model.ts";
 import { applyChanges, forgetProviderChanges, invert } from "./changes.ts";
-import { commandsFor, grantTables, grantsOf, providerCards, providerPushes } from "./providers.ts";
+import {
+  commandsFor,
+  grantTables,
+  grantsOf,
+  machineBusy,
+  providerCards,
+  providerPushes,
+} from "./providers.ts";
 
 const report: ProviderReport = {
   name: "t3",
@@ -242,5 +249,24 @@ describe("pushes to a machine (K-709, K-717, K-1608)", () => {
       0,
     );
     expect(stale[1]).toMatchObject({ values: { app: { updateChannel: "nightly" } } });
+  });
+});
+
+describe("a busy machine (K-1608)", () => {
+  it("is busy only while a running card of a provider reports busy, not an offline or dropped one", () => {
+    const value = state([]);
+    const app = [...value.resources.values()].find((card) => card.kind === "t3.app")!;
+    const with_ = (card: Resource) => ({
+      ...value,
+      resources: new Map([...value.resources, [app.id, card]]),
+    });
+    const busy = {
+      ...app,
+      provider: { ...app.provider!, facts: [{ label: "busy", value: "true", role: "busy" as const }] },
+    };
+    expect(machineBusy(with_(busy), "vps")).toBe(true);
+    expect(machineBusy(with_({ ...busy, status: "offline" }), "vps")).toBe(false);
+    expect(machineBusy(with_({ ...busy, provider: { ...busy.provider, droppedAt: 1 } }), "vps")).toBe(false);
+    expect(machineBusy(value, "vps")).toBe(false);
   });
 });

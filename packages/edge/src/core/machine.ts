@@ -268,6 +268,8 @@ export type DaemonMessage =
   /** K-709: a provider set a part of a desired state; kitshn stores it and pushes it to every machine. */
   | {
       readonly type: "desiredSet";
+      /** kitshn answers with `requestAnswer` and this id. */
+      readonly requestId: string;
       readonly provider: string;
       readonly kind: string;
       readonly part: "shared" | "machine";
@@ -297,6 +299,8 @@ export type ServerToDaemon =
       readonly tables: GrantTables;
       readonly hash: string;
     }
+  /** The answer to a request of the daemon that names a `requestId`: null, or why kitshn refused. */
+  | { readonly type: "requestAnswer"; readonly requestId: string; readonly error: string | null }
   /** K-709: the shared part and this machine's part of one desired state. */
   | {
       readonly type: "desired";

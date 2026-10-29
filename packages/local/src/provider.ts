@@ -25,6 +25,8 @@ export const PROVIDER_LIMITS = {
   columns: 8,
   /** K-709: each part of a desired state, in bytes of its JSON. */
   stateBytes: 64 * 1024,
+  /** K-1625: one resource with its facts, stickers and lists, in bytes of its JSON, so a card stays far below a row. */
+  resourceBytes: 64 * 1024,
 } as const;
 
 const LOWER = "abcdefghijklmnopqrstuvwxyz";
@@ -307,11 +309,19 @@ export function reportProblem(
     if (!kind) return `the resource ${resource.id} has the unknown kind ${resource.kind}.`;
     if (Object.keys(kind.levels).length === 0)
       return `the kind ${kind.id} has no levels, so it has no cards (K-709).`;
-    for (const list of resource.lists ?? [])
-      for (const row of list.rows)
+    for (const list of resource.lists ?? []) {
+      const columns = new Set(list.columns.map((column) => column.id));
+      for (const row of list.rows) {
         for (const command of row.commands ?? [])
           if (!commands.get(command)?.kinds.includes(resource.kind))
             return `the list ${list.id} of ${resource.id} names the command ${command}, which its kind does not have.`;
+        for (const key of Object.keys(row.cells))
+          if (!columns.has(key))
+            return `the row ${row.id} of the list ${list.id} has a cell ${key} that is no column.`;
+      }
+    }
+    if (bytesOf(resource) > PROVIDER_LIMITS.resourceBytes)
+      return `the resource ${resource.id} holds more than ${PROVIDER_LIMITS.resourceBytes} bytes.`;
     if (resource.parent !== undefined && (resource.parent === resource.id || !ids.has(resource.parent)))
       return `the resource ${resource.id} names the unknown parent ${resource.parent}.`;
     if (resource.site) {
@@ -347,3 +357,30 @@ export const pushKey = {
   settings: (provider: string) => `settings:${provider}`,
   desired: (provider: string, kind: string) => `desired:${provider}:${kind}`,
 } as const;
+
+/** The UTF-8 length of a value's JSON; this package runs without DOM types, so it counts by hand. */
+function bytesOf(value: unknown): number {
+  let bytes = 0;
+  for (const char of JSON.stringify(value ?? null)) {
+    const code = char.codePointAt(0) ?? 0;
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+  }
+  return bytes;
+}
+
+/**
+ * K-709: why a desired state part is refused, or null: the provider registered the kind with `state`, and the part
+ * holds at most `PROVIDER_LIMITS.stateBytes`. The daemon checks it before it answers, and kitshn again when it writes.
+ * kitshn does not check the value against the kind's schema; the provider validates what it applies.
+ */
+export function desiredProblem(
+  kinds: ReadonlyArray<ProviderKind>,
+  kind: string,
+  value: unknown,
+): string | null {
+  if (!kinds.some((item) => item.id === kind && item.state !== undefined))
+    return `the kind ${kind} has no desired state (K-709).`;
+  if (bytesOf(value) > PROVIDER_LIMITS.stateBytes)
+    return `a desired state part holds at most ${PROVIDER_LIMITS.stateBytes} bytes (K-709).`;
+  return null;
+}

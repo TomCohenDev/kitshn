@@ -1758,6 +1758,7 @@ export function App() {
               onToast={(text, error) => showToast({ text, error, undo: null })}
               onRemoveMachine={handlers.removeMachine}
               onRunJob={runJob}
+              onRunProviderCommand={handlers.runProviderCommand}
               warnings={store.snapshot.accessWarnings}
               onOpenSafety={openSafety}
               selectionActions={selectionActions(actionContext, handlers)}
@@ -2318,6 +2319,8 @@ function Panel(props: {
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
   onRunJob: (view: MachineView, command: Command) => Promise<void>;
+  /** K-707, K-1615: a provider command; a question asks first. */
+  onRunProviderCommand: (view: MachineView, command: Command, question: string | null) => void;
   version: string;
   onToast: (text: string, error: boolean) => void;
   onOpenSafety: () => void;
@@ -2398,6 +2401,7 @@ function Panel(props: {
         jobs={props.jobs}
         onRemoveMachine={props.onRemoveMachine}
         onRunJob={props.onRunJob}
+        onRunProviderCommand={props.onRunProviderCommand}
         onToast={props.onToast}
       />
     );
@@ -2800,6 +2804,8 @@ function CardPanel(props: {
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
   onRunJob: (view: MachineView, command: Command) => Promise<void>;
+  /** K-707, K-1615: a provider command; a question asks first. */
+  onRunProviderCommand: (view: MachineView, command: Command, question: string | null) => void;
   version: string;
   onToast: (text: string, error: boolean) => void;
 }) {
@@ -2850,13 +2856,17 @@ function CardPanel(props: {
           onRow={
             props.providerMachine
               ? (command, row) =>
-                  void props.onRunJob(props.providerMachine!, {
-                    kind: "provider",
-                    provider: resource.provider!.name,
-                    command,
-                    resource: resource.id,
-                    row,
-                  })
+                  props.onRunProviderCommand(
+                    props.providerMachine!,
+                    {
+                      kind: "provider",
+                      provider: resource.provider!.name,
+                      command: command.id,
+                      resource: resource.id,
+                      row,
+                    },
+                    command.confirm ? `${command.title} for this row of ${resource.name}?` : null,
+                  )
               : null
           }
         />
@@ -3371,7 +3381,7 @@ function ProviderFacts(props: {
   commands: ReadonlyArray<ProviderCommand>;
   onSetting: (key: string, value: string) => void;
   /** Null while kitshn does not know the machine of the card. */
-  onRow: ((command: string, row: string) => void) | null;
+  onRow: ((command: ProviderCommand, row: string) => void) | null;
 }) {
   const { card } = props;
   return (
@@ -3431,7 +3441,7 @@ function ProviderFacts(props: {
                           type="button"
                           class="btn"
                           data-tip={`${command.title} for this row; an offline machine runs it when it connects.`}
-                          onClick={() => props.onRow!(id, row.id)}
+                          onClick={() => props.onRow!(command, row.id)}
                         >
                           {command.title}
                         </button>

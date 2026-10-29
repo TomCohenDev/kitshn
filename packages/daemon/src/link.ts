@@ -3,7 +3,7 @@
 // socket in the daemon's private folder, and a named pipe on Windows with the rules of K-621.
 import { chmodSync, lstatSync, rmSync } from "node:fs";
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
-import { type Socket, connect as connectTcp } from "node:net";
+import { type Socket, connect as connectTcp, createServer as createListener } from "node:net";
 import { Readable } from "node:stream";
 import { connect as connectTls } from "node:tls";
 import type { ReachedCard } from "@kitshn/local";
@@ -16,13 +16,13 @@ export interface MachineToken {
   readonly clientSecret: string;
 }
 
-/** K-621: at most this many connections at once, and a request sends its headers within this time. */
+/** K-621: at most this many connections at once, and a connection that sends nothing in this time closes. */
 const LINK_CONNECTIONS = 64;
-const LINK_HEADERS_MS = 30_000;
+const LINK_FIRST_BYTE_MS = 30_000;
 
 /**
- * K-1609: where a request to `/<provider>/<machine id>/<path>` goes: the address of that provider's card on that
- * machine in this machine's reach. Known limit: with two addressed kinds of one provider on one machine, the first
+ * K-1609: where a request to `/<provider>/<machine id>/<path>` goes: the address of the card of the provider that the
+ * path names, on that machine in this machine's reach. Every caller runs as the daemon user, so this is no boundary. Known limit: with two addressed kinds of one provider on one machine, the first
  * card with an address wins; revisit when a provider has two, then the path names the card.
  */
 export function linkTarget(
@@ -98,8 +98,9 @@ interface LinkOptions {
 
 /**
  * K-1609: serves the link proxy on `path`: a Unix socket of mode 0600 in the daemon's private folder, or on Windows a
- * named pipe, which refuses remote clients and gives read and write only to its owner (K-621). HTTP streams both
- * ways; a WebSocket upgrade becomes a byte tunnel to the card's address, with the headers of the proxy.
+ * named pipe, which gives read and write only to its owner, SYSTEM and Administrators (K-621). The `node:net` server
+ * of K-621 takes each connection and gives it to the HTTP server, which never listens itself: Bun's `node:http` is
+ * not tested on a pipe. HTTP streams both ways; a WebSocket upgrade becomes a byte tunnel to the card's address.
  */
 export function serveLinks(path: string, options: LinkOptions): Promise<{ readonly stop: () => void }> {
   const scheme = options.scheme ?? "https";
@@ -178,21 +179,32 @@ export function serveLinks(path: string, options: LinkOptions): Promise<{ readon
     client.on("close", () => upstream.destroy());
     upstream.on("close", () => client.destroy());
   });
-  server.maxConnections = LINK_CONNECTIONS;
-  server.headersTimeout = LINK_HEADERS_MS;
-  server.requestTimeout = 0;
+  const listener = createListener((socket) => {
+    // A connection that never sends a byte holds a pipe instance for nothing, for example a read-only one.
+    const quiet = setTimeout(() => socket.destroy(), LINK_FIRST_BYTE_MS);
+    socket.once("data", () => clearTimeout(quiet));
+    socket.on("close", () => clearTimeout(quiet));
+    socket.on("error", () => socket.destroy());
+    server.emit("connection", socket);
+  });
+  listener.maxConnections = LINK_CONNECTIONS;
   if (!path.startsWith("\\\\.\\pipe\\")) rmSync(path, { force: true });
   return new Promise((resolve, reject) => {
-    server.once("error", (error: NodeJS.ErrnoException) =>
+    listener.once("error", (error: NodeJS.ErrnoException) =>
       reject(
         error.code === "EADDRINUSE"
           ? new Error(`another program holds the link pipe ${path} (K-621); the daemon serves no links now.`)
           : error,
       ),
     );
-    server.listen(path, () => {
+    listener.listen(path, () => {
       if (!path.startsWith("\\\\.\\pipe\\")) chmodSync(path, 0o600);
-      resolve({ stop: () => void server.close() });
+      resolve({
+        stop: () => {
+          listener.close();
+          server.close();
+        },
+      });
     });
   });
 }

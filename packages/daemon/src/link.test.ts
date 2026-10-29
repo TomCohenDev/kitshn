@@ -17,7 +17,7 @@ const card = (address: string | null): ReachedCard => ({
 });
 
 describe("the link proxy (K-1609)", () => {
-  it("reaches only the address of the asking provider's card on a machine in reach, and a path never changes the host", () => {
+  it("reaches only the address of the card of the provider that the path names, on a machine in reach, and a path never changes the host", () => {
     const other: ReachedCard = { ...card("other-b.example.com"), kind: "other.app" };
     const reachOf = (provider: string) =>
       provider === "t3" ? [card(null), card("t3-b.example.com")] : provider === "other" ? [other] : [];

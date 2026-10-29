@@ -335,9 +335,11 @@ export function desiredAccess(
   // "needs passkey" gets a policy with the passkey check of 10 minutes on `/api/approve/passkey`, whose application has
   // no other policy, so its token proves a fresh passkey; a circle without it goes on `/api/approve/login`, where the
   // Durable Object refuses a passkey circle. "All must match" is left out, as for K-113. During a pause no ask runs.
+  // K-1776: an unset right asks the Owner, so the Owner is an approver while any machine is joined, also one in the tray.
   const host = state.resources.get(ADMIN_RESOURCE_ID)?.addresses[0];
-  const asked = new Set(
-    [...state.circles.values()].flatMap((circle) =>
+  const asked = new Set([
+    ...(state.machines.size > 0 ? [OWNER_CIRCLE_ID] : []),
+    ...[...state.circles.values()].flatMap((circle) =>
       circle.members.flatMap((member) =>
         member._tag === "machine"
           ? Object.values(member.rights ?? {}).flatMap((mode) =>
@@ -346,7 +348,7 @@ export function desiredAccess(
           : [],
       ),
     ),
-  );
+  ]);
   const approvers = { passkey: [] as Array<string>, login: [] as Array<string> };
   for (const id of state.paused || !host ? [] : asked) {
     const circle = state.circles.get(id);

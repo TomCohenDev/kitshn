@@ -1726,6 +1726,8 @@ function setAttester(request: Extract<Request, { type: "attester-set" }>, caller
   writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
   renameSync(temporary, paths.config);
   log(`attester ${request.prefix} set to ${request.url}`);
+  // K-1751: the map shows the new attester without a daemon restart.
+  report();
   return {
     id: request.id,
     type: "attester-set",

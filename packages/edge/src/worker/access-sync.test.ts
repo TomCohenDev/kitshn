@@ -1397,7 +1397,21 @@ describe("the approve applications (K-1723)", () => {
       mfa_config: { session_duration: "10m" },
     });
     expect(desired.apps.has("app:approve:login")).toBe(false);
-    // No ask right: no approve application.
+    // No machine: no approve application.
     expect(desiredAccess(state, 0).apps.has("app:approve:passkey")).toBe(false);
+    // K-1776: a joined machine in the tray, in no circle, asks the Owner for each unset right.
+    const tray = {
+      id: "vps",
+      name: "vps",
+      labels: [],
+      order: 0,
+      serviceTokenId: "t",
+      clientId: "c",
+      tunnelId: "u",
+    };
+    const joined = desiredAccess({ ...state, machines: new Map([["vps", tray]]) }, 0);
+    expect(joined.apps.get("app:approve:passkey")).toMatchObject({
+      policyKeys: ["policy:approve-passkey:owner"],
+    });
   });
 });

@@ -2,7 +2,7 @@ import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import type { ProviderReport } from "@kitshn/local";
 import { afterEach, expect, it, vi } from "vitest";
-import type { Machine } from "../src/core/machine.ts";
+import type { Machine, MachineStatus } from "../src/core/machine.ts";
 import { type Circle, OWNER_CIRCLE_ID, type Resource, providerCardId } from "../src/core/model.ts";
 import { accessToken, send, stubAccessCerts } from "./access.ts";
 
@@ -230,16 +230,27 @@ it("stores desired state from a provider, and runs a provider command that an ag
   await sql("DELETE FROM circles WHERE id = 'agents'");
 });
 
-it("counts the pushes that a machine has not applied, takes applied only for its own keys, and sends idle jobs after a report (K-1608)", async () => {
-  const { stub, message } = await setup();
-  type Internals = { queuedFor(id: string): number | null; deliverJobs(): void };
+it("counts the pushes that a machine has not applied, and takes applied only for its own keys (K-1608)", async () => {
+  const { stub, message, sql } = await setup();
+  type Internals = { queuedFor(machine: Machine, status: MachineStatus | null): number | null };
+  const keyed: Machine = { ...machine, key: { kind: "public", publicKey: "k", fingerprint: "f", since: 0 } };
+  await sql("INSERT OR REPLACE INTO machines (id, body) VALUES ('vps', ?)", JSON.stringify(keyed));
   await message("signed", [report([app])]);
-  await runInDurableObject(stub, (_, state) => void state.storage.sql.exec("DELETE FROM applied_state"));
-  await evictDurableObject(stub);
-  const queued = () =>
-    runInDurableObject(stub, (instance) => (instance as unknown as Internals).queuedFor("vps"));
-  // A daemon that never answered applied has an unknown count, not a growing one.
-  expect(await queued()).toBeNull();
+  await sql("DELETE FROM applied_state");
+  const status = (capabilities: Array<string>): MachineStatus => ({
+    version: "dev",
+    os: "linux",
+    arch: "x64",
+    hostname: "vps",
+    tunnel: "running",
+    capabilities,
+  });
+  const queued = (on: Machine, live: MachineStatus | null) =>
+    runInDurableObject(stub, (instance) => (instance as unknown as Internals).queuedFor(on, live));
+  // A machine without a key gets no pushes, so nothing waits for it.
+  expect(await queued(machine, null)).toBe(0);
+  // An online daemon that does not name "applied" has an unknown count.
+  expect(await queued(keyed, status([]))).toBeNull();
   const raw = (body: object) =>
     runInDurableObject(stub, (instance) =>
       instance.webSocketMessage(daemonSocket("signed"), JSON.stringify(body)),
@@ -254,20 +265,68 @@ it("counts the pushes that a machine has not applied, takes applied only for its
   );
   expect(keys).toEqual(["grants:t3"]);
   // Three pushes wait: the grant tables, with a stale hash, and the reach and the card settings, with none.
-  expect(await queued()).toBe(3);
-  // A report that can end busy sends the jobs that wait for an idle machine.
-  const delivered = await runInDurableObject(stub, async (instance) => {
-    const spy = vi.spyOn(instance as unknown as Internals, "deliverJobs");
-    await instance.webSocketMessage(
-      daemonSocket("signed"),
-      JSON.stringify({
-        type: "providers",
-        providers: [report([{ ...app, facts: [{ label: "busy", value: "false", role: "busy" }] }])],
-      }),
-    );
-    return spy.mock.calls.length;
+  expect(await queued(keyed, null)).toBe(3);
+  expect(await queued(keyed, status(["applied"]))).toBe(3);
+  await sql("INSERT OR REPLACE INTO machines (id, body) VALUES ('vps', ?)", JSON.stringify(machine));
+});
+
+it("holds a job that waits for an idle machine while a provider is busy, and the next report sends it (K-1608)", async () => {
+  const { stub, message } = await setup();
+  await message("signed", [report([app])]);
+  // A real socket of the machine, so the Durable Object sends jobs to it.
+  await runInDurableObject(stub, (_, state) => {
+    const pair = new WebSocketPair();
+    state.acceptWebSocket(pair[1], ["vps", "machines"]);
+    pair[0].accept();
+    pair[1].serializeAttachment({
+      kind: "machine",
+      machineId: "vps",
+      since: Date.now(),
+      challenge: "",
+      check: "signed",
+      answered: true,
+      rotateBy: null,
+      status: null,
+      sample: null,
+    });
   });
-  expect(delivered).toBeGreaterThan(0);
+  const busy = (value: string) =>
+    runInDurableObject(stub, (instance) =>
+      instance.webSocketMessage(
+        daemonSocket("signed"),
+        JSON.stringify({
+          type: "providers",
+          providers: [report([{ ...app, facts: [{ label: "busy", value, role: "busy" }] }])],
+        }),
+      ),
+    );
+  await busy("true");
+  const id = await runInDurableObject(
+    stub,
+    (_, state) =>
+      state.storage.sql
+        .exec<{ id: number }>(
+          `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output, when_idle)
+         VALUES ('vps', '[]', '{"kind":"diagnostics"}', 'queued', 0, 9999999999999, '{"_tag":"kitshn","reason":"test"}',
+         '{"kitshn":true,"email":null,"clientId":null,"ip":null}', NULL, '', 1) RETURNING id`,
+        )
+        .one().id,
+  );
+  const jobState = () =>
+    runInDurableObject(
+      stub,
+      (_, state) =>
+        state.storage.sql.exec<{ state: string }>("SELECT state FROM jobs WHERE id = ?", id).one().state,
+    );
+  // A report while the card is busy delivers jobs, and this one stays.
+  await busy("true");
+  expect(await jobState()).toBe("queued");
+  await busy("false");
+  expect(await jobState()).toBe("sent");
+  // An open socket keeps the Durable Object busy, and the next test evicts it.
+  await runInDurableObject(stub, (_, state) => {
+    for (const socket of state.getWebSockets("vps")) socket.close(1000, "test over");
+  });
 });
 
 it("records only the calls that a machine reports on machines that it reaches, as its own and only on a signed connection (K-1610)", async () => {
@@ -454,7 +513,7 @@ it("queues only a command that the card's provider has (K-707)", async () => {
 
 it("forgets only a provider that does not run, and an offline report does not bring it back (K-704, K-705)", async () => {
   stubAccessCerts();
-  const { message, card, lastSummary } = await setup();
+  const { message, card, sql, lastSummary } = await setup();
   await message("signed", [report([app])]);
   const token = await accessToken("admin-aud", { email: "owner@example.com" });
   const forget = (card: string | null = null) =>
@@ -468,9 +527,18 @@ it("forgets only a provider that does not run, and an offline report does not br
   const thread = { ...app, id: "th-1", name: "Fix" };
   const threadId = providerCardId("vps", "t3", "th-1");
   await message("signed", [report([app, thread])]);
+  await sql(
+    "INSERT OR REPLACE INTO card_settings (card_id, key, value) VALUES (?, 'updateChannel', 'daily')",
+    threadId,
+  );
   expect((await forget(threadId)).status).toBe(409);
   await message("signed", [report([app])]);
   expect((await forget(threadId)).status).toBe(200);
+  // K-717: the maps get no settings of a forgotten card; the row stays for Undo.
+  const snapshot = (await (
+    await send("/api/state", { headers: { "cf-access-jwt-assertion": token } })
+  ).json()) as { cardSettings: Record<string, unknown> };
+  expect(snapshot.cardSettings[threadId]).toBeUndefined();
   expect(await lastSummary()).toBe("Forgot 1 card of the provider t3 (K-704)");
   await message("signed", [report([app], false)]);
   expect((await forget()).status).toBe(200);

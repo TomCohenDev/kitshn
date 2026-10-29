@@ -13,8 +13,9 @@ export const SECRET_ROWS: ReadonlyArray<{ readonly table: string } | { readonly 
   { table: "pass_keys" },
   { table: "github_tokens" },
   { metaPrefix: "pass_key" },
-  // K-1901: the VAPID private key of Web Push.
+  // K-1907: the VAPID private key of Web Push, and the subscriptions, whose endpoints and auth secrets are keys too.
   { metaPrefix: "push_vapid_jwk" },
+  { table: "push_subscriptions" },
 ];
 
 const secretTables = new Set(SECRET_ROWS.flatMap((row) => ("table" in row ? [row.table] : [])));
@@ -28,6 +29,8 @@ export const EXPORT_PREFIX = "state/";
 export interface StateExport {
   readonly format: "kitshn-state";
   readonly version: 1;
+  /** K-1833: the Cloudflare account of the install; an import works only into the same one. */
+  readonly account: string;
   readonly schemaVersion: number;
   readonly exportedAt: number;
   readonly tables: Readonly<Record<string, ReadonlyArray<Record<string, unknown>>>>;
@@ -40,7 +43,12 @@ const base64 = (bytes: ArrayBuffer) => {
 };
 
 /** K-1831: every row of every table but the left-out ones; a BLOB becomes `{"base64": ...}`. */
-export function stateExport(sql: SqlStorage, schemaVersion: number, now: number): StateExport {
+export function stateExport(
+  sql: SqlStorage,
+  account: string,
+  schemaVersion: number,
+  now: number,
+): StateExport {
   const names = sql
     .exec<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name",
@@ -62,7 +70,7 @@ export function stateExport(sql: SqlStorage, schemaVersion: number, now: number)
           ]),
         ),
       );
-  return { format: "kitshn-state", version: 1, schemaVersion, exportedAt: now, tables };
+  return { format: "kitshn-state", version: 1, account, schemaVersion, exportedAt: now, tables };
 }
 
 /** K-1818: the size of every object of the bucket, by listing it. */

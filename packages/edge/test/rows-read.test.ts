@@ -1,4 +1,4 @@
-import { runInDurableObject } from "cloudflare:test";
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Circle } from "../src/core/model.ts";
@@ -153,4 +153,40 @@ it("reads few rows in an alarm run that checks a static site that is up (K-1126)
     return instance.alarm();
   });
   expect(rowsRead).toBeLessThan(100);
+});
+
+it("reads the Access rows once for the life of the object, not in each alarm run (K-1302)", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("ok", { status: 200 }));
+  // Its own object, so the rows of the tests above do not count here.
+  const stub = env.KITSHN.getByName("access-rows");
+  await runInDurableObject(stub, (_instance, state) => {
+    for (let i = 0; i < 300; i++)
+      state.storage.sql.exec(
+        "INSERT INTO access_objects (key, cf_id, body, tried) VALUES (?, 'cf', '{}', '{}')",
+        `access-rows-${i}`,
+      );
+  });
+  // A new object reads the Access rows once, when it first needs them.
+  await evictDurableObject(stub);
+  const read = await runInDurableObject(stub, async (instance, state) => {
+    let accessRowsRead = 0;
+    const sql = state.storage.sql;
+    const exec = sql.exec.bind(sql);
+    sql.exec = ((query: string, ...bindings: Array<SqlStorageValue>) => {
+      const cursor = exec(query, ...bindings);
+      const toArray = cursor.toArray.bind(cursor);
+      cursor.toArray = () => {
+        const rows = toArray();
+        if (query.includes("FROM access_objects")) accessRowsRead += cursor.rowsRead;
+        return rows;
+      };
+      return cursor;
+    }) as typeof sql.exec;
+    // Two alarm runs with a load between them, as a run that writes does: the rows come from memory each time.
+    await instance.alarm();
+    (instance as unknown as { load(): void }).load();
+    await instance.alarm();
+    return accessRowsRead;
+  });
+  expect(read).toBe(0);
 });

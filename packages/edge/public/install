@@ -14,7 +14,8 @@
 # KITSHN_ZONES (comma-separated further zones of the account that the extra addresses of an app may use, K-817;
 # a second run keeps the list when it is not set), KITSHN_GITHUB_APP_ID and KITSHN_GITHUB_APP_KEY (the id and the private key file of the kitshn GitHub
 # App, so agent keys can start a repo's kitshn workflow, K-718; a second run keeps them unless
-# KITSHN_SET_GITHUB_APP=1).
+# KITSHN_SET_GITHUB_APP=1), KITSHN_IMPORT (a state export, .json or .json.gz, that rebuilds the state of an empty
+# kitshn on the same Cloudflare account, K-1833).
 set -eu
 
 API=https://api.cloudflare.com/client/v4
@@ -38,6 +39,7 @@ done
 [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || die "set CLOUDFLARE_API_TOKEN. Make a token with this link: $TOKEN_LINK"
 [ -n "${KITSHN_HOST:-}" ] || die "set KITSHN_HOST to the admin address, for example kit.example.com."
 [ -n "${KITSHN_OWNER_EMAILS:-}" ] || die "set KITSHN_OWNER_EMAILS to your email (a comma-separated list for more)."
+[ -z "${KITSHN_IMPORT:-}" ] || [ -r "$KITSHN_IMPORT" ] || die "KITSHN_IMPORT names no readable file: $KITSHN_IMPORT"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -269,6 +271,19 @@ if try GET "/accounts/$ACCOUNT/r2/buckets"; then
     changed "created the R2 bucket kitshn"
   fi
   R2=kitshn
+  # K-1833: the export waits in R2; the Durable Object imports it once when it sees the new KITSHN_IMPORT_AT.
+  if [ -n "${KITSHN_IMPORT:-}" ]; then
+    case "$KITSHN_IMPORT" in
+    *.gz) cp "$KITSHN_IMPORT" "$WORK/import.json.gz" ;;
+    *) gzip -c "$KITSHN_IMPORT" >"$WORK/import.json.gz" ;;
+    esac
+    curl -sS -X PUT "$API/accounts/$ACCOUNT/r2/buckets/kitshn/objects/import%2Fstate.json.gz" \
+      -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "content-type: application/gzip" \
+      --data-binary "@$WORK/import.json.gz" >"$WORK/out"
+    [ "$(jq -r .success "$WORK/out")" = true ] || die "the upload of the import failed: $(head -c 300 "$WORK/out")"
+    IMPORT_AT=$(date +%s)
+    changed "uploaded $KITSHN_IMPORT for the import (K-1833)"
+  fi
   # K-812: the files of a Compose deploy go when its job ends; a rule removes any left after a day.
   rules=$(api GET "/accounts/$ACCOUNT/r2/buckets/kitshn/lifecycle")
   if printf '%s' "$rules" | jq -e '.rules // [] | any(.id == "kitshn deploys")' >/dev/null; then
@@ -284,6 +299,8 @@ elif grep -q "enable R2" "$WORK/out"; then
 else
   die "the R2 check failed: $(jq -r '[.errors[]?.message] | join("; ")' "$WORK/out")"
 fi
+
+[ -z "${KITSHN_IMPORT:-}" ] || [ -n "$R2" ] || die "KITSHN_IMPORT needs R2, which is off on this account (K-1833)."
 
 say "7. Worker (K-1203)"
 NEED="Workers Scripts: Edit"
@@ -353,7 +370,8 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
   --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" \
   --arg zone "$ZONE" --arg zone_name "$ZONE_NAME" --arg zones "$ZONES_JSON" --arg deployers "$DEPLOY_OWNER_IDS" \
   --arg version "$(cat "$WORK/bundle/version")" --arg r2 "$R2" --arg pages_login "$PAGES_LOGIN_AUD" \
-  --arg pages_passkey "$PAGES_PASSKEY_AUD" --arg files_login "$FILES_LOGIN_AUD" --arg files_passkey "$FILES_PASSKEY_AUD" '
+  --arg pages_passkey "$PAGES_PASSKEY_AUD" --arg files_login "$FILES_LOGIN_AUD" --arg files_passkey "$FILES_PASSKEY_AUD" \
+  --arg import_at "${IMPORT_AT:-}" '
   {
     main_module: "worker.js",
     compatibility_date: $date,
@@ -381,7 +399,8 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
       {type: "plain_text", name: "FILES_LOGIN_AUD", text: $files_login},
       {type: "plain_text", name: "FILES_PASSKEY_AUD", text: $files_passkey}
     ] + (if $old_host == "" then [] else [{type: "plain_text", name: "KITSHN_OLD_HOST", text: $old_host}] end)
-      + (if $r2 == "" then [] else [{type: "r2_bucket", name: "BUCKET", bucket_name: $r2}] end),
+      + (if $r2 == "" then [] else [{type: "r2_bucket", name: "BUCKET", bucket_name: $r2}] end)
+      + (if $import_at == "" then [] else [{type: "plain_text", name: "KITSHN_IMPORT_AT", text: $import_at}] end),
     keep_bindings: ["secret_text"]
   } + (if $migrations == null then {} else {migrations: $migrations} end)')
 printf '%s' "$metadata" >"$WORK/metadata.json"
@@ -451,6 +470,24 @@ for host in "$KITSHN_HOST" "pages.$ZONE_NAME" "files.$ZONE_NAME"; do
     changed "$host now serves the Worker"
   fi
 done
+
+if [ -n "${IMPORT_AT:-}" ]; then
+  say "9. Import (K-1833)"
+  answer=""
+  for _ in $(seq 1 24); do
+    answer=$(curl -fsS "https://$KITSHN_HOST/join/import-status" 2>/dev/null || true)
+    case "$(printf '%s' "$answer" | jq -r '.state // empty' 2>/dev/null)" in
+    done)
+      changed "imported $KITSHN_IMPORT; History names the import"
+      break
+      ;;
+    refused) die "kitshn refused the import ($(printf '%s' "$answer" | jq -r .code)); the Worker log names the details (K-1833)." ;;
+    esac
+    sleep 5
+  done
+  printf '%s' "$answer" | jq -e '.state == "done"' >/dev/null 2>&1 ||
+    die "kitshn did not answer the import within 2 minutes; check https://$KITSHN_HOST/join/import-status"
+fi
 
 say ""
 say "kitshn is ready: https://$KITSHN_HOST"

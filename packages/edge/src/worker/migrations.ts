@@ -193,7 +193,14 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `CREATE TABLE repo_cards (repo_id TEXT NOT NULL, app_key TEXT NOT NULL, environment TEXT NOT NULL,
      card_id TEXT NOT NULL UNIQUE, PRIMARY KEY (repo_id, app_key, environment))`,
   ],
-  // 29: section 17. A proposal is an ask that waits for its approver circle (K-1722); `body` and `labels` are JSON,
+  // 29: Web Push subscriptions (K-1907), one row per browser of a person. `levels` is a JSON list; the quiet hours
+  // are minutes after midnight in `time_zone`, or all null.
+  [
+    `CREATE TABLE push_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL UNIQUE,
+     p256dh TEXT NOT NULL, auth TEXT NOT NULL, email TEXT NOT NULL, label TEXT NOT NULL, levels TEXT NOT NULL,
+     quiet_start INTEGER, quiet_end INTEGER, time_zone TEXT, created_at INTEGER NOT NULL, last_ok_at INTEGER)`,
+  ],
+  // 30: section 17. A proposal is an ask that waits for its approver circle (K-1722); `body` and `labels` are JSON,
   // and one conditional update moves `state` from pending (K-1723). Ask events are the History of asks (K-1717): not
   // revisions, with their own cap.
   [
@@ -231,16 +238,19 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */
 export const REPO_GATE_MIGRATION = 6;
 
-/** Runs the migrations after `from`. Returns the new version. The caller provides the transaction. */
-export function migrate(exec: (query: string) => void, from: number): number {
+/**
+ * Runs the migrations after `from`, up to `to` (K-1833 stops at the schema of an export). Returns the new version.
+ * The caller provides the transaction.
+ */
+export function migrate(exec: (query: string) => void, from: number, to = MIGRATIONS.length): number {
   if (from > MIGRATIONS.length) {
     throw new Error(
       `The database has schema version ${from}, newer than this kitshn (${MIGRATIONS.length}).`,
     );
   }
-  for (let version = from + 1; version <= MIGRATIONS.length; version++) {
+  for (let version = from + 1; version <= to; version++) {
     for (const query of MIGRATIONS[version - 1] ?? []) exec(query);
     exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '${version}')`);
   }
-  return MIGRATIONS.length;
+  return to;
 }

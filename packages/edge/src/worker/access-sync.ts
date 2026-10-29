@@ -7,6 +7,7 @@ import {
 } from "../core/access.ts";
 import { Schema } from "effect";
 import { deepEqual } from "../core/changes.ts";
+import { CloudflareError } from "./cloudflare.ts";
 import type { AccessState } from "../core/protocol.ts";
 
 /**
@@ -21,6 +22,10 @@ export interface AccessRow {
   readonly body: string;
   readonly tried: string;
   readonly error: string | null;
+  /** K-407, K-408: in memory only, when a failed write or delete tries again; after a restart it tries at once. */
+  readonly retryAt?: number;
+  /** K-408: in memory only, the failed tries in a row, for the backoff. */
+  readonly attempts?: number;
 }
 
 export interface AccessStore {
@@ -37,8 +42,54 @@ const PAGE = 1000;
 
 const policyBody = (policy: PolicyBody) => JSON.stringify(policy);
 
-/** True when an attempt with this body failed and waits for the daily retry (K-408). */
-const failedWith = (row: AccessRow | undefined, body: string) => row?.error != null && row.tried === body;
+/**
+ * K-407, K-408: the backoff of a write after an unclear answer, and of a write that lowers access after a refusal: 5
+ * minutes, then 15, then each hour. The daily run of K-408 retries every failed write anyway.
+ */
+export const BACKOFF_MS = [5 * 60_000, 15 * 60_000, 60 * 60_000] as const;
+export const RETRY_AFTER_MS = BACKOFF_MS[0];
+
+/** The retry time and the count of the next failed try of a row. */
+const backoff = (row: AccessRow | undefined, now: number) => {
+  const attempts = (row?.attempts ?? 0) + 1;
+  return { retryAt: now + BACKOFF_MS[Math.min(attempts, BACKOFF_MS.length) - 1]!, attempts };
+};
+
+/** K-408: what Cloudflare serves is the wanted body: every field of the body, and the policies by id in order. */
+const serves = (live: unknown, body: string) => {
+  if (typeof live !== "object" || live === null) return false;
+  const served = live as Record<string, unknown>;
+  return Object.entries(JSON.parse(body) as Record<string, unknown>).every(([key, wanted]) =>
+    key === "policies"
+      ? deepEqual(
+          ((served["policies"] ?? []) as ReadonlyArray<{ id: string }>).map((policy) => policy.id),
+          (wanted as ReadonlyArray<{ id: string }>).map((policy) => policy.id),
+        )
+      : deepEqual(served[key], wanted),
+  );
+};
+
+/** K-408: Cloudflare gave no clear answer (no answer, a 5xx or a 429), so the write may or may not have landed. */
+export const unclearAnswer = (error: unknown) =>
+  error instanceof CloudflareError && (error.status === 0 || error.status >= 500 || error.status === 429);
+
+/**
+ * K-407: the write may take access away: it drops a policy of the body that Cloudflare has, or that body is unknown
+ * (after an unclear answer), so least access wins.
+ */
+const lowers = (row: AccessRow, body: string) =>
+  row.body === "" ? row.cfId !== "" : removesPolicy(row.body, body);
+
+/**
+ * True when the write of this body waits. A refusal (`tried` is this body) waits for the daily retry (K-408), and one
+ * that lowers access only until its retry time (K-407). After an unclear answer the row has no `tried` and no `body`,
+ * and the next write of any body waits until its retry time.
+ */
+const failedWith = (row: AccessRow | undefined, body: string, now = Date.now()) => {
+  if (row?.error == null) return false;
+  if (row.tried === body) return !lowers(row, body) || (row.retryAt ?? 0) > now;
+  return row.tried === "" && (row.retryAt ?? 0) > now;
+};
 
 /**
  * The application body, or null while it must wait. A policy without a Cloudflare id is left out only
@@ -74,12 +125,22 @@ export function accessStates(
       }),
       { row: rows.get(key), body: appBody(key, app, rows) ?? "" },
     ];
-    const failed = parts.find((part) => failedWith(part.row, part.body));
+    // A refusal shows in red; one that may lower access says so, because the old access stays open until it lands.
+    const failed = parts.find((part) => part.row?.error != null && part.row.tried === part.body);
+    // After an unclear answer the row has no `tried`; kitshn tries again by itself, so the card says "retrying".
+    const unclear = parts.find((part) => part.row?.error != null && part.row.tried === "");
     const state: AccessState = failed?.row?.error
-      ? { state: "failed", error: failed.row.error }
-      : parts.every((part) => part.row?.cfId && part.row.body === part.body)
-        ? { state: "applied" }
-        : { state: "applying" };
+      ? {
+          state: "failed",
+          error: lowers(failed.row, failed.body)
+            ? `Access not lowered yet: ${failed.row.error}`
+            : failed.row.error,
+        }
+      : unclear?.row?.error
+        ? { state: "retrying", error: unclear.row.error, at: unclear.row.retryAt ?? 0 }
+        : parts.every((part) => part.row?.cfId && part.row.body === part.body)
+          ? { state: "applied" }
+          : { state: "applying" };
     const previous = states[resourceId];
     if (!previous || previous.state === "applied") states[resourceId] = state;
   }
@@ -138,7 +199,7 @@ function keptPolicies(
     if (!row.key.startsWith("app:") || desired.apps.has(row.key)) continue;
     const domain = appDomain(row);
     if (domain === null || !reachable.has(domain)) continue;
-    // A kept app whose body the daily compare cleared has unknown policies: keep every policy for now.
+    // A kept app whose body is unknown (after an unclear answer) has unknown policies: keep every policy for now.
     if (!row.body) return null;
     for (const id of policyIds(row.body)) kept.add(id);
   }
@@ -152,7 +213,14 @@ const isStale = (
   reachable: ReadonlySet<string>,
   kept: ReadonlySet<string> | null,
 ) => {
-  if (desired.policies.has(row.key) || desired.apps.has(row.key) || row.error !== null) return false;
+  if (desired.policies.has(row.key) || desired.apps.has(row.key)) return false;
+  // A failed delete waits for its retry time (an unclear answer, or an application, whose delete lowers access), or
+  // else for the daily retry (K-407, K-408).
+  if (
+    row.error !== null &&
+    (row.retryAt === undefined ? !row.key.startsWith("app:") : row.retryAt > Date.now())
+  )
+    return false;
   if (row.key.startsWith("app:")) {
     const domain = appDomain(row);
     return domain === null || !reachable.has(domain);
@@ -165,7 +233,7 @@ const isNotFound = (error: unknown) =>
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-/** The policy ids in an application body. An empty body (cleared by the daily compare) has none. */
+/** The policy ids in an application body. An empty body (unknown after an unclear answer) has none. */
 const policyIds = (body: string) =>
   body
     ? ((JSON.parse(body) as { policies?: ReadonlyArray<{ id: string }> }).policies?.map(
@@ -243,7 +311,7 @@ export async function verifyAccess(
           },
         );
       if (!live) store.put({ ...row, cfId: "", aud: "", body: "", tried: "", error: null });
-      else if (!same) store.put({ ...row, body: "", tried: "", error: null });
+      else if (!same) store.put({ ...row, body: JSON.stringify(live), tried: "", error: null });
       continue;
     }
     const live = apps.find((app) => app.id === row.cfId);
@@ -264,7 +332,7 @@ export async function verifyAccess(
         },
       );
     if (!live) store.put({ ...row, cfId: "", aud: "", body: "", tried: "", error: null });
-    else if (!same) store.put({ ...row, body: "", tried: "", error: null });
+    else if (!same) store.put({ ...row, body: JSON.stringify(live), tried: "", error: null });
   }
   const ours = new Set([...store.rows.values()].map((row) => row.cfId));
   const warnings: Array<string> = [];
@@ -435,7 +503,7 @@ export async function verifyPasskeys(
         [...ours.allowed_authenticators].sort(),
       ) &&
       live.mfa_config?.session_duration === ours.session_duration;
-    if (!same) store.put({ ...row, body: "", tried: "", error: null });
+    if (!same) store.put({ ...row, body: JSON.stringify(live), tried: "", error: null });
   }
   return calls;
 }
@@ -443,7 +511,7 @@ export async function verifyPasskeys(
 /**
  * K-403, K-603: whether the application that Cloudflare last accepted has a Bypass policy. Null when
  * kitshn does not know: the accepted body of the application, or of one of its policies, is unknown
- * (the daily compare clears a changed one, K-408) and no known policy is Bypass.
+ * (after an unclear answer, K-408) and no known policy is Bypass.
  */
 export function appliesBypass(app: AccessRow, rows: ReadonlyMap<string, AccessRow>): boolean | null {
   if (app.body === "") return null;
@@ -534,9 +602,22 @@ export async function syncAccess(
           existingApps = await api<ReadonlyArray<Named>>("GET", `${base}/apps?per_page=1000`);
         }
         const found = find((kind === "policies" ? existingPolicies : existingApps) ?? []);
-        // Never adopt an object that another row holds: one Cloudflare object belongs to one row (K-410).
+        // Never adopt an object that another row holds: one Cloudflare object belongs to one row (K-408).
         const taken = new Set([...store.rows.values()].map((item) => item.cfId));
         cfId = found && found.name.startsWith(ACCESS_NAME_PREFIX) && !taken.has(found.id) ? found.id : "";
+      }
+      // K-408: the body of the object is unknown (after an unclear answer): read it back. When
+      // Cloudflare serves the wanted body, the row takes it and nothing is written; else the wanted body is written.
+      // kitshn never adopts what Cloudflare serves as the wanted body.
+      let live: unknown = null;
+      if (cfId && row !== undefined && row.body === "") {
+        if (!spend()) return false;
+        live = await api<unknown>("GET", `${base}/${kind}/${cfId}`);
+        if (serves(live, body)) {
+          const aud = kind === "apps" ? String((live as { aud?: unknown }).aud ?? row.aud) : "";
+          store.put({ key, cfId, aud, body, tried: body, error: null });
+          return true;
+        }
       }
       if (!spend()) return false;
       const request: unknown = JSON.parse(body);
@@ -546,10 +627,17 @@ export async function syncAccess(
       // A missing tag is read again from the list of applications (K-603).
       const aud = kind === "apps" ? (result.aud ?? "") : "";
       // K-409: a removed share takes effect at once, so the sessions of the application end. Until the
-      // revoke succeeds, the row keeps its old body, so the next run writes and revokes again.
-      if (kind === "apps" && row?.body && removesPolicy(row.body, body)) {
+      // revoke succeeds, the row keeps the old body (what Cloudflare served, read back when unknown), so the next run
+      // writes and revokes again. A create that landed after an unclear answer is read back too.
+      const before = live !== null ? JSON.stringify(live) : (row?.body ?? "");
+      if (
+        kind === "apps" &&
+        row !== undefined &&
+        (row.cfId || live !== null) &&
+        removesPolicy(before, body)
+      ) {
         if (!spend()) {
-          store.put({ key, cfId: result.id, aud, body: row.body, tried: "", error: null });
+          store.put({ key, cfId: result.id, aud, body: before, tried: "", error: null });
           return false;
         }
         try {
@@ -559,9 +647,10 @@ export async function syncAccess(
             key,
             cfId: result.id,
             aud,
-            body: row.body,
+            body: before,
             tried: body,
             error: `sessions not ended: ${message(error)}`,
+            ...backoff(row, Date.now()),
           });
           return true;
         }
@@ -572,7 +661,29 @@ export async function syncAccess(
       if (isNotFound(error) && cfId) store.put({ key, cfId: "", aud: "", body: "", tried: "", error: null });
       else {
         const aud = cfId === row?.cfId ? row.aud : "";
-        store.put({ key, cfId, aud, body: row?.body ?? "", tried: body, error: message(error) });
+        if (unclearAnswer(error))
+          // K-408: the write may or may not have landed, so the body of the object is unknown, and the next run
+          // writes the wanted body, whatever it is then.
+          store.put({
+            key,
+            cfId,
+            aud,
+            body: "",
+            tried: "",
+            error: message(error),
+            ...backoff(row, Date.now()),
+          });
+        else {
+          const failed: AccessRow = {
+            key,
+            cfId,
+            aud,
+            body: row?.body ?? "",
+            tried: body,
+            error: message(error),
+          };
+          store.put(lowers(failed, body) ? { ...failed, ...backoff(row, Date.now()) } : failed);
+        }
       }
     }
     return true;
@@ -606,7 +717,15 @@ export async function syncAccess(
       store.remove(row.key);
     } catch (error) {
       if (isNotFound(error)) store.remove(row.key);
-      else store.put({ ...row, tried: "", error: message(error) });
+      else {
+        const { retryAt: _, ...failed } = row;
+        // An unclear answer, or the delete of an application, which lowers access, tries again in five minutes.
+        store.put(
+          unclearAnswer(error) || row.key.startsWith("app:")
+            ? { ...failed, tried: "", error: message(error), ...backoff(row, Date.now()) }
+            : { ...failed, tried: "", error: message(error) },
+        );
+      }
     }
   }
   return true;

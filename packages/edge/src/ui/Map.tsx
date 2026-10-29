@@ -85,6 +85,7 @@ export const USER_STACK = "stack:";
 /** K-407 */
 export const ACCESS_TIPS = {
   applying: "Applying: Cloudflare does not have this change yet.",
+  retrying: "Retrying: Cloudflare gave no clear answer, so kitshn tries again by itself.",
   applied: "Applied: Cloudflare has this change.",
 } as const;
 
@@ -940,6 +941,11 @@ function CardView(props: {
         {props.access?.state === "applying" ? (
           <span class="sticker wait state" data-tip={ACCESS_TIPS.applying}>
             applying
+          </span>
+        ) : null}
+        {props.access?.state === "retrying" ? (
+          <span class="sticker wait state" data-tip={`${ACCESS_TIPS.retrying} ${props.access.error}`}>
+            retrying
           </span>
         ) : null}
         {props.access?.state === "failed" ? (

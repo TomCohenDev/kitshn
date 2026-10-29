@@ -101,6 +101,15 @@ import {
   gigabytes,
 } from "../core/backups.ts";
 import { bucketSize, stateExport, writeExport } from "./backups.ts";
+import {
+  IMPORT_OBJECT,
+  type ImportCode,
+  ImportError,
+  type ImportRefusal,
+  notEmptyReason,
+  readExport,
+  writeImport,
+} from "./state-import.ts";
 import { MIGRATIONS } from "./migrations.ts";
 import type {
   DeployNote,
@@ -202,6 +211,15 @@ import { seed } from "../core/seed.ts";
 import { type Visitor, circleMatches, visitorLevel } from "../core/visitor.ts";
 import { APPROVE_APPS } from "../core/access.ts";
 import {
+  DEFAULT_LEVELS,
+  PUSH_SENDS_PER_RUN,
+  PUSH_TEST_MS,
+  type PushDevice,
+  deviceWants,
+  pushMessage,
+} from "../core/push.ts";
+import { type VapidKey, generateVapidJwk, pushTopic, sendPush, vapidKey } from "./push.ts";
+import {
   type Mute,
   NOTIFICATIONS_KEEP_MS,
   NOTIFICATIONS_MAX,
@@ -212,6 +230,7 @@ import {
   NOTIFICATION_SOURCES,
   changed,
   clip,
+  muted,
   onBell,
 } from "../core/notifications.ts";
 import {
@@ -386,6 +405,93 @@ interface UndoOf {
   readonly item: string | null;
 }
 
+/** K-1907: the `meta` key of the VAPID private key; no read path, export or backup includes it. */
+const VAPID_META = "push_vapid_jwk";
+
+interface PushRow extends Record<string, SqlStorageValue> {
+  id: number;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  email: string;
+  label: string;
+  levels: string;
+  quiet_start: number | null;
+  quiet_end: number | null;
+  time_zone: string | null;
+  created_at: number;
+  last_ok_at: number | null;
+}
+
+const pushDeviceOf = (row: PushRow): PushDevice => ({
+  id: row.id,
+  label: row.label,
+  email: row.email,
+  levels: (JSON.parse(row.levels) as Array<string>).map((level) =>
+    oneOf(level, ["info", "warn", "error"] as const),
+  ),
+  quiet:
+    row.quiet_start === null || row.quiet_end === null || row.time_zone === null
+      ? null
+      : { start: row.quiet_start, end: row.quiet_end, timeZone: row.time_zone },
+  createdAt: row.created_at,
+  lastOkAt: row.last_ok_at,
+});
+
+/** The bytes of a base64url text, or null when it is not base64url. */
+function base64UrlBytes(text: string): Uint8Array | null {
+  try {
+    return Uint8Array.from(atob(text.replaceAll("-", "+").replaceAll("_", "/")), (c) => c.charCodeAt(0));
+  } catch {
+    return null;
+  }
+}
+
+/** K-1907: a subscription from the browser, checked. A push endpoint is an https address of a push service. */
+function pushInput(body: unknown) {
+  if (!isRecord(body)) return "Send the subscription as JSON.";
+  const { endpoint, p256dh, auth, label, levels, quiet } = body;
+  if (typeof endpoint !== "string" || !URL.canParse(endpoint) || new URL(endpoint).protocol !== "https:")
+    return "The endpoint is not an https address.";
+  // RFC 8291: the browser key is an uncompressed P-256 point (65 bytes), the auth secret 16 bytes.
+  if (
+    typeof p256dh !== "string" ||
+    base64UrlBytes(p256dh)?.length !== 65 ||
+    base64UrlBytes(p256dh)?.[0] !== 4
+  )
+    return "The browser key is not a P-256 point of 65 bytes.";
+  if (typeof auth !== "string" || base64UrlBytes(auth)?.length !== 16)
+    return "The auth secret is not 16 bytes.";
+  if (typeof label !== "string" || label.trim() === "" || label.length > 80)
+    return "Name the device in at most 80 characters.";
+  const chosen = Array.isArray(levels) ? levels : DEFAULT_LEVELS;
+  if (!chosen.every((level) => level === "info" || level === "warn" || level === "error"))
+    return "The levels are info, warn and error.";
+  let hours: { start: number; end: number; timeZone: string } | null = null;
+  if (quiet !== null && quiet !== undefined) {
+    if (!isRecord(quiet)) return "Quiet hours have a start, an end and a time zone.";
+    const { start, end, timeZone } = quiet;
+    const minute = (value: unknown) =>
+      Number.isInteger(value) && Number(value) >= 0 && Number(value) < 24 * 60;
+    if (!minute(start) || !minute(end) || typeof timeZone !== "string")
+      return "Quiet hours have a start and an end in minutes after midnight, and a time zone.";
+    try {
+      new Intl.DateTimeFormat("en", { timeZone });
+    } catch {
+      return `kitshn does not know the time zone ${timeZone}.`;
+    }
+    hours = { start: Number(start), end: Number(end), timeZone };
+  }
+  return {
+    endpoint,
+    p256dh,
+    auth,
+    label: label.trim(),
+    levels: chosen as Array<"info" | "warn" | "error">,
+    quiet: hours,
+  };
+}
+
 interface NotificationRow extends Record<string, SqlStorageValue> {
   id: number;
   source: string;
@@ -516,7 +622,10 @@ export class Kitshn extends DurableObject<Env> {
    * row and makes the namespace again. Revisit when a delete must survive a restart, for example with a row per delete.
    */
   private readonly deletingStorage = new Set<string>();
-  /** K-1302: the Access rows, read on first use; a wake for a daemon sample never needs them. */
+  /**
+   * K-1302: the Access rows, read on first use and then kept for the life of the object; a wake for a daemon sample
+   * never needs them. Every write goes through accessStore(), which writes the map and the table together.
+   */
   private accessCache: Map<string, AccessRow> | null = null;
   private get access(): Map<string, AccessRow> {
     this.accessCache ??= new Map(
@@ -536,6 +645,8 @@ export class Kitshn extends DurableObject<Env> {
   }
   /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
   private stuckShares = new Set<string>();
+  /** K-1716: false once `github_tokens` is known to be empty, so a broadcast reads no row of it. True after a wake. */
+  private tokensLive = true;
   private accessWarnings: Array<string> = [];
   /** K-819: a GitHub check of the repos runs, so a second open tab starts none. */
   private checkingRepos = false;
@@ -615,6 +726,9 @@ export class Kitshn extends DurableObject<Env> {
         if (from < REPO_GATE_MIGRATION) this.backfillRepoIds();
       });
       this.load();
+      // K-1833: a bootstrap with KITSHN_IMPORT asks for one import, before the start steps, so they run on the
+      // imported state; a start reads one meta row for it, and only while the variable is set.
+      await this.importIfDue();
       if (this.state.circles.size === 0) this.seed();
       this.syncAdminAddress();
       this.reconcilePresence();
@@ -686,7 +800,7 @@ export class Kitshn extends DurableObject<Env> {
     );
     this.iconCache = null;
     this.accessWarnings = JSON.parse(this.meta("access_warnings") ?? "[]") as Array<string>;
-    this.accessCache = null;
+    // The Access rows stay: every write goes through accessStore() or also sets the map (the daily reset).
     this.revisionCache = null;
     this.uptimeCache = null;
     this.openCache = null;
@@ -1161,6 +1275,7 @@ export class Kitshn extends DurableObject<Env> {
       return this.insertRevision(actor, summary, changes, undoes, undo?.item ? undo.revision : null);
     });
     this.state = after;
+    this.clearAccessFailures();
     for (const change of changes) {
       if (change._tag === "shareSetting") this.stuckShares.delete(change.id);
       if (change._tag === "place")
@@ -1237,6 +1352,16 @@ export class Kitshn extends DurableObject<Env> {
       if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
       throw error;
     }
+  }
+
+  /**
+   * K-407: a change on the map clears every failed Access write, so the next alarm writes the wanted bodies at once,
+   * also a body that failed before, such as a move back to earlier circles. Changes come at human speed.
+   */
+  private clearAccessFailures() {
+    const store = this.accessStore();
+    for (const { retryAt: _, attempts: __, ...row } of this.access.values())
+      if (row.error !== null) store.put({ ...row, tried: "", error: null });
   }
 
   /** K-1502, K-1506: Undo reverses the caller's own newest revision, and runs the same rules as an edit. */
@@ -1756,6 +1881,109 @@ export class Kitshn extends DurableObject<Env> {
     return this.backupAtMemory;
   }
 
+  /** K-1833: imports the file of the bootstrap once per new `KITSHN_IMPORT_AT`, and keeps the outcome in meta. */
+  private async importIfDue() {
+    const at = this.env.KITSHN_IMPORT_AT;
+    if (!at) return;
+    if (this.meta("import_at") === at) {
+      if (this.meta("import_finish") === "due") await this.finishImport();
+      return;
+    }
+    const refused = await this.runImport(at).catch((error: unknown): ImportRefusal => ({
+      code: "failed",
+      detail: String(error),
+    }));
+    if (refused) {
+      // The details can name an account, a card or a table, so only the log has them (K-1833).
+      console.error(`kitshn refused the import (${refused.code}): ${refused.detail}`);
+      this.setMeta("import_at", at);
+      this.setMeta(
+        "import_status",
+        JSON.stringify({ state: "refused", code: refused.code } satisfies ImportStatus),
+      );
+      return;
+    }
+    await this.finishImport();
+  }
+
+  /**
+   * K-1833: imports the file of the bootstrap. The rows, History and the "done" status go in one transaction, so a
+   * later error or a restart never turns a done import into a refused one. Returns the refusal, or null.
+   */
+  private async runImport(at: string): Promise<ImportRefusal | null> {
+    const bucket = this.env.BUCKET;
+    if (!bucket) return { code: "no_file", detail: "R2 is off on this account." };
+    const file = await bucket.get(IMPORT_OBJECT);
+    if (!file) return { code: "no_file", detail: `R2 holds no ${IMPORT_OBJECT}.` };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await new Response(file.body.pipeThrough(new DecompressionStream("gzip"))).text());
+    } catch (error) {
+      return { code: "bad_file", detail: `The import file is no gzip JSON: ${String(error)}` };
+    }
+    const state = readExport(parsed, this.env.CLOUDFLARE_ACCOUNT_ID);
+    if ("code" in state) return state;
+    const notEmpty = notEmptyReason(this.ctx.storage.sql, [ADMIN_RESOURCE_ID]);
+    if (notEmpty) return notEmpty;
+    try {
+      this.ctx.storage.transactionSync(() => {
+        writeImport(this.ctx.storage.sql, state, (from) => {
+          if (from < REPO_GATE_MIGRATION) this.backfillRepoIds();
+          this.insertRevision(
+            IMPORT_ACTOR,
+            `Imported the state of ${new Date(state.exportedAt).toISOString()} (K-1833)`,
+            [],
+            null,
+          );
+          this.setMeta("import_at", at);
+          this.setMeta("import_status", JSON.stringify({ state: "done" } satisfies ImportStatus));
+          this.setMeta("import_finish", "due");
+        });
+      });
+    } catch (error) {
+      // A table or a column that the schema of the export lacks rolls the whole transaction back.
+      this.load();
+      return error instanceof ImportError
+        ? { code: error.code, detail: error.message }
+        : { code: "failed", detail: String(error) };
+    }
+    this.load();
+    return null;
+  }
+
+  /**
+   * K-1833, K-1834: the steps after a done import: the import file goes, and the pass key rotates, because the
+   * export holds none. A failure is logged, and the next start tries again.
+   */
+  private async finishImport() {
+    try {
+      await this.env.BUCKET?.delete(IMPORT_OBJECT);
+      await this.rotatePassKey(IMPORT_ACTOR);
+      this.sql("DELETE FROM meta WHERE key = 'import_finish'");
+    } catch (error) {
+      console.error(`kitshn finishes the import at the next start: ${String(error)}`);
+    }
+  }
+
+  /** K-1833: the public import status: the state and a fixed reason code, nothing more. */
+  private importStatus(): ImportStatus | { state: "none" | "pending" } {
+    if (!this.env.KITSHN_IMPORT_AT) return { state: "none" };
+    if (this.meta("import_at") !== this.env.KITSHN_IMPORT_AT) return { state: "pending" };
+    return JSON.parse(this.meta("import_status") ?? '{"state":"pending"}') as ImportStatus;
+  }
+
+  /** K-1832: the state export of K-1831 for the admin, as a file. */
+  private exportResponse() {
+    const now = Date.now();
+    const state = stateExport(this.ctx.storage.sql, this.env.CLOUDFLARE_ACCOUNT_ID, MIGRATIONS.length, now);
+    return new Response(JSON.stringify(state), {
+      headers: {
+        "content-type": "application/json",
+        "content-disposition": `attachment; filename="kitshn-state-${new Date(now).toISOString().slice(0, 10)}.json"`,
+      },
+    });
+  }
+
   /** K-1817: one backup job and its row. Returns the run. */
   private queueBackup(card: string, actor: Actor, prune: boolean, now: number) {
     const resource = this.state.resources.get(card);
@@ -1910,7 +2138,10 @@ export class Kitshn extends DurableObject<Env> {
         console.error(`kitshn daily backups: ${what} failed: ${String(error)}`),
       );
     await step("the state export (K-1821)", async () => {
-      await writeExport(bucket, stateExport(this.ctx.storage.sql, MIGRATIONS.length, now));
+      await writeExport(
+        bucket,
+        stateExport(this.ctx.storage.sql, this.env.CLOUDFLARE_ACCOUNT_ID, MIGRATIONS.length, now),
+      );
     });
     await step("the bucket size (K-1818)", async () => {
       this.setMeta("r2_bucket", JSON.stringify(await bucketSize(bucket, now)));
@@ -2834,6 +3065,7 @@ export class Kitshn extends DurableObject<Env> {
       return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
     if (path === "/internal/public-cards") return this.publicCards();
     if (path === "/internal/badge") return this.badge(new URL(request.url).searchParams);
+    if (path === "/internal/import-status") return Response.json(this.importStatus());
     if (path === "/internal/backup-access")
       return this.backupAccess((await request.json()) as { card: string; clientId: string });
     if (path === "/internal/content") return this.contentDecision((await request.json()) as ContentRequest);
@@ -2939,6 +3171,7 @@ export class Kitshn extends DurableObject<Env> {
         decodeURIComponent(path.slice("/api/apps/".length, -"/logs".length)),
         await request.json().catch(() => null),
       );
+    if (path === "/api/state/export" && request.method === "GET") return this.exportResponse();
     if (path.startsWith("/api/apps/") && path.includes("/backups")) {
       const [card = "", , run = "", action = ""] = path
         .slice("/api/apps/".length)
@@ -3117,6 +3350,7 @@ export class Kitshn extends DurableObject<Env> {
     if (path.startsWith("/api/uptime/") && request.method === "GET")
       return Response.json(this.uptimeChanges(decodeURIComponent(path.slice("/api/uptime/".length))));
     if (path.startsWith("/api/notifications")) return this.notificationRequest(path, request, caller);
+    if (path === "/api/push" || path.startsWith("/api/push/")) return this.pushRequest(path, request, caller);
     if ((path === "/api/pages" || path === "/api/files") && request.method === "POST")
       return this.upload(caller, request, path === "/api/pages" ? "page" : "file").catch((error: unknown) => {
         if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 400 });
@@ -4769,6 +5003,10 @@ export class Kitshn extends DurableObject<Env> {
       now,
     );
     if (retry?.at) next = Math.min(next, retry.at);
+    // K-407, K-408: a failed Access write or delete tries again at its retry time.
+    for (const row of this.access.values())
+      if (row.error !== null && row.retryAt !== undefined && row.retryAt > now)
+        next = Math.min(next, row.retryAt);
     // K-817: an expired Compose deploy gives up the DNS record that its plan made.
     for (const run of this.deploys().composeRuns)
       if (run.expiresAt > now) next = Math.min(next, run.expiresAt);
@@ -4785,6 +5023,8 @@ export class Kitshn extends DurableObject<Env> {
     if (ends.some((end) => end !== null && end <= now) && this.expiredShares(now).length > 0) next = now;
     // K-1126: a connected daemon keeps the 2-minute alarm going; without one, uptime wakes at most every 10 minutes.
     if (this.uptimeTargets().length > 0) next = Math.min(next, now + UPTIME_IDLE_MS);
+    // K-1907: pushes that wait go out in the next second.
+    if (this.pushQueue.length > 0) next = Math.min(next, now + 1000);
     const bellEnd = this.nextBellEnd(now);
     if (bellEnd !== null) next = Math.min(next, bellEnd);
     // Never move a pending alarm later: frequent wake-ups would otherwise push it away for good.
@@ -4915,6 +5155,8 @@ export class Kitshn extends DurableObject<Env> {
     if (busy) return busy;
     // K-110: the Worker checks pages and files itself, so it refuses every login from before this second.
     this.setMeta("signed_out_at", String(Math.floor(Date.now() / 1000) * 1000));
+    // K-1606, K-1907: no browser keeps getting pushes after Sign out everywhere.
+    this.sql("DELETE FROM push_subscriptions");
     // K-110: no confirm in the map, so History records the start before any Cloudflare call, and the outcome.
     this.recordRevision(caller.actor, "Sign out everywhere: kitshn refuses older page and file logins");
     return this.finishSignOut(caller, false, async (api) => {
@@ -7662,6 +7904,7 @@ export class Kitshn extends DurableObject<Env> {
           owner,
           minted.installationId,
         );
+      this.tokensLive = true;
       this.sql(
         "INSERT INTO github_tokens (id, machine_id, repo, right_name, expires_at, sealed) VALUES (?, ?, ?, ?, ?, ?)",
         crypto.randomUUID(),
@@ -7685,6 +7928,7 @@ export class Kitshn extends DurableObject<Env> {
    * the tokens whose right the machine still has, so a right turned off revokes only what it gave.
    */
   private revokeTokens(machineId: string | null, onlyLost: boolean) {
+    if (!this.tokensLive) return;
     const now = Date.now();
     this.sql("DELETE FROM github_tokens WHERE expires_at <= ?", now);
     const rows = this.sql<{
@@ -7694,6 +7938,7 @@ export class Kitshn extends DurableObject<Env> {
       right_name: string;
       sealed: string;
     }>("SELECT id, machine_id, repo, right_name, sealed FROM github_tokens");
+    this.tokensLive = rows.length > 0;
     const key = this.env.GITHUB_APP_KEY;
     for (const row of rows) {
       if (machineId !== null && row.machine_id !== machineId) continue;
@@ -9619,14 +9864,16 @@ export class Kitshn extends DurableObject<Env> {
       value.episode,
     );
     if (!row) throw new Error("kitshn wrote a notification and got no id back.");
-    this.openNotifications.set(id, {
+    const opened: Notification = {
       ...value,
       id: row.id,
       state: "open",
       openedAt: now,
       closedAt: null,
       snoozedUntil: null,
-    });
+    };
+    this.openNotifications.set(id, opened);
+    this.queuePush(opened);
   }
 
   /** K-1903: sets the state of an open notification; any state but "open" closes it for every recipient. */
@@ -9638,6 +9885,9 @@ export class Kitshn extends DurableObject<Env> {
     this.sql("UPDATE notifications SET state = ?, closed_at = ? WHERE id = ?", state, now, before.id);
     this.openNotifications.delete(id);
     if (state === "dismissed") this.dismissed.set(id, before.episode);
+    // K-1907: a high priority notification also tells its recipients about its answer; dismiss is the owner's own.
+    if (before.priority === "high" && state !== "dismissed")
+      this.queuePush({ ...before, state, closedAt: now });
   }
 
   /** K-1904: the sources that kitshn derives from its own state. */
@@ -9852,6 +10102,186 @@ export class Kitshn extends DurableObject<Env> {
     ].some((end) => end !== null && end > since && end <= now);
   }
 
+  /** K-1907: the VAPID key, made on first use. The private half never leaves `meta` (no snapshot, no export). */
+  private vapid: Promise<VapidKey> | null = null;
+  private vapidKey(): Promise<VapidKey> {
+    this.vapid ??= (async () => {
+      let jwk = this.meta(VAPID_META);
+      if (jwk === null) {
+        jwk = await generateVapidJwk();
+        this.setMeta(VAPID_META, jwk);
+      }
+      const key = await vapidKey(jwk);
+      if (!key) throw new Error("kitshn has a push key in meta that it cannot read.");
+      return key;
+    })();
+    return this.vapid;
+  }
+
+  /**
+   * K-1907: pushes wait until the change commits. Each entry is one notification for every device (`device` null),
+   * or one send that waits or failed once. Only the alarm sends, once at its end, so one invocation sends at most
+   * PUSH_SENDS_PER_RUN (K-406). Known limit: the queue lives in memory, so a wake drops what waits; the alarm runs
+   * within a second while it holds anything. Revisit if pushes get lost.
+   */
+  private pushQueue: Array<{ notification: Notification; device: number | null; tries: number }> = [];
+  private queuePush(notification: Notification) {
+    this.pushQueue.push({ notification, device: null, tries: 0 });
+    if (this.pushQueue.length === 1) void this.scheduleAlarm();
+  }
+
+  /** K-1907: sends at most PUSH_SENDS_PER_RUN pushes; the rest, and a send that failed once, wait for the alarm. */
+  private async flushPushes() {
+    const queue = this.pushQueue;
+    this.pushQueue = [];
+    if (queue.length === 0) return;
+    const devices = new Map(
+      this.sql<PushRow>("SELECT * FROM push_subscriptions").map((row) => [row.id, row]),
+    );
+    const now = Date.now();
+    const sends = queue.flatMap(({ notification, device, tries }) =>
+      // A mute holds for every push of its card and source, also a state change of priority high.
+      (notification.state === "open" && !onBell(notification, this.mutes, now)) ||
+      muted(notification, this.mutes, now)
+        ? []
+        : [...devices.values()]
+            .filter(
+              (row) =>
+                (device === null || row.id === device) &&
+                this.receives({ email: row.email, clientId: null, ip: null }, notification) &&
+                deviceWants(pushDeviceOf(row), notification, now),
+            )
+            .map((row) => ({ row, notification, tries })),
+    );
+    const batch = sends.slice(0, PUSH_SENDS_PER_RUN);
+    for (const { row, notification, tries } of sends.slice(PUSH_SENDS_PER_RUN))
+      this.pushQueue.push({ notification, device: row.id, tries });
+    if (batch.length === 0) return;
+    const key = await this.vapidKey();
+    const results = await Promise.all(
+      batch.map(async ({ row, notification, tries }) => {
+        const card =
+          notification.card === null ? null : (this.state.resources.get(notification.card)?.name ?? null);
+        try {
+          const result = await sendPush(
+            { endpoint: row.endpoint, p256dh: row.p256dh, auth: row.auth },
+            pushMessage(notification, card),
+            key,
+            `https://${this.env.KITSHN_HOST}`,
+            {
+              urgency: notification.level === "error" || notification.priority === "high" ? "high" : "normal",
+              topic: await pushTopic(`${notification.source}:${notification.key}`),
+            },
+          );
+          return { row, notification, tries, result };
+        } catch (error) {
+          console.warn(`kitshn could not push to device ${row.id}: ${String(error).slice(0, 200)}`);
+          return { row, notification, tries, result: "failed" as const };
+        }
+      }),
+    );
+    for (const { row, notification, tries, result } of results) {
+      if (result === "gone") this.sql("DELETE FROM push_subscriptions WHERE id = ?", row.id);
+      else if (result === "refused")
+        console.warn(
+          `The push service refused the key of kitshn for device ${row.id} (401 or 403); Rotate push key.`,
+        );
+      else if (result === "delivered")
+        this.sql("UPDATE push_subscriptions SET last_ok_at = ? WHERE id = ?", now, row.id);
+      // One retry on the next alarm, then kitshn drops the push; the warning above names the device.
+      else if (tries === 0) this.pushQueue.push({ notification, device: row.id, tries: 1 });
+    }
+    if (this.pushQueue.length > 0) await this.scheduleAlarm();
+  }
+
+  /** K-1907: the devices of push, for the Owner circle only in this version (K-1902). */
+  private async pushRequest(path: string, request: Request, caller: Caller): Promise<Response> {
+    if (!this.isOwner(caller.visitor))
+      return Response.json(
+        { error: "Push is for the Owner circle in this version (K-1902)." },
+        { status: 403 },
+      );
+    const email = caller.visitor.email;
+    if (email === null)
+      return Response.json({ error: "Push needs a person, not a service token." }, { status: 403 });
+    const now = Date.now();
+    const body = request.method === "POST" ? ((await request.json().catch(() => null)) as unknown) : null;
+    // The endpoint of this browser goes in the body: a query string would leave it in request logs.
+    if (path === "/api/push/devices" && request.method === "POST") {
+      const mine = isRecord(body) && typeof body["mine"] === "string" ? body["mine"] : null;
+      const rows = this.sql<PushRow>("SELECT * FROM push_subscriptions ORDER BY created_at");
+      return Response.json({
+        publicKey: (await this.vapidKey()).publicKey,
+        devices: rows.map((row) => ({ ...pushDeviceOf(row), mine: row.endpoint === mine })),
+        testAt: Number(this.meta("push_test_at") ?? 0),
+      });
+    }
+    if (path === "/api/push/subscribe" && request.method === "POST") {
+      const input = pushInput(body);
+      if (typeof input === "string") return Response.json({ error: input }, { status: 400 });
+      this.sql(
+        `INSERT INTO push_subscriptions (endpoint, p256dh, auth, email, label, levels, quiet_start, quiet_end, time_zone,
+         created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (endpoint) DO UPDATE SET p256dh = excluded.p256dh,
+         auth = excluded.auth, email = excluded.email, label = excluded.label, levels = excluded.levels,
+         quiet_start = excluded.quiet_start, quiet_end = excluded.quiet_end, time_zone = excluded.time_zone`,
+        input.endpoint,
+        input.p256dh,
+        input.auth,
+        email,
+        input.label,
+        JSON.stringify(input.levels),
+        input.quiet?.start ?? null,
+        input.quiet?.end ?? null,
+        input.quiet?.timeZone ?? null,
+        now,
+      );
+      return Response.json({ ok: true });
+    }
+    if (path === "/api/push/unsubscribe" && request.method === "POST") {
+      const endpoint = isRecord(body) ? body["endpoint"] : undefined;
+      const id = isRecord(body) ? body["id"] : undefined;
+      if (typeof endpoint === "string")
+        this.sql("DELETE FROM push_subscriptions WHERE endpoint = ?", endpoint);
+      else if (typeof id === "number") this.sql("DELETE FROM push_subscriptions WHERE id = ?", id);
+      else return Response.json({ error: "Name the device by its endpoint or its id." }, { status: 400 });
+      return Response.json({ ok: true });
+    }
+    if (path === "/api/push/test" && request.method === "POST") {
+      const last = Number(this.meta("push_test_at") ?? 0);
+      if (now - last < PUSH_TEST_MS)
+        return Response.json({ error: "One test a minute; try again shortly." }, { status: 429 });
+      this.setMeta("push_test_at", String(now));
+      this.queuePush({
+        id: 0,
+        source: "test",
+        key: String(now),
+        episode: String(now),
+        card: null,
+        recipients: { _tag: "owner" },
+        level: "error",
+        priority: "normal",
+        title: "kitshn test push",
+        text: "",
+        actions: [],
+        state: "open",
+        openedAt: now,
+        closedAt: null,
+        snoozedUntil: null,
+      });
+      return Response.json({ ok: true });
+    }
+    if (path === "/api/push/rotate" && request.method === "POST") {
+      this.ctx.storage.transactionSync(() => {
+        this.sql("DELETE FROM meta WHERE key = ?", VAPID_META);
+        this.sql("DELETE FROM push_subscriptions");
+      });
+      this.vapid = null;
+      this.recordRevision(caller.actor, "Rotate push key: every browser subscribes again");
+      return Response.json({ publicKey: (await this.vapidKey()).publicKey });
+    }
+    return Response.json({ error: "Not found." }, { status: 404 });
+  }
+
   override async alarm() {
     const now = Date.now();
     await this.finishPendingRestore().catch((error: unknown) =>
@@ -9931,6 +10361,8 @@ export class Kitshn extends DurableObject<Env> {
       changed ||= daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
     }
     if (changed) this.broadcast();
+    // K-1907, K-406: the pushes go out once, at the end, after the reconcile of broadcast queued its own.
+    await this.flushPushes();
     await this.scheduleAlarm();
   }
 }
@@ -9987,6 +10419,11 @@ const repoGateOf = (row: RepoRow): RepoGate => ({
 });
 
 /** K-1819 */
+/** K-1833: the outcome of an import, which the bootstrap reads. */
+type ImportStatus = { readonly state: "done" } | { readonly state: "refused"; readonly code: ImportCode };
+
+const IMPORT_ACTOR: Actor = { _tag: "kitshn", reason: "the import of the bootstrap (K-1833)" };
+
 /** K-1822: what finishes a restore to a time after the restart. */
 interface RestoreFinish {
   readonly undo: string;

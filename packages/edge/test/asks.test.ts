@@ -230,9 +230,9 @@ it("reads only what its own event write reads for a refused ask, and a few rows 
   const proposalReads = await counted((instance) =>
     instance.webSocketMessage(daemonSocket(sent), message("deploy")),
   );
-  // The proposal itself reads nothing; the alarm schedule reads its next due items (jobs, retries, the expiry), and the
-  // notification of the ask reads the open asks and its own row (K-1722).
-  expect(proposalReads).toBeLessThanOrEqual(30);
+  // The proposal itself reads nothing; the alarm schedule reads its next due items (jobs, retries, the expiry), the
+  // notification of the ask reads the open asks and its own row (K-1722), and its Web Push schedules once more (K-1907).
+  expect(proposalReads).toBeLessThanOrEqual(40);
 });
 
 it("ends an approval that is no longer allowed, and refuses one for a text that the approver did not read (K-1712, K-1722)", async () => {

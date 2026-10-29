@@ -144,22 +144,25 @@ describe("state export (K-1831)", () => {
           durable.storage.sql.exec(
             `CREATE TABLE IF NOT EXISTS "${row.table}" (id TEXT PRIMARY KEY, value TEXT)`,
           );
+          // A table that a migration made keeps its columns; each column of the row holds the secret.
           const columns = durable.storage.sql
-            .exec<{ name: string; notnull: number }>(`PRAGMA table_info("${row.table}")`)
-            .toArray();
+            .exec<{ name: string; type: string }>(`PRAGMA table_info("${row.table}")`)
+            .toArray()
+            .filter((column) => column.name !== "id" || column.type !== "INTEGER");
           durable.storage.sql.exec(
-            `INSERT OR REPLACE INTO "${row.table}" (${columns.map((column) => `"${column.name}"`).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
-            ...columns.map((column, index) => (index === 0 ? "k" : "secret")),
+            `INSERT OR REPLACE INTO "${row.table}" (${columns.map((column) => column.name).join(", ")})
+             VALUES (${columns.map((column) => (column.type === "INTEGER" ? "1" : "'secret'")).join(", ")})`,
           );
         } else
           durable.storage.sql.exec(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, 'secret')",
             `${row.metaPrefix}_test`,
           );
-      const exported = stateExport(durable.storage.sql, 21, 5);
+      const exported = stateExport(durable.storage.sql, "acct", 21, 5);
       expect(exported).toMatchObject({
         format: "kitshn-state",
         version: 1,
+        account: "acct",
         schemaVersion: 21,
         exportedAt: 5,
       });

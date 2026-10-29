@@ -95,6 +95,8 @@ import {
   uptime,
 } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { oldBinaries, oldBinaryName, swapBinary } from "./update.ts";
+import { ownSid } from "./winpipe.ts";
 import {
   type Platform,
   RELEASES,
@@ -193,15 +195,18 @@ async function joinCommand(code: string | undefined, server: string | undefined)
   // inherited access.
   if (platform === "win32") {
     mkdirSync(dirname(paths.config), { recursive: true });
+    // SIDs, not names: SYSTEM has another name in some languages, and a bare user name can match a domain account.
+    const sid = ownSid();
+    if (sid === null) fail("kitshn cannot read the SID of this Windows account (K-623).");
     const grant = spawnSync(
       "icacls",
       [
         dirname(paths.config),
         "/inheritance:r",
         "/grant:r",
-        `${process.env["USERNAME"] ?? ""}:(OI)(CI)F`,
+        `*${sid}:(OI)(CI)F`,
         "/grant:r",
-        "SYSTEM:(OI)(CI)F",
+        "*S-1-5-18:(OI)(CI)F",
       ],
       { encoding: "utf8", windowsHide: true },
     );
@@ -862,11 +867,14 @@ async function updateDaemon(
     writeFileSync(next, bytes);
     chmodSync(next, 0o755);
     // K-620: Windows cannot replace a running .exe, but it can rename one; the next start deletes the old one.
-    if (platform === "win32") {
-      rmSync(oldBinary(), { force: true });
-      renameSync(process.execPath, oldBinary());
-    }
-    renameSync(next, process.execPath);
+    if (platform === "win32")
+      await swapBinary(
+        { rename: renameSync },
+        process.execPath,
+        next,
+        oldBinaryName(process.execPath, Date.now()),
+      );
+    else renameSync(next, process.execPath);
   } catch (error) {
     return failed(`The update failed: ${String(error)}`);
   }
@@ -874,7 +882,22 @@ async function updateDaemon(
   return { ok: true, exitCode: 0, output: `Updated ${VERSION} to ${version}; restarting.` };
 }
 
-const oldBinary = () => process.execPath.replace(/\.exe$/i, ".old.exe");
+/**
+ * K-620: deletes the copies that earlier updates renamed. A copy that still runs (a `kitshn provider` bridge, for
+ * example) stays until a later try; the daemon starts anyway and tries again every hour.
+ */
+function removeOldBinaries() {
+  const left = oldBinaries(process.execPath, readdirSync(dirname(process.execPath))).filter((file) => {
+    try {
+      rmSync(file, { force: true });
+      return false;
+    } catch (error) {
+      log(`${file} is still in use; kitshn deletes it later (${String(error)})`);
+      return true;
+    }
+  });
+  if (left.length > 0) setTimeout(removeOldBinaries, 60 * 60_000).unref();
+}
 
 /**
  * K-601: exits so that the service manager starts the daemon again. K-622: Task Scheduler does not start an action
@@ -2388,8 +2411,7 @@ async function runCommand() {
     );
   // First, so a second daemon stops before it touches the tunnel or the connection of the running one.
   const own = ownUid();
-  // K-620: the binary that an update renamed on Windows.
-  if (platform === "win32") rmSync(oldBinary(), { force: true });
+  if (platform === "win32") removeOldBinaries();
   const socketOptions = {
     platform,
     // Read at each connection, so `kitshn local-users` needs no restart.

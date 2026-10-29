@@ -38,7 +38,8 @@ if ($env:KITSHN_DAEMON) {
 }
 $exe = Join-Path $bin 'kitshn.exe'
 # A running daemon keeps its .exe open; Windows renames it but does not overwrite it (K-620).
-if (Test-Path $exe) { Move-Item $exe (Join-Path $bin 'kitshn.old.exe') -Force }
+# The name of each old copy is its own, so an old copy that still runs never blocks this; the daemon deletes them.
+if (Test-Path $exe) { Move-Item $exe (Join-Path $bin "kitshn.old-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()).exe") }
 Move-Item $next $exe -Force
 
 & $exe join $Code --server $Server

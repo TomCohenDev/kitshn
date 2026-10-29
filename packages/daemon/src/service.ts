@@ -79,6 +79,26 @@ export function pathsFor(
 export const windowsPipe = (env: Record<string, string | undefined>) =>
   `\\\\.\\pipe\\kitshn-${(env["USERNAME"] || "user").toLowerCase().replaceAll("\\", "-")}`;
 
+/**
+ * K-622: a PowerShell command that stops the processes of `image` whose full path is one of `paths` (and whose
+ * command line ends with ` <lastArgument>`), never by name alone.
+ */
+function stopByPath(
+  image: string,
+  paths: ReadonlyArray<string>,
+  lastArgument?: string,
+): ReadonlyArray<string> {
+  const quote = (text: string) => `'${text.replaceAll("'", "''")}'`;
+  const argument = lastArgument ? ` -and $_.CommandLine -match ${quote(`\\s${lastArgument}$`)}` : "";
+  return [
+    "powershell.exe",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    `Get-CimInstance Win32_Process -Filter ${quote(`Name="${image}"`)} | Where-Object { @(${paths.map(quote).join(", ")}) -contains $_.ExecutablePath${argument} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`,
+  ];
+}
+
 /** K-622: the Windows account of the tasks, as Task Scheduler names it. */
 const windowsUser = (env: Record<string, string | undefined>) =>
   env["USERDOMAIN"] ? `${env["USERDOMAIN"]}\\${env["USERNAME"] ?? ""}` : (env["USERNAME"] ?? "");
@@ -310,20 +330,39 @@ export interface Step {
  * K-603: start (idempotent), restart with a changed service file, stop and read the tunnel service. On macOS a
  * changed plist needs `bootout` and `bootstrap`; `kickstart` would run the old definition.
  */
-export function tunnelCommands(platform: Platform, file: string, uid: number) {
+export function tunnelCommands(
+  platform: Platform,
+  file: string,
+  uid: number,
+  env: Record<string, string | undefined> = process.env,
+) {
   if (platform === "win32") {
     const name = WINDOWS_TASKS.tunnel;
     const create = { argv: ["schtasks", "/Create", "/TN", name, "/XML", file, "/F"], mayFail: false };
     const run = { argv: ["schtasks", "/Run", "/TN", name], mayFail: false };
-    // `/End` ends the task and its conhost but not the program inside, so the process goes by its own name too.
+    // `/End` ends the task and its conhost but not the program inside, so the process goes too: by its full path,
+    // so the tunnel of another user and a system cloudflared stay.
     const end = { argv: ["schtasks", "/End", "/TN", name], mayFail: true };
-    const kill = { argv: ["taskkill", "/F", "/IM", WINDOWS_CLOUDFLARED], mayFail: true };
+    const kill = {
+      argv: stopByPath(WINDOWS_CLOUDFLARED, [win32.join(win32.dirname(file), WINDOWS_CLOUDFLARED)]),
+      mayFail: true,
+    };
     return {
       start: [create, { ...run, mayFail: true }],
       restart: [end, kill, create, run],
       stop: [end, kill, { argv: ["schtasks", "/Delete", "/TN", name, "/F"], mayFail: true }],
       // The task state of schtasks is in the language of Windows, so the check looks for the process instead.
-      state: ["tasklist", "/FI", `IMAGENAME eq ${WINDOWS_CLOUDFLARED}`, "/FO", "CSV", "/NH"],
+      // Only this user's processes count; another user's kitshn tunnel is not this one.
+      state: [
+        "tasklist",
+        "/FI",
+        `IMAGENAME eq ${WINDOWS_CLOUDFLARED}`,
+        "/FI",
+        `USERNAME eq ${windowsUser(env)}`,
+        "/FO",
+        "CSV",
+        "/NH",
+      ],
     } satisfies Record<string, ReadonlyArray<Step> | ReadonlyArray<string>>;
   }
   if (platform === "darwin") {
@@ -363,7 +402,7 @@ export function tunnelStateOf(platform: Platform, output: string): "starting" | 
 }
 
 /** The commands that start and stop the service of the platform. */
-export function serviceCommands(platform: Platform, file: string, uid: number) {
+export function serviceCommands(platform: Platform, file: string, uid: number, binary = process.execPath) {
   if (platform === "win32") {
     const name = WINDOWS_TASKS.daemon;
     return {
@@ -371,17 +410,11 @@ export function serviceCommands(platform: Platform, file: string, uid: number) {
         ["schtasks", "/Create", "/TN", name, "/XML", file, "/F"],
         ["schtasks", "/Run", "/TN", name],
       ],
-      // `/End` leaves the program inside conhost running. The daemon is the one `kitshn.exe … run`; a kitshn
-      // command, such as this `service install`, has other arguments and keeps running.
+      // `/End` leaves the program inside conhost running. The daemon is this binary with `run`; a kitshn command,
+      // such as this `service install`, has other arguments and keeps running.
       stop: [
         ["schtasks", "/End", "/TN", name],
-        [
-          "powershell.exe",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          "Get-CimInstance Win32_Process -Filter \"Name='kitshn.exe'\" | Where-Object { $_.CommandLine -match '\\srun$' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
-        ],
+        stopByPath(win32.basename(binary), [binary], "run"),
         ["schtasks", "/Delete", "/TN", name, "/F"],
       ],
     };

@@ -1779,7 +1779,14 @@ export class Kitshn extends DurableObject<Env> {
     if (attachment.check === "token")
       return { error: `${machine.name} has no machine key yet, so it only reports (K-1708).` };
     if (!attachment.status?.capabilities?.includes("logs"))
-      return { error: `Update the daemon of ${machine.name} to read logs (K-1804).` };
+      return {
+        error: missingFeature(
+          attachment.status,
+          machine.name,
+          "app logs",
+          `Update the daemon of ${machine.name} to read logs (K-1804).`,
+        ),
+      };
     return { socket, name: machine.name };
   }
 
@@ -2009,7 +2016,12 @@ export class Kitshn extends DurableObject<Env> {
       attachment.status &&
       !attachment.status.capabilities?.includes("backup-restore")
     )
-      return `Update the daemon of ${this.state.machines.get(resource.machine)?.name ?? resource.machine} to back up (K-1817).`;
+      return missingFeature(
+        attachment.status,
+        this.state.machines.get(resource.machine)?.name ?? resource.machine,
+        "backups",
+        `Update the daemon of ${this.state.machines.get(resource.machine)?.name ?? resource.machine} to back up (K-1817).`,
+      );
     return null;
   }
 
@@ -2521,7 +2533,14 @@ export class Kitshn extends DurableObject<Env> {
     const offMachine = this.redeployRefusal(machine.id, card);
     if (offMachine) return { error: offMachine };
     if (!this.machineView(machine).status?.capabilities?.includes("compose-rollback"))
-      return { error: `Update the daemon on ${machine.name} first: it cannot roll back yet (K-821).` };
+      return {
+        error: missingFeature(
+          this.machineView(machine).status,
+          machine.name,
+          "rollbacks",
+          `Update the daemon on ${machine.name} first: it cannot roll back yet (K-821).`,
+        ),
+      };
     const jobId = this.ctx.storage.transactionSync(() => {
       const queued = this.queueKitshnJob(
         machine.id,
@@ -6537,10 +6556,12 @@ export class Kitshn extends DurableObject<Env> {
         )
           return Response.json(
             {
-              // K-624: a Windows daemon has no Compose in v1, so an update would not help there.
-              error: this.machineView(running).status?.os.startsWith("win32")
-                ? `${running.name} runs Windows, where kitshn has no Compose apps yet (K-624).`
-                : `Update the daemon on ${running.name} first: it does not check Compose settings yet (K-818).`,
+              error: missingFeature(
+                this.machineView(running).status,
+                running.name,
+                "Compose apps",
+                `Update the daemon on ${running.name} first: it does not check Compose settings yet (K-818).`,
+              ),
             },
             { status: 409 },
           );
@@ -11871,6 +11892,20 @@ const deviceActor = (machine: Machine): Actor => ({
   clientId: machine.clientId,
   name: machine.name,
 });
+
+/**
+ * K-624: why a machine lacks a feature. A Windows daemon has no Compose, logs or backups in the first version, so an
+ * update does not help there; elsewhere the daemon is too old.
+ */
+const missingFeature = (
+  status: MachineStatus | null | undefined,
+  name: string,
+  feature: string,
+  update: string,
+) =>
+  status?.os.startsWith("win32")
+    ? `${name} runs Windows, where kitshn has no ${feature} yet (K-624).`
+    : update;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;

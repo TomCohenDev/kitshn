@@ -6,6 +6,22 @@ import { connect, createServer } from "node:net";
 import { dirname } from "node:path";
 import { type PeerDecision, peerUid, requestAllowed } from "./peer.ts";
 import { type Platform, ownUid } from "./service.ts";
+import { pipeServerProblem } from "./winpipe.ts";
+
+/** K-621: at most this many pipe connections at once, and a connection sends its first line within this time. */
+const PIPE_CONNECTIONS = 64;
+const PIPE_FIRST_LINE_MS = 30_000;
+
+/**
+ * K-621: a client checks that the pipe's server runs as its own account before it sends anything, so a program of
+ * another account that took the name first gets no request. Only on Windows; tests run this code on a Unix socket.
+ */
+function pipeRefusal(path: string): Promise<LocalOutcome> | null {
+  if (process.platform !== "win32") return null;
+  const problem = pipeServerProblem(path);
+  if (problem === "missing") return Promise.resolve({ kind: "not-running" });
+  return problem === null ? null : Promise.reject(new Error(problem));
+}
 
 /** The local user that sent a request. Each request records it (K-701). */
 export interface Caller {
@@ -247,15 +263,22 @@ function lineReader(onLine: (text: string) => void, tooLong: () => void) {
 /**
  * K-621: the daemon's named pipe on Windows. A pipe with no security descriptor gives read and write only to its
  * owner, SYSTEM and Administrators; everyone else gets read only, so no other user opens it for a request (tested
- * on Windows 11, also from a low integrity process). Each caller counts as the daemon user. The pipe is first come:
- * a program that holds the name before the daemon starts makes the start fail here.
+ * on Windows 11, also from a low integrity process). Each caller counts as the daemon user. The name is first come:
+ * a program of another account that takes it before the daemon starts makes the start fail here, and the clients
+ * refuse it, because they check the server's account first (`pipeRefusal`).
  */
 async function listenPipe(path: string, options: LocalOptions): Promise<{ readonly stop: () => void }> {
   let connections = 0;
   const server = createServer((socket) => {
     const key = ++connections;
     const send = (answer: Answer) => void socket.write(line(answer));
-    socket.on("close", () => options.closed?.(key));
+    // A connection that never sends a line holds a pipe instance for nothing, for example a read-only one.
+    const quiet = setTimeout(() => socket.destroy(), PIPE_FIRST_LINE_MS);
+    socket.once("data", () => clearTimeout(quiet));
+    socket.on("close", () => {
+      clearTimeout(quiet);
+      options.closed?.(key);
+    });
     socket.on(
       "data",
       lineReader(
@@ -268,6 +291,7 @@ async function listenPipe(path: string, options: LocalOptions): Promise<{ readon
     );
     socket.on("error", () => socket.destroy());
   });
+  server.maxConnections = PIPE_CONNECTIONS;
   await new Promise<void>((resolve, reject) => {
     server.once("error", (error: NodeJS.ErrnoException) =>
       reject(
@@ -435,6 +459,8 @@ function askPipe(
   follow: (answer: Answer) => boolean,
   onLine: (answer: Answer) => void,
 ): Promise<LocalOutcome> {
+  const refused = pipeRefusal(path);
+  if (refused) return refused;
   return new Promise((resolve, reject) => {
     let done = false;
     const finish = (settle: () => void) => {
@@ -492,6 +518,8 @@ function bridgePipe(
   input: AsyncIterable<Uint8Array>,
   output: (bytes: Uint8Array) => void,
 ): Promise<LocalOutcome | "closed"> {
+  const refused = pipeRefusal(path);
+  if (refused) return refused;
   return new Promise((resolve, reject) => {
     const socket = connect(path, () => {
       void (async () => {

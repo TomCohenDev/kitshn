@@ -16,6 +16,8 @@ const TYPES: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".json": "application/json",
+  // K-625: Windows PowerShell 5.1 `irm` reads text with no charset as ISO-8859-1.
+  ".ps1": "text/plain; charset=utf-8",
   "": "text/plain; charset=utf-8",
 };
 

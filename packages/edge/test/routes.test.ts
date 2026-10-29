@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Edit } from "../src/core/changes.ts";
 import type { Circle } from "../src/core/model.ts";
+import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import worker from "../src/worker/index.ts";
 import { accessToken, send, strangerKeys, stubAccessCerts } from "./access.ts";
 
 const call = (path: string, token: string | null, body?: object) => {
@@ -163,5 +166,29 @@ describe("agent route /agent/state (K-718)", () => {
     );
     expect(response.status).toBe(403);
     expect(await response.json()).toEqual({ error: expect.stringContaining("no agent circle") });
+  });
+});
+
+describe("public join paths (K-617, K-625)", () => {
+  it("serves the Windows join script from its asset, with no login", async () => {
+    const asked: Array<string> = [];
+    const assets = {
+      fetch: async (request: Request) => {
+        asked.push(new URL(request.url).pathname);
+        return new Response("param([string]$Code, [string]$Server)", {
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
+      },
+    };
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request("https://kit.example.com/join/windows.ps1"),
+      { ...env, ASSETS: assets as unknown as Fetcher },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(response.status).toBe(200);
+    expect(asked).toEqual(["/join.ps1"]);
+    expect(await response.text()).toContain("param(");
   });
 });

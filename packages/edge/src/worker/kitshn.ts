@@ -2668,7 +2668,8 @@ export class Kitshn extends DurableObject<Env> {
     for (const { after } of apps) if (after) this.refuseTakenBack(after);
     // K-410: a Worker address goes before its card, because the card keeps its Access application.
     for (const { before, after } of apps) {
-      const teardown = before && !after ? appTeardown(before, this.env.KITSHN_ZONE) : null;
+      const teardown =
+        before && !after ? appTeardown(before, this.env.KITSHN_ZONE, this.isFolderSite(before.id)) : null;
       if (teardown?.kind !== "worker" && teardown?.kind !== "domains") continue;
       const api = this.api();
       if (!api) throw new RuleError("kitshn has no Cloudflare API token here.");
@@ -2705,7 +2706,7 @@ export class Kitshn extends DurableObject<Env> {
       after?.kind === "site.compose" && !this.closedPreview(after.id) ? [after] : [],
     );
     for (const { after } of apps)
-      if (after && keepsScript(after) && this.deletingStorage.has(after.id))
+      if (after && keepsScript(after, this.isFolderSite(after.id)) && this.deletingStorage.has(after.id))
         throw new RuleError(
           `kitshn deletes the storage of ${after.name} now; undo after it finishes (K-909).`,
         );
@@ -2891,7 +2892,7 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-909: stops a removed Compose app and keeps its volumes. The job waits for the machine, however long. */
   private stopCompose(actor: Actor, card: AppCard) {
-    const teardown = appTeardown(card, this.env.KITSHN_ZONE);
+    const teardown = appTeardown(card, this.env.KITSHN_ZONE, this.isFolderSite(card.id));
     if (teardown.kind !== "compose") throw new Error(`${card.name} is no Compose app.`);
     const machine = teardown.machineId ? this.state.machines.get(teardown.machineId) : undefined;
     if (!machine) return `kitshn knows no machine of ${card.name}, so nothing stops there.`;
@@ -2902,7 +2903,7 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-909: the undo of a removal starts the app again where it can, and says why where it cannot. */
   private async restartApp(actor: Actor, card: AppCard) {
-    if (keepsScript(card)) return await this.reattachWorker(card);
+    if (keepsScript(card, this.isFolderSite(card.id))) return await this.reattachWorker(card);
     const done = this.lastDone(card.id);
     const machine = done?.machine_id ? this.state.machines.get(done.machine_id) : undefined;
     const refusal = this.state.paused

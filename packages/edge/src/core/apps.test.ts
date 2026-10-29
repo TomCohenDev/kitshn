@@ -25,18 +25,20 @@ const ready = { canRedeploy: true, takesDeploys: true, runsCard: true, allowed: 
 
 describe("app removal (K-909)", () => {
   it("takes down the Worker of a site, and stops a Compose app with its data kept", () => {
-    expect(appTeardown({ ...compose, kind: "site.static", machine: null }, "example.com")).toEqual({
+    expect(appTeardown({ ...compose, kind: "site.static", machine: null }, "example.com", false)).toEqual({
       kind: "worker",
       addresses: ["riffle.example.com"],
       script: `kitshn-${compose.id}`,
     });
     // K-817: every address of the card loses its custom domain; the Compose down keeps the main name.
     const several = { ...compose, addresses: ["riffle.example.com", "riffle.org"] };
-    expect(appTeardown({ ...several, kind: "site.static", machine: null }, "example.com")).toMatchObject({
+    expect(
+      appTeardown({ ...several, kind: "site.static", machine: null }, "example.com", false),
+    ).toMatchObject({
       addresses: ["riffle.example.com", "riffle.org"],
     });
-    expect(appTeardown(several, "example.com")).toMatchObject({ command: { name: "riffle" } });
-    expect(appTeardown(compose, "example.com")).toEqual({
+    expect(appTeardown(several, "example.com", false)).toMatchObject({ command: { name: "riffle" } });
+    expect(appTeardown(compose, "example.com", false)).toEqual({
       kind: "compose",
       machineId: "vps",
       command: { kind: "compose-down", project: compose.id, name: "riffle", removeData: false },
@@ -44,7 +46,13 @@ describe("app removal (K-909)", () => {
   });
 
   it("takes only the addresses of a Worker app off, so its Durable Objects and KV keep their data", () => {
-    expect(appTeardown({ ...compose, kind: "site.worker", machine: null }, "example.com")).toEqual({
+    // K-1123, K-1127: a folder site keeps its script too, until a repo takes its card.
+    expect(
+      appTeardown({ ...compose, kind: "site.static", machine: null }, "example.com", true),
+    ).toMatchObject({
+      kind: "domains",
+    });
+    expect(appTeardown({ ...compose, kind: "site.worker", machine: null }, "example.com", false)).toEqual({
       kind: "domains",
       addresses: ["riffle.example.com"],
       script: `kitshn-${compose.id}`,

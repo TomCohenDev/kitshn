@@ -193,10 +193,10 @@ export const MACHINE_TIPS = {
 } as const;
 
 /** K-523, K-909: the label of "Remove app" names what goes and what stays, by the kind of the card. */
-export const removeAppTip = (resource: Pick<Resource, "id" | "kind">) =>
+export const removeAppTip = (resource: Pick<Resource, "kind">, folderSite: boolean) =>
   resource.kind === "site.worker"
     ? "Remove app: take its addresses off and keep the Worker, its Durable Objects and its KV. Undo puts the addresses back."
-    : keepsScript(resource)
+    : keepsScript(resource, folderSite)
       ? "Remove app: take its address off and keep its files in the Worker. Undo puts the address back."
       : "Remove app: take down what the deploy made and keep the volumes. Undo starts it again.";
 
@@ -736,7 +736,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
             {
               id: "remove-app",
               label: "Remove app",
-              tip: removeAppTip(resource),
+              tip: removeAppTip(resource, ctx.folderSites.has(resource.id)),
               danger: true as const,
               run: () => h.removeApp(resource),
             },

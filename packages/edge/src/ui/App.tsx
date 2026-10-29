@@ -2921,7 +2921,7 @@ function CardPanel(props: {
       {isAppCard(resource) && props.deployed ? (
         <button
           class="btn danger"
-          data-tip={removeAppTip(resource)}
+          data-tip={removeAppTip(resource, resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo)}
           onClick={() => props.onRemoveApp(resource)}
         >
           Remove app

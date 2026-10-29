@@ -1312,6 +1312,9 @@ describe("make it a repo (K-1127)", () => {
     expect((await agentStep("hand-key.access", "/agent/sites/plan", { folder: "hand" })).body).toMatchObject({
       updated: false,
     });
+    // The repo can build it again, so Remove app deletes its script as for any static site (K-909).
+    expect((await admin(`/api/apps/${card.id}`, "DELETE")).status).toBe(200);
+    expect(cloudflare.scripts.has(`kitshn-${card.id}`)).toBe(false);
   });
 
   it("turns a page into a repo's site, its old address redirects, and an expired handover does nothing", async () => {

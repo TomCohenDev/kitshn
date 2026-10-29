@@ -537,6 +537,13 @@ export default {
       headers.set("x-kitshn-deployer", JSON.stringify(deployer));
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
     }
+    // K-1770: exactly the discovery document and the JWKS answer below /.well-known; every other path is "not found".
+    if (url.pathname.startsWith("/.well-known/")) {
+      const file = url.pathname.slice("/.well-known/".length);
+      if ((file !== "openid-configuration" && file !== "jwks.json") || request.method !== "GET")
+        return Response.json({ error: "Not found." }, { status: 404 });
+      return env.KITSHN.getByName("kitshn").fetch(`https://kitshn.internal/internal/well-known/${file}`);
+    }
     if (url.pathname === "/public/cards.json" && (request.method === "GET" || request.method === "HEAD"))
       return publicCards(request, env, ctx);
     if (

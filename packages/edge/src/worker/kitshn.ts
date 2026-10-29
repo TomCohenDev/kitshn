@@ -241,6 +241,7 @@ import {
   verifyPasskeys,
 } from "./access-sync.ts";
 import { approverOf } from "./auth.ts";
+import { MAX_KEYS, type PassKey, RETIRED_MS, discovery, jwks, newPassKey, signPass } from "./passes.ts";
 import type { Caller, Deployer } from "./auth.ts";
 import { CloudflareError, cloudflare } from "./cloudflare.ts";
 import {
@@ -1971,12 +1972,6 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json(finish);
   }
 
-  /**
-   * K-1771, K-1822: the pass key rotation of section 17. It does nothing until section 17 lands; then it runs the
-   * same rule as "Rotate pass key".
-   */
-  private async rotatePassKey(_actor: Actor): Promise<void> {}
-
   /** K-1822: the Worker's poll after the restart, with the finish that the restore sent it. */
   private async restored(caller: Caller, body: unknown) {
     if (!this.authorized(caller))
@@ -2786,6 +2781,8 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/internal/backup-access")
       return this.backupAccess((await request.json()) as { card: string; clientId: string });
     if (path === "/internal/content") return this.contentDecision((await request.json()) as ContentRequest);
+    if (path === "/internal/well-known/openid-configuration" || path === "/internal/well-known/jwks.json")
+      return this.wellKnown(path.slice("/internal/well-known/".length).replace(".json", ""));
     if (path.startsWith("/deploy/")) {
       const header = request.headers.get("x-kitshn-deployer");
       if (!header) return new Response("The Worker sent no deployer.", { status: 500 });
@@ -2916,6 +2913,60 @@ export class Kitshn extends DurableObject<Env> {
     if (path.startsWith("/api/apps/") && request.method === "DELETE")
       return this.removeApp(caller, decodeURIComponent(path.slice("/api/apps/".length)));
     if (path === "/api/repos/check" && request.method === "POST") return await this.checkReposOnGitHub();
+    // K-1770 to K-1774: the passes of Settings: on or off, the audiences, and "Rotate pass key".
+    if (path === "/api/passes" && request.method === "GET") return Response.json(this.passSettings());
+    if (path === "/api/passes" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      if (!isRecord(body) || typeof body["on"] !== "boolean")
+        return Response.json({ error: 'Send {"on": true | false}.' }, { status: 400 });
+      const on = body["on"];
+      this.ctx.storage.transactionSync(() => {
+        this.setMeta("passes_on", on ? "1" : "0");
+        this.insertRevision(caller.actor, on ? "Turned on passes" : "Turned off passes", [], null);
+      });
+      this.broadcast();
+      return Response.json(this.passSettings());
+    }
+    if (path === "/api/passes/rotate" && request.method === "POST") {
+      await this.rotatePassKey(caller.actor);
+      this.broadcast();
+      return Response.json(this.passSettings());
+    }
+    if (path === "/api/passes/audiences" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      const address = isRecord(body) && typeof body["address"] === "string" ? body["address"].trim() : "";
+      // An audience that exists already changes only whether its passes carry labels.
+      if (this.sql("SELECT 1 AS one FROM pass_audiences WHERE address = ?", address).length > 0) {
+        const labels = isRecord(body) && body["labels"] === true;
+        this.ctx.storage.transactionSync(() => {
+          this.sql("UPDATE pass_audiences SET labels = ? WHERE address = ?", labels ? 1 : 0, address);
+          this.insertRevision(
+            caller.actor,
+            `${labels ? "Put" : "Took"} labels ${labels ? "in" : "out of"} the passes for ${address}`,
+            [],
+            null,
+          );
+        });
+        return Response.json(this.passSettings());
+      }
+      const added = this.addAudience(
+        address,
+        { machineId: null, name: "the owner" },
+        isRecord(body) && body["labels"] === true,
+      );
+      if (added.outcome !== "done")
+        return Response.json({ error: added.outcome === "refused" ? added.reason : "No." }, { status: 400 });
+      return Response.json(this.passSettings());
+    }
+    if (path.startsWith("/api/passes/audiences/") && request.method === "DELETE") {
+      const address = decodeURIComponent(path.slice("/api/passes/audiences/".length));
+      this.ctx.storage.transactionSync(() => {
+        this.sql("DELETE FROM pass_audiences WHERE address = ?", address);
+        this.insertRevision(caller.actor, `Removed the pass audience ${address}`, [], null);
+      });
+      this.broadcast();
+      return Response.json(this.passSettings());
+    }
     // K-1756: History searches the ask events by one label.
     if (path === "/api/ask-events" && request.method === "GET") {
       const label = new URL(request.url).searchParams.get("label") ?? "";
@@ -6847,6 +6898,40 @@ export class Kitshn extends DurableObject<Env> {
     }
     if (action === "github-token")
       return event(await this.askGitHubToken(machine, target, raw["body"], reason, labels, now));
+    // K-1773: an agent removes an audience that its machine added at once, because that lowers access (K-715).
+    if (action === "audience-remove") {
+      const [row] = this.sql<{ added_by: string | null }>(
+        "SELECT added_by FROM pass_audiences WHERE address = ?",
+        target,
+      );
+      if (row?.added_by !== machine.id)
+        return event({
+          outcome: "refused",
+          reason: "A machine removes only an audience that it added (K-1773).",
+        });
+      this.ctx.storage.transactionSync(() => {
+        this.sql("DELETE FROM pass_audiences WHERE address = ?", target);
+        this.insertRevision(
+          { _tag: "machine", machineId: machine.id, name: machine.name },
+          `Removed the pass audience ${target}`,
+          [],
+          null,
+        );
+      });
+      this.broadcast();
+      return event({ outcome: "done", result: { removed: target } });
+    }
+    // K-1774: passes stay off until the owner turns them on after the host move (K-1209).
+    if (action === "pass" && this.meta("passes_on") !== "1")
+      return event({
+        outcome: "refused",
+        reason: 'Passes are off. The owner turns on "Passes" in Settings after the host move (17.7).',
+      });
+    if (
+      action === "pass" &&
+      this.sql("SELECT 1 AS one FROM pass_audiences WHERE address = ?", target).length === 0
+    )
+      return event({ outcome: "refused", reason: `${target} is not in the pass audiences (K-1773).` });
     // K-1756: the ask events of this machine with one label, `target` is key=value; it writes no event itself.
     if (action === "history") {
       const equals = target.indexOf("=");
@@ -6899,7 +6984,7 @@ export class Kitshn extends DurableObject<Env> {
         return event({ outcome: "refused", reason: edits });
       }
     }
-    return event(await this.runAsk(machine, action, target, raw["body"], null));
+    return event(await this.runAsk(machine, action, target, raw["body"], null, labels));
   }
 
   /**
@@ -6973,7 +7058,11 @@ export class Kitshn extends DurableObject<Env> {
     target: string,
     body: unknown,
     approved: MachineRight | null,
+    labels: Readonly<Record<string, string>> = {},
   ): Promise<AskOutcome> {
+    if (action === "pass") return this.issuePass(machine, target, labels);
+    if (action === "audience-add")
+      return this.addAudience(target, { machineId: machine.id, name: machine.name });
     if (action === "github-token") {
       const permission = isRecord(body) && body["permission"] === "write" ? "write" : "read";
       return this.mintToken(machine, target, permission);
@@ -7089,6 +7178,141 @@ export class Kitshn extends DurableObject<Env> {
     return attachment?.kind === "machine"
       ? (attachment.status?.attesters ?? []).map((item) => item.prefix)
       : [];
+  }
+
+  /** K-1771: the pass keys, newest first; the first is current. One read of a small table. */
+  private passKeys(): Array<PassKey> {
+    return this.sql<{
+      kid: string;
+      private_jwk: string;
+      public_jwk: string;
+      created_at: number;
+      retired_at: number | null;
+    }>("SELECT * FROM pass_keys ORDER BY created_at DESC").map((row) => ({
+      kid: row.kid,
+      privateJwk: JSON.parse(row.private_jwk) as PassKey["privateJwk"],
+      publicJwk: JSON.parse(row.public_jwk) as PassKey["publicJwk"],
+      createdAt: row.created_at,
+      retiredAt: row.retired_at,
+    }));
+  }
+
+  /**
+   * K-1771, K-1822: "Rotate pass key", and the last step of kitshn's own restore to a time. A new key becomes current;
+   * the old one stays in the JWKS for 6 minutes, and keys past that, or past 5, go.
+   */
+  private async rotatePassKey(actor: Actor): Promise<void> {
+    const now = Date.now();
+    const key = await newPassKey(now);
+    this.ctx.storage.transactionSync(() => {
+      this.sql("UPDATE pass_keys SET retired_at = ? WHERE retired_at IS NULL", now);
+      this.sql("DELETE FROM pass_keys WHERE retired_at IS NOT NULL AND retired_at < ?", now - RETIRED_MS);
+      this.sql(
+        "INSERT INTO pass_keys (kid, private_jwk, public_jwk, created_at, retired_at) VALUES (?, ?, ?, ?, NULL)",
+        key.kid,
+        JSON.stringify(key.privateJwk),
+        JSON.stringify(key.publicJwk),
+        now,
+      );
+      this.sql(
+        "DELETE FROM pass_keys WHERE kid NOT IN (SELECT kid FROM pass_keys ORDER BY created_at DESC LIMIT ?)",
+        MAX_KEYS,
+      );
+      this.insertRevision(actor, "Rotated the pass key", [], null);
+    });
+  }
+
+  /** K-1770 to K-1773: what Settings shows of the passes: on or off, the audiences and the public keys. Never a private half. */
+  private passSettings() {
+    return {
+      on: this.meta("passes_on") === "1",
+      issuer: `https://${this.env.KITSHN_HOST}`,
+      audiences: this.sql<{ address: string; labels: number; added_by: string | null }>(
+        "SELECT address, labels, added_by FROM pass_audiences ORDER BY added_at",
+      ).map((row) => ({ address: row.address, labels: row.labels === 1, addedBy: row.added_by })),
+      keys: this.passKeys().map((key) => ({
+        kid: key.kid,
+        createdAt: key.createdAt,
+        retiredAt: key.retiredAt,
+      })),
+    };
+  }
+
+  /** K-1770, K-1771: the discovery document and the JWKS, with no login; "not found" while passes are off. */
+  private async wellKnown(file: string): Promise<Response> {
+    if (this.meta("passes_on") !== "1") return Response.json({ error: "Not found." }, { status: 404 });
+    const issuer = `https://${this.env.KITSHN_HOST}`;
+    const headers = { "cache-control": "public, max-age=300" };
+    if (file === "openid-configuration") return Response.json(discovery(issuer), { headers });
+    if (this.passKeys().length === 0) await this.rotatePassKey({ _tag: "kitshn", reason: "first pass key" });
+    return Response.json(jwks(this.passKeys(), Date.now()), { headers });
+  }
+
+  /** K-1772, K-1774: a 5-minute pass for one audience; the attested labels go in only when the audience allows them. */
+  private async issuePass(
+    machine: Machine,
+    audience: string,
+    labels: Readonly<Record<string, string>>,
+  ): Promise<AskOutcome> {
+    const [row] = this.sql<{ labels: number }>(
+      "SELECT labels FROM pass_audiences WHERE address = ?",
+      audience,
+    );
+    if (!row) return { outcome: "refused", reason: `${audience} is not in the pass audiences (K-1773).` };
+    if (this.passKeys().length === 0) await this.rotatePassKey({ _tag: "kitshn", reason: "first pass key" });
+    const [key] = this.passKeys();
+    if (!key) throw new Error("kitshn made a pass key and has none.");
+    const verified = Object.fromEntries(
+      Object.entries(labels).filter(([name]) => this.verifiedKeys(machine.id, labels).includes(name)),
+    );
+    const signed = await signPass(
+      key,
+      {
+        issuer: `https://${this.env.KITSHN_HOST}`,
+        audience,
+        machineId: machine.id,
+        labels: row.labels === 1 ? verified : null,
+      },
+      Date.now(),
+    );
+    return {
+      outcome: "done",
+      result: { pass: signed.pass, expiresAt: new Date(signed.expiresAt).toISOString() },
+    };
+  }
+
+  /** K-1773: adds an outside service to the pass audiences; an exact https address, never more than 50. */
+  private addAudience(
+    address: string,
+    by: { readonly machineId: string | null; readonly name: string },
+    labels = false,
+  ): AskOutcome {
+    let url: URL;
+    try {
+      url = new URL(address);
+    } catch {
+      return { outcome: "refused", reason: `${address} is not an address (K-1773).` };
+    }
+    if (url.protocol !== "https:")
+      return { outcome: "refused", reason: "A pass audience is an https address (K-1773)." };
+    const [count] = this.sql<{ count: number }>("SELECT COUNT(*) AS count FROM pass_audiences");
+    if ((count?.count ?? 0) >= 50)
+      return { outcome: "refused", reason: "kitshn keeps at most 50 pass audiences." };
+    const actor: Actor = by.machineId
+      ? { _tag: "machine", machineId: by.machineId, name: by.name }
+      : { _tag: "kitshn", reason: by.name };
+    this.ctx.storage.transactionSync(() => {
+      this.sql(
+        "INSERT OR IGNORE INTO pass_audiences (address, labels, added_by, added_at) VALUES (?, ?, ?, ?)",
+        address,
+        labels ? 1 : 0,
+        by.machineId,
+        Date.now(),
+      );
+      this.insertRevision(actor, `Added the pass audience ${address}`, [], null);
+    });
+    this.broadcast();
+    return { outcome: "done", result: { added: address } };
   }
 
   /** K-1760: the GitHub way of an owner, from its owner group or the default of Settings. */
@@ -7407,7 +7631,14 @@ export class Kitshn extends DurableObject<Env> {
       return { ok: true };
     }
     const outcome = machine
-      ? await this.runAsk(machine, proposal.action, proposal.target, proposal.body, proposal.right)
+      ? await this.runAsk(
+          machine,
+          proposal.action,
+          proposal.target,
+          proposal.body,
+          proposal.right,
+          proposal.labels,
+        )
       : ({ outcome: "refused", reason: "The machine that asked is gone." } as const);
     const result = outcome.outcome === "done" ? outcome.result : null;
     this.sql("UPDATE proposals SET result = ? WHERE id = ?", JSON.stringify(outcome), proposalId);

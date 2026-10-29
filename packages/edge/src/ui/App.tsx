@@ -121,6 +121,7 @@ import {
 import { playResumeSound, pressSound, showPanic, unlockAudio } from "./panic.ts";
 import { GONE_STICKER, REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
 import { AskEvents, AskList, approveFromHash } from "./Asks.tsx";
+import { PassSettingsPanel } from "./Passes.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
@@ -2172,6 +2173,7 @@ function Panel(props: {
           ))}
         </ul>
         <GitHubDefaultWay way={props.githubDefaultWay} onToast={props.onToast} />
+        <PassSettingsPanel onToast={props.onToast} />
         <AskList
           proposals={props.proposals}
           circleName={(id) => props.state.circles.get(id)?.name ?? id}

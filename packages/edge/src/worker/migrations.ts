@@ -204,6 +204,10 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "CREATE INDEX ask_labels_event ON ask_labels (event_id)",
     // K-1762: the App installation of each GitHub owner, so a token costs one GitHub call.
     "CREATE TABLE github_installations (owner TEXT PRIMARY KEY, installation_id INTEGER NOT NULL)",
+    // K-1771: the pass keys; backups and the state export leave this table out. K-1773: the pass audiences.
+    `CREATE TABLE pass_keys (kid TEXT PRIMARY KEY, private_jwk TEXT NOT NULL, public_jwk TEXT NOT NULL,
+      created_at INTEGER NOT NULL, retired_at INTEGER)`,
+    "CREATE TABLE pass_audiences (address TEXT PRIMARY KEY, labels INTEGER NOT NULL, added_by TEXT, added_at INTEGER NOT NULL)",
   ],
 ];
 

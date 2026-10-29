@@ -310,3 +310,45 @@ it("finds the ask events of one label, and keeps a caller's t3. label out (K-175
   expect(found).toHaveLength(1);
   expect(found[0]?.labels).toEqual({ "my.task": "42" });
 });
+
+it("issues a pass only while passes are on and for a listed audience, and serves its key (K-1770, K-1774)", async () => {
+  const stub = await setup({ getsPasses: { mode: "automatic" } });
+  expect(await ask(stub, "pass", "https://api.example.com")).toMatchObject({
+    outcome: "refused",
+    reason: expect.stringContaining("Passes are off"),
+  });
+  const wellKnown = (file: string) =>
+    runInDurableObject(
+      stub,
+      async (instance) =>
+        (
+          await (instance as unknown as { fetch(r: Request): Promise<Response> }).fetch(
+            new Request(`https://kitshn.internal/internal/well-known/${file}`),
+          )
+        ).status,
+    );
+  expect(await wellKnown("jwks.json")).toBe(404);
+  await runInDurableObject(stub, (_, state) => {
+    state.storage.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('passes_on', '1')");
+    state.storage.sql.exec("DELETE FROM pass_audiences");
+  });
+  await evictDurableObject(stub);
+  expect(await ask(stub, "pass", "https://api.example.com")).toMatchObject({
+    outcome: "refused",
+    reason: expect.stringContaining("not in the pass audiences"),
+  });
+  await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec(
+      "INSERT INTO pass_audiences (address, labels, added_by, added_at) VALUES ('https://api.example.com', 0, NULL, 0)",
+    ),
+  );
+  expect(await ask(stub, "pass", "https://api.example.com")).toMatchObject({
+    outcome: "done",
+    result: { pass: expect.any(String) },
+  });
+  expect(await wellKnown("jwks.json")).toBe(200);
+  await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec("DELETE FROM meta WHERE key = 'passes_on'"),
+  );
+  await evictDurableObject(stub);
+});

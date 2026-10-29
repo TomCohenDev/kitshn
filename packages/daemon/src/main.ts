@@ -399,6 +399,8 @@ async function agentCommand(argv: ReadonlyArray<string>) {
     const word = rest[index] ?? "";
     const value = () => rest[++index] ?? fail(`${word} needs a value.`);
     if (word === "--reason") reason = value();
+    // K-1774: `--aud` is the alias of the JWT claim name.
+    else if (word === "--audience" || word === "--aud") target = value();
     else if (word === "--body") {
       const text = value();
       try {

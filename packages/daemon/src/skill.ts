@@ -12,39 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, relative } from "node:path";
-
-declare const KITSHN_SKILL: string;
-
-/** The skill of this release, built into the binary; from source, the repo's file. */
-export const skillText = () =>
-  typeof KITSHN_SKILL === "string"
-    ? KITSHN_SKILL
-    : readFileSync(new URL("../../kitshn/skill/SKILL.md", import.meta.url), "utf8");
-
-export const SKILL_UPDATE = { global: "kitshn skill install", repo: "kitshn skill install --repo" } as const;
-export type SkillScope = keyof typeof SKILL_UPDATE;
-
-const MARK = "<!-- kitshn edge-";
-
-/**
- * The skill with one line after its front matter that names the release and the update command. The front matter
- * stays first, because agents read the skill's name and description from it.
- */
-export function versionedSkill(text: string, version: string, scope: SkillScope) {
-  const end = text.startsWith("---\n") ? text.indexOf("\n---\n", 4) : -1;
-  if (end < 0) throw new Error("The kitshn skill has no front matter.");
-  const cut = end + "\n---\n".length;
-  return `${text.slice(0, cut)}${MARK}${version}. Update it with: ${SKILL_UPDATE[scope]} -->\n${text.slice(cut)}`;
-}
-
-/** The release that a copy of the skill names, or null for a copy without the line. */
-export function skillVersion(text: string): string | null {
-  const at = text.indexOf(MARK);
-  if (at < 0) return null;
-  const rest = text.slice(at + MARK.length);
-  const version = rest.slice(0, rest.indexOf("."));
-  return version === "" ? null : version;
-}
+import { SKILL_UPDATE, type SkillScope, skillText, skillVersion, versionedSkill } from "kitshn/skill";
 
 /** Where the global copy lives, and the link that agents read it through. */
 export const globalSkillPaths = (home: string) => ({

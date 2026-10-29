@@ -8,6 +8,7 @@
     ".": "./src/index.ts",
     "./recipe": "./src/recipe.ts",
     "./icon": "./src/icon.ts",
+    "./skill": "./src/skill.ts",
     "./names": "./src/names.ts",
     "./media": "./src/media.ts",
     "./templates": "./src/templates.ts",
@@ -34,7 +35,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "build": "rm -rf dist && bun build src/cli.ts --target=node --outfile=dist/kitshn.mjs && tsc -p tsconfig.build.json"
+    "build": "rm -rf dist && node scripts/build.ts && tsc -p tsconfig.build.json"
   },
   "devDependencies": {
     "@babel/parser": "8.0.8",

@@ -12,6 +12,7 @@ describe("kitshn repo files (K-1127)", () => {
         { card: "folder-x", kind: "folder", addresses },
         "owner/hand",
         "https://kit.example.com",
+        "skill",
       );
       const apps = decodeApps(readApps(files["kitshn.config.ts"] ?? "")) as Record<
         string,
@@ -25,11 +26,14 @@ describe("kitshn repo files (K-1127)", () => {
         addresses,
       });
     }
-    const readme = repoFiles(
+    const files = repoFiles(
       { card: "x", kind: "page", addresses: ["a.example.com"] },
       "owner/hand",
       "https://kit.example.com",
-    )["README.md"];
-    expect(readme).toContain("https://kit.example.com/public/badges/owner/hand.svg");
+      "the skill",
+    );
+    expect(files["README.md"]).toContain("https://kit.example.com/public/badges/owner/hand.svg");
+    // K-618: a new repo starts with its copy of the kitshn skill.
+    expect(files[".claude/skills/kitshn/SKILL.md"]).toBe("the skill");
   });
 });

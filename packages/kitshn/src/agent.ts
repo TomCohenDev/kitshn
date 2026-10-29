@@ -20,6 +20,7 @@ import { type DeployRun, type LogAnswer, logArgs, logLineText, logRange } from "
 import { contentType } from "./media.ts";
 import { cardOutput, errorOutput } from "./output.ts";
 import { type HandoverAnswer, repoFiles } from "./repo-files.ts";
+import { KITSHN_RELEASE, skillText, versionedSkill } from "./skill.ts";
 
 /** One call to an `/agent` path of kitshn. */
 export interface AgentTransport {
@@ -284,7 +285,8 @@ async function makeRepo(t: AgentTransport, card: string, path: string, repo: str
       if (!page.ok) fail(`kitshn did not send the page: ${page.status}.`);
       writeFileSync(join(site, "index.html"), Buffer.from(await page.arrayBuffer()));
     } else fail("name the folder of the site: kitshn cannot read the files of a folder site back.");
-    for (const [file, text] of Object.entries(repoFiles(handover, repo, await t.server()))) {
+    const skill = versionedSkill(skillText(), KITSHN_RELEASE, "repo");
+    for (const [file, text] of Object.entries(repoFiles(handover, repo, await t.server(), skill))) {
       mkdirSync(join(dir, file, ".."), { recursive: true });
       writeFileSync(join(dir, file), text);
     }

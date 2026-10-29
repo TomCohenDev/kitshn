@@ -22,7 +22,7 @@ A repo with `.kitshn.yaml` and `Caddyfile.j2` is a KitSHn 1 repo. Do not mix the
 The daemon carries the skill of its release (K-618). The line under the front matter names that release and the update command.
 
 - Global: `kitshn skill install` writes `~/.local/share/kitshn/skills/kitshn` and links `~/.claude/skills/kitshn` to it. The join does this once, and the daemon writes it again after an update.
-- In an app repo: `kitshn skill install --repo` writes `.claude/skills/kitshn/SKILL.md`. Commit it with the repo.
+- In an app repo: `kitshn skill install --repo` writes `.claude/skills/kitshn/SKILL.md`. Commit it with the repo. A repo from `kitshn repo` starts with this copy.
 - `kitshn skill check` exits 1 when a copy is from another release. The deploy workflow warns about an old or missing repo copy and deploys anyway.
 
 ## Add kitshn to an app repo

@@ -4,6 +4,7 @@ A pass proves to an outside service that a request comes from an agent on a join
 
 ## Trust kitshn
 
+- Passes work only while the owner has "Passes" on in Settings; until then the two addresses below answer "not found".
 - Issuer: `https://kitshn.<zone>`, the exact value of `iss`.
 - Discovery: `https://kitshn.<zone>/.well-known/openid-configuration`.
 - Keys: `https://kitshn.<zone>/.well-known/jwks.json`.

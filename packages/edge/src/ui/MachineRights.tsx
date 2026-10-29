@@ -102,3 +102,25 @@ export function withMode(member: MachineMember, right: MachineRight, mode: Right
   const { rights: _old, ...rest } = member;
   return Object.keys(rights).length === 0 ? rest : { ...rest, rights };
 }
+
+/** K-1730: a sticker for each right of a machine on its chip in an agent circle; "ask" rights carry a "?". */
+export function MachineRightStickers(props: { readonly member: MachineMember }) {
+  return (
+    <>
+      {MACHINE_RIGHTS.flatMap((right) => {
+        const mode = props.member.rights?.[right];
+        if (!mode) return [];
+        return [
+          <span
+            key={right}
+            class="sticker right"
+            data-tip={`${RIGHT_HELP[right]} ${mode.mode === "ask" ? "Each ask waits for its approver circle." : "Runs at once."}`}
+          >
+            {MACHINE_RIGHT_NAMES[right]}
+            {mode.mode === "ask" ? " ?" : ""}
+          </span>,
+        ];
+      })}
+    </>
+  );
+}

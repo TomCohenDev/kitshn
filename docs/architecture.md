@@ -50,6 +50,7 @@ This page says what the parts are, where each piece of state lives, how requests
 | Machine key pair (planned, K-1702) | Private half in a daemon file, mode 0600; public half in Durable Object SQLite | |
 | Pass signing key (planned, K-1771) | Durable Object storage; public halves of retired keys for 6 minutes | Passes are only for outside services, so kitshn stores no pass ids. |
 | Ask events and their label index (planned, K-1717, K-1756) | Durable Object SQLite, one row per ask and one per label, indexed on (key, value, time) | 30 days, at most 5,000 events, as K-1610. |
+| App pull request runs (planned, K-1767) | Durable Object SQLite, one row per pull request and commit | The owner's Deploy approves that commit. |
 | GitHub installation ids (planned, K-1762) | Durable Object SQLite, one row per owner | Repo tokens live only in memory: the daemon's, and kitshn's for revocation (K-1716). |
 | Recipe | App repo | The only state in Git. |
 | Page and file bytes | R2 | |

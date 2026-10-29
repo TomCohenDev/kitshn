@@ -17,6 +17,7 @@ import {
 import type { AccessState, MachineView, Snapshot } from "../core/protocol.ts";
 import { isAgentKey } from "../core/agent.ts";
 import { AGENT_TIP, LEVEL_TIPS, MATCH_TIPS, MEMBER_HELP, PASSKEY_TIP, RightStickers } from "./Circle.tsx";
+import { MachineRightStickers } from "./MachineRights.tsx";
 import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { KeySticker, PresenceSticker } from "./Machines.tsx";
 import type { MenuTarget } from "./actions.ts";
@@ -778,7 +779,8 @@ function CircleView(props: {
   const { circle } = props;
   const shown = circle.members.slice(0, 4);
   // K-718: rights count only in a circle of devices only.
-  const agentCircle = circle.members.every((member) => member._tag === "device");
+  // K-1730: an agent circle holds devices and machines only.
+  const agentCircle = circle.members.every((member) => member._tag === "device" || member._tag === "machine");
   const extra = circle.members.length - shown.length;
   const counts = new Map<ResourceKind, number>();
   if (props.zoomedOut) {
@@ -852,9 +854,16 @@ function CircleView(props: {
                   <span class="sticker agent" data-tip={AGENT_TIP}>
                     agent
                   </span>
+                  <span
+                    class="sticker"
+                    data-tip="Exception: an agent key is for an agent on no joined machine; agents on machines ask as their machine (K-1732)."
+                  >
+                    exception
+                  </span>
                   {agentCircle ? <RightStickers member={member} /> : null}
                 </>
               ) : null}
+              {member._tag === "machine" && agentCircle ? <MachineRightStickers member={member} /> : null}
             </span>
           ))}
           {extra > 0 ? (

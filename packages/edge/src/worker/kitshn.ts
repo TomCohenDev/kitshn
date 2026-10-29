@@ -348,7 +348,7 @@ import {
   rekeyDecision,
   socketStart,
 } from "./machines.ts";
-import { adminHosts, type Env } from "./env.ts";
+import { adminHosts, type Env, loginPages } from "./env.ts";
 
 /** What a WebSocket of this Durable Object belongs to. */
 type Attachment =
@@ -1263,7 +1263,7 @@ export class Kitshn extends DurableObject<Env> {
       now,
       [...removed, ...leaving],
       [...this.oldAddresses(), ...going],
-      this.env.KITSHN_CLOSED_PAGE?.trim() || null,
+      loginPages(this.env),
     );
   }
 

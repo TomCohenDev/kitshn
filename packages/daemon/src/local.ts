@@ -70,6 +70,8 @@ export interface LocalOptions {
    * the users in `localUsers`; the peer check is then the only guard.
    */
   readonly access: "private" | "shared";
+  /** K-702: the longest line that a connection may send; a test sets a small one, so it sends no 17 MiB. */
+  readonly maxLineLength?: number;
 }
 
 /**
@@ -128,8 +130,9 @@ export async function listenLocal(
   rmSync(path, { force: true });
   const send = (socket: Bun.Socket<Connection | undefined>, answer: Answer) =>
     socket.data?.writer.write(line(answer));
+  const maxLine = options.maxLineLength ?? MAX_LINE_LENGTH;
   const tooLong = (socket: Bun.Socket<Connection | undefined>) => {
-    send(socket, { id: null, type: "error", error: `A line is longer than ${MAX_LINE_LENGTH} characters.` });
+    send(socket, { id: null, type: "error", error: `A line is longer than ${maxLine} characters.` });
     socket.data?.writer.end();
   };
   const lastRefusal = new Map<number | null, number>();
@@ -201,10 +204,10 @@ export async function listenLocal(
         for (let end = connection.buffer.indexOf("\n"); end >= 0; end = connection.buffer.indexOf("\n")) {
           const text = connection.buffer.slice(0, end);
           connection.buffer = connection.buffer.slice(end + 1);
-          if (text.length > MAX_LINE_LENGTH) return tooLong(socket);
+          if (text.length > maxLine) return tooLong(socket);
           void answer(socket, connection, text);
         }
-        if (connection.buffer.length > MAX_LINE_LENGTH) tooLong(socket);
+        if (connection.buffer.length > maxLine) tooLong(socket);
       },
     },
   });

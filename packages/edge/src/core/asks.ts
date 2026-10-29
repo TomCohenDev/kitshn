@@ -7,6 +7,8 @@ import {
   type RightCondition,
   type RightMode,
 } from "./model.ts";
+import type { Machine } from "./machine.ts";
+import { type Visitor, circleMatches } from "./visitor.ts";
 
 /** K-1711: the actions of an ask. The daemon checks the same list (`@kitshn/local`). */
 export const ASK_ACTIONS = [
@@ -198,6 +200,25 @@ export const WINDOW_ACTIONS: ReadonlySet<AskAction> = new Set(["github-token", "
 
 /** K-1727: a machine of this circle approves asks; in a circle that needs a passkey only with "machines may approve". */
 export const machinesApprove = (circle: Circle) => !circle.needsPasskey || circle.machinesMayApprove === true;
+
+/**
+ * K-1723, K-1727, K-1902: why this visitor may not answer the asks of an approver circle, or null when it may. The
+ * answer check and the live list of asks use it, so who sees an ask and who answers it never differ. `machine` says
+ * that the visitor is a machine, which answers only where machines approve.
+ */
+export function answerRefusal(
+  circle: Circle | undefined,
+  circleId: string,
+  visitor: Visitor,
+  machines: ReadonlyMap<string, Machine>,
+  machine: boolean,
+): string | null {
+  if (!circle || !circleMatches(circle, visitor, machines))
+    return `Only a member of the approver circle ${circle?.name ?? circleId} answers this ask (K-1723).`;
+  if (machine && !machinesApprove(circle))
+    return `${circle.name} needs a passkey, and "machines may approve" is off, so a machine does not answer its asks (K-1727).`;
+  return null;
+}
 
 /** K-1717: ask events stay 30 days, at most 5,000, as K-1610. */
 export const ASK_EVENT_DAYS = 30;

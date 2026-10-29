@@ -84,6 +84,7 @@ import {
   expectedHash,
   isDigits,
   localSocket,
+  versionJson,
   pathsFor,
   releaseAsset,
   serviceCommands,
@@ -2282,7 +2283,7 @@ switch (command) {
     localUsersCommand(args[0], args[1]);
     break;
   case "version":
-    console.log(VERSION);
+    console.log(args.includes("--json") ? versionJson(VERSION) : VERSION);
     break;
   case "expose":
     exposeCommand(args[0], flag("--name"), args.includes("--dev"));
@@ -2312,5 +2313,5 @@ kitshn expose <port|socket> --name <n>  share a local server at <n>.<zone> (K-11
 kitshn unexpose <name>                  stop sharing it
 kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>
                                         as root: move KitSHn 1 data into rootless Docker (K-1404)
-kitshn version`);
+kitshn version [--json]                 the version; --json: {"product":"kitshn","generation":2,"version"}`);
 }

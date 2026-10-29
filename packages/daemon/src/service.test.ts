@@ -10,6 +10,7 @@ import {
   serviceFile,
   tunnelServiceFile,
   tunnelStateOf,
+  versionJson,
 } from "./service.ts";
 
 describe("daemon service (K-601)", () => {
@@ -124,6 +125,14 @@ describe("daemon service (K-601)", () => {
     ).toEqual({ refused: expect.stringContaining("mode 777") });
     expect(localSocket({}, root, at({ ...daemon, ...renamed }), [...tmp, "kitshn-1002"], named)).toEqual({
       several: ["/tmp/kitshn-1000/kitshn.sock", "/tmp/kitshn-1002/kitshn.sock"],
+    });
+  });
+
+  it("names itself kitshn 2 in one stable JSON line, so tools can tell it from KitSHn 1 (K-1714)", () => {
+    expect(JSON.parse(versionJson("edge-abc"))).toEqual({
+      product: "kitshn",
+      generation: 2,
+      version: "edge-abc",
     });
   });
 });

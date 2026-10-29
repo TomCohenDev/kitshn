@@ -1,46 +1,39 @@
 @import url("https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;600&display=swap");
 
+/* The kitshn site in the logo colours: graphite ink and one yolk yellow, on white. A soft neo-brutalism: thin ink
+   edges and short hard shadows, round corners, and a lift on hover. Light only for now. */
 :root {
   color-scheme: light;
-  --canvas: #e4e7ff;
-  --dots: #00000026;
+  --canvas: #fbfbf9;
+  --dots: #19191b14;
   --surface: #ffffff;
-  --raised: #f1f2ff;
-  --code-bg: #ffffff;
-  --ink: #000000;
-  --muted: #3d3d5c;
-  --border: #000000;
-  --shadow-ink: #000000;
-  --accent: #6c5ce7;
-  --accent-fg: #ffffff;
-  --select: #ffe14d;
-  --select-fg: #000000;
-  --info: #00b3ff;
-  --warning: #ffb347;
-  --green: #7cff8a;
-  --yellow: #ffe14d;
-  --pink: #ff9eb0;
-  --radius: 0.25rem;
-  --bw: 2px;
-  --shadow: 4px 4px 0 0 var(--shadow-ink);
+  --raised: #f4f4f2;
+  --tint: #fff7d1;
+  --code-bg: #19191b;
+  --code-ink: #f4f4ef;
+  --ink: #19191b;
+  --muted: #6b6b70;
+  --border: #19191b;
+  --hairline: #19191b1f;
+  --shadow-ink: #19191b;
+  --accent: #ffd23f;
+  --accent-fg: #19191b;
+  --select: #ffd23f;
+  --select-fg: #19191b;
+  --info: #5cc8ff;
+  --warning: #ffad4d;
+  --green: #6ee7a0;
+  --yellow: #ffd23f;
+  --pink: #ff9fb2;
+  --radius: 14px;
+  --pill: 999px;
+  --square: 4px;
+  --bw: 1.5px;
+  --shadow: 3px 3px 0 0 var(--shadow-ink);
+  --shadow-up: 5px 5px 0 0 var(--shadow-ink);
+  --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --sans: "Bricolage Grotesque", system-ui, sans-serif;
   --mono: "JetBrainsMono Nerd Font Mono", "JetBrains Mono", monospace;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-    --canvas: #15122b;
-    --dots: #f3f0ff22;
-    --surface: #262147;
-    --raised: #1d1938;
-    --code-bg: #1d1938;
-    --ink: #f3f0ff;
-    --muted: #bdb6e6;
-    --border: #f3f0ff;
-    --shadow-ink: #b9a8ff;
-    --select: #6c5ce7;
-    --select-fg: #ffffff;
-  }
 }
 
 * {
@@ -48,6 +41,8 @@
 }
 html {
   font-size: 18px;
+  scroll-behavior: smooth;
+  overflow-x: clip;
 }
 body {
   margin: 0;
@@ -55,21 +50,21 @@ body {
   color: var(--ink);
   background-color: var(--canvas);
   background-image: radial-gradient(var(--dots) 1.2px, transparent 1.2px);
-  background-size: 16px 16px;
+  background-size: 18px 18px;
 }
 h1,
 h2,
 h3 {
   font-weight: 800;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
   margin: 0 0 0.5rem;
-  line-height: 1.15;
+  line-height: 1.1;
 }
 h1 {
-  font-size: 3rem;
+  font-size: clamp(2.4rem, 5.5vw, 4.2rem);
 }
 h2 {
-  font-size: 1.8rem;
+  font-size: clamp(1.6rem, 3vw, 2.3rem);
 }
 h3 {
   font-size: 1.2rem;
@@ -78,53 +73,119 @@ p {
   margin: 0 0 0.8rem;
 }
 a {
-  color: var(--accent);
+  color: var(--ink);
   font-weight: 600;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 3px;
+  text-underline-offset: 3px;
 }
-@media (prefers-color-scheme: dark) {
-  a {
-    color: #b9a8ff;
-  }
+a:hover {
+  text-decoration-color: var(--ink);
 }
 code,
 pre {
   font-family: var(--mono);
   font-size: 0.85em;
 }
+/* A yellow marker band behind inline code, no box. */
 :not(pre) > code {
   background: linear-gradient(transparent 35%, var(--select) 35%, var(--select) 88%, transparent 88%);
+  color: var(--select-fg);
   padding: 0 2px;
+  overflow-wrap: anywhere;
 }
 pre {
   margin: 0 0 1rem;
-  padding: 10px 12px;
+  padding: 14px 16px;
   overflow-x: auto;
+  color: var(--code-ink);
   background: var(--code-bg);
   border: var(--bw) solid var(--border);
   border-radius: var(--radius);
-  box-shadow: 3px 3px 0 0 var(--shadow-ink);
+  box-shadow: var(--shadow);
 }
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--ink);
   outline-offset: 2px;
+  box-shadow: 0 0 0 6px #ffd23f99;
 }
 img {
   max-width: 100%;
   height: auto;
   display: block;
 }
+ul {
+  padding-left: 1.2rem;
+}
 
 .wrap {
-  width: min(64rem, calc(100% - 2rem));
+  width: min(78rem, calc(100% - 1.5rem));
   margin-inline: auto;
 }
+@media (max-width: 760px) {
+  .wrap {
+    width: calc(100% - 1rem);
+  }
+}
+
+.card {
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+section {
+  margin-block: 4.5rem;
+}
+.pad {
+  padding: 1.4rem 1.5rem;
+}
+.label {
+  display: block;
+  margin-bottom: 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.muted {
+  color: var(--muted);
+}
+.mark {
+  white-space: nowrap;
+  background: linear-gradient(transparent 58%, var(--accent) 58%, var(--accent) 92%, transparent 92%);
+  padding: 0 0.08em;
+}
+.lede {
+  font-size: 1.2rem;
+  color: var(--muted);
+  max-width: 40rem;
+}
+.head {
+  max-width: 44rem;
+  margin-bottom: 1.8rem;
+}
+.head.center {
+  margin-inline: auto;
+  text-align: center;
+}
+.head.center .lede {
+  margin-inline: auto;
+}
+
+/* The header: brand on the left, links and the main action on the right. */
 .top {
+  position: sticky;
+  top: 0.6rem;
+  z-index: 10;
   display: flex;
   align-items: center;
   gap: 1rem;
   flex-wrap: wrap;
-  margin: 1rem auto 0;
-  padding: 0.5rem 0.9rem;
+  margin: 0.6rem auto 0;
+  padding: 0.45rem 0.6rem 0.45rem 0.8rem;
+  border-radius: var(--square);
 }
 .top .brand {
   display: flex;
@@ -142,60 +203,50 @@ img {
 }
 .top nav {
   display: flex;
-  gap: 0.4rem;
+  align-items: center;
+  gap: 0.2rem;
   flex-wrap: wrap;
 }
-
-.card {
-  background: var(--surface);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+.top nav a:not(.btn) {
+  padding: 4px 10px;
+  border-radius: var(--square);
+  text-decoration: none;
 }
-section {
-  margin-block: 3rem;
+.top nav a:not(.btn):hover,
+.top nav a:not(.btn)[aria-current="page"] {
+  background: var(--raised);
 }
-.pad {
-  padding: 1.4rem 1.6rem;
+.top nav .btn {
+  margin-left: 0.3rem;
 }
-.label {
-  display: block;
-  margin-bottom: 0.3rem;
-  font-size: 0.7rem;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.muted {
-  color: var(--muted);
-}
-
-.hero {
-  position: relative;
-  padding: 2.4rem 2rem;
-}
-.hero p {
-  font-size: 1.25rem;
-  max-width: 40rem;
-}
-.hero .sticker {
-  position: absolute;
-  top: -0.8rem;
-  right: 1.5rem;
-}
-.actions {
-  display: flex;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-  margin-top: 1.2rem;
+/* On a phone the header keeps the brand and Install on one row; the first screen links to the rest. */
+@media (max-width: 640px) {
+  .top {
+    gap: 0.5rem;
+    padding-left: 0.6rem;
+  }
+  .top .brand {
+    font-size: 1.1rem;
+  }
+  .top .brand img {
+    width: 1.7rem;
+    height: 1.7rem;
+  }
+  .top nav a:not(.btn) {
+    display: none;
+  }
+  .top nav .btn {
+    margin-left: 0;
+    padding: 4px 10px;
+    font-size: 0.9rem;
+  }
 }
 
 .btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px;
+  padding: 6px 16px;
   cursor: pointer;
   font: inherit;
   font-weight: 700;
@@ -203,22 +254,27 @@ section {
   text-decoration: none;
   background: var(--surface);
   border: var(--bw) solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--square);
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
   transition:
-    transform 80ms,
-    box-shadow 80ms;
+    transform 160ms var(--spring),
+    box-shadow 160ms var(--spring);
 }
 .btn:hover {
   transform: translate(-1px, -1px);
   box-shadow: 3px 3px 0 0 var(--shadow-ink);
 }
 .btn:active {
-  transform: translate(3px, 3px);
+  transform: translate(2px, 2px);
   box-shadow: none;
 }
 .btn.primary {
   background: var(--accent);
   color: var(--accent-fg);
+}
+.btn.big {
+  padding: 10px 22px;
+  font-size: 1.05rem;
 }
 .btn[aria-current="page"] {
   background: var(--select);
@@ -227,19 +283,18 @@ section {
 
 .sticker {
   display: inline-block;
-  padding: 0 6px;
+  padding: 1px 8px;
   line-height: 1.5;
   white-space: nowrap;
-  font-size: 0.65rem;
+  font-size: 0.66rem;
   font-weight: 800;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #000000;
+  color: var(--ink);
   background: var(--pink);
-  border: var(--bw) solid var(--shadow-ink);
-  border-radius: 4px;
-  box-shadow: 2px 2px 0 0 var(--shadow-ink);
-  transform: rotate(var(--tilt, -3deg));
+  border: var(--bw) solid var(--border);
+  border-radius: var(--pill);
+  transform: rotate(var(--tilt, -2deg));
 }
 .sticker.ok {
   background: var(--green);
@@ -254,37 +309,180 @@ section {
   background: var(--warning);
 }
 
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin-top: 1.4rem;
+}
+
+/* The first screen of a page. On the home page it splits into words and a picture of the map. */
+.hero {
+  position: relative;
+  padding: 2rem 1.6rem;
+}
+.hero p {
+  font-size: 1.2rem;
+  max-width: 40rem;
+}
+.hero > .sticker {
+  position: absolute;
+  top: -0.7rem;
+  right: 1.5rem;
+}
+.landing {
+  display: grid;
+  grid-template-columns: 1.05fr 1fr;
+  gap: 2.5rem;
+  align-items: center;
+  margin-top: 3.5rem;
+}
+.landing h1 {
+  margin-bottom: 1rem;
+}
+.landing .lede {
+  font-size: 1.3rem;
+}
+.landing .picture {
+  position: relative;
+}
+.landing .picture .sticker {
+  position: absolute;
+  z-index: 1;
+  font-size: 0.75rem;
+}
+.landing .picture .sticker.one {
+  top: -0.8rem;
+  left: 1.5rem;
+}
+@media (max-width: 860px) {
+  .landing {
+    grid-template-columns: 1fr;
+    margin-top: 2rem;
+  }
+}
+
+/* A row of what kitshn works with, under the first screen. */
+.strip {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.6rem 1.6rem;
+  padding: 1rem 1.2rem;
+  margin-block: 3.5rem;
+  border-block: var(--bw) solid var(--hairline);
+  font-weight: 700;
+  color: var(--muted);
+}
+.strip span::before {
+  content: "✦";
+  margin-right: 0.4rem;
+  color: var(--accent);
+  -webkit-text-stroke: 0.5px var(--ink);
+}
+
+/* Three numbered steps. */
+.how {
+  display: grid;
+  gap: 1.2rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  counter-reset: how;
+}
+.how li {
+  counter-increment: how;
+  padding: 1.3rem 1.4rem 1rem;
+}
+.how li::before {
+  content: counter(how);
+  display: grid;
+  place-content: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  margin-bottom: 0.8rem;
+  font-weight: 800;
+  font-size: 1.1rem;
+  background: var(--accent);
+  border: var(--bw) solid var(--border);
+  border-radius: 50%;
+}
+
 .grid {
   display: grid;
   gap: 1.2rem;
-  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(17rem, 100%), 1fr));
 }
 .grid > .card {
-  padding: 1rem 1.2rem;
+  min-width: 0;
+  padding: 1.2rem 1.3rem;
+}
+.grid > .card .sticker {
+  margin-bottom: 0.6rem;
 }
 .grid > .card:nth-child(3n + 2) .sticker {
   --tilt: 2deg;
 }
 .grid > .card:nth-child(3n) .sticker {
-  --tilt: -1.5deg;
+  --tilt: -1deg;
+}
+.lift {
+  transition:
+    transform 160ms var(--spring),
+    box-shadow 160ms var(--spring);
+}
+.lift:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: var(--shadow-up);
 }
 
 .split {
   display: grid;
-  gap: 1.6rem;
+  gap: 2.5rem;
   grid-template-columns: 1fr 1fr;
   align-items: center;
 }
 .split.narrow-pic {
   grid-template-columns: 2fr 1fr;
 }
+.split p {
+  font-size: 1.05rem;
+}
+.split ul.ticks {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0;
+}
+.ticks li {
+  position: relative;
+  padding-left: 1.8rem;
+  margin-bottom: 0.4rem;
+}
+.ticks li::before {
+  content: "✓";
+  position: absolute;
+  left: 0;
+  top: 0.15rem;
+  width: 1.2rem;
+  height: 1.2rem;
+  display: grid;
+  place-content: center;
+  font-size: 0.7rem;
+  font-weight: 800;
+  background: var(--green);
+  border: var(--bw) solid var(--border);
+  border-radius: 50%;
+}
 @media (max-width: 760px) {
-  h1 {
-    font-size: 2.2rem;
-  }
   .split,
   .split.narrow-pic {
     grid-template-columns: 1fr;
+    gap: 1.4rem;
+  }
+  .split > figure {
+    order: -1;
   }
 }
 figure {
@@ -295,44 +493,90 @@ figure.shot {
   padding: 0;
 }
 figcaption {
-  padding: 0.5rem 0.8rem;
+  padding: 0.55rem 0.9rem;
   border-top: var(--bw) solid var(--border);
   font-size: 0.85rem;
   color: var(--muted);
+  background: var(--raised);
 }
 .diagram {
-  padding: 1rem;
+  padding: 1.2rem;
 }
 .diagram img {
   margin: 0 auto;
 }
 
+/* A soft yellow band that runs the full width. */
+.band {
+  margin-block: 4.5rem;
+  padding-block: 4rem;
+  background: var(--tint);
+  border-block: var(--bw) solid var(--border);
+}
+.band > section {
+  margin-block: 0;
+}
+
+/* The three kinds of apps. */
+.kinds {
+  display: grid;
+  gap: 1.2rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+}
+.kinds .card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 1.3rem 1.4rem;
+}
+.kinds .sticker {
+  align-self: flex-start;
+  margin-bottom: 0.5rem;
+}
+.kinds dl {
+  margin: 0.6rem 0 0;
+  padding-top: 0.8rem;
+  border-top: var(--bw) dashed var(--hairline);
+  font-size: 0.92rem;
+}
+.kinds dt {
+  font-weight: 800;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.kinds dd {
+  margin: 0 0 0.5rem;
+}
+
 .apps {
   display: grid;
   gap: 1rem;
-  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(15rem, 100%), 1fr));
   row-gap: 1.6rem;
   padding: 0;
   margin: 0;
   list-style: none;
 }
 .apps li a {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 0.7rem;
-  padding: 0.8rem 0.9rem;
+  padding: 1.1rem 0.9rem 0.8rem;
   color: var(--ink);
   text-decoration: none;
   transition:
-    transform 80ms,
-    box-shadow 80ms;
+    transform 160ms var(--spring),
+    box-shadow 160ms var(--spring);
 }
 .apps li a:hover {
-  transform: translate(-1px, -1px);
-  box-shadow: 5px 5px 0 0 var(--shadow-ink);
+  transform: translate(-2px, -2px);
+  box-shadow: var(--shadow-up);
 }
 .apps li a:active {
-  transform: translate(3px, 3px);
+  transform: translate(2px, 2px);
   box-shadow: none;
 }
 .apps .icon {
@@ -341,8 +585,8 @@ figcaption {
   height: 2.2rem;
   padding: 3px;
   background: var(--raised);
-  border: var(--bw) solid var(--border);
-  border-radius: 4px;
+  border: var(--bw) solid var(--hairline);
+  border-radius: 8px;
   object-fit: contain;
 }
 .apps .name {
@@ -360,11 +604,7 @@ figcaption {
   --tilt: 2deg;
 }
 .apps li:nth-child(3n) .sticker {
-  --tilt: -1.5deg;
-}
-.apps li a {
-  position: relative;
-  padding-top: 1.1rem;
+  --tilt: -1deg;
 }
 .apps li a > span:not(.sticker) {
   min-width: 0;
@@ -373,6 +613,84 @@ figcaption {
   position: absolute;
   top: -0.7rem;
   right: 0.7rem;
+}
+
+/* The way to kitshn for teams (app.kitshn.com): a graphite card, so it reads apart from the rest. */
+.teams {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr auto;
+  gap: 1.5rem 2rem;
+  align-items: center;
+  padding: 2rem;
+  color: var(--code-ink);
+  background: var(--ink);
+}
+.teams > * {
+  min-width: 0;
+}
+.teams .label,
+.teams .lede {
+  color: #a3a3aa;
+}
+.teams .lede {
+  margin: 0;
+}
+.teams ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.6rem;
+}
+.teams li {
+  position: relative;
+  padding-left: 1.6rem;
+  font-weight: 600;
+}
+.teams li::before {
+  content: "✦";
+  position: absolute;
+  left: 0;
+  color: var(--accent);
+}
+.teams .btn {
+  box-shadow: 3px 3px 0 0 var(--accent);
+  border-color: var(--accent);
+}
+@media (max-width: 960px) {
+  .teams {
+    grid-template-columns: 1fr;
+    padding: 1.6rem 1.2rem;
+  }
+  .teams .btn {
+    justify-self: start;
+  }
+}
+
+/* The last call to action. */
+.cta {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  gap: 2rem;
+  align-items: center;
+  padding: 2.2rem 2rem;
+  background: var(--accent);
+}
+.cta > * {
+  min-width: 0;
+}
+.cta pre {
+  margin: 0;
+  box-shadow: none;
+}
+.cta .lede {
+  color: var(--ink);
+}
+@media (max-width: 860px) {
+  .cta {
+    grid-template-columns: 1fr;
+    padding: 1.6rem 1.2rem;
+  }
 }
 
 ol.steps {
@@ -384,14 +702,15 @@ ol.steps {
   gap: 1.2rem;
 }
 ol.steps > li {
+  min-width: 0;
   counter-increment: step;
   position: relative;
-  padding: 1.1rem 1.3rem 0.4rem 3.6rem;
+  padding: 1.1rem 1.3rem 0.4rem 3.8rem;
 }
 ol.steps > li::before {
   content: counter(step);
   position: absolute;
-  left: 0.9rem;
+  left: 1rem;
   top: 1rem;
   width: 2rem;
   height: 2rem;
@@ -401,7 +720,7 @@ ol.steps > li::before {
   background: var(--select);
   color: var(--select-fg);
   border: var(--bw) solid var(--border);
-  border-radius: 4px;
+  border-radius: 50%;
 }
 
 table {
@@ -413,23 +732,68 @@ th,
 td {
   text-align: left;
   vertical-align: top;
-  padding: 0.5rem 0.7rem;
-  border: var(--bw) solid var(--border);
+  padding: 0.55rem 0.8rem;
+  border-bottom: var(--bw) solid var(--hairline);
 }
 th {
   background: var(--raised);
   font-weight: 800;
+  border-bottom-color: var(--border);
 }
 .table-wrap {
   overflow-x: auto;
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
   box-shadow: var(--shadow);
 }
 
 footer {
-  margin: 3rem auto 2rem;
-  padding: 1rem 1.2rem;
+  margin: 4rem auto 1.5rem;
+  padding: 1rem 1.3rem;
   display: flex;
-  gap: 1rem;
+  align-items: center;
+  gap: 1rem 1.4rem;
   flex-wrap: wrap;
   font-size: 0.9rem;
+}
+footer .brand {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-right: auto;
+  font-weight: 800;
+  text-decoration: none;
+}
+footer .brand img {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+/* A picture keeps its own size in a split, so a narrow one leaves no empty frame. */
+.split > figure.shot {
+  justify-self: center;
+  width: fit-content;
+}
+.ticks.row {
+  display: grid;
+  gap: 0.6rem 1.6rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+  list-style: none;
+  padding: 0;
+  margin: 1.4rem 0 0;
+}
+
+/* The map demo beside the headline: the real kitshn map, with no toolbar or panels, on a made-up kitshn that lives in
+   the page (site/demo, built from packages/edge/src/ui/site-demo), in the neo-brutal look of this site. */
+.demo-frame {
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+}
+.demo-frame iframe {
+  display: block;
+  width: 100%;
+  height: clamp(420px, 64vh, 580px);
+  border: 0;
+  background: var(--canvas);
 }

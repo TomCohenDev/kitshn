@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>kitshn for enterprise: every internal app, one map of who gets in</title>
+    <meta
+      name="description"
+      content="kitshn deploys your company's sites, Workers and containers to your own Cloudflare account and servers, and one map decides which teams can open each one."
+    />
+    <meta property="og:title" content="kitshn for enterprise" />
+    <meta property="og:url" content="https://kitshn.com/enterprise/" />
+    <meta property="og:image" content="https://kitshn.com/social-preview.png" />
+    <meta property="og:image:width" content="1280" />
+    <meta property="og:image:height" content="640" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="wrap top card">
+      <a class="brand" href="/"><img src="/favicon.svg" alt="" /> kitshn</a>
+      <nav>
+        <a href="/architecture/">How it works</a>
+        <a href="/enterprise/" aria-current="page">Enterprise</a>
+        <a href="https://github.com/Yarden-zamir/kitshn">GitHub</a>
+        <a class="btn primary" href="/install/">Install</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="wrap landing">
+        <div>
+          <span class="label">kitshn for enterprise</span>
+          <h1>Every internal app, one map of <span class="mark">who gets in.</span></h1>
+          <p class="lede">
+            kitshn deploys your company's sites, Workers and containers from GitHub to your own Cloudflare account
+            and servers. One map decides which teams, partners and machines can open each one, and Cloudflare
+            Access enforces it.
+          </p>
+          <div class="actions">
+            <a class="btn primary big" href="/install/">Set it up on your account</a>
+            <a class="btn big" href="/architecture/">How it works</a>
+          </div>
+        </div>
+        <div class="picture">
+          <span class="sticker wait one">Try it: give a team access</span>
+          <figure class="card demo-frame">
+            <iframe
+              src="/demo/?map=company"
+              title="The kitshn map of a company, as a demo: drag an app into a team to give the team access"
+            ></iframe>
+          </figure>
+        </div>
+      </section>
+
+      <div class="wrap strip" aria-label="What kitshn works with">
+        <span>GitHub Actions</span>
+        <span>Cloudflare Workers</span>
+        <span>Cloudflare Access</span>
+        <span>Docker Compose</span>
+        <span>Your own servers</span>
+      </div>
+
+      <section class="wrap">
+        <div class="head">
+          <span class="label">Access</span>
+          <h2>Teams, not passwords</h2>
+          <p class="lede">
+            A circle is a group: an email, a company domain such as <code>@acme.com</code>, a device, a machine, an
+            IP range, or everyone. A circle can ask that a person match all of its rules, for example your domain
+            and the office network.
+          </p>
+        </div>
+        <figure class="card diagram">
+          <img src="/diagrams/circles.svg" alt="Circles become Access policies: a card in a circle gets an Access application that lets in the members of the circle; a card in Everyone opens with no login" width="910" height="330" />
+        </figure>
+        <ul class="ticks row">
+          <li>A circle can ask for a passkey after the login.</li>
+          <li>Each share has a level, and a share for a contractor can end on a date.</li>
+          <li>People sign in through Cloudflare Access. kitshn stores no passwords.</li>
+        </ul>
+      </section>
+
+      <div class="band">
+        <section class="wrap">
+          <div class="head">
+            <span class="label">Deploys</span>
+            <h2>One pipeline for every kind of app</h2>
+            <p class="lede">
+              A recipe in each repo, <code>kitshn.config.ts</code>, says what the repo deploys. A push to
+              <code>main</code> deploys production, and each pull request gets its own preview address that goes
+              away when it closes.
+            </p>
+          </div>
+          <div class="kinds">
+            <div class="card lift">
+              <span class="sticker ok">static</span>
+              <h3>Static sites</h3>
+              <dl>
+                <dt>Runs on</dt>
+                <dd>Workers static assets</dd>
+                <dt>Good for</dt>
+                <dd>Docs, dashboards, internal portals</dd>
+              </dl>
+            </div>
+            <div class="card lift">
+              <span class="sticker blue">worker</span>
+              <h3>Worker apps</h3>
+              <dl>
+                <dt>Runs on</dt>
+                <dd>A Cloudflare Worker with KV, Durable Objects and crons</dd>
+                <dt>Good for</dt>
+                <dd>Internal APIs and tools with state</dd>
+              </dl>
+            </div>
+            <div class="card lift">
+              <span class="sticker orange">compose</span>
+              <h3>Compose apps</h3>
+              <dl>
+                <dt>Runs on</dt>
+                <dd>Docker Compose on your servers, behind a tunnel, with backups of its volumes</dd>
+                <dt>Good for</dt>
+                <dd>Databases, bots, anything in a container</dd>
+              </dl>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section class="wrap">
+        <div class="head">
+          <span class="label">Security</span>
+          <h2>No secrets in the repo, no open ports</h2>
+          <p class="lede">
+            GitHub signs each run with an OIDC token, and kitshn trusts only the GitHub accounts on its list. It
+            reads the recipe as data and never runs it. Servers talk through Cloudflare tunnels, so no port is
+            open to the internet.
+          </p>
+        </div>
+        <figure class="card diagram">
+          <img src="/diagrams/deploy.svg" alt="A push runs GitHub Actions. Actions sends the recipe and its OIDC token to the kitshn Worker. The app goes to Cloudflare or to a machine, and its card gets Access from its circles." width="1010" height="290" />
+        </figure>
+      </section>
+
+      <section class="wrap">
+        <div class="head center">
+          <span class="label">Control</span>
+          <h2>Know who changed what, and stop it fast</h2>
+        </div>
+        <ol class="how">
+          <li class="card lift">
+            <h3>History of every change</h3>
+            <p>
+              Each share, move and deploy is one revision with who made it. You undo your own newest change in
+              one click. History keeps up to 90 days.
+            </p>
+          </li>
+          <li class="card lift">
+            <h3>An emergency pause</h3>
+            <p>
+              A big red button closes every share at once, or every share but the public ones, and keeps the
+              owners in. Resume needs a fresh passkey login.
+            </p>
+          </li>
+          <li class="card lift">
+            <h3>Agents that ask first</h3>
+            <p>
+              Coding agents on your machines act through their machine. Each right is off, automatic, or asks a
+              circle of approvers before it runs.
+            </p>
+          </li>
+        </ol>
+      </section>
+
+      <section class="wrap">
+        <div class="card cta">
+          <div>
+            <span class="label" style="color: var(--ink)">Start</span>
+            <h2>Runs on your account, under your rules</h2>
+            <p class="lede">
+              kitshn is open source under the MIT license. It runs on your Cloudflare account and your servers,
+              so your apps and their data stay with you.
+            </p>
+            <div class="actions">
+              <a class="btn big" href="/install/">All install steps</a>
+              <a class="btn big" href="https://github.com/Yarden-zamir/kitshn">Source on GitHub</a>
+            </div>
+          </div>
+          <pre><code>curl -fsSL https://kit.yarden-zamir.com/install | \
+  CLOUDFLARE_API_TOKEN=... \
+  KITSHN_HOST=kit.acme.com \
+  KITSHN_OWNER_EMAILS=it@acme.com \
+  KITSHN_DEPLOY_OWNERS=acme sh</code></pre>
+        </div>
+      </section>
+    </main>
+
+    <footer class="wrap card">
+      <a class="brand" href="/"><img src="/favicon.svg" alt="" /> kitshn</a>
+      <a href="https://github.com/Yarden-zamir/kitshn">Source on GitHub</a>
+      <a href="https://github.com/Yarden-zamir/kitshn/blob/main/SPEC.md">Spec</a>
+      <a href="https://github.com/Yarden-zamir/kitshn/blob/main/LICENSE">MIT license</a>
+      <a href="https://kitshn-legacy.yarden-zamir.com">KitSHn 1</a>
+      <span class="muted">This site deploys with kitshn.</span>
+    </footer>
+  </body>
+</html>

@@ -3,12 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>kitshn: push a repo, share it with a circle</title>
+    <meta name="color-scheme" content="light" />
+    <title>kitshn: put your projects online with a drag and drop</title>
     <meta
       name="description"
       content="kitshn deploys your GitHub repos to Cloudflare and to your own machines, and one map decides who can open each app."
     />
-    <meta property="og:title" content="kitshn: push a repo, share it with a circle" />
+    <meta property="og:title" content="kitshn: put your projects online with a drag and drop" />
     <meta property="og:url" content="https://kitshn.com/" />
     <meta property="og:image" content="https://kitshn.com/social-preview.png" />
     <meta property="og:image:width" content="1280" />
@@ -16,210 +17,228 @@
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/style.css" />
-    <script type="module" src="/apps.js"></script>
   </head>
   <body>
     <header class="wrap top card">
       <a class="brand" href="/"><img src="/favicon.svg" alt="" /> kitshn</a>
       <nav>
-        <a class="btn" href="/" aria-current="page">Home</a>
-        <a class="btn" href="/install/">Install</a>
-        <a class="btn" href="/architecture/">How it works</a>
-        <a class="btn" href="https://github.com/Yarden-zamir/kitshn">GitHub</a>
+        <a href="/architecture/">How it works</a>
+        <a href="/enterprise/">Enterprise</a>
+        <a href="https://github.com/Yarden-zamir/kitshn">GitHub</a>
+        <a class="btn primary" href="/install/">Install</a>
       </nav>
     </header>
 
     <main>
-      <section class="wrap card hero">
-        <span class="sticker ok">Free plan</span>
-        <h1>Push a repo.<br />Share it with a circle.</h1>
-        <p>
-          kitshn deploys your GitHub repos to Cloudflare and to your own machines. One map decides who can open
-          each app: drag its card into a circle, and Cloudflare Access does the rest.
-        </p>
-        <div class="actions">
-          <a class="btn primary" href="/install/">Install kitshn</a>
-          <a class="btn" href="/architecture/">How it works</a>
-          <a class="btn" href="#live">See it live</a>
+      <section class="wrap landing">
+        <div>
+          <h1>Put your projects online with <span class="mark">a drag and drop.</span></h1>
+          <p class="lede">
+            Push to GitHub and your site is live. Drag it into a circle to share it with a friend, your family or
+            the whole internet. It runs on Cloudflare's free plan.
+          </p>
+          <div class="actions">
+            <a class="btn primary big" href="/install/">Get started free</a>
+            <a class="btn big" href="/architecture/">How it works</a>
+          </div>
+        </div>
+        <div class="picture">
+          <span class="sticker wait one">Try it: share a project</span>
+          <figure class="card demo-frame">
+            <iframe src="/demo/" title="The kitshn map, as a demo: drag a card into a circle to share it"></iframe>
+          </figure>
         </div>
       </section>
 
-      <section class="wrap" id="live">
-        <span class="label">On the pass</span>
-        <h2>Live right now</h2>
-        <p id="apps-status" class="muted">Asking kitshn for the public apps…</p>
-        <ul class="apps" id="apps"></ul>
+      <div class="wrap strip" aria-label="What kitshn works with">
+        <span>GitHub Actions</span>
+        <span>Cloudflare Workers</span>
+        <span>Cloudflare Access</span>
+        <span>Docker Compose</span>
+        <span>Your own machines</span>
+      </div>
+
+      <section class="wrap">
+        <div class="head center">
+          <span class="label">How it works</span>
+          <h2>From push to shared in three steps</h2>
+          <p class="lede">Three steps, and the second one is a drag.</p>
+        </div>
+        <ol class="how">
+          <li class="card lift">
+            <h3>Push your code</h3>
+            <p>
+              A push to <code>main</code> deploys production. A pull request gets its own preview address, and the
+              preview goes away when the pull request closes.
+            </p>
+          </li>
+          <li class="card lift">
+            <h3>Drag it into a circle</h3>
+            <p>
+              Circles hold people, email domains, devices and networks. A card inside a circle is shared with it.
+            </p>
+          </li>
+          <li class="card lift">
+            <h3>Your friends open it</h3>
+            <p>kitshn turns the map into Cloudflare Access, so only the people in the circle get in.</p>
+          </li>
+        </ol>
       </section>
 
-      <section class="wrap grid">
-        <div class="card">
-          <span class="sticker wait">Git</span>
-          <h3>Deploys from git</h3>
-          <p>
-            A push to <code>main</code> deploys production. A pull request gets its own preview address, and the
-            preview goes away when the pull request closes.
+      <section class="wrap">
+        <div class="head">
+          <span class="label">Sharing</span>
+          <h2>Share with people, not passwords</h2>
+          <p class="lede">
+            Each circle is a group: a few friends by email, your family, your own phone, or everyone. Circles
+            overlap freely. A card counts for every circle that it sits in.
           </p>
         </div>
-        <div class="card">
-          <span class="sticker">Who</span>
-          <h3>One map for access</h3>
-          <p>
-            Circles hold people, email domains, devices and networks. A card inside a circle is shared with it.
-            kitshn turns that into Cloudflare Access, so a check costs nothing.
-          </p>
-        </div>
-        <div class="card">
-          <span class="sticker blue">Where</span>
-          <h3>Cloudflare and your machines</h3>
-          <p>
-            Static sites and Worker apps run on Cloudflare. Compose apps run on your own machines through a
-            tunnel, with no open ports.
-          </p>
-        </div>
-      </section>
-
-      <section class="wrap split">
-        <figure class="card shot">
-          <picture>
-            <source srcset="/img/circles-dark.webp" media="(prefers-color-scheme: dark)" />
-            <img src="/img/circles-light.webp" alt="Two circles on the kitshn map, Everyone and Her, with cards inside them" width="660" height="650" />
-          </picture>
-          <figcaption>tick3d sits in Everyone, so it opens with no login.</figcaption>
+        <figure class="card diagram">
+          <img src="/diagrams/circles.svg" alt="Circles become Access policies: a card in the Friends circle gets an Access application that lets in ana@example.com; a card in Everyone opens with no login" width="910" height="330" />
         </figure>
-        <div>
-          <span class="label">The map</span>
-          <h2>Circles say who</h2>
-          <p>
-            Each circle is a group: an email, a domain such as <code>@qlik.com</code>, a phone, a machine, an IP
-            range, or everyone. Circles overlap freely. A card counts for every circle that it sits in.
-          </p>
-          <p>
-            A circle can ask for a passkey after the login. The Owner circle always does, and it holds the kitshn
-            admin card.
-          </p>
-        </div>
+        <ul class="ticks row">
+          <li>A circle can ask for a passkey after the login.</li>
+          <li>The Owner circle always does, and it holds the kitshn admin card.</li>
+          <li>Change the level for one circle, or set an end date: a share for a guest can end after a week.</li>
+        </ul>
       </section>
 
       <section class="wrap split">
         <div>
-          <span class="label">Share</span>
-          <h2>Drag to share, see it first</h2>
+          <span class="label">Preview</span>
+          <h2>See who gets in before you let go</h2>
           <p>
             While you drag a card, every circle edge lights up and a label says what changes, such as
-            <code>+ Her · view</code>. The drop applies it. A toast offers Undo, and History keeps every change.
+            <code>+ Her · view</code>. The drop applies it.
           </p>
-          <p>A card that enters a public circle asks first.</p>
+          <ul class="ticks">
+            <li>A toast offers Undo, and History keeps every change.</li>
+            <li>A card that enters a public circle asks first.</li>
+            <li>The map works on a phone too. One finger pans, a long press opens the menu, and two fingers zoom.</li>
+          </ul>
         </div>
         <figure class="card shot">
-          <picture>
-            <source srcset="/img/drag-dark.webp" media="(prefers-color-scheme: dark)" />
-            <img src="/img/drag-light.webp" alt="A card dragged from Everyone into the Her circle, with the labels “− Everyone” and “+ Her · view”" width="480" height="450" />
-          </picture>
+          <img src="/img/drag-light.webp" alt="A card dragged from Everyone into the Her circle, with the labels “− Everyone” and “+ Her · view”" width="480" height="450" />
           <figcaption>The preview before the drop.</figcaption>
         </figure>
       </section>
 
-      <section class="wrap card pad">
-        <span class="label">Apps</span>
-        <h2>Three kinds of apps</h2>
-        <p>A recipe, <code>kitshn.config.ts</code>, names one kind. A repo can hold up to 10 apps.</p>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Kind</th>
-                <th>Runs on</th>
-                <th>Good for</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><span class="sticker ok">static</span></td>
-                <td>Workers static assets. Requests are free.</td>
-                <td>Sites, docs, a résumé, a trip plan</td>
-              </tr>
-              <tr>
-                <td><span class="sticker blue">worker</span></td>
-                <td>A Cloudflare Worker with KV, Durable Objects and crons</td>
-                <td>Small APIs and apps with state</td>
-              </tr>
-              <tr>
-                <td><span class="sticker orange">compose</span></td>
-                <td>Docker Compose on your machine, behind its tunnel</td>
-                <td>Anything in a container: bots, databases, big apps</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="wrap">
-        <span class="label">Deploy</span>
-        <h2>From a push to a live app</h2>
-        <figure class="card diagram">
-          <img src="/diagrams/deploy.svg" alt="A push runs GitHub Actions. Actions sends the recipe and its OIDC token to the kitshn Worker. The app goes to Cloudflare or to a machine, and its card gets Access from its circles." width="1010" height="290" />
-        </figure>
-        <p style="margin-top: 1rem">
-          The repo needs no secret: GitHub signs each run with an OIDC token, and kitshn trusts only the GitHub accounts on its list.
-          kitshn never runs the recipe. It reads it as data. <a href="/architecture/">Read how it works</a>.
-        </p>
-      </section>
-
-      <section class="wrap split narrow-pic">
-        <div>
-          <span class="label">Details</span>
-          <h2>Every card says who can open it</h2>
-          <p>
-            Select a card to see each circle that holds it, the members, the level and the address. Change the
-            level for one circle, or set an end date: a share for a guest can end after a week.
-          </p>
-          <p>
-            The map works on a phone too. One finger pans, a long press opens the menu, and two fingers zoom.
-          </p>
-        </div>
-        <figure class="card shot">
-          <picture>
-            <source srcset="/img/panel-dark.webp" media="(prefers-color-scheme: dark)" />
-            <img src="/img/panel-light.webp" alt="The card panel of the riffle app: its address, deploys allowed, and who can open it" width="492" height="620" />
-          </picture>
-        </figure>
-      </section>
+      <div class="band">
+        <section class="wrap">
+          <div class="head">
+            <span class="label">Projects</span>
+            <h2>Sites, apps and containers, one workflow</h2>
+            <p class="lede">A recipe, <code>kitshn.config.ts</code>, names one kind. A repo can hold up to 10 apps.</p>
+          </div>
+          <div class="kinds">
+            <div class="card lift">
+              <span class="sticker ok">static</span>
+              <h3>Static sites</h3>
+              <dl>
+                <dt>Runs on</dt>
+                <dd>Workers static assets. Requests are free.</dd>
+                <dt>Good for</dt>
+                <dd>Sites, docs, a résumé, a trip plan</dd>
+              </dl>
+            </div>
+            <div class="card lift">
+              <span class="sticker blue">worker</span>
+              <h3>Worker apps</h3>
+              <dl>
+                <dt>Runs on</dt>
+                <dd>A Cloudflare Worker with KV, Durable Objects and crons</dd>
+                <dt>Good for</dt>
+                <dd>Small APIs and apps with state</dd>
+              </dl>
+            </div>
+            <div class="card lift">
+              <span class="sticker orange">compose</span>
+              <h3>Compose apps</h3>
+              <dl>
+                <dt>Runs on</dt>
+                <dd>Docker Compose on your machine, behind its tunnel</dd>
+                <dt>Good for</dt>
+                <dd>Anything in a container: bots, databases, big apps</dd>
+              </dl>
+            </div>
+          </div>
+        </section>
+      </div>
 
       <section class="wrap split">
-        <figure class="card shot">
-          <picture>
-            <source srcset="/img/offline-dark.webp" media="(prefers-color-scheme: dark)" />
-            <img src="/img/offline-light.webp" alt="The kitshn offline page: “The kitchen is closed.” with the site, the reason and a Knock again button" width="600" height="420" />
-          </picture>
-        </figure>
         <div>
-          <span class="label">Machines</span>
-          <h2>Your machines, on the map</h2>
+          <span class="label">Self-hosting</span>
+          <h2>Your home server, on the internet, with no open ports</h2>
           <p>
             A small daemon joins each machine with one command. It runs the tunnel, deploys Compose apps in
             rootless Docker, and shares local dev servers as live sites.
           </p>
-          <p>
-            When a machine is off, visitors get this page instead of an error. It costs a Worker request only
-            while the site is down.
+          <ul class="ticks">
+            <li>No open ports: every machine talks through its tunnel.</li>
+            <li>
+              When a machine is off, visitors get this page instead of an error. It costs a Worker request only
+              while the site is down.
+            </li>
+          </ul>
+        </div>
+        <figure class="card shot">
+          <img src="/img/offline-light.webp" alt="The kitshn offline page: “The kitchen is closed.” with the site, the reason and a Knock again button" width="600" height="420" />
+        </figure>
+      </section>
+
+      <section class="wrap">
+        <div class="head">
+          <span class="label">Safety</span>
+          <h2>No keys to copy, no secrets to leak</h2>
+          <p class="lede">
+            GitHub signs each run with an OIDC token, and kitshn trusts only the GitHub accounts on its list.
+            kitshn never runs the recipe. It reads it as data.
           </p>
+        </div>
+        <figure class="card diagram">
+          <img src="/diagrams/deploy.svg" alt="A push runs GitHub Actions. Actions sends the recipe and its OIDC token to the kitshn Worker. The app goes to Cloudflare or to a machine, and its card gets Access from its circles." width="1010" height="290" />
+        </figure>
+        <p style="margin-top: 1rem"><a href="/architecture/">Read how it works</a></p>
+      </section>
+
+      <section class="wrap">
+        <div class="card teams">
+          <div>
+            <span class="label">Enterprise</span>
+            <h2>Using kitshn at work?</h2>
+            <p class="lede">The same map, for the apps your company runs.</p>
+          </div>
+          <ul>
+            <li>Circles for teams, company domains and office networks</li>
+            <li>One pipeline for sites, Workers and containers</li>
+            <li>History of every change, and an emergency pause</li>
+          </ul>
+          <a class="btn primary big" href="/enterprise/">kitshn for enterprise</a>
         </div>
       </section>
 
-      <section class="wrap card pad">
-          <span class="label">Start</span>
-          <h2>Set it up in one command</h2>
-          <p>You need a free Cloudflare account with a domain, and a GitHub account.</p>
+      <section class="wrap">
+        <div class="card cta">
+          <div>
+            <span class="label" style="color: var(--ink)">Start</span>
+            <h2>Set it up in one command</h2>
+            <p class="lede">You need a free Cloudflare account with a domain, and a GitHub account.</p>
+            <div class="actions">
+              <a class="btn big" href="/install/">All install steps</a>
+            </div>
+          </div>
           <pre><code>curl -fsSL https://kit.yarden-zamir.com/install | \
   CLOUDFLARE_API_TOKEN=... \
   KITSHN_HOST=kit.example.com \
   KITSHN_OWNER_EMAILS=you@example.com \
   KITSHN_DEPLOY_OWNERS=your-github-name sh</code></pre>
-          <a class="btn primary" href="/install/">All install steps</a>
+        </div>
       </section>
     </main>
 
     <footer class="wrap card">
+      <a class="brand" href="/"><img src="/favicon.svg" alt="" /> kitshn</a>
       <a href="https://github.com/Yarden-zamir/kitshn">Source on GitHub</a>
       <a href="https://github.com/Yarden-zamir/kitshn/blob/main/SPEC.md">Spec</a>
       <a href="https://github.com/Yarden-zamir/kitshn/blob/main/LICENSE">MIT license</a>

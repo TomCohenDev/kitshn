@@ -288,7 +288,11 @@ const routeFromHash = (): {
   };
 };
 
-export function App() {
+/**
+ * `panels: false` keeps every panel closed: the map of the kitshn.com demo (site-demo) is the map alone, so a press
+ * on a card never opens a panel over half of its small frame, nor fits the map again under the pointer (K-514).
+ */
+export function App(props: { readonly panels?: boolean } = {}) {
   const store = useStore();
   const [selection, setSelection] = useState<Selection>({ cards: new Set(), circle: null });
   const [hidden, setHidden] = useState<ReadonlySet<CardKind>>(new Set());
@@ -1004,7 +1008,7 @@ export function App() {
   };
 
   const fullPage = route.tab !== "map";
-  const shownPanel: PanelKind | null = fullPage ? route.tab : panel;
+  const shownPanel: PanelKind | null = props.panels === false ? null : fullPage ? route.tab : panel;
   const large = fullPage || ((panel === "details" || panel === "safety") && detailsLarge);
   /** The panel floats over the map, so the map keeps its width and fit and pan leave its part free. */
   const floating = shownPanel !== null && !large;

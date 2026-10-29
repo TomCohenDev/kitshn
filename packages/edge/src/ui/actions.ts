@@ -8,7 +8,7 @@ import {
   resolveEdits,
   ruleViolation,
 } from "../core/changes.ts";
-import { FOLDER_SITE_PREFIX, keepsScript } from "../core/apps.ts";
+import { keepsScript } from "../core/apps.ts";
 import type { Command } from "../core/machine.ts";
 import {
   ADMIN_RESOURCE_ID,
@@ -85,6 +85,8 @@ export interface ActionContext {
   readonly handoverCards: ReadonlySet<string>;
   /** K-508, K-521: the stacks that show as a column on the map now, by their key (`USER_STACK` and the id). */
   readonly openStacks: ReadonlySet<string>;
+  /** K-1129: the folder sites that a folder from the owner can give a new version. */
+  readonly folderSites: ReadonlySet<string>;
 }
 
 export interface ActionHandlers {
@@ -111,6 +113,8 @@ export interface ActionHandlers {
   readonly restorePrevious: (resource: Resource) => void;
   /** K-1120: shows the address name field of a page or a file card. */
   readonly editAddress: (resource: Resource) => void;
+  /** K-1128: shows the redirect address field of a site card. */
+  readonly editRedirects: (resource: Resource) => void;
   /** K-1801: opens the logs of a Compose or Worker card. */
   readonly logs: (resource: Resource) => void;
   /** K-1819: opens the backups of a Compose card. */
@@ -123,6 +127,8 @@ export interface ActionHandlers {
   readonly deleteCircle: (circle: Circle) => void;
   readonly newCircle: (at: Point | null) => void;
   readonly upload: (at: Point | null) => void;
+  /** K-1129: picks a folder: a new folder site at `at` (null: the tray), or a new version of the card `card`. */
+  readonly uploadFolder: (target: { readonly at: Point | null } | { readonly card: Resource }) => void;
   readonly addSite: () => void;
   /** K-1733: a new repo group card. */
   readonly addRepoGroup: () => void;
@@ -187,10 +193,10 @@ export const MACHINE_TIPS = {
 } as const;
 
 /** K-523, K-909: the label of "Remove app" names what goes and what stays, by the kind of the card. */
-export const removeAppTip = (resource: Pick<Resource, "id" | "kind">) =>
+export const removeAppTip = (resource: Pick<Resource, "kind">, folderSite: boolean) =>
   resource.kind === "site.worker"
     ? "Remove app: take its addresses off and keep the Worker, its Durable Objects and its KV. Undo puts the addresses back."
-    : keepsScript(resource)
+    : keepsScript(resource, folderSite)
       ? "Remove app: take its address off and keep its files in the Worker. Undo puts the address back."
       : "Remove app: take down what the deploy made and keep the volumes. Undo starts it again.";
 
@@ -557,6 +563,16 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
             },
           ]
         : []),
+      ...(ctx.folderSites.has(resource.id)
+        ? [
+            {
+              id: "upload-version",
+              label: "Upload a new version…",
+              tip: `Pick a folder: its files replace the files of ${resource.name}, at the same address.`,
+              run: () => h.uploadFolder({ card: resource }),
+            },
+          ]
+        : []),
       ...(resource.kind === "page" || resource.kind === "file"
         ? [
             {
@@ -564,6 +580,16 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
               label: "Set address…",
               tip: `Give ${resource.name} a new address name. The old address keeps working and sends visitors on.`,
               run: () => h.editAddress(resource),
+            },
+          ]
+        : []),
+      ...(resource.kind.startsWith("site.")
+        ? [
+            {
+              id: "add-redirect",
+              label: "Add redirect address…",
+              tip: `Add a hostname that only sends visitors on to ${resource.name}, such as an old name of the site.`,
+              run: () => h.editRedirects(resource),
             },
           ]
         : []),
@@ -683,7 +709,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
               run: () => h.rollback(resource, "card"),
             },
             // K-1123: a folder site comes from no workflow run; one that a repo took over does (K-1127).
-            ...(resource.id.startsWith(FOLDER_SITE_PREFIX) && ctx.handoverCards.has(resource.id)
+            ...(ctx.folderSites.has(resource.id)
               ? []
               : [
                   {
@@ -710,7 +736,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
             {
               id: "remove-app",
               label: "Remove app",
-              tip: removeAppTip(resource),
+              tip: removeAppTip(resource, ctx.folderSites.has(resource.id)),
               danger: true as const,
               run: () => h.removeApp(resource),
             },
@@ -847,6 +873,15 @@ export function addActions(ctx: ActionContext, h: ActionHandlers, at: Point | nu
         ? "Upload files to this spot: they land in exactly the circles here, so they get those shares. An HTML file becomes a page, any other file stays a file, at most 100 MB."
         : "Upload files: they wait in the tray, private. An HTML file becomes a page, any other file stays a file, at most 100 MB. You can also drop files on the map.",
       run: () => h.upload(at),
+    },
+    {
+      id: "upload-folder",
+      label: `Upload a folder${here}`,
+      keywords: "static site html",
+      tip: at
+        ? "Upload a folder as a new static site with a random address. Its card lands in exactly the circles here. You can also drop a folder on the map."
+        : "Upload a folder as a new static site with a random address. Its card waits in the tray, private. You can also drop a folder on the map.",
+      run: () => h.uploadFolder({ at }),
     },
     {
       id: "add-site",

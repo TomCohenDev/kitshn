@@ -98,6 +98,8 @@ export const ACCESS_TIPS = {
 interface Props {
   /** K-1101: files dropped from the computer, with the map point under the pointer. */
   onDropFiles: (files: Array<File>, at: Point) => void;
+  /** K-1129: folders dropped on the map, each a new folder site. */
+  onDropFolders: (folders: Array<FileSystemDirectoryEntry>, at: Point) => void;
   /** Cards dragged from the tray (K-509), with the map point under the pointer. */
   onDropCards: (ids: Array<string>, at: Point) => void;
   readonly state: State;
@@ -622,10 +624,16 @@ export function MapView(props: Props) {
           props.onDropCards(JSON.parse(cards) as Array<string>, at);
           return;
         }
-        const files = [...(event.dataTransfer?.files ?? [])];
-        if (files.length === 0) return;
+        // The entries exist only while the drop event runs; a folder shows up in `files` too, as an empty file.
+        const folders = [...(event.dataTransfer?.items ?? [])]
+          .map((item) => item.webkitGetAsEntry())
+          .filter((entry): entry is FileSystemDirectoryEntry => entry?.isDirectory === true);
+        const names = new Set(folders.map((folder) => folder.name));
+        const files = [...(event.dataTransfer?.files ?? [])].filter((file) => !names.has(file.name));
+        if (files.length === 0 && folders.length === 0) return;
         event.preventDefault();
-        props.onDropFiles(files, at);
+        if (files.length > 0) props.onDropFiles(files, at);
+        if (folders.length > 0) props.onDropFolders(folders, at);
       }}
     >
       <div

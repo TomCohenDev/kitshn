@@ -22,17 +22,18 @@ export const FOLDER_SITE_PREFIX = "folder-";
 
 /**
  * K-909, K-1123: a removal keeps the script of a Worker app and of a folder site, so Undo puts its domains back;
- * a folder site has no repo that could build it again.
+ * a folder site has no repo that could build it again. `folderSite` is false once a repo took the card (K-1127).
  */
-export const keepsScript = (card: { readonly id: string; readonly kind: string }) =>
-  card.kind === "site.worker" || card.id.startsWith(FOLDER_SITE_PREFIX);
+export const keepsScript = (card: { readonly kind: string }, folderSite: boolean) =>
+  card.kind === "site.worker" || folderSite;
 
-export function appTeardown(card: AppCard, zone: string): Teardown {
+export function appTeardown(card: AppCard, zone: string, folderSite: boolean): Teardown {
   const address = card.addresses[0];
   if (address === undefined) throw new Error(`The app ${card.name} has no address.`);
   // The Worker script of an environment is `kitshn-<card id>` (environmentNames in worker/deploys.ts).
   // K-817: a static site loses every custom domain of its card.
-  if (keepsScript(card)) return { kind: "domains", addresses: card.addresses, script: `kitshn-${card.id}` };
+  if (keepsScript(card, folderSite))
+    return { kind: "domains", addresses: card.addresses, script: `kitshn-${card.id}` };
   if (card.kind !== "site.compose")
     return { kind: "worker", addresses: card.addresses, script: `kitshn-${card.id}` };
   // K-909: a removal keeps the volumes and the last good build on the machine, so undo can start it again.

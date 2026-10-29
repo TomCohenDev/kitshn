@@ -82,6 +82,7 @@ import {
 import { ItemIcon } from "./ItemIcon.tsx";
 import { FOLDER_SITE_PREFIX } from "../core/apps.ts";
 import { peekable } from "./frames.ts";
+import { type FolderFiles, droppedFolder, pickedFolder, uploadFolder } from "./folders.ts";
 import { PeekArrow } from "./Peek.tsx";
 import {
   type Action,
@@ -306,6 +307,9 @@ export function App() {
   const uploadInput = useRef<HTMLInputElement>(null);
   /** Where the next upload of the file chooser lands: a map point, or null for the tray. */
   const uploadAt = useRef<Point | null>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
+  /** K-1129: what the next folder of the folder chooser becomes: a new site, or a new version of a card. */
+  const folderTarget = useRef<{ readonly at: Point | null } | { readonly card: Resource } | null>(null);
   /** K-110: a sign-out or its retry waits for Cloudflare; the server also runs one at a time. */
   const [signingOut, setSigningOut] = useState(false);
   const [menu, setMenu] = useState<{ readonly target: MenuTarget; readonly anchor: Rect } | null>(null);
@@ -361,6 +365,7 @@ export function App() {
   const pullRequests = store.snapshot?.pullRequests ?? {};
   const previousVersions = useMemo(() => new Set(store.snapshot?.previousVersions ?? []), [store.snapshot]);
   const handoverCards = useMemo(() => new Set(store.snapshot?.handoverCards ?? []), [store.snapshot]);
+  const folderSites = useMemo(() => new Set(store.snapshot?.folderSites ?? []), [store.snapshot]);
 
   /**
    * K-523, K-1507: the item whose per-item undo the open menu shows, or for the palette the selected card or
@@ -483,6 +488,21 @@ export function App() {
   };
 
   /**
+   * K-204, K-210: the circles of a drop point, which every dropped card lands in exactly, also when several fan out.
+   * Null when a public circle is there and the owner says no.
+   */
+  const confirmPublic = async (at: Point, what: string | undefined) => {
+    const circles = [...(state?.circles.values() ?? [])];
+    const wanted = new Set(circles.filter((circle) => insideCircle(at, circle)).map((circle) => circle.id));
+    const publicHere = circles.filter((circle) => wanted.has(circle.id) && isPublicCircle(circle));
+    if (publicHere.length === 0) return wanted;
+    const where = publicHere.map((circle) => circle.name).join(", ");
+    return (await ask(`This makes ${what} public in ${where}. Anyone with the address can open it.`))
+      ? wanted
+      : null;
+  };
+
+  /**
    * K-1101: uploads one file after the other. With `at` (a drop on the map), the cards land there and so get
    * the shares of the circles around that point; a public circle asks first (K-210). Without, they wait
    * in the tray, private.
@@ -498,17 +518,10 @@ export function App() {
       if (refused) showToast({ text: refused, error: true, undo: null });
       return;
     }
-    // Every card lands in exactly the circles of the drop point, also when several fan out (K-204).
-    const circles = [...state.circles.values()];
-    const wanted = new Set(
-      at ? circles.filter((circle) => insideCircle(at, circle)).map((circle) => circle.id) : [],
-    );
-    const publicHere = circles.filter((circle) => wanted.has(circle.id) && isPublicCircle(circle));
-    if (publicHere.length > 0) {
-      const what = fitting.length === 1 ? fitting[0]?.name : plural(fitting.length, "file");
-      const where = publicHere.map((circle) => circle.name).join(", ");
-      if (!(await ask(`This makes ${what} public in ${where}. Anyone with the address can open it.`))) return;
-    }
+    const wanted = at
+      ? await confirmPublic(at, fitting.length === 1 ? fitting[0]?.name : plural(fitting.length, "file"))
+      : new Set<string>();
+    if (wanted === null) return;
     const added: Array<{ id: string; revision: number }> = [];
     const errors: Array<string> = [];
     for (const [index, file] of fitting.entries()) {
@@ -892,6 +905,26 @@ export function App() {
     return !("error" in result);
   };
 
+  /** K-1128: adds or removes a redirect address of a site card. */
+  const changeRedirect = async (resource: Resource, address: string, remove: boolean) => {
+    const path = `/api/cards/${encodeURIComponent(resource.id)}/redirects`;
+    const result = remove
+      ? await callApi<{ address: string }>("DELETE", `${path}/${encodeURIComponent(address)}`)
+      : await callApi<{ address: string }>("POST", path, { address });
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : {
+            text: remove
+              ? `${result.address} no longer sends visitors on to ${resource.name}.`
+              : `${result.address} sends visitors on to ${resource.name} once its domain is up.`,
+            error: false,
+            undo: null,
+          },
+    );
+    return !("error" in result);
+  };
+
   const restorePrevious = async (resource: Resource) => {
     const result = await callApi<{ revision: number }>(
       "POST",
@@ -1265,6 +1298,48 @@ export function App() {
     if (to) void commit([{ _tag: "place", id: resource.id, after: to }], []);
   };
 
+  /**
+   * K-1129: publishes folders as folder sites, one after the other. A new site lands at `at` like a dropped file
+   * (a public circle asks first, K-210) or waits in the tray; `card` gets a new version at its address.
+   */
+  const uploadFolders = async (
+    folders: ReadonlyArray<FolderFiles & { readonly folder: string }>,
+    target: { readonly at: Point | null } | { readonly card: Resource },
+  ) => {
+    if (!state || folders.length === 0) return;
+    const at = "at" in target ? target.at : null;
+    const wanted = at
+      ? await confirmPublic(at, folders.length === 1 ? folders[0]?.folder : plural(folders.length, "folder"))
+      : new Set<string>();
+    if (wanted === null) return;
+    const done: Array<string> = [];
+    const errors: Array<string> = [];
+    const added: Array<string> = [];
+    for (const [index, { folder, ...files }] of folders.entries()) {
+      const spot = at
+        ? (placeInside(state, { x: at.x + index * 30, y: at.y + index * 90 }, wanted) ?? at)
+        : null;
+      const prefix = folders.length > 1 ? `${index + 1} of ${folders.length}, ${folder}: ` : "";
+      const result = await uploadFolder(
+        "card" in target ? { card: target.card.id } : { folder, at: spot },
+        files,
+        (text) => setProgress(`${prefix}${text}`),
+      );
+      if ("error" in result) errors.push(`${folder}: ${result.error}`);
+      else {
+        added.push(result.card);
+        done.push(
+          result.updated
+            ? `Uploaded a new version of ${"card" in target ? target.card.name : folder}.`
+            : `Published ${folder} at https://${result.address}${at ? "" : "; it waits in the tray, private"}.`,
+        );
+      }
+    }
+    setProgress(null);
+    if (added.length > 0) select({ cards: new Set(added), circle: null });
+    showToast({ text: [...done, ...errors].join(" "), error: errors.length > 0, undo: null });
+  };
+
   const uploadTo = (at: Point | null) => {
     uploadAt.current = at;
     location.hash = "map";
@@ -1344,6 +1419,8 @@ export function App() {
     restorePrevious: (resource) => void restorePrevious(resource),
     editAddress: (resource) =>
       selectAndFocus({ cards: new Set([resource.id]), circle: null }, 'input[aria-label="Address name"]'),
+    editRedirects: (resource) =>
+      selectAndFocus({ cards: new Set([resource.id]), circle: null }, 'input[aria-label="Redirect address"]'),
     logs: setLogs,
     backups: setBackupsCard,
     runJob: (machine, command) => void runJob(machine, command),
@@ -1358,6 +1435,11 @@ export function App() {
     deleteCircle: (circle) => void deleteCircle(circle),
     newCircle: (at) => void newCircle(at),
     upload: uploadTo,
+    uploadFolder: (target) => {
+      folderTarget.current = target;
+      location.hash = "map";
+      setTimeout(() => folderInput.current?.click());
+    },
     addSite: () => setAddingSite(true),
     addRepoGroup: () => setAddingRepoGroup(true),
     addMachine: () => setAddingMachine(true),
@@ -1376,6 +1458,7 @@ export function App() {
     previousVersions,
     handoverCards,
     openStacks,
+    folderSites,
   };
 
   const waitingRepos = store.snapshot?.repos.filter(awaitsAllow).length ?? 0;
@@ -1384,6 +1467,19 @@ export function App() {
       {route.tab === "map" ? (
         <MapView
           onDropFiles={(files, at) => void uploadFiles(files, at)}
+          onDropFolders={(entries, at) =>
+            void Promise.all(
+              entries.map(async (entry) => ({ folder: entry.name, ...(await droppedFolder(entry)) })),
+            ).then(
+              (folders) => uploadFolders(folders, { at }),
+              (error: unknown) =>
+                showToast({
+                  text: `kitshn could not read the folder: ${String(error)}`,
+                  error: true,
+                  undo: null,
+                }),
+            )
+          }
           onDropCards={(ids, at) => void placeFromTray(ids, at)}
           onStackOnto={(ids, target) => void stacks.stackOnto(ids, target)}
           previews={previews}
@@ -1520,6 +1616,8 @@ export function App() {
               previousVersions={previousVersions}
               onRestorePrevious={(resource) => void restorePrevious(resource)}
               onSetAddress={setAddress}
+              redirects={store.snapshot?.redirects ?? {}}
+              onRedirect={changeRedirect}
               onLogs={setLogs}
               backups={store.snapshot.backups}
               r2Bucket={store.snapshot.r2Bucket}
@@ -1607,6 +1705,20 @@ export function App() {
           const at = uploadAt.current;
           uploadAt.current = null;
           void uploadFiles(files, at);
+        }}
+      />
+      <input
+        ref={folderInput}
+        type="file"
+        // K-1129: the browser asks for one folder and gives its files with their paths.
+        {...{ webkitdirectory: true }}
+        hidden
+        onChange={(event) => {
+          const picked = pickedFolder([...(event.currentTarget.files ?? [])]);
+          event.currentTarget.value = "";
+          const target = folderTarget.current;
+          folderTarget.current = null;
+          if (target && picked.files.length > 0) void uploadFolders([picked], target);
         }}
       />
       <header class={`bar${floating ? " beside-panel" : ""}`} ref={barRef}>
@@ -2063,6 +2175,8 @@ function Panel(props: {
   previousVersions: ReadonlySet<string>;
   onRestorePrevious: (resource: Resource) => void;
   onSetAddress: (resource: Resource, name: string) => Promise<boolean>;
+  redirects: Readonly<Record<string, ReadonlyArray<string>>>;
+  onRedirect: (resource: Resource, address: string, remove: boolean) => Promise<boolean>;
   onLogs: (resource: Resource) => void;
   backups: Readonly<Record<string, BackupRun>>;
   r2Bucket: BucketSize | null;
@@ -2138,6 +2252,8 @@ function Panel(props: {
         onRollback={props.onRollback}
         onRestorePrevious={props.previousVersions.has(cards[0].id) ? props.onRestorePrevious : null}
         onSetAddress={props.onSetAddress}
+        redirects={props.redirects[cards[0].id] ?? []}
+        onRedirect={props.onRedirect}
         onLogs={props.onLogs}
         backup={props.backups[cards[0].id] ?? null}
         r2Bucket={props.r2Bucket}
@@ -2445,6 +2561,56 @@ function AddressName(props: { address: string; onSave: (name: string) => Promise
   );
 }
 
+/**
+ * K-1128: the hostnames that only send visitors on to this card, each with Remove, and a field to add one. Enter or Add
+ * sends it; a refused one stays in the field to fix.
+ */
+function Redirects(props: {
+  addresses: ReadonlyArray<string>;
+  onAdd: (address: string) => Promise<boolean>;
+  onRemove: (address: string) => void;
+}) {
+  const field = useRef<HTMLInputElement>(null);
+  const add = async () => {
+    const input = field.current;
+    const address = input?.value.trim() ?? "";
+    if (!input || address === "") return;
+    if ((await props.onAdd(address)) && input.isConnected) input.value = "";
+  };
+  return (
+    <>
+      <div class="label" data-tip="Hostnames that only send visitors on to this card's address (K-1128).">
+        Redirects
+      </div>
+      {props.addresses.map((address) => (
+        <div class="row" key={address}>
+          <code>{address}</code>
+          <button
+            type="button"
+            class="btn"
+            data-tip={`Stop sending visitors from ${address} on to this card.`}
+            onClick={() => props.onRemove(address)}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <div class="row">
+        <input
+          ref={field}
+          aria-label="Redirect address"
+          data-tip="A hostname under one of kitshn's zones, such as old-name.example.com. At most 5 per card."
+          placeholder="old-name.example.com"
+          onKeyDown={(event) => event.key === "Enter" && void add()}
+        />
+        <button type="button" class="btn" data-tip="Add this redirect address." onClick={() => void add()}>
+          Add
+        </button>
+      </div>
+    </>
+  );
+}
+
 function CardPanel(props: {
   resource: Resource;
   /** K-1733: every repo that kitshn knows, for the matches of a repo group. */
@@ -2467,6 +2633,8 @@ function CardPanel(props: {
   onRestorePrevious: ((resource: Resource) => void) | null;
   /** K-1120: a page or a file gets a new address name. */
   onSetAddress: (resource: Resource, name: string) => Promise<boolean>;
+  redirects: ReadonlyArray<string>;
+  onRedirect: (resource: Resource, address: string, remove: boolean) => Promise<boolean>;
   onLogs: (resource: Resource) => void;
   /** K-1819: the newest backup run of this card, or null. */
   backup: BackupRun | null;
@@ -2561,6 +2729,13 @@ function CardPanel(props: {
       ) : null}
       {address && props.repo ? (
         <p class="help">Its repo sets this address: change it in kitshn.config.ts.</p>
+      ) : null}
+      {resource.kind.startsWith("site.") ? (
+        <Redirects
+          addresses={props.redirects}
+          onAdd={(name) => props.onRedirect(resource, name, false)}
+          onRemove={(name) => void props.onRedirect(resource, name, true)}
+        />
       ) : null}
       {props.pullRequest !== null && props.repo ? (
         <div class="row">
@@ -2746,7 +2921,7 @@ function CardPanel(props: {
       {isAppCard(resource) && props.deployed ? (
         <button
           class="btn danger"
-          data-tip={removeAppTip(resource)}
+          data-tip={removeAppTip(resource, resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo)}
           onClick={() => props.onRemoveApp(resource)}
         >
           Remove app

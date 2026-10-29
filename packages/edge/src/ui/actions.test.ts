@@ -118,6 +118,7 @@ function context(version = "0123456789ab"): ActionContext {
     previousVersions: new Set(),
     handoverCards: new Set(),
     openStacks: new Set(),
+    folderSites: new Set(),
   };
 }
 
@@ -153,6 +154,7 @@ describe("card actions", () => {
       "details",
       "open",
       "copy",
+      "add-redirect",
       "share",
       "unshare",
       "select-kind",
@@ -178,6 +180,14 @@ describe("card actions", () => {
     });
     expect(ids(preview)).not.toContain("rollback");
     expect(ids(preview)).toContain("remove-app");
+    // K-1129: a folder site takes a new version from a folder, and no workflow run made it.
+    const folder = actionsFor({ ...context(), folderSites: new Set(["riffle"]) }, handlers, {
+      _tag: "card",
+      id: "riffle",
+    });
+    expect(ids(folder)).not.toContain("rollback-run");
+    run(find(folder, "upload-version"));
+    expect(calls.at(-1)).toMatchObject(["uploadFolder", { card: { id: "riffle" } }]);
     run(find(groups, "rollback-run"));
     expect(calls.at(-1)).toMatchObject(["rollback", { id: "riffle" }, "run"]);
     calls.length = 0;
@@ -277,9 +287,11 @@ describe("stack, circle and map actions", () => {
     const groups = actionsFor(context(), handlers, { _tag: "map", at: { x: 5, y: 6 } });
     run(find(groups, "new-circle"));
     run(find(groups, "upload"));
+    run(find(groups, "upload-folder"));
     expect(calls).toEqual([
       ["newCircle", { x: 5, y: 6 }],
       ["upload", { x: 5, y: 6 }],
+      ["uploadFolder", { at: { x: 5, y: 6 } }],
     ]);
   });
 
@@ -291,6 +303,7 @@ describe("stack, circle and map actions", () => {
     expect(ids(add)).toEqual([
       "new-circle",
       "upload",
+      "upload-folder",
       "add-site",
       "add-repo-group",
       "add-machine",

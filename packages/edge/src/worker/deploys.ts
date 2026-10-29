@@ -6,6 +6,11 @@ import { type DeployEvent, type WorkerApp, workerBindingNames } from "kitshn/rec
 export const SCRIPT_LIMIT = 90;
 /** A planned deploy must finish within this time. */
 export const DEPLOY_MS = 60 * 60 * 1000;
+/**
+ * K-1129: one part of an owner's folder upload passes through the Durable Object, which holds it in memory (128 MB).
+ * A file is at most 25 MiB, so one file in base64 fits.
+ */
+export const FOLDER_PART_BYTES = 40 * 1024 * 1024;
 
 const id = (text: string) =>
   text

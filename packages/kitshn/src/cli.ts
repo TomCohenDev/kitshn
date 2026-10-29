@@ -21,6 +21,7 @@ import { gzipSync } from "node:zlib";
 import { headersWarnings, redirectsWarnings } from "./headers.ts";
 import { pickSiteIcon } from "./icon.ts";
 import { contentType } from "./media.ts";
+import { isHiddenName } from "./names.ts";
 import { cardOutput, errorOutput } from "./output.ts";
 import { type DeployRun, type LogAnswer, logArgs, logLineText, logRange } from "./logs.ts";
 import { type HandoverAnswer, repoFiles } from "./repo-files.ts";
@@ -109,7 +110,7 @@ async function call<T>(server: string, path: string, body: object): Promise<T> {
  */
 const files = (dir: string): Array<string> =>
   readdirSync(dir).flatMap((name) => {
-    if (name.startsWith(".")) return [];
+    if (isHiddenName(name)) return [];
     const path = join(dir, name);
     const stat = lstatSync(path);
     if (stat.isSymbolicLink()) return [];
@@ -794,6 +795,30 @@ async function makeRepo(server: string, card: string, path: string, repo: string
   );
 }
 
+/** K-1128: adds a hostname that only sends visitors on to a site card, or with `remove` takes it away again. */
+async function redirect(server: string, card: string, address: string, remove: boolean) {
+  const path = `/agent/cards/${encodeURIComponent(card)}/redirects`;
+  const response = await fetch(new URL(remove ? `${path}/${encodeURIComponent(address)}` : path, server), {
+    method: remove ? "DELETE" : "POST",
+    headers: { ...agentHeaders(server), "content-type": "application/json" },
+    ...(remove ? {} : { body: JSON.stringify({ address }) }),
+  });
+  const data = (await response.json().catch(() => null)) as {
+    error?: string;
+    card?: string;
+    address?: string;
+    to?: string;
+    revision?: number;
+  } | null;
+  if (!response.ok || !data) fail(data?.error ?? `${path} answered ${response.status}.`);
+  if (json) return void process.stdout.write(`${JSON.stringify({ ...data, removed: remove })}\n`);
+  console.log(
+    remove
+      ? `kitshn: ${address} no longer sends visitors on to ${card}.`
+      : `kitshn: ${address} sends visitors on to https://${data?.to ?? ""} once its domain is up (K-1128).`,
+  );
+}
+
 const [command, ...args] = process.argv.slice(2);
 
 /** K-1809: bad arguments exit with 2, and with --json the reason is the one object on stdout. */
@@ -848,6 +873,18 @@ try {
         json: args.includes("--json"),
       },
     );
+  } else if (command === "redirect") {
+    const [card, address] = args.filter(
+      (arg, index) => !arg.startsWith("--") && args[index - 1] !== "--server",
+    );
+    if (!card || !address)
+      fail("name the site card and the hostname: kitshn redirect <card> <address> [--remove].");
+    await redirect(
+      flag("--server", process.env["KITSHN_SERVER"] ?? ""),
+      card ?? "",
+      address ?? "",
+      args.includes("--remove"),
+    );
   } else if (command === "address") {
     const [card, name] = args.filter((arg, index) => !arg.startsWith("--") && args[index - 1] !== "--server");
     if (!card || !name) fail("name the card and its new address name: kitshn address <card> <name>.");
@@ -871,7 +908,7 @@ try {
   console.error(`kitshn: ${error.message}`);
   process.exit(1);
 }
-if (!["check", "deploy", "publish", "address", "logs", "repo"].includes(command ?? "")) {
+if (!["check", "deploy", "publish", "address", "logs", "repo", "redirect"].includes(command ?? "")) {
   console.log(`kitshn check [--dir <app>]                  check kitshn.config.ts and print it as JSON (K-802)
 kitshn deploy --server <address> [--dir <app>]   deploy from GitHub Actions (K-803)
 kitshn publish <file|folder> [--name <name>] [--address <name>] [--zone <zone>] [--circle <circle>] [--public] [--json]
@@ -881,5 +918,7 @@ kitshn address <card> <name> [--json]        give a page, a file (K-1120) or a f
 kitshn logs <card> [text] [--since 1h | --from <time> [--to <time>]] [--deploys] [--json] [-- <text>]
                                              search the logs of a card that your agent key controls (K-1809)
 kitshn repo <card> [<folder|file>] --repo <owner/name>
-                                             make a new repo of a page or a folder site with gh (K-1127)`);
+                                             make a new repo of a page or a folder site with gh (K-1127)
+kitshn redirect <card> <address> [--remove] [--json]
+                                             a hostname that only sends visitors on to a site card (K-1128)`);
 }

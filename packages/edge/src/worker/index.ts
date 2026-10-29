@@ -390,8 +390,14 @@ export default {
       if (upload && !request.headers.has("x-kitshn-name")) {
         return Response.json({ error: "Send the name in the X-Kitshn-Name header." }, { status: 400 });
       }
+      // K-1129: a part of a folder upload is a form; its X-Kitshn-Deploy header makes a browser ask first too.
+      const part = url.pathname === "/api/sites/upload";
+      if (part && !request.headers.has("x-kitshn-deploy")) {
+        return Response.json({ error: "Send the deploy id in the X-Kitshn-Deploy header." }, { status: 400 });
+      }
       if (
         !upload &&
+        !part &&
         request.method === "POST" &&
         !request.headers.get("content-type")?.startsWith("application/json")
       ) {

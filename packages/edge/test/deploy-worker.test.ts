@@ -32,6 +32,7 @@ function fakeCloudflare(others: Record<string, number> = {}) {
     scripts.set(id, { classes: new Set(), crons: Array.from({ length: count }, () => "0 * * * *") });
   const domains: Array<{ id: string; hostname: string; service: string }> = [];
   const uploads: Array<Record<string, unknown>> = [];
+  const assets: Array<string> = [];
   /** K-821: each rollback of a script to a version, in order. */
   const rollbacks: Array<{ script: string; version: string }> = [];
   const state: {
@@ -127,6 +128,16 @@ function fakeCloudflare(others: Record<string, number> = {}) {
       return ok({});
     }
     if (deployed) return ok({ deployments: [{ versions: [{ version_id: `version-${uploads.length}` }] }] });
+    // K-1129: each file of the manifest goes up in one bucket, with the session token; the last part ends it.
+    if (path.endsWith("/assets-upload-session") && method === "POST") {
+      const body = (await request.json()) as { manifest: Record<string, { hash: string }> };
+      return ok({ jwt: "session", buckets: [Object.values(body.manifest).map((file) => file.hash)] });
+    }
+    if (path === "/accounts/acct/workers/assets/upload" && method === "POST") {
+      if (request.headers.get("authorization") !== "Bearer session") return refuse("not the session token");
+      assets.push(...(await request.formData()).keys());
+      return ok({ jwt: "done" });
+    }
     if (path.startsWith("/accounts/acct/workers/scripts/")) return ok({});
     if (path === "/accounts/acct/workers/domains") {
       if (method === "GET")
@@ -181,7 +192,7 @@ function fakeCloudflare(others: Record<string, number> = {}) {
     domains.filter((item) => item.hostname === hostname).map((item) => item.service);
   /** Deletes a KV namespace behind kitshn's back, as a restart in the middle of an orphan delete can leave it. */
   const dropKv = (id: string) => collection("/accounts/acct/storage/kv/namespaces").delete(id);
-  return { uploads, state, scripts, served, dropKv, rollbacks };
+  return { uploads, assets, state, scripts, served, dropKv, rollbacks };
 }
 
 /** One repo of the test, so each test has its own cards. */
@@ -233,23 +244,45 @@ async function call(path: string, method: string, headers: Record<string, string
 const step = async (app: ReturnType<typeof repo>, path: string, body: unknown) =>
   call(path, "POST", { authorization: `Bearer ${await app.token()}` }, body);
 
+const ownerHeaders = async () => ({
+  "cf-access-jwt-assertion": await new SignJWT({ email: "owner@example.com" })
+    .setProtectedHeader({ alg: "RS256", kid: "team" })
+    .setIssuer("https://team.example.com")
+    .setAudience("admin-aud")
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(team.privateKey),
+  origin: "https://kit.example.com",
+});
+
 /** A request of the owner to the admin API, with an Access token. */
 const admin = async (path: string, method: string, body?: unknown) =>
-  call(
-    path,
-    method,
+  call(path, method, await ownerHeaders(), body);
+
+/** K-1129: one part of an owner's folder upload, as the browser sends it. */
+const ownerPart = async (deployId: string, files: Record<string, string>) => {
+  const form = new FormData();
+  for (const [hash, text] of Object.entries(files)) form.set(hash, btoa(text));
+  const body = new Response(form);
+  const bytes = await body.arrayBuffer();
+  const request = new Request<unknown, IncomingRequestCfProperties>(
+    "https://kit.example.com/api/sites/upload",
     {
-      "cf-access-jwt-assertion": await new SignJWT({ email: "owner@example.com" })
-        .setProtectedHeader({ alg: "RS256", kid: "team" })
-        .setIssuer("https://team.example.com")
-        .setAudience("admin-aud")
-        .setIssuedAt()
-        .setExpirationTime("5m")
-        .sign(team.privateKey),
-      origin: "https://kit.example.com",
+      method: "POST",
+      headers: {
+        ...(await ownerHeaders()),
+        "x-kitshn-deploy": deployId,
+        "content-type": body.headers.get("content-type") ?? "",
+        "content-length": String(bytes.byteLength),
+      },
+      body: bytes,
     },
-    body,
   );
+  const ctx = createExecutionContext();
+  const response = await worker.fetch(request, env, ctx);
+  await waitOnExecutionContext(ctx);
+  return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+};
 
 const recipe = (worker: Record<string, unknown> = {}, name = "prod", needs?: ReadonlyArray<string>) => ({
   ...(needs ? { needs: { apps: needs } } : {}),
@@ -1080,6 +1113,30 @@ describe("folder sites (K-1123)", () => {
     await alarm();
     expect(cloudflare.served("second.example.com")).toEqual(["kitshn-redirects"]);
 
+    // A failed move puts the redirect addresses of the card back as they were (K-1128).
+    const kept = await admin(`/api/cards/${card.id}/redirects`, "POST", { address: "kept.example.com" });
+    expect(kept.status, JSON.stringify(kept.body)).toBe(200);
+    // A removal in progress stays removed. The redirect Worker upload fails, so no alarm takes its domain off yet.
+    expect(
+      (await admin(`/api/cards/${card.id}/redirects`, "POST", { address: "gone.example.com" })).status,
+    ).toBe(200);
+    cloudflare.state.failUploads = 1000;
+    expect((await admin(`/api/cards/${card.id}/redirects/gone.example.com`, "DELETE")).status).toBe(200);
+    cloudflare.state.failDomains = 1000;
+    let failed = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && failed.status === 503; attempt++)
+      failed = await agentStep("move-key.access", "/agent/cards/moving/address", { address: "third" });
+    expect(failed.status).not.toBe(200);
+    cloudflare.state.failDomains = 0;
+    expect((await admin("/api/state", "GET")).body["redirects"]).toEqual({ [card.id]: ["kept.example.com"] });
+    const going = await runInDurableObject(durable, (_instance, storage) =>
+      storage.storage.sql
+        .exec("SELECT going FROM old_addresses WHERE address = 'gone.example.com'")
+        .toArray(),
+    );
+    expect(going).toEqual([{ going: 1 }]);
+    cloudflare.state.failUploads = 0;
+
     // Removed, the site lets its old address go; another site takes it, and the Undo of the removal then refuses.
     const removed = await admin(`/api/apps/${card.id}`, "DELETE");
     expect(removed.status, JSON.stringify(removed.body)).toBe(200);
@@ -1141,6 +1198,110 @@ describe("folder sites (K-1123)", () => {
     // The address comes back: it leaves the redirect Worker and serves the app again.
     expect((await deployAt("mover-one.example.com")).status).toBe(200);
     expect(cloudflare.served("mover-one.example.com")).toEqual([app.script]);
+  });
+});
+
+describe("owner folder sites (K-1129)", () => {
+  it("puts a dropped folder at the drop point and a new version on the same card", async () => {
+    const cloudflare = fakeCloudflare();
+    const plan = await admin("/api/sites/plan", "POST", { folder: "dropped", x: 7000, y: 7000 });
+    expect(plan.status, JSON.stringify(plan.body)).toBe(200);
+    const { deployId, card, address } = plan.body as { deployId: string; card: string; address: string };
+    expect(card.startsWith("folder-")).toBe(true);
+    const [page, style] = ["a".repeat(32), "b".repeat(32)];
+    const manifest = { "/index.html": { hash: page, size: 4 }, "/style.css": { hash: style, size: 3 } };
+    const assets = await admin("/api/sites/assets", "POST", { deployId, manifest });
+    expect(assets.status, JSON.stringify(assets.body)).toBe(200);
+    // The browser gets the buckets but never the session token.
+    expect(assets.body).toEqual({ buckets: [[page, style]] });
+
+    expect((await ownerPart(deployId, { ["c".repeat(32)]: "evil" })).status).toBe(400);
+    expect((await ownerPart("no-such-plan", { [page]: "page" })).status).toBe(404);
+    expect((await ownerPart(deployId, { [page]: "page", [style]: "css" })).status).toBe(200);
+    expect(cloudflare.assets).toEqual([page, style]);
+
+    let finish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && finish.status === 503; attempt++)
+      finish = await admin("/api/sites/finish", "POST", { deployId });
+    expect(finish.status, JSON.stringify(finish.body)).toBe(200);
+    expect(cloudflare.served(address)).toEqual([`kitshn-${card}`]);
+    const state = await admin("/api/state", "GET");
+    expect((state.body["places"] as Record<string, unknown>)[card]).toEqual({ x: 7000, y: 7000 });
+
+    const again = await admin("/api/sites/plan", "POST", { card });
+    expect(again.body).toMatchObject({ card, address, updated: true });
+    // Only a folder site takes a new version from a folder.
+    expect((await admin("/api/sites/plan", "POST", { card: "no-such-card" })).status).toBe(409);
+  });
+
+  it("replaces a key's folder site, and ends an upload that fails or that a repo took over", async () => {
+    const cloudflare = fakeCloudflare();
+    const edits = [
+      { _tag: "circle", id: "folders", after: agentCircle("folders", "owned-key.access", true) },
+    ];
+    expect((await admin("/api/apply", "POST", { edits })).status).toBe(200);
+    const published = await agentStep("owned-key.access", "/agent/sites/plan", { folder: "keysite" });
+    const keyDeploy = published.body["deployId"];
+    const manifest = { "/index.html": { hash: "d".repeat(32), size: 4 } };
+    expect(
+      (await agentStep("owned-key.access", "/agent/sites/assets", { deployId: keyDeploy, manifest })).status,
+    ).toBe(200);
+    let keyFinish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && keyFinish.status === 503; attempt++)
+      keyFinish = await agentStep("owned-key.access", "/agent/sites/finish", {
+        deployId: keyDeploy,
+        jwt: "done",
+      });
+    expect(keyFinish.status, JSON.stringify(keyFinish.body)).toBe(200);
+    const card = String(published.body["card"]);
+    const durable = env.KITSHN.getByName("kitshn");
+    const deployState = (id: string) =>
+      runInDurableObject(durable, (_instance, storage) =>
+        storage.storage.sql.exec("SELECT state FROM deploys WHERE id = ?", id).toArray(),
+      );
+
+    // The owner owns every card, so a new version of the key's site goes through all three steps.
+    const version = async () => {
+      const plan = await admin("/api/sites/plan", "POST", { card });
+      expect(plan.body).toMatchObject({ card, updated: true });
+      const deployId = String(plan.body["deployId"]);
+      expect((await admin("/api/sites/assets", "POST", { deployId, manifest })).status).toBe(200);
+      expect((await ownerPart(deployId, { ["d".repeat(32)]: "page" })).status).toBe(200);
+      return deployId;
+    };
+    const replaced = await version();
+    let finish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && finish.status === 503; attempt++)
+      finish = await admin("/api/sites/finish", "POST", { deployId: replaced });
+    expect(finish.status, JSON.stringify(finish.body)).toBe(200);
+    expect(cloudflare.served(String(published.body["address"]))).toEqual([`kitshn-${card}`]);
+
+    // A failed upload ends its plan, and a new site that has no card yet lets its name go.
+    const fresh = await admin("/api/sites/plan", "POST", { folder: "never" });
+    const freshId = String(fresh.body["deployId"]);
+    expect((await admin("/api/sites/cancel", "POST", { deployId: freshId })).status).toBe(200);
+    expect(await deployState(freshId)).toEqual([{ state: "failed" }]);
+    const kept = await runInDurableObject(durable, (_instance, storage) =>
+      storage.storage.sql
+        .exec("SELECT 1 FROM agent_sites WHERE card_id = ?", String(fresh.body["card"]))
+        .toArray(),
+    );
+    expect(kept).toEqual([]);
+    expect((await admin("/api/sites/cancel", "POST", { deployId: freshId })).status).toBe(404);
+
+    // A repo that takes the site over during an upload stops its finish (K-1127).
+    const late = await version();
+    await runInDurableObject(durable, (_instance, storage) =>
+      storage.storage.sql.exec(
+        "INSERT INTO repo_cards (repo_id, app_key, environment, card_id) VALUES ('99', 'app', 'prod', ?)",
+        card,
+      ),
+    );
+    expect((await admin("/api/sites/finish", "POST", { deployId: late })).status).toBe(409);
+    expect(await deployState(late)).toEqual([{ state: "failed" }]);
+    await runInDurableObject(durable, (_instance, storage) =>
+      storage.storage.sql.exec("DELETE FROM repo_cards WHERE card_id = ?", card),
+    );
   });
 });
 
@@ -1221,6 +1382,9 @@ describe("make it a repo (K-1127)", () => {
     expect((await agentStep("hand-key.access", "/agent/sites/plan", { folder: "hand" })).body).toMatchObject({
       updated: false,
     });
+    // The repo can build it again, so Remove app deletes its script as for any static site (K-909).
+    expect((await admin(`/api/apps/${card.id}`, "DELETE")).status).toBe(200);
+    expect(cloudflare.scripts.has(`kitshn-${card.id}`)).toBe(false);
   });
 
   it("turns a page into a repo's site, its old address redirects, and an expired handover does nothing", async () => {
@@ -1397,5 +1561,69 @@ describe("make it a repo (K-1127)", () => {
     expect((await staticDeploy(repo("85", "lostright"), "probe.example.com")).status).not.toBe(200);
     expect(await kindOf()).toBe("page");
     expect(await snapshot()).toEqual({ handovers: 0, cards: 0, repos: 0 });
+  });
+});
+
+describe("redirect addresses (K-1128)", () => {
+  it("adds a hostname that sends visitors on to an app, keeps the limit, and removes it again", async () => {
+    const cloudflare = fakeCloudflare();
+    await noOldAddresses();
+    const app = repo("90", "aliased");
+    await allow(app);
+    expect((await deploy(app)).status).toBe(200);
+    const durable = env.KITSHN.getByName("kitshn");
+    const alarm = () =>
+      runInDurableObject(durable, (instance) => (instance as unknown as { alarm(): Promise<void> }).alarm());
+    const add = (address: string) => admin(`/api/cards/${app.card}/redirects`, "POST", { address });
+
+    expect((await add("kit.example.com")).status).toBe(400);
+    // A row of another card holds its hostname, also one that oldAddresses() skips.
+    await runInDurableObject(durable, (_instance, storage) =>
+      storage.storage.sql.exec(
+        "INSERT INTO old_addresses (address, card_id, attached, going) VALUES ('held.example.com', 'gone', 1, 1)",
+      ),
+    );
+    expect((await add("held.example.com")).status).toBe(409);
+    const added = await add("alias.example.com");
+    expect(added.body, JSON.stringify(added.body)).toMatchObject({
+      address: "alias.example.com",
+      to: app.address,
+    });
+    await alarm();
+    expect(cloudflare.served("alias.example.com")).toEqual(["kitshn-redirects"]);
+    const bindings = (cloudflare.uploads.at(-1)?.["bindings"] ?? []) as Array<{ name: string; text: string }>;
+    expect(JSON.parse(bindings.find((binding) => binding.name === "MAP")?.text ?? "{}")).toEqual({
+      "alias.example.com": app.address,
+    });
+
+    // At most 5 per card.
+    for (const name of ["alias-two", "alias-three", "alias-four", "alias-five"])
+      expect((await add(`${name}.example.com`)).status).toBe(200);
+    expect((await add("alias-six.example.com")).status).toBe(409);
+
+    // A key that does not control the card cannot add one.
+    const edits = [
+      { _tag: "circle", id: "strangers", after: agentCircle("strangers", "stranger-key.access", true) },
+    ];
+    expect((await admin("/api/apply", "POST", { edits })).status).toBe(200);
+    expect(
+      (
+        await agentStep("stranger-key.access", `/agent/cards/${app.card}/redirects`, {
+          address: "x.example.com",
+        })
+      ).status,
+    ).toBe(403);
+
+    // Remove: the custom domain goes, then the row.
+    expect((await admin(`/api/cards/${app.card}/redirects/alias.example.com`, "DELETE")).status).toBe(200);
+    await alarm();
+    expect(cloudflare.served("alias.example.com")).toEqual([]);
+    const left = await runInDurableObject(durable, (_instance, storage) =>
+      storage.storage.sql
+        .exec("SELECT address FROM old_addresses WHERE address = 'alias.example.com'")
+        .toArray(),
+    );
+    expect(left).toEqual([]);
+    expect((await add("alias-six.example.com")).status).toBe(200);
   });
 });

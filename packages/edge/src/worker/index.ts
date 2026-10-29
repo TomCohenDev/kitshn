@@ -65,6 +65,7 @@ async function offline(request: Request, env: Env, ctx: ExecutionContext): Promi
 /** What the Durable Object decides for one page or file request (K-1004). */
 type ContentAnswer = { readonly stale: boolean } & (
   | { readonly decision: "allow"; readonly item: LibraryItem; readonly address: string }
+  | { readonly decision: "moved"; readonly address: string }
   | { readonly decision: "login" | "passkey" | "deny" | "missing" }
 );
 
@@ -148,6 +149,8 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
       body: JSON.stringify({ segment, kind, visitor }),
     })
   ).json()) as ContentAnswer;
+  // K-1127: a page that became a repo's site; the share check passed in the Durable Object.
+  if (answer.decision === "moved") return Response.redirect(`https://${answer.address}/`, 302);
   const back = `?next=${encodeURIComponent(url.pathname)}`;
   const cameBack = cookieValues(request.headers.get("cookie"), RETURN_MARK)[0] ?? null;
   const step = loginStep(answer.decision, cameBack);

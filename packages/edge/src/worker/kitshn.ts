@@ -2404,7 +2404,7 @@ export class Kitshn extends DurableObject<Env> {
     // K-1123: a removed folder site ends the plans that wait for its files, so it counts for nothing and its next
     // publish is a first publish.
     for (const { before, after } of apps)
-      if (before && !after && before.id.startsWith(FOLDER_SITE_PREFIX))
+      if (before && !after && this.isFolderSite(before.id))
         this.sql(
           "UPDATE deploys SET state = 'failed', reason = ? WHERE resource_id = ? AND state = 'planned'",
           "The owner removed the site.",
@@ -2668,6 +2668,16 @@ export class Kitshn extends DurableObject<Env> {
       previousVersions: this.sql<{ id: string }>(
         "SELECT id FROM library WHERE previous_size IS NOT NULL",
       ).map((row) => row.id),
+      handoverCards: this.sql<{ id: string }>(
+        `SELECT id FROM library WHERE added_by IS NOT NULL AND kind = 'page'
+         UNION SELECT card_id AS id FROM agent_sites WHERE card_id NOT IN (SELECT card_id FROM repo_cards)`,
+      )
+        .map((row) => row.id)
+        .filter(
+          (id) =>
+            this.state.resources.get(id)?.kind === "page" ||
+            this.state.resources.get(id)?.kind === "site.static",
+        ),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       jobs: this.recentJobs(10, 2000),
@@ -4578,6 +4588,8 @@ export class Kitshn extends DurableObject<Env> {
 
   private daily(now: number) {
     this.ctx.storage.transactionSync(() => {
+      // K-1127: a handover that no push used goes.
+      this.sql("DELETE FROM handovers WHERE expires_at <= ?", now);
       this.sql(
         `DELETE FROM revisions WHERE at < ? OR id <= (SELECT id FROM revisions ORDER BY id DESC LIMIT 1 OFFSET ?)`,
         now - REVISION_DAYS * DAY,
@@ -5326,9 +5338,30 @@ export class Kitshn extends DurableObject<Env> {
         { status: 423 },
       );
     // A blocked repo still tears down what it made (K-819).
-    const gate = result.kind === "teardown" ? null : this.repoGate(deployer);
+    // K-1127: the first push event of a handed-over repo, which kitshn does not know yet, takes the card. Only a push
+    // event counts, never a dispatch (K-1767). Nothing changes until the plan passes every check below.
+    const handover =
+      result.kind === "deploy" &&
+      deployer.eventName === "push" &&
+      !result.ephemeral &&
+      this.sql("SELECT 1 FROM repos WHERE repo_id = ?", deployer.repoId).length === 0
+        ? this.usableHandover(deployer)
+        : null;
+    const gate = result.kind === "teardown" || handover ? null : this.repoGate(deployer);
     if (gate) return gate;
-    const { resourceId, script } = environmentNames(deployer.repoId, deployer.repo, result.environment, key);
+    const [mapped] = this.sql<{ card_id: string }>(
+      "SELECT card_id FROM repo_cards WHERE repo_id = ? AND app_key = ? AND environment = ?",
+      deployer.repoId,
+      key,
+      result.environment,
+    );
+    let { resourceId, script } = mapped
+      ? { resourceId: mapped.card_id, script: `kitshn-${mapped.card_id}` }
+      : environmentNames(deployer.repoId, deployer.repo, result.environment, key);
+    if (!mapped && handover) {
+      resourceId = handover.card_id;
+      script = `kitshn-${handover.card_id}`;
+    }
     // K-804: a card belongs to one app of its repo; two apps whose long ids hash alike never share it.
     const [owner] = this.sql<{ app_key: string; repo_id: string | null }>(
       "SELECT app_key, repo_id FROM deploys WHERE resource_id = ? ORDER BY rowid DESC LIMIT 1",
@@ -5341,7 +5374,12 @@ export class Kitshn extends DurableObject<Env> {
         },
         { status: 409 },
       );
-    const existing = this.state.resources.get(resourceId);
+    // A handed-over page plans as the static site that it becomes.
+    const found = this.state.resources.get(resourceId);
+    const existing =
+      handover && found?.kind === "page"
+        ? { ...found, kind: "site.static" as const, addresses: handover.addresses }
+        : found;
     if (this.deletingStorage.has(resourceId))
       return Response.json(
         { error: `kitshn deletes the storage of ${resourceId} now. Deploy again after it finishes (K-909).` },
@@ -5524,33 +5562,46 @@ export class Kitshn extends DurableObject<Env> {
       }
     }
     const deployId = crypto.randomUUID();
-    this.sql(
-      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file, addresses, worker, app_key, run_id, run_attempt, needs, workflow)
+    // K-1127: the takeover and the deploy row in one step, after every check; the use is checked again at that point.
+    if (handover && !this.usableHandover(deployer))
+      return Response.json(
+        {
+          error:
+            "The handover of this repo ended while it planned (K-1127). Publish and hand the card over again.",
+        },
+        { status: 409 },
+      );
+    this.ctx.storage.transactionSync(() => {
+      if (handover) this.takeOver(handover, deployer, key, result.environment);
+      this.sql(
+        `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, machine_id, compose_file, addresses, worker, app_key, run_id, run_attempt, needs, workflow)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      deployId,
-      deployer.repo,
-      deployer.repoId,
-      result.environment,
-      resourceId,
-      result.address,
-      script,
-      result.startsIn,
-      result.kind,
-      deployer.sha,
-      Date.now() + DEPLOY_MS,
-      // A push binds its environment to the branch (K-807); a preview records its head branch for its close.
-      event.branch,
-      compose ? "compose" : "worker" in recipe ? "worker" : "static",
-      machineId,
-      compose?.file ?? null,
-      JSON.stringify(result.addresses),
-      "worker" in recipe ? JSON.stringify(recipe.worker) : null,
-      key,
-      deployer.runId,
-      deployer.runAttempt,
-      JSON.stringify(recipe.needs?.apps ?? []),
-      deployer.workflow,
-    );
+        deployId,
+        deployer.repo,
+        deployer.repoId,
+        result.environment,
+        resourceId,
+        result.address,
+        script,
+        result.startsIn,
+        result.kind,
+        deployer.sha,
+        Date.now() + DEPLOY_MS,
+        // A push binds its environment to the branch (K-807); a preview records its head branch for its close.
+        event.branch,
+        compose ? "compose" : "worker" in recipe ? "worker" : "static",
+        machineId,
+        compose?.file ?? null,
+        JSON.stringify(result.addresses),
+        "worker" in recipe ? JSON.stringify(recipe.worker) : null,
+        key,
+        deployer.runId,
+        deployer.runAttempt,
+        JSON.stringify(recipe.needs?.apps ?? []),
+        deployer.workflow,
+      );
+    });
+    if (handover) this.load();
     // K-817, K-901: the alarm makes the DNS records of a Compose deploy now, before its build (dnsWork).
     if (compose && result.kind === "deploy") void this.scheduleAlarm();
     return Response.json({ deployId, plan: result });
@@ -6065,6 +6116,10 @@ export class Kitshn extends DurableObject<Env> {
       );
     if (resource) this.putResource({ ...resource, addresses, status: "running" });
     this.sql("UPDATE deploys SET state = 'done' WHERE id = ? AND state = 'planned'", row.id);
+    await this.exclusive(row.resource_id, async () => {
+      await this.retireLibraryItem(row.resource_id);
+      return new Response(null);
+    });
     if (icon !== undefined) await this.setIcon(row.resource_id, icon);
     this.load();
     this.broadcast();
@@ -6311,7 +6366,7 @@ export class Kitshn extends DurableObject<Env> {
       ? "kitshn is paused, so it starts nothing until Resume."
       : this.closedPreview(card.id)
         ? "its pull request is closed, so the preview does not come back."
-        : done && !card.id.startsWith(FOLDER_SITE_PREFIX)
+        : done && !this.isFolderSite(card.id)
           ? this.repoRefusal(done.repo_id)
           : null;
     if (refusal) return `${back}, but kitshn did not put its addresses back: ${refusal}`;
@@ -6499,6 +6554,21 @@ export class Kitshn extends DurableObject<Env> {
     }
     // K-1116: an agent key publishes a page or a file, the same upload as a drop on the map.
     if (path === "/agent/library" && request.method === "POST") return this.agentPublish(agent, request, now);
+    // K-1127: a key hands a page or a folder site over to a new repo of its user.
+    if (path.startsWith("/agent/cards/") && path.endsWith("/handover") && request.method === "POST") {
+      const input: unknown = await request.json().catch(() => null);
+      return this.handOver(
+        agent,
+        path.slice("/agent/cards/".length, -"/handover".length),
+        isRecord(input) ? input : {},
+        now,
+      );
+    }
+    if (path.startsWith("/agent/library/") && path.endsWith("/content") && request.method === "GET") {
+      const id = path.slice("/agent/library/".length, -"/content".length);
+      const refusal = this.agentMayChange(agent, id, now);
+      return refusal ? Response.json({ error: refusal }, { status: 403 }) : this.preview(id);
+    }
     if (path.startsWith("/agent/cards/") && path.endsWith("/address") && request.method === "POST")
       return this.setAddress(
         agent,
@@ -6713,6 +6783,15 @@ export class Kitshn extends DurableObject<Env> {
         )[0]?.item_id ?? "");
     const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", id);
     const resource = this.state.resources.get(id);
+    // K-1127: a page that became a repo's site sends its old addresses on, after the same share check.
+    if (!row && resource?.kind.startsWith("site.")) {
+      const decision = contentAccess(this.state, resource, visitor, Date.now());
+      return Response.json(
+        decision === "allow"
+          ? { decision: "moved", address: resource.addresses[0] ?? "", stale }
+          : { decision, stale },
+      );
+    }
     if (!row || !resource) return Response.json({ decision: "missing", stale });
     const decision = contentAccess(this.state, resource, visitor, Date.now());
     return Response.json(
@@ -7279,12 +7358,213 @@ export class Kitshn extends DurableObject<Env> {
         );
     }
     if (
-      card.id.startsWith(FOLDER_SITE_PREFIX) &&
+      this.isFolderSite(card.id) &&
       this.sql("SELECT 1 FROM agent_sites WHERE card_id = ?", card.id).length === 0
     )
       throw new RuleError(
         `A new publish of the folder of ${card.name} replaced it, so this undo no longer fits.`,
       );
+  }
+
+  /**
+   * K-1127: a key hands a page or a folder site that it may change over to a repo that its user made, by the repo's
+   * GitHub id and owner id. For an hour, the first push deploy of that repo takes the card, with its circles and shares.
+   */
+  private handOver(agent: Caller, named: string, input: Record<string, unknown>, now: number) {
+    const fail = (status: number, error: string) => Response.json({ error }, { status });
+    const repo = typeof input["repo"] === "string" ? input["repo"].trim() : "";
+    const repoId = typeof input["repoId"] === "string" ? input["repoId"] : "";
+    const ownerId = typeof input["ownerId"] === "string" ? input["ownerId"] : "";
+    if (!isRepoName(repo) || !isGitHubId(repoId) || !isGitHubId(ownerId))
+      return fail(
+        400,
+        "Name the repo as owner/name with its GitHub repoId and ownerId, as gh api repos/<repo> gives.",
+      );
+    const card = this.agentCard(agent, named, now);
+    const resource = card ? this.state.resources.get(card) : undefined;
+    if (!card || !resource)
+      return fail(403, `This key cannot change the card "${named}" (K-1117, K-1123, K-1127).`);
+    const folder = this.isFolderSite(card);
+    if (resource.kind !== "page" && !folder)
+      return fail(
+        409,
+        "Only a page or a folder site becomes a repo; put a file into a folder site first (K-1127).",
+      );
+    if (!agentHas(this.state, agent.visitor, "addsApps", now))
+      return fail(403, 'A repo adds an app, so it needs the right "may add apps" (K-718, K-1127).');
+    if (this.sql("SELECT 1 FROM repos WHERE repo_id = ?", repoId).length > 0)
+      return fail(409, `kitshn knows ${repo} already; a handover is for a new repo (K-1127).`);
+    // K-817: a repo's main address is under the kitshn zone. A folder site on another zone keeps that address as
+    // an extra one and gets a main one under the kitshn zone.
+    const current = resource.addresses[0] ?? "";
+    const label = (address: string) =>
+      address.includes("/") ? addressSegment(address) : (address.split(".")[0] ?? "");
+    const underZone = current.endsWith(`.${this.env.KITSHN_ZONE}`) && !current.includes("/");
+    let addresses = [current];
+    if (!underZone) {
+      const wanted = label(current);
+      const name = this.folderSiteName(isLibraryId(wanted) ? null : wanted, this.env.KITSHN_ZONE);
+      const free = typeof name === "string" ? name : this.folderSiteName(null, this.env.KITSHN_ZONE);
+      if (typeof free !== "string") return fail(free.status, free.error);
+      addresses = [`${free}.${this.env.KITSHN_ZONE}`, ...(folder ? [current] : [])];
+    }
+    const expiresAt = now + HANDOVER_MS;
+    const name = agent.actor._tag === "device" ? agent.actor.name : (agent.visitor.clientId ?? "a key");
+    this.ctx.storage.transactionSync(() => {
+      this.sql("DELETE FROM handovers WHERE card_id = ? OR repo_id = ?", card, repoId);
+      this.sql(
+        `INSERT INTO handovers (repo_id, owner_id, repo, card_id, client_id, client_name, address, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        repoId,
+        ownerId,
+        repo,
+        card,
+        agent.visitor.clientId ?? "",
+        name,
+        JSON.stringify(addresses),
+        expiresAt,
+      );
+      this.insertRevision(
+        agent.actor,
+        `Handed ${resource.name} over to ${repo}; its first push deploys it at ${addresses[0]} within an hour (K-1127)`,
+        [],
+        null,
+      );
+    });
+    this.broadcast();
+    return Response.json({
+      card,
+      kind: folder ? "folder" : "page",
+      address: addresses[0],
+      addresses,
+      repo,
+      expiresAt,
+    });
+  }
+
+  /** K-1123, K-1127: a folder site is a `folder-` card that no repo took over. */
+  private isFolderSite(id: string) {
+    return (
+      id.startsWith(FOLDER_SITE_PREFIX) &&
+      this.sql("SELECT 1 FROM repo_cards WHERE card_id = ?", id).length === 0
+    );
+  }
+
+  /** K-1120, K-1123: the cards that a name means: a card id, a name of a page or file address, or a folder. */
+  private cardCandidates(named: string): Array<string> {
+    if (this.state.resources.has(named)) return [named];
+    return this.sql<{ id: string }>(
+      `SELECT DISTINCT item_id AS id FROM library_addresses WHERE kind IN ('page', 'file') AND name = ?
+       UNION SELECT card_id AS id FROM agent_sites WHERE folder = ?`,
+      named,
+      named,
+    ).map((row) => row.id);
+  }
+
+  /** K-1117, K-1120, K-1123: the card that a key names by id, address name or folder, if the key may change it. */
+  private agentCard(agent: Caller, named: string, now: number): string | null {
+    const candidates = this.cardCandidates(named);
+    return (
+      candidates.find(
+        (id) =>
+          this.agentMayChange(agent, id, now) === null || this.agentSiteMayChange(agent, id, now) === null,
+      ) ?? null
+    );
+  }
+
+  /**
+   * K-1127: the handover of this repo, by its GitHub ids, while it lasts and while it still fits: the card exists and
+   * is still a page or a folder site, and the key still may change it and still may add apps. A handover that no
+   * longer fits ends unused, and History says why.
+   */
+  private usableHandover(deployer: Deployer): Handover | null {
+    const now = Date.now();
+    const [row] = this.sql<HandoverRow>(
+      "SELECT * FROM handovers WHERE repo_id = ? AND owner_id = ? AND expires_at > ?",
+      deployer.repoId,
+      deployer.ownerId,
+      now,
+    );
+    if (!row) return null;
+    const key: Caller = {
+      visitor: { email: null, clientId: row.client_id, ip: null },
+      actor: { _tag: "device", clientId: row.client_id, name: row.client_name },
+    };
+    const card = this.state.resources.get(row.card_id);
+    const fits =
+      card !== undefined &&
+      (card.kind === "page" || this.isFolderSite(card.id)) &&
+      agentHas(this.state, key.visitor, "addsApps", now) &&
+      (this.agentMayChange(key, row.card_id, now) === null ||
+        this.agentSiteMayChange(key, row.card_id, now) === null);
+    if (!fits) {
+      this.ctx.storage.transactionSync(() => {
+        this.sql("DELETE FROM handovers WHERE repo_id = ?", row.repo_id);
+        this.insertRevision(
+          { _tag: "kitshn", reason: "handover" },
+          `The handover of ${card?.name ?? row.card_id} to ${row.repo} ended unused: the card or the key's right changed (K-1127)`,
+          [],
+          null,
+        );
+      });
+      return null;
+    }
+    return {
+      repo_id: row.repo_id,
+      repo: row.repo,
+      card_id: row.card_id,
+      client_id: row.client_id,
+      client_name: row.client_name,
+      addresses: JSON.parse(row.address) as Array<string>,
+    };
+  }
+
+  /**
+   * K-1127: the repo takes the handed-over card for this app and environment from now on, and counts as allowed by
+   * the key (K-819). A page becomes a static site at the handover's address; a folder site stops being one. It runs in
+   * the transaction of the deploy row.
+   */
+  private takeOver(handover: Handover, deployer: Deployer, key: string, environment: string) {
+    const card = this.state.resources.get(handover.card_id);
+    if (!card) throw new RuleError("The handed-over card went while the deploy planned (K-1127).");
+    this.sql(
+      `INSERT INTO repos (repo_id, name, state, first_seen, branch, workflow, allowed_by_client, allowed_by_name)
+       VALUES (?, ?, 'allowed', ?, ?, ?, ?, ?)`,
+      deployer.repoId,
+      deployer.repo,
+      Date.now(),
+      deployer.branch,
+      deployer.workflow,
+      handover.client_id,
+      handover.client_name,
+    );
+    this.sql(
+      "INSERT INTO repo_cards (repo_id, app_key, environment, card_id) VALUES (?, ?, ?, ?)",
+      deployer.repoId,
+      key,
+      environment,
+      card.id,
+    );
+    this.sql("DELETE FROM handovers WHERE repo_id = ?", handover.repo_id);
+    this.sql("DELETE FROM agent_sites WHERE card_id = ?", card.id);
+    if (card.kind === "page")
+      this.putResource({ ...card, kind: "site.static", addresses: handover.addresses });
+    this.insertRevision(
+      { _tag: "kitshn", reason: `deploy of ${deployer.repo}` },
+      `${deployer.repo} deploys ${card.name} from now on, as ${handover.client_name} handed it over (K-819, K-1127)`,
+      [],
+      null,
+    );
+  }
+
+  /** K-1127: after its repo's first deploy, the bytes of a page that became a site go; its old names still redirect. */
+  private async retireLibraryItem(cardId: string) {
+    const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", cardId);
+    const card = this.state.resources.get(cardId);
+    if (!row || !card?.kind.startsWith("site.")) return;
+    const item = libraryItem(row);
+    await this.env.BUCKET?.delete([slotKey(item, 0), slotKey(item, 1)]);
+    this.sql("DELETE FROM library WHERE id = ?", cardId);
   }
 
   /** K-1123: a folder site row counts while its card exists or a plan of it waits for its files. */
@@ -7300,8 +7580,17 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-1123: the addresses that live folder site rows hold, also while their first files have not arrived. */
-  private heldSiteAddresses(now: number) {
-    return this.sql<AgentSiteRow>("SELECT * FROM agent_sites").filter((row) => this.siteLive(row, now));
+  private heldSiteAddresses(now: number): Array<{ readonly address: string; readonly card_id: string }> {
+    return [
+      ...this.sql<AgentSiteRow>("SELECT * FROM agent_sites").filter((row) => this.siteLive(row, now)),
+      // K-1127: a handover holds the address that the repo's first deploy takes.
+      ...this.sql<{ address: string; card_id: string }>(
+        "SELECT address, card_id FROM handovers WHERE expires_at > ?",
+        now,
+      ).flatMap((row) =>
+        (JSON.parse(row.address) as Array<string>).map((address) => ({ address, card_id: row.card_id })),
+      ),
+    ];
   }
 
   /** K-1123: as K-1117 for pages: the key that published the site, while it controls the card or it waits in the tray. */
@@ -7378,24 +7667,10 @@ export class Kitshn extends DurableObject<Env> {
    * visitors on, so no one else takes it; Undo moves the card back.
    */
   private async setAddress(caller: Caller, named: string, name: string, agent: boolean) {
-    // The card by its id, by a name of its address, or for a folder site by its folder, so `kitshn address` takes
-    // what the key knows.
-    const candidates = this.state.resources.has(named)
-      ? [named]
-      : this.sql<{ id: string }>(
-          `SELECT DISTINCT item_id AS id FROM library_addresses WHERE kind IN ('page', 'file') AND name = ?
-           UNION SELECT card_id AS id FROM agent_sites WHERE folder = ?`,
-          named,
-          named,
-        ).map((row) => row.id);
     let card: string;
     if (agent) {
       // A key learns nothing about cards that it may not change: one answer for unknown and for not its own.
-      const now = Date.now();
-      const mine = candidates.find(
-        (id) =>
-          this.agentMayChange(caller, id, now) === null || this.agentSiteMayChange(caller, id, now) === null,
-      );
+      const mine = this.agentCard(caller, named, Date.now());
       if (!mine)
         return Response.json(
           { error: `This key cannot change the address of "${named}" (K-1117, K-1120).` },
@@ -7403,6 +7678,8 @@ export class Kitshn extends DurableObject<Env> {
         );
       card = mine;
     } else {
+      // The card by its id, by a name of its address, or for a folder site by its folder.
+      const candidates = this.cardCandidates(named);
       if (candidates.length > 1)
         return Response.json(
           { error: `Several cards have the name "${named}"; name the card by its id.` },
@@ -7412,8 +7689,7 @@ export class Kitshn extends DurableObject<Env> {
     }
     const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", card);
     const resource = this.state.resources.get(card);
-    if (resource && card.startsWith(FOLDER_SITE_PREFIX))
-      return await this.renameFolderSite(caller, resource, name);
+    if (resource && this.isFolderSite(card)) return await this.renameFolderSite(caller, resource, name);
     if (!row || !resource)
       return Response.json(
         {
@@ -7485,6 +7761,8 @@ export class Kitshn extends DurableObject<Env> {
    */
   private updateLibrary(caller: Caller, row: LibraryRow, request: Request, now: number) {
     return this.exclusive(row.id, async () => {
+      const taken = this.takenOver(row.id);
+      if (taken) return taken;
       const refuse = (error: string, status = 400) => Response.json({ error }, { status });
       const bucket = this.env.BUCKET;
       if (!bucket) return refuse("R2 is off for this kitshn. Run the bootstrap again after R2 is on.", 503);
@@ -7560,6 +7838,8 @@ export class Kitshn extends DurableObject<Env> {
    */
   private restorePrevious(caller: Caller, id: string, by: "owner" | "agent") {
     return this.exclusive(id, async () => {
+      const taken = this.takenOver(id);
+      if (taken) return taken;
       const refusal = by === "agent" ? this.agentMayChange(caller, id, Date.now()) : null;
       if (refusal) return Response.json({ error: refusal }, { status: 403 });
       const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", id);
@@ -7625,8 +7905,25 @@ export class Kitshn extends DurableObject<Env> {
     return this.exclusive(id, () => this.deleteItemNow(caller, id));
   }
 
+  /**
+   * K-1127: a page whose card a repo took is the repo's site now; its bytes wait only for the first finish. No
+   * library write changes it: no update by name, no restore, no delete. Remove app takes that card down.
+   */
+  private takenOver(id: string): Response | null {
+    const card = this.state.resources.get(id);
+    if (!card || card.kind === "page" || card.kind === "file") return null;
+    return Response.json(
+      {
+        error: `${card.name} is a repo's site now; change it in its repo, or remove the app on the map (K-1127).`,
+      },
+      { status: 409 },
+    );
+  }
+
   private async deleteItemNow(caller: Caller, id: string) {
     const [row] = this.sql<LibraryRow>("SELECT * FROM library WHERE id = ?", id);
+    const taken = this.takenOver(id);
+    if (taken) return taken;
     if (!row) return Response.json({ error: `The library has no item ${id}.` }, { status: 404 });
     const item = libraryItem(row);
     if (!this.env.BUCKET) return Response.json({ error: "R2 is off for this kitshn." }, { status: 503 });
@@ -8549,6 +8846,51 @@ const folderDeployer = (folder: string): Deployer => ({
   runAttempt: "",
   workflow: null,
 });
+
+/** K-1127: how long a handover waits for the first push of its repo. */
+const HANDOVER_MS = 60 * 60_000;
+
+/** K-1127: a handover that still fits, with its addresses read. */
+interface Handover {
+  readonly repo_id: string;
+  readonly repo: string;
+  readonly card_id: string;
+  readonly client_id: string;
+  readonly client_name: string;
+  readonly addresses: ReadonlyArray<string>;
+}
+
+interface HandoverRow extends Record<string, SqlStorageValue> {
+  /** GitHub's ids of the repo and its owner, which the deploy token proves; the name only reads well. */
+  repo_id: string;
+  owner_id: string;
+  repo: string;
+  card_id: string;
+  client_id: string;
+  client_name: string;
+  /** The addresses that the repo's card gets, the main one first, as JSON. */
+  address: string;
+  expires_at: number;
+}
+
+/** K-1127: a GitHub numeric id, as the API and the deploy token give it. */
+const isGitHubId = (id: string) =>
+  id.length >= 1 && id.length <= 20 && [...id].every((c) => c >= "0" && c <= "9");
+
+/** K-1127: `owner/name` as GitHub allows it: letters, digits and dashes in the owner; also dots and underscores after. */
+function isRepoName(repo: string): boolean {
+  const [owner = "", name = "", ...rest] = repo.split("/");
+  const plain = (c: string) =>
+    (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "-";
+  const okOwner = owner.length >= 1 && owner.length <= 39 && [...owner].every(plain);
+  const okName =
+    name.length >= 1 &&
+    name.length <= 100 &&
+    name !== "." &&
+    name !== ".." &&
+    [...name].every((c) => plain(c) || c === "." || c === "_");
+  return rest.length === 0 && okOwner && okName;
+}
 
 /** K-1122: the old names that an item keeps; each sends visitors on, and no other item takes it. */
 const OLD_NAMES = 5;

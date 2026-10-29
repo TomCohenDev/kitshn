@@ -184,6 +184,15 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     // K-1819: when the daily run first saw that a card with backups was gone; its repository goes 7 days later.
     "CREATE TABLE backup_gone (card TEXT PRIMARY KEY, since INTEGER NOT NULL)",
   ],
+  // 28: make it a repo (K-1127). A handover lets the first push deploy of one repo take over a page or a folder site
+  // card for an hour; `repo_cards` then keeps that card for every later deploy of the repo, its app and environment.
+  [
+    `CREATE TABLE handovers (repo_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, repo TEXT NOT NULL,
+     card_id TEXT NOT NULL UNIQUE, client_id TEXT NOT NULL, client_name TEXT NOT NULL, address TEXT NOT NULL,
+     expires_at INTEGER NOT NULL)`,
+    `CREATE TABLE repo_cards (repo_id TEXT NOT NULL, app_key TEXT NOT NULL, environment TEXT NOT NULL,
+     card_id TEXT NOT NULL UNIQUE, PRIMARY KEY (repo_id, app_key, environment))`,
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

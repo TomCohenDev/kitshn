@@ -479,6 +479,23 @@ function Controls() {
         ) : null}
       </Entry>
       <Entry
+        heading="Keyboard focus"
+        what="An accent ring and a pink glow, so focus is easy to find on the dots canvas. Components with their own hard shadow (card, checkbox, radio, switch) keep that shadow and show only the ring, on purpose."
+        source=":focus-visible · styles.css"
+      >
+        <div class="row">
+          <button class="btn" data-tip="Tab to me: the ring and the glow.">
+            Tab to me
+          </button>
+          <Check
+            label="Tab to me"
+            tip="Tab to me: the ring only, with the box's own shadow."
+            checked={false}
+            onChange={noop}
+          />
+        </div>
+      </Entry>
+      <Entry
         heading="Tooltip"
         what="Every control says what it is and what happens: after 300 ms on hover, at once on keyboard focus."
         source="TooltipLayer with data-tip · controls.tsx"
@@ -1025,7 +1042,7 @@ export function StyleGuide() {
       <section class="guide-entry guide-differences">
         <header>
           <h3>Differences with the neo-brutalism skill</h3>
-          <p>What is left after the decisions of 2026-10-29. The skill update is not done yet.</p>
+          <p>The differences that are left. The skill follows kitshn on stickers, buttons and tabs.</p>
         </header>
         <ol>
           {DIFFERENCES.map((difference) => (

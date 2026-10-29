@@ -48,6 +48,7 @@ import {
 } from "./Backups.tsx";
 import { type BackupRun, BACKUP_LIMIT_BYTES, type BucketSize, gigabytes } from "../core/backups.ts";
 import type {
+  AccessState,
   DeployNote,
   JobView,
   MachineView,
@@ -2132,7 +2133,7 @@ function Panel(props: {
   /** K-1767: App pull request runs that wait for Deploy. */
   botRuns: Snapshot["botRuns"];
   selection: Selection;
-  access: Readonly<Record<string, import("../core/protocol.ts").AccessState>>;
+  access: Readonly<Record<string, AccessState>>;
   me: Actor;
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onDeleteCircle: (circle: Circle) => void;
@@ -2599,7 +2600,7 @@ function CardPanel(props: {
   peek: boolean;
   /** K-819: the repo gate of the repo that deploys this card, when it has one. */
   repo: RepoView | null;
-  access: import("../core/protocol.ts").AccessState | null;
+  access: AccessState | null;
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
@@ -3100,7 +3101,7 @@ export function TrayCard(props: {
 }
 
 /** K-407: the Access row of a card panel: applied as a stamp; applying, retrying and failed as stickers with why. */
-export function AccessRow(props: { readonly access: import("../core/protocol.ts").AccessState }) {
+export function AccessRow(props: { readonly access: AccessState }) {
   return (
     <div class="row">
       <span class="label" data-tip="Access: whether Cloudflare has the latest shares of this card.">

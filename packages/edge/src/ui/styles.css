@@ -1530,6 +1530,12 @@ pre.output {
 .radio:checked::after {
   opacity: 1;
 }
+/* A control with its own hard shadow keeps it on focus and shows only the ring, as cards do: no glow. */
+.check:focus-visible,
+.radio:focus-visible,
+.switch:focus-visible {
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
+}
 .check:active,
 .radio:active {
   transform: translate(2px, 2px);

@@ -30,6 +30,7 @@ import {
   shareKey,
   shareLevel,
   stackTitle,
+  type UndoSource,
 } from "../core/model.ts";
 import { MAX_UPLOAD_BYTES, isLibraryId } from "../core/library.ts";
 import { circleForCards, placeInside } from "../core/place.ts";
@@ -844,8 +845,8 @@ export function App() {
     } else if (done) showToast({ text: done, error: false, undo: result.revision, card: placed });
   };
 
-  const undo = async (revision: number) => {
-    const result = await undoRevision(revision);
+  const undo = async (revision: number, source: UndoSource) => {
+    const result = await undoRevision(revision, source);
     showToast(
       result.ok
         ? {
@@ -1175,7 +1176,7 @@ export function App() {
   );
 
   historyShow.current = showOnMap;
-  historyUndo.current = (id) => void undo(id);
+  historyUndo.current = (id) => void undo(id, "history");
 
   // Escape clears a selection first, then closes the panel; the palette and dialogs handle their own.
   escapeRef.current = () => {
@@ -2085,7 +2086,7 @@ export function App() {
                   const revisions = [...(toast.undo === null ? [] : [toast.undo]), ...(toast.alsoUndo ?? [])];
                   setToast(null);
                   void (async () => {
-                    for (const revision of revisions) await undo(revision);
+                    for (const revision of revisions) await undo(revision, "toast");
                   })();
                 }
           }

@@ -77,6 +77,45 @@ describe("owner route /api/state", () => {
     expect((await call("/api/apply", owner, { edits: stack("   ") })).status).toBe(400);
     expect((await call("/api/apply", owner, { edits: stack(" Sites") })).status).toBe(400);
   });
+
+  it("records where each Undo came from, and calls an Undo over HTTP without a source the API (K-1509)", async () => {
+    stubAccessCerts();
+    const owner = await accessToken("admin-aud", { email: "owner@example.com" });
+    const undone = async (id: string, source?: string) => {
+      const circle: Circle = {
+        id,
+        name: id,
+        color: "#7c3aed",
+        level: "view",
+        members: [],
+        match: "any",
+        needsPasskey: false,
+        endsAt: null,
+        x: 4000,
+        y: 4000,
+        r: 100,
+      };
+      const applied = (await (
+        await call("/api/apply", owner, { edits: [{ _tag: "circle", id, after: circle }] })
+      ).json()) as {
+        revision: number;
+      };
+      const undo = await call("/api/undo", owner, {
+        revision: applied.revision,
+        ...(source ? { source } : {}),
+      });
+      expect(undo.status).toBe(200);
+      return ((await undo.json()) as { revision: number }).revision;
+    };
+    const fromHistory = await undone("undo-history", "history");
+    const fromApi = await undone("undo-api");
+    const state = (await (await call("/api/state", owner)).json()) as {
+      revisions: ReadonlyArray<{ id: number; undoSource: string | null }>;
+    };
+    const sourceOf = (id: number) => state.revisions.find((revision) => revision.id === id)?.undoSource;
+    expect([sourceOf(fromHistory), sourceOf(fromApi)]).toEqual(["history", "api"]);
+    expect((await call("/api/undo", owner, { revision: fromApi, source: "keyboard" })).status).toBe(400);
+  });
 });
 
 describe("agent route /agent/state (K-718)", () => {

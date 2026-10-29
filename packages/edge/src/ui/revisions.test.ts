@@ -12,6 +12,7 @@ const HOUR = 60 * 60 * 1000;
 const revision = (id: number, at: number, actor: Actor, summary = "Moved a card"): RevisionView => ({
   id,
   at,
+  undoSource: null,
   actor,
   summary,
   undoes: null,

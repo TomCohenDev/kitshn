@@ -3,7 +3,16 @@ import type { Command, Machine, MachineStatus, ProjectVolume, Sample } from "./m
 import type { BackupRun, BucketSize } from "./backups.ts";
 import type { MachineOs } from "./icons.ts";
 import type { LogLine, TailAnswer } from "./logs.ts";
-import type { Circle, GitHubWay, PauseMode, Point, Resource, ShareSetting, Stack } from "./model.ts";
+import type {
+  Circle,
+  GitHubWay,
+  PauseMode,
+  Point,
+  Resource,
+  ShareSetting,
+  Stack,
+  UndoSource,
+} from "./model.ts";
 import type { RepoGate } from "./repos.ts";
 import type { Proposal } from "./asks.ts";
 
@@ -58,6 +67,8 @@ export interface RevisionView {
   readonly actor: Actor;
   readonly summary: string;
   readonly undoes: number | null;
+  /** K-1509: where a whole-revision Undo came from; null for other revisions and older undos. */
+  readonly undoSource: UndoSource | null;
   readonly undoneBy: number | null;
   /** False for a revision that records an action, such as a shell command, and changes nothing. */
   readonly undoable: boolean;

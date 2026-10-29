@@ -57,6 +57,8 @@ import {
   pauseModeOf,
   type Stack,
   type State,
+  UNDO_SOURCES,
+  type UndoSource,
   circlesHolding,
 } from "../core/model.ts";
 import {
@@ -421,6 +423,16 @@ const LOG_ANSWER_MS = 20_000;
 interface UndoOf {
   readonly revision: number;
   readonly item: string | null;
+  /** K-1509: where a whole-revision Undo came from; a per-item undo has none. */
+  readonly source: UndoSource | null;
+}
+
+/** K-1509: a stored source; null for rows before it existed. Any other value is bad data, so it throws. */
+function undoSourceOf(value: string | null): UndoSource | null {
+  if (value === null) return null;
+  const source = UNDO_SOURCES.find((each) => each === value);
+  if (!source) throw new Error(`A revision names an unknown undo source "${value}".`);
+  return source;
 }
 
 /** K-1907: the `meta` key of the VAPID private key; no read path, export or backup includes it. */
@@ -858,11 +870,12 @@ export class Kitshn extends DurableObject<Env> {
       actor: string;
       summary: string;
       undoes: number | null;
+      undo_source: string | null;
       empty: number;
       targets: string;
     }>(
       // K-1508: only the tag, id and stack members of each change, so the load never parses whole circles.
-      `SELECT id, at, actor, summary, undoes,
+      `SELECT id, at, actor, summary, undoes, undo_source,
          NOT EXISTS (SELECT 1 FROM json_each(changes) WHERE json_extract(value, '$._tag') != 'forget') AS empty,
          (SELECT json_group_array(json_object('_tag', json_extract(value, '$._tag'), 'id', json_extract(value, '$.id'),
              'members', CASE WHEN json_extract(value, '$._tag') = 'stack'
@@ -881,6 +894,7 @@ export class Kitshn extends DurableObject<Env> {
       actor: JSON.parse(row.actor) as Actor,
       summary: row.summary,
       undoes: row.undoes,
+      undoSource: undoSourceOf(row.undo_source),
       undoneBy: undone.get(row.id) ?? null,
       undoable: row.empty === 0,
       ...revisionTargets(JSON.parse(row.targets) as Array<RevisionTarget>),
@@ -1071,15 +1085,17 @@ export class Kitshn extends DurableObject<Env> {
     changes: ReadonlyArray<Change | Forget>,
     undoes: number | null,
     itemUndo: number | null = null,
+    undoSource: UndoSource | null = null,
   ) {
     const [row] = this.sql<{ id: number }>(
-      "INSERT INTO revisions (at, actor, summary, changes, undoes, item_undo) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+      "INSERT INTO revisions (at, actor, summary, changes, undoes, item_undo, undo_source) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
       Date.now(),
       JSON.stringify(actor),
       summary,
       JSON.stringify(changes),
       undoes,
       itemUndo,
+      undoSource,
     );
     if (!row) throw new Error("The revision insert returned no id.");
     return row.id;
@@ -1335,7 +1351,14 @@ export class Kitshn extends DurableObject<Env> {
         );
         return merge.id;
       }
-      return this.insertRevision(actor, summary, changes, undoes, undo?.item ? undo.revision : null);
+      return this.insertRevision(
+        actor,
+        summary,
+        changes,
+        undoes,
+        undo?.item ? undo.revision : null,
+        undo?.item === null ? undo.source : null,
+      );
     });
     this.state = after;
     this.clearAccessFailures();
@@ -1357,6 +1380,7 @@ export class Kitshn extends DurableObject<Env> {
         actor,
         summary,
         undoes,
+        undoSource: undo?.item === null ? undo.source : null,
         undoneBy: null,
         undoable: true,
         ...revisionTargets(changes.map(targetOf)),
@@ -1428,9 +1452,9 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-1502, K-1506: Undo reverses the caller's own newest revision, and runs the same rules as an edit. */
-  private undo(actor: Actor, revisionId: number) {
+  private undo(actor: Actor, revisionId: number, source: UndoSource | null) {
     const target = undoTarget(this.state, this.storedRevisions(), actor, { revision: revisionId });
-    return this.commitUndo(actor, target.changes, { revision: target.revision, item: null });
+    return this.commitUndo(actor, target.changes, { revision: target.revision, item: null, source });
   }
 
   /** K-1507: undoes the caller's own newest change to one card or circle, and only that item's part of it. */
@@ -1440,7 +1464,7 @@ export class Kitshn extends DurableObject<Env> {
       item.kind === "card"
         ? (this.state.resources.get(item.id)?.name ?? item.id)
         : `the circle ${this.state.circles.get(item.id)?.name ?? item.id}`;
-    return this.commitUndo(actor, target.changes, { revision: target.revision, item: name });
+    return this.commitUndo(actor, target.changes, { revision: target.revision, item: name, source: null });
   }
 
   /** Every revision that History keeps (K-1503: at most 5,000). */
@@ -3116,16 +3140,22 @@ export class Kitshn extends DurableObject<Env> {
     }
   }
 
+  /** `via`: an HTTP request without a source is the API (K-1509); the map always names its source. */
   private async handle(
     caller: Caller,
     message: ClientMessage,
+    via: "socket" | "http",
   ): Promise<Extract<ServerMessage, { type: "result" }>> {
     try {
       const { revision, notes, summary } =
         message.type === "apply"
           ? { revision: this.apply(caller.actor, message.edits), notes: [], summary: null }
           : message.type === "undo"
-            ? await this.undo(caller.actor, message.revision)
+            ? await this.undo(
+                caller.actor,
+                message.revision,
+                message.source ?? (via === "http" ? "api" : null),
+              )
             : await this.undoItem(caller.actor, message.item);
       return { type: "result", requestId: message.requestId, ok: true, revision, notes, summary };
     } catch (error) {
@@ -3501,7 +3531,7 @@ export class Kitshn extends DurableObject<Env> {
       } catch (error) {
         return Response.json({ error: String(error) }, { status: 400 });
       }
-      const result = await this.handle(caller, message);
+      const result = await this.handle(caller, message, "http");
       return Response.json(result, { status: result.ok ? 200 : 409 });
     }
     return new Response("Not found.", { status: 404 });
@@ -3534,7 +3564,7 @@ export class Kitshn extends DurableObject<Env> {
       return;
     }
     try {
-      send(socket, await this.handle(caller, message));
+      send(socket, await this.handle(caller, message, "socket"));
     } catch (error) {
       // Every request gets an answer, so a map never waits forever on an edit it shows (held.ts).
       console.error(`kitshn could not handle a ${message.type} request: ${String(error)}`);
@@ -5376,6 +5406,7 @@ export class Kitshn extends DurableObject<Env> {
       actor,
       summary,
       undoes: null,
+      undoSource: null,
       undoneBy: null,
       undoable: false,
       ...revisionTargets([]),

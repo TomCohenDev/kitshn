@@ -770,7 +770,7 @@ export class Kitshn extends DurableObject<Env> {
       });
       this.load();
       // K-1833: a bootstrap with KITSHN_IMPORT asks for one import, before the start steps, so they run on the
-      // imported state; a start reads one meta row for it, and only while the variable is set.
+      // imported state. Each start reads the meta row of a due finish, and one more while the variable is set.
       await this.importIfDue();
       if (this.state.circles.size === 0) this.seed();
       this.syncAdminAddress();
@@ -1945,13 +1945,10 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-1833: imports the file of the bootstrap once per new `KITSHN_IMPORT_AT`, and keeps the outcome in meta. */
-  private async importIfDue() {
-    const at = this.env.KITSHN_IMPORT_AT;
-    if (!at) return;
-    if (this.meta("import_at") === at) {
-      if (this.meta("import_finish") === "due") await this.finishImport();
-      return;
-    }
+  private async importIfDue(at = this.env.KITSHN_IMPORT_AT) {
+    // A done import finishes also after the bootstrap dropped KITSHN_IMPORT_AT.
+    if (this.meta("import_finish") === "due") await this.finishImport();
+    if (!at || this.meta("import_at") === at) return;
     const refused = await this.runImport(at).catch((error: unknown): ImportRefusal => ({
       code: "failed",
       detail: String(error),
@@ -1963,6 +1960,10 @@ export class Kitshn extends DurableObject<Env> {
       this.setMeta(
         "import_status",
         JSON.stringify({ state: "refused", code: refused.code } satisfies ImportStatus),
+      );
+      // The file holds the whole state, so it does not stay in R2 after a refusal either.
+      await this.env.BUCKET?.delete(IMPORT_OBJECT).catch((error: unknown) =>
+        console.error(`kitshn could not delete the refused import file: ${String(error)}`),
       );
       return;
     }

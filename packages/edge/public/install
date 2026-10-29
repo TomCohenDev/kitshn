@@ -461,7 +461,7 @@ if [ -n "${IMPORT_AT:-}" ]; then
       changed "imported $KITSHN_IMPORT; History names the import"
       break
       ;;
-    refused) die "kitshn refused the import: $(printf '%s' "$answer" | jq -r .reason)" ;;
+    refused) die "kitshn refused the import ($(printf '%s' "$answer" | jq -r .code)); the Worker log names the details (K-1833)." ;;
     esac
     sleep 5
   done

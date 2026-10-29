@@ -95,7 +95,15 @@ import {
   gigabytes,
 } from "../core/backups.ts";
 import { bucketSize, stateExport, writeExport } from "./backups.ts";
-import { IMPORT_OBJECT, notEmptyReason, readExport, writeImport } from "./state-import.ts";
+import {
+  IMPORT_OBJECT,
+  type ImportCode,
+  ImportError,
+  type ImportRefusal,
+  notEmptyReason,
+  readExport,
+  writeImport,
+} from "./state-import.ts";
 import { MIGRATIONS } from "./migrations.ts";
 import type {
   DeployNote,
@@ -666,13 +674,14 @@ export class Kitshn extends DurableObject<Env> {
         if (from < REPO_GATE_MIGRATION) this.backfillRepoIds();
       });
       this.load();
+      // K-1833: a bootstrap with KITSHN_IMPORT asks for one import, before the start steps, so they run on the
+      // imported state; a start reads one meta row for it, and only while the variable is set.
+      await this.importIfDue();
       if (this.state.circles.size === 0) this.seed();
       this.syncAdminAddress();
       this.reconcilePresence();
       // K-821: a restart cut off any run rollback that did not wait for a job.
       this.settleRollbacks();
-      // K-1833: a bootstrap with KITSHN_IMPORT asks for one import; a start reads one meta row for it.
-      await this.importIfDue();
       await this.scheduleAlarm();
     });
   }
@@ -1814,59 +1823,88 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1833: imports the file of the bootstrap once per new `KITSHN_IMPORT_AT`, and keeps the outcome in meta. */
   private async importIfDue() {
     const at = this.env.KITSHN_IMPORT_AT;
-    if (!at || this.meta("import_at") === at) return;
-    const outcome = await this.runImport().catch((error: unknown): ImportStatus => ({
-      state: "refused",
-      reason: `The import failed: ${String(error)}`,
+    if (!at) return;
+    if (this.meta("import_at") === at) {
+      if (this.meta("import_finish") === "due") await this.finishImport();
+      return;
+    }
+    const refused = await this.runImport(at).catch((error: unknown): ImportRefusal => ({
+      code: "failed",
+      detail: String(error),
     }));
-    this.setMeta("import_at", at);
-    this.setMeta("import_status", JSON.stringify(outcome));
+    if (refused) {
+      // The details can name an account, a card or a table, so only the log has them (K-1833).
+      console.error(`kitshn refused the import (${refused.code}): ${refused.detail}`);
+      this.setMeta("import_at", at);
+      this.setMeta(
+        "import_status",
+        JSON.stringify({ state: "refused", code: refused.code } satisfies ImportStatus),
+      );
+      return;
+    }
+    await this.finishImport();
   }
 
-  private async runImport(): Promise<ImportStatus> {
-    const refuse = (reason: string): ImportStatus => ({ state: "refused", reason });
+  /**
+   * K-1833: imports the file of the bootstrap. The rows, History and the "done" status go in one transaction, so a
+   * later error or a restart never turns a done import into a refused one. Returns the refusal, or null.
+   */
+  private async runImport(at: string): Promise<ImportRefusal | null> {
     const bucket = this.env.BUCKET;
-    if (!bucket) return refuse("R2 is off on this account, so kitshn finds no import file.");
+    if (!bucket) return { code: "no_file", detail: "R2 is off on this account." };
     const file = await bucket.get(IMPORT_OBJECT);
-    if (!file) return refuse(`R2 holds no ${IMPORT_OBJECT}; run the bootstrap with KITSHN_IMPORT again.`);
-    const text = await new Response(file.body.pipeThrough(new DecompressionStream("gzip"))).text();
+    if (!file) return { code: "no_file", detail: `R2 holds no ${IMPORT_OBJECT}.` };
     let parsed: unknown;
     try {
-      parsed = JSON.parse(text);
-    } catch {
-      return refuse("The import file is no JSON.");
+      parsed = JSON.parse(await new Response(file.body.pipeThrough(new DecompressionStream("gzip"))).text());
+    } catch (error) {
+      return { code: "bad_file", detail: `The import file is no gzip JSON: ${String(error)}` };
     }
     const state = readExport(parsed, this.env.CLOUDFLARE_ACCOUNT_ID);
-    if (typeof state === "string") return refuse(state);
+    if ("code" in state) return state;
     const notEmpty = notEmptyReason(this.ctx.storage.sql, [ADMIN_RESOURCE_ID]);
-    if (notEmpty) return refuse(notEmpty);
-    // A table or a column that the schema of the export lacks rolls the whole transaction back.
+    if (notEmpty) return notEmpty;
     try {
-      this.ctx.storage.transactionSync(() =>
+      this.ctx.storage.transactionSync(() => {
         writeImport(this.ctx.storage.sql, state, (from) => {
           if (from < REPO_GATE_MIGRATION) this.backfillRepoIds();
-        }),
-      );
+          this.insertRevision(
+            IMPORT_ACTOR,
+            `Imported the state of ${new Date(state.exportedAt).toISOString()} (K-1833)`,
+            [],
+            null,
+          );
+          this.setMeta("import_at", at);
+          this.setMeta("import_status", JSON.stringify({ state: "done" } satisfies ImportStatus));
+          this.setMeta("import_finish", "due");
+        });
+      });
     } catch (error) {
+      // A table or a column that the schema of the export lacks rolls the whole transaction back.
       this.load();
-      return refuse(error instanceof Error ? error.message : String(error));
+      return error instanceof ImportError
+        ? { code: error.code, detail: error.message }
+        : { code: "failed", detail: String(error) };
     }
-    const actor: Actor = { _tag: "kitshn", reason: "the import of the bootstrap (K-1833)" };
     this.load();
-    this.insertRevision(
-      actor,
-      `Imported the state of ${new Date(state.exportedAt).toISOString()} (K-1833)`,
-      [],
-      null,
-    );
-    this.load();
-    await bucket.delete(IMPORT_OBJECT);
-    // K-1834: the export holds no pass key, so the import ends with a new one.
-    await this.rotatePassKey(actor);
-    return { state: "done", reason: null };
+    return null;
   }
 
-  /** K-1833: what the public import status tells the bootstrap: the state and the reason, nothing more. */
+  /**
+   * K-1833, K-1834: the steps after a done import: the import file goes, and the pass key rotates, because the
+   * export holds none. A failure is logged, and the next start tries again.
+   */
+  private async finishImport() {
+    try {
+      await this.env.BUCKET?.delete(IMPORT_OBJECT);
+      await this.rotatePassKey(IMPORT_ACTOR);
+      this.sql("DELETE FROM meta WHERE key = 'import_finish'");
+    } catch (error) {
+      console.error(`kitshn finishes the import at the next start: ${String(error)}`);
+    }
+  }
+
+  /** K-1833: the public import status: the state and a fixed reason code, nothing more. */
   private importStatus(): ImportStatus | { state: "none" | "pending" } {
     if (!this.env.KITSHN_IMPORT_AT) return { state: "none" };
     if (this.meta("import_at") !== this.env.KITSHN_IMPORT_AT) return { state: "pending" };
@@ -8974,8 +9012,9 @@ const repoGateOf = (row: RepoRow): RepoGate => ({
 
 /** K-1819 */
 /** K-1833: the outcome of an import, which the bootstrap reads. */
-type ImportStatus =
-  { readonly state: "done"; readonly reason: null } | { readonly state: "refused"; readonly reason: string };
+type ImportStatus = { readonly state: "done" } | { readonly state: "refused"; readonly code: ImportCode };
+
+const IMPORT_ACTOR: Actor = { _tag: "kitshn", reason: "the import of the bootstrap (K-1833)" };
 
 /** K-1822: what finishes a restore to a time after the restart. */
 interface RestoreFinish {

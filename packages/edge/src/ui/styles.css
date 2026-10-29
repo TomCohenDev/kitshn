@@ -584,11 +584,112 @@ input[type="search"]::-webkit-search-cancel-button {
   margin-top: 4px;
   flex-wrap: wrap;
 }
-.card .dot {
-  width: 12px;
-  height: 12px;
+/* K-507: one chip per circle that shares the card; the circle colour on its edge, the level colour on its tail. */
+.card .shares {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 4px;
+}
+.share {
+  display: inline-flex;
+  align-items: stretch;
+  max-width: 100%;
+  font-size: 0.7rem;
+  font-weight: 800;
+  line-height: 1.5;
+  white-space: nowrap;
+  color: var(--ink);
+  background: var(--surface);
   border: var(--bw) solid var(--border);
-  border-radius: 50%;
+  border-left: 6px solid var(--circle, var(--border));
+  border-radius: var(--radius);
+}
+.share .who {
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.share .lv,
+.lens-pill .lv,
+.reach .lv {
+  padding: 0 4px;
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #000000;
+}
+.share .lv {
+  border-left: var(--bw) solid var(--border);
+}
+.share.more-shares {
+  flex: none;
+  padding: 0 4px;
+  border-left-width: var(--bw);
+}
+/* K-537: a card without a line in the lens of the selected card. */
+.card.dim {
+  opacity: 0.3;
+  transition: opacity 120ms;
+}
+/* K-537: the lens lines, in map units inside the world, above the cards and below the circle heads. */
+.lens {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 5;
+  fill: none;
+  stroke: var(--ink);
+  stroke-linecap: round;
+}
+.lens marker path {
+  fill: var(--ink);
+  stroke: none;
+}
+.lens-pill {
+  position: absolute;
+  z-index: 5;
+  transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 0 2px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  white-space: nowrap;
+  color: var(--ink);
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: 999px;
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
+}
+.lens-pill .lv {
+  border-radius: 999px;
+}
+.lens-pill .who {
+  color: var(--muted);
+}
+.cap {
+  width: 1em;
+  height: 1em;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.reach .row {
+  flex-wrap: wrap;
+}
+.reach .lv {
+  border: var(--bw) solid var(--border);
+  border-radius: 4px;
 }
 .card .count {
   position: absolute;

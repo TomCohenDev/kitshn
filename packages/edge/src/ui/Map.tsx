@@ -9,8 +9,6 @@ import {
   circlesHolding,
   insideCircle,
   memberLabel,
-  shareKey,
-  shareLevel,
   stackTitle,
   type CardKind,
 } from "../core/model.ts";
@@ -27,6 +25,8 @@ import { parseSiteInput } from "../core/sites.ts";
 import { openToAll } from "../core/library.ts";
 import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
+import { CircleChips, ReachLayer, ShareChips } from "./Reach.tsx";
+import { reachOf } from "../core/reach.ts";
 import { FRAMED_KINDS, peekable } from "./frames.ts";
 import { CardPreview, type FramePhase, KindSticker, PeekFrame, usePeek } from "./Peek.tsx";
 import type { Rect } from "./popover.ts";
@@ -639,6 +639,17 @@ export function MapView(props: Props) {
     return () => observer.disconnect();
   }, [openKey, zoomedOut]);
   const draggedIds = drag?.type === "cards" && drag.moved ? new Set(drag.origins.keys()) : new Set<string>();
+  // K-537: the lens follows the stored map, so a drag only moves its lines.
+  const lens = props.selection.cards.size === 1 && !zoomedOut ? [...props.selection.cards][0] : undefined;
+  const lensLines = useMemo(() => (lens ? reachOf(state, lens, Date.now()) : []), [state, lens]);
+  const lit = lens
+    ? new Set([
+        lens,
+        ...lensLines.flatMap((line) => [line.to, ...(line.from._tag === "card" ? [line.from.id] : [])]),
+      ])
+    : null;
+  /** Where each shown card draws, filled while the cards render, for the lens lines. */
+  const drawn = new Map<string, Point>();
 
   return (
     <div
@@ -780,6 +791,7 @@ export function MapView(props: Props) {
                     )[index] ?? 0),
                 }
               : place;
+          for (const id of stack && !open ? stack[1] : [resource.id]) drawn.set(id, at);
           const selected = props.selection.cards.has(resource.id);
           // A closed stack shows the highlight of any of its cards.
           const flash = (stack && !open ? stack[1] : [resource.id]).some((id) =>
@@ -825,6 +837,7 @@ export function MapView(props: Props) {
                 dragging={draggedIds.has(resource.id)}
                 target={stackTarget === resource.id}
                 flash={flash}
+                dim={lit !== null && !stack[1].some((id) => lit.has(id))}
                 layer={layer}
                 onMenu={(anchor) =>
                   props.onMenu({ target: { _tag: "stack", id: stack[0].slice(USER_STACK.length) }, anchor })
@@ -842,6 +855,7 @@ export function MapView(props: Props) {
               dragging={draggedIds.has(resource.id)}
               target={stackTarget === resource.id}
               flash={flash}
+              dim={lit !== null && !(stack && !open ? stack[1] : [resource.id]).some((id) => lit.has(id))}
               layer={layer}
               count={stack && index === 0 ? stack[1].length : null}
               open={open}
@@ -859,6 +873,7 @@ export function MapView(props: Props) {
             />
           );
         })}
+        {lens ? <ReachLayer state={shown} selected={lens} lines={lensLines} drawn={drawn} /> : null}
       </div>
       {drag?.type === "box" ? (
         <div
@@ -1042,6 +1057,8 @@ export function CardView(props: {
   dragging: boolean;
   target: boolean;
   flash: boolean;
+  /** K-537: the lens of another card is on, and this card has no line. */
+  dim?: boolean;
   count: number | null;
   open: boolean;
   access: AccessState | null;
@@ -1067,10 +1084,9 @@ export function CardView(props: {
     props.selected && props.peek && peekable(resource) && !(props.preview && resource.addresses[0]),
     props.previewOpen,
   );
-  const holding = circlesHolding(state, resource.id);
   return (
     <div
-      class={`card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}${props.flash ? " flash" : ""}`}
+      class={`card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}${props.flash ? " flash" : ""}${props.dim ? " dim" : ""}`}
       data-card={resource.id}
       style={{
         left: px(props.at.x),
@@ -1160,33 +1176,9 @@ export function CardView(props: {
         {props.machine ? <PresenceSticker view={props.machine} time={false} /> : null}
         {props.machine ? <KeySticker view={props.machine} /> : null}
         {props.machine ? <QueuedSticker view={props.machine} /> : null}
-        {holding.map((circle) => {
-          const level = shareLevel(state, resource, circle);
-          return (
-            <span
-              key={circle.id}
-              class="dot"
-              tabIndex={0}
-              role="img"
-              aria-label={`${circle.name} · ${level ?? "none"}`}
-              data-tip={`${circle.name} · ${level ?? "none"}: shared with this circle at ${level ?? "no level"}.`}
-              style={{ background: circle.color }}
-            />
-          );
-        })}
-        {holding
-          .filter((circle) => state.shareSettings.get(shareKey(resource.id, circle.id))?.level)
-          .map((circle) => (
-            <span
-              key={`o-${circle.id}`}
-              class="chip"
-              data-tip={`Level override: this card has its own level in ${circle.name}, not the circle's default.`}
-            >
-              {circle.name}: {shareLevel(state, resource, circle) ?? "none"}
-            </span>
-          ))}
         <MoreButton name={resource.name} onOpen={props.onMenu} />
       </div>
+      <ShareChips state={state} resource={resource} />
       {props.preview && resource.addresses[0] ? (
         <CardPreview
           resource={resource}
@@ -1213,12 +1205,14 @@ export function StackCard(props: {
   dragging: boolean;
   target: boolean;
   flash: boolean;
+  /** K-537: the lens of another card is on, and no card of this stack has a line. */
+  dim?: boolean;
   onMenu: (anchor: Rect) => void;
 }) {
   const holding = circlesHolding(props.state, props.id);
   return (
     <div
-      class={`card stack-card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}${props.flash ? " flash" : ""}`}
+      class={`card stack-card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}${props.flash ? " flash" : ""}${props.dim ? " dim" : ""}`}
       data-card={props.id}
       style={{
         left: px(props.at.x),
@@ -1243,19 +1237,9 @@ export function StackCard(props: {
         {props.members.length > 6 ? <li class="muted">and {props.members.length - 6} more</li> : null}
       </ul>
       <div class="foot">
-        {holding.map((circle) => (
-          <span
-            key={circle.id}
-            class="dot"
-            tabIndex={0}
-            role="img"
-            aria-label={circle.name}
-            data-tip={`${circle.name}: every card of this stack is shared with this circle.`}
-            style={{ background: circle.color }}
-          />
-        ))}
         <MoreButton name={props.name} onOpen={props.onMenu} />
       </div>
+      <CircleChips circles={holding} />
     </div>
   );
 }

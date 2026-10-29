@@ -980,6 +980,8 @@ export function CardView(props: {
   preview: boolean;
   /** A fixed phase of its preview frame, for the style guide (`/neo-brutalism`). */
   previewStill?: FramePhase;
+  /** The preview of the ▾ starts open, for the style guide; the map never sets it. */
+  previewOpen?: boolean;
   /** K-520: the selected card offers its preview on its kind sticker; a phone has it in the card sheet instead. */
   peek: boolean;
   zone: string;
@@ -990,6 +992,7 @@ export function CardView(props: {
   // K-520: the selected card offers its preview on its kind sticker, unless a live preview already shows.
   const peek = usePeek(
     props.selected && props.peek && peekable(resource) && !(props.preview && resource.addresses[0]),
+    props.previewOpen,
   );
   const holding = circlesHolding(state, resource.id);
   return (

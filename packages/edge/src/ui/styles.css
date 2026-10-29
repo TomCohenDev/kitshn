@@ -2109,8 +2109,11 @@ a > code {
 .peek {
   margin-top: 6px;
 }
-/* K-520: the ▾ at the end of a kind sticker that opens the preview: the sticker's text, a button's target. */
+/* K-520: the ▾ at the end of a kind sticker that opens the preview: small to see, big to hit. Its target (::before)
+   grows up, down and to the right only, so it never takes a press on the sticker's text; the sticker keeps that room
+   free on its right, so no neighbour sits under the target. 1.75rem is the skill's minimum; a finger gets 2.5rem. */
 .sticker-peek {
+  position: relative;
   margin: 0 0 0 4px;
   padding: 0 2px;
   font: inherit;
@@ -2119,6 +2122,24 @@ a > code {
   border: 0;
   border-left: var(--bw) solid currentColor;
   cursor: pointer;
+}
+.sticker-peek::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: var(--hit);
+  height: var(--hit);
+  transform: translateY(-50%);
+}
+.sticker:has(> .sticker-peek) {
+  --hit: 1.75rem;
+  margin-right: calc(var(--hit) - 1.2em);
+}
+@media (pointer: coarse) {
+  .sticker:has(> .sticker-peek) {
+    --hit: 2.5rem;
+  }
 }
 .sticker-peek:focus-visible {
   outline-offset: 1px;

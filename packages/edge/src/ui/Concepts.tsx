@@ -360,7 +360,7 @@ function Things(props: { base: State }) {
       <Concept
         name="Owner and Everyone"
         words="Two circles exist from the start. The Owner circle holds the person who installed kitshn and the admin card, with “needs passkey” on. The Everyone circle holds “everyone”: its cards are public."
-        relates="The admin card always keeps a share to a circle with a person and “needs passkey”; kitshn refuses any change that breaks that. A card that enters Everyone asks first: “This makes <name> public.”"
+        relates="The admin card always keeps a share to a circle with a person and “needs passkey”; kitshn refuses any change that breaks that. The first time that a card enters any circle with “everyone”, kitshn asks first: “This makes <name> public.”"
         ks={["K-104", "K-105", "K-210", "K-211"]}
         section={["1. Identity and login", "1-identity-and-login"]}
       >
@@ -463,7 +463,7 @@ function Delivery(props: { base: State }) {
   compose: { runsOn: ["docker"] },
   deploy: [
     { on: "push", branch: "main", name: "prod", startsIn: "Everyone" },
-    { on: "pull_request", name: "pr-{pr}", ephemeral: true, startsIn: "Everyone" },
+    { on: "pull_request", name: "pr-{pr}", ephemeral: true, startsIn: "Owner" },
   ],
 });`}
         </pre>
@@ -475,8 +475,8 @@ function Delivery(props: { base: State }) {
       </Concept>
       <Concept
         name="Preview"
-        words="Two things share the name. A pull request preview is an environment pr-<n> with its own address, which goes when the pull request closes. A live preview is a small frame of a site or page on its card."
-        relates="A pull request preview is a card like any other, with a “PR #n” sticker. A live preview shows only what the browser may open: a site behind Access shows after a login."
+        words="Two things share the name. A pull request preview is an environment pr-<n> with its own address, which goes when the pull request closes. A live preview is a small frame of a site, a page or a file (of a type that a browser shows) on its card."
+        relates="A pull request preview is a card like any other, with a “PR #n” sticker. A live preview shows only what the browser may open: a frame cannot log in, so a site behind Access shows only when the browser already has its Access session."
         ks={["K-901", "K-904", "K-303", "K-520"]}
         section={["9. Previews", "9-previews"]}
       >

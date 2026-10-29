@@ -138,8 +138,8 @@ export function CardPreview(props: {
 }
 
 /** K-520: whether a selected card's preview is open, and large. It closes when the card loses the selection. */
-export function usePeek(offered: boolean) {
-  const [open, setOpen] = useState(false);
+export function usePeek(offered: boolean, startsOpen = false) {
+  const [open, setOpen] = useState(startsOpen);
   const [large, setLarge] = useState(false);
   const toggle = useRef<HTMLButtonElement>(null);
   if (!offered && (open || large)) {

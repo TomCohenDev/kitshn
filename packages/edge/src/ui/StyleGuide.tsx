@@ -493,6 +493,14 @@ function MapParts(props: { state: State }) {
           {card(site, at(120, 0), { selected: true })}
         </MiniMap>
         <p class="help">Plain, and selected.</p>
+        <MiniMap width={520} height={400} center={at(0, 150)}>
+          {card(framed, at(-120, 0), { selected: true, peek: true })}
+          {card(framed, at(120, 0), { selected: true, peek: true, previewOpen: true })}
+        </MiniMap>
+        <p class="help">
+          A selected card that has a preview: the ▾ at the end of its kind sticker, closed and open
+          (example.com).
+        </p>
       </Entry>
       <Entry
         heading="Card with a preview frame"

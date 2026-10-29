@@ -1,9 +1,11 @@
-import { mkdtempSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ReachedCard } from "@kitshn/local";
 import { describe, expect, it } from "vitest";
-import { linkTarget, serveLinks } from "./link.ts";
+import { linkSocketProblem, linkTarget, serveLinks } from "./link.ts";
+
+const platform = process.platform === "darwin" ? "darwin" : "linux";
 
 const card = (address: string | null): ReachedCard => ({
   machineId: "b",
@@ -15,14 +17,19 @@ const card = (address: string | null): ReachedCard => ({
 });
 
 describe("the link proxy (K-1609)", () => {
-  it("reaches only the address of a machine in reach, and a path never changes the host", () => {
-    const reach = [card("t3-b.example.com")];
-    expect(linkTarget(reach, new URL("http://link/b/api/x?y=1"))).toEqual({
+  it("reaches only the address of the card of the provider that the path names, on a machine in reach, and a path never changes the host", () => {
+    const other: ReachedCard = { ...card("other-b.example.com"), kind: "other.app" };
+    const reachOf = (provider: string) =>
+      provider === "t3" ? [card(null), card("t3-b.example.com")] : provider === "other" ? [other] : [];
+    expect(linkTarget(reachOf, new URL("http://link/t3/b/api/x?y=1"))).toEqual({
       target: new URL("https://t3-b.example.com/api/x?y=1"),
     });
-    expect(linkTarget(reach, new URL("http://link/c/api"))).toMatchObject({ status: 403 });
-    expect(linkTarget([card(null)], new URL("http://link/b/api"))).toMatchObject({ status: 403 });
-    expect(linkTarget(reach, new URL("http://link/b//evil.example.com/x"))).toMatchObject({
+    expect(linkTarget(reachOf, new URL("http://link/other/b/api"))).toMatchObject({
+      target: { host: "other-b.example.com" },
+    });
+    expect(linkTarget(reachOf, new URL("http://link/t3/c/api"))).toMatchObject({ status: 403 });
+    expect(linkTarget(reachOf, new URL("http://link/nobody/b/api"))).toMatchObject({ status: 403 });
+    expect(linkTarget(reachOf, new URL("http://link/t3/b//evil.example.com/x"))).toMatchObject({
       target: { host: "t3-b.example.com" },
     });
   });
@@ -48,15 +55,15 @@ describe("the link proxy (K-1609)", () => {
     });
     const folder = mkdtempSync(join(tmpdir(), "kitshn-link-"));
     const path = join(folder, "link.sock");
-    const links = serveLinks(path, {
-      reach: () => [card(`127.0.0.1:${upstream.port}`)],
+    const links = await serveLinks(path, {
+      reachOf: (provider) => (provider === "t3" ? [card(`127.0.0.1:${upstream.port}`)] : []),
       token: () => ({ clientId: "a.access", clientSecret: "secret" }),
       log: () => {},
       scheme: "http",
     });
     try {
-      expect(statSync(path).mode & 0o777).toBe(0o600);
-      const answer = await fetch("http://link/b/api/thing", {
+      expect(linkSocketProblem(platform, path)).toBeNull();
+      const answer = await fetch("http://link/t3/b/api/thing", {
         unix: path,
         method: "POST",
         headers: {
@@ -73,10 +80,14 @@ describe("the link proxy (K-1609)", () => {
       // An Access session never crosses the proxy, in either direction.
       expect(seen[0]?.get("cookie")).toBe("lang=he");
       expect(answer.headers.getSetCookie()).toEqual(["theme=dark; Path=/"]);
-      const refused = await fetch("http://link/other/api", { unix: path } as RequestInit);
+      const refused = await fetch("http://link/t3/other/api", { unix: path } as RequestInit);
       expect(refused.status).toBe(403);
 
-      expect(await webSocketEcho(path, "/b/ws", "hi")).toBe("echo hi");
+      expect(await webSocketEcho(path, "/t3/b/ws", "hi")).toBe("echo hi");
+      // A provider refuses a socket that another user could open or replace (K-621).
+      chmodSync(path, 0o666);
+      expect(linkSocketProblem(platform, path)).toMatch(/mode 666/);
+      expect(linkSocketProblem(platform, join(folder, "none.sock"))).toMatch(/no link proxy/);
     } finally {
       links.stop();
       void upstream.stop(true);

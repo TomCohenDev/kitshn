@@ -1,7 +1,14 @@
 // K-1609, K-711: the link proxy. A provider reaches the address of a card on another machine through this machine's
-// daemon, which adds the machine token. The provider never holds a Cloudflare credential.
-import { chmodSync, rmSync } from "node:fs";
+// daemon, which adds the machine token. The provider never holds a Cloudflare credential. One server serves a Unix
+// socket in the daemon's private folder, and a named pipe on Windows with the rules of K-621.
+import { chmodSync, lstatSync, rmSync } from "node:fs";
+import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
+import { type Socket, connect as connectTcp, createServer as createListener } from "node:net";
+import { Readable } from "node:stream";
+import { connect as connectTls } from "node:tls";
 import type { ReachedCard } from "@kitshn/local";
+import type { Platform } from "./service.ts";
+import { pipeServerProblem } from "./winpipe.ts";
 
 /** The Access service token of this machine (K-107). */
 export interface MachineToken {
@@ -9,45 +16,33 @@ export interface MachineToken {
   readonly clientSecret: string;
 }
 
+/** K-621: at most this many connections at once, and a connection that sends nothing in this time closes. */
+const LINK_CONNECTIONS = 64;
+const LINK_FIRST_BYTE_MS = 30_000;
+
 /**
- * K-1609: where a request to `/<machine id>/<path>` goes: the address of a card of that machine that this machine
- * reaches. Known limit: the reach of every provider of this machine counts, and with several such cards the first
- * with an address wins, also a card of another provider. Revisit when a second provider, or a second addressed kind,
- * has cards on the same machine: then the path names the card.
+ * K-1609: where a request to `/<provider>/<machine id>/<path>` goes: the address of the card of the provider that the
+ * path names, on that machine in this machine's reach. Every caller runs as the daemon user, so this is no boundary. Known limit: with two addressed kinds of one provider on one machine, the first
+ * card with an address wins; revisit when a provider has two, then the path names the card.
  */
 export function linkTarget(
-  reach: ReadonlyArray<ReachedCard>,
+  reachOf: (provider: string) => ReadonlyArray<ReachedCard>,
   url: URL,
   scheme: "https" | "http" = "https",
 ): { readonly target: URL } | { readonly error: string; readonly status: number } {
-  const [, machineId = "", ...rest] = url.pathname.split("/");
-  const address = reach.find((card) => card.machineId === machineId && card.address !== null)?.address;
+  const [, provider = "", machineId = "", ...rest] = url.pathname.split("/");
+  const address = reachOf(provider).find(
+    (card) => card.machineId === machineId && card.address !== null,
+  )?.address;
   if (!address)
-    return { error: `this machine reaches no address of the machine ${machineId} (K-1609).`, status: 403 };
+    return {
+      error: `the provider ${provider} of this machine reaches no address of the machine ${machineId} (K-1609).`,
+      status: 403,
+    };
   const target = new URL(`${scheme}://${address}/${rest.join("/")}${url.search}`);
   // A path cannot change the host: the proxy reaches only the card's own address.
   if (target.host !== address) return { error: `${url.pathname} leaves ${address}.`, status: 400 };
   return { target };
-}
-
-/** The headers that go on: never the caller's own Access headers, nor the parts of a WebSocket handshake. */
-export function linkHeaders(incoming: Headers, token: MachineToken): Record<string, string> {
-  const headers: Record<string, string> = {};
-  for (const [name, value] of incoming) {
-    const lower = name.toLowerCase();
-    if (lower.startsWith("cf-access-") || lower.startsWith("sec-websocket-")) continue;
-    if (["host", "connection", "upgrade", "content-length"].includes(lower)) continue;
-    // An Access session cookie would let B see a person or an old session instead of A's machine token.
-    if (lower === "cookie") {
-      const kept = withoutAccessCookie(value);
-      if (kept) headers[name] = kept;
-      continue;
-    }
-    headers[name] = value;
-  }
-  headers["CF-Access-Client-Id"] = token.clientId;
-  headers["CF-Access-Client-Secret"] = token.clientSecret;
-  return headers;
 }
 
 /** The cookies of a `Cookie` header without `CF_Authorization`, or null when none is left. */
@@ -59,94 +54,203 @@ export function withoutAccessCookie(cookie: string): string | null {
   return kept.length > 0 ? kept.join("; ") : null;
 }
 
-/** An answer without the `Set-Cookie` of an Access session, so the caller never keeps B's session. */
-function withoutAccessSetCookie(answer: Response): Response {
-  const cookies = answer.headers.getSetCookie();
-  if (!cookies.some((cookie) => cookie.startsWith("CF_Authorization="))) return answer;
-  const headers = new Headers(answer.headers);
-  headers.delete("set-cookie");
-  for (const cookie of cookies)
-    if (!cookie.startsWith("CF_Authorization=")) headers.append("set-cookie", cookie);
-  return new Response(answer.body, { status: answer.status, statusText: answer.statusText, headers });
+/**
+ * The headers that go on: never the caller's own Access headers or Access session cookie, nor the parts of a hop.
+ * An Access session cookie would let B see a person or an old session instead of A's machine token.
+ */
+export function linkHeaders(rawHeaders: ReadonlyArray<string>, token: MachineToken): Array<[string, string]> {
+  const headers: Array<[string, string]> = [];
+  for (let index = 0; index + 1 < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index]!;
+    const value = rawHeaders[index + 1]!;
+    const lower = name.toLowerCase();
+    if (lower.startsWith("cf-access-") || HOP_HEADERS.has(lower)) continue;
+    if (lower === "cookie") {
+      const kept = withoutAccessCookie(value);
+      if (kept) headers.push([name, kept]);
+      continue;
+    }
+    headers.push([name, value]);
+  }
+  headers.push(["CF-Access-Client-Id", token.clientId], ["CF-Access-Client-Secret", token.clientSecret]);
+  return headers;
 }
 
-interface Upstream {
-  readonly target: string;
-  readonly headers: Record<string, string>;
-  socket: WebSocket | null;
-  readonly pending: Array<string | ArrayBuffer | Uint8Array>;
+/** Headers of one hop, which each side of the proxy sets for itself. */
+const HOP_HEADERS: ReadonlySet<string> = new Set([
+  "host",
+  "connection",
+  "content-length",
+  "keep-alive",
+  "transfer-encoding",
+]);
+
+/** Whether a `Set-Cookie` value sets the Access session, which never comes back through the proxy. */
+const setsAccessSession = (cookie: string) => cookie.trimStart().startsWith("CF_Authorization=");
+
+interface LinkOptions {
+  readonly reachOf: (provider: string) => ReadonlyArray<ReachedCard>;
+  readonly token: () => MachineToken | null;
+  readonly log: (text: string) => void;
+  /** `http` only in tests. */
+  readonly scheme?: "https" | "http";
 }
 
 /**
- * K-1609: serves the link proxy on a Unix socket in the daemon's private folder (mode 0600 in 0700), so only the daemon
- * user and root reach it (K-701). HTTP and WebSocket requests stream both ways. `scheme` is `http` only in tests.
+ * K-1609: serves the link proxy on `path`: a Unix socket of mode 0600 in the daemon's private folder, or on Windows a
+ * named pipe, which gives read and write only to its owner, SYSTEM and Administrators (K-621). The `node:net` server
+ * of K-621 takes each connection and gives it to the HTTP server, which never listens itself: Bun's `node:http` is
+ * not tested on a pipe. HTTP streams both ways; a WebSocket upgrade becomes a byte tunnel to the card's address.
  */
-export function serveLinks(
-  path: string,
-  options: {
-    readonly reach: () => ReadonlyArray<ReachedCard>;
-    readonly token: () => MachineToken | null;
-    readonly log: (text: string) => void;
-    readonly scheme?: "https" | "http";
-  },
-): { readonly stop: () => void } {
-  rmSync(path, { force: true });
-  const server = Bun.serve<Upstream>({
-    unix: path,
-    fetch(request, server) {
-      const found = linkTarget(options.reach(), new URL(request.url), options.scheme);
-      if ("error" in found) return Response.json({ error: found.error }, { status: found.status });
-      const token = options.token();
-      if (!token) return Response.json({ error: "the daemon has no machine token." }, { status: 503 });
-      const headers = linkHeaders(request.headers, token);
-      if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
-        const target = new URL(found.target);
-        target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
-        const upgraded = server.upgrade(request, {
-          data: { target: target.toString(), headers, socket: null, pending: [] },
-        });
-        return upgraded
-          ? undefined
-          : Response.json({ error: "the WebSocket upgrade failed." }, { status: 400 });
-      }
-      return fetch(found.target, {
-        method: request.method,
-        headers,
+export function serveLinks(path: string, options: LinkOptions): Promise<{ readonly stop: () => void }> {
+  const scheme = options.scheme ?? "https";
+  const refuse = (response: ServerResponse, status: number, error: string) => {
+    response.writeHead(status, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error }));
+  };
+  const server = createServer((request, response) => void forward(request, response));
+  const forward = async (request: IncomingMessage, response: ServerResponse) => {
+    const found = linkTarget(options.reachOf, new URL(request.url ?? "/", "http://link"), scheme);
+    if ("error" in found) return refuse(response, found.status, found.error);
+    const token = options.token();
+    if (!token) return refuse(response, 503, "the daemon has no machine token.");
+    const method = request.method ?? "GET";
+    try {
+      const answer = await fetch(found.target, {
+        method,
+        headers: linkHeaders(request.rawHeaders, token),
         redirect: "manual",
-        ...(request.body ? { body: request.body, duplex: "half" } : {}),
-      } as RequestInit).then(withoutAccessSetCookie);
-    },
-    websocket: {
-      open(client) {
-        const upstream = new WebSocket(client.data.target, {
-          headers: client.data.headers,
-        } as unknown as string[]);
-        upstream.binaryType = "arraybuffer";
-        client.data.socket = upstream;
-        upstream.onopen = () => {
-          for (const message of client.data.pending.splice(0)) upstream.send(message);
-        };
-        upstream.onmessage = (event) => client.send(event.data as string | ArrayBuffer);
-        // 1005 and 1006 are reserved and cannot be sent; such a close ends the client plainly.
-        upstream.onclose = (event) =>
-          event.code === 1005 || event.code === 1006
-            ? client.close()
-            : client.close(event.code, event.reason);
-        upstream.onerror = () => {
-          options.log(`link: ${new URL(client.data.target).host} failed`);
-          client.close(1011, "the link to the other machine failed");
-        };
-      },
-      message(client, message) {
-        const upstream = client.data.socket;
-        if (upstream?.readyState === WebSocket.OPEN) upstream.send(message);
-        else client.data.pending.push(message);
-      },
-      close(client) {
-        client.data.socket?.close();
-      },
-    },
+        // The bytes go on as B sends them, so a compressed answer keeps its own encoding header.
+        decompress: false,
+        ...(method === "GET" || method === "HEAD"
+          ? {}
+          : { body: Readable.toWeb(request) as ReadableStream, duplex: "half" }),
+      } as RequestInit);
+      const headers: Array<[string, string]> = [];
+      for (const [name, value] of answer.headers)
+        if (name.toLowerCase() !== "set-cookie" && !HOP_HEADERS.has(name.toLowerCase()))
+          headers.push([name, value]);
+      for (const cookie of answer.headers.getSetCookie())
+        if (!setsAccessSession(cookie)) headers.push(["set-cookie", cookie]);
+      response.writeHead(answer.status, headers.flat());
+      if (answer.body) for await (const chunk of answer.body) response.write(chunk);
+      response.end();
+    } catch (error) {
+      options.log(`link: ${found.target.host} failed: ${String(error)}`);
+      if (response.headersSent) response.destroy();
+      else refuse(response, 502, "the link to the other machine failed.");
+    }
+  };
+  server.on("upgrade", (request: IncomingMessage, client: Socket, head: Buffer) => {
+    const found = linkTarget(options.reachOf, new URL(request.url ?? "/", "http://link"), scheme);
+    const token = options.token();
+    if ("error" in found || !token) {
+      client.end(`HTTP/1.1 ${"error" in found ? found.status : 503} Refused\r\nConnection: close\r\n\r\n`);
+      return;
+    }
+    const { target } = found;
+    const port = Number(target.port || (scheme === "https" ? 443 : 80));
+    const upstream =
+      scheme === "https"
+        ? connectTls({ host: target.hostname, port, servername: target.hostname })
+        : connectTcp({ host: target.hostname, port });
+    const ready = scheme === "https" ? "secureConnect" : "connect";
+    upstream.once(ready, () => {
+      const lines = [
+        `GET ${target.pathname}${target.search} HTTP/1.1`,
+        `Host: ${target.host}`,
+        "Connection: Upgrade",
+      ];
+      for (const [name, value] of linkHeaders(request.rawHeaders, token)) lines.push(`${name}: ${value}`);
+      upstream.write(`${lines.join("\r\n")}\r\n\r\n`);
+      if (head.length > 0) upstream.write(head);
+      tunnelAnswer(upstream, client);
+      client.pipe(upstream);
+    });
+    const close = () => {
+      upstream.destroy();
+      client.destroy();
+    };
+    upstream.on("error", (error: Error) => {
+      options.log(`link: ${target.host} failed: ${String(error)}`);
+      close();
+    });
+    client.on("error", close);
+    client.on("close", () => upstream.destroy());
+    upstream.on("close", () => client.destroy());
   });
-  chmodSync(path, 0o600);
-  return { stop: () => server.stop(true) };
+  const listener = createListener((socket) => {
+    // A connection that never sends a byte holds a pipe instance for nothing, for example a read-only one.
+    const quiet = setTimeout(() => socket.destroy(), LINK_FIRST_BYTE_MS);
+    socket.once("data", () => clearTimeout(quiet));
+    socket.on("close", () => clearTimeout(quiet));
+    socket.on("error", () => socket.destroy());
+    server.emit("connection", socket);
+  });
+  listener.maxConnections = LINK_CONNECTIONS;
+  if (!path.startsWith("\\\\.\\pipe\\")) rmSync(path, { force: true });
+  return new Promise((resolve, reject) => {
+    listener.once("error", (error: NodeJS.ErrnoException) =>
+      reject(
+        error.code === "EADDRINUSE"
+          ? new Error(`another program holds the link pipe ${path} (K-621); the daemon serves no links now.`)
+          : error,
+      ),
+    );
+    listener.listen(path, () => {
+      if (!path.startsWith("\\\\.\\pipe\\")) chmodSync(path, 0o600);
+      resolve({
+        stop: () => {
+          listener.close();
+          server.close();
+        },
+      });
+    });
+  });
+}
+
+/**
+ * The answer head of an upgrade goes back without the `Set-Cookie` of an Access session; the bytes after it go on as
+ * they come.
+ */
+function tunnelAnswer(upstream: Socket, client: Socket) {
+  let head = Buffer.alloc(0);
+  const onData = (chunk: Buffer) => {
+    head = Buffer.concat([head, chunk]);
+    const end = head.indexOf("\r\n\r\n");
+    if (end < 0) return;
+    upstream.off("data", onData);
+    const lines = head
+      .subarray(0, end)
+      .toString("latin1")
+      .split("\r\n")
+      .filter((line) => !(line.toLowerCase().startsWith("set-cookie:") && setsAccessSession(line.slice(11))));
+    client.write(Buffer.from(`${lines.join("\r\n")}\r\n\r\n`, "latin1"));
+    const rest = head.subarray(end + 4);
+    if (rest.length > 0) client.write(rest);
+    upstream.pipe(client);
+  };
+  upstream.on("data", onData);
+}
+
+/**
+ * K-1609, K-621: why a provider must not use the link socket `path`, or null. On Windows, the pipe's server must run as
+ * this account; elsewhere, the socket must be this user's, with mode 0600.
+ */
+export function linkSocketProblem(platform: Platform, path: string): string | null {
+  if (platform === "win32") {
+    const problem = pipeServerProblem(path);
+    return problem === "missing" ? `no link proxy serves ${path}.` : problem;
+  }
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isSocket()) return `${path} is not a socket.`;
+    if (stat.uid !== process.getuid!())
+      return `${path} belongs to the user id ${stat.uid}, not to this user.`;
+    if ((stat.mode & 0o777) !== 0o600)
+      return `${path} has the mode ${(stat.mode & 0o777).toString(8)}, not 600.`;
+    return null;
+  } catch {
+    return `no link proxy serves ${path}.`;
+  }
 }

@@ -126,7 +126,7 @@ import { keepBuild, keptId, keptTag, rollbackOverride, serviceImages, staleTags 
 import { TokenCache } from "./tokens.ts";
 import { Providers, parseSaved } from "./providers.ts";
 import { desiredProblem } from "@kitshn/local";
-import { serveLinks } from "./link.ts";
+import { linkSocketProblem, serveLinks } from "./link.ts";
 import { lastHour, lastSamples } from "./samples.ts";
 import { pushKey } from "@kitshn/local";
 import { listenerUid, portOf } from "./listener.ts";
@@ -382,6 +382,17 @@ async function providerCommand(argv: ReadonlyArray<string>) {
     (bytes) => process.stdout.write(bytes),
   ).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   if (outcome !== "closed") fail(notRunning());
+}
+
+/**
+ * K-1609, K-621: `kitshn link-check <socket>` exits 0 when this account's daemon serves the link socket, so a provider
+ * that cannot read a pipe's server account itself checks it before its first call.
+ */
+function linkCheckCommand(path: string | undefined) {
+  if (!path) fail("usage: kitshn link-check <socket or pipe>");
+  const problem = linkSocketProblem(platform, path!);
+  if (problem) fail(problem);
+  console.log(`${path} is served by this account.`);
 }
 
 /** K-702: one request to the running daemon; null when it does not run. An error answer ends the command. */
@@ -2605,17 +2616,16 @@ async function runCommand() {
   const local = await listenLocal(paths.socket, { ...socketOptions, access: "private" });
   process.on("exit", local.stop);
   // K-1609: the link proxy of the providers, in the same private folder, so only the daemon user and root reach it.
-  const links =
-    linkSocket === null
-      ? null
-      : serveLinks(linkSocket, {
-          reach: () =>
-            registry()
-              .reports()
-              .flatMap((report) => registry().reachOf(report.name)),
-          token: () => (joined ? { clientId: joined.clientId, clientSecret: joined.clientSecret } : null),
-          log,
-        });
+  // K-1609, K-621: a start without the link proxy still serves the rest; the answer to register then names none.
+  const links = await serveLinks(linkSocket, {
+    reachOf: (provider) => registry().reachOf(provider),
+    token: () => (joined ? { clientId: joined.clientId, clientSecret: joined.clientSecret } : null),
+    log,
+  }).catch((error: unknown) => {
+    log(`no link proxy: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  });
+  linkServed = links !== null;
   if (links) process.on("exit", links.stop);
   // K-701: the users in `localUsers` connect here. An unsafe folder costs only this socket, not the daemon.
   const shared =
@@ -2692,9 +2702,17 @@ const answerWaiters = new Map<string, (error: string | null) => void>();
 const MACHINE_NAME_KEY = "machine:name";
 
 /** K-1609: the Unix socket of the link proxy, next to the private local socket. */
-// Known limit: Windows has no link proxy, because its local socket is a named pipe with no private folder (K-621).
-// Revisit with a pipe of its own, under the pipe rules of K-621.
-const linkSocket = platform === "win32" ? null : join(dirname(paths.socket), "link.sock");
+/**
+ * K-1609: the link proxy, next to the private local socket. On Windows a named pipe has no private folder, so its name
+ * ends in a part that is new at each start: no other account can take it first, and a provider learns it only from
+ * the answer to `register` (K-621).
+ */
+const linkSocket =
+  platform === "win32"
+    ? `${paths.socket}-link-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`
+    : join(dirname(paths.socket), "link.sock");
+/** False when the link proxy did not start; the answer to `register` then names no socket. */
+let linkServed = false;
 
 /** K-704: the providers of this machine, saved in `providers.json`. */
 const providersFile = () => join(paths.data, "providers.json");
@@ -2929,7 +2947,7 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
       type: "register",
       machineId: joined.machineId,
       ...registry().savedFor(request.provider),
-      linkSocket,
+      linkSocket: linkServed ? linkSocket : null,
       machineName: registry().pushedValue(MACHINE_NAME_KEY) as string | null,
     };
   }
@@ -2999,6 +3017,9 @@ switch (command) {
   case "provider":
     await providerCommand(args);
     break;
+  case "link-check":
+    linkCheckCommand(args[0]);
+    break;
   case "publish":
   case "address":
   case "logs":
@@ -3053,6 +3074,7 @@ kitshn attester set --prefix <p.> --url <loopback url> --token-env <NAME>
                                         register an attester of thread labels, as the daemon user or root (K-1751)
 kitshn provider                         join stdin and stdout to the local socket, for a provider (K-704)
 kitshn provider forget <name>           drop a provider that does not run, as the daemon user or root (K-704)
+kitshn link-check <socket or pipe>      exit 0 when this account's daemon serves that link proxy (K-1609)
 kitshn agent <action> [target]          ask kitshn as this machine (K-1710): --reason, --label k=v, --body json
 ${AGENT_USAGE}
 kitshn setup-git                        git asks kitshn first for github.com tokens (K-1763)

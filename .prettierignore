@@ -1,14 +1,9 @@
-# KitSHn 1 files keep their own style. The folders are anchored to the root, so packages/*/src is checked.
+# These files keep their own style. The folders are anchored to the root, so packages/*/src is checked.
 *.md
 *.yml
 *.yaml
 *.html
-/src/
-/tests/
-/specs/
 /assets/
-.homebrew/
-uv.lock
 pnpm-lock.yaml
 packages/edge/public/install
 dist/

@@ -102,7 +102,6 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: kitshn-edge
-      # A release made with GITHUB_TOKEN triggers no other workflow, so homebrew.yml stays quiet.
       # K-617: one release per commit, edge-<version>, that nothing changes later, with SHA256SUMS. The
       # Worker names its version; join, update and deploy download from that release only. The rolling
       # "edge" release stays for the bootstrap of a new account.

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  answersMarkedPush,
   credentialAnswer,
   credentialReply,
+  permissionOfCredential,
   readCredentialInput,
   repoOfCredential,
   repoOfRemote,
@@ -47,5 +49,27 @@ describe("git credential helper (K-1763, K-1764)", () => {
         reason: "could not check the T3 thread; try again.",
       }),
     ).toEqual({ stdout: "quit=1\n", stderr: "kitshn: could not check the T3 thread; try again." });
+  });
+
+  it("asks for write only on a push, which kitshn setup-git marks with the user kitshn-push", () => {
+    const push = readCredentialInput(
+      "protocol=https\nhost=github.com\nusername=kitshn-push\npath=a/b.git\n\n",
+    );
+    expect(permissionOfCredential(push)).toBe("write");
+    expect(
+      permissionOfCredential(readCredentialInput("protocol=https\nhost=github.com\npath=a/b.git\n\n")),
+    ).toBe("read");
+  });
+
+  it("clears the push mark when kitshn cannot help, so the next helper (gh) answers for its own user", () => {
+    const notKitshn = { id: "1", type: "ask", outcome: "not-kitshn", reason: "x" } as const;
+    expect(credentialReply(notKitshn, true)).toEqual({ stdout: "username=\n", stderr: null });
+    expect(credentialReply(null, true)).toEqual({ stdout: "username=\n", stderr: null });
+    expect(credentialReply(notKitshn, false)).toEqual({ stdout: "", stderr: null });
+    // setup-git warns about every later helper that looks up the user name.
+    expect(answersMarkedPush("!/opt/homebrew/bin/gh auth git-credential")).toBe(true);
+    expect(
+      ["osxkeychain", "store", "cache", "/usr/lib/git-core/git-credential-libsecret"].some(answersMarkedPush),
+    ).toBe(false);
   });
 });

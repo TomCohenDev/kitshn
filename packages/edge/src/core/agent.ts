@@ -130,11 +130,18 @@ export function agentHas(
 }
 
 /**
- * K-819: the circle where a new card of a repo that an agent key allowed starts: its first agent circle at
- * the level `control`, so the key manages the card. Undefined sends the card to the tray.
+ * K-819, K-1711: the agent circle of a key or a machine at the level `control` where its card goes: the first of
+ * `holding` (the circles that hold the card now), else its first one. Undefined sends the card to the tray.
  */
-export const agentHomeCircle = (state: State, clientId: string, now: number) =>
-  controlCircles(state, { email: null, clientId, ip: null }, now)[0];
+export const agentHomeCircle = (
+  state: State,
+  clientId: string,
+  now: number,
+  holding: ReadonlyArray<Circle> = [],
+) => {
+  const homes = controlCircles(state, { email: null, clientId, ip: null }, now);
+  return homes.find((home) => holding.some((circle) => circle.id === home.id)) ?? homes[0];
+};
 
 /** K-718: the agent circles of a key at the level `control`, in map order. */
 const controlCircles = (state: State, visitor: Visitor, now: number) =>
@@ -230,9 +237,9 @@ export function agentRefusal(
   const own = circlesOf(state, visitor, now);
   const publishes = agentHas(state, visitor, "publishes", now, approved);
   for (const edit of changes) {
-    if (edit._tag !== "place") return `An agent key may only move cards; it cannot change a ${edit._tag}.`;
+    if (edit._tag !== "place") return `An agent may only move cards; it cannot change a ${edit._tag}.`;
     if (!controlled.has(edit.id))
-      return `This key has no control on the card "${state.resources.get(edit.id)?.name ?? edit.id}".`;
+      return `This agent has no control on the card "${state.resources.get(edit.id)?.name ?? edit.id}".`;
     const kind = state.resources.get(edit.id)?.kind;
     const publishable = added.has(edit.id) && kind !== undefined && PUBLISHABLE.has(kind);
     for (const side of [state, after]) {
@@ -244,7 +251,7 @@ export function agentRefusal(
           (!own.has(circle.id) || levelIn(side, edit.id, circle) !== "control"),
       );
       if (foreign)
-        return `An agent key moves cards only between its own agent circles with control${publishes ? ", and the sites that it added into Everyone" : ""}, and "${foreign.name}" is not one of them.`;
+        return `An agent moves cards only between its own agent circles with control${publishes ? ", and the sites that it added into Everyone" : ""}, and "${foreign.name}" is not one of them.`;
       const keeps = holding.some(
         (circle) => own.has(circle.id) && levelIn(side, edit.id, circle) === "control",
       );
@@ -265,7 +272,7 @@ function publishRefusal(state: State, visitor: Visitor, now: number) {
   );
   return overlaps
     ? "Publish into the overlap of an agent circle and Everyone, so the key keeps managing the card."
-    : `No agent circle of this key overlaps Everyone. Ask the owner to ${CIRCLE_ALONE_KEY.mac.label}-drag (on a Mac, iPad or iPhone) or ${CIRCLE_ALONE_KEY.other.label}-drag (on other systems) the head of the Agents circle, which moves the circle alone, so it overlaps Everyone and its cards stay in place.`;
+    : `No agent circle of this agent overlaps Everyone. Ask the owner to ${CIRCLE_ALONE_KEY.mac.label}-drag (on a Mac, iPad or iPhone) or ${CIRCLE_ALONE_KEY.other.label}-drag (on other systems) the head of the Agents circle, which moves the circle alone, so it overlaps Everyone and its cards stay in place.`;
 }
 
 /**
@@ -288,8 +295,8 @@ export function agentUploadPlace(
     circleId === null ? homes[0] : homes.find((circle) => circle.id === circleId || circle.name === circleId);
   if (!home)
     return circleId === null
-      ? "This key has no agent circle with control to publish from (K-718)."
-      : `"${circleId}" is not an agent circle of this key with control (K-718).`;
+      ? "This agent has no agent circle with control to publish from (K-718)."
+      : `"${circleId}" is not an agent circle of this agent with control (K-718).`;
   const taken = [...state.places.values()];
   if (!publish)
     return (
@@ -297,7 +304,7 @@ export function agentUploadPlace(
       `kitshn finds no free spot inside "${home.name}".`
     );
   if (!agentHas(state, visitor, "publishes", now, approved))
-    return 'This key may not publish. The owner turns on "may publish" for it (K-718).';
+    return 'This agent may not publish. The owner turns on "may publish" for it (K-718).';
   const everyone = [...state.circles.values()].find(isEveryoneCircle);
   if (!everyone) return "The map has no Everyone circle.";
   return (
@@ -360,7 +367,7 @@ export function agentDeployPlan(
   if (mode === "build") {
     // A pull request environment is always `pr-<n>` (K-807); its build comes from a push to the pull request.
     if (isPreview(last.environment))
-      return refused("A preview builds again on a new push to its pull request, not from an agent key.");
+      return refused("A preview builds again on a new push to its pull request, not from an agent.");
     return last.branch
       ? { kind: "build", repo: last.repo, branch: last.branch }
       : refused("kitshn does not know the branch of this environment.");

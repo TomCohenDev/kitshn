@@ -5650,7 +5650,7 @@ export class Kitshn extends DurableObject<Env> {
       if (visitor.kitshn && visitor.clientId !== null) {
         const reason =
           queuedCommand.kind !== "compose-redeploy"
-            ? "kitshn makes no other job for an agent key."
+            ? "kitshn makes no other job for an agent."
             : !cardsControlledBy(this.state, visitor, Date.now()).has(queuedCommand.project)
               ? "The key no longer manages the card."
               : (this.redeployRefusal(job.machine_id, queuedCommand.project) ??
@@ -7264,7 +7264,7 @@ export class Kitshn extends DurableObject<Env> {
       this.insertRevision(
         caller.actor,
         takeOver && row.state === "allowed"
-          ? `Took over deploys of ${row.name} from ${row.allowed_by_name ?? "an agent key"} (K-819)`
+          ? `Took over deploys of ${row.name} from ${row.allowed_by_name ?? "an agent"} (K-819)`
           : `${state === "allowed" ? "Allowed" : "Blocked"} deploys of ${row.name} (K-819)`,
         [],
         null,
@@ -7745,7 +7745,7 @@ export class Kitshn extends DurableObject<Env> {
     // K-819: the Compose apps of a repo that an agent key allowed run only where that key may run jobs.
     const allowedBy = this.allowingAgent(deployer.repoId);
     const agentLimit = allowedBy
-      ? ` The agent key ${allowedBy.name} allowed this repo, so it deploys only to a machine whose card, and every card on it, that key manages (K-819).`
+      ? ` The agent ${allowedBy.name} allowed this repo, so it deploys only to a machine whose card, and every card on it, that agent manages (K-819).`
       : "";
     // K-610, K-611: a new Compose app goes to the first online machine with all labels; a running one stays.
     let machineId: string | null = null;
@@ -7989,7 +7989,7 @@ export class Kitshn extends DurableObject<Env> {
         null,
       );
       return allowedBy
-        ? `The card starts in ${circle.name}, a circle of the agent key ${allowedBy.name} that allowed the repo (K-819).`
+        ? `The card starts in ${circle.name}, a circle of the agent ${allowedBy.name} that allowed the repo (K-819).`
         : `The card starts in ${circle.name} (K-807).`;
     }
     this.insertRevision(actor, `Deployed ${row.repo} ${row.environment}`, [], null);
@@ -8082,7 +8082,7 @@ export class Kitshn extends DurableObject<Env> {
     if (!mayDeployOn(this.state, allowedBy?.clientId ?? null, machine.id, Date.now()))
       return Response.json(
         {
-          error: `The agent key ${allowedBy?.name} that allowed this repo no longer manages ${machine.name} (K-819).`,
+          error: `The agent ${allowedBy?.name} that allowed this repo no longer manages ${machine.name} (K-819).`,
         },
         { status: 409 },
       );
@@ -8927,7 +8927,7 @@ export class Kitshn extends DurableObject<Env> {
     const own = circlesOf(this.state, caller.visitor, now);
     if (own.size === 0)
       return Response.json(
-        { error: "This key is in no agent circle, so it manages nothing (K-718)." },
+        { error: "This agent is in no agent circle, so it manages nothing (K-718)." },
         { status: 403 },
       );
     const managed = cardsControlledBy(this.state, caller.visitor, now);
@@ -9180,16 +9180,13 @@ export class Kitshn extends DurableObject<Env> {
       // K-718, K-909: an agent key removes nothing, also no orphaned volume.
       const command = isRecord(body) && isRecord(body["command"]) ? body["command"] : null;
       if (command?.["kind"] === "compose-volume-remove")
-        return Response.json(
-          { error: "An agent key does not delete volumes (K-718, K-909)." },
-          { status: 403 },
-        );
+        return Response.json({ error: "An agent does not delete volumes (K-718, K-909)." }, { status: 403 });
       // Only the machines whose cards it manages; a label job could land on any machine.
       if (typeof machineId !== "string" || !agentMayRunOn(this.state, caller.visitor, machineId, Date.now()))
         return Response.json(
           {
             error:
-              "An agent key runs jobs only on a machine whose card, and every card that runs on it, it manages (K-718).",
+              "An agent runs jobs only on a machine whose card, and every card that runs on it, it manages (K-718).",
           },
           { status: 403 },
         );
@@ -9203,7 +9200,7 @@ export class Kitshn extends DurableObject<Env> {
       const sender = row ? (JSON.parse(row.visitor) as Visitor).clientId : null;
       const [job] = sender !== null && sender === caller.visitor.clientId ? this.recentJobs(1, 4000, id) : [];
       // Only its own jobs: their state, exit code and output.
-      if (!job) return Response.json({ error: `This key sent no job ${id}.` }, { status: 404 });
+      if (!job) return Response.json({ error: `This agent sent no job ${id}.` }, { status: 404 });
       return Response.json(job);
     }
     if (path.startsWith("/agent/repos/") && request.method === "POST") {
@@ -9241,14 +9238,14 @@ export class Kitshn extends DurableObject<Env> {
         return Response.json({ error: 'Send {"card": <id>, "tab", "text", "from", "to"}.' }, { status: 400 });
       if (!managed.has(card))
         return Response.json(
-          { error: `This key has no control on the card "${card}" (K-1810).` },
+          { error: `This agent has no control on the card "${card}" (K-1810).` },
           { status: 403 },
         );
       // K-1810: each key searches at most 30 times a minute, so a loop cannot keep a daemon busy.
       const wait = this.logRateWait(caller.visitor.clientId ?? "", now);
       if (wait > 0)
         return Response.json(
-          { error: `This key searched logs 30 times in the last minute; try again in ${wait} s (K-1810).` },
+          { error: `This agent searched logs 30 times in the last minute; try again in ${wait} s (K-1810).` },
           { status: 429, headers: { "retry-after": String(wait) } },
         );
       // The query schema of the map ignores the extra `card` key.
@@ -9269,7 +9266,7 @@ export class Kitshn extends DurableObject<Env> {
           { status: 400 },
         );
       if (!cardsControlledBy(this.state, caller.visitor, Date.now()).has(card))
-        return Response.json({ error: `This key has no control on the card "${card}".` }, { status: 403 });
+        return Response.json({ error: `This agent has no control on the card "${card}".` }, { status: 403 });
       const row = this.lastDone(card);
       const machine = row?.machine_id ? this.state.machines.get(row.machine_id) : undefined;
       const plan = agentDeployPlan(
@@ -9507,7 +9504,12 @@ export class Kitshn extends DurableObject<Env> {
     let edits: ReadonlyArray<Edit>;
     if (action === "publish") {
       const wantsPublic = !(isRecord(body) && body["public"] === false);
-      const to = agentUploadPlace(this.state, visitor, null, wantsPublic, now, approved);
+      // A move out of Everyone stays in an agent circle that holds the card, not in the tray.
+      const holding = circlesHolding(this.state, target);
+      const home = wantsPublic
+        ? null
+        : (agentHomeCircle(this.state, machine.clientId, now, holding)?.id ?? null);
+      const to = agentUploadPlace(this.state, visitor, home, wantsPublic, now, approved);
       if (to === null || typeof to === "string")
         return to ?? "This machine has no agent circle with control (K-718).";
       edits = [{ _tag: "place", id: target, after: to }];
@@ -9852,7 +9854,7 @@ export class Kitshn extends DurableObject<Env> {
 
   /**
    * K-1762: a token for one repo. The owner's way decides first (K-1760); then "writes code" or "reads code" on a card
-   * that covers the repo, with its mode. `permission` "auto" asks for write when the machine may write (K-1763).
+   * that covers the repo, with its mode. `permission` "auto" (kitshn gh) asks for write when the machine may write (K-1764).
    */
   private async askGitHubToken(
     machine: Machine,
@@ -9871,7 +9873,7 @@ export class Kitshn extends DurableObject<Env> {
         reason: `${owner} is "not kitshn"; the machine uses its own login (K-1760).`,
       };
     const wanted = isRecord(body) ? body["permission"] : "auto";
-    // K-1763, K-1776: git cannot say push or fetch, so "auto" asks for write when the machine may write, when an Owner
+    // K-1764, K-1776: gh cannot say whether it writes, so "auto" asks for write when the machine may write, when an Owner
     // approval of write is open, and when no code right is set at all (the Owner then approves write).
     const unset =
       codeRightMode(this.state, machine.id, "readsCode", fullName, now) === null &&
@@ -10771,8 +10773,7 @@ export class Kitshn extends DurableObject<Env> {
    */
   private async agentPublish(agent: Caller, request: Request, now: number) {
     const clientId = agent.visitor.clientId;
-    if (!clientId)
-      return Response.json({ error: "Only an agent key publishes here (K-1116)." }, { status: 403 });
+    if (!clientId) return Response.json({ error: "Only an agent publishes here (K-1116)." }, { status: 403 });
     const header = (key: string) => {
       const value = request.headers.get(key);
       try {
@@ -10990,7 +10991,7 @@ export class Kitshn extends DurableObject<Env> {
     const api = this.api();
     if (!api) return fail(503, "kitshn has no Cloudflare API token here.");
     const clientId = agent.visitor.clientId;
-    if (!clientId) return fail(403, "Only an agent key publishes a folder site (K-1123).");
+    if (!clientId) return fail(403, "Only an agent publishes a folder site (K-1123).");
     try {
       if (step === "plan") return await this.agentSitePlan(api, agent, clientId, input, now);
       const [row] = this.sql<DeployRow>(
@@ -11005,7 +11006,7 @@ export class Kitshn extends DurableObject<Env> {
           )
         : [];
       if (!row || !site || row.repo_id !== null)
-        return fail(404, "kitshn knows no such folder deploy of this key.");
+        return fail(404, "kitshn knows no such folder deploy of this agent.");
       if (row.expires_at < Date.now() || row.state !== "planned")
         return fail(410, "This deploy expired or ended. Publish the folder again.");
       if (step === "assets") return await this.deployAssets(api, row, input["manifest"]);
@@ -11389,7 +11390,7 @@ export class Kitshn extends DurableObject<Env> {
     const card = this.agentCard(agent, named, now);
     const resource = card ? this.state.resources.get(card) : undefined;
     if (!card || !resource)
-      return fail(403, `This key cannot change the card "${named}" (K-1117, K-1123, K-1127).`);
+      return fail(403, `This agent cannot change the card "${named}" (K-1117, K-1123, K-1127).`);
     const folder = this.isFolderSite(card);
     if (resource.kind !== "page" && !folder)
       return fail(
@@ -11606,11 +11607,11 @@ export class Kitshn extends DurableObject<Env> {
       id,
     );
     if (!row || row.client_id !== agent.visitor.clientId)
-      return "This key changes only the folder sites that it published (K-1123).";
+      return "This agent changes only the folder sites that it published (K-1123).";
     // A plan whose files never arrived has no card yet.
     if (!this.state.resources.has(id) || row.agent_tray === 1) return null;
     if (cardsControlledBy(this.state, agent.visitor, now).has(id)) return null;
-    return "This key no longer controls the site, so it cannot change it (K-1123).";
+    return "This agent no longer controls the site, so it cannot change it (K-1123).";
   }
 
   /**
@@ -11623,7 +11624,7 @@ export class Kitshn extends DurableObject<Env> {
     if (!resource || !mine || !resource.kind.startsWith("site."))
       return Response.json(
         {
-          error: `${agent ? "This key cannot change" : "kitshn has no site card"} "${card}" (K-718, K-1128).`,
+          error: `${agent ? "This agent cannot change" : "kitshn has no site card"} "${card}" (K-718, K-1128).`,
         },
         { status: agent ? 403 : 404 },
       );
@@ -11833,7 +11834,7 @@ export class Kitshn extends DurableObject<Env> {
       const mine = this.agentCard(caller, named, Date.now());
       if (!mine)
         return Response.json(
-          { error: `This key cannot change the address of "${named}" (K-1117, K-1120).` },
+          { error: `This agent cannot change the address of "${named}" (K-1117, K-1120).` },
           { status: 403 },
         );
       card = mine;
@@ -11892,9 +11893,9 @@ export class Kitshn extends DurableObject<Env> {
       id,
     );
     if (!row || row.added_by !== agent.visitor.clientId)
-      return "This key changes only what it published (K-1117).";
+      return "This agent changes only what it published (K-1117).";
     if (row.agent_tray === 1 || cardsControlledBy(this.state, agent.visitor, now).has(id)) return null;
-    return "This key no longer controls the card, so it cannot change it (K-1117).";
+    return "This agent no longer controls the card, so it cannot change it (K-1117).";
   }
 
   /**

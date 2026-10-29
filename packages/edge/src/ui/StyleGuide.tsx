@@ -1,0 +1,1014 @@
+import type { ComponentChildren } from "preact";
+import { useEffect, useRef, useState } from "preact/hooks";
+import { demo, DEMO_MACHINES } from "../core/demo.ts";
+import type { MachineKey } from "../core/machine.ts";
+import type { Circle, Point, Resource, State } from "../core/model.ts";
+import type { Notification } from "../core/notifications.ts";
+import type { AccessState, MachineView, ProposalView } from "../core/protocol.ts";
+import { seed } from "../core/seed.ts";
+import { AccessRow, TrayCard } from "./App.tsx";
+import { AskRow } from "./Asks.tsx";
+import {
+  Check,
+  Menu,
+  MenuItem,
+  MenuSep,
+  MoreButton,
+  OverlayPanel,
+  Radio,
+  Switch,
+  ToastView,
+  TooltipLayer,
+} from "./controls.tsx";
+import { IconTile } from "./ItemIcon.tsx";
+import { KINDS, LEVEL_COLORS, LEVEL_TILTS } from "./kinds.ts";
+import { HEAD_LAYER, stackOffsets } from "./layout.ts";
+import { KeySticker, PresenceSticker } from "./Machines.tsx";
+import { CardView, CircleView, StackCard } from "./Map.tsx";
+import { NotificationRow } from "./Notifications.tsx";
+import { PanicOpener, PausedBanner, SafetyView } from "./Pause.tsx";
+import type { Rect } from "./popover.ts";
+
+/**
+ * The living style guide at `kit.<zone>/neo-brutalism`: every primitive of the map, drawn by its real component or
+ * its shared class, with fixtures and never the live state. Owner only, as the map: the same Access application
+ * guards the host.
+ */
+
+const NOW = Date.now();
+const noop = () => undefined;
+const at = (x: number, y: number): Point => ({ x, y });
+
+/** The fixtures: the seed of a fresh kitshn and the local demo, as the Worker's demo mode makes them. */
+function fixtureState(): State {
+  const initial = seed(["owner@example.com"], "kit.example.com");
+  const extra = demo();
+  return {
+    circles: new Map([...initial.circles, ...extra.circles].map((circle) => [circle.id, circle])),
+    resources: new Map([...initial.resources, ...extra.resources].map((resource) => [resource.id, resource])),
+    places: new Map([...initial.places, ...extra.places]),
+    shareSettings: new Map(),
+    stacks: new Map(),
+    paused: null,
+    machines: new Map(DEMO_MACHINES.map(({ machine }) => [machine.id, machine])),
+  };
+}
+
+const resource = (id: string, kind: Resource["kind"], name: string, address: string | null): Resource => ({
+  id,
+  kind,
+  name,
+  addresses: address ? [address] : [],
+  status: "running",
+  group: null,
+  machine: null,
+});
+
+const machineView = (online: boolean, key: MachineKey | null): MachineView => {
+  const first = DEMO_MACHINES[0];
+  if (!first) throw new Error("The demo has no machine.");
+  return {
+    machine: key ? { ...first.machine, key } : first.machine,
+    online,
+    lastSeen: online ? NOW : NOW - 3_600_000,
+    status: null,
+    sample: null,
+    os: first.os,
+    keyFailure: null,
+    orphanVolumes: [],
+  };
+};
+const KEY: MachineKey = { kind: "public", publicKey: "demo", fingerprint: "SHA256:demo", since: NOW };
+
+/** The tokens of the page's own stylesheet: the light `:root` block and its dark override. */
+function rootTokens() {
+  const light = new Map<string, string>();
+  const dark = new Map<string, string>();
+  const collect = (style: CSSStyleDeclaration, into: Map<string, string>) => {
+    for (let index = 0; index < style.length; index++) {
+      const name = style.item(index);
+      into.set(name, style.getPropertyValue(name).trim());
+    }
+  };
+  for (const sheet of document.styleSheets) {
+    let rules: CSSRuleList;
+    try {
+      rules = sheet.cssRules;
+    } catch {
+      continue; // The font stylesheet of another origin.
+    }
+    for (const rule of rules) {
+      if (rule instanceof CSSStyleRule && rule.selectorText === ":root") collect(rule.style, light);
+      if (rule instanceof CSSMediaRule && rule.conditionText.includes("prefers-color-scheme: dark"))
+        for (const inner of rule.cssRules)
+          if (inner instanceof CSSStyleRule && inner.selectorText === ":root") collect(inner.style, dark);
+    }
+  }
+  return { light, dark };
+}
+
+type Scheme = "system" | "light" | "dark";
+
+/** Sets the tokens of one scheme on the page itself, so both show without a change of the system setting. */
+function applyScheme(scheme: Scheme) {
+  const { light, dark } = rootTokens();
+  const root = document.documentElement.style;
+  // Only the names that the dark block changes differ between the two schemes.
+  for (const name of dark.keys()) {
+    const value = scheme === "dark" ? dark.get(name) : scheme === "light" ? light.get(name) : undefined;
+    if (value === undefined) root.removeProperty(name);
+    else root.setProperty(name, value);
+  }
+}
+
+function useScheme(): [Scheme, (scheme: Scheme) => void] {
+  const [scheme, setScheme] = useState<Scheme>("system");
+  return [
+    scheme,
+    (next) => {
+      applyScheme(next);
+      setScheme(next);
+    },
+  ];
+}
+
+/** One entry: what it is, what it is for, and where it lives. */
+function Entry(props: { heading: string; what: string; source: string; children: ComponentChildren }) {
+  return (
+    <section class="guide-entry">
+      <header>
+        <h3>{props.heading}</h3>
+        <p>{props.what}</p>
+        <code>{props.source}</code>
+      </header>
+      <div class="guide-sample">{props.children}</div>
+    </section>
+  );
+}
+
+/** A small map: a `.world` at a fixed view, so map components draw where they do on the map. */
+function MiniMap(props: { width: number; height: number; center: Point; children: ComponentChildren }) {
+  return (
+    <div class="guide-map" style={{ width: `${props.width}px`, height: `${props.height}px` }}>
+      <div
+        class="world"
+        style={{
+          transform: `translate(${props.width / 2 - props.center.x}px, ${props.height / 2 - props.center.y}px)`,
+          "--head-layer": HEAD_LAYER,
+        }}
+      >
+        {props.children}
+      </div>
+    </div>
+  );
+}
+
+/** A box that keeps fixed surfaces (dialogs, panels, toasts, the banner) inside it: a transform makes it their frame. */
+function Stage(props: { height: number; children: ComponentChildren }) {
+  return (
+    <div class="guide-stage" style={{ height: `${props.height}px` }}>
+      {props.children}
+    </div>
+  );
+}
+
+/** The computed font size of a sample, so the type scale says what it draws. */
+function Measured(props: { children: ComponentChildren }) {
+  const box = useRef<HTMLSpanElement>(null);
+  const [size, setSize] = useState("");
+  useEffect(() => {
+    const first = box.current?.firstElementChild;
+    if (first) setSize(getComputedStyle(first).fontSize);
+  }, []);
+  return (
+    <span class="guide-measured" ref={box}>
+      {props.children}
+      <code>{size}</code>
+    </span>
+  );
+}
+
+function Tokens() {
+  const [tokens] = useState(rootTokens);
+  const colours = [...tokens.light].filter(([, value]) => value.startsWith("#"));
+  const others = [...tokens.light].filter(([name, value]) => name.startsWith("--") && !value.startsWith("#"));
+  return (
+    <>
+      <Entry
+        heading="Colour tokens"
+        what="Every colour of the map. Components use the tokens, never a literal colour, so dark mode changes tokens only."
+        source=":root and @media (prefers-color-scheme: dark) · styles.css"
+      >
+        <div class="guide-swatches">
+          {colours.map(([name, light]) => {
+            const dark = tokens.dark.get(name) ?? light;
+            return (
+              <div key={name} class="guide-swatch">
+                <span class="chip-pair">
+                  <span style={{ background: light }} data-tip={`Light: ${light}`} />
+                  <span style={{ background: dark }} data-tip={`Dark: ${dark}`} />
+                </span>
+                <code>{name}</code>
+                <span class="muted">
+                  {light}
+                  {dark === light ? " (both)" : ` · ${dark}`}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </Entry>
+      <Entry
+        heading="Size, radius, border, shadow and fonts"
+        what="The other tokens: the 2px ink border, the 0.25rem radius, the hard 4px card shadow, and the two fonts."
+        source=":root · styles.css"
+      >
+        <dl class="guide-values">
+          {others.map(([name, value]) => (
+            <div key={name}>
+              <dt>
+                <code>{name}</code>
+              </dt>
+              <dd>{value}</dd>
+            </div>
+          ))}
+        </dl>
+        <div class="row">
+          <span
+            class="guide-shadow"
+            style={{ boxShadow: "var(--shadow)" }}
+            data-tip="var(--shadow): cards, dialogs, panels."
+          >
+            card 4px
+          </span>
+          <span
+            class="guide-shadow"
+            style={{ boxShadow: "3px 3px 0 0 var(--shadow-ink)" }}
+            data-tip="3px: controls, menus, tooltips."
+          >
+            control 3px
+          </span>
+          <span
+            class="guide-shadow"
+            style={{ boxShadow: "2px 2px 0 0 var(--shadow-ink)" }}
+            data-tip="2px: stickers, checkboxes."
+          >
+            sticker 2px
+          </span>
+        </div>
+      </Entry>
+      <Entry
+        heading="Type scale"
+        what="An 18px base on html, body text at 1rem, headings at weight 800, section labels in caps, ids in the mono font."
+        source="html, body, h1–h3, .label, .help, .muted, code · styles.css"
+      >
+        <div class="guide-type">
+          <Measured>
+            <h1>Heading 1</h1>
+          </Measured>
+          <Measured>
+            <h2>Heading 2</h2>
+          </Measured>
+          <Measured>
+            <h3>Heading 3</h3>
+          </Measured>
+          <Measured>
+            <span>Body text</span>
+          </Measured>
+          <Measured>
+            <span class="label">Section label</span>
+          </Measured>
+          <Measured>
+            <span class="help">Help text under a control</span>
+          </Measured>
+          <Measured>
+            <span class="muted">Muted text</span>
+          </Measured>
+          <Measured>
+            <code>code-and-ids-01</code>
+          </Measured>
+        </div>
+      </Entry>
+    </>
+  );
+}
+
+function Controls() {
+  const [segment, setSegment] = useState("view");
+  const [checked, setChecked] = useState(true);
+  const [on, setOn] = useState(true);
+  const [radio, setRadio] = useState("a");
+  const [menu, setMenu] = useState<Rect | null>(null);
+  return (
+    <>
+      <Entry
+        heading="Buttons"
+        what="Every action. A press lifts the button on hover and pushes it into its shadow on click."
+        source=".btn, .btn.primary, .btn.danger, .btn.resume, .btn.toggle, .btn.add · styles.css"
+      >
+        <div class="row">
+          <button
+            class="btn"
+            data-tip="A plain button: hover lifts it, a press moves it 3px into its shadow."
+          >
+            Plain
+          </button>
+          <button class="btn primary" data-tip="The main action of a view.">
+            Primary
+          </button>
+          <button class="btn danger" data-tip="An action that removes something; its label says what goes.">
+            Danger
+          </button>
+          <button class="btn resume" data-tip="Resume after a pause (K-1504).">
+            Resume
+          </button>
+          <button class="btn toggle" aria-pressed="true" data-tip="A toggle that is on.">
+            Toggle on
+          </button>
+          <button class="btn toggle" aria-pressed="false" data-tip="A toggle that is off.">
+            Toggle off
+          </button>
+          <button class="btn primary add" aria-label="Add" data-tip="The one + of the toolbar (K-526).">
+            +
+          </button>
+          <button class="btn" disabled data-tip="A disabled button: no hover, no press.">
+            Disabled
+          </button>
+        </div>
+        <p class="help">
+          Hover and press any of them to see the lift and the press. kitshn has no send button.
+        </p>
+      </Entry>
+      <Entry
+        heading="Segmented control and tabs"
+        what="One choice of a few, and the tabs of the toolbar. The chosen part is filled with the selection colour."
+        source=".seg, .seg.small with aria-pressed · styles.css"
+      >
+        <div class="row">
+          <div class="seg">
+            {["view", "use", "control"].map((level) => (
+              <button
+                key={level}
+                type="button"
+                aria-pressed={segment === level}
+                data-tip={`Choose ${level}.`}
+                onClick={() => setSegment(level)}
+              >
+                {level}
+              </button>
+            ))}
+          </div>
+          <div class="seg small">
+            {["Map", "Machines", "Library", "History"].map((tab, index) => (
+              <button key={tab} type="button" aria-pressed={index === 0} data-tip={`The ${tab} tab.`}>
+                {tab}
+              </button>
+            ))}
+          </div>
+        </div>
+      </Entry>
+      <Entry
+        heading="Checkbox, radio and switch"
+        what="On or off, one of a group, and a setting that takes effect at once. The native input keeps the keyboard; the look is kitshn's."
+        source="Check, Radio, Switch · controls.tsx"
+      >
+        <div class="row">
+          <Check label="Checked" tip="A checkbox that is on." checked={checked} onChange={setChecked} />
+          <Check
+            label="Disabled"
+            tip="A checkbox that is off and disabled."
+            checked={false}
+            disabled
+            onChange={noop}
+          />
+          <Radio
+            label="One"
+            tip="The first radio of a group."
+            name="guide"
+            checked={radio === "a"}
+            onSelect={() => setRadio("a")}
+          />
+          <Radio
+            label="Two"
+            tip="The second radio of a group."
+            name="guide"
+            checked={radio === "b"}
+            onSelect={() => setRadio("b")}
+          />
+          <Switch
+            label="Switch"
+            tip="A switch that changes a setting at once."
+            checked={on}
+            onChange={setOn}
+          />
+          <Switch
+            label="Disabled"
+            tip="A switch that is off and disabled."
+            checked={false}
+            disabled
+            onChange={noop}
+          />
+        </div>
+      </Entry>
+      <Entry
+        heading="Text field"
+        what="Text input. kitshn has no select list: a choice of many is a menu or a segmented control."
+        source="input · styles.css"
+      >
+        <div class="row">
+          <input
+            type="text"
+            placeholder="name@example.com"
+            aria-label="A text field"
+            data-tip="A text field."
+          />
+          <input
+            type="search"
+            placeholder="Filter"
+            aria-label="A search field"
+            data-tip="A search field; Escape clears it."
+          />
+          <input type="text" value="Disabled" disabled aria-label="A disabled field" />
+        </div>
+      </Entry>
+      <Entry
+        heading="Menu"
+        what="The context menu of cards, stacks, circles and the map, and every dropdown. Items with a key hint, a danger item, a separator."
+        source="Menu, MenuItem, MenuSep, MoreButton · controls.tsx"
+      >
+        <div class="row">
+          <button
+            class="btn"
+            aria-haspopup="menu"
+            data-tip="Open a real menu here."
+            onClick={(event) => setMenu(event.currentTarget.getBoundingClientRect())}
+          >
+            Open the menu
+          </button>
+          <MoreButton name="this sample" onOpen={setMenu} />
+        </div>
+        {menu ? (
+          <Menu label="Sample menu" anchor={menu} onClose={() => setMenu(null)}>
+            <MenuItem tip="An item." onSelect={noop}>
+              Show details
+            </MenuItem>
+            <MenuItem tip="An item with a key hint." keys="⌘K" onSelect={noop}>
+              Find
+            </MenuItem>
+            <MenuItem tip="An item that opens a sub-list." opens keepOpen onSelect={noop}>
+              Share with
+            </MenuItem>
+            <MenuItem tip="A refused item: its reason is the tooltip." disabled onSelect={noop}>
+              Unstack
+            </MenuItem>
+            <MenuSep />
+            <MenuItem tip="A dangerous item: it runs at once and shows Undo." danger onSelect={noop}>
+              Remove app
+            </MenuItem>
+          </Menu>
+        ) : null}
+      </Entry>
+      <Entry
+        heading="Tooltip"
+        what="Every control says what it is and what happens: after 300 ms on hover, at once on keyboard focus."
+        source="TooltipLayer with data-tip · controls.tsx"
+      >
+        <button class="btn" data-tip="This is a tooltip: one short sentence.">
+          Hover or focus me
+        </button>
+      </Entry>
+    </>
+  );
+}
+
+function Surfaces() {
+  return (
+    <>
+      <Entry
+        heading="Dialog with scrim"
+        what="A question or a form over the page. The scrim dims the page with a flat layer, no blur."
+        source=".scrim, .dialog · styles.css"
+      >
+        <Stage height={340}>
+          <div class="scrim">
+            <section class="dialog" role="dialog" aria-label="Sample dialog">
+              <h2>Make tick3d public?</h2>
+              <p>Anyone with the address can open it.</p>
+              <div class="row">
+                <button class="btn" data-tip="Cancel: nothing changes.">
+                  Cancel
+                </button>
+                <button class="btn primary" data-tip="Continue with the change.">
+                  Continue
+                </button>
+              </div>
+            </section>
+          </div>
+        </Stage>
+      </Entry>
+      <Entry
+        heading="Overlay panel"
+        what="The side panel over the map: card details, a circle, the map. Enlarge opens its full view."
+        source="OverlayPanel · controls.tsx"
+      >
+        <Stage height={260}>
+          <OverlayPanel heading="Card" large={false} onResize={noop} onClose={noop}>
+            <div class="label">Static sites</div>
+            <h2>tick3d</h2>
+            <p class="help">The panel scrolls inside itself.</p>
+          </OverlayPanel>
+        </Stage>
+      </Entry>
+      <Entry
+        heading="Toast"
+        what="What a change did, with Undo for 10 seconds. It shows in the half of the map away from the changed card."
+        source="ToastView · controls.tsx; toastPlace · layout.ts"
+      >
+        <Stage height={170}>
+          <ToastView
+            text="Shared tick3d with Everyone · view"
+            error={false}
+            besidePanel={false}
+            place={{ top: 12 }}
+            onUndo={noop}
+            action={null}
+            onClose={noop}
+          />
+          <ToastView
+            text="Cloudflare refused the change."
+            error
+            besidePanel={false}
+            place={{ bottom: 12 }}
+            onUndo={null}
+            action={null}
+            onClose={noop}
+          />
+        </Stage>
+        <p class="help">
+          Top: a change with Undo, placed at the top. Bottom: an error, placed at the bottom.
+        </p>
+      </Entry>
+    </>
+  );
+}
+
+function MapParts(props: { state: State }) {
+  const { state } = props;
+  const site =
+    state.resources.get("tick3d") ?? resource("tick3d", "site.static", "tick3d", "tick3d.example.com");
+  const framed = resource("framed", "site.static", "example", "example.com");
+  const card = (item: Resource, point: Point, extra: Partial<Parameters<typeof CardView>[0]> = {}) => (
+    <CardView
+      key={`${item.id}-${point.x}`}
+      resource={item}
+      layer={null}
+      state={state}
+      at={point}
+      selected={false}
+      dragging={false}
+      target={false}
+      flash={false}
+      count={null}
+      open={false}
+      access={null}
+      downSince={null}
+      machine={null}
+      pullRequest={null}
+      preview={false}
+      peek={false}
+      zone="example.invalid"
+      onMenu={noop}
+      onClose={noop}
+      {...extra}
+    />
+  );
+  const ring: Circle = {
+    id: "guide-ring",
+    name: "Friends",
+    color: "#FF5277",
+    level: "view",
+    members: [{ _tag: "email", email: "friend@example.com" }],
+    match: "any",
+    needsPasskey: false,
+    endsAt: null,
+    x: 0,
+    y: 0,
+    r: 170,
+  };
+  const members = ["riffle", "riffle-pr-41", "riffle-pr-42"].flatMap((id) => state.resources.get(id) ?? []);
+  const offsets = stackOffsets(
+    members.map(() => undefined),
+    124,
+    16,
+  );
+  const access = (item: AccessState) => card(site, at(0, 0), { access: item });
+  return (
+    <>
+      <Entry
+        heading="Card"
+        what="One item on the map: its icon, name, address, kind sticker, circles and actions. Selected cards fill with the selection colour."
+        source="CardView · Map.tsx"
+      >
+        <MiniMap width={520} height={130} center={at(0, 20)}>
+          {card(site, at(-120, 0))}
+          {card(site, at(120, 0), { selected: true })}
+        </MiniMap>
+        <p class="help">Plain, and selected.</p>
+      </Entry>
+      <Entry
+        heading="Card with a preview frame"
+        what="A live view of a site: a thumbnail of the top of its page. Still while it loads; Open when it never loads."
+        source="CardView, CardPreview, LiveFrame · Map.tsx, Peek.tsx"
+      >
+        <MiniMap width={700} height={330} center={at(0, 110)}>
+          {card(framed, at(-230, 0), { preview: true, previewStill: "loading" })}
+          {card(framed, at(0, 0), { preview: true })}
+          {card(framed, at(230, 0), { preview: true, previewStill: "failed" })}
+        </MiniMap>
+        <p class="help">Loading, loaded (example.com), and not available.</p>
+      </Entry>
+      <Entry
+        heading="Circle with head"
+        what="Who may open the cards inside it. The head names it and its level; member chips sit on its edge."
+        source="CircleView · Map.tsx"
+      >
+        <MiniMap width={520} height={400} center={at(0, 10)}>
+          <CircleView
+            circle={ring}
+            state={{ ...state, circles: new Map([[ring.id, ring]]) }}
+            selected={false}
+            preview={false}
+            flash={false}
+            headAngle={0}
+            zoomedOut={false}
+            hidden={new Set()}
+            onMenu={noop}
+          />
+          {card(site, at(0, 30))}
+        </MiniMap>
+      </Entry>
+      <Entry
+        heading="Stack, closed and open"
+        what="Cards that the owner keeps together. Closed it lists its cards; open it is a column, and its count closes it."
+        source="StackCard, CardView · Map.tsx; stackOffsets · layout.ts"
+      >
+        <MiniMap width={560} height={420} center={at(0, 160)}>
+          <StackCard
+            id="guide-stack"
+            layer={null}
+            name="Sites"
+            members={members}
+            state={state}
+            at={at(-150, 0)}
+            selected={false}
+            dragging={false}
+            target={false}
+            flash={false}
+            onMenu={noop}
+          />
+          {members.map((member, index) =>
+            card(member, at(150, offsets[index] ?? 0), {
+              count: index === 0 ? members.length : null,
+              open: true,
+            }),
+          )}
+        </MiniMap>
+      </Entry>
+      <Entry
+        heading="Tray item"
+        what="A new card, private until the owner drags it onto the map."
+        source="TrayCard · App.tsx"
+      >
+        <div class="tray guide-tray">
+          <div class="tray-list">
+            <TrayCard
+              resource={resource("slides", "file", "slides.pdf", null)}
+              selected={false}
+              onDragStart={noop}
+              onMenu={noop}
+              onClick={noop}
+            />
+            <TrayCard
+              resource={resource("notes", "page", "CI time table", null)}
+              selected
+              onDragStart={noop}
+              onMenu={noop}
+              onClick={noop}
+            />
+          </div>
+        </div>
+      </Entry>
+      <Entry
+        heading="Access states"
+        what="Whether Cloudflare holds the latest shares of a card: on the card as a sticker, in its panel as a row."
+        source="AccessRow · App.tsx; CardView · Map.tsx"
+      >
+        <div class="guide-rows">
+          <AccessRow access={{ state: "applied" }} />
+          <AccessRow access={{ state: "applying" }} />
+          <AccessRow access={{ state: "retrying", error: "Cloudflare answered 504.", at: NOW + 60_000 }} />
+          <AccessRow access={{ state: "failed", error: "Cloudflare refused the policy." }} />
+          <AccessRow
+            access={{ state: "failed", error: "Access not lowered yet: Cloudflare answered 504." }}
+          />
+        </div>
+        <div class="guide-cards">
+          {(
+            [
+              { state: "applying" },
+              { state: "retrying", error: "Cloudflare answered 504.", at: NOW + 60_000 },
+              { state: "failed", error: "Cloudflare refused the policy." },
+            ] as const
+          ).map((item) => (
+            <MiniMap key={item.state} width={230} height={140} center={at(0, 10)}>
+              {access(item)}
+            </MiniMap>
+          ))}
+        </div>
+      </Entry>
+    </>
+  );
+}
+
+function Stickers() {
+  const tones = [
+    ["", "Other states: pink."],
+    ["ok", "Working or done: green."],
+    ["wait", "Waiting: yellow."],
+    ["info", "More states: blue."],
+    ["agent", "An agent key."],
+    ["right", "A right of a device or machine."],
+    ["cut", "Closed by the pause."],
+    ["paused-sticker", "The paused state."],
+  ] as const;
+  return (
+    <>
+      <Entry
+        heading="Stickers"
+        what="Status, levels and tags as small tilted stickers with black text; neighbours lean different ways."
+        source=".sticker and its tones · styles.css; KINDS, LEVEL_COLORS · kinds.ts"
+      >
+        <div class="row">
+          {tones.map(([tone, tip], index) => (
+            <span
+              key={tone || "default"}
+              class={`sticker${tone ? ` ${tone}` : ""}`}
+              style={{ "--tilt": `${[-3, 2, -1.5, 3, -2, 1, -4, 4][index]}deg` }}
+              data-tip={tip}
+            >
+              {tone || "default"}
+            </span>
+          ))}
+        </div>
+        <div class="row">
+          {Object.entries(KINDS).map(([kind, value]) => (
+            <span
+              key={kind}
+              class="sticker"
+              data-tip={value.help}
+              style={{ "--tilt": value.tilt, background: value.color, color: value.ink }}
+            >
+              {kind}
+            </span>
+          ))}
+        </div>
+        <div class="row">
+          {Object.entries(LEVEL_COLORS).map(([level, colour]) => (
+            <span
+              key={level}
+              class="sticker"
+              data-tip={`The level ${level}.`}
+              style={{ "--tilt": LEVEL_TILTS[level as keyof typeof LEVEL_TILTS], background: colour }}
+            >
+              {level}
+            </span>
+          ))}
+        </div>
+      </Entry>
+      <Entry
+        heading="Stamp"
+        what="A settled item: an outline ✓ in the stamp colour, such as Access applied."
+        source=".stamp · styles.css"
+      >
+        <span class="stamp" data-tip="Applied: Cloudflare holds the latest shares.">
+          ✓ applied
+        </span>
+      </Entry>
+      <Entry
+        heading="Badges"
+        what="A count on a toolbar button: open notifications, repos that wait for their first deploy."
+        source=".btn with a .sticker · App.tsx"
+      >
+        <div class="row">
+          <button class="btn" aria-label="Notifications, 3 open" data-tip="Notifications: 3 open.">
+            🔔<span class="sticker">3</span>
+          </button>
+          <button class="btn" data-tip="Repos that wait for you to allow their first deploy.">
+            <span class="sticker wait">1 repo waiting</span>
+          </button>
+        </div>
+      </Entry>
+      <Entry
+        heading="Machine stickers and icon tiles"
+        what="Whether a machine is online and has a key; the icon tile in front of every card name."
+        source="PresenceSticker, KeySticker · Machines.tsx; IconTile · ItemIcon.tsx"
+      >
+        <div class="row">
+          <PresenceSticker view={machineView(true, KEY)} />
+          <PresenceSticker view={machineView(false, KEY)} />
+          <KeySticker view={machineView(true, null)} />
+          <KeySticker view={machineView(true, { kind: "waiting", since: NOW })} />
+          <IconTile image={null} glyph="📦" tip="The icon of the kind, when the item has none." />
+        </div>
+      </Entry>
+    </>
+  );
+}
+
+function Safety() {
+  const reach = { closes: 12, cards: 5, keptPublic: 3 };
+  const pause = { mode: "keep-public" as const, by: "owner@example.com", at: NOW - 600_000 };
+  return (
+    <>
+      <Entry
+        heading="Big red button"
+        what="The emergency pause: the toolbar opener, and the button under its lid in the Safety panel."
+        source="PanicOpener, SafetyView · Pause.tsx"
+      >
+        <div class="row">
+          <PanicOpener pause={null} open={false} onOpen={noop} />
+          <PanicOpener pause={pause} open={false} onOpen={noop} />
+        </div>
+        <div class="guide-box">
+          <SafetyView reach={() => reach} pause={null} onPress={noop} onLockdown={noop} />
+        </div>
+      </Entry>
+      <Entry
+        heading="Pause banner"
+        what="While paused, the banner says what is closed, with Lockdown and Resume."
+        source="PausedBanner · Pause.tsx"
+      >
+        <Stage height={380}>
+          <PausedBanner pause={pause} reach={reach} besidePanel={false} onLockdown={noop} onResume={noop} />
+        </Stage>
+      </Entry>
+    </>
+  );
+}
+
+function Lists(props: { state: State }) {
+  const notification: Notification = {
+    id: 1,
+    source: "deploy",
+    key: "deploy:tick3d",
+    episode: "d-1",
+    card: "tick3d",
+    recipients: { _tag: "owner" },
+    level: "error",
+    priority: "normal",
+    title: "tick3d did not deploy",
+    text: "The build failed in step 3. The card still serves its last good deploy.",
+    actions: [{ id: "logs", label: "Logs", kind: "link", path: "#map/tick3d" }],
+    state: "open",
+    openedAt: NOW - 3_600_000,
+    closedAt: null,
+    snoozedUntil: null,
+  };
+  const proposal: ProposalView = {
+    id: "p-1",
+    machineId: "vps",
+    machineName: "VPS",
+    action: "publish",
+    target: "tick3d",
+    body: null,
+    reason: "Release 2.4",
+    labels: { agent: "claude", repo: "tick3d" },
+    verified: ["repo"],
+    right: "publishes",
+    circleId: "owner",
+    shown: "publish tick3d",
+    shownHash: "0",
+    state: "pending",
+    createdAt: NOW - 120_000,
+    expiresAt: NOW + 86_000_000,
+  };
+  return (
+    <>
+      <Entry
+        heading="Notification row"
+        what="What kitshn told the owner, with its state, source and card, its actions, Snooze, Dismiss and Mute."
+        source="NotificationRow · Notifications.tsx"
+      >
+        <NotificationRow
+          notification={notification}
+          card="tick3d"
+          shown
+          now={NOW}
+          onPost={noop}
+          onMute={noop}
+        />
+        <NotificationRow
+          notification={{
+            ...notification,
+            id: 2,
+            level: "info",
+            state: "closed",
+            closedAt: NOW,
+            title: "tick3d is up again",
+          }}
+          card="tick3d"
+          shown={false}
+          now={NOW}
+          onPost={noop}
+          onMute={noop}
+        />
+      </Entry>
+      <Entry
+        heading="Inbox ask row"
+        what="An agent's ask that waits for one member of the approver circle: Approve or Deny."
+        source="AskRow · Asks.tsx"
+      >
+        <ul class="repo-list">
+          <AskRow
+            proposal={proposal}
+            circleName={(id) => props.state.circles.get(id)?.name ?? id}
+            busy={false}
+            onApprove={noop}
+            onDeny={noop}
+          />
+        </ul>
+      </Entry>
+    </>
+  );
+}
+
+/** Where kitshn and the neo-brutalism skill differ (checked 2026-10-29); each needs a fix in one of the two. */
+const DIFFERENCES = [
+  "Tokens: the skill has --code-bg, --warning-fg, --warning-surface, --info-fg and --info-surface; kitshn has none of them.",
+  "Stickers: the skill sets 0.65rem; kitshn sets 0.72rem.",
+  "Buttons: the skill uses 1rem text, 4px 10px padding and the 4px card shadow on hover; kitshn uses 0.9rem, 3px 10px and a 3px shadow.",
+  "Send button: the skill defines .btn.send (the one gradient); kitshn has no send button.",
+  "Focus ring: the skill adds a 6px pink glow (box-shadow 0 0 0 6px #FF527766) to the accent outline; kitshn has the outline only.",
+  "Scrim: the skill uses #0006 and centres a fixed dialog of 32rem; kitshn uses #00000055, puts the dialog 12vh from the top, and makes it 560px wide.",
+  "Text field and select: the skill styles .field and .select; kitshn styles every input by element, uses .field for a layout row, has no select list, and no aria-invalid look.",
+  "Tabs: the skill marks the chosen tab with aria-pressed or aria-selected; kitshn uses aria-pressed only.",
+  "Inbox ask row: Approve and Deny are plain buttons without .btn, so they keep the browser's own look, which the skill forbids.",
+  "Components that kitshn has and the skill does not define: toast, card, circle with head, stack, tray, badge, Access row, big red button, pause banner, notification row.",
+];
+
+export function StyleGuide() {
+  const [scheme, setScheme] = useScheme();
+  const [state] = useState(fixtureState);
+  return (
+    <main class="guide">
+      <header class="guide-head">
+        <div>
+          <h1>neo-brutalism</h1>
+          <p class="muted">
+            The primitives of the kitshn map, drawn by their real components with fixtures. Nothing here reads
+            or changes the live state.
+          </p>
+        </div>
+        <div class="seg" role="group" aria-label="Colour scheme">
+          {(["system", "light", "dark"] as const).map((each) => (
+            <button
+              key={each}
+              type="button"
+              aria-pressed={scheme === each}
+              data-tip={each === "system" ? "Follow the system setting." : `Show the ${each} scheme.`}
+              onClick={() => setScheme(each)}
+            >
+              {each}
+            </button>
+          ))}
+        </div>
+      </header>
+      <h2 class="label">Tokens</h2>
+      <Tokens />
+      <h2 class="label">Controls</h2>
+      <Controls />
+      <h2 class="label">Stickers and badges</h2>
+      <Stickers />
+      <h2 class="label">Surfaces</h2>
+      <Surfaces />
+      <h2 class="label">Map</h2>
+      <MapParts state={state} />
+      <h2 class="label">Safety</h2>
+      <Safety />
+      <h2 class="label">Lists</h2>
+      <Lists state={state} />
+      <section class="guide-entry guide-differences">
+        <header>
+          <h3>Differences with the neo-brutalism skill</h3>
+          <p>Each one needs a fix in the skill or in kitshn.</p>
+        </header>
+        <ol>
+          {DIFFERENCES.map((difference) => (
+            <li key={difference}>{difference}</li>
+          ))}
+        </ol>
+      </section>
+      <TooltipLayer />
+    </main>
+  );
+}

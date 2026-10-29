@@ -24,7 +24,7 @@ import { type MenuTarget, USER_STACK } from "./actions.ts";
 import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import { FRAMED_KINDS, peekable } from "./frames.ts";
-import { CardPreview, PeekArrow } from "./Peek.tsx";
+import { CardPreview, type FramePhase, PeekArrow } from "./Peek.tsx";
 import type { Rect } from "./popover.ts";
 import { HOLD_MS, type Press, fingerDown, startPress, stepPress } from "./press.ts";
 import {
@@ -838,7 +838,7 @@ function editsOf(from: State, to: State): Array<Edit> {
   return edits;
 }
 
-function CircleView(props: {
+export function CircleView(props: {
   circle: Circle;
   state: State;
   selected: boolean;
@@ -960,7 +960,7 @@ function CircleView(props: {
   );
 }
 
-function CardView(props: {
+export function CardView(props: {
   resource: Resource;
   /** `cardLayer`: its z-index on the map, or null for document order. */
   layer: number | null;
@@ -978,6 +978,8 @@ function CardView(props: {
   machine: MachineView | null;
   pullRequest: number | null;
   preview: boolean;
+  /** A fixed phase of its preview frame, for the style guide (`/neo-brutalism`). */
+  previewStill?: FramePhase;
   /** K-520: the selected card offers the preview arrow; a phone has it in the card sheet instead. */
   peek: boolean;
   zone: string;
@@ -1095,7 +1097,12 @@ function CardView(props: {
         <MoreButton name={resource.name} onOpen={props.onMenu} />
       </div>
       {props.preview && resource.addresses[0] ? (
-        <CardPreview resource={resource} state={state} zone={props.zone} />
+        <CardPreview
+          resource={resource}
+          state={state}
+          zone={props.zone}
+          {...(props.previewStill ? { still: props.previewStill } : {})}
+        />
       ) : props.selected && props.peek && peekable(resource) ? (
         <PeekArrow resource={resource} state={state} zone={props.zone} />
       ) : null}
@@ -1104,7 +1111,7 @@ function CardView(props: {
 }
 
 /** K-521: a closed stack of the owner, as one card that lists its cards. A click opens it. */
-function StackCard(props: {
+export function StackCard(props: {
   id: string;
   layer: number | null;
   name: string;

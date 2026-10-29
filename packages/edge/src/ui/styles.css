@@ -2230,3 +2230,148 @@ a > code {
 .push input.time {
   width: 5.5rem;
 }
+
+/* The style guide (/neo-brutalism): its own layout around the real components. The map's body does not scroll. */
+.guide {
+  height: 100dvh;
+  overflow: auto;
+  padding: 24px clamp(12px, 4vw, 48px) 64px;
+}
+.guide-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.guide > h2.label {
+  margin: 28px 0 10px;
+}
+.guide-entry {
+  margin-bottom: 16px;
+  padding: 14px;
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.guide-entry > header p {
+  margin: 4px 0;
+}
+.guide-sample {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+/* A sample keeps its own width, so a sticker or a stamp is not stretched across the entry. */
+.guide-sample > * {
+  justify-self: start;
+}
+.guide-sample > .row {
+  align-items: center;
+  gap: 12px;
+}
+/* A small map and a stage hold map parts and fixed surfaces; the transform makes the stage their frame. */
+.guide-map,
+.guide-stage {
+  position: relative;
+  max-width: 100%;
+  overflow: hidden;
+  background-color: var(--canvas);
+  background-image: radial-gradient(var(--dots) 1.2px, transparent 1.2px);
+  background-size: 16px 16px;
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+}
+.guide-stage {
+  /* Its children are fixed, so it has no width of its own. */
+  justify-self: stretch;
+  transform: translateZ(0);
+}
+.guide-stage .overlay-panel {
+  --panel-width: 22rem;
+}
+.guide-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.guide-swatches {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 10px;
+}
+.guide-swatch {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  align-items: center;
+}
+.guide-swatch .chip-pair {
+  grid-row: span 2;
+  display: inline-flex;
+}
+.guide-swatch .chip-pair span {
+  width: 1.6rem;
+  height: 2.2rem;
+  border: var(--bw) solid var(--border);
+}
+.guide-swatch .chip-pair span + span {
+  border-left: 0;
+}
+.guide-swatch .muted {
+  font-size: 0.8rem;
+}
+.guide-values {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
+  gap: 6px 16px;
+  margin: 0;
+}
+.guide-values div {
+  display: flex;
+  gap: 8px;
+}
+.guide-values dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.guide-shadow {
+  padding: 8px 14px;
+  font-weight: 700;
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+}
+.guide-type {
+  display: grid;
+  gap: 8px;
+}
+.guide-measured {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.guide-measured > :first-child {
+  margin: 0;
+}
+.guide-tray {
+  position: static;
+  width: 260px;
+  max-height: none;
+}
+.guide-rows {
+  display: grid;
+  gap: 4px;
+}
+.guide-box {
+  max-width: 36rem;
+}
+.guide-differences ol {
+  margin: 8px 0 0;
+  padding-left: 1.4rem;
+}
+.guide-differences li + li {
+  margin-top: 4px;
+}

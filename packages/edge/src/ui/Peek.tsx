@@ -11,6 +11,8 @@ const opensForAnyone = (state: State, resource: Resource) =>
 
 const LOGIN_HELP = "Shows only after you log in. Open it in a new tab to log in.";
 
+export type FramePhase = "loading" | "loaded" | "failed";
+
 /**
  * A frame that has not loaded after this long shows "Preview not available". A browser fires no error for a frame,
  * and fires `load` for the error page of a refused one, so this catches only a page that hangs.
@@ -23,8 +25,16 @@ const FRAME_GIVE_UP_MS = 20_000;
  * It loads at once, because it mounts only while shown, so the timer starts with the load. Callers key it by its
  * address, so a new address starts again from "Loading preview".
  */
-function LiveFrame(props: { url: string; label: string; sandbox: string; interact: boolean }) {
-  const [phase, setPhase] = useState<"loading" | "loaded" | "failed">("loading");
+export function LiveFrame(props: {
+  url: string;
+  label: string;
+  sandbox: string;
+  interact: boolean;
+  /** A fixed phase that ignores the page, for the style guide (`/neo-brutalism`); the map never sets it. */
+  still?: FramePhase;
+}) {
+  const [loadPhase, setPhase] = useState<FramePhase>("loading");
+  const phase = props.still ?? loadPhase;
   useEffect(() => {
     const timer = setTimeout(() => setPhase((now) => (now === "loading" ? "failed" : now)), FRAME_GIVE_UP_MS);
     return () => clearTimeout(timer);
@@ -74,6 +84,8 @@ export function CardPreview(props: {
   state: State;
   zone: string;
   onEnlarge?: () => void;
+  /** A fixed phase of the frame, for the style guide (`/neo-brutalism`). */
+  still?: FramePhase;
 }) {
   const [interact, setInteract] = useState(false);
   const address = props.resource.addresses[0] ?? "";
@@ -89,6 +101,7 @@ export function CardPreview(props: {
           label={`Preview of ${address}`}
           sandbox={sandbox}
           interact={interact}
+          {...(props.still ? { still: props.still } : {})}
         />
       </div>
       <div class="row">

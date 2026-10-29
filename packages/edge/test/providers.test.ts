@@ -58,6 +58,7 @@ async function setup() {
     state.storage.sql.exec("DELETE FROM resources WHERE id LIKE 'p-%' OR id = 'other'");
     state.storage.sql.exec("DELETE FROM places WHERE id LIKE 'p-%'");
     state.storage.sql.exec("DELETE FROM providers");
+    state.storage.sql.exec("DELETE FROM live_sites WHERE id LIKE 'p-%'");
     state.storage.sql.exec(
       "INSERT OR REPLACE INTO machines (id, body) VALUES (?, ?)",
       "vps",
@@ -114,7 +115,30 @@ async function setup() {
           .exec<{ summary: string }>("SELECT summary FROM revisions ORDER BY id DESC LIMIT 1")
           .one().summary,
     );
-  return { stub, message, card, sql, lastSummary };
+  /** The daemon reports the provider site `name`, and the address check finds a record of something else or none. */
+  const site = async (name: string, usedElsewhere: boolean) => {
+    await runInDurableObject(stub, async (instance) => {
+      await instance.webSocketMessage(
+        daemonSocket("signed"),
+        JSON.stringify({
+          type: "sites",
+          sites: [{ name, target: "http://localhost:3773", dev: false, up: true }],
+        }),
+      );
+      await (
+        instance as unknown as {
+          checkSites(
+            api: (method: string, path: string) => Promise<unknown>,
+            budget: number,
+          ): Promise<number>;
+        }
+      ).checkSites(
+        async (_, path) => (usedElsewhere && path.includes("dns_records") ? [{ id: "portal" }] : []),
+        6,
+      );
+    });
+  };
+  return { stub, message, card, sql, lastSummary, site };
 }
 
 it("makes cards from a signed report only, shows an offline provider, and records a removal (K-704, K-705)", async () => {
@@ -405,7 +429,37 @@ it("records only the calls that a machine reports on machines that it reaches, a
 });
 
 it("keeps an address that another card holds, or a name of kitshn, off a provider card (K-705)", async () => {
-  const { message, card, sql } = await setup();
+  const { stub, message, card, sql, site } = await setup();
+  const withSite = report([{ ...app, site: { name: "t3-vps", port: 3773 } }]);
+  const accessHosts = () =>
+    runInDurableObject(stub, (instance) =>
+      [
+        ...(
+          instance as unknown as { desired(now: number): { apps: ReadonlyMap<string, { domain: string }> } }
+        )
+          .desired(Date.now())
+          .apps.values(),
+      ].map((app) => app.domain),
+    );
+  // In the Owner circle, so a card with an address gets an Access application.
+  await sql("INSERT OR REPLACE INTO places (id, x, y) SELECT ?, x, y FROM places WHERE id = 'vps'", appId);
+  // K-1623: the address waits for its check, and a host that something else serves stays off with no application.
+  await message("signed", [withSite]);
+  expect((await card())?.addresses).toEqual([]);
+  await site("t3-vps", true);
+  await message("signed", [withSite]);
+  expect(await card()).toMatchObject({ addresses: [], provider: { stickers: [{ text: "address in use" }] } });
+  expect(await accessHosts()).not.toContain("t3-vps.example.com");
+  // A free host comes on the card itself, not on a card of its own.
+  await sql("DELETE FROM live_sites WHERE id LIKE 'p-%'");
+  await site("t3-vps", false);
+  expect(await card()).toMatchObject({ addresses: ["t3-vps.example.com"], provider: { stickers: [] } });
+  await message("signed", [withSite]);
+  expect((await card())?.addresses).toEqual(["t3-vps.example.com"]);
+  expect(await accessHosts()).toContain("t3-vps.example.com");
+  await sql("DELETE FROM live_sites WHERE id LIKE 'p-%'");
+  await sql("DELETE FROM resources WHERE id LIKE 'p-%'");
+  await sql("DELETE FROM places WHERE id LIKE 'p-%'");
   const other: Resource = {
     id: "other",
     kind: "site.static",
@@ -554,7 +608,7 @@ it("forgets only a provider that does not run, and an offline report does not br
 
 it("lists for a device the provider cards with an address that its token opens, in the portal's shape (K-1601)", async () => {
   stubAccessCerts();
-  const { message, sql } = await setup();
+  const { message, sql, site } = await setup();
   const phone: Circle = {
     id: "phone",
     name: "Phone",
@@ -575,6 +629,7 @@ it("lists for a device the provider cards with an address that its token opens, 
       { ...app, id: "hidden", name: "Hidden" },
     ]),
   ]);
+  await site("t3-vps", false);
   await sql("INSERT OR REPLACE INTO places (id, x, y) VALUES (?, 9000, 9000)", appId);
   const list = async (clientId: string) =>
     (await (

@@ -3597,11 +3597,25 @@ export class Kitshn extends DurableObject<Env> {
                 : null));
         return refusal ? [{ address, refusal }] : [];
       });
-      if (refusals.length === 0) continue;
       for (const { refusal } of refusals)
         console.warn(`kitshn kept an address off the card ${card.name}: ${refusal}`);
-      const off = new Set(refusals.map((item) => item.address));
-      wanted.set(id, { ...card, addresses: card.addresses.filter((address) => !off.has(address)) });
+      // K-705, K-1111: the site's address goes on the card only after its check found it free, so no Access
+      // application, DNS record or ingress rule takes a host that something else still serves (K-1623).
+      const site = this.liveSites.get(id);
+      const held = card.addresses.filter((address) => site?.state !== "ok" || site.address !== address);
+      if (refusals.length === 0 && held.length === 0) continue;
+      const off = new Set([...refusals.map((item) => item.address), ...held]);
+      const inUse = site?.state === "refused" && held.includes(site.address);
+      wanted.set(id, {
+        ...card,
+        addresses: card.addresses.filter((address) => !off.has(address)),
+        provider: {
+          ...card.provider!,
+          stickers: inUse
+            ? [{ text: "address in use", tone: "warn" as const }, ...card.provider!.stickers].slice(0, 8)
+            : card.provider!.stickers,
+        },
+      });
     }
     const existing = [...this.state.resources.values()].filter(
       (card) => card.machine === machine.id && card.provider !== undefined,
@@ -5676,12 +5690,14 @@ export class Kitshn extends DurableObject<Env> {
       for (const report of sites) {
         const address = `${report.name}.${this.env.KITSHN_ZONE}`;
         // K-812: the socket of a Compose app on this machine is the address of its card.
-        // K-705: so is the site of a provider card on this machine.
+        // K-705: the site of a provider card on this machine is that card, by its name: the card gets the address
+        // only after the check below.
         const app = [...this.state.resources.values()].find(
           (resource) =>
-            (resource.kind === "site.compose" || resource.provider !== undefined) &&
             resource.machine === machine.id &&
-            resource.addresses.includes(address),
+            (resource.provider
+              ? resource.provider.site === report.name
+              : resource.kind === "site.compose" && resource.addresses.includes(address)),
         );
         // K-909: a removed Compose app keeps its row until its compose-down ends, so it never turns into a
         // live site card meanwhile.
@@ -5809,9 +5825,16 @@ export class Kitshn extends DurableObject<Env> {
         };
         this.putResource(
           card
-            ? // K-705: a provider reports the status of its own cards.
+            ? // K-705: a provider reports the status of its own cards, and its site's address comes on now.
               card.provider
-              ? card
+              ? {
+                  ...card,
+                  addresses: [site.address],
+                  provider: {
+                    ...card.provider,
+                    stickers: card.provider.stickers.filter((sticker) => sticker.text !== "address in use"),
+                  },
+                }
               : { ...card, status: site.up ? "running" : "stopped" }
             : {
                 id: site.id,

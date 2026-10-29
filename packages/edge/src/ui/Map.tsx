@@ -36,6 +36,7 @@ import {
   headAngle,
   pinchView,
   shownCardBoxes,
+  stackOffsets,
 } from "./layout.ts";
 
 export type { View };
@@ -141,6 +142,8 @@ export const ALONE_KEY = circleAloneKey(navigator.platform);
 const px = (value: number) => `${value}px`;
 /** The row step of an open stack: a card with a row of stickers, such as a machine, plus a gap. */
 const STACK_ROW = 124;
+/** The gap under a card of an open stack that is taller than `STACK_ROW`, such as one with a preview frame. */
+const STACK_GAP = 16;
 
 /** Live previews: at most this many frames, for these kinds, from this zoom on. */
 const MAX_PREVIEWS = 4;
@@ -203,6 +206,11 @@ export function MapView(props: Props) {
   });
   const stacks = stacksOf(shown);
   const stackOf = (id: string) => [...stacks.entries()].find(([, ids]) => ids.includes(id));
+  // K-508, K-521: an open stack spaces its cards by their drawn heights, which a preview frame or an opened preview
+  // arrow changes without a render of the map, so a ResizeObserver reports them.
+  const openIds = [...stacks].flatMap(([key, ids]) => (props.openStacks.has(key) ? ids : []));
+  const [cardHeights, setCardHeights] = useState<ReadonlyMap<string, number>>(new Map());
+  const openKey = openIds.join(",");
 
   /** The drawn card under the pointer that a drop stacks onto, from what is on screen (K-522). */
   const stackTargetAt = (clientX: number, clientY: number, dragged: ReadonlySet<string>) => {
@@ -556,6 +564,25 @@ export function MapView(props: Props) {
   const previewIds = new Set([...kept, ...visible.filter((id) => !kept.includes(id))].slice(0, MAX_PREVIEWS));
   previewed.current = previewIds;
   const zoomedOut = view.s < ZOOMED_OUT;
+
+  useEffect(() => {
+    const world = viewport.current?.querySelector(".world");
+    if (!world || openIds.length === 0 || zoomedOut) return;
+    const elements = openIds.flatMap(
+      (id) => world.querySelector<HTMLElement>(`:scope > [data-card="${CSS.escape(id)}"]`) ?? [],
+    );
+    const measure = () =>
+      setCardHeights((before) => {
+        const next = new Map(before);
+        for (const element of elements) next.set(element.dataset["card"] ?? "", element.offsetHeight);
+        const same =
+          next.size === before.size && [...next].every(([id, height]) => before.get(id) === height);
+        return same ? before : next;
+      });
+    const observer = new ResizeObserver(measure);
+    for (const element of elements) observer.observe(element);
+    return () => observer.disconnect();
+  }, [openKey, zoomedOut]);
   const draggedIds = drag?.type === "cards" && drag.moved ? new Set(drag.origins.keys()) : new Set<string>();
 
   return (
@@ -671,7 +698,19 @@ export function MapView(props: Props) {
           if (stack && !open && resource.id !== face) return null;
           const head = stack ? shown.places.get(stack[1][0] ?? "") : undefined;
           // A stack opens downwards as a column, so its cards stay near the circles that hold them (K-508, K-521).
-          const at = stack && open && head ? { x: head.x, y: head.y + index * STACK_ROW } : place;
+          const at =
+            stack && open && head
+              ? {
+                  x: head.x,
+                  y:
+                    head.y +
+                    (stackOffsets(
+                      stack[1].map((id) => cardHeights.get(id)),
+                      STACK_ROW,
+                      STACK_GAP,
+                    )[index] ?? 0),
+                }
+              : place;
           const selected = props.selection.cards.has(resource.id);
           // A closed stack shows the highlight of any of its cards.
           const flash = (stack && !open ? stack[1] : [resource.id]).some((id) =>

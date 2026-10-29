@@ -7214,14 +7214,24 @@ export class Kitshn extends DurableObject<Env> {
         if (failed) return refuse(403, failed);
       }
       // A page or a folder site into Everyone also needs the conditions of "publishes", as `apply` does (K-1754).
-      const publishes =
-        (path === "/agent/library" && request.headers.get("x-kitshn-public") === "true") ||
-        (path === "/agent/sites/plan" &&
-          (await request
+      const input: unknown = path.startsWith("/agent/sites/")
+        ? await request
             .clone()
             .json()
-            .then((input: unknown) => isRecord(input) && input["public"] === true)
-            .catch(() => false)));
+            .catch(() => null)
+        : null;
+      // `finish` lands the site with the `public` of its plan, so it checks the labels again (K-1123).
+      const plannedPublic = () =>
+        this.sql<{ public: number }>(
+          `SELECT agent_sites.public FROM deploys JOIN agent_sites ON agent_sites.card_id = deploys.resource_id
+           AND agent_sites.client_id = ? WHERE deploys.id = ?`,
+          machine.clientId,
+          isRecord(input) ? String(input["deployId"] ?? "") : "",
+        )[0]?.public === 1;
+      const publishes =
+        (path === "/agent/library" && request.headers.get("x-kitshn-public") === "true") ||
+        (path === "/agent/sites/plan" && isRecord(input) && input["public"] === true) ||
+        (path === "/agent/sites/finish" && plannedPublic());
       if (publishes) {
         const failed = conditionProblem(
           machineRightMode(this.state, machine.id, "publishes", now)?.conditions,
@@ -7672,6 +7682,15 @@ export class Kitshn extends DurableObject<Env> {
         result: this.askEventsWithLabel(target.slice(0, equals), target.slice(equals + 1), machine.id),
       };
     }
+    // K-1819, K-1820: a card that the machine does not manage refuses at once, so the Owner gets no ask that cannot run.
+    if (
+      (action === "backup" || action === "restore") &&
+      !cardsControlledBy(this.state, { email: null, clientId: machine.clientId, ip: null }, now).has(target)
+    )
+      return event({
+        outcome: "refused",
+        reason: `This machine does not manage the card ${target} (K-718).`,
+      });
     const needs = ASK_RIGHT[action];
     if (needs === "member")
       throw new Error(`The action ${action} needs membership, and only approve and deny do.`);
@@ -8505,7 +8524,12 @@ export class Kitshn extends DurableObject<Env> {
       proposal.right === "readsCode" || proposal.right === "writesCode"
         ? codeRightMode(this.state, proposal.machineId, proposal.right, proposal.target, now)
         : machineRightMode(this.state, proposal.machineId, proposal.right, now);
-    // K-1776: an Owner ask of an off right stays allowed while the right stays off.
+    // K-1776: "off" wins also over an Owner ask that waits; an unset right keeps its Owner ask.
+    const off =
+      proposal.right === "readsCode" || proposal.right === "writesCode"
+        ? codeRightOff(this.state, proposal.machineId, proposal.right, proposal.target, now)
+        : machineRightOff(this.state, proposal.machineId, proposal.right, now);
+    if (off) return `the owner set the right "${MACHINE_RIGHT_NAMES[proposal.right]}" to off.`;
     const ownerAsk = mode === null && proposal.circleId === OWNER_CIRCLE_ID;
     if (!ownerAsk && (mode?.mode !== "ask" || mode.circleId !== proposal.circleId))
       return `the right "${MACHINE_RIGHT_NAMES[proposal.right]}" no longer asks this circle.`;

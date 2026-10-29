@@ -500,3 +500,89 @@ it("opens a high-priority notification for each ask and closes it when the ask i
   });
   expect(late).toMatch(/already decided/);
 });
+
+it("runs an approved Owner ask of an unset right, and refuses it once the owner sets the right to off (K-1776)", async () => {
+  const approve = (stub: DurableObjectStub, id: string) =>
+    runInDurableObject(stub, (instance) => (instance as unknown as Instance).decide(id, "approved", owner));
+  const waitingId = (outcome: AskOutcome) => (outcome.outcome === "waiting" ? outcome.proposalId : "");
+  // "adds apps" unset: the approval allows the waiting repo.
+  const stub = await setup({ deploys: { mode: "automatic" } });
+  await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO repos (repo_id, name, state, first_seen) VALUES ('123', 'Yarden-zamir/x', 'waiting', 0)",
+    ),
+  );
+  const allow = await ask(stub, "allow", "123");
+  expect(allow).toMatchObject({ outcome: "waiting" });
+  expect(await approve(stub, waitingId(allow))).toMatchObject({ ok: true });
+  const repo = await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec<{ state: string }>("SELECT state FROM repos WHERE repo_id = '123'").one(),
+  );
+  expect(repo.state).toBe("allowed");
+  // "publishes" unset: a page that the machine added goes into Everyone after the approval.
+  const near = await setup({ deploys: { mode: "automatic" } }, { x: 1000, y: 0 });
+  await runInDurableObject(near, (_, state) => {
+    const sql = state.storage.sql;
+    sql.exec(
+      "INSERT OR REPLACE INTO library (id, kind, title, size, content_type, created_at, added_by) VALUES ('pg', 'page', 'pg', 1, 'text/html', 0, 'vps.access')",
+    );
+    const page = {
+      id: "pg",
+      kind: "page",
+      name: "pg",
+      addresses: [],
+      status: "running",
+      group: null,
+      machine: null,
+    };
+    sql.exec("INSERT OR REPLACE INTO resources (id, body) VALUES ('pg', ?)", JSON.stringify(page));
+    sql.exec("INSERT OR REPLACE INTO places (id, x, y) VALUES ('pg', 1150, 0)");
+  });
+  await evictDurableObject(near);
+  const publish = await ask(near, "publish", "pg");
+  expect(publish).toMatchObject({ outcome: "waiting" });
+  expect(await approve(near, waitingId(publish))).toMatchObject({ ok: true });
+  // The reviewer's deploy probe: "deploys" unset waits for the Owner; set to off meanwhile, the approval refuses.
+  const offLater = await setup({ addsApps: { mode: "automatic" } });
+  const deploy = await ask(offLater, "deploy", "card");
+  expect(deploy).toMatchObject({ outcome: "waiting" });
+  await runInDurableObject(offLater, (_, state) => {
+    const [row] = state.storage.sql
+      .exec<{ body: string }>("SELECT body FROM circles WHERE id = 'agents'")
+      .toArray();
+    const circle = JSON.parse(row?.body ?? "{}") as Circle;
+    const members = [
+      {
+        _tag: "machine",
+        machineId: "vps",
+        rights: { addsApps: { mode: "automatic" }, deploys: { mode: "off" } },
+      },
+    ];
+    state.storage.sql.exec(
+      "UPDATE circles SET body = ? WHERE id = 'agents'",
+      JSON.stringify({ ...circle, members }),
+    );
+  });
+  await evictDurableObject(offLater);
+  expect(await approve(offLater, waitingId(deploy))).toMatchObject({
+    ok: false,
+    error: expect.stringContaining('"deploys" to off'),
+  });
+  // A backup of a card that the machine does not manage refuses at once, with no Owner ask.
+  expect(await ask(offLater, "backup", "elsewhere")).toMatchObject({ outcome: "refused" });
+  const open = await runInDurableObject(offLater, (_, state) =>
+    state.storage.sql
+      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM proposals WHERE state = 'pending'")
+      .one(),
+  );
+  expect(open.n).toBe(0);
+  await runInDurableObject(offLater, (_, state) => {
+    for (const sql of [
+      "DELETE FROM library WHERE id = 'pg'",
+      "DELETE FROM resources WHERE id = 'pg'",
+      "DELETE FROM places WHERE id = 'pg'",
+      "DELETE FROM repos WHERE repo_id = '123'",
+    ])
+      state.storage.sql.exec(sql);
+  });
+});

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { credentialAnswer, readCredentialInput, repoOfCredential, repoOfRemote } from "./gitCredential.ts";
+import {
+  credentialAnswer,
+  credentialReply,
+  readCredentialInput,
+  repoOfCredential,
+  repoOfRemote,
+} from "./gitCredential.ts";
 
 describe("git credential helper (K-1763, K-1764)", () => {
   it("takes the repo only from a github.com https request with a path", () => {
@@ -19,5 +25,27 @@ describe("git credential helper (K-1763, K-1764)", () => {
     expect(credentialAnswer("t", "2026-10-29T10:00:00Z")).toBe(
       "username=x-access-token\npassword=t\npassword_expiry_utc=1793268000\n",
     );
+  });
+
+  it("stops git with quit=1 only when kitshn refuses or waits; a daemon that cannot help leaves git to its next helper", () => {
+    expect(credentialReply({ id: "1", type: "error", error: "the daemon has no signed connection" })).toEqual(
+      {
+        stdout: "",
+        stderr: null,
+      },
+    );
+    expect(credentialReply(null)).toEqual({ stdout: "", stderr: null });
+    expect(credentialReply({ id: "1", type: "ask", outcome: "not-kitshn", reason: "x" })).toEqual({
+      stdout: "",
+      stderr: null,
+    });
+    expect(
+      credentialReply({
+        id: "1",
+        type: "ask",
+        outcome: "refused",
+        reason: "could not check the T3 thread; try again.",
+      }),
+    ).toEqual({ stdout: "quit=1\n", stderr: "kitshn: could not check the T3 thread; try again." });
   });
 });

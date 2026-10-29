@@ -3,18 +3,35 @@
 /** K-1755: `t3.` is the prefix of the T3 attester; it stays reserved also before a machine lists that attester. */
 export const RESERVED_PREFIXES: ReadonlyArray<string> = ["t3."];
 
+/** K-1752: the variable of a T3 thread's credential; a call that has it always sends it, also with no `t3.` attester. */
+export const T3_TOKEN_ENV = "T3_ACP_MCP_AUTHORIZATION";
+
+/** K-1752: a call that carries a token and that no attester could vouch for; it refuses, never the bare machine. */
+export class AttestationError extends Error {}
+
+/** K-1752: the refusal of a call with the T3 credential on a machine where no `t3.` attester is registered. */
+export const unregisteredT3 = (
+  attestations: Readonly<Record<string, string>> | undefined,
+  attesters: ReadonlyArray<Attester>,
+): string | null =>
+  attestations?.[T3_TOKEN_ENV] && !attesters.some((attester) => attester.prefix === "t3.")
+    ? "this T3 thread is not checked: the T3 server has not registered with kitshn."
+    : null;
+
 /** K-1751: one attester of `machine.json`: its label prefix, its loopback address and the variable of the token. */
 export interface Attester {
   readonly prefix: string;
   readonly address: string;
   readonly tokenEnv: string;
+  /** The user that registered it (`attester-set`); its listener must still be that user. A hand-written entry has none. */
+  readonly uid?: number;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "[::1]", "::1", "localhost"]);
 
 /**
  * K-1751: the attesters of `machine.json`, and why each other entry is refused: an address off loopback, a prefix
- * without a dot, or a missing variable name. The daemon never takes an attester from a caller.
+ * without a dot, or a missing variable name. Only the daemon user and root write an attester (`attester-set`).
  */
 export function attestersOf(machine: unknown): {
   readonly attesters: Array<Attester>;
@@ -34,17 +51,20 @@ export function attestersOf(machine: unknown): {
     const prefix = typeof item["prefix"] === "string" ? item["prefix"] : "";
     const address = typeof item["address"] === "string" ? item["address"] : "";
     const tokenEnv = typeof item["tokenEnv"] === "string" ? item["tokenEnv"] : "";
-    let host = "";
+    const uid = typeof item["uid"] === "number" && Number.isInteger(item["uid"]) ? item["uid"] : undefined;
+    let url: URL | null = null;
     try {
-      host = new URL(address).hostname;
+      url = new URL(address);
     } catch {
-      host = "";
+      url = null;
     }
     if (!prefix.endsWith(".") || prefix.length < 2)
       refused.push(`${prefix || "(none)"}: a prefix ends with a dot`);
-    else if (!LOOPBACK.has(host)) refused.push(`${prefix}: ${address} is not on loopback`);
+    else if (url?.protocol !== "http:" && url?.protocol !== "https:")
+      refused.push(`${prefix}: ${address} is not an http or https address`);
+    else if (!LOOPBACK.has(url.hostname)) refused.push(`${prefix}: ${address} is not on loopback`);
     else if (tokenEnv === "") refused.push(`${prefix}: no tokenEnv`);
-    else attesters.push({ prefix, address, tokenEnv });
+    else attesters.push({ prefix, address, tokenEnv, ...(uid === undefined ? {} : { uid }) });
   }
   return { attesters, refused };
 }
@@ -98,8 +118,14 @@ export function attestedLabels(prefix: string, answer: unknown): Record<string, 
   return labels;
 }
 
-/** K-1752: asks one attester with the caller's token, at most 2 seconds; null for an inactive answer or a fault. */
-export async function attest(attester: Attester, token: string): Promise<Record<string, string> | null> {
+/** K-1752: what one attester said about the caller's token. */
+export type Attestation =
+  | { readonly outcome: "labels"; readonly labels: Record<string, string> }
+  | { readonly outcome: "inactive" }
+  | { readonly outcome: "failed" };
+
+/** K-1752: asks one attester with the caller's token, at most 2 seconds. */
+export async function attest(attester: Attester, token: string): Promise<Attestation> {
   try {
     const response = await fetch(attester.address, {
       headers: { authorization: token },
@@ -107,9 +133,51 @@ export async function attest(attester: Attester, token: string): Promise<Record<
       redirect: "error",
       signal: AbortSignal.timeout(2000),
     });
-    if (!response.ok) return null;
-    return attestedLabels(attester.prefix, await response.json());
+    if (!response.ok) return { outcome: "failed" };
+    const answer: unknown = await response.json();
+    if (
+      typeof answer === "object" &&
+      answer !== null &&
+      (answer as Record<string, unknown>)["active"] === false
+    )
+      return { outcome: "inactive" };
+    const labels = attestedLabels(attester.prefix, answer);
+    return labels === null ? { outcome: "failed" } : { outcome: "labels", labels };
   } catch {
-    return null;
+    return { outcome: "failed" };
   }
+}
+
+/**
+ * K-1752: the refusal of a call whose token an attester could not vouch for; a call never falls back to the bare
+ * machine once it carries a token.
+ */
+export function attestationRefusal(attester: Attester, result: Attestation): string | null {
+  const name = attester.prefix === "t3." ? "T3" : attester.prefix.slice(0, -1);
+  if (result.outcome === "failed") return `could not check the ${name} thread; try again.`;
+  if (result.outcome === "inactive")
+    return `the ${name} thread of this call is not active (archived or deleted).`;
+  return null;
+}
+
+/**
+ * K-1751: `machine.json` with this attester, which replaces an older entry of the same prefix; or why it is refused,
+ * by the rules of `attestersOf`.
+ */
+export function withAttester(
+  machine: Record<string, unknown>,
+  entry: Attester,
+): Record<string, unknown> | string {
+  const { refused } = attestersOf({ attesters: [entry] });
+  if (refused[0]) return refused[0];
+  const old = Array.isArray(machine["attesters"]) ? (machine["attesters"] as Array<unknown>) : [];
+  const others = old.filter(
+    (item) =>
+      !(
+        typeof item === "object" &&
+        item !== null &&
+        (item as Record<string, unknown>)["prefix"] === entry.prefix
+      ),
+  );
+  return { ...machine, attesters: [...others, { ...entry }] };
 }

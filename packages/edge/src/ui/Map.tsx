@@ -20,7 +20,9 @@ import { AGENT_TIP, LEVEL_TIPS, MATCH_TIPS, MEMBER_HELP, PASSKEY_TIP, RightStick
 import { MachineRightStickers } from "./MachineRights.tsx";
 import { type KindInfo, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS, kindInfo } from "./kinds.ts";
 import { KeySticker, PresenceSticker } from "./Machines.tsx";
-import { type MenuTarget, USER_STACK } from "./actions.ts";
+import type { MenuTarget } from "./actions.ts";
+import type { DrawnWire } from "../core/organize.ts";
+import { type Box, USER_STACK, headAngle, stacksOf, union } from "../core/place.ts";
 import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import { FRAMED_KINDS, peekable } from "./frames.ts";
@@ -33,7 +35,6 @@ import {
   type View,
   ZOOM,
   cardLayer,
-  headAngle,
   pinchView,
   shownCardBoxes,
   stackOffsets,
@@ -66,27 +67,44 @@ type Drag =
   | { readonly type: "pinch"; readonly from: Fingers; readonly view: View }
   | { readonly type: "box"; readonly start: Point; readonly end: Point; readonly base: ReadonlySet<string> };
 
-/** Cards with one group stack when they share the same circles (K-508). */
-export function stacksOf(state: State): Map<string, Array<string>> {
-  const stacks = new Map<string, Array<string>>();
-  // K-521: the owner's stacks come first; their cards leave the stacks by group.
-  const owned = new Set<string>();
-  for (const stack of state.stacks.values()) {
-    const placed = stack.members.filter((id) => state.places.has(id));
-    for (const id of placed) owned.add(id);
-    if (placed.length > 1) stacks.set(`${USER_STACK}${stack.id}`, placed);
+/**
+ * K-532: the sizes that the map draws now, for Organize: each card or stack around the place of its first card,
+ * each circle head and each chip row. A zoomed-out map draws dots, so then the server takes plain card sizes.
+ */
+export function measureMap(state: State): DrawnWire {
+  const world = document.querySelector<HTMLElement>(".viewport > .world");
+  if (!world) throw new Error("measureMap: the map is not on screen.");
+  const firstOf = new Map<string, string>();
+  for (const ids of stacksOf(state).values()) for (const id of ids) firstOf.set(id, ids[0] as string);
+  const boxes = new Map<string, Box>();
+  for (const element of world.querySelectorAll<HTMLElement>(":scope > .card[data-card]")) {
+    const id = element.dataset["card"] ?? "";
+    const first = firstOf.get(id) ?? id;
+    const place = state.places.get(first);
+    if (!place) continue;
+    const box = {
+      left: element.offsetLeft - place.x,
+      top: element.offsetTop - place.y,
+      right: element.offsetLeft + element.offsetWidth - place.x,
+      bottom: element.offsetTop + element.offsetHeight - place.y,
+    };
+    const before = boxes.get(first);
+    boxes.set(first, before ? union([before, box]) : box);
   }
-  for (const resource of state.resources.values()) {
-    if (!resource.group || owned.has(resource.id) || !state.places.has(resource.id)) continue;
-    const circles = circlesHolding(state, resource.id)
-      .map((circle) => circle.id)
-      .sort()
-      .join(",");
-    const key = `${resource.group}|${circles}`;
-    stacks.set(key, [...(stacks.get(key) ?? []), resource.id]);
-  }
-  for (const [key, ids] of stacks) if (ids.length < 2) stacks.delete(key);
-  return stacks;
+  const sizeOf = (element: HTMLElement | null) =>
+    element ? { width: element.offsetWidth, height: element.offsetHeight } : null;
+  return {
+    units: [...boxes].map(([id, box]) => ({ id, ...box })),
+    heads: [...world.querySelectorAll<HTMLElement>(".circle > .head[data-head]")].flatMap((head) => {
+      const size = sizeOf(head);
+      return size ? [{ id: head.dataset["head"] ?? "", ...size }] : [];
+    }),
+    members: [...world.querySelectorAll<HTMLElement>(".circle > .members")].flatMap((members) => {
+      const id = members.parentElement?.querySelector<HTMLElement>(":scope > .head")?.dataset["head"];
+      const size = sizeOf(members);
+      return id && size ? [{ id, ...size }] : [];
+    }),
+  };
 }
 
 /** K-407 */

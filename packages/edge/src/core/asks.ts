@@ -12,6 +12,7 @@ import {
 export const ASK_ACTIONS = [
   "state",
   "apply",
+  "organize",
   "publish",
   "allow",
   "deploy",
@@ -39,6 +40,7 @@ export const isAskAction = (value: unknown): value is AskAction =>
 export const ASK_RIGHT: Record<AskAction, MachineRight | "none" | "member" | "apply"> = {
   state: "none",
   apply: "apply",
+  organize: "apply",
   publish: "apply",
   allow: "addsApps",
   deploy: "deploys",
@@ -92,6 +94,8 @@ export function askRequest(
       return { method: "GET", path: "/agent/state", body: null };
     case "apply":
       return { method: "POST", path: "/agent/apply", body: { edits: object["edits"] } };
+    case "organize":
+      return { method: "POST", path: "/agent/organize", body: {} };
     case "allow":
       return {
         method: "POST",

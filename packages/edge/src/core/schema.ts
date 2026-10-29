@@ -110,6 +110,10 @@ export const Actor_ = Schema.Union([
   Schema.TaggedStruct("kitshn", { reason: Schema.String }),
 ]);
 
+/** K-532: a size that the map measured, in map units. */
+const Drawn = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1e5 }));
+const DrawnSize = Schema.Struct({ id: Schema.String, width: Drawn, height: Drawn });
+
 /** Messages from a map client, over the WebSocket or as a POST body. */
 export const ClientMessage = Schema.Union([
   Schema.Struct({
@@ -127,6 +131,22 @@ export const ClientMessage = Schema.Union([
     type: Schema.Literal("undoItem"),
     requestId: Schema.String,
     item: Schema.Struct({ kind: Schema.Literals(["card", "circle"]), id: Schema.String }),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("organize"),
+    requestId: Schema.String,
+    /** The drawn box of each card or stack around the place of its first card. */
+    units: Schema.Array(
+      Schema.Struct({
+        id: Schema.String,
+        left: Coordinate,
+        top: Coordinate,
+        right: Coordinate,
+        bottom: Coordinate,
+      }),
+    ).check(Schema.isMaxLength(5000)),
+    heads: Schema.Array(DrawnSize).check(Schema.isMaxLength(1000)),
+    members: Schema.Array(DrawnSize).check(Schema.isMaxLength(1000)),
   }),
 ]);
 export type ClientMessage = typeof ClientMessage.Type;

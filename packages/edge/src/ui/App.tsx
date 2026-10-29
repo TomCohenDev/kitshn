@@ -36,7 +36,16 @@ import {
 } from "../core/model.ts";
 import type { ProviderSticker } from "@kitshn/local";
 import { MAX_UPLOAD_BYTES, isLibraryId } from "../core/library.ts";
-import { circleForCards, placeInside } from "../core/place.ts";
+import {
+  type Box,
+  cardBox,
+  circleBox,
+  circleForCards,
+  headAngle,
+  headBox,
+  placeInside,
+  union,
+} from "../core/place.ts";
 import { awaitsAllow } from "../core/repos.ts";
 import type { Command } from "../core/machine.ts";
 import { ROLLBACK_DATA, RollbackDialog } from "./Rollback.tsx";
@@ -106,6 +115,7 @@ import {
   levelEdit,
   paletteEntries,
   NEW_CIRCLE,
+  ORGANIZE_TIP,
   reshareEdits,
   selectionActions,
   type StackPart,
@@ -131,23 +141,25 @@ import { AskEvents, BotRuns, approveFromHash } from "./Asks.tsx";
 import { PassSettingsPanel } from "./Passes.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
-import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
+import {
+  ACCESS_TIPS,
+  ALONE_KEY,
+  MapView,
+  type Selection,
+  TRAY_CARDS_TYPE,
+  type View,
+  measureMap,
+} from "./Map.tsx";
 import { overlay } from "./held.ts";
 import { HistoryView } from "./History.tsx";
 import { UsageView } from "./Usage.tsx";
 import { UptimeRow } from "./Uptime.tsx";
 import { NotificationsView } from "./Notifications.tsx";
 import {
-  type Box,
-  cardBox,
-  circleBox,
   fitMap,
-  headAngle,
-  headBox,
   openArea,
   panInto,
   shownCardBoxes,
-  union,
   type WidthLimits,
   shownWidths,
   toastPlace,
@@ -162,6 +174,7 @@ import {
   release,
   upload,
   toState,
+  organizeMap,
   undoRevision,
   useStore,
 } from "./store.ts";
@@ -1123,6 +1136,16 @@ export function App() {
 
   fitRef.current = fit;
 
+  /** K-532: one save on the server, which refuses when a share would change; the toast offers Undo. */
+  const organize = async () => {
+    const result = await organizeMap(measureMap(state));
+    showToast(
+      result.ok
+        ? { text: `${result.summary ?? "Organized"}.`, error: false, undo: result.revision }
+        : { text: result.error, error: true, undo: null },
+    );
+  };
+
   /**
    * K-1508: shows the cards and circles of a History row on the map: a pan that brings them clear of the
    * panel, and one highlight that ends by itself.
@@ -1476,6 +1499,7 @@ export function App() {
     addMachine: () => setAddingMachine(true),
     newCircleFor: (ids) => void newCircleFor(ids),
     fit,
+    organize: () => void organize(),
     undoItem: (item) => void undoItem(item),
   };
   const actionContext: ActionContext = {
@@ -1822,6 +1846,9 @@ export function App() {
                 <MenuItem tip="Fit every circle and card in the view." onSelect={fit}>
                   Fit
                 </MenuItem>
+                <MenuItem tip={ORGANIZE_TIP} onSelect={() => void organize()}>
+                  Organize
+                </MenuItem>
                 <MenuItem
                   checkbox
                   checked={previews}
@@ -1902,6 +1929,9 @@ export function App() {
               <>
                 <button class="btn" data-tip="Fit every circle and card in the view." onClick={fit}>
                   Fit
+                </button>
+                <button class="btn" data-tip={ORGANIZE_TIP} onClick={() => void organize()}>
+                  Organize
                 </button>
                 <button
                   class="btn toggle"

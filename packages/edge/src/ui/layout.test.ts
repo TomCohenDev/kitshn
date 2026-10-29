@@ -1,18 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { Circle } from "../core/model.ts";
+import { type Box, cardBox, circleBox, headAngle, headBox } from "../core/place.ts";
 import {
-  type Box,
-  cardBox,
   cardLayer,
   stackOffsets,
   toastPlace,
   FOCUS_LAYER,
   HEAD_LAYER,
-  circleBox,
   fitMap,
   fitView,
-  headAngle,
-  headBox,
   MAP_MIN_WIDTH,
   keyWidth,
   mapBox,

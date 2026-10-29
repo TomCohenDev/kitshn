@@ -85,6 +85,7 @@ Call `kitshn` on the machine where you run. kitshn knows the machine and your th
 
 - `kitshn agent state`: the cards that you manage, with the newest deploy, backup and uptime of each, and your rights.
 - `kitshn agent deploy <card> --body '{"mode":"redeploy"}'`: redeploy a card (`"build"` runs its workflow again). `kitshn agent backup <card>` backs it up now.
+- `kitshn agent organize` puts the cards that you manage in a tidy grid, each in its own circles, as one Undo (K-532). No share changes.
 - `kitshn agent job <machine> --body '{"command": ...}'` runs a job; `kitshn agent history t3.thread.id=<id>` lists what a thread asked.
 - `kitshn publish <file|folder> [--name <name>] [--address <name>] [--circle <circle>] [--public]` puts a page, a file or a folder site on the map (K-1116, K-1123). The same name again updates its card.
 - `kitshn address <card> <name>`, `kitshn redirect <card> <address> [--remove]`, `kitshn logs <card> [text] [--since 1h] [--deploys]` and `kitshn repo <card> --repo <owner/name>` do what their names say (K-1120, K-1128, K-1809, K-1127).

@@ -683,11 +683,11 @@ export class Kitshn extends DurableObject<Env> {
   private busyItems = new Set<string>();
   /**
    * K-1129: the upload of an owner's folder site: the session token, the files that it may send, and the token
-   * that ends it. Known limit: in memory only, so a restart of the Durable Object ends the upload; the browser
-   * then starts again. Revisit when uploads often outlive a restart.
+   * that ends it. Known limit: in memory only, so a restart of the Durable Object ends the upload, and the owner
+   * uploads again. Revisit when uploads often outlive a restart.
    */
   private folderUploads = new Map<string, { jwt: string; hashes: ReadonlySet<string>; done: string }>();
-  /** K-1129: where an owner dropped a folder, until its files arrive; a restart sends the site to the tray. */
+  /** K-1129: where an owner dropped a folder, until its files arrive; it goes with the upload at a restart. */
   private folderDrops = new Map<string, Point>();
   /** Address checks that failed, and when to try them again. Memory only; a restart retries at once. */
   private checkRetryAt = new Map<string, number>();

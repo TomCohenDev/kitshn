@@ -1711,7 +1711,7 @@ export function App() {
         ref={folderInput}
         type="file"
         // K-1129: the browser asks for one folder and gives its files with their paths.
-        {...{ webkitdirectory: "" }}
+        {...{ webkitdirectory: true }}
         hidden
         onChange={(event) => {
           const picked = pickedFolder([...(event.currentTarget.files ?? [])]);

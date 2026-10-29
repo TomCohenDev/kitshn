@@ -282,6 +282,8 @@ export type DaemonMessage =
       readonly part: "shared" | "machine";
       readonly value: unknown;
     }
+  /** K-1612: a local user cancels a queued job of this machine; kitshn answers with `requestAnswer`. */
+  | { readonly type: "cancelJob"; readonly requestId: string; readonly jobId: number }
   /** K-1610: a provider of the machine reports one exec run or forwarded tool call on another machine. */
   | { readonly type: "audit"; readonly audit: LinkAudit }
   /** K-1608: the daemon saved the push with this key and hash and gave it to its provider. */
@@ -299,6 +301,8 @@ export type ServerToDaemon =
   | { readonly type: "accepted"; readonly fingerprint: string }
   /** K-1705: "Rotate key" in the machine panel. */
   | { readonly type: "rotateKey" }
+  /** K-704: the name of the machine on the map, on each signed connection and after a rename. */
+  | { readonly type: "name"; readonly name: string }
   /** K-704: the owner forgot this provider on the map; the daemon drops it unless a connection holds it. */
   | { readonly type: "forgetProvider"; readonly provider: string }
   /** K-706: the grant table of each resource of one provider, on connect and on each change. */

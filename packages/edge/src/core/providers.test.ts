@@ -1,8 +1,8 @@
 import type { ProviderReport } from "@kitshn/local";
 import { describe, expect, it } from "vitest";
 import type { Machine } from "./machine.ts";
-import { type Circle, type Resource, type State, levelForKind, shareKey } from "./model.ts";
-import { applyChanges, forgetProviderChanges, invert } from "./changes.ts";
+import { type Circle, OWNER_CIRCLE_ID, type Resource, type State, levelForKind, shareKey } from "./model.ts";
+import { applyChanges, forgetProviderChanges, invert, ruleViolation } from "./changes.ts";
 import {
   commandsFor,
   grantTables,
@@ -297,5 +297,29 @@ describe("a busy machine (K-1608)", () => {
     expect(machineBusy(with_({ ...busy, status: "offline" }), "vps")).toBe(false);
     expect(machineBusy(with_({ ...busy, provider: { ...busy.provider, droppedAt: 1 } }), "vps")).toBe(false);
     expect(machineBusy(value, "vps")).toBe(false);
+  });
+});
+
+describe("owner control (K-719)", () => {
+  it("gives the Owner circle the top level of an owner-control card wherever it sits, and refuses an override of it", () => {
+    const owner = circle(OWNER_CIRCLE_ID, [{ _tag: "email", email: "owner@b.c" }], {
+      x: 5000,
+      y: 5000,
+      level: "view",
+    });
+    const base = state([owner]);
+    const app = [...base.resources.values()].find((card) => card.kind === "t3.app")!;
+    const guarded = { ...app, provider: { ...app.provider!, ownerControl: true as const } };
+    const value: State = { ...base, resources: new Map([...base.resources, [app.id, guarded]]) };
+    // The card sits at 0,0, outside the Owner circle, and the Owner circle's default is view.
+    expect(grantsOf(value, guarded, 0)).toEqual([
+      expect.objectContaining({ circle: expect.objectContaining({ id: OWNER_CIRCLE_ID }), level: "control" }),
+    ]);
+    expect(grantsOf(base, app, 0)).toEqual([]);
+    const lowered = {
+      ...value,
+      shareSettings: new Map([[shareKey(app.id, OWNER_CIRCLE_ID), { level: "view" as const, endsAt: null }]]),
+    };
+    expect(ruleViolation(lowered)).toMatch(/keeps control/);
   });
 });

@@ -23,6 +23,7 @@
     "ACCESS_ADMIN_AUD": "",
     "ACCESS_CONNECT_AUD": "",
     "ACCESS_AGENT_AUD": "",
+    "ACCESS_DEVICE_AUD": "",
     "ACCESS_FRESH_AUD": "",
     "PAGES_LOGIN_AUD": "",
     "PAGES_PASSKEY_AUD": "",

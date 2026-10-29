@@ -56,6 +56,7 @@ export function providerCards(
           stickers: item.stickers ?? [],
           lists: item.lists ?? [],
           settings: kind.settings ?? [],
+          ...(kind.ownerControl === true ? { ownerControl: true as const } : {}),
           site: item.site?.name ?? null,
         },
       });

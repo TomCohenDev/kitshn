@@ -401,6 +401,14 @@ export async function queueJob(
     : { text: `Job #${result.id} is queued.`, error: false };
 }
 
+/** K-1612: cancels a queued job; the answer is a toast text. */
+async function cancelJob(id: number): Promise<{ text: string; error: boolean }> {
+  const result = await callApi<{ ok: true }>("POST", `/api/jobs/${id}/cancel`, {});
+  return "error" in result
+    ? { text: result.error, error: true }
+    : { text: `Job #${id} is cancelled.`, error: false };
+}
+
 /** The machine part of the card panel: status, sample, commands (K-612) and removal (K-615). */
 export function MachinePanel(props: {
   view: MachineView;
@@ -635,6 +643,16 @@ export function MachinePanel(props: {
               >
                 {job.state}
               </span>
+              {job.state === "queued" ? (
+                <button
+                  type="button"
+                  class="btn"
+                  data-tip="Cancel this job before it reaches the machine. History records it (K-1612)."
+                  onClick={() => void cancelJob(job.id).then(({ text, error }) => props.onToast(text, error))}
+                >
+                  Cancel
+                </button>
+              ) : null}
             </div>
             {job.output ? <pre class="output">{job.output}</pre> : null}
           </li>

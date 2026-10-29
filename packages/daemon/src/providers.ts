@@ -174,6 +174,11 @@ export class Providers {
     };
   }
 
+  /** A saved push of kitshn by its key, or null. */
+  pushedValue(key: string): unknown {
+    return this.pushed[key] ?? null;
+  }
+
   /** K-1609: the saved reach of a provider: the cards on other machines that this machine opens. */
   reachOf(provider: string): ReadonlyArray<ReachedCard> {
     return (this.pushed[pushKey.reach(provider)] as ReadonlyArray<ReachedCard> | undefined) ?? [];

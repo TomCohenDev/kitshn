@@ -483,3 +483,91 @@ it("forgets only a provider that does not run, and an offline report does not br
   await message("signed", [report([app])]);
   expect(await card()).toBeDefined();
 });
+
+it("lists for a device the provider cards with an address that its token opens, in the portal's shape (K-1601)", async () => {
+  stubAccessCerts();
+  const { message, sql } = await setup();
+  const phone: Circle = {
+    id: "phone",
+    name: "Phone",
+    color: "#00B3FF",
+    level: "use",
+    members: [{ _tag: "device", tokenId: "t-phone", clientId: "phone.access", name: "Yarden's phone" }],
+    match: "any",
+    needsPasskey: false,
+    endsAt: null,
+    x: 9000,
+    y: 9000,
+    r: 200,
+  };
+  await sql("INSERT OR REPLACE INTO circles (id, body) VALUES ('phone', ?)", JSON.stringify(phone));
+  await message("signed", [
+    report([
+      { ...app, site: { name: "t3-vps", port: 3773 } },
+      { ...app, id: "hidden", name: "Hidden" },
+    ]),
+  ]);
+  await sql("INSERT OR REPLACE INTO places (id, x, y) VALUES (?, 9000, 9000)", appId);
+  const list = async (clientId: string) =>
+    (await (
+      await send("/device/machines", {
+        headers: { "cf-access-jwt-assertion": await accessToken("device-aud", { common_name: clientId }) },
+      })
+    ).json()) as { machines: Array<unknown> };
+  expect(await list("phone.access")).toEqual({
+    machines: [
+      {
+        id: "vps",
+        name: "vps",
+        origin: "https://t3-vps.example.com",
+        card: appId,
+        kind: "t3.app",
+        level: "use",
+      },
+    ],
+  });
+  // A token that no circle holds gets an empty list.
+  expect(await list("stranger.access")).toEqual({ machines: [] });
+  // A person's login is not a device.
+  const person = await send("/device/machines", {
+    headers: { "cf-access-jwt-assertion": await accessToken("device-aud", { email: "owner@example.com" }) },
+  });
+  expect(person.status).toBe(403);
+  await sql("DELETE FROM circles WHERE id = 'phone'");
+});
+
+it("lets a machine cancel only its own queued jobs (K-1612)", async () => {
+  const { stub } = await setup();
+  const sent: Array<{ type: string; error?: string | null }> = [];
+  const raw = (message: object) =>
+    runInDurableObject(stub, (instance) =>
+      instance.webSocketMessage(daemonSocket("signed", sent as Array<unknown>), JSON.stringify(message)),
+    );
+  const ids = await runInDurableObject(stub, (_, state) => {
+    const insert = (machine: string, jobState: string) =>
+      state.storage.sql
+        .exec<{ id: number }>(
+          `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
+           VALUES (?, '[]', '{"kind":"restart"}', ?, 0, 9999999999999, '{"_tag":"kitshn","reason":"test"}', '{}', NULL, '') RETURNING id`,
+          machine,
+          jobState,
+        )
+        .one().id;
+    return {
+      own: insert("vps", "queued"),
+      other: insert("mac", "queued"),
+      sentAlready: insert("vps", "sent"),
+    };
+  });
+  await raw({ type: "cancelJob", requestId: "a", jobId: ids.other });
+  await raw({ type: "cancelJob", requestId: "b", jobId: ids.sentAlready });
+  await raw({ type: "cancelJob", requestId: "c", jobId: ids.own });
+  const answers = sent.filter((item) => item.type === "requestAnswer").map((item) => item.error === null);
+  expect(answers).toEqual([false, false, true]);
+  const state = await runInDurableObject(stub, (_, storage) =>
+    storage.storage.sql
+      .exec<{ state: string; output: string }>("SELECT state, output FROM jobs WHERE id = ?", ids.own)
+      .one(),
+  );
+  expect(state).toEqual({ state: "failed", output: "Cancelled by vps." });
+});

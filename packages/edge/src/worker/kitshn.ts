@@ -295,6 +295,7 @@ import {
   eventOf,
   legacyRepos,
   parseManifest,
+  FOLDER_PART_BYTES,
   parseConfigFile,
   parseSiteIcon,
   pullRequestNumber,
@@ -680,6 +681,14 @@ export class Kitshn extends DurableObject<Env> {
   private liveSites = new Map<string, LiveSite>();
   /** K-1117: the library items that an update, a restore or a delete changes now. */
   private busyItems = new Set<string>();
+  /**
+   * K-1129: the upload of an owner's folder site: the session token, the files that it may send, and the token
+   * that ends it. Known limit: in memory only, so a restart of the Durable Object ends the upload; the browser
+   * then starts again. Revisit when uploads often outlive a restart.
+   */
+  private folderUploads = new Map<string, { jwt: string; hashes: ReadonlySet<string>; done: string }>();
+  /** K-1129: where an owner dropped a folder, until its files arrive; a restart sends the site to the tray. */
+  private folderDrops = new Map<string, Point>();
   /** Address checks that failed, and when to try them again. Memory only; a restart retries at once. */
   private checkRetryAt = new Map<string, number>();
   /**
@@ -2975,7 +2984,8 @@ export class Kitshn extends DurableObject<Env> {
       ).map((row) => row.id),
       handoverCards: this.sql<{ id: string }>(
         `SELECT id FROM library WHERE added_by IS NOT NULL AND kind = 'page'
-         UNION SELECT card_id AS id FROM agent_sites WHERE card_id NOT IN (SELECT card_id FROM repo_cards)`,
+         UNION SELECT card_id AS id FROM agent_sites
+         WHERE client_id NOT LIKE 'owner:%' AND card_id NOT IN (SELECT card_id FROM repo_cards)`,
       )
         .map((row) => row.id)
         .filter(
@@ -2983,6 +2993,11 @@ export class Kitshn extends DurableObject<Env> {
             this.state.resources.get(id)?.kind === "page" ||
             this.state.resources.get(id)?.kind === "site.static",
         ),
+      folderSites: this.sql<{ id: string }>(
+        "SELECT card_id AS id FROM agent_sites WHERE card_id NOT IN (SELECT card_id FROM repo_cards)",
+      )
+        .map((row) => row.id)
+        .filter((id) => this.state.resources.has(id)),
       redirects: this.sql<{ address: string; card_id: string }>(
         "SELECT address, card_id FROM old_addresses WHERE pinned = 1 AND going = 0 ORDER BY rowid",
       ).reduce<Record<string, Array<string>>>((all, row) => {
@@ -3393,6 +3408,9 @@ export class Kitshn extends DurableObject<Env> {
       return this.preview(path.slice("/api/library/".length, -"/content".length));
     if (path.startsWith("/api/library/") && request.method === "DELETE")
       return this.deleteItem(caller, path.slice("/api/library/".length));
+    // K-1129: the owner uploads a folder as a folder site, through kitshn, because the browser cannot reach Cloudflare.
+    if (path.startsWith("/api/sites/") && request.method === "POST")
+      return this.ownerSite(caller, path.slice("/api/sites/".length), request);
     // K-1128: an address that only redirects to the card's main address.
     if (path.startsWith("/api/cards/") && path.includes("/redirects")) {
       const [card = "", rest = ""] = path.slice("/api/cards/".length).split("/redirects");
@@ -8677,6 +8695,151 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /**
+   * K-1129: the steps of an owner's folder site: `plan` (a new site at a drop point or in the tray, or a new version
+   * of one), `assets` (the upload session), `upload` (one bucket of files, which kitshn passes on to Cloudflare) and
+   * `finish`. Each drop makes a new site; an owner site row has its own key, `owner:<card>`.
+   */
+  private async ownerSite(caller: Caller, step: string, request: Request): Promise<Response> {
+    const fail = (status: number, error: string) => Response.json({ error }, { status });
+    const api = this.api();
+    if (!api) return fail(503, "kitshn has no Cloudflare API token here.");
+    const now = Date.now();
+    if (step === "upload") return await this.ownerUpload(request);
+    const input: unknown = await request.json().catch(() => null);
+    const body = isRecord(input) ? input : {};
+    try {
+      if (step === "plan") return await this.ownerSitePlan(api, body, now);
+      const [row] = this.sql<DeployRow>("SELECT * FROM deploys WHERE id = ?", String(body["deployId"] ?? ""));
+      const [site] = row
+        ? this.sql<AgentSiteRow>(
+            "SELECT * FROM agent_sites WHERE card_id = ? AND client_id LIKE 'owner:%'",
+            row.resource_id,
+          )
+        : [];
+      if (!row || !site || row.repo_id !== null) return fail(404, "kitshn knows no such folder upload.");
+      if (row.expires_at < now || row.state !== "planned")
+        return fail(410, "This upload expired or ended. Upload the folder again.");
+      if (step === "assets") {
+        const manifest = parseManifest(body["manifest"]);
+        if (typeof manifest === "string") return fail(400, manifest);
+        const answer = await this.deployAssets(api, row, body["manifest"]);
+        if (!answer.ok) return answer;
+        const session = (await answer.json()) as { jwt: string; buckets: Array<Array<string>> };
+        this.folderUploads.set(row.id, {
+          jwt: session.jwt,
+          hashes: new Set(Object.values(manifest).map((file) => file.hash)),
+          done: session.jwt,
+        });
+        return Response.json({ buckets: session.buckets });
+      }
+      if (step !== "finish") return fail(404, `kitshn has no folder site step ${step}.`);
+      const upload = this.folderUploads.get(row.id);
+      if (!upload) return fail(409, "kitshn lost this upload while it ran; upload the folder again.");
+      if (this.deletingStorage.has(site.card_id))
+        return fail(409, `kitshn deletes the script of ${site.folder} now; upload again after it finishes.`);
+      if (!this.state.resources.has(site.card_id)) {
+        this.addFolderCard(caller.actor, site, this.folderDrops.get(site.card_id) ?? null, false);
+        this.folderDrops.delete(site.card_id);
+      }
+      const finished = await this.finishDeploy(
+        api,
+        row,
+        folderDeployer(site.folder),
+        upload.done,
+        body["icon"],
+        body["headers"],
+        body["redirects"],
+      );
+      if (finished.ok) this.folderUploads.delete(row.id);
+      return finished;
+    } catch (error) {
+      if (error instanceof RuleError) return fail(409, error.message);
+      return fail(502, `kitshn could not finish the step: ${String(error)}`);
+    }
+  }
+
+  /** K-1129: a new folder site of the owner, at the drop point or in the tray, or a new version of a folder site. */
+  private async ownerSitePlan(api: Api, input: Record<string, unknown>, now: number) {
+    const fail = (status: number, error: string) => Response.json({ error }, { status });
+    const card = typeof input["card"] === "string" ? input["card"] : null;
+    if (card !== null) {
+      // "Upload a new version": any folder site, also one that a key published (K-1123).
+      const [site] = this.sql<AgentSiteRow>("SELECT * FROM agent_sites WHERE card_id = ?", card);
+      const resource = this.state.resources.get(card);
+      if (!site || !resource || !this.isFolderSite(card))
+        return fail(409, "Only a folder site takes a new version from a folder (K-1129).");
+      const address = resource.addresses[0] ?? site.address;
+      return Response.json({
+        deployId: this.planFolderDeploy(site, address, now),
+        card,
+        address,
+        updated: true,
+      });
+    }
+    const folder = typeof input["folder"] === "string" ? input["folder"].trim() : "";
+    const folderError = fileNameError(folder);
+    if (folderError) return fail(400, folderError);
+    const [x, y] = [input["x"], input["y"]];
+    const spot =
+      typeof x === "number" && typeof y === "number" && Number.isFinite(x) && Number.isFinite(y)
+        ? { x: Math.round(x), y: Math.round(y) }
+        : null;
+    const name = this.folderSiteName(null, this.env.KITSHN_ZONE);
+    if (typeof name !== "string") return fail(name.status, name.error);
+    const cardId = `${FOLDER_SITE_PREFIX}${newLibraryId()}`;
+    const planned = await this.planNewFolderSite(
+      api,
+      {
+        card_id: cardId,
+        client_id: `owner:${cardId}`,
+        folder,
+        address: `${name}.${this.env.KITSHN_ZONE}`,
+        circle: null,
+        public: 0,
+        agent_tray: 0,
+        created_at: now,
+      },
+      now,
+    );
+    if (planned.ok && spot) this.folderDrops.set(cardId, spot);
+    return planned;
+  }
+
+  /**
+   * K-1129: one bucket of an owner's folder upload. It belongs to an open plan of the owner, holds only files of its
+   * manifest, and stays under the Worker's body limit; kitshn sends it on to Cloudflare with the session token.
+   */
+  private async ownerUpload(request: Request): Promise<Response> {
+    const fail = (status: number, error: string) => Response.json({ error }, { status });
+    const deployId = request.headers.get("x-kitshn-deploy") ?? "";
+    const upload = this.folderUploads.get(deployId);
+    const [row] = this.sql<DeployRow>("SELECT * FROM deploys WHERE id = ? AND state = 'planned'", deployId);
+    if (!upload || !row || row.expires_at < Date.now())
+      return fail(404, "kitshn knows no such open folder upload.");
+    const size = Number(request.headers.get("content-length"));
+    if (!Number.isInteger(size) || size <= 0) return fail(411, "Send the bucket with a Content-Length.");
+    if (size > FOLDER_PART_BYTES)
+      return fail(413, "One part of a folder upload is at most 40 MB; send fewer files at once.");
+    const form = await request.formData();
+    const names = [...form.keys()];
+    if (names.length === 0 || names.some((name) => !upload.hashes.has(name)))
+      return fail(400, "The bucket holds a file that the manifest of this upload does not name.");
+    const answer = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/assets/upload?base64=true`,
+      { method: "POST", headers: { authorization: `Bearer ${upload.jwt}` }, body: form },
+    );
+    const result = (await answer.json().catch(() => null)) as {
+      success?: boolean;
+      result?: { jwt?: string };
+      errors?: unknown;
+    } | null;
+    if (!result?.success)
+      return fail(502, `Cloudflare did not take the files: ${JSON.stringify(result?.errors)}`);
+    if (result.result?.jwt) upload.done = result.result.jwt;
+    return Response.json({ ok: true });
+  }
+
+  /**
    * K-1123: the steps of a folder site: `plan` checks the key, the name and the address; `assets` opens the upload
    * session; `finish` makes the card, if it is new, where K-1116 lets it land, and publishes the files.
    */
@@ -8718,24 +8881,7 @@ export class Kitshn extends DurableObject<Env> {
         // The rights and the circles can change between the plan and the files, so the spot counts now.
         const spot = agentUploadPlace(this.state, agent.visitor, site.circle, site.public === 1, now);
         if (typeof spot === "string") return fail(403, spot);
-        const resource: Resource = {
-          id: site.card_id,
-          kind: "site.static",
-          name: site.folder,
-          addresses: [site.address],
-          status: "unknown",
-          group: null,
-          machine: null,
-        };
-        this.ctx.storage.transactionSync(() => {
-          const other = [...this.state.resources.values()].find((card) =>
-            card.addresses.includes(site.address),
-          );
-          if (other) throw new RuleError(`${site.address} belongs to the card ${other.name} now.`);
-          if (!spot) this.sql("UPDATE agent_sites SET agent_tray = 1 WHERE card_id = ?", site.card_id);
-          this.addCard(agent.actor, resource, spot, `the folder site ${site.folder}`);
-        });
-        this.load();
+        this.addFolderCard(agent.actor, site, spot, !spot);
       }
       return await this.finishDeploy(
         api,
@@ -8776,21 +8922,6 @@ export class Kitshn extends DurableObject<Env> {
     // K-1123: a site whose card went (Remove app, a delete) and whose plan expired counts for nothing; a publish of the
     // same folder is a first publish again.
     const known = stored && this.siteLive(stored, now) ? stored : undefined;
-    const planned = (site: AgentSiteRow, address: string) => {
-      const deployId = crypto.randomUUID();
-      this.sql(
-        `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, addresses, app_key)
-         VALUES (?, ?, NULL, 'folder', ?, ?, ?, NULL, 'deploy', 'folder', 'planned', ?, '', 'static', ?, 'app')`,
-        deployId,
-        `folder ${site.folder}`,
-        site.card_id,
-        address,
-        `kitshn-${site.card_id}`,
-        now + DEPLOY_MS,
-        JSON.stringify([address]),
-      );
-      return deployId;
-    };
     if (known) {
       // K-1123, as K-1117: a second publish deploys the same card; a move goes through /agent/apply.
       if (circle !== null || open || wanted !== null || text("zone"))
@@ -8804,7 +8935,7 @@ export class Kitshn extends DurableObject<Env> {
       if (refusal) return fail(403, refusal);
       const address = this.state.resources.get(known.card_id)?.addresses[0] ?? known.address;
       return Response.json({
-        deployId: planned(known, address),
+        deployId: this.planFolderDeploy(known, address, now),
         card: known.card_id,
         address,
         updated: true,
@@ -8836,8 +8967,33 @@ export class Kitshn extends DurableObject<Env> {
       agent_tray: 0,
       created_at: now,
     };
+    return await this.planNewFolderSite(api, site, now, stored?.card_id);
+  }
+
+  /** K-1123: the deploy row of one upload of a folder site. */
+  private planFolderDeploy(site: Pick<AgentSiteRow, "card_id" | "folder">, address: string, now: number) {
+    const deployId = crypto.randomUUID();
+    this.sql(
+      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, addresses, app_key)
+       VALUES (?, ?, NULL, 'folder', ?, ?, ?, NULL, 'deploy', 'folder', 'planned', ?, '', 'static', ?, 'app')`,
+      deployId,
+      `folder ${site.folder}`,
+      site.card_id,
+      address,
+      `kitshn-${site.card_id}`,
+      now + DEPLOY_MS,
+      JSON.stringify([address]),
+    );
+    return deployId;
+  }
+
+  /**
+   * K-1123, K-1129: the plan of a new folder site. Call it with no await between the name check and this call, so
+   * two plans at once cannot take one name. `replaces` is an old site row of the same folder that counts for nothing.
+   */
+  private async planNewFolderSite(api: Api, site: AgentSiteRow, now: number, replaces?: string) {
     const deployId = this.ctx.storage.transactionSync(() => {
-      if (stored) this.sql("DELETE FROM agent_sites WHERE card_id = ?", stored.card_id);
+      if (replaces) this.sql("DELETE FROM agent_sites WHERE card_id = ?", replaces);
       this.sql(
         `INSERT INTO agent_sites (card_id, client_id, folder, address, circle, public, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -8849,11 +9005,11 @@ export class Kitshn extends DurableObject<Env> {
         site.public,
         site.created_at,
       );
-      return planned(site, address);
+      return this.planFolderDeploy(site, site.address, now);
     });
     // The plan holds its address from here; a refusal below lets it go again.
     const release = (response: Response) => {
-      this.sql("DELETE FROM agent_sites WHERE card_id = ?", cardId);
+      this.sql("DELETE FROM agent_sites WHERE card_id = ?", site.card_id);
       this.sql(
         "UPDATE deploys SET state = 'failed', reason = ? WHERE id = ?",
         "The plan was refused.",
@@ -8867,14 +9023,43 @@ export class Kitshn extends DurableObject<Env> {
     );
     if (scripts.length >= SCRIPT_LIMIT)
       return release(
-        fail(
-          409,
-          `The account has ${scripts.length} Worker scripts; kitshn makes no new site at ${SCRIPT_LIMIT} (K-903, K-1123).`,
+        Response.json(
+          {
+            error: `The account has ${scripts.length} Worker scripts; kitshn makes no new site at ${SCRIPT_LIMIT} (K-903, K-1123).`,
+          },
+          { status: 409 },
         ),
       );
-    const refused = await this.addressRefusal(api, [address], cardId, `kitshn-${cardId}`, undefined, true);
+    const refused = await this.addressRefusal(
+      api,
+      [site.address],
+      site.card_id,
+      `kitshn-${site.card_id}`,
+      undefined,
+      true,
+    );
     if (refused) return release(refused);
-    return Response.json({ deployId, card: cardId, address, updated: false });
+    return Response.json({ deployId, card: site.card_id, address: site.address, updated: false });
+  }
+
+  /** K-1123: the card of a folder site at its first finish; a card that took its address since stops it. */
+  private addFolderCard(actor: Actor, site: AgentSiteRow, spot: Point | null, agentTray: boolean) {
+    const resource: Resource = {
+      id: site.card_id,
+      kind: "site.static",
+      name: site.folder,
+      addresses: [site.address],
+      status: "unknown",
+      group: null,
+      machine: null,
+    };
+    this.ctx.storage.transactionSync(() => {
+      const other = [...this.state.resources.values()].find((card) => card.addresses.includes(site.address));
+      if (other) throw new RuleError(`${site.address} belongs to the card ${other.name} now.`);
+      if (agentTray) this.sql("UPDATE agent_sites SET agent_tray = 1 WHERE card_id = ?", site.card_id);
+      this.addCard(actor, resource, spot, `the folder site ${site.folder}`);
+    });
+    this.load();
   }
 
   /**

@@ -82,6 +82,7 @@ import {
 import { ItemIcon } from "./ItemIcon.tsx";
 import { FOLDER_SITE_PREFIX } from "../core/apps.ts";
 import { peekable } from "./frames.ts";
+import { type FolderFile, droppedFolder, pickedFolder, uploadFolder } from "./folders.ts";
 import { PeekArrow } from "./Peek.tsx";
 import {
   type Action,
@@ -306,6 +307,9 @@ export function App() {
   const uploadInput = useRef<HTMLInputElement>(null);
   /** Where the next upload of the file chooser lands: a map point, or null for the tray. */
   const uploadAt = useRef<Point | null>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
+  /** K-1129: what the next folder of the folder chooser becomes: a new site, or a new version of a card. */
+  const folderTarget = useRef<{ readonly at: Point | null } | { readonly card: Resource } | null>(null);
   /** K-110: a sign-out or its retry waits for Cloudflare; the server also runs one at a time. */
   const [signingOut, setSigningOut] = useState(false);
   const [menu, setMenu] = useState<{ readonly target: MenuTarget; readonly anchor: Rect } | null>(null);
@@ -361,6 +365,7 @@ export function App() {
   const pullRequests = store.snapshot?.pullRequests ?? {};
   const previousVersions = useMemo(() => new Set(store.snapshot?.previousVersions ?? []), [store.snapshot]);
   const handoverCards = useMemo(() => new Set(store.snapshot?.handoverCards ?? []), [store.snapshot]);
+  const folderSites = useMemo(() => new Set(store.snapshot?.folderSites ?? []), [store.snapshot]);
 
   /**
    * K-523, K-1507: the item whose per-item undo the open menu shows, or for the palette the selected card or
@@ -483,6 +488,21 @@ export function App() {
   };
 
   /**
+   * K-204, K-210: the circles of a drop point, which every dropped card lands in exactly, also when several fan out.
+   * Null when a public circle is there and the owner says no.
+   */
+  const confirmPublic = async (at: Point, what: string | undefined) => {
+    const circles = [...(state?.circles.values() ?? [])];
+    const wanted = new Set(circles.filter((circle) => insideCircle(at, circle)).map((circle) => circle.id));
+    const publicHere = circles.filter((circle) => wanted.has(circle.id) && isPublicCircle(circle));
+    if (publicHere.length === 0) return wanted;
+    const where = publicHere.map((circle) => circle.name).join(", ");
+    return (await ask(`This makes ${what} public in ${where}. Anyone with the address can open it.`))
+      ? wanted
+      : null;
+  };
+
+  /**
    * K-1101: uploads one file after the other. With `at` (a drop on the map), the cards land there and so get
    * the shares of the circles around that point; a public circle asks first (K-210). Without, they wait
    * in the tray, private.
@@ -498,17 +518,10 @@ export function App() {
       if (refused) showToast({ text: refused, error: true, undo: null });
       return;
     }
-    // Every card lands in exactly the circles of the drop point, also when several fan out (K-204).
-    const circles = [...state.circles.values()];
-    const wanted = new Set(
-      at ? circles.filter((circle) => insideCircle(at, circle)).map((circle) => circle.id) : [],
-    );
-    const publicHere = circles.filter((circle) => wanted.has(circle.id) && isPublicCircle(circle));
-    if (publicHere.length > 0) {
-      const what = fitting.length === 1 ? fitting[0]?.name : plural(fitting.length, "file");
-      const where = publicHere.map((circle) => circle.name).join(", ");
-      if (!(await ask(`This makes ${what} public in ${where}. Anyone with the address can open it.`))) return;
-    }
+    const wanted = at
+      ? await confirmPublic(at, fitting.length === 1 ? fitting[0]?.name : plural(fitting.length, "file"))
+      : new Set<string>();
+    if (wanted === null) return;
     const added: Array<{ id: string; revision: number }> = [];
     const errors: Array<string> = [];
     for (const [index, file] of fitting.entries()) {
@@ -1285,6 +1298,48 @@ export function App() {
     if (to) void commit([{ _tag: "place", id: resource.id, after: to }], []);
   };
 
+  /**
+   * K-1129: publishes folders as folder sites, one after the other. A new site lands at `at` like a dropped file
+   * (a public circle asks first, K-210) or waits in the tray; `card` gets a new version at its address.
+   */
+  const uploadFolders = async (
+    folders: ReadonlyArray<{ readonly folder: string; readonly files: ReadonlyArray<FolderFile> }>,
+    target: { readonly at: Point | null } | { readonly card: Resource },
+  ) => {
+    if (!state || folders.length === 0) return;
+    const at = "at" in target ? target.at : null;
+    const wanted = at
+      ? await confirmPublic(at, folders.length === 1 ? folders[0]?.folder : plural(folders.length, "folder"))
+      : new Set<string>();
+    if (wanted === null) return;
+    const done: Array<string> = [];
+    const errors: Array<string> = [];
+    const added: Array<string> = [];
+    for (const [index, { folder, files }] of folders.entries()) {
+      const spot = at
+        ? (placeInside(state, { x: at.x + index * 30, y: at.y + index * 90 }, wanted) ?? at)
+        : null;
+      const prefix = folders.length > 1 ? `${index + 1} of ${folders.length}, ${folder}: ` : "";
+      const result = await uploadFolder(
+        "card" in target ? { card: target.card.id } : { folder, at: spot },
+        files,
+        (text) => setProgress(`${prefix}${text}`),
+      );
+      if ("error" in result) errors.push(`${folder}: ${result.error}`);
+      else {
+        added.push(result.card);
+        done.push(
+          result.updated
+            ? `Uploaded a new version of ${"card" in target ? target.card.name : folder}.`
+            : `Published ${folder} at https://${result.address}${at ? "" : "; it waits in the tray, private"}.`,
+        );
+      }
+    }
+    setProgress(null);
+    if (added.length > 0) select({ cards: new Set(added), circle: null });
+    showToast({ text: [...done, ...errors].join(" "), error: errors.length > 0, undo: null });
+  };
+
   const uploadTo = (at: Point | null) => {
     uploadAt.current = at;
     location.hash = "map";
@@ -1380,6 +1435,11 @@ export function App() {
     deleteCircle: (circle) => void deleteCircle(circle),
     newCircle: (at) => void newCircle(at),
     upload: uploadTo,
+    uploadFolder: (target) => {
+      folderTarget.current = target;
+      location.hash = "map";
+      setTimeout(() => folderInput.current?.click());
+    },
     addSite: () => setAddingSite(true),
     addRepoGroup: () => setAddingRepoGroup(true),
     addMachine: () => setAddingMachine(true),
@@ -1398,6 +1458,7 @@ export function App() {
     previousVersions,
     handoverCards,
     openStacks,
+    folderSites,
   };
 
   const waitingRepos = store.snapshot?.repos.filter(awaitsAllow).length ?? 0;
@@ -1406,6 +1467,19 @@ export function App() {
       {route.tab === "map" ? (
         <MapView
           onDropFiles={(files, at) => void uploadFiles(files, at)}
+          onDropFolders={(entries, at) =>
+            void Promise.all(
+              entries.map(async (entry) => ({ folder: entry.name, files: await droppedFolder(entry) })),
+            ).then(
+              (folders) => uploadFolders(folders, { at }),
+              (error: unknown) =>
+                showToast({
+                  text: `kitshn could not read the folder: ${String(error)}`,
+                  error: true,
+                  undo: null,
+                }),
+            )
+          }
           onDropCards={(ids, at) => void placeFromTray(ids, at)}
           onStackOnto={(ids, target) => void stacks.stackOnto(ids, target)}
           previews={previews}
@@ -1631,6 +1705,20 @@ export function App() {
           const at = uploadAt.current;
           uploadAt.current = null;
           void uploadFiles(files, at);
+        }}
+      />
+      <input
+        ref={folderInput}
+        type="file"
+        // K-1129: the browser asks for one folder and gives its files with their paths.
+        {...{ webkitdirectory: "" }}
+        hidden
+        onChange={(event) => {
+          const picked = pickedFolder([...(event.currentTarget.files ?? [])]);
+          event.currentTarget.value = "";
+          const target = folderTarget.current;
+          folderTarget.current = null;
+          if (target && picked.files.length > 0) void uploadFolders([picked], target);
         }}
       />
       <header class={`bar${floating ? " beside-panel" : ""}`} ref={barRef}>

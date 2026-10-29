@@ -32,6 +32,7 @@ function fakeCloudflare(others: Record<string, number> = {}) {
     scripts.set(id, { classes: new Set(), crons: Array.from({ length: count }, () => "0 * * * *") });
   const domains: Array<{ id: string; hostname: string; service: string }> = [];
   const uploads: Array<Record<string, unknown>> = [];
+  const assets: Array<string> = [];
   /** K-821: each rollback of a script to a version, in order. */
   const rollbacks: Array<{ script: string; version: string }> = [];
   const state: {
@@ -127,6 +128,16 @@ function fakeCloudflare(others: Record<string, number> = {}) {
       return ok({});
     }
     if (deployed) return ok({ deployments: [{ versions: [{ version_id: `version-${uploads.length}` }] }] });
+    // K-1129: each file of the manifest goes up in one bucket, with the session token; the last part ends it.
+    if (path.endsWith("/assets-upload-session") && method === "POST") {
+      const body = (await request.json()) as { manifest: Record<string, { hash: string }> };
+      return ok({ jwt: "session", buckets: [Object.values(body.manifest).map((file) => file.hash)] });
+    }
+    if (path === "/accounts/acct/workers/assets/upload" && method === "POST") {
+      if (request.headers.get("authorization") !== "Bearer session") return refuse("not the session token");
+      assets.push(...(await request.formData()).keys());
+      return ok({ jwt: "done" });
+    }
     if (path.startsWith("/accounts/acct/workers/scripts/")) return ok({});
     if (path === "/accounts/acct/workers/domains") {
       if (method === "GET")
@@ -181,7 +192,7 @@ function fakeCloudflare(others: Record<string, number> = {}) {
     domains.filter((item) => item.hostname === hostname).map((item) => item.service);
   /** Deletes a KV namespace behind kitshn's back, as a restart in the middle of an orphan delete can leave it. */
   const dropKv = (id: string) => collection("/accounts/acct/storage/kv/namespaces").delete(id);
-  return { uploads, state, scripts, served, dropKv, rollbacks };
+  return { uploads, assets, state, scripts, served, dropKv, rollbacks };
 }
 
 /** One repo of the test, so each test has its own cards. */
@@ -233,23 +244,45 @@ async function call(path: string, method: string, headers: Record<string, string
 const step = async (app: ReturnType<typeof repo>, path: string, body: unknown) =>
   call(path, "POST", { authorization: `Bearer ${await app.token()}` }, body);
 
+const ownerHeaders = async () => ({
+  "cf-access-jwt-assertion": await new SignJWT({ email: "owner@example.com" })
+    .setProtectedHeader({ alg: "RS256", kid: "team" })
+    .setIssuer("https://team.example.com")
+    .setAudience("admin-aud")
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(team.privateKey),
+  origin: "https://kit.example.com",
+});
+
 /** A request of the owner to the admin API, with an Access token. */
 const admin = async (path: string, method: string, body?: unknown) =>
-  call(
-    path,
-    method,
+  call(path, method, await ownerHeaders(), body);
+
+/** K-1129: one part of an owner's folder upload, as the browser sends it. */
+const ownerPart = async (deployId: string, files: Record<string, string>) => {
+  const form = new FormData();
+  for (const [hash, text] of Object.entries(files)) form.set(hash, btoa(text));
+  const body = new Response(form);
+  const bytes = await body.arrayBuffer();
+  const request = new Request<unknown, IncomingRequestCfProperties>(
+    "https://kit.example.com/api/sites/upload",
     {
-      "cf-access-jwt-assertion": await new SignJWT({ email: "owner@example.com" })
-        .setProtectedHeader({ alg: "RS256", kid: "team" })
-        .setIssuer("https://team.example.com")
-        .setAudience("admin-aud")
-        .setIssuedAt()
-        .setExpirationTime("5m")
-        .sign(team.privateKey),
-      origin: "https://kit.example.com",
+      method: "POST",
+      headers: {
+        ...(await ownerHeaders()),
+        "x-kitshn-deploy": deployId,
+        "content-type": body.headers.get("content-type") ?? "",
+        "content-length": String(bytes.byteLength),
+      },
+      body: bytes,
     },
-    body,
   );
+  const ctx = createExecutionContext();
+  const response = await worker.fetch(request, env, ctx);
+  await waitOnExecutionContext(ctx);
+  return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+};
 
 const recipe = (worker: Record<string, unknown> = {}, name = "prod", needs?: ReadonlyArray<string>) => ({
   ...(needs ? { needs: { apps: needs } } : {}),
@@ -1141,6 +1174,40 @@ describe("folder sites (K-1123)", () => {
     // The address comes back: it leaves the redirect Worker and serves the app again.
     expect((await deployAt("mover-one.example.com")).status).toBe(200);
     expect(cloudflare.served("mover-one.example.com")).toEqual([app.script]);
+  });
+});
+
+describe("owner folder sites (K-1129)", () => {
+  it("puts a dropped folder at the drop point and a new version on the same card", async () => {
+    const cloudflare = fakeCloudflare();
+    const plan = await admin("/api/sites/plan", "POST", { folder: "dropped", x: 7000, y: 7000 });
+    expect(plan.status, JSON.stringify(plan.body)).toBe(200);
+    const { deployId, card, address } = plan.body as { deployId: string; card: string; address: string };
+    expect(card.startsWith("folder-")).toBe(true);
+    const [page, style] = ["a".repeat(32), "b".repeat(32)];
+    const manifest = { "/index.html": { hash: page, size: 4 }, "/style.css": { hash: style, size: 3 } };
+    const assets = await admin("/api/sites/assets", "POST", { deployId, manifest });
+    expect(assets.status, JSON.stringify(assets.body)).toBe(200);
+    // The browser gets the buckets but never the session token.
+    expect(assets.body).toEqual({ buckets: [[page, style]] });
+
+    expect((await ownerPart(deployId, { ["c".repeat(32)]: "evil" })).status).toBe(400);
+    expect((await ownerPart("no-such-plan", { [page]: "page" })).status).toBe(404);
+    expect((await ownerPart(deployId, { [page]: "page", [style]: "css" })).status).toBe(200);
+    expect(cloudflare.assets).toEqual([page, style]);
+
+    let finish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && finish.status === 503; attempt++)
+      finish = await admin("/api/sites/finish", "POST", { deployId });
+    expect(finish.status, JSON.stringify(finish.body)).toBe(200);
+    expect(cloudflare.served(address)).toEqual([`kitshn-${card}`]);
+    const state = await admin("/api/state", "GET");
+    expect((state.body["places"] as Record<string, unknown>)[card]).toEqual({ x: 7000, y: 7000 });
+
+    const again = await admin("/api/sites/plan", "POST", { card });
+    expect(again.body).toMatchObject({ card, address, updated: true });
+    // Only a folder site takes a new version from a folder.
+    expect((await admin("/api/sites/plan", "POST", { card: "no-such-card" })).status).toBe(409);
   });
 });
 

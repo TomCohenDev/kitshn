@@ -52,6 +52,7 @@ export function LibraryView(props: {
         Pages and files. A new one is private and waits in the tray; place its card in a circle to share it.
       </p>
       <input
+        class="field"
         type="search"
         aria-label="Search the library"
         data-tip="Search pages and files by title, thread or machine."

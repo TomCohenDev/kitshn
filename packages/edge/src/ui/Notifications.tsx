@@ -100,105 +100,17 @@ export function NotificationsView(props: {
       {list && list.notifications.length === 0 ? (
         <p class="muted">No notification in the last 30 days.</p>
       ) : null}
-      {list?.notifications.map((notification) => {
-        const shown = onBell(notification, list.mutes, now);
-        const card = cardName(notification.card);
-        return (
-          <article
-            key={notification.id}
-            class={`notification level-${notification.level}${shown ? "" : " quiet"}`}
-          >
-            <div class="notification-head">
-              <strong>{notification.title}</strong>
-              <span
-                class={`sticker${notification.state === "open" ? (notification.level === "error" ? "" : " wait") : " ok"}`}
-              >
-                {notification.state}
-              </span>
-            </div>
-            <p>{notification.text}</p>
-            <p class="muted">
-              {notification.source}
-              {card ? ` · ${card}` : ""} · opened {new Date(notification.openedAt).toLocaleString()}
-              {notification.closedAt ? ` · closed ${new Date(notification.closedAt).toLocaleString()}` : ""}
-              {notification.snoozedUntil && notification.snoozedUntil > now
-                ? ` · snoozed until ${new Date(notification.snoozedUntil).toLocaleString()}`
-                : ""}
-            </p>
-            <div class="row">
-              {notification.actions.map((action) =>
-                action.kind === "link" ? (
-                  <a key={action.id} class="btn" href={action.path}>
-                    {action.label}
-                  </a>
-                ) : (
-                  <button
-                    key={action.id}
-                    class="btn"
-                    onClick={() =>
-                      void post(
-                        `/api/notifications/${notification.id}/actions/${action.id}`,
-                        {},
-                        `${action.label}: done.`,
-                      )
-                    }
-                  >
-                    {action.label}
-                  </button>
-                ),
-              )}
-              {notification.state === "open" ? (
-                notification.snoozedUntil !== null && notification.snoozedUntil > now ? (
-                  <button
-                    class="btn"
-                    data-tip="Show this notification on the bell again now."
-                    onClick={() =>
-                      void post(`/api/notifications/${notification.id}/snooze`, { until: null }, "Unsnoozed.")
-                    }
-                  >
-                    Unsnooze
-                  </button>
-                ) : (
-                  <button
-                    class="btn"
-                    data-tip="Hide this notification from the bell for one hour. It stays open."
-                    onClick={() =>
-                      void post(
-                        `/api/notifications/${notification.id}/snooze`,
-                        { until: now + HOUR },
-                        "Snoozed for 1 hour.",
-                      )
-                    }
-                  >
-                    Snooze 1 h
-                  </button>
-                )
-              ) : null}
-              {notification.state === "open" ? (
-                <button
-                  class="btn"
-                  data-tip="Close this notification. The same card and source notify again only when their state changes again."
-                  onClick={() => void post(`/api/notifications/${notification.id}/dismiss`, {}, "Dismissed.")}
-                >
-                  Dismiss
-                </button>
-              ) : null}
-              {notification.card !== null ? (
-                <button
-                  class="btn"
-                  aria-haspopup="menu"
-                  data-tip={`Hide the ${notification.source} notifications of ${card} for a while.`}
-                  onClick={(event) =>
-                    setMuting({ notification, anchor: event.currentTarget.getBoundingClientRect() })
-                  }
-                >
-                  Mute ▾
-                </button>
-              ) : null}
-            </div>
-          </article>
-        );
-      })}
+      {list?.notifications.map((notification) => (
+        <NotificationRow
+          key={notification.id}
+          notification={notification}
+          card={cardName(notification.card)}
+          shown={onBell(notification, list.mutes, now)}
+          now={now}
+          onPost={(path, body, done) => void post(path, body, done)}
+          onMute={(anchor) => setMuting({ notification, anchor })}
+        />
+      ))}
       {list && list.mutes.length > 0 ? (
         <>
           <h3>Muted</h3>
@@ -225,5 +137,117 @@ export function NotificationsView(props: {
         </>
       ) : null}
     </div>
+  );
+}
+
+/** K-1905: one notification with its state, its source and card, and its actions. */
+export function NotificationRow(props: {
+  readonly notification: Notification;
+  /** The name of its card, or null when it names none. */
+  readonly card: string | null;
+  /** False when a mute or a snooze hides it from the bell. */
+  readonly shown: boolean;
+  readonly now: number;
+  readonly onPost: (path: string, body: object, done: string) => void;
+  readonly onMute: (anchor: Rect) => void;
+}) {
+  return (
+    <article class={`notification level-${props.notification.level}${props.shown ? "" : " quiet"}`}>
+      <div class="notification-head">
+        <strong>{props.notification.title}</strong>
+        <span
+          class={`sticker${props.notification.state === "open" ? (props.notification.level === "error" ? "" : " wait") : " ok"}`}
+        >
+          {props.notification.state}
+        </span>
+      </div>
+      <p>{props.notification.text}</p>
+      <p class="muted">
+        {props.notification.source}
+        {props.card ? ` · ${props.card}` : ""} · opened{" "}
+        {new Date(props.notification.openedAt).toLocaleString()}
+        {props.notification.closedAt
+          ? ` · closed ${new Date(props.notification.closedAt).toLocaleString()}`
+          : ""}
+        {props.notification.snoozedUntil && props.notification.snoozedUntil > props.now
+          ? ` · snoozed until ${new Date(props.notification.snoozedUntil).toLocaleString()}`
+          : ""}
+      </p>
+      <div class="row">
+        {props.notification.actions.map((action) =>
+          action.kind === "link" ? (
+            <a key={action.id} class="btn" href={action.path}>
+              {action.label}
+            </a>
+          ) : (
+            <button
+              key={action.id}
+              class="btn"
+              onClick={() =>
+                props.onPost(
+                  `/api/notifications/${props.notification.id}/actions/${action.id}`,
+                  {},
+                  `${action.label}: done.`,
+                )
+              }
+            >
+              {action.label}
+            </button>
+          ),
+        )}
+        {props.notification.state === "open" ? (
+          props.notification.snoozedUntil !== null && props.notification.snoozedUntil > props.now ? (
+            <button
+              class="btn"
+              data-tip="Show this notification on the bell again now."
+              onClick={() =>
+                props.onPost(
+                  `/api/notifications/${props.notification.id}/snooze`,
+                  { until: null },
+                  "Unsnoozed.",
+                )
+              }
+            >
+              Unsnooze
+            </button>
+          ) : (
+            <button
+              class="btn"
+              data-tip="Hide this notification from the bell for one hour. It stays open."
+              onClick={() =>
+                props.onPost(
+                  `/api/notifications/${props.notification.id}/snooze`,
+                  { until: props.now + HOUR },
+                  "Snoozed for 1 hour.",
+                )
+              }
+            >
+              Snooze 1 h
+            </button>
+          )
+        ) : null}
+        {props.notification.state === "open" ? (
+          <button
+            class="btn"
+            data-tip="Close this notification. The same card and source notify again only when their state changes again."
+            onClick={() =>
+              props.onPost(`/api/notifications/${props.notification.id}/dismiss`, {}, "Dismissed.")
+            }
+          >
+            Dismiss
+          </button>
+        ) : null}
+        {props.notification.card !== null ? (
+          <button
+            class="btn"
+            aria-haspopup="menu"
+            data-tip={`Hide the ${props.notification.source} notifications of ${props.card} for a while.`}
+            onClick={(event) => props.onMute(event.currentTarget.getBoundingClientRect())}
+          >
+            Mute ▾
+          </button>
+        ) : null}
+      </div>
+    </article>
   );
 }

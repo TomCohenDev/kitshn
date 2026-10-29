@@ -154,6 +154,7 @@ export function AddSite(props: {
                 Server
               </span>
               <input
+                class="field"
                 value={target}
                 aria-label="Server"
                 data-tip="The port or the Unix socket of the local server on the machine."
@@ -167,6 +168,7 @@ export function AddSite(props: {
               </span>
               <div>
                 <input
+                  class="field"
                   value={name}
                   aria-label="Name"
                   data-tip="The name of the site: 1 to 40 lowercase letters, digits and dashes. It is the first part of the address."

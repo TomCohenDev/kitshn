@@ -579,3 +579,44 @@ export function ResizeEdge(props: {
     />
   );
 }
+
+/**
+ * K-503: the toast of the map: what changed, Undo, an optional way back that is not an undo (Resume, K-1504), and
+ * Close. `place` comes from `toastPlace` (layout.ts), so it keeps clear of the card that the change names.
+ */
+export function ToastView(props: {
+  readonly text: string;
+  readonly error: boolean;
+  readonly besidePanel: boolean;
+  readonly place: { readonly top: number } | { readonly bottom: number };
+  readonly onUndo: (() => void) | null;
+  readonly action: { readonly label: string; readonly tip: string; readonly run: () => void } | null;
+  readonly onClose: () => void;
+}) {
+  return (
+    <div
+      class={`toast${props.error ? " error" : ""}${props.besidePanel ? " beside-panel" : ""}`}
+      style={
+        "top" in props.place
+          ? { top: `${props.place.top}px`, bottom: "auto" }
+          : { bottom: `${props.place.bottom}px` }
+      }
+      role="status"
+    >
+      <span>{props.text}</span>
+      {props.onUndo ? (
+        <button class="btn primary" data-tip="Undo: take this change back." onClick={props.onUndo}>
+          Undo
+        </button>
+      ) : null}
+      {props.action ? (
+        <button class="btn resume" data-tip={props.action.tip} onClick={props.action.run}>
+          {props.action.label}
+        </button>
+      ) : null}
+      <button class="btn" onClick={props.onClose} aria-label="Close" data-tip="Close this message.">
+        ×
+      </button>
+    </div>
+  );
+}

@@ -52,6 +52,7 @@ export function AddRepoGroup(props: {
           rights cover every repo that it matches.
         </p>
         <input
+          class="field"
           aria-label="Match"
           value={match}
           placeholder="owner or owner/pattern-*"

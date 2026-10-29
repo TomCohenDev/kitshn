@@ -164,6 +164,7 @@ export function LogsDialog(props: { card: Resource; onClose: () => void }) {
           }}
         >
           <input
+            class="field"
             type="search"
             aria-label="Search the logs"
             data-tip="Plain text, case does not count. Press Enter to search."
@@ -202,6 +203,7 @@ export function LogsDialog(props: { card: Resource; onClose: () => void }) {
         {range === "custom" ? (
           <div class="row">
             <input
+              class="field"
               aria-label="From"
               data-tip="The start, in your time zone, such as 2026-10-28 14:00."
               placeholder="From: 2026-10-28 14:00"
@@ -209,6 +211,7 @@ export function LogsDialog(props: { card: Resource; onClose: () => void }) {
               onInput={(event) => setFrom(event.currentTarget.value)}
             />
             <input
+              class="field"
               aria-label="To"
               data-tip="The end, in your time zone. Empty means now."
               placeholder="To: empty means now"

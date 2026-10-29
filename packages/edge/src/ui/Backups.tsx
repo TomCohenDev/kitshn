@@ -155,6 +155,7 @@ export function RestoreTimeDialog(props: { restoreUndo: string | null; onClose: 
           }}
         >
           <input
+            class="field"
             aria-label="Time"
             data-tip="A time of the past 30 days, in your time zone."
             placeholder="2026-10-28 14:00"

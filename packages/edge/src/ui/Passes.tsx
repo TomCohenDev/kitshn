@@ -62,6 +62,7 @@ export function PassSettingsPanel(props: { readonly onToast: (text: string, erro
             />
             <button
               type="button"
+              class="btn danger"
               data-tip="Remove: passes for this service stop at once."
               onClick={() =>
                 void call("DELETE", `/api/passes/audiences/${encodeURIComponent(audience.address)}`)
@@ -73,6 +74,7 @@ export function PassSettingsPanel(props: { readonly onToast: (text: string, erro
         ))}
       </ul>
       <input
+        class="field"
         aria-label="New pass audience"
         placeholder="https://service.example.com"
         value={address}
@@ -85,6 +87,7 @@ export function PassSettingsPanel(props: { readonly onToast: (text: string, erro
       />
       <button
         type="button"
+        class="btn"
         data-tip="Rotate pass key: a new key signs from now on; the old one stays in the public keys for 6 minutes (K-1771)."
         onClick={() => void call("POST", "/api/passes/rotate", {}, "Rotated the pass key.")}
       >

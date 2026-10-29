@@ -57,10 +57,14 @@ export function AskList(props: {
                 <span
                   key={key}
                   class="muted"
-                  data-tip="A label that the agent wrote; no attester checked it."
+                  data-tip={
+                    proposal.verified.includes(key)
+                      ? "Verified: an attester of the machine set this label (K-1752)."
+                      : "Claimed: the agent wrote this label; no attester checked it (K-1750)."
+                  }
                 >
                   {" "}
-                  · {key}={value} (claimed)
+                  · {key}={value} ({proposal.verified.includes(key) ? "verified" : "claimed"})
                 </span>
               ))}
             </span>
@@ -108,8 +112,19 @@ const OUTCOME_TEXT: Record<AskEventView["outcome"], string> = {
   "not-kitshn": "not kitshn",
 };
 
-/** K-1717: the asks of agents as History events, newest first; they have no Undo. */
+/** K-1717: the asks of agents as History events, newest first; they have no Undo. K-1756: a search by one label. */
 export function AskEvents(props: { readonly events: ReadonlyArray<AskEventView> }) {
+  const [label, setLabel] = useState("");
+  const [found, setFound] = useState<ReadonlyArray<AskEventView> | null>(null);
+  const search = async () => {
+    if (!label.includes("=")) return setFound(null);
+    const result = await callApi<{ events: ReadonlyArray<AskEventView> }>(
+      "GET",
+      `/api/ask-events?label=${encodeURIComponent(label)}`,
+    );
+    setFound("error" in result ? [] : result.events);
+  };
+  const events = found ?? props.events;
   if (props.events.length === 0) return null;
   return (
     <section class="ask-events">
@@ -119,8 +134,16 @@ export function AskEvents(props: { readonly events: ReadonlyArray<AskEventView> 
       >
         Asks of agents
       </h3>
+      <input
+        aria-label="Search asks by label"
+        placeholder="t3.thread.id=…"
+        value={label}
+        data-tip="A label as key=value, for example t3.thread.id=abc: the asks with it, newest first, at most 50."
+        onInput={(event) => setLabel(event.currentTarget.value)}
+        onKeyDown={(event) => event.key === "Enter" && void search()}
+      />
       <ul class="repo-list">
-        {props.events.map((event) => (
+        {events.map((event) => (
           <li key={event.id}>
             <span class="muted">
               {new Date(event.at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
@@ -134,10 +157,14 @@ export function AskEvents(props: { readonly events: ReadonlyArray<AskEventView> 
                 <span
                   key={key}
                   class="muted"
-                  data-tip="A label that the agent wrote; no attester checked it (K-1750)."
+                  data-tip={
+                    event.verified.includes(key)
+                      ? "Verified: an attester of the machine set this label (K-1752)."
+                      : "Claimed: the agent wrote this label; no attester checked it (K-1750)."
+                  }
                 >
                   {" "}
-                  · {key}={value} (claimed)
+                  · {key}={value} ({event.verified.includes(key) ? "verified" : "claimed"})
                 </span>
               ))}
             </span>

@@ -4,6 +4,7 @@ import {
   HIGH_RISK_RIGHTS,
   MACHINE_RIGHT_NAMES,
   type MachineRight,
+  type RightCondition,
   type RightMode,
 } from "./model.ts";
 
@@ -193,7 +194,7 @@ export function rightWarnings(
     if (!mode) continue;
     const name = MACHINE_RIGHT_NAMES[right];
     if (mode.mode === "automatic") {
-      if (right === "writesCode")
+      if (right === "writesCode" && (mode.conditions ?? []).length === 0)
         warnings.push(
           `"${name}" runs at once with no thread condition, so any process of the machine writes code.`,
         );
@@ -241,3 +242,47 @@ export function selfApprovers(circles: ReadonlyMap<string, Circle>, circle: Circ
     return asks ? [member.machineId] : [];
   });
 }
+
+/**
+ * K-1754: why the attested labels of an ask fail the conditions of its right, or null. A condition counts only on a
+ * prefix that an attester of the machine reports, because only then the daemon dropped the caller's own labels of it.
+ */
+export function conditionProblem(
+  conditions: ReadonlyArray<RightCondition> | undefined,
+  labels: Readonly<Record<string, string>>,
+  attesterPrefixes: ReadonlyArray<string>,
+): string | null {
+  for (const condition of conditions ?? []) {
+    if (!attesterPrefixes.some((prefix) => condition.key.startsWith(prefix)))
+      return `The condition on ${condition.key} has no attester on this machine (K-1754).`;
+    const value = labels[condition.key];
+    if (value === undefined || !condition.values.includes(value))
+      return `The right needs ${condition.key} to be ${condition.values.join(" or ")}, and the ask has ${value === undefined ? "no such verified label" : value} (K-1754).`;
+  }
+  return null;
+}
+
+/** K-1754: conditions as the editor writes them: `key=value,value; key=value`. */
+export function parseConditions(text: string): Array<RightCondition> | string {
+  const conditions: Array<RightCondition> = [];
+  for (const part of text
+    .split(";")
+    .map((each) => each.trim())
+    .filter((each) => each !== "")) {
+    const equals = part.indexOf("=");
+    if (equals <= 0) return `"${part}" is not key=value.`;
+    const key = part.slice(0, equals).trim();
+    const values = part
+      .slice(equals + 1)
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => value !== "");
+    if (!key.includes(".") || values.length === 0)
+      return `"${part}" needs a prefixed key and at least one value.`;
+    conditions.push({ key, values });
+  }
+  return conditions;
+}
+
+export const formatConditions = (conditions: ReadonlyArray<RightCondition> | undefined) =>
+  (conditions ?? []).map((condition) => `${condition.key}=${condition.values.join(",")}`).join("; ");

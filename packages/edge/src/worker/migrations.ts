@@ -198,6 +198,10 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       action TEXT NOT NULL, target TEXT NOT NULL, reason TEXT, labels TEXT NOT NULL, outcome TEXT NOT NULL,
       detail TEXT NOT NULL)`,
     "CREATE INDEX ask_events_machine ON ask_events (machine_id, id)",
+    // K-1756: one row for each label of an ask event, so a search by key=value reads at most its 50 rows.
+    "CREATE TABLE ask_labels (event_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL)",
+    "CREATE INDEX ask_labels_search ON ask_labels (key, value, event_id)",
+    "CREATE INDEX ask_labels_event ON ask_labels (event_id)",
     // K-1762: the App installation of each GitHub owner, so a token costs one GitHub call.
     "CREATE TABLE github_installations (owner TEXT PRIMARY KEY, installation_id INTEGER NOT NULL)",
   ],

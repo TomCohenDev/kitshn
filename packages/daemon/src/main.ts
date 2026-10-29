@@ -24,7 +24,7 @@ import { ASK_ACTIONS, type Answer, type AskAction, type Request } from "@kitshn/
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { backup, finishRestores, restore, unpauseMarked } from "./backup.ts";
 import { keyPlan } from "./keys.ts";
-import { attesterPrefixes, dropAttested } from "./attest.ts";
+import { attest, attesterPrefixes, attestersOf, dropAttested } from "./attest.ts";
 import { credentialAnswer, readCredentialInput, repoOfCredential, repoOfRemote } from "./gitCredential.ts";
 import { composeLogs, followLogs, rangeArgs, searchLogs, withLogLimits } from "./logs.ts";
 import { type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from "./local.ts";
@@ -260,12 +260,38 @@ async function ask(request: Request): Promise<Exclude<Answer, { type: "error" }>
   return outcome.answer;
 }
 
+/**
+ * K-1752: the values of the token variables that this machine's attesters read, from the environment of this
+ * command; the daemon names the variables, so a command never needs to read `machine.json`.
+ */
+async function attestationsFromEnv(): Promise<Record<string, string>> {
+  if (typeof daemonUid === "string") return {};
+  const outcome = await askLocal(socketPath, { id: "1", type: "status" }, 5_000, {
+    platform,
+    daemonUid: daemonUid as number,
+  }).catch(() => null);
+  const names =
+    outcome?.kind === "answer" && outcome.answer.type === "status"
+      ? (outcome.answer.status.attesterEnv ?? [])
+      : [];
+  return Object.fromEntries(
+    names.flatMap((name) => (process.env[name] ? [[name, process.env[name] as string]] : [])),
+  );
+}
+
 /** K-1763, K-1764: one `github-token` ask for a repo; the answer, or null when the daemon does not run. */
 async function askToken(repo: string): Promise<Answer | null> {
   if (typeof daemonUid === "string") return null;
   const outcome = await askLocal(
     socketPath,
-    { id: "1", type: "ask", action: "github-token", target: repo, body: { permission: "auto" } },
+    {
+      id: "1",
+      type: "ask",
+      action: "github-token",
+      target: repo,
+      body: { permission: "auto" },
+      attestations: await attestationsFromEnv(),
+    },
     90_000,
     { platform, daemonUid: daemonUid as number },
   ).catch(() => null);
@@ -398,6 +424,7 @@ async function agentCommand(argv: ReadonlyArray<string>) {
     ...(body === undefined ? {} : { body }),
     ...(reason === undefined ? {} : { reason }),
     ...(Object.keys(labels).length === 0 ? {} : { labels }),
+    attestations: await attestationsFromEnv(),
   };
   const outcome = await askLocal(
     socketPath,
@@ -1402,6 +1429,8 @@ function report() {
       arch: arch(),
       hostname: hostname(),
       tunnel: tunnelState,
+      // K-1751: the map shows the attesters of each machine.
+      attesters: attestersOf(readMachineFile()).attesters.map(({ prefix, address }) => ({ prefix, address })),
     },
   };
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -1508,6 +1537,8 @@ let githubWays: { fallback: string; owners: Readonly<Record<string, string>> } =
   fallback: "not-kitshn",
   owners: {},
 };
+/** K-1762: the GitHub tokens that the daemon keeps in memory, by repo and attested thread, never on disk. */
+const keptTokens = new Map<string, { token: string; expiresAt: string; permission: "read" | "write" }>();
 /** K-1710: the asks that wait for kitshn's answer, by request id. */
 const askWaiters = new Map<string, (outcome: AskOutcome) => void>();
 /** K-1722: the local connections that wait for the answer to a proposal, by proposal id. */
@@ -1535,12 +1566,26 @@ async function askKitshn(
       "the daemon has no signed connection to kitshn, so it cannot ask (K-1710). See kitshn status.",
     );
   const requestId = crypto.randomUUID();
-  const { id, type: _type, labels, ...rest } = request;
-  // K-1753: only an attester sets the labels of its prefix.
+  const { id, type: _type, labels, attestations, ...rest } = request;
+  // K-1752, K-1753: only an attester sets the labels of its prefix; the caller's token goes to that attester only.
+  const { attesters } = attestersOf(readMachineFile());
+  const attested: Record<string, string> = {};
+  for (const attester of attesters) {
+    const token = attestations?.[attester.tokenEnv];
+    if (!token) continue;
+    Object.assign(attested, (await attest(attester, token)) ?? {});
+  }
   const ask = {
     ...rest,
-    ...(labels ? { labels: dropAttested(labels, attesterPrefixes(readMachineFile())) } : {}),
+    ...(labels ? { labels: dropAttested(labels, attesterPrefixes(attesters)) } : {}),
+    ...(Object.keys(attested).length > 0 ? { attested } : {}),
   };
+  // K-1762: a kept token goes only to the same repo and the same attested thread; an ask without one always asks kitshn.
+  const thread = attested["t3.thread.id"];
+  const cacheKey = request.action === "github-token" && thread ? `${request.target}\n${thread}` : null;
+  const kept = cacheKey ? keptTokens.get(cacheKey) : undefined;
+  if (kept && Date.parse(kept.expiresAt) - 5 * 60_000 > Date.now())
+    return { id, type: "ask", outcome: "done", result: kept };
   const outcome = await new Promise<AskOutcome>((resolve) => {
     const timer = setTimeout(() => {
       askWaiters.delete(requestId);
@@ -1554,6 +1599,16 @@ async function askKitshn(
   });
   if (outcome.outcome === "waiting")
     proposalWaiters.set(outcome.proposalId, [...(proposalWaiters.get(outcome.proposalId) ?? []), emit]);
+  if (
+    cacheKey &&
+    outcome.outcome === "done" &&
+    typeof outcome.result === "object" &&
+    outcome.result !== null
+  ) {
+    const { token, expiresAt, permission } = outcome.result as Record<string, unknown>;
+    if (typeof token === "string" && typeof expiresAt === "string")
+      keptTokens.set(cacheKey, { token, expiresAt, permission: permission === "write" ? "write" : "read" });
+  }
   return { id, type: "ask", ...outcome };
 }
 const settleRotation = (outcome: RotationOutcome) => {
@@ -1961,6 +2016,7 @@ async function answerLocal(
         fingerprint: key ? await fingerprintOf(key.x) : null,
         connection: socket === null ? "disconnected" : challenge === null ? "token-only" : "connected",
         tunnel: tunnelState,
+        attesterEnv: attestersOf(readMachineFile()).attesters.map((attester) => attester.tokenEnv),
       },
     };
   }

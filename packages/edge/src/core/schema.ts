@@ -11,9 +11,18 @@ const Time = Schema.Finite;
 export const Level = Schema.Literals(Model.LEVELS);
 
 /** K-1720: the mode of one right that is on. */
+const Conditions = Schema.Array(
+  Schema.Struct({
+    key: Schema.String.check(Schema.isMinLength(3), Schema.isMaxLength(64)),
+    values: Schema.Array(Schema.String.check(Schema.isMaxLength(256))).check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(20),
+    ),
+  }),
+).check(Schema.isMaxLength(10));
 const RightMode = Schema.Union([
-  Schema.Struct({ mode: Schema.Literal("automatic") }),
-  Schema.Struct({ mode: Schema.Literal("ask"), circleId: Id }),
+  Schema.Struct({ mode: Schema.Literal("automatic"), conditions: Schema.optionalKey(Conditions) }),
+  Schema.Struct({ mode: Schema.Literal("ask"), circleId: Id, conditions: Schema.optionalKey(Conditions) }),
 ]);
 /** K-1730: each right of a machine in an agent circle; a missing right is off. */
 const MachineRights = Schema.Struct({

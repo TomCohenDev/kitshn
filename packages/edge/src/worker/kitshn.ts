@@ -170,6 +170,7 @@ import {
   MAX_SHOWN,
   askRequest,
   isAskAction,
+  conditionProblem,
   labelProblem,
   shownAsk,
   shownHash,
@@ -2915,6 +2916,15 @@ export class Kitshn extends DurableObject<Env> {
     if (path.startsWith("/api/apps/") && request.method === "DELETE")
       return this.removeApp(caller, decodeURIComponent(path.slice("/api/apps/".length)));
     if (path === "/api/repos/check" && request.method === "POST") return await this.checkReposOnGitHub();
+    // K-1756: History searches the ask events by one label.
+    if (path === "/api/ask-events" && request.method === "GET") {
+      const label = new URL(request.url).searchParams.get("label") ?? "";
+      const equals = label.indexOf("=");
+      if (equals <= 0) return Response.json({ error: "Send ?label=key=value." }, { status: 400 });
+      return Response.json({
+        events: this.askEventsWithLabel(label.slice(0, equals), label.slice(equals + 1), null),
+      });
+    }
     // K-1733, K-1760: repo groups and the default GitHub way.
     if (path === "/api/repo-groups" && request.method === "POST")
       return this.addRepoGroup(caller, await request.json().catch(() => null));
@@ -3352,6 +3362,20 @@ export class Kitshn extends DurableObject<Env> {
         Number.isSafeInteger(message.status.keptBytes) &&
         message.status.keptBytes >= 0
           ? { keptBytes: message.status.keptBytes }
+          : {}),
+        // K-1751: the attesters that the daemon reports; their prefixes are the only labels that rights check.
+        ...(Array.isArray(message.status.attesters)
+          ? {
+              attesters: message.status.attesters
+                .filter(
+                  (item): item is { prefix: string; address: string } =>
+                    isRecord(item) &&
+                    typeof item["prefix"] === "string" &&
+                    typeof item["address"] === "string",
+                )
+                .slice(0, 10)
+                .map((item) => ({ prefix: item.prefix.slice(0, 32), address: item.address.slice(0, 200) })),
+            }
           : {}),
       };
       socket.serializeAttachment({ ...attachment, status } satisfies Attachment);
@@ -4692,6 +4716,7 @@ export class Kitshn extends DurableObject<Env> {
         "DELETE FROM proposals WHERE state != 'pending' AND decided_at < ?",
         now - ASK_EVENT_DAYS * DAY,
       );
+      this.sql("DELETE FROM ask_labels WHERE event_id < (SELECT MIN(id) FROM ask_events)");
       this.sql("DELETE FROM rekey_codes WHERE expires_at < ?", now);
       // K-1901, K-1905: closed notifications stay 30 days and 500 at most; an ended mute goes.
       this.sql(
@@ -6774,8 +6799,26 @@ export class Kitshn extends DurableObject<Env> {
     const target = typeof raw["target"] === "string" ? raw["target"].slice(0, 512) : "";
     const reason = typeof raw["reason"] === "string" ? raw["reason"].slice(0, 500) : null;
     const problem = labelProblem(raw["labels"]);
-    const labels =
-      problem === null && isRecord(raw["labels"]) ? (raw["labels"] as Record<string, string>) : {};
+    // K-1752, K-1753: labels of an attester prefix count only from the daemon's `attested`; a caller's own are dropped.
+    const prefixes = this.attesterPrefixesOf(machine.id);
+    const reserved = [...prefixes, "t3."];
+    const claimed = Object.fromEntries(
+      Object.entries(
+        problem === null && isRecord(raw["labels"]) ? (raw["labels"] as Record<string, string>) : {},
+      ).filter(([key]) => !reserved.some((prefix) => key.startsWith(prefix))),
+    );
+    const attested = Object.fromEntries(
+      Object.entries(isRecord(raw["attested"]) ? raw["attested"] : {})
+        .filter(
+          (entry): entry is [string, string] =>
+            typeof entry[1] === "string" &&
+            entry[0].length <= 64 &&
+            entry[1].length <= 256 &&
+            prefixes.some((prefix) => entry[0].startsWith(prefix)),
+        )
+        .slice(0, 20),
+    );
+    const labels: Record<string, string> = { ...claimed, ...attested };
     const event = (outcome: AskOutcome) => {
       if (isAskAction(action)) this.askEvent(now, machine, action, target, reason, labels, outcome);
       return outcome;
@@ -6804,6 +6847,16 @@ export class Kitshn extends DurableObject<Env> {
     }
     if (action === "github-token")
       return event(await this.askGitHubToken(machine, target, raw["body"], reason, labels, now));
+    // K-1756: the ask events of this machine with one label, `target` is key=value; it writes no event itself.
+    if (action === "history") {
+      const equals = target.indexOf("=");
+      if (equals <= 0)
+        return { outcome: "refused", reason: "history takes key=value, for example t3.thread.id=abc." };
+      return {
+        outcome: "done",
+        result: this.askEventsWithLabel(target.slice(0, equals), target.slice(equals + 1), machine.id),
+      };
+    }
     const needs = ASK_RIGHT[action];
     if (needs === "member")
       throw new Error(`The action ${action} needs membership, and only approve and deny do.`);
@@ -6814,6 +6867,8 @@ export class Kitshn extends DurableObject<Env> {
           outcome: "refused",
           reason: `The right "${MACHINE_RIGHT_NAMES[needs]}" is off for this machine. The owner turns it on in its agent circle (K-1720).`,
         });
+      const failed = conditionProblem(mode.conditions, labels, prefixes);
+      if (failed) return event({ outcome: "refused", reason: failed });
       if (mode.mode === "ask")
         return event(
           await this.propose(machine, action, target, raw["body"], reason, labels, needs, mode.circleId, now),
@@ -6824,6 +6879,8 @@ export class Kitshn extends DurableObject<Env> {
       if (typeof edits === "string") {
         // K-1720: a move into Everyone needs "publishes"; with "ask <circle>" it waits for an approval.
         const mode = machineRightMode(this.state, machine.id, "publishes", now);
+        const failed = conditionProblem(mode?.conditions, labels, prefixes);
+        if (failed) return event({ outcome: "refused", reason: failed });
         const withApproval = this.askEdits(machine, action, target, raw["body"], now, "publishes");
         if (mode?.mode === "ask" && typeof withApproval !== "string")
           return event(
@@ -7025,6 +7082,15 @@ export class Kitshn extends DurableObject<Env> {
     return login;
   }
 
+  /** K-1751: the label prefixes of the attesters that the machine reports now; none while it is offline. */
+  private attesterPrefixesOf(machineId: string): Array<string> {
+    const socket = this.openSocket(machineId);
+    const attachment = socket ? attachmentOf(socket) : null;
+    return attachment?.kind === "machine"
+      ? (attachment.status?.attesters ?? []).map((item) => item.prefix)
+      : [];
+  }
+
   /** K-1760: the GitHub way of an owner, from its owner group or the default of Settings. */
   private githubWay(owner: string): GitHubWay {
     return githubWayOf(this.state, owner, this.meta("github_default_way") === "app" ? "app" : "not-kitshn");
@@ -7056,6 +7122,10 @@ export class Kitshn extends DurableObject<Env> {
       (wanted !== "read" && codeRightMode(this.state, machine.id, "writesCode", fullName, now) !== null);
     const right: MachineRight = write ? "writesCode" : "readsCode";
     const mode = codeRightMode(this.state, machine.id, right, fullName, now);
+    const failed = mode
+      ? conditionProblem(mode.conditions, labels, this.attesterPrefixesOf(machine.id))
+      : null;
+    if (failed) return { outcome: "refused", reason: failed };
     if (mode === null)
       return {
         outcome: "refused",
@@ -7383,6 +7453,12 @@ export class Kitshn extends DurableObject<Env> {
         : machineRightMode(this.state, proposal.machineId, proposal.right, now);
     if (mode?.mode !== "ask" || mode.circleId !== proposal.circleId)
       return `the right "${MACHINE_RIGHT_NAMES[proposal.right]}" no longer asks this circle.`;
+    const failed = conditionProblem(
+      mode.conditions,
+      proposal.labels,
+      this.attesterPrefixesOf(proposal.machineId),
+    );
+    if (failed) return failed;
     const circle = this.state.circles.get(proposal.circleId);
     if (!circle || (circle.endsAt !== null && circle.endsAt <= now)) return "the approver circle ended.";
     if (!this.state.machines.has(proposal.machineId)) return "the machine that asked is gone.";
@@ -7463,22 +7539,35 @@ export class Kitshn extends DurableObject<Env> {
     );
     // K-1717: at most 5,000 events, trimmed on insert by id, so a burst of asks cannot grow the table within a day.
     const [last] = this.sql<{ id: number }>("SELECT last_insert_rowid() AS id");
-    if (last) this.sql("DELETE FROM ask_events WHERE id <= ?", last.id - ASK_EVENT_COUNT);
+    if (!last) return;
+    // K-1756: the label index of this event, for the search of History.
+    for (const [key, value] of Object.entries(labels))
+      this.sql("INSERT INTO ask_labels (event_id, key, value) VALUES (?, ?, ?)", last.id, key, value);
+    this.sql("DELETE FROM ask_events WHERE id <= ?", last.id - ASK_EVENT_COUNT);
+    this.sql("DELETE FROM ask_labels WHERE event_id <= ?", last.id - ASK_EVENT_COUNT);
   }
 
   /** K-1717: the newest 50 ask events, for History; a snapshot reads at most 50 rows for them. */
   private recentAskEvents(): Array<AskEventView> {
-    return this.sql<{
-      id: number;
-      at: number;
-      machine_id: string;
-      action: string;
-      target: string;
-      reason: string | null;
-      labels: string;
-      outcome: string;
-      detail: string;
-    }>("SELECT * FROM ask_events ORDER BY id DESC LIMIT 50").map((row) => ({
+    return this.sql<AskEventRow>("SELECT * FROM ask_events ORDER BY id DESC LIMIT 50").map((row) =>
+      this.askEventView(row),
+    );
+  }
+
+  /** K-1756: the newest 50 ask events with one label, of one machine or of all; it reads at most 50 index rows. */
+  private askEventsWithLabel(key: string, value: string, machineId: string | null): Array<AskEventView> {
+    return this.sql<AskEventRow>(
+      `SELECT ask_events.* FROM ask_labels JOIN ask_events ON ask_events.id = ask_labels.event_id
+       WHERE ask_labels.key = ? AND ask_labels.value = ?${machineId === null ? "" : " AND ask_events.machine_id = ?"}
+       ORDER BY ask_labels.event_id DESC LIMIT 50`,
+      key,
+      value,
+      ...(machineId === null ? [] : [machineId]),
+    ).map((row) => this.askEventView(row));
+  }
+
+  private askEventView(row: AskEventRow): AskEventView {
+    return {
       id: row.id,
       at: row.at,
       machineName: this.state.machines.get(row.machine_id)?.name ?? row.machine_id,
@@ -7488,7 +7577,14 @@ export class Kitshn extends DurableObject<Env> {
       labels: JSON.parse(row.labels) as Record<string, string>,
       outcome: row.outcome as AskEventView["outcome"],
       detail: row.detail,
-    }));
+      verified: this.verifiedKeys(row.machine_id, JSON.parse(row.labels) as Record<string, string>),
+    };
+  }
+
+  /** K-1752: the labels of an attester prefix are attested, because kitshn drops a caller's own of them. */
+  private verifiedKeys(machineId: string, labels: Readonly<Record<string, string>>): Array<string> {
+    const prefixes = [...this.attesterPrefixesOf(machineId), "t3."];
+    return Object.keys(labels).filter((key) => prefixes.some((prefix) => key.startsWith(prefix)));
   }
 
   /** K-1722: the open proposals, for the Asks list of the map. */
@@ -7499,6 +7595,7 @@ export class Kitshn extends DurableObject<Env> {
         return {
           ...proposal,
           machineName: this.state.machines.get(proposal.machineId)?.name ?? proposal.machineId,
+          verified: this.verifiedKeys(proposal.machineId, proposal.labels),
         };
       },
     );
@@ -9518,3 +9615,16 @@ const proposalOf = (row: ProposalRow): Proposal => ({
   createdAt: row.created_at,
   expiresAt: row.expires_at,
 });
+
+/** K-1717: a row of the ask events table. */
+interface AskEventRow extends Record<string, SqlStorageValue> {
+  readonly id: number;
+  readonly at: number;
+  readonly machine_id: string;
+  readonly action: string;
+  readonly target: string;
+  readonly reason: string | null;
+  readonly labels: string;
+  readonly outcome: string;
+  readonly detail: string;
+}

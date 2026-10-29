@@ -296,3 +296,17 @@ it("refuses an ask whose text is too long for an approver to read (K-1722)", asy
     await ask(stub, "job", "vps", { body: { command: { kind: "shell", script: "x".repeat(5000) } } }),
   ).toEqual({ outcome: "refused", reason: expect.stringContaining("too long") });
 });
+
+it("finds the ask events of one label, and keeps a caller's t3. label out (K-1756, K-1753)", async () => {
+  const stub = await setup({ deploys: { mode: "automatic" } });
+  await ask(stub, "allow", "123", { labels: { "my.task": "42", "t3.thread.id": "forged" } });
+  const found = await runInDurableObject(stub, (instance) =>
+    (
+      instance as unknown as {
+        askEventsWithLabel(k: string, v: string, m: string | null): Array<{ labels: object }>;
+      }
+    ).askEventsWithLabel("my.task", "42", null),
+  );
+  expect(found).toHaveLength(1);
+  expect(found[0]?.labels).toEqual({ "my.task": "42" });
+});

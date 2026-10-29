@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { ASK_ACTIONS as LOCAL_ACTIONS } from "../../../local/src/index.ts";
-import { ASK_ACTIONS, askRequest, labelProblem, rightWarnings, selfApprovers } from "./asks.ts";
+import {
+  ASK_ACTIONS,
+  askRequest,
+  conditionProblem,
+  formatConditions,
+  labelProblem,
+  parseConditions,
+  rightWarnings,
+  selfApprovers,
+} from "./asks.ts";
 import type { Circle } from "./model.ts";
 
 describe("asks of agents on machines (K-1710, K-1711, K-1750)", () => {
@@ -102,5 +111,25 @@ describe("self-approval (K-1727)", () => {
     ]);
     expect(selfApprovers(circles, bots)).toEqual(["vps"]);
     expect(selfApprovers(circles, agents)).toEqual([]);
+  });
+});
+
+describe("conditions on attested labels (K-1754)", () => {
+  const conditions = [{ key: "t3.project.name", values: ["kitshn", "riffle"] }];
+
+  it("holds only for a verified label with one of its values, on a prefix that an attester reports", () => {
+    expect(conditionProblem(conditions, { "t3.project.name": "kitshn" }, ["t3."])).toBeNull();
+    expect(conditionProblem(conditions, { "t3.project.name": "other" }, ["t3."])).toMatch(/kitshn or riffle/);
+    expect(conditionProblem(conditions, {}, ["t3."])).toMatch(/no such verified label/);
+    expect(conditionProblem(conditions, { "t3.project.name": "kitshn" }, [])).toMatch(/no attester/);
+  });
+
+  it("reads and writes the editor text", () => {
+    expect(parseConditions("t3.project.name=kitshn, riffle; t3.subagent=false")).toEqual([
+      ...conditions,
+      { key: "t3.subagent", values: ["false"] },
+    ]);
+    expect(parseConditions("nokey")).toEqual(expect.any(String));
+    expect(formatConditions(conditions)).toBe("t3.project.name=kitshn,riffle");
   });
 });

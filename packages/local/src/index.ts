@@ -47,6 +47,10 @@ const Ask = Schema.Struct({
   body: Schema.optionalKey(Schema.Unknown),
   reason: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(500))),
   labels: Schema.optionalKey(Labels),
+  /** K-1752: the values of the attesters' token variables, by name; the daemon sends each only to its attester. */
+  attestations: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.String.check(Schema.isMaxLength(4096))),
+  ),
 });
 export type Ask = typeof Ask.Type;
 
@@ -69,6 +73,8 @@ export const Status = Schema.Struct({
   /** `token-only`: kitshn has no key for this machine and reads only its status (K-1708). */
   connection: Schema.Literals(["connected", "token-only", "disconnected"]),
   tunnel: Schema.Literals(["starting", "running", "stopped"]),
+  /** K-1752: the variables whose values the commands send with an ask, for the attesters of this machine. */
+  attesterEnv: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type Status = typeof Status.Type;
 

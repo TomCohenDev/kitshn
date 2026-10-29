@@ -57,6 +57,8 @@ export interface MachineStatus {
   readonly capabilities?: ReadonlyArray<string>;
   /** K-821: the bytes of the images that the daemon keeps for rollbacks, at most; shared layers count once per image. */
   readonly keptBytes?: number;
+  /** K-1751: the attesters of `machine.json`; their prefixes are the labels that rights may check (K-1754). */
+  readonly attesters?: ReadonlyArray<{ readonly prefix: string; readonly address: string }>;
 }
 
 /** K-605, K-606: the latest resource sample. The Durable Object keeps it in memory only. */
@@ -186,6 +188,8 @@ export interface AskWire {
   readonly body?: unknown;
   readonly reason?: string;
   readonly labels?: Readonly<Record<string, string>>;
+  /** K-1752: the labels that an attester of the machine set; only these count for rights (K-1754). */
+  readonly attested?: Readonly<Record<string, string>>;
 }
 
 /** K-1710, K-1722: kitshn's answer to one ask. */

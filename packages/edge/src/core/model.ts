@@ -80,8 +80,19 @@ export const HIGH_RISK_RIGHTS: ReadonlySet<MachineRight> = new Set([
   "addsApps",
 ]);
 
-/** K-1720: a right that is on runs at once, or asks one circle. A right that is off has no mode. */
-export type RightMode = { readonly mode: "automatic" } | { readonly mode: "ask"; readonly circleId: string };
+/** K-1754: an attested label must have one of these values. */
+export interface RightCondition {
+  readonly key: string;
+  readonly values: ReadonlyArray<string>;
+}
+
+/**
+ * K-1720: a right that is on runs at once, or asks one circle. A right that is off has no mode. K-1754: its conditions
+ * on attested labels must all hold.
+ */
+export type RightMode =
+  | { readonly mode: "automatic"; readonly conditions?: ReadonlyArray<RightCondition> }
+  | { readonly mode: "ask"; readonly circleId: string; readonly conditions?: ReadonlyArray<RightCondition> };
 
 /** K-718: the rights that the owner can give an agent key on its device member. */
 export const AGENT_RIGHTS = ["addsApps", "publishes"] as const;

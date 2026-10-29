@@ -1,4 +1,4 @@
-import { rightWarnings } from "../core/asks.ts";
+import { formatConditions, parseConditions, rightWarnings } from "../core/asks.ts";
 import {
   type Circle,
   EVERYONE_CIRCLE_ID,
@@ -68,6 +68,20 @@ export function MachineRights(props: {
                 onSelect={() => props.onChange(right, { mode: "ask", circleId: circle.id })}
               />
             ))}
+            {mode ? (
+              <input
+                aria-label={`Conditions of ${MACHINE_RIGHT_NAMES[right]}`}
+                placeholder="t3.project.name=kitshn,riffle; t3.subagent=false"
+                value={formatConditions(mode.conditions)}
+                data-tip="Conditions: attested labels that each ask must have, as key=value,value; key=value. A condition on a label that no attester of the machine sets refuses every ask (K-1754)."
+                onChange={(event) => {
+                  const parsed = parseConditions(event.currentTarget.value);
+                  if (typeof parsed === "string") return;
+                  const { conditions: _, ...rest } = mode;
+                  props.onChange(right, parsed.length === 0 ? rest : { ...rest, conditions: parsed });
+                }}
+              />
+            ) : null}
           </fieldset>
         );
       })}

@@ -1,5 +1,5 @@
 // Section 7: what a provider (K-704) tells the daemon, and what the daemon passes on to kitshn over `/connect`.
-import { Schema } from "effect";
+import { Schema, SchemaGetter } from "effect";
 
 /** K-704: names that a provider cannot take, because kitshn's own kinds start with them (K-301). */
 export const RESERVED_PROVIDERS: ReadonlySet<string> = new Set([
@@ -165,7 +165,7 @@ export const decodeProviderReports = Schema.decodeUnknownSync(
  * K-706: one member rule of a circle. `clientId` is what the Access JWT carries in `common_name`, so the provider
  * matches a device or a machine from the JWT alone.
  */
-export const GrantRule = Schema.Union([
+const KnownRule = Schema.Union([
   Schema.Struct({ email: Schema.String }),
   Schema.Struct({ domain: Schema.String }),
   Schema.Struct({ ip: Schema.String }),
@@ -173,6 +173,27 @@ export const GrantRule = Schema.Union([
   Schema.Struct({ machine: Schema.Struct({ machineId: Schema.String, clientId: Schema.String }) }),
   Schema.Struct({ everyone: Schema.Literal(true) }),
 ]);
+/** A rule of a type that this reader does not know. It never matches, and in an "all" circle it fails the grant. */
+const UnknownRule = Schema.Struct({ unknown: Schema.String });
+const isKnownRule = Schema.is(KnownRule);
+
+/**
+ * K-706: a rule decodes forward compatibly: a type that a newer kitshn adds becomes `{ unknown: <its key> }`, so the
+ * rest of the table still decodes and the new rule never widens access.
+ */
+export const GrantRule = Schema.Unknown.pipe(
+  Schema.decodeTo(Schema.Union([KnownRule, UnknownRule]), {
+    decode: SchemaGetter.transform((value: unknown) =>
+      isKnownRule(value)
+        ? value
+        : {
+            unknown:
+              typeof value === "object" && value !== null ? (Object.keys(value)[0] ?? "") : typeof value,
+          },
+    ),
+    encode: SchemaGetter.transform((rule) => rule),
+  }),
+);
 export type GrantRule = typeof GrantRule.Type;
 
 /**

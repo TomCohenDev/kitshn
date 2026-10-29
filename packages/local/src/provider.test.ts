@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type ProviderReport, readRequest, reportProblem } from "./index.ts";
+import { type ProviderReport, readAnswer, readRequest, reportProblem } from "./index.ts";
 
 const t3 = (resources: ProviderReport["resources"], extra: Partial<ProviderReport> = {}): ProviderReport => ({
   name: "t3",
@@ -64,5 +64,23 @@ describe("provider reports (K-704, K-705)", () => {
       request: { type: "register", provider: "t3" },
     });
     expect(readRequest(line("site"))).toMatchObject({ ok: false, answer: { id: "1", type: "error" } });
+  });
+
+  it("keeps a grant table whole when a rule has a type that this reader does not know (K-706)", () => {
+    const grant = {
+      circle: {
+        id: "her",
+        name: "Her",
+        match: "all",
+        needsPasskey: false,
+        rules: [{ email: "a@b.c" }, { future: 1 }],
+      },
+      level: "send",
+      endsAt: null,
+    };
+    const answer = readAnswer(JSON.stringify({ type: "grants", provider: "t3", tables: { a: [grant] } }));
+    expect(answer).toMatchObject({
+      tables: { a: [{ circle: { rules: [{ email: "a@b.c" }, { unknown: "future" }] } }] },
+    });
   });
 });

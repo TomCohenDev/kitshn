@@ -962,10 +962,11 @@ export function App() {
   };
 
   /** K-704: no confirm; the toast and History undo it. */
-  const forgetProvider = async (machineId: string, provider: string) => {
+  const forgetProvider = async (machineId: string, provider: string, card: Resource | null) => {
     const result = await callApi<{ revision: number | null }>(
       "POST",
       `/api/machines/${encodeURIComponent(machineId)}/providers/${encodeURIComponent(provider)}/forget`,
+      { card: card?.id ?? null },
     );
     if ("error" in result) {
       showToast({ text: result.error, error: true, undo: null });
@@ -973,7 +974,7 @@ export function App() {
     }
     setSelection({ cards: new Set(), circle: null });
     showToast({
-      text: `Forgot the provider ${provider} and its cards.`,
+      text: card ? `Forgot ${card.name}.` : `Forgot the provider ${provider} and its cards.`,
       error: false,
       undo: result.revision,
     });
@@ -1439,7 +1440,7 @@ export function App() {
         'input[aria-label="Stack name"]',
       ),
     removeApp: (resource) => void removeApp(resource),
-    forgetProvider: (machineId, provider) => void forgetProvider(machineId, provider),
+    forgetProvider: (machineId, provider, card) => void forgetProvider(machineId, provider, card),
     rollback: (resource, mode) => setRollback({ card: resource, mode }),
     restorePrevious: (resource) => void restorePrevious(resource),
     editAddress: (resource) =>
@@ -3190,9 +3191,8 @@ function ProviderFacts(props: { card: ProviderCard }) {
     <>
       {card.droppedAt !== undefined ? (
         <p class="help">
-          {card.name} no longer reports this card. kitshn keeps its place and shares until{" "}
-          {new Date(card.droppedAt + 24 * 60 * 60_000).toLocaleString()}, then forgets it, unless it comes
-          back.
+          {card.name} no longer reports this card, since {new Date(card.droppedAt).toLocaleString()}. It keeps
+          its place and shares, offline, until {card.name} reports it again or you forget it.
         </p>
       ) : null}
       {card.stickers.length > 0 ? (

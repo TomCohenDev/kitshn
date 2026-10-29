@@ -401,9 +401,6 @@ type MapTail =
 /** The attachment of a socket; null for one that never got one, which every reader skips. */
 const attachmentOf = (socket: WebSocket) => socket.deserializeAttachment() as Attachment | null;
 
-/** K-705: how long a card that its provider dropped keeps its place and shares. */
-const DROP_GRACE_MS = 24 * 60 * 60_000;
-
 /** K-704: what kitshn keeps of one provider's registration; its cards are rows of `resources`. */
 interface ProviderRegistration {
   readonly name: string;
@@ -3253,13 +3250,10 @@ export class Kitshn extends DurableObject<Env> {
     const existing = [...this.state.resources.values()].filter(
       (card) => card.machine === machine.id && card.provider !== undefined,
     );
-    // K-705: a card that a report drops keeps its place and shares for a grace time, offline and with no grants, so a
-    // provider that registers before its list is complete loses nothing. After that, kitshn forgets it.
+    // K-705: a card that a report drops stays, offline with its place and shares and no grants, until its provider
+    // reports it again or the owner forgets it. kitshn never forgets a share by itself.
     const now = Date.now();
     const dropped = existing.filter((card) => named.has(card.provider!.name) && !wanted.has(card.id));
-    const gone = existing.filter(
-      (card) => card.provider!.droppedAt !== undefined && now - card.provider!.droppedAt >= DROP_GRACE_MS,
-    );
     const changed = [
       ...[...wanted.values()].filter((card) => !deepEqual(this.state.resources.get(card.id), card)),
       ...dropped
@@ -3272,7 +3266,7 @@ export class Kitshn extends DurableObject<Env> {
       ...existing
         .filter((card) => !named.has(card.provider!.name) && card.status !== "offline")
         .map((card): Resource => ({ ...card, status: "offline" })),
-    ].filter((card) => !gone.includes(card));
+    ];
     // K-713: a provider that changes the levels of a kind changes what existing shares give, so History says so.
     const levelChanges = valid.flatMap((report) => {
       const old = this.providerRegs.get(machine.id)?.find((reg) => reg.name === report.name);
@@ -3290,10 +3284,9 @@ export class Kitshn extends DurableObject<Env> {
       [...(this.providerRegs.get(machine.id) ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
       [...regs].sort((a, b) => a.name.localeCompare(b.name)),
     );
-    if (changed.length === 0 && gone.length === 0 && !regsChanged) return;
+    if (changed.length === 0 && !regsChanged) return;
     this.ctx.storage.transactionSync(() => {
       for (const card of changed) this.putResource(card);
-      const forgotten = gone.map((card) => this.forgetCard(card.id));
       if (regsChanged) {
         this.sql("DELETE FROM providers WHERE machine_id = ?", machine.id);
         for (const reg of regs)
@@ -3311,21 +3304,12 @@ export class Kitshn extends DurableObject<Env> {
           [],
           null,
         );
-      // K-1502: cards that come and go are History; a status, a fact or a sticker that changes is not.
-      if (added.length > 0 || gone.length > 0)
+      // K-1502: new cards are History; a status, a fact or a sticker that changes is not.
+      if (added.length > 0)
         this.insertRevision(
           { _tag: "kitshn", reason: `providers on ${machine.name}` },
-          [
-            added.length > 0 ? `added ${added.map((card) => card.name).join(", ")}` : "",
-            gone.length > 0
-              ? `forgot ${gone.map((card) => card.name).join(", ")}, which they dropped a day ago`
-              : "",
-          ]
-            .filter(Boolean)
-            .join("; ")
-            .replace(/^./, (first) => `The providers of ${machine.name} ${first}`)
-            .slice(0, 500),
-          forgotten,
+          `The providers of ${machine.name} added ${added.map((card) => card.name).join(", ")}`.slice(0, 500),
+          [],
           null,
         );
     });
@@ -3451,7 +3435,11 @@ export class Kitshn extends DurableObject<Env> {
         .slice("/api/machines/".length, -"/forget".length)
         .split("/providers/")
         .map(decodeURIComponent);
-      if (request.method === "POST") return this.forgetProvider(caller, machineId, name);
+      if (request.method === "POST") {
+        const body: unknown = await request.json().catch(() => null);
+        const card = isRecord(body) && typeof body["card"] === "string" ? body["card"] : null;
+        return this.forgetProvider(caller, machineId, name, card);
+      }
     }
     if (path.startsWith("/api/machines/") && path.endsWith("/rotate-key") && request.method === "POST")
       return this.rotateFromPanel(
@@ -4552,7 +4540,7 @@ export class Kitshn extends DurableObject<Env> {
    * K-704: "Forget provider" removes the cards of a provider that does not run, with their shares, as one revision
    * with Undo, and its registration. A running provider would bring its cards back at once, so kitshn refuses it.
    */
-  private forgetProvider(caller: Caller, machineId: string, name: string) {
+  private forgetProvider(caller: Caller, machineId: string, name: string, card: string | null) {
     const machine = this.state.machines.get(machineId);
     if (!machine) return Response.json({ error: `No machine "${machineId}" exists.` }, { status: 404 });
     if (!this.canControl(caller.visitor, machineId))
@@ -4561,7 +4549,11 @@ export class Kitshn extends DurableObject<Env> {
     const running = [...this.state.resources.values()].some(
       (card) => card.machine === machineId && card.provider?.name === name && card.status !== "offline",
     );
-    if (running)
+    // K-705: one card that its provider dropped can go while the provider runs.
+    const dropped = card !== null && this.state.resources.get(card)?.provider?.droppedAt !== undefined;
+    if (card !== null && !dropped)
+      return Response.json({ error: "Only a card that its provider dropped can go alone." }, { status: 409 });
+    if (running && !dropped)
       return Response.json(
         {
           error: `${name} runs on ${machine.name}. Stop it, or run kitshn provider forget ${name} on the machine, then forget it here.`,
@@ -4569,9 +4561,13 @@ export class Kitshn extends DurableObject<Env> {
         { status: 409 },
       );
     try {
-      const revision = this.commit(caller.actor, forgetProviderChanges(this.state, machineId, name), null);
+      const revision = this.commit(
+        caller.actor,
+        forgetProviderChanges(this.state, machineId, name, card),
+        null,
+      );
       // Undo brings the cards back offline; the provider's next report brings its commands back.
-      this.sql("DELETE FROM providers WHERE machine_id = ? AND name = ?", machineId, name);
+      if (card === null) this.sql("DELETE FROM providers WHERE machine_id = ? AND name = ?", machineId, name);
       this.load();
       this.broadcast();
       void this.scheduleAlarm();

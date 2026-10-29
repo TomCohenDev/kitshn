@@ -116,7 +116,7 @@ async function setup() {
 }
 
 it("makes cards from a signed report only, shows an offline provider, and records a removal (K-704, K-705)", async () => {
-  const { stub, message, card, sql, lastSummary } = await setup();
+  const { stub, message, card, sql } = await setup();
   await message("token", [report([app])]);
   expect(await card()).toBeUndefined();
 
@@ -145,7 +145,7 @@ it("makes cards from a signed report only, shows an offline provider, and record
     ),
   ).toHaveLength(1);
 
-  // After the day, the next report forgets it.
+  // kitshn never forgets it by itself, however long ago its provider dropped it.
   await message("signed", [report([])]);
   const dropped = await card();
   await sql(
@@ -154,8 +154,7 @@ it("makes cards from a signed report only, shows an offline provider, and record
     appId,
   );
   await message("signed", [report([])]);
-  expect(await card()).toBeUndefined();
-  expect(await lastSummary()).toBe("The providers of vps forgot T3 on vps, which they dropped a day ago");
+  expect(await card()).toMatchObject({ provider: { droppedAt: 0 } });
 });
 
 it("keeps an address that another card holds, or a name of kitshn, off a provider card (K-705)", async () => {
@@ -206,16 +205,30 @@ it("queues only a command that the card's provider has, and forgets only a provi
     resource: "app",
   });
 
+  // K-707: a registration without the command takes it off the card.
+  await message("signed", [{ ...report([app]), commands: [] }]);
+  expect((await job({ kind: "provider", provider: "t3", command: "restart", resource: appId })).status).toBe(
+    409,
+  );
+
   // K-704: Forget provider, with one revision.
-  const forget = () =>
+  const forget = (card: string | null = null) =>
     send("/api/machines/vps/providers/t3/forget", {
       method: "POST",
       headers: { "cf-access-jwt-assertion": token, "content-type": "application/json" },
-      body: "{}",
+      body: JSON.stringify({ card }),
     });
   expect((await forget()).status).toBe(409);
+  // K-705: a card that the running provider dropped goes alone; a card it still reports does not.
+  const thread = { ...app, id: "th-1", name: "Fix" };
+  const threadId = providerCardId("vps", "t3", "th-1");
+  await message("signed", [report([app, thread])]);
+  expect((await forget(threadId)).status).toBe(409);
+  await message("signed", [report([app])]);
+  expect((await forget(threadId)).status).toBe(200);
+  expect(await lastSummary()).toBe("Forgot 1 card of the provider t3 (K-704)");
   await message("signed", [report([app], false)]);
   expect((await forget()).status).toBe(200);
   expect(await card()).toBeUndefined();
-  expect(await lastSummary()).toBe("Forgot the provider t3 and its 1 cards (K-704)");
+  expect(await lastSummary()).toBe("Forgot 1 card of the provider t3 (K-704)");
 });

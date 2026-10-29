@@ -252,11 +252,20 @@ export function withStackMates(state: State, changes: ReadonlyArray<Change>): Ar
  * K-704: the changes that forget one provider of a machine: each card, its place, its share settings and its place
  * in a stack. Undo brings the cards back in the same places and circles.
  */
-export function forgetProviderChanges(state: State, machineId: string, provider: string): Array<Change> {
+export function forgetProviderChanges(
+  state: State,
+  machineId: string,
+  provider: string,
+  /** One card only, a card that its provider dropped (K-705); null for every card of the provider. */
+  only: string | null = null,
+): Array<Change> {
   const cards = [...state.resources.values()].filter(
-    (resource) => resource.machine === machineId && resource.provider?.name === provider,
+    (resource) =>
+      resource.machine === machineId &&
+      resource.provider?.name === provider &&
+      (only === null || resource.id === only),
   );
-  if (cards.length === 0) throw new RuleError(`The machine has no cards of the provider ${provider}.`);
+  if (cards.length === 0) throw new RuleError(`The machine has no such card of the provider ${provider}.`);
   const edits: Array<Edit> = cards.flatMap((card) => [
     ...(state.places.has(card.id) ? [{ _tag: "place", id: card.id, after: null } as const] : []),
     ...[...state.shareSettings.keys()]
@@ -788,8 +797,8 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
   if (card) {
     const provider = (card.before ?? card.after)?.provider?.name ?? "a provider";
     return card.before
-      ? `Forgot the provider ${provider} and its ${cards.length} cards (K-704)`
-      : `Brought back the provider ${provider} and its ${cards.length} cards (K-704)`;
+      ? `Forgot ${cards.length} ${cards.length === 1 ? "card" : "cards"} of the provider ${provider} (K-704)`
+      : `Brought back ${cards.length} ${cards.length === 1 ? "card" : "cards"} of the provider ${provider} (K-704)`;
   }
   const address = changes.find((change) => change._tag === "address");
   if (address)

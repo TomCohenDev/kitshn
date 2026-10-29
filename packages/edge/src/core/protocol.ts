@@ -16,6 +16,7 @@ import type {
 } from "./model.ts";
 import type { RepoGate } from "./repos.ts";
 import type { Proposal } from "./asks.ts";
+import type { LinkCheck, LinkReport } from "./links.ts";
 import type { ProviderCommand } from "@kitshn/local";
 
 /** K-1717: one ask of an agent on a machine, as History shows it: an event, with no Undo. */
@@ -33,6 +34,12 @@ export interface AskEventView {
   /** K-1752: the label keys that an attester set; the rest are claims. */
   readonly verified: ReadonlyArray<string>;
 }
+
+/**
+ * K-1610: one call between machines, as History shows it: an event, with no Undo. It is the report of the source, or
+ * of the target when the source sent none, with the report of the other side and whether it came.
+ */
+export type LinkEventView = LinkReport & { readonly partner: LinkReport | null; readonly check: LinkCheck };
 
 /** K-1722: an open proposal, with the name of the machine that asked, for the Asks list. */
 export type ProposalView = Proposal & {
@@ -154,6 +161,8 @@ export interface Snapshot {
   readonly githubDefaultWay: GitHubWay;
   /** K-1717: the newest 50 ask events. */
   readonly askEvents: ReadonlyArray<AskEventView>;
+  /** K-1610: the newest 50 exec runs and forwarded tool calls between machines. */
+  readonly linkEvents: ReadonlyArray<LinkEventView>;
   /** The newest jobs, with their output cut to 4,000 characters. */
   readonly jobs: ReadonlyArray<JobView>;
   /** K-515: the jobs that wait for each machine, from the job table, not from the newest jobs above. */

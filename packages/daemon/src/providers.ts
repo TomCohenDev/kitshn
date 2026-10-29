@@ -4,6 +4,7 @@ import {
   type CardSettingValues,
   type DesiredParts,
   type GrantTables,
+  type ReachedCard,
   type ProviderReport,
   type ProviderRequest,
   type ProviderResource,
@@ -104,6 +105,7 @@ export class Providers {
       if (
         key === pushKey.grants(provider) ||
         key === pushKey.settings(provider) ||
+        key === pushKey.reach(provider) ||
         key.startsWith(`desired:${provider}:`)
       )
         delete this.pushed[key];
@@ -157,6 +159,7 @@ export class Providers {
     readonly grants: GrantTables;
     readonly desired: Record<string, DesiredParts>;
     readonly settings: CardSettingValues;
+    readonly reach: ReadonlyArray<ReachedCard>;
   } {
     const prefix = `desired:${provider}:`;
     return {
@@ -167,7 +170,13 @@ export class Providers {
         ),
       ),
       settings: (this.pushed[pushKey.settings(provider)] as CardSettingValues | undefined) ?? {},
+      reach: this.reachOf(provider),
     };
+  }
+
+  /** K-1609: the saved reach of a provider: the cards on other machines that this machine opens. */
+  reachOf(provider: string): ReadonlyArray<ReachedCard> {
+    return (this.pushed[pushKey.reach(provider)] as ReadonlyArray<ReachedCard> | undefined) ?? [];
   }
 
   private persist() {

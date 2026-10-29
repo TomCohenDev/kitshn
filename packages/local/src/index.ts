@@ -3,6 +3,8 @@
 import { Schema } from "effect";
 import {
   CardSettingValues,
+  LinkAudit,
+  ReachedCard,
   DesiredParts,
   GrantTables,
   PROVIDER_LIMITS,
@@ -160,6 +162,8 @@ export const Request = Schema.Union([
     part: Schema.Literals(["shared", "machine"]),
     value: Schema.Unknown,
   }),
+  /** K-1610: the provider reports one exec run or forwarded tool call on another machine. */
+  Schema.Struct({ id: Id, type: Schema.Literal("audit"), provider: ProviderName, audit: LinkAudit }),
   /** K-707: the result of a `command` event. */
   Schema.Struct({
     id: Id,
@@ -257,8 +261,15 @@ export const Answer = Schema.Union([
     desired: Schema.Record(Schema.String, DesiredParts),
     /** K-717: the saved value of each card setting, by resource id and setting id. */
     settings: CardSettingValues,
+    /** K-1609: the saved reach of this machine. */
+    reach: Schema.Array(ReachedCard),
+    /** K-1609: the Unix socket of the link proxy: `http://link/<machine id>/<path>` reaches that machine's card. */
+    linkSocket: Schema.String,
   }),
   Schema.Struct({ id: Id, type: Schema.Literal("desired-set") }),
+  Schema.Struct({ id: Id, type: Schema.Literal("audit") }),
+  /** K-1609: an event: the cards of this provider on other machines that this machine reaches, on each change. */
+  Schema.Struct({ type: Schema.Literal("reach"), provider: Schema.String, cards: Schema.Array(ReachedCard) }),
   /** K-709: an event: the desired state of one kind, on each change. */
   Schema.Struct({
     type: Schema.Literal("desired"),

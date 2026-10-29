@@ -1,6 +1,6 @@
 import { useState } from "preact/hooks";
 import { MACHINE_RIGHT_NAMES } from "../core/model.ts";
-import type { AskEventView, ProposalView } from "../core/protocol.ts";
+import type { AskEventView, LinkEventView, ProposalView } from "../core/protocol.ts";
 import { callApi } from "./store.ts";
 
 /**
@@ -248,5 +248,53 @@ export function AskRow(props: {
         Deny
       </button>
     </li>
+  );
+}
+
+const CHECK_CLASSES: Record<LinkEventView["check"], string> = {
+  paired: "ok",
+  waiting: "info",
+  "no target report": "",
+  "no source report": "",
+};
+const CHECK_TIPS: Record<LinkEventView["check"], string> = {
+  paired: "Both machines reported this call.",
+  waiting: "The report of the other machine can still come.",
+  "no target report": "The calling machine reported this call, but the target never did.",
+  "no source report":
+    "The target served this call, but the calling machine never reported it. A source that skips its reports shows here.",
+};
+
+/** K-1610: exec runs and forwarded tool calls between machines, as both machines report them. */
+export function LinkEvents(props: { readonly events: ReadonlyArray<LinkEventView> }) {
+  if (props.events.length === 0) return null;
+  return (
+    <section class="ask-events">
+      <h3
+        class="label"
+        data-tip="Work of agents on other machines: events, not changes, so they have no Undo. Never with arguments or output (K-1610)."
+      >
+        Cross-machine work
+      </h3>
+      <ul class="repo-list">
+        {props.events.map((event) => (
+          <li key={event.id}>
+            <span class="muted">
+              {new Date(event.at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
+            </span>
+            <span class="name">
+              {event.source} → {event.target}: {event.kind === "exec" ? "ran" : "called"}{" "}
+              <code>{event.name}</code> {event.outcome}
+              {event.exitCode !== null ? <span class="muted"> · exit {event.exitCode}</span> : null}
+              {event.cwd ? <span class="muted"> · in {event.cwd}</span> : null}
+              {event.thread ? <span class="muted"> · thread {event.thread}</span> : null}{" "}
+              <span class={`sticker ${CHECK_CLASSES[event.check]}`} data-tip={CHECK_TIPS[event.check]}>
+                {event.check}
+              </span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }

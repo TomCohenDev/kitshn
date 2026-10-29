@@ -111,6 +111,8 @@ export interface ActionHandlers {
   readonly restorePrevious: (resource: Resource) => void;
   /** K-1120: shows the address name field of a page or a file card. */
   readonly editAddress: (resource: Resource) => void;
+  /** K-1128: shows the redirect address field of a site card. */
+  readonly editRedirects: (resource: Resource) => void;
   /** K-1801: opens the logs of a Compose or Worker card. */
   readonly logs: (resource: Resource) => void;
   /** K-1819: opens the backups of a Compose card. */
@@ -564,6 +566,16 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
               label: "Set address…",
               tip: `Give ${resource.name} a new address name. The old address keeps working and sends visitors on.`,
               run: () => h.editAddress(resource),
+            },
+          ]
+        : []),
+      ...(resource.kind.startsWith("site.")
+        ? [
+            {
+              id: "add-redirect",
+              label: "Add redirect address…",
+              tip: `Add a hostname that only sends visitors on to ${resource.name}, such as an old name of the site.`,
+              run: () => h.editRedirects(resource),
             },
           ]
         : []),

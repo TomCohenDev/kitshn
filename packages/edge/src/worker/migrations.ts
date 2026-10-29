@@ -233,6 +233,13 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `CREATE TABLE github_tokens (id TEXT PRIMARY KEY, machine_id TEXT NOT NULL, repo TEXT NOT NULL,
       right_name TEXT NOT NULL, expires_at INTEGER NOT NULL, sealed TEXT NOT NULL)`,
   ],
+  // 31: redirect addresses (K-1128). `pinned` marks an old address that the owner or a key added by hand: it counts
+  // toward the 5 of K-1122 but no rename pushes it out. `going` marks one that is being removed, which keeps its Access
+  // application until its custom domain left the redirect Worker (K-410).
+  [
+    "ALTER TABLE old_addresses ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE old_addresses ADD COLUMN going INTEGER NOT NULL DEFAULT 0",
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

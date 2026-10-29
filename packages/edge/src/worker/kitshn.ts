@@ -1051,7 +1051,7 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1124: the old addresses of cards that exist and no longer serve them; a removed card's wait for its Undo. */
   private oldAddresses(): Array<OldAddress> {
     return this.sql<{ address: string; card_id: string }>(
-      "SELECT address, card_id FROM old_addresses ORDER BY rowid",
+      "SELECT address, card_id FROM old_addresses WHERE going = 0 ORDER BY rowid",
     )
       .filter((row) => this.state.resources.get(row.card_id)?.addresses.includes(row.address) === false)
       .map((row) => ({ cardId: row.card_id, address: row.address }));
@@ -1068,12 +1068,17 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("DELETE FROM old_addresses WHERE address = ?", address);
       this.sql("INSERT INTO old_addresses (address, card_id) VALUES (?, ?)", address, cardId);
     }
+    // K-1128: an address added by hand counts toward the limit, but only old addresses go to keep it.
+    const [kept] = this.sql<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM old_addresses WHERE card_id = ? AND pinned = 1",
+      cardId,
+    );
     this.sql(
-      `DELETE FROM old_addresses WHERE card_id = ? AND rowid NOT IN
-       (SELECT rowid FROM old_addresses WHERE card_id = ? ORDER BY rowid DESC LIMIT ?)`,
+      `DELETE FROM old_addresses WHERE card_id = ? AND pinned = 0 AND rowid NOT IN
+       (SELECT rowid FROM old_addresses WHERE card_id = ? AND pinned = 0 ORDER BY rowid DESC LIMIT ?)`,
       cardId,
       cardId,
-      OLD_NAMES,
+      Math.max(0, OLD_NAMES - (kept?.n ?? 0)),
     );
   }
 
@@ -1140,6 +1145,8 @@ export class Kitshn extends DurableObject<Env> {
       }
       await api("DELETE", `${account}/workers/domains/${domain.id}`);
       this.sql("UPDATE old_addresses SET attached = 0 WHERE address = ?", domain.hostname);
+      // K-1128: a removed redirect address goes for good once its custom domain went.
+      this.sql("DELETE FROM old_addresses WHERE address = ? AND going = 1", domain.hostname);
       calls++;
     }
     for (const { cardId, address } of old) {
@@ -1176,6 +1183,8 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("UPDATE old_addresses SET attached = 1 WHERE address = ?", address);
       calls++;
     }
+    // A removed redirect address whose custom domain is not on the redirect Worker has nothing left to take off.
+    this.sql("DELETE FROM old_addresses WHERE going = 1 AND attached = 0");
     this.setMeta("redirects_done", waiting ? "" : text);
     // A wait (an Access application, a DNS record, the budget) tries again later, so the alarm does not loop on it.
     this.setMeta("redirects_retry_at", waiting ? String(Date.now() + RETRY_MS) : "0");
@@ -1215,7 +1224,13 @@ export class Kitshn extends DurableObject<Env> {
     )
       .filter((row) => !this.state.resources.has(row.card_id))
       .map((row) => ({ id: row.card_id, name: row.address, address: row.address }));
-    return desiredAccess(this.state, now, [...removed, ...leaving], this.oldAddresses());
+    // K-1128: a redirect address that is being removed keeps its card's policies until its custom domain went.
+    const going = this.sql<{ address: string; card_id: string }>(
+      "SELECT address, card_id FROM old_addresses WHERE going = 1 AND attached = 1",
+    )
+      .filter((row) => this.state.resources.has(row.card_id))
+      .map((row) => ({ cardId: row.card_id, address: row.address }));
+    return desiredAccess(this.state, now, [...removed, ...leaving], [...this.oldAddresses(), ...going]);
   }
 
   /** The rules that every write keeps (K-105, K-1504). Returns the state after the changes. */
@@ -2968,6 +2983,12 @@ export class Kitshn extends DurableObject<Env> {
             this.state.resources.get(id)?.kind === "page" ||
             this.state.resources.get(id)?.kind === "site.static",
         ),
+      redirects: this.sql<{ address: string; card_id: string }>(
+        "SELECT address, card_id FROM old_addresses WHERE pinned = 1 AND going = 0 ORDER BY rowid",
+      ).reduce<Record<string, Array<string>>>((all, row) => {
+        (all[row.card_id] ??= []).push(row.address);
+        return all;
+      }, {}),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
       proposals: this.openProposals(),
@@ -3372,6 +3393,14 @@ export class Kitshn extends DurableObject<Env> {
       return this.preview(path.slice("/api/library/".length, -"/content".length));
     if (path.startsWith("/api/library/") && request.method === "DELETE")
       return this.deleteItem(caller, path.slice("/api/library/".length));
+    // K-1128: an address that only redirects to the card's main address.
+    if (path.startsWith("/api/cards/") && path.includes("/redirects")) {
+      const [card = "", rest = ""] = path.slice("/api/cards/".length).split("/redirects");
+      if (request.method === "POST" && rest === "")
+        return this.addRedirect(caller, card, await addressBody(request), false);
+      if (request.method === "DELETE" && rest.startsWith("/"))
+        return this.removeRedirect(caller, card, decodeURIComponent(rest.slice(1)), false);
+    }
     if (path.startsWith("/api/cards/") && path.endsWith("/address") && request.method === "POST")
       return this.setAddress(
         caller,
@@ -7182,6 +7211,13 @@ export class Kitshn extends DurableObject<Env> {
       const refusal = this.agentMayChange(agent, id, now);
       return refusal ? Response.json({ error: refusal }, { status: 403 }) : this.preview(id);
     }
+    if (path.startsWith("/agent/cards/") && path.includes("/redirects")) {
+      const [card = "", rest = ""] = path.slice("/agent/cards/".length).split("/redirects");
+      if (request.method === "POST" && rest === "")
+        return this.addRedirect(agent, card, await addressBody(request), true);
+      if (request.method === "DELETE" && rest.startsWith("/"))
+        return this.removeRedirect(agent, card, decodeURIComponent(rest.slice(1)), true);
+    }
     if (path.startsWith("/agent/cards/") && path.endsWith("/address") && request.method === "POST")
       return this.setAddress(
         agent,
@@ -9249,6 +9285,99 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /**
+   * K-1128: the site card that a redirect address belongs to, if the caller may change it: any site card for the
+   * owner, a card that a key controls (K-718) for a key. One refusal for unknown and not its own.
+   */
+  private redirectCard(caller: Caller, card: string, agent: boolean): Resource | Response {
+    const resource = this.state.resources.get(card);
+    const mine = resource && (!agent || cardsControlledBy(this.state, caller.visitor, Date.now()).has(card));
+    if (!resource || !mine || !resource.kind.startsWith("site."))
+      return Response.json(
+        {
+          error: `${agent ? "This key cannot change" : "kitshn has no site card"} "${card}" (K-718, K-1128).`,
+        },
+        { status: agent ? 403 : 404 },
+      );
+    return resource;
+  }
+
+  /**
+   * K-1128: adds a hostname that only sends visitors on to the card's main address, through the redirect Worker of
+   * K-1124. It counts toward the 5 addresses of K-1122 and gets the checks of K-817.
+   */
+  private async addRedirect(caller: Caller, card: string, address: string, agent: boolean) {
+    const fail = (status: number, error: string) => Response.json({ error }, { status });
+    const resource = this.redirectCard(caller, card, agent);
+    if (resource instanceof Response) return resource;
+    const api = this.api();
+    if (!api) return fail(503, "kitshn has no Cloudflare API token here.");
+    const name = address.toLowerCase();
+    const error = redirectAddressError(name, this.env);
+    if (error) return fail(400, error);
+    if (resource.addresses.includes(name)) return fail(409, `${name} serves ${resource.name} already.`);
+    const [own] = this.sql<{ card_id: string; pinned: number }>(
+      "SELECT card_id, pinned FROM old_addresses WHERE address = ? AND going = 0",
+      name,
+    );
+    if (own?.card_id === resource.id && own.pinned === 1)
+      return fail(409, `${name} sends visitors on to ${resource.name} already.`);
+    const [count] = this.sql<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM old_addresses WHERE card_id = ? AND pinned = 1",
+      resource.id,
+    );
+    if ((count?.n ?? 0) >= OLD_NAMES)
+      return fail(
+        409,
+        `A card has at most ${OLD_NAMES} redirect addresses; remove one first (K-1122, K-1128).`,
+      );
+    const refused = await this.addressRefusal(api, [name], resource.id, REDIRECT_SCRIPT, resource, true);
+    if (refused) return refused;
+    const revision = this.ctx.storage.transactionSync(() => {
+      // A plain old address of this card becomes pinned; the primary key keeps another card's.
+      this.sql("DELETE FROM old_addresses WHERE address = ? AND card_id = ?", name, resource.id);
+      this.sql("INSERT INTO old_addresses (address, card_id, pinned) VALUES (?, ?, 1)", name, resource.id);
+      this.rememberOld(resource.id, [], resource.addresses);
+      return this.insertRevision(
+        caller.actor,
+        `Added ${name} as a redirect address of ${resource.name} (K-1128)`,
+        [],
+        null,
+      );
+    });
+    this.broadcast();
+    // The Access application of the new address comes first (K-402), so the next alarm can attach its domain.
+    await this.syncAccessLocked(api, 20);
+    void this.scheduleAlarm();
+    return Response.json({ card: resource.id, address: name, to: resource.addresses[0] ?? "", revision });
+  }
+
+  /** K-1128: the way out of addRedirect: the address stops sending visitors on and goes free once its domain went. */
+  private removeRedirect(caller: Caller, card: string, address: string, agent: boolean) {
+    const resource = this.redirectCard(caller, card, agent);
+    if (resource instanceof Response) return resource;
+    const name = address.toLowerCase();
+    const [row] = this.sql(
+      "SELECT 1 FROM old_addresses WHERE address = ? AND card_id = ? AND pinned = 1",
+      name,
+      resource.id,
+    );
+    if (!row)
+      return Response.json({ error: `${name} is no redirect address of ${resource.name}.` }, { status: 404 });
+    const revision = this.ctx.storage.transactionSync(() => {
+      this.sql("UPDATE old_addresses SET going = 1 WHERE address = ?", name);
+      return this.insertRevision(
+        caller.actor,
+        `Removed the redirect address ${name} of ${resource.name} (K-1128)`,
+        [],
+        null,
+      );
+    });
+    this.broadcast();
+    void this.scheduleAlarm();
+    return Response.json({ card: resource.id, address: name, revision });
+  }
+
+  /**
    * K-1120, K-1122: gives an item a name in its transaction, or throws when another item holds it. The item keeps
    * its newest old names, up to `OLD_NAMES`; an older one goes free.
    */
@@ -10753,6 +10882,24 @@ function isRepoName(repo: string): boolean {
     name !== ".." &&
     [...name].every((c) => plain(c) || c === "." || c === "_");
   return rest.length === 0 && okOwner && okName;
+}
+
+/**
+ * K-1128, K-817: why a hostname cannot be a redirect address, or null: one name under a zone of K-1111, or the apex of
+ * a zone other than the kitshn zone, and none of kitshn's own names.
+ */
+function redirectAddressError(address: string, env: Env): string | null {
+  const zone = zoneOfAddressIn(address, env);
+  if (!zone) return `kitshn does not publish on the zone of ${address} (K-1111).`;
+  const label = address === zone.name ? "" : address.slice(0, -zone.name.length - 1);
+  const plain = [...label].every((c) => (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "-");
+  if (label === "" && zone.name === env.KITSHN_ZONE)
+    return `The apex of ${zone.name} is kitshn's own (K-817).`;
+  if (label.includes(".") || !plain || label.startsWith("-") || label.endsWith("-") || label.length > 63)
+    return `A redirect address is one name of letters, digits and inner dashes under a zone (K-817).`;
+  if (address === env.KITSHN_HOST || (zone.name === env.KITSHN_ZONE && RESERVED_SITE_NAMES.has(label)))
+    return `${address} is a name of kitshn itself (K-817).`;
+  return null;
 }
 
 /** K-1122: the old names that an item keeps; each sends visitors on, and no other item takes it. */

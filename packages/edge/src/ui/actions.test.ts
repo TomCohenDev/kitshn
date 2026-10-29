@@ -153,6 +153,7 @@ describe("card actions", () => {
       "details",
       "open",
       "copy",
+      "add-redirect",
       "share",
       "unshare",
       "select-kind",

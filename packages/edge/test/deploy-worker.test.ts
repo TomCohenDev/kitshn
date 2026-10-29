@@ -1399,3 +1399,60 @@ describe("make it a repo (K-1127)", () => {
     expect(await snapshot()).toEqual({ handovers: 0, cards: 0, repos: 0 });
   });
 });
+
+describe("redirect addresses (K-1128)", () => {
+  it("adds a hostname that sends visitors on to an app, keeps the limit, and removes it again", async () => {
+    const cloudflare = fakeCloudflare();
+    await noOldAddresses();
+    const app = repo("90", "aliased");
+    await allow(app);
+    expect((await deploy(app)).status).toBe(200);
+    const durable = env.KITSHN.getByName("kitshn");
+    const alarm = () =>
+      runInDurableObject(durable, (instance) => (instance as unknown as { alarm(): Promise<void> }).alarm());
+    const add = (address: string) => admin(`/api/cards/${app.card}/redirects`, "POST", { address });
+
+    expect((await add("kit.example.com")).status).toBe(400);
+    const added = await add("alias.example.com");
+    expect(added.body, JSON.stringify(added.body)).toMatchObject({
+      address: "alias.example.com",
+      to: app.address,
+    });
+    await alarm();
+    expect(cloudflare.served("alias.example.com")).toEqual(["kitshn-redirects"]);
+    const bindings = (cloudflare.uploads.at(-1)?.["bindings"] ?? []) as Array<{ name: string; text: string }>;
+    expect(JSON.parse(bindings.find((binding) => binding.name === "MAP")?.text ?? "{}")).toEqual({
+      "alias.example.com": app.address,
+    });
+
+    // At most 5 per card.
+    for (const name of ["alias-two", "alias-three", "alias-four", "alias-five"])
+      expect((await add(`${name}.example.com`)).status).toBe(200);
+    expect((await add("alias-six.example.com")).status).toBe(409);
+
+    // A key that does not control the card cannot add one.
+    const edits = [
+      { _tag: "circle", id: "strangers", after: agentCircle("strangers", "stranger-key.access", true) },
+    ];
+    expect((await admin("/api/apply", "POST", { edits })).status).toBe(200);
+    expect(
+      (
+        await agentStep("stranger-key.access", `/agent/cards/${app.card}/redirects`, {
+          address: "x.example.com",
+        })
+      ).status,
+    ).toBe(403);
+
+    // Remove: the custom domain goes, then the row.
+    expect((await admin(`/api/cards/${app.card}/redirects/alias.example.com`, "DELETE")).status).toBe(200);
+    await alarm();
+    expect(cloudflare.served("alias.example.com")).toEqual([]);
+    const left = await runInDurableObject(durable, (_instance, storage) =>
+      storage.storage.sql
+        .exec("SELECT address FROM old_addresses WHERE address = 'alias.example.com'")
+        .toArray(),
+    );
+    expect(left).toEqual([]);
+    expect((await add("alias-six.example.com")).status).toBe(200);
+  });
+});

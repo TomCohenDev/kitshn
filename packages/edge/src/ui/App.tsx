@@ -892,6 +892,26 @@ export function App() {
     return !("error" in result);
   };
 
+  /** K-1128: adds or removes a redirect address of a site card. */
+  const changeRedirect = async (resource: Resource, address: string, remove: boolean) => {
+    const path = `/api/cards/${encodeURIComponent(resource.id)}/redirects`;
+    const result = remove
+      ? await callApi<{ address: string }>("DELETE", `${path}/${encodeURIComponent(address)}`)
+      : await callApi<{ address: string }>("POST", path, { address });
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : {
+            text: remove
+              ? `${result.address} no longer sends visitors on to ${resource.name}.`
+              : `${result.address} sends visitors on to ${resource.name} once its domain is up.`,
+            error: false,
+            undo: null,
+          },
+    );
+    return !("error" in result);
+  };
+
   const restorePrevious = async (resource: Resource) => {
     const result = await callApi<{ revision: number }>(
       "POST",
@@ -1344,6 +1364,8 @@ export function App() {
     restorePrevious: (resource) => void restorePrevious(resource),
     editAddress: (resource) =>
       selectAndFocus({ cards: new Set([resource.id]), circle: null }, 'input[aria-label="Address name"]'),
+    editRedirects: (resource) =>
+      selectAndFocus({ cards: new Set([resource.id]), circle: null }, 'input[aria-label="Redirect address"]'),
     logs: setLogs,
     backups: setBackupsCard,
     runJob: (machine, command) => void runJob(machine, command),
@@ -1520,6 +1542,8 @@ export function App() {
               previousVersions={previousVersions}
               onRestorePrevious={(resource) => void restorePrevious(resource)}
               onSetAddress={setAddress}
+              redirects={store.snapshot?.redirects ?? {}}
+              onRedirect={changeRedirect}
               onLogs={setLogs}
               backups={store.snapshot.backups}
               r2Bucket={store.snapshot.r2Bucket}
@@ -2063,6 +2087,8 @@ function Panel(props: {
   previousVersions: ReadonlySet<string>;
   onRestorePrevious: (resource: Resource) => void;
   onSetAddress: (resource: Resource, name: string) => Promise<boolean>;
+  redirects: Readonly<Record<string, ReadonlyArray<string>>>;
+  onRedirect: (resource: Resource, address: string, remove: boolean) => Promise<boolean>;
   onLogs: (resource: Resource) => void;
   backups: Readonly<Record<string, BackupRun>>;
   r2Bucket: BucketSize | null;
@@ -2138,6 +2164,8 @@ function Panel(props: {
         onRollback={props.onRollback}
         onRestorePrevious={props.previousVersions.has(cards[0].id) ? props.onRestorePrevious : null}
         onSetAddress={props.onSetAddress}
+        redirects={props.redirects[cards[0].id] ?? []}
+        onRedirect={props.onRedirect}
         onLogs={props.onLogs}
         backup={props.backups[cards[0].id] ?? null}
         r2Bucket={props.r2Bucket}
@@ -2445,6 +2473,56 @@ function AddressName(props: { address: string; onSave: (name: string) => Promise
   );
 }
 
+/**
+ * K-1128: the hostnames that only send visitors on to this card, each with Remove, and a field to add one. Enter or Add
+ * sends it; a refused one stays in the field to fix.
+ */
+function Redirects(props: {
+  addresses: ReadonlyArray<string>;
+  onAdd: (address: string) => Promise<boolean>;
+  onRemove: (address: string) => void;
+}) {
+  const field = useRef<HTMLInputElement>(null);
+  const add = async () => {
+    const input = field.current;
+    const address = input?.value.trim() ?? "";
+    if (!input || address === "") return;
+    if ((await props.onAdd(address)) && input.isConnected) input.value = "";
+  };
+  return (
+    <>
+      <div class="label" data-tip="Hostnames that only send visitors on to this card's address (K-1128).">
+        Redirects
+      </div>
+      {props.addresses.map((address) => (
+        <div class="row" key={address}>
+          <code>{address}</code>
+          <button
+            type="button"
+            class="btn"
+            data-tip={`Stop sending visitors from ${address} on to this card.`}
+            onClick={() => props.onRemove(address)}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <div class="row">
+        <input
+          ref={field}
+          aria-label="Redirect address"
+          data-tip="A hostname under one of kitshn's zones, such as old-name.example.com. At most 5 per card."
+          placeholder="old-name.example.com"
+          onKeyDown={(event) => event.key === "Enter" && void add()}
+        />
+        <button type="button" class="btn" data-tip="Add this redirect address." onClick={() => void add()}>
+          Add
+        </button>
+      </div>
+    </>
+  );
+}
+
 function CardPanel(props: {
   resource: Resource;
   /** K-1733: every repo that kitshn knows, for the matches of a repo group. */
@@ -2467,6 +2545,8 @@ function CardPanel(props: {
   onRestorePrevious: ((resource: Resource) => void) | null;
   /** K-1120: a page or a file gets a new address name. */
   onSetAddress: (resource: Resource, name: string) => Promise<boolean>;
+  redirects: ReadonlyArray<string>;
+  onRedirect: (resource: Resource, address: string, remove: boolean) => Promise<boolean>;
   onLogs: (resource: Resource) => void;
   /** K-1819: the newest backup run of this card, or null. */
   backup: BackupRun | null;
@@ -2561,6 +2641,13 @@ function CardPanel(props: {
       ) : null}
       {address && props.repo ? (
         <p class="help">Its repo sets this address: change it in kitshn.config.ts.</p>
+      ) : null}
+      {resource.kind.startsWith("site.") ? (
+        <Redirects
+          addresses={props.redirects}
+          onAdd={(name) => props.onRedirect(resource, name, false)}
+          onRemove={(name) => void props.onRedirect(resource, name, true)}
+        />
       ) : null}
       {props.pullRequest !== null && props.repo ? (
         <div class="row">

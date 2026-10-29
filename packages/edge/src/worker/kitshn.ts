@@ -12125,15 +12125,12 @@ export class Kitshn extends DurableObject<Env> {
        WHERE machine_id = ? AND state = 'queued' AND json_extract(command, '$.kind') = 'doors'`,
       machineId,
     );
-    const plan = doorPlan(
+    this.queueKitshnJob(
       machineId,
-      this.gameRows().map(gameOf),
-      this.openDoors(now),
-      now,
-      this.env.KITSHN_ZONE,
-      this.openGames(now),
+      { kind: "doors", plan: this.doorPlanOf(machineId, now) },
+      actor,
+      now + HOUR_MS,
     );
-    this.queueKitshnJob(machineId, { kind: "doors", plan }, actor, now + HOUR_MS);
     this.deliverJobs();
   }
 
@@ -12268,6 +12265,17 @@ export class Kitshn extends DurableObject<Env> {
     for (const machine of machines) this.queueDoors(machine, actor, now);
   }
 
+  private doorPlanOf(machineId: string, now: number) {
+    return doorPlan(
+      machineId,
+      this.gameRows().map(gameOf),
+      this.openDoors(now),
+      now,
+      this.env.KITSHN_ZONE,
+      this.openGames(now),
+    );
+  }
+
   /** K-2004: the game cards with an active share in Everyone, whose ports are open to every address. */
   private openGames(now: number) {
     return new Set(
@@ -12284,10 +12292,25 @@ export class Kitshn extends DurableObject<Env> {
   private syncOpenGames(now: number) {
     const open = [...this.openGames(now)].sort().join(" ");
     if (open === this.openGamesSent) return;
+    const restarted = this.openGamesSent === null;
     this.openGamesSent = open;
-    const games = this.gameRows().map(gameOf);
     const actor: Actor = { _tag: "kitshn", reason: "Everyone share of a game (K-2004)" };
-    for (const machine of new Set(games.map(doorMachine))) this.queueDoors(machine, actor, now);
+    for (const machine of new Set(this.gameRows().map(gameOf).map(doorMachine))) {
+      // After a restart the last change is not known, so a machine gets a plan only when its gated ports differ from
+      // its last plan that did not fail.
+      if (restarted && JSON.stringify(this.doorPlanOf(machine, now).ports) === this.lastDoorPorts(machine))
+        continue;
+      this.queueDoors(machine, actor, now);
+    }
+  }
+
+  private lastDoorPorts(machineId: string) {
+    const [last] = this.sql<{ ports: string | null }>(
+      `SELECT json_extract(command, '$.plan.ports') AS ports FROM jobs
+       WHERE machine_id = ? AND state != 'failed' AND json_extract(command, '$.kind') = 'doors' ORDER BY id DESC LIMIT 1`,
+      machineId,
+    );
+    return last?.ports ?? null;
   }
 
   /** K-2005: a door whose person lost the card's share closes at once; a door of a removed card goes too. */
@@ -12356,11 +12379,14 @@ export class Kitshn extends DurableObject<Env> {
     };
     if (input.action === "open" && !waiting) {
       // K-2004: the address that kitshn sees is always a door; the browser adds the other addresses that it found,
-      // within the limits of openDoors. A refused browser address is left out.
+      // within the limits of openDoors. Each browser address passes the share check, so an address condition of a
+      // circle still holds; a refused one is left out.
       const seen = doorAddress(visitor.ip ?? "");
       const found = (input.addresses ?? [])
         .slice(0, DOOR_LIMITS[4] + DOOR_LIMITS[6])
-        .map((address) => doorAddress(String(address)))
+        .map(String)
+        .filter((ip) => contentAccess(this.state, resource, { ...visitor, ip }, now) === "allow")
+        .map((address) => doorAddress(address))
         .flatMap((door) => ("error" in door ? [] : [door.address]));
       const addresses = "error" in seen ? [] : [...new Set([seen.address, ...found])];
       error =

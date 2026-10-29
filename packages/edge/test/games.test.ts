@@ -164,12 +164,15 @@ it("keeps a door when its circle checks the address, and refuses a second open w
     state.storage.sql.exec("UPDATE circles SET body = ? WHERE id = 'friends'", JSON.stringify(office));
   });
   await evictDurableObject(stub);
+  // A browser address outside the circle's range opens no door.
   const opened = await game(stub, {
     name: "mc",
     action: "open",
     visitor: visitor("friend@example.com", "203.0.113.9"),
+    addresses: ["203.0.113.50", "198.51.100.7"],
   });
   expect(opened.error).toBeNull();
+  expect(opened.doors.map((door) => door.address).sort()).toEqual(["203.0.113.50", "203.0.113.9"]);
   // Any commit runs the share check of the open doors; it uses the address that opened the door.
   const edited = await send("/api/apply", {
     method: "POST",
@@ -185,7 +188,7 @@ it("keeps a door when its circle checks the address, and refuses a second open w
     action: "open",
     visitor: visitor("friend@example.com", "203.0.113.9"),
   });
-  expect(again.doors.map((door) => door.address)).toEqual(["203.0.113.9"]);
+  expect(again.doors.map((door) => door.address).sort()).toEqual(["203.0.113.50", "203.0.113.9"]);
   expect(again.error).toMatch(/Wait a moment/);
 });
 
@@ -309,6 +312,11 @@ it("opens the ports of a game in Everyone to all and gates them again after the 
 
   expect((await place({ x: everyone.x, y: everyone.y })).status).toBe(200);
   expect((await doorJobs(stub)).at(-1)?.plan).toMatchObject({ ports: [], doors: [] });
+  // After a restart, a commit sends no plan that equals the last one.
+  await evictDurableObject(stub);
+  const before = (await doorJobs(stub)).length;
+  expect((await place({ x: everyone.x + 1, y: everyone.y })).status).toBe(200);
+  expect(await doorJobs(stub)).toHaveLength(before);
   // The join page needs no login and offers no door.
   const view = (await game(stub, { name: "mc", action: "view", visitor: visitor(null, "203.0.113.9") })) as {
     decision: string;
@@ -325,4 +333,17 @@ it("opens the ports of a game in Everyone to all and gates them again after the 
   });
   expect(opened.error).toBeNull();
   expect((await doorJobs(stub)).at(-1)?.plan.doors.map((door) => door.address)).toEqual(["203.0.113.9"]);
+
+  // Shared again, then a pause gates the ports, and the join page asks for a login (K-1504).
+  expect((await place({ x: everyone.x, y: everyone.y })).status).toBe(200);
+  expect((await doorJobs(stub)).at(-1)?.plan.ports).toEqual([]);
+  const paused = await send("/api/apply", {
+    method: "POST",
+    headers: owner,
+    body: JSON.stringify({ edits: [{ _tag: "pause", after: "keep-public" }] }),
+  });
+  expect(paused.status).toBe(200);
+  expect((await doorJobs(stub)).at(-1)?.plan.ports).toEqual([{ port: 25565, proto: "tcp" }]);
+  const login = await game(stub, { name: "mc", action: "view", visitor: visitor(null, "203.0.113.9") });
+  expect(login.decision).toBe("login");
 });

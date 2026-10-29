@@ -214,14 +214,26 @@ it("stores desired state from a provider, and runs a provider command that an ag
   await sql("DELETE FROM circles WHERE id = 'agents'");
 });
 
-it("records the calls that a machine reports on other machines, as its own and only on a signed connection (K-1610)", async () => {
-  const { stub } = await setup();
-  const audit = {
+it("records both sides of a call, each as the machine that reported it (K-1610)", async () => {
+  const { stub, sql } = await setup();
+  const mac: Machine = { ...machine, id: "mac", name: "mac", clientId: "mac.access" };
+  await sql("INSERT OR REPLACE INTO machines (id, body) VALUES ('mac', ?)", JSON.stringify(mac));
+  const source = {
+    side: "source",
     kind: "exec",
     target: "mac",
     thread: "thread-1",
-    name: "git status",
+    name: "git",
     cwd: "/home/kcw",
+    outcome: "succeeded",
+    exitCode: 0,
+    at: 0,
+  };
+  const target = {
+    side: "target",
+    kind: "exec",
+    caller: "mac.access",
+    name: "exec",
     outcome: "succeeded",
     exitCode: 0,
     at: 0,
@@ -231,16 +243,21 @@ it("records the calls that a machine reports on other machines, as its own and o
       instance.webSocketMessage(daemonSocket(check), JSON.stringify(message)),
     );
   await runInDurableObject(stub, (_, state) => void state.storage.sql.exec("DELETE FROM link_events"));
-  await raw("token", { type: "audit", audit });
-  await raw("signed", { type: "audit", audit: { ...audit, outcome: "maybe" } });
-  await raw("signed", { type: "audit", audit });
+  await raw("token", { type: "audit", audit: source });
+  await raw("signed", { type: "audit", audit: { ...source, outcome: "maybe" } });
+  // vps sends a call to mac, and vps serves a call of mac: the reporter is always one side.
+  await raw("signed", { type: "audit", audit: source });
+  await raw("signed", { type: "audit", audit: target });
+  await raw("signed", { type: "audit", audit: { ...target, caller: "stranger.access" } });
   const rows = await runInDurableObject(stub, (_, state) =>
     state.storage.sql
-      .exec("SELECT source, target, kind, name, outcome, exit_code FROM link_events")
+      .exec("SELECT side, source, target, thread, name FROM link_events ORDER BY id")
       .toArray(),
   );
   expect(rows).toEqual([
-    { source: "vps", target: "mac", kind: "exec", name: "git status", outcome: "succeeded", exit_code: 0 },
+    { side: "source", source: "vps", target: "mac", thread: "thread-1", name: "git" },
+    { side: "target", source: "mac", target: "vps", thread: null, name: "exec" },
+    { side: "target", source: "client:stranger.access", target: "vps", thread: null, name: "exec" },
   ]);
 });
 

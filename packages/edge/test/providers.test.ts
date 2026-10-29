@@ -814,6 +814,10 @@ it("takes over a provider site's address with its application first, then ingres
     setHandover(id: string, value: unknown): void;
     desired(now: number): { apps: ReadonlyMap<string, { domain: string }> };
     hashesOf(machineId: string): ReadonlyMap<string, string>;
+    pushesOf(
+      machineId: string,
+    ): Array<{ key: string; hash: string; push: { access?: { served: Array<string> } } }>;
+    sentGrants: ReadonlyMap<string, string>;
   };
   const run = <T>(fn: (instance: Internals) => T) =>
     runInDurableObject(stub, async (instance) => await fn(instance as unknown as Internals));
@@ -862,6 +866,10 @@ it("takes over a provider site's address with its application first, then ingres
     await statusOf(run((instance) => instance.takeAddress(person("owner@example.com"), appId, api))),
   ).toBe(200);
   expect(await card()).toMatchObject({ addresses: ["t3-vps.example.com"], provider: { stickers: [] } });
+  // The provider learns which hosts kitshn serves: none before the record moved.
+  const served = (instance: Internals) =>
+    instance.pushesOf("vps").find((item) => item.key === "access:t3")?.push.access?.served;
+  expect(await run(served)).toEqual([]);
   // The application covers `<host>/*`, which Cloudflare takes next to the application that holds the host now.
   expect(
     await run((instance) => [...instance.desired(Date.now()).apps.values()].map((item) => item.domain)),
@@ -916,12 +924,33 @@ it("takes over a provider site's address with its application first, then ingres
   ]);
   expect(await state()).toEqual({ site: "ok", records: ["portal-record"] });
   expect(await run((instance) => instance.handoverOf(appId)?.switched)).toBe(true);
+  expect(await run(served)).toEqual(["t3-vps.example.com"]);
 
   // Giving it back points the record at what served it, forgets the record, and takes the address off the card.
+  // The host leaves `served`, and that push goes out, before the record call.
   calls.length = 0;
+  let atRecordCall: { served: unknown; sent: boolean } | null = null;
   expect(
-    await statusOf(run((instance) => instance.giveAddressBack(person("owner@example.com"), appId, api))),
+    await statusOf(
+      run((instance) =>
+        instance.giveAddressBack(
+          person("owner@example.com"),
+          appId,
+          async (method: string, path: string, body?: unknown) => {
+            if (method === "PUT" && path.includes("dns_records/")) {
+              const push = instance.pushesOf("vps").find((item) => item.key === "access:t3");
+              atRecordCall = {
+                served: served(instance),
+                sent: instance.sentGrants.get("vps/access:t3") === push?.hash,
+              };
+            }
+            return api(method, path, body);
+          },
+        ),
+      ),
+    ),
   ).toBe(200);
+  expect(atRecordCall).toEqual({ served: [], sent: true });
   expect(calls).toEqual([`PUT ${records}/portal-record portal.cfargotunnel.com`]);
   expect(await state()).toEqual({ site: "refused", records: [] });
   expect(await card()).toMatchObject({ addresses: [], provider: { stickers: [{ text: "address in use" }] } });

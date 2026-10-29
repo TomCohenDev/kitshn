@@ -410,6 +410,11 @@ export type ReachedCard = typeof ReachedCard.Type;
 export const ProviderAccess = Schema.Struct({
   teamDomain: Schema.String,
   audiences: Schema.Array(Schema.String),
+  /**
+   * The provider's site hosts whose DNS record points at kitshn's tunnel: after a handover, and sites that kitshn
+   * served from the start. A give-back drops its host before the record moves back.
+   */
+  served: Schema.Array(Schema.String),
 });
 export type ProviderAccess = typeof ProviderAccess.Type;
 

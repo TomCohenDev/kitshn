@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type Notification, changed, clip, onBell } from "./notifications.ts";
+import { type Notification, changed, clip, muted, onBell } from "./notifications.ts";
 
 const open: Notification = {
   id: 1,
@@ -28,6 +28,10 @@ describe("notifications (K-1901, K-1905)", () => {
     expect(onBell(open, [{ card: "shop", source: "deploy", until: null }], 10)).toBe(false);
     expect(onBell(open, [{ card: "shop", source: "deploy", until: 5 }], 10)).toBe(true);
     expect(onBell(open, [{ card: "shop", source: "uptime", until: null }], 10)).toBe(true);
+    // A mute holds for a closed notification too, so its state change sends no push (K-1907).
+    expect(muted({ ...open, state: "closed" }, [{ card: "shop", source: "deploy", until: null }], 10)).toBe(
+      true,
+    );
   });
 
   it("writes only when a source sends something new", () => {

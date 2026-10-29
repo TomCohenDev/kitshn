@@ -143,7 +143,15 @@ describe("state export (K-1831)", () => {
           durable.storage.sql.exec(
             `CREATE TABLE IF NOT EXISTS "${row.table}" (id TEXT PRIMARY KEY, value TEXT)`,
           );
-          durable.storage.sql.exec(`INSERT OR REPLACE INTO "${row.table}" VALUES ('k', 'secret')`);
+          // A table that a migration made keeps its columns; each column of the row holds the secret.
+          const columns = durable.storage.sql
+            .exec<{ name: string; type: string }>(`PRAGMA table_info("${row.table}")`)
+            .toArray()
+            .filter((column) => column.name !== "id" || column.type !== "INTEGER");
+          durable.storage.sql.exec(
+            `INSERT OR REPLACE INTO "${row.table}" (${columns.map((column) => column.name).join(", ")})
+             VALUES (${columns.map((column) => (column.type === "INTEGER" ? "1" : "'secret'")).join(", ")})`,
+          );
         } else
           durable.storage.sql.exec(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, 'secret')",

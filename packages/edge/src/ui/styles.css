@@ -2186,3 +2186,13 @@ a > code {
 .notification p {
   margin: 4px 0;
 }
+
+/* Web Push (K-1907) */
+.push .row {
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0;
+}
+.push input.time {
+  width: 5.5rem;
+}

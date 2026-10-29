@@ -12,8 +12,9 @@ export const SECRET_ROWS: ReadonlyArray<{ readonly table: string } | { readonly 
   // K-1771: the pass key of section 17.
   { table: "pass_keys" },
   { metaPrefix: "pass_key" },
-  // K-1901: the VAPID private key of Web Push.
+  // K-1907: the VAPID private key of Web Push, and the subscriptions, whose endpoints and auth secrets are keys too.
   { metaPrefix: "push_vapid_jwk" },
+  { table: "push_subscriptions" },
 ];
 
 const secretTables = new Set(SECRET_ROWS.flatMap((row) => ("table" in row ? [row.table] : [])));

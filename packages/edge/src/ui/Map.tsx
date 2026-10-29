@@ -19,7 +19,7 @@ import { isAgentKey } from "../core/agent.ts";
 import { AGENT_TIP, LEVEL_TIPS, MATCH_TIPS, MEMBER_HELP, PASSKEY_TIP, RightStickers } from "./Circle.tsx";
 import { MachineRightStickers } from "./MachineRights.tsx";
 import { type KindInfo, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS, kindInfo } from "./kinds.ts";
-import { KeySticker, PresenceSticker } from "./Machines.tsx";
+import { KeySticker, MachineLive, PresenceSticker } from "./Machines.tsx";
 import { type MenuTarget, untilText } from "./actions.ts";
 import type { DrawnWire } from "../core/organize.ts";
 import { USER_STACK, headAngle, stacksOf } from "../core/place.ts";
@@ -1137,6 +1137,7 @@ export function CardView(props: {
           ⏱ {untilText(endsAt)}
         </div>
       ) : null}
+      {props.machine ? <MachineLive view={props.machine} /> : null}
       <div class="foot">
         <KindSticker resource={resource} peek={peek} />
         {props.pullRequest !== null ? (
@@ -1147,7 +1148,7 @@ export function CardView(props: {
             PR #{props.pullRequest}
           </span>
         ) : null}
-        {props.machine ? <PresenceSticker view={props.machine} /> : null}
+        {props.machine ? <PresenceSticker view={props.machine} time={false} /> : null}
         {props.machine ? <KeySticker view={props.machine} /> : null}
         {holding.map((circle) => {
           const level = shareLevel(state, resource, circle);

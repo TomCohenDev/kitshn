@@ -154,6 +154,8 @@ export interface Snapshot {
   readonly askEvents: ReadonlyArray<AskEventView>;
   /** The newest jobs, with their output cut to 4,000 characters. */
   readonly jobs: ReadonlyArray<JobView>;
+  /** K-515: the jobs that wait for each machine, from the job table, not from the newest jobs above. */
+  readonly queuedJobs: Readonly<Record<string, number>>;
   /** K-1819: the newest backup run of each Compose card that has one. */
   readonly backups: Readonly<Record<string, BackupRun>>;
   /** K-1818: the size of the `kitshn` bucket at the last daily run; null before the first. */

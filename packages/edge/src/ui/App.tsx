@@ -1668,6 +1668,7 @@ export function App() {
               state={state}
               bell={store.snapshot.bell}
               proposals={store.snapshot.proposals}
+              machine={fullPage && route.tab === "notifications" ? decodeURIComponent(route.id) : ""}
               onToast={(text, error) => showToast({ text, error, undo: null })}
             />
           ) : (

@@ -3585,6 +3585,30 @@ export class Kitshn extends DurableObject<Env> {
     });
     const named = new Set(valid.map((report) => report.name));
     const wanted = providerCards(machine, valid, this.env.KITSHN_ZONE);
+    // K-705: the daemon reports a provider's site before its cards, so the site can wait under an id of its own. It
+    // moves to the card that names it, and a card that kitshn made for it meanwhile goes.
+    const waiting = [...wanted.values()].flatMap((card) => {
+      const site = card.provider?.site
+        ? this.liveSites.get(liveSiteId(machine.id, card.provider.site))
+        : undefined;
+      return site && !this.liveSites.has(card.id) ? [{ site, card }] : [];
+    });
+    if (waiting.length > 0) {
+      this.ctx.storage.transactionSync(() => {
+        for (const { site, card } of waiting) {
+          this.sql("UPDATE live_sites SET id = ? WHERE id = ?", card.id, site.id);
+          if (!this.state.resources.has(site.id)) continue;
+          this.forgetCard(site.id);
+          this.insertRevision(
+            { _tag: "kitshn", reason: `providers on ${machine.name}` },
+            `${site.address} belongs to the provider card ${card.name}, so its own card went`,
+            [],
+            null,
+          );
+        }
+      });
+      this.load();
+    }
     for (const [id, card] of wanted) {
       const refusals = card.addresses.flatMap((address) => {
         const label = address.slice(0, -`.${this.env.KITSHN_ZONE}`.length);
@@ -3597,11 +3621,22 @@ export class Kitshn extends DurableObject<Env> {
                 : null));
         return refusal ? [{ address, refusal }] : [];
       });
-      if (refusals.length === 0) continue;
       for (const { refusal } of refusals)
         console.warn(`kitshn kept an address off the card ${card.name}: ${refusal}`);
-      const off = new Set(refusals.map((item) => item.address));
-      wanted.set(id, { ...card, addresses: card.addresses.filter((address) => !off.has(address)) });
+      // K-705, K-1111: the site's address goes on the card only after its check found it free, so no Access
+      // application, DNS record or ingress rule takes a host that something else still serves (K-1623).
+      const site = this.liveSites.get(id);
+      const held = card.addresses.filter((address) => site?.state !== "ok" || site.address !== address);
+      if (refusals.length === 0 && held.length === 0) continue;
+      const off = new Set([...refusals.map((item) => item.address), ...held]);
+      const inUse = site?.state === "refused" && held.includes(site.address);
+      wanted.set(
+        id,
+        withAddressInUse(
+          { ...card, addresses: card.addresses.filter((address) => !off.has(address)) },
+          inUse,
+        ),
+      );
     }
     const existing = [...this.state.resources.values()].filter(
       (card) => card.machine === machine.id && card.provider !== undefined,
@@ -5676,12 +5711,14 @@ export class Kitshn extends DurableObject<Env> {
       for (const report of sites) {
         const address = `${report.name}.${this.env.KITSHN_ZONE}`;
         // K-812: the socket of a Compose app on this machine is the address of its card.
-        // K-705: so is the site of a provider card on this machine.
+        // K-705: the site of a provider card on this machine is that card, by its name: the card gets the address
+        // only after the check below.
         const app = [...this.state.resources.values()].find(
           (resource) =>
-            (resource.kind === "site.compose" || resource.provider !== undefined) &&
             resource.machine === machine.id &&
-            resource.addresses.includes(address),
+            (resource.provider
+              ? resource.provider.site === report.name && resource.provider.droppedAt === undefined
+              : resource.kind === "site.compose" && resource.addresses.includes(address)),
         );
         // K-909: a removed Compose app keeps its row until its compose-down ends, so it never turns into a
         // live site card meanwhile.
@@ -5791,6 +5828,9 @@ export class Kitshn extends DurableObject<Env> {
       if (used) {
         this.sql("UPDATE live_sites SET state = 'refused' WHERE id = ?", site.id);
         console.warn(`kitshn refused ${site.address}: something else already uses the address.`);
+        // K-705: a provider card shows at once that something else serves its address.
+        const card = this.state.resources.get(site.id);
+        if (card?.provider) this.putResource(withAddressInUse(card, true));
         continue;
       }
       const machine = this.state.machines.get(site.machineId);
@@ -5809,9 +5849,9 @@ export class Kitshn extends DurableObject<Env> {
         };
         this.putResource(
           card
-            ? // K-705: a provider reports the status of its own cards.
+            ? // K-705: a provider reports the status of its own cards, and its site's address comes on now.
               card.provider
-              ? card
+              ? withAddressInUse({ ...card, addresses: [site.address] }, false)
               : { ...card, status: site.up ? "running" : "stopped" }
             : {
                 id: site.id,
@@ -13219,6 +13259,22 @@ function rowAddresses(row: Pick<DeployRow, "address" | "addresses">): Array<stri
 
 /** A failed tunnel, DNS or route write tries again after this time. */
 const RETRY_MS = 5 * 60_000;
+
+/** K-705: the sticker of a provider card whose address something else serves. */
+const ADDRESS_IN_USE = "address in use";
+
+/** K-705: a provider card with or without the sticker of an address that something else serves. */
+function withAddressInUse(card: Resource, inUse: boolean): Resource {
+  const provider = card.provider!;
+  const stickers = provider.stickers.filter((sticker) => sticker.text !== ADDRESS_IN_USE);
+  return {
+    ...card,
+    provider: {
+      ...provider,
+      stickers: inUse ? [{ text: ADDRESS_IN_USE, tone: "warn" as const }, ...stickers].slice(0, 8) : stickers,
+    },
+  };
+}
 
 const DAY_MS = 24 * 3_600_000;
 

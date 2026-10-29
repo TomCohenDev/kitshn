@@ -4,6 +4,9 @@ import {
   type Box,
   cardBox,
   cardLayer,
+  toastPlace,
+  FOCUS_LAYER,
+  HEAD_LAYER,
   circleBox,
   fitMap,
   fitView,
@@ -196,16 +199,30 @@ describe("pinch (K-516)", () => {
 });
 
 describe("cardLayer", () => {
-  it("puts a dragged card on top, then the focused card, then selected and framed cards", () => {
+  it("puts a dragged card on top, then focused, selected and framed cards, all under the circle heads (K-506)", () => {
     const card = (flags: Partial<Parameters<typeof cardLayer>[0]>) =>
-      cardLayer({ dragging: false, focused: false, selected: false, framed: false, ...flags });
-    const all = { dragging: true, focused: true, selected: true, framed: true };
-    expect([
-      card(all),
-      card({ ...all, dragging: false }),
+      cardLayer({ dragging: false, selected: false, framed: false, ...flags });
+    const layers = [
+      card({ dragging: true, selected: true, framed: true }),
+      FOCUS_LAYER,
       card({ selected: true, framed: true }),
       card({ framed: true }),
-      card({}),
-    ]).toEqual([6, 5, 4, 3, null]);
+    ];
+    expect(layers).toEqual([6, 5, 4, 3]);
+    expect(card({})).toBeNull();
+    expect(Math.max(...layers.map(Number))).toBeLessThan(HEAD_LAYER);
+  });
+});
+
+describe("toastPlace (K-503)", () => {
+  it("keeps the toast in the half of the open map away from the changed card", () => {
+    // A wide screen: the toolbar ends at 120, the hint line starts at 940 of 982.
+    const wide = { top: 120, bottom: 940 };
+    expect(toastPlace(880, wide, 982)).toEqual({ top: 130 });
+    expect(toastPlace(150, wide, 982)).toEqual({ bottom: 52 });
+    // A phone with its card sheet open from 464: a card just under the toolbar gets the toast above the sheet.
+    const phone = { top: 100, bottom: 464 };
+    expect(toastPlace(140, phone, 844)).toEqual({ bottom: 390 });
+    expect(toastPlace(400, phone, 844)).toEqual({ top: 110 });
   });
 });

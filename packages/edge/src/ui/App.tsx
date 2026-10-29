@@ -143,6 +143,7 @@ import {
   union,
   type WidthLimits,
   shownWidths,
+  toastPlace,
 } from "./layout.ts";
 import { actorLabel, undoneText } from "./revisions.ts";
 import {
@@ -177,6 +178,8 @@ interface Toast {
   readonly undo: number | null;
   /** More revisions that the same Undo takes back after `undo`, newest first (a drop of several files). */
   readonly alsoUndo?: ReadonlyArray<number>;
+  /** The card that the change names; the toast keeps clear of it. Without one, of the last press or drop. */
+  readonly card?: string | undefined;
   /** A way back that is not an undo, for example Resume after a pause (K-1504). */
   readonly action?: { readonly label: string; readonly tip: string; readonly run: () => void };
 }
@@ -279,8 +282,10 @@ export function App() {
     else next.add(key);
     setOpenStacks(next);
   };
-  const [toast, setToast] = useState<(Toast & { readonly top: boolean }) | null>(null);
-  /** Where the last press ended; a toast shows away from it, so it never covers what the owner just touched. */
+  const [toast, setToast] = useState<(Toast & { readonly place: ReturnType<typeof toastPlace> }) | null>(
+    null,
+  );
+  /** Where the last press or drop ended, for a toast that names no card. */
   const lastPressY = useRef(0);
   /** The palette's first query, or null while it is closed. */
   const [palette, setPalette] = useState<string | null>(null);
@@ -430,16 +435,19 @@ export function App() {
     if (location.hash === "#restore-time") void finishRestoreTime();
     addEventListener("hashchange", onHash);
     addEventListener("keydown", onKey);
-    const notePress = (event: PointerEvent) => {
+    const notePress = (event: MouseEvent) => {
       lastPressY.current = event.clientY;
     };
     addEventListener("pointerup", notePress, true);
+    // A drag from the tray or of files ends in `drop`, with no `pointerup`.
+    addEventListener("drop", notePress, true);
     addEventListener("dragover", keepFiles);
     addEventListener("drop", keepFiles);
     return () => {
       removeEventListener("hashchange", onHash);
       removeEventListener("keydown", onKey);
       removeEventListener("pointerup", notePress, true);
+      removeEventListener("drop", notePress, true);
       removeEventListener("dragover", keepFiles);
       removeEventListener("drop", keepFiles);
     };
@@ -763,8 +771,20 @@ export function App() {
 
   const showToast = (next: Toast) => {
     toastShownAt.current = Date.now();
-    // A phone's card sheet fills the bottom; on a wide screen the toast keeps clear of a card just dropped there.
-    setToast({ ...next, top: !wideScreen() || lastPressY.current > innerHeight / 2 });
+    const card = next.card ? document.querySelector(`[data-card="${CSS.escape(next.card)}"]`) : null;
+    const rect = card?.getBoundingClientRect();
+    const sheet = wideScreen() ? null : document.querySelector(".overlay-panel:not(.large)");
+    const area = {
+      top: document.querySelector("header.bar")?.getBoundingClientRect().bottom ?? 0,
+      bottom:
+        sheet?.getBoundingClientRect().top ??
+        (wideScreen() ? document.querySelector(".hint")?.getBoundingClientRect().top : undefined) ??
+        innerHeight,
+    };
+    setToast({
+      ...next,
+      place: toastPlace(rect ? rect.top + rect.height / 2 : lastPressY.current, area, innerHeight),
+    });
     if (toastTimer.current !== null) clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(null), UNDO_MS);
   };
@@ -779,6 +799,7 @@ export function App() {
   /** Sends edits. K-210: a card that enters a public circle asks first. K-503: a share change shows Undo. */
   const commit = async (edits: Array<Edit>, diffs: Array<ShareDiff>, done?: string) => {
     const goingPublic = diffs.filter((diff) => diff.to && !diff.from && isPublicCircle(diff.circle));
+    const placed = edits.find((edit) => edit._tag === "place")?.id;
     // The drop stays where the owner let go while they answer; Cancel puts it back.
     const requestId = hold(edits);
     if (goingPublic.length > 0) {
@@ -803,8 +824,9 @@ export function App() {
         text: diffs.length > 2 ? `${text}. And ${diffs.length - 2} more.` : text,
         error: false,
         undo: result.revision,
+        card: diffs[0]?.resource.id,
       });
-    } else if (done) showToast({ text: done, error: false, undo: result.revision });
+    } else if (done) showToast({ text: done, error: false, undo: result.revision, card: placed });
   };
 
   const undo = async (revision: number) => {
@@ -1166,6 +1188,7 @@ export function App() {
     const { moved, cards } = plan;
     selectAndFocus({ cards: new Set(), circle: id }, ".add-member input");
     showToast({
+      card: ids[0],
       text: `Made a circle for ${plural(cards, "card")}${moved > 0 ? `; ${plural(moved, "card")} moved to keep their circles` : ""}. Add members next.`,
       error: false,
       undo: result.revision,
@@ -1953,7 +1976,12 @@ export function App() {
       ) : null}
       {toast ? (
         <div
-          class={`toast${toast.error ? " error" : ""}${floating ? " beside-panel" : ""}${toast.top ? " top" : ""}`}
+          class={`toast${toast.error ? " error" : ""}${floating ? " beside-panel" : ""}`}
+          style={
+            "top" in toast.place
+              ? { top: `${toast.place.top}px`, bottom: "auto" }
+              : { bottom: `${toast.place.bottom}px` }
+          }
           role="status"
         >
           <span>{toast.text}</span>

@@ -731,10 +731,10 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
   ].filter((group) => group.length > 0);
 }
 
-/** K-521, K-522: a closed stack of the owner. Shares go through its first card, which takes the stack along. */
 /** The key prefix of a stack that the owner made, as opposed to a stack by group (K-508). */
 export const USER_STACK = "stack:";
 
+/** K-521, K-522: a closed stack of the owner. Shares go through its first card, which takes the stack along. */
 export function stackActions(ctx: ActionContext, h: ActionHandlers, stack: Stack): ActionGroups {
   const { state } = ctx;
   const key = `${USER_STACK}${stack.id}`;

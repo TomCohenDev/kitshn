@@ -34,9 +34,16 @@ export default {
     await shot("loading");
     await page.waitForTimeout(4500);
     const layers = await page.evaluate<string>(
-      `[...document.querySelectorAll(".world > .card")].filter((card) => card.style.zIndex).map((card) => card.dataset.card + "=" + card.style.zIndex).join(", ")`,
+      `[...document.querySelectorAll(".world > .card")].filter((card) => card.style.getPropertyValue("--layer")).map((card) => card.dataset.card + "=" + card.style.getPropertyValue("--layer")).join(", ")`,
     );
     console.log(`cards with a layer: ${layers}`);
+    const focus = await page.evaluate<string>(`(() => {
+      const card = document.querySelector('.world > .card[data-card="riffle"]');
+      card.querySelector("button").focus();
+      const head = document.querySelector(".circle .head");
+      return "focused riffle z=" + getComputedStyle(card).zIndex + ", circle head z=" + getComputedStyle(head).zIndex;
+    })()`);
+    console.log(focus);
     await shot("loaded");
     await page.waitForTimeout(16_000);
     await shot("not-available");

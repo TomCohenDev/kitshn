@@ -188,7 +188,14 @@ function fakeCloudflare(others: Record<string, number> = {}) {
 function repo(id: string, name: string) {
   const card = environmentNames(id, `owner/${name}`, "prod").resourceId;
   /** The workflow run and the commit that the next token names. */
-  const run = { id: "100", sha: "0123456789abcdef", actor: "owner" };
+  const run = {
+    id: "100",
+    sha: "0123456789abcdef",
+    actor: "owner",
+    event: "push",
+    ref: "refs/heads/main",
+    headRef: "",
+  };
   const token = () =>
     new SignJWT({
       repository: `owner/${name}`,
@@ -197,8 +204,9 @@ function repo(id: string, name: string) {
       sha: run.sha,
       run_id: run.id,
       run_attempt: "1",
-      event_name: "push",
-      ref: "refs/heads/main",
+      event_name: run.event,
+      ref: run.ref,
+      head_ref: run.headRef,
       actor: run.actor,
     })
       .setProtectedHeader({ alg: "RS256", kid: "gh" })
@@ -433,6 +441,23 @@ describe("several apps per repo (K-804, K-820)", () => {
     const waits = await step(app, "/deploy/plan", { recipe: recipe(), event: {} });
     expect(waits.status).toBe(409);
     expect(String(waits.body["error"])).toMatch(/waits for a deploy ask/);
+    // A pull request of the App waits for the owner's Deploy of its run's commit; that commit then deploys.
+    app.run.event = "pull_request";
+    app.run.ref = "refs/pull/7/merge";
+    app.run.headRef = "agent-branch";
+    const prRun = {
+      recipe: { ...recipe(), deploy: [{ on: "pull_request", name: "pr-{pr}", ephemeral: true }] },
+      event: { action: "opened" },
+    };
+    const waitsPr = await step(app, "/deploy/plan", prRun);
+    expect(waitsPr.status).toBe(409);
+    expect(String(waitsPr.body["error"])).toMatch(/waits for a deploy click/);
+    await runInDurableObject(env.KITSHN.getByName("kitshn"), (_instance, durable) =>
+      durable.storage.sql.exec("UPDATE bot_runs SET approved = 1 WHERE repo_id = '1767' AND pr = 7"),
+    );
+    expect((await step(app, "/deploy/plan", prRun)).status).not.toBe(409);
+    app.run.event = "push";
+    app.run.ref = "refs/heads/main";
     // Another bot, such as Dependabot, deploys as before.
     app.run.actor = "dependabot[bot]";
     expect((await step(app, "/deploy/plan", { recipe: recipe(), event: {} })).status).toBe(200);

@@ -89,6 +89,28 @@ const record = (value: unknown): Record<string, unknown> => {
  * that repo id and only Actions, and the current name comes from that token. Returns the current full name.
  */
 export async function dispatchDeploy(app: GitHubApp, repoId: string, branch: string, workflow: string) {
+  const { token, name } = await actionsToken(app, repoId);
+  // A full branch ref, so a tag with the same name never runs.
+  await call(token, "POST", `/repos/${name}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
+    ref: `refs/heads/${branch}`,
+  });
+  return name;
+}
+
+/** K-1767: runs a workflow run of the repo with this id again, for an approved preview of a pull request of the App. */
+export async function rerunWorkflowRun(app: GitHubApp, repoId: string, runId: string) {
+  if (runId === "" || ![...runId].every((char) => char >= "0" && char <= "9"))
+    throw new Error(`${runId} is not a workflow run id.`);
+  const { token, name } = await actionsToken(app, repoId);
+  await call(token, "POST", `/repos/${name}/actions/runs/${runId}/rerun`);
+  return name;
+}
+
+/**
+ * K-718, K-819: a token for the repo with this id and only Actions, and the repo's current full name from that token.
+ * kitshn names the repo by its id, never by a name that a rename or a new repo can take over.
+ */
+async function actionsToken(app: GitHubApp, repoId: string) {
   const id = repositoryId(repoId);
   const jwt = await appJwt(app);
   // GitHub looks up an installation only by a repo name, so kitshn asks each installation for a token of
@@ -126,11 +148,7 @@ export async function dispatchDeploy(app: GitHubApp, repoId: string, branch: str
     .find((item) => item["id"] === id);
   const name = repo?.["full_name"];
   if (typeof name !== "string") throw new Error(`The installation token does not reach the repo ${repoId}.`);
-  // A full branch ref, so a tag with the same name never runs.
-  await call(token, "POST", `/repos/${name}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
-    ref: `refs/heads/${branch}`,
-  });
-  return name;
+  return { token, name };
 }
 
 /** K-819: what GitHub says about one repo id. "unknown" never changes what kitshn shows. */

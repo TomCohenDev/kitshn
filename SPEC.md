@@ -463,7 +463,7 @@ Planned. It needs the GitHub App (K-908) with the permissions Contents (read and
 - **K-1764** `kitshn gh <args>` gets a token for the repo of `--repo` or of the git remote of the current folder, and runs `gh <args>` with `GH_TOKEN`. It adds nothing else to `gh`.
 - **K-1765** Work with these tokens shows as `kitshn[bot]` on GitHub, so the owner can review and approve agent pull requests. Commits keep the author of the machine's git config, so they count for that person.
 - **K-1766** An owner that has not installed the App gets "the kitshn App is not installed on <owner>" and no token.
-- **K-1767** A push or a pull request of the kitshn App (the OIDC `actor` of K-811 is its bot) never deploys by itself. Its deploy step waits with "waits for a deploy ask". A machine with "deploys" on the card starts it with `kitshn agent deploy <card>`. This holds for push environments and for previews. The card of such a preview shows "waits for a deploy ask" and a one-click "Deploy" for the owner, so an agent pull request does not look broken.
+- **K-1767** A push or a pull request of the kitshn App (the OIDC `actor` of K-811 is its bot) never deploys by itself. A push waits for a deploy ask: a machine with "deploys" on the card starts a build with `kitshn agent deploy <card>`, which runs by `workflow_dispatch`. A pull request waits for the owner: kitshn records the run with its pull request and the commit of the run, and the map panel lists it under "Agent pull requests" with "Deploy". Deploy approves that commit only and runs the workflow run again, so the preview deploys; a new push waits again (owner decision of 2026-10-29).
 
 ### 17.7 Passes for outside services
 

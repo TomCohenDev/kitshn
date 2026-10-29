@@ -207,6 +207,10 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     // K-1771: the pass keys; backups and the state export leave this table out. K-1773: the pass audiences.
     `CREATE TABLE pass_keys (kid TEXT PRIMARY KEY, private_jwk TEXT NOT NULL, public_jwk TEXT NOT NULL,
       created_at INTEGER NOT NULL, retired_at INTEGER)`,
+    // K-1767: a run of a pull request of the kitshn App that waits for the owner's Deploy, by repo, pull request and
+    // the commit of the run; an approval counts for that commit only.
+    `CREATE TABLE bot_runs (repo_id TEXT NOT NULL, repo TEXT NOT NULL, pr INTEGER NOT NULL, sha TEXT NOT NULL,
+      run_id TEXT NOT NULL, at INTEGER NOT NULL, approved INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (repo_id, pr, sha))`,
     "CREATE TABLE pass_audiences (address TEXT PRIMARY KEY, labels INTEGER NOT NULL, added_by TEXT, added_at INTEGER NOT NULL)",
   ],
 ];

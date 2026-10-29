@@ -248,6 +248,7 @@ import {
   NotInstalled,
   type RepoOnGitHub,
   appBotLogin,
+  rerunWorkflowRun,
   dispatchDeploy,
   repoToken,
   reposOnGitHub,
@@ -2689,6 +2690,10 @@ export class Kitshn extends DurableObject<Env> {
       proposals: this.openProposals(),
       askEvents: this.recentAskEvents(),
       githubDefaultWay: this.meta("github_default_way") === "app" ? "app" : "not-kitshn",
+      // K-1767: the newest 20 runs of pull requests of the App that wait for Deploy.
+      botRuns: this.sql<{ repo_id: string; repo: string; pr: number; sha: string; at: number }>(
+        "SELECT repo_id, repo, pr, sha, at FROM bot_runs WHERE approved = 0 ORDER BY at DESC LIMIT 20",
+      ).map((row) => ({ repoId: row.repo_id, repo: row.repo, pr: row.pr, sha: row.sha, at: row.at })),
       jobs: this.recentJobs(10, 2000),
       backups: Object.fromEntries(this.latestBackups()),
       r2Bucket: this.bucket(),
@@ -2971,6 +2976,50 @@ export class Kitshn extends DurableObject<Env> {
       });
       this.broadcast();
       return Response.json(this.passSettings());
+    }
+    // K-1767: the owner's Deploy of a pull request of the kitshn App approves its run's commit and runs it again.
+    if (path === "/api/bot-runs/deploy" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      const repoId = isRecord(body) && typeof body["repoId"] === "string" ? body["repoId"] : "";
+      const pr = isRecord(body) && typeof body["pr"] === "number" ? body["pr"] : -1;
+      const sha = isRecord(body) && typeof body["sha"] === "string" ? body["sha"] : "";
+      const [run] = this.sql<{ run_id: string; repo: string }>(
+        "SELECT run_id, repo FROM bot_runs WHERE repo_id = ? AND pr = ? AND sha = ?",
+        repoId,
+        pr,
+        sha,
+      );
+      if (!run) return Response.json({ error: "kitshn knows no such waiting run." }, { status: 404 });
+      if (!this.env.GITHUB_APP_ID || !this.env.GITHUB_APP_KEY)
+        return Response.json({ error: NO_GITHUB_APP }, { status: 503 });
+      this.ctx.storage.transactionSync(() => {
+        this.sql(
+          "UPDATE bot_runs SET approved = 1 WHERE repo_id = ? AND pr = ? AND sha = ?",
+          repoId,
+          pr,
+          sha,
+        );
+        this.insertRevision(
+          caller.actor,
+          `Deployed pull request #${pr} of ${run.repo} (${sha.slice(0, 7)})`,
+          [],
+          null,
+        );
+      });
+      try {
+        await rerunWorkflowRun(
+          { id: this.env.GITHUB_APP_ID, key: this.env.GITHUB_APP_KEY },
+          repoId,
+          run.run_id,
+        );
+      } catch (error) {
+        return Response.json(
+          { error: error instanceof Error ? error.message : String(error) },
+          { status: 502 },
+        );
+      }
+      this.broadcast();
+      return Response.json({ deployed: pr });
     }
     // K-1756: History searches the ask events by one label.
     if (path === "/api/ask-events" && request.method === "GET") {
@@ -5471,19 +5520,46 @@ export class Kitshn extends DurableObject<Env> {
     }
     const event = eventOf(deployer, input["event"]);
     if (typeof event === "string") return Response.json({ error: event }, { status: 400 });
-    // K-1767: a push or a pull request of the kitshn App never deploys by itself; a deploy ask starts a build
-    // (workflow_dispatch), which "deploys" allows.
+    // K-1767: a push or a pull request of the kitshn App never deploys by itself. A push waits for a deploy ask, which
+    // builds by workflow_dispatch; a pull request waits for the owner's Deploy of its run's commit.
     if (
       deployer.actor.endsWith("[bot]") &&
       deployer.eventName !== "workflow_dispatch" &&
       deployer.actor === (await this.appBot())
-    )
-      return Response.json(
-        {
-          error: `This ${deployer.eventName === "pull_request" ? "pull request" : "push"} of the kitshn App waits for a deploy ask: kitshn agent deploy <card> --body '{"mode":"build"}' (K-1767).`,
-        },
-        { status: 409 },
-      );
+    ) {
+      if (deployer.eventName === "pull_request" && deployer.pr !== null) {
+        const [run] = this.sql<{ approved: number }>(
+          "SELECT approved FROM bot_runs WHERE repo_id = ? AND pr = ? AND sha = ?",
+          deployer.repoId,
+          deployer.pr,
+          deployer.sha,
+        );
+        if (run?.approved !== 1) {
+          this.sql(
+            `INSERT OR REPLACE INTO bot_runs (repo_id, repo, pr, sha, run_id, at, approved) VALUES (?, ?, ?, ?, ?, ?, 0)`,
+            deployer.repoId,
+            deployer.repo,
+            deployer.pr,
+            deployer.sha,
+            deployer.runId,
+            Date.now(),
+          );
+          this.broadcast();
+          return Response.json(
+            {
+              error: `This pull request of the kitshn App waits for a deploy click: Deploy in the map panel (K-1767).`,
+            },
+            { status: 409 },
+          );
+        }
+      } else
+        return Response.json(
+          {
+            error: `This push of the kitshn App waits for a deploy ask: kitshn agent deploy <card> --body '{"mode":"build"}' (K-1767).`,
+          },
+          { status: 409 },
+        );
+    }
     // K-804: a CLI from before several apps sends no key; its one app is the app `app`.
     const key = input["key"] ?? DEFAULT_APP;
     if (!Schema.is(AppKey)(key))

@@ -174,3 +174,54 @@ export function AskEvents(props: { readonly events: ReadonlyArray<AskEventView> 
     </section>
   );
 }
+
+/** K-1767: pull requests of the kitshn App whose run waits for the owner's Deploy of that exact commit. */
+export function BotRuns(props: {
+  readonly runs: ReadonlyArray<{
+    readonly repoId: string;
+    readonly repo: string;
+    readonly pr: number;
+    readonly sha: string;
+  }>;
+  readonly onToast: (text: string, error: boolean) => void;
+}) {
+  if (props.runs.length === 0) return null;
+  const deploy = async (run: (typeof props.runs)[number]) => {
+    const result = await callApi<{ deployed: number }>("POST", "/api/bot-runs/deploy", {
+      repoId: run.repoId,
+      pr: run.pr,
+      sha: run.sha,
+    });
+    props.onToast(
+      "error" in result ? result.error : `Deploying pull request #${run.pr} of ${run.repo}.`,
+      "error" in result,
+    );
+  };
+  return (
+    <>
+      <div
+        class="label"
+        data-tip="Agent pull requests: the kitshn App opened them, so their preview deploys only after your Deploy of that commit (K-1767). A new push waits again."
+      >
+        Agent pull requests
+      </div>
+      <ul class="repo-list">
+        {props.runs.map((run) => (
+          <li key={`${run.repoId}-${run.pr}-${run.sha}`}>
+            <a href={`https://github.com/${run.repo}/pull/${run.pr}`} target="_blank" rel="noreferrer">
+              {run.repo} #{run.pr}
+            </a>
+            <code>{run.sha.slice(0, 7)}</code>
+            <button
+              type="button"
+              data-tip="Deploy: kitshn runs the pull request's workflow again for this commit, and its preview deploys."
+              onClick={() => void deploy(run)}
+            >
+              Deploy
+            </button>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}

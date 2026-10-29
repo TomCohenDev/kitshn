@@ -120,7 +120,7 @@ import {
 } from "./Pause.tsx";
 import { playResumeSound, pressSound, showPanic, unlockAudio } from "./panic.ts";
 import { GONE_STICKER, REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
-import { AskEvents, AskList, approveFromHash } from "./Asks.tsx";
+import { AskEvents, AskList, BotRuns, approveFromHash } from "./Asks.tsx";
 import { PassSettingsPanel } from "./Passes.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
@@ -1440,6 +1440,7 @@ export function App() {
               repos={store.snapshot.repos}
               proposals={store.snapshot.proposals}
               githubDefaultWay={store.snapshot.githubDefaultWay}
+              botRuns={store.snapshot.botRuns}
               selection={selection}
               access={store.snapshot.access}
               me={store.snapshot.me}
@@ -1981,6 +1982,8 @@ function Panel(props: {
   proposals: ReadonlyArray<ProposalView>;
   /** K-1760: the GitHub way of owners with no owner group. */
   githubDefaultWay: GitHubWay;
+  /** K-1767: App pull request runs that wait for Deploy. */
+  botRuns: Snapshot["botRuns"];
   selection: Selection;
   access: Readonly<Record<string, import("../core/protocol.ts").AccessState>>;
   me: Actor;
@@ -2174,6 +2177,7 @@ function Panel(props: {
         </ul>
         <GitHubDefaultWay way={props.githubDefaultWay} onToast={props.onToast} />
         <PassSettingsPanel onToast={props.onToast} />
+        <BotRuns runs={props.botRuns} onToast={props.onToast} />
         <AskList
           proposals={props.proposals}
           circleName={(id) => props.state.circles.get(id)?.name ?? id}

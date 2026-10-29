@@ -110,6 +110,14 @@ export interface Snapshot {
   readonly machines: ReadonlyArray<MachineView>;
   /** K-1722: the asks that wait for an approver circle, oldest first. */
   readonly proposals: ReadonlyArray<ProposalView>;
+  /** K-1767: runs of pull requests of the kitshn App that wait for the owner's Deploy. */
+  readonly botRuns: ReadonlyArray<{
+    readonly repoId: string;
+    readonly repo: string;
+    readonly pr: number;
+    readonly sha: string;
+    readonly at: number;
+  }>;
   /** K-1760: the GitHub way of an owner with no owner group. */
   readonly githubDefaultWay: GitHubWay;
   /** K-1717: the newest 50 ask events. */

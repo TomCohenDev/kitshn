@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { desiredAccess } from "../core/access.ts";
 import { applyChanges, resolveEdits } from "../core/changes.ts";
-import type { State } from "../core/model.ts";
+import type { Circle, State } from "../core/model.ts";
 import { seed } from "../core/seed.ts";
 import { CloudflareError } from "./cloudflare.ts";
 import {
@@ -518,6 +518,76 @@ describe("Access sync (K-406, K-408)", () => {
     }
   });
 
+  it("ends the sessions of the applications that share to a circle when a member leaves it (K-409)", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    const owner = state.circles.get("owner")!;
+    const domain = { _tag: "domain" as const, domain: "x.com" };
+    const withX = applyChanges(
+      state,
+      resolveEdits(state, [
+        { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, domain] } },
+      ]),
+    );
+    await syncAccess(desiredAccess(withX, 0), cf.store, cf.api, "a");
+    const app = cf.rows.get("app:kitshn-admin:kit.example.com")!.cfId;
+    const people = cf.rows.get("policy:owner:people")!.cfId;
+    cf.calls.length = 0;
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    // One change: the circle's four policies, and one revoke for the one application that uses the people policy.
+    expect(cf.calls).toEqual([
+      `PUT /policies/${people}`,
+      `POST /apps/${app}/revoke_tokens`,
+      `PUT /policies/${cf.rows.get("policy:owner:login")!.cfId}`,
+      `PUT /policies/${cf.rows.get("policy:owner:login-passkey")!.cfId}`,
+      `PUT /policies/${cf.rows.get("policy:enrollment")!.cfId}`,
+    ]);
+  });
+
+  it.each([
+    ["a passkey check", (owner: Circle) => ({ ...owner, needsPasskey: true }), true],
+    [
+      "a rule that all must match",
+      (owner: Circle) => ({
+        ...owner,
+        match: "all" as const,
+        members: [...owner.members, { _tag: "domain" as const, domain: "x.com" }],
+      }),
+      true,
+    ],
+    ["a new name", (owner: Circle) => ({ ...owner, name: "Renamed" }), false],
+    [
+      "Everyone",
+      (owner: Circle) => ({ ...owner, members: [...owner.members, { _tag: "everyone" as const }] }),
+      false,
+    ],
+  ])("a refused policy write with %s shows whether it lowers access (K-407)", async (_, edit, lowered) => {
+    const cf = fakeCloudflare();
+    // Owner starts without a passkey check, so that adding one is a change.
+    const seeded = start();
+    const state = applyChanges(
+      seeded,
+      resolveEdits(seeded, [
+        { _tag: "circle", id: "owner", after: { ...seeded.circles.get("owner")!, needsPasskey: false } },
+      ]),
+    );
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    const changed = applyChanges(
+      state,
+      resolveEdits(state, [{ _tag: "circle", id: "owner", after: edit(state.circles.get("owner")!) }]),
+    );
+    const desired = desiredAccess(changed, 0);
+    const refusing: Api = async (method, path, body) => {
+      if (method === "PUT" && path.includes("/policies/"))
+        throw new CloudflareError(400, `PUT ${path} failed (400): refused`);
+      return cf.api(method, path, body);
+    };
+    await syncAccess(desired, cf.store, refusing, "a");
+    const card = accessStates(desired, cf.rows)["kitshn-admin"];
+    expect(card).toMatchObject({ state: "failed" });
+    expect(card && "error" in card && card.error.startsWith("Access not lowered yet: ")).toBe(lowered);
+  });
+
   it("removes a share from the application even when the policy of a new share fails", async () => {
     const cf = fakeCloudflare();
     const state = start();
@@ -631,7 +701,8 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
         ? ({ id: "id1", name: "kitshn circle Owner", decision: "allow", include: [{ everyone: {} }] } as T)
         : cf.api<T>(method, path, body);
     await syncAccess(desired, cf.store, changedOwner, "a");
-    expect(cf.calls).toEqual(["PUT /policies/id1"]);
+    // The rewrite takes "everyone" out again, so the sessions of the admin application end (K-409).
+    expect(cf.calls).toEqual(["PUT /policies/id1", `POST /apps/${adminId}/revoke_tokens`]);
   });
 
   it("ends the sessions of an application that loses a policy, and of every kitshn application on sign out", async () => {

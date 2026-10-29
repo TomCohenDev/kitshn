@@ -4,6 +4,7 @@ import { Schema } from "effect";
 import {
   CardSettingValues,
   LinkAudit,
+  ProviderAccess,
   ReachedCard,
   DesiredParts,
   GrantTables,
@@ -276,9 +277,11 @@ export const Answer = Schema.Union([
     settings: CardSettingValues,
     /** K-1609: the saved reach of this machine. */
     reach: Schema.Array(ReachedCard),
+    /** K-1623: the saved Access audiences of the provider's site hosts; null before kitshn sent them. */
+    access: Schema.NullOr(ProviderAccess),
     /**
-     * K-1609: the Unix socket of the link proxy: `http://link/<machine id>/<path>` reaches that machine's card. Null on
-     * Windows, which has no link proxy yet.
+     * K-1609: the Unix socket or Windows pipe of the link proxy: `http://link/<provider>/<machine id>/<path>` reaches
+     * that provider's card on that machine. Null when the daemon could not serve it.
      */
     linkSocket: Schema.NullOr(Schema.String),
     /** The name of this machine on the map; null before its first connection to kitshn. */
@@ -288,6 +291,8 @@ export const Answer = Schema.Union([
   Schema.Struct({ id: Id, type: Schema.Literal("audit") }),
   Schema.Struct({ id: Id, type: Schema.Literal("job-cancel") }),
   Schema.Struct({ id: Id, type: Schema.Literal("samples"), newest: Sample, history: Schema.Array(Sample) }),
+  /** K-1623: an event: the Access audiences of the provider's site hosts, on each change. */
+  Schema.Struct({ type: Schema.Literal("access"), provider: Schema.String, access: ProviderAccess }),
   /** K-1609: an event: the cards of this provider on other machines that this machine reaches, on each change. */
   Schema.Struct({ type: Schema.Literal("reach"), provider: Schema.String, cards: Schema.Array(ReachedCard) }),
   /** K-709: an event: the desired state of one kind, on each change. */

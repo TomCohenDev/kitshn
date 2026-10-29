@@ -18,6 +18,9 @@ import type { RepoGate } from "./repos.ts";
 import type { Proposal } from "./asks.ts";
 import type { ProviderCommand } from "@kitshn/local";
 
+/** K-1623: a provider card's address that something else serves, that kitshn takes over now, or took over. */
+export type AddressHold = "in-use" | "taking" | "taken";
+
 /** K-1717: one ask of an agent on a machine, as History shows it: an event, with no Undo. */
 export interface AskEventView {
   readonly id: number;
@@ -138,6 +141,8 @@ export interface Snapshot {
   readonly previousVersions: ReadonlyArray<string>;
   /** K-1127: the pages and folder sites that an agent key published, which it can hand over to a repo. */
   readonly handoverCards: ReadonlyArray<string>;
+  /** K-1623: provider cards whose address something else serves, that kitshn takes over now, or took over. */
+  readonly addressHolds: Readonly<Record<string, AddressHold>>;
   /** K-1123, K-1129: the folder sites that no repo took over; a folder from the owner gives them a new version. */
   readonly folderSites: ReadonlyArray<string>;
   /** K-1128: the redirect addresses of each site card, by card id. */

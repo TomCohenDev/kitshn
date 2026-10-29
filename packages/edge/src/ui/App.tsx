@@ -987,6 +987,42 @@ export function App() {
     if ("error" in result) showToast({ text: result.error, error: true, undo: null });
   };
 
+  const takeAddress = async (resource: Resource) => {
+    if (
+      !(await ask(
+        `Take over the address of ${resource.name}? Its machine needs a T3 that takes kitshn's Access audiences (fork #415). kitshn makes its Access application, then its tunnel route, and moves the DNS record once T3 has the new audience. Then take the address out of what served it.`,
+      ))
+    )
+      return;
+    const result = await callApi<object>(
+      "POST",
+      `/api/cards/${encodeURIComponent(resource.id)}/take-address`,
+    );
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: `kitshn takes over the address of ${resource.name}.`, error: false, undo: null },
+    );
+  };
+
+  const giveAddressBack = async (resource: Resource) => {
+    if (
+      !(await ask(
+        `Give the address of ${resource.name} back? Its DNS record points at what served it before, and kitshn lets go. Do this only while that still serves the address.`,
+      ))
+    )
+      return;
+    const result = await callApi<object>(
+      "POST",
+      `/api/cards/${encodeURIComponent(resource.id)}/give-address-back`,
+    );
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: `Gave the address of ${resource.name} back.`, error: false, undo: null },
+    );
+  };
+
   /** K-704: no confirm; the toast and History undo it. */
   const forgetProvider = async (machineId: string, provider: string, card: Resource | null) => {
     const result = await callApi<{ revision: number | null }>(
@@ -1524,6 +1560,8 @@ export function App() {
     removeApp: (resource) => void removeApp(resource),
     removeGame: (resource) => void removeGame(resource),
     forgetProvider: (machineId, provider, card) => void forgetProvider(machineId, provider, card),
+    takeAddress: (resource) => void takeAddress(resource),
+    giveAddressBack: (resource) => void giveAddressBack(resource),
     rollback: (resource, mode) => setRollback({ card: resource, mode }),
     restorePrevious: (resource) => void restorePrevious(resource),
     editAddress: (resource) =>
@@ -1572,6 +1610,7 @@ export function App() {
     selected: selection.cards,
     previousVersions,
     handoverCards,
+    addressHolds: store.snapshot?.addressHolds ?? {},
     openStacks,
     folderSites,
     providerCommands: store.snapshot.providerCommands,

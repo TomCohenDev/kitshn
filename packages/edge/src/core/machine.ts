@@ -7,6 +7,7 @@ import type {
   GrantTables,
   LinkAudit,
   ProviderReport,
+  ProviderAccess,
   ReachedCard,
 } from "@kitshn/local";
 import type { ServerReport } from "./sites.ts";
@@ -327,6 +328,13 @@ export type ServerToDaemon =
       readonly type: "reach";
       readonly provider: string;
       readonly cards: ReadonlyArray<ReachedCard>;
+      readonly hash: string;
+    }
+  /** K-1623: the Access audiences of one provider's site hosts on this machine. */
+  | {
+      readonly type: "access";
+      readonly provider: string;
+      readonly access: ProviderAccess;
       readonly hash: string;
     }
   /** K-717: the card settings of one provider's cards on this machine. */

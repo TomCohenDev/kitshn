@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { PolicyBody } from "../core/access.ts";
 import type { AccessRow } from "./access-sync.ts";
 import {
+  type AccessAppListing,
+  foreignHolds,
+  foreignPaths,
+  ingressPath,
   ATTACHMENT_BUDGET,
   cloneBytes,
   fitAttachment,
@@ -84,6 +88,56 @@ describe("live sites (K-1104 to K-1108)", () => {
           access: { required: true, teamName: "team", audTag: ["aud-b"] },
         },
       },
+      { service: "http_status:404" },
+    ]);
+  });
+
+  it("keeps the paths of other applications on a taken address with their own check, ahead of the host (K-1623)", () => {
+    const app = (name: string, aud: string, hosts: Array<string>, decision = "allow"): AccessAppListing => ({
+      name,
+      domain: hosts[0]!,
+      aud,
+      self_hosted_domains: hosts,
+      policies: [{ decision }],
+    });
+    const portal = app("T3 Code servers", "aud-portal", ["b.example.com", "a.example.com"]);
+    const apps = [
+      app("kitshn T3 on a", "aud-a", ["a.example.com/*"]),
+      app("t3 web build", "aud-build", ["a.example.com/assets/*", "a.example.com/favicon.ico"], "bypass"),
+      app("t3 guest links", "aud-guest", ["a.example.com/guest", "a.example.com/api/guest/*"]),
+      app("other host", "aud-c", ["c.example.com/x"]),
+    ];
+    expect(foreignPaths([portal, ...apps], "a.example.com")).toEqual([
+      { path: "/api/guest/*", aud: "aud-guest" },
+      { path: "/favicon.ico", aud: null },
+      { path: "/assets/*", aud: null },
+      { path: "/guest", aud: "aud-guest" },
+    ]);
+    // Only an application of another owner on the exact host holds it.
+    expect([foreignHolds([portal, ...apps], "a.example.com"), foreignHolds(apps, "a.example.com")]).toEqual([
+      true,
+      false,
+    ]);
+    expect(ingressPath("/favicon.ico")).toBe("^/favicon\\.ico(/|$)");
+    const taken: LiveSite = {
+      ...site("a", "m", true),
+      paths: [
+        { path: "/assets/*", aud: null },
+        { path: "/guest", aud: "aud-guest" },
+      ],
+    };
+    const check = (aud: string) => ({ access: { required: true, teamName: "team", audTag: [aud] } });
+    expect(
+      tunnelConfig([taken], () => ({ kind: "check", teamName: "team", aud: "aud-a" })).config.ingress,
+    ).toEqual([
+      { hostname: "a.example.com", path: "^/assets/.*", service: "http://localhost:5173" },
+      {
+        hostname: "a.example.com",
+        path: "^/guest(/|$)",
+        service: "http://localhost:5173",
+        originRequest: check("aud-guest"),
+      },
+      { hostname: "a.example.com", service: "http://localhost:5173", originRequest: check("aud-a") },
       { service: "http_status:404" },
     ]);
   });

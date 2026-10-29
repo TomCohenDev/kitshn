@@ -359,6 +359,7 @@ export const pushKey = {
   settings: (provider: string) => `settings:${provider}`,
   desired: (provider: string, kind: string) => `desired:${provider}:${kind}`,
   reach: (provider: string) => `reach:${provider}`,
+  access: (provider: string) => `access:${provider}`,
 } as const;
 
 /** The UTF-8 length of a value's JSON; this package runs without DOM types, so it counts by hand. */
@@ -401,6 +402,16 @@ export const ReachedCard = Schema.Struct({
   level: Schema.String,
 });
 export type ReachedCard = typeof ReachedCard.Type;
+
+/**
+ * K-1623: what a provider checks Access tokens against: the team domain, and the AUD tags of kitshn's Access
+ * applications on the provider's site hosts on this machine. Empty while no application exists yet.
+ */
+export const ProviderAccess = Schema.Struct({
+  teamDomain: Schema.String,
+  audiences: Schema.Array(Schema.String),
+});
+export type ProviderAccess = typeof ProviderAccess.Type;
 
 /**
  * K-1610: what the source machine reports of one call on another machine; never its arguments or its output. Known

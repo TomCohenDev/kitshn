@@ -115,14 +115,14 @@ async function setup() {
           .exec<{ summary: string }>("SELECT summary FROM revisions ORDER BY id DESC LIMIT 1")
           .one().summary,
     );
-  /** The daemon reports the provider site `name`, as it does before it reports the provider's cards. */
-  const sites = (name: string) =>
+  /** The daemon reports the provider site `name`, or none, as it does before it reports the provider's cards. */
+  const sites = (name?: string) =>
     runInDurableObject(stub, (instance) =>
       instance.webSocketMessage(
         daemonSocket("signed"),
         JSON.stringify({
           type: "sites",
-          sites: [{ name, target: "http://localhost:3773", dev: false, up: true }],
+          sites: name ? [{ name, target: "http://localhost:3773", dev: false, up: true }] : [],
         }),
       ),
     );
@@ -295,8 +295,10 @@ it("counts the pushes that a machine has not applied, and takes applied only for
       .map((row) => row.key),
   );
   expect(keys).toEqual(["grants:t3"]);
-  // Three pushes wait: the grant tables, with a stale hash, and the reach and the card settings, with none.
-  expect(await queued(keyed, null)).toBe(3);
+  // Four pushes wait: the grant tables, with a stale hash, and the reach, the card settings and the Access audiences,
+  // with none. A daemon from before K-1623 never applies the access push, so its count leaves that one out.
+  expect(await queued(keyed, null)).toBe(4);
+  expect(await queued(keyed, status(["applied", "access"]))).toBe(4);
   expect(await queued(keyed, status(["applied"]))).toBe(3);
   await sql("INSERT OR REPLACE INTO machines (id, body) VALUES ('vps', ?)", JSON.stringify(machine));
 });
@@ -756,3 +758,201 @@ it("lets a machine cancel only the queued jobs that it queued itself (K-1612)", 
   );
   expect(state).toEqual({ state: "failed", output: "Cancelled by vps." });
 });
+
+it("takes over a provider site's address with its application first, then ingress, then the kept record, and gives it back (K-1623)", async () => {
+  const { stub, message, card, sql, site, sites } = await setup();
+  await sql("INSERT OR REPLACE INTO places (id, x, y) SELECT ?, x, y FROM places WHERE id = 'vps'", appId);
+  await message("signed", [report([{ ...app, site: { name: "t3-vps", port: 3773 } }])]);
+  await site("t3-vps", true);
+  const calls: Array<string> = [];
+  let portalHolds = true;
+  let tunnelIngress: Array<Record<string, unknown>> = [];
+  const portal = (hosts: Array<string>, decision: string, aud: string) => ({
+    name: "portal",
+    domain: hosts[0],
+    aud,
+    self_hosted_domains: hosts,
+    policies: [{ decision }],
+  });
+  const api = async (method: string, path: string, body?: unknown) => {
+    if (path.includes("/access/apps"))
+      return [
+        ...(portalHolds ? [portal(["t3-vps.example.com"], "allow", "aud-portal")] : []),
+        portal(["t3-vps.example.com/assets/*"], "bypass", "aud-build"),
+      ];
+    if (path.includes("cfd_tunnel") && isRecordLike(body))
+      tunnelIngress = (body["config"] as { ingress: Array<Record<string, unknown>> }).ingress;
+    const content = isRecordLike(body) && typeof body["content"] === "string" ? ` ${body["content"]}` : "";
+    const ingress =
+      path.includes("cfd_tunnel") && JSON.stringify(body).includes("t3-vps.example.com")
+        ? " with the host"
+        : "";
+    calls.push(`${method} ${path.split("?")[0]}${content}${ingress}`);
+    if (method === "GET" && path.includes("/dns_records?name="))
+      return [
+        {
+          id: "portal-record",
+          type: "CNAME",
+          content: "portal.cfargotunnel.com",
+          proxied: true,
+          comment: "T3",
+        },
+      ];
+    if (method === "GET") return [];
+    return { id: "portal-record" };
+  };
+  const person = (email: string) => ({
+    visitor: { kitshn: false, email, clientId: null, ip: null },
+    actor: { _tag: "person" as const, email },
+  });
+  type Internals = {
+    takeAddress(caller: unknown, id: string, api: unknown): Promise<Response>;
+    giveAddressBack(caller: unknown, id: string, api: unknown): Promise<Response>;
+    syncTunnels(api: unknown, budget: number): Promise<void>;
+    syncDns(api: unknown, budget: number): Promise<void>;
+    handoverOf(id: string): { ingressAt: number | null; switched: boolean } | null;
+    setHandover(id: string, value: unknown): void;
+    desired(now: number): { apps: ReadonlyMap<string, { domain: string }> };
+    hashesOf(machineId: string): ReadonlyMap<string, string>;
+  };
+  const run = <T>(fn: (instance: Internals) => T) =>
+    runInDurableObject(stub, async (instance) => await fn(instance as unknown as Internals));
+  const state = () =>
+    runInDurableObject(stub, (_, storage) => ({
+      site: storage.storage.sql
+        .exec<{ state: string }>("SELECT state FROM live_sites WHERE id = ?", appId)
+        .one().state,
+      records: storage.storage.sql
+        .exec<{ record_id: string }>("SELECT record_id FROM dns_objects WHERE address = 't3-vps.example.com'")
+        .toArray()
+        .map((row) => row.record_id),
+    }));
+
+  expect(
+    await statusOf(run((instance) => instance.takeAddress(person("someone@example.com"), appId, api))),
+  ).toBe(403);
+  // T3 must get kitshn's audience first, so the machine must be online with a daemon that passes it on.
+  expect(
+    await statusOf(run((instance) => instance.takeAddress(person("owner@example.com"), appId, api))),
+  ).toBe(409);
+  await runInDurableObject(stub, (_, state) => {
+    const pair = new WebSocketPair();
+    state.acceptWebSocket(pair[1], ["vps", "machines"]);
+    pair[0].accept();
+    pair[1].serializeAttachment({
+      kind: "machine",
+      machineId: "vps",
+      since: Date.now(),
+      challenge: "",
+      check: "signed",
+      answered: true,
+      rotateBy: null,
+      status: {
+        version: "dev",
+        os: "linux",
+        arch: "x64",
+        hostname: "vps",
+        tunnel: "running",
+        capabilities: ["applied", "access"],
+      },
+      sample: null,
+    });
+  });
+  expect(
+    await statusOf(run((instance) => instance.takeAddress(person("owner@example.com"), appId, api))),
+  ).toBe(200);
+  expect(await card()).toMatchObject({ addresses: ["t3-vps.example.com"], provider: { stickers: [] } });
+  // The application covers `<host>/*`, which Cloudflare takes next to the application that holds the host now.
+  expect(
+    await run((instance) => [...instance.desired(Date.now()).apps.values()].map((item) => item.domain)),
+  ).toContain("t3-vps.example.com/*");
+
+  // No ingress before the application exists, and no record before an earlier run gave the tunnel its ingress.
+  await run((instance) => instance.syncTunnels(api, 6));
+  expect(calls.some((call) => call.endsWith("with the host"))).toBe(false);
+  expect(await run((instance) => instance.handoverOf(appId)?.ingressAt)).toBeNull();
+  // The machine's socket is open, so the row goes in without an eviction, and the Access rows load again.
+  await runInDurableObject(stub, (instance, state) => {
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO access_objects (key, cf_id, aud, body, tried, error) VALUES (?, 'cf-app', 'aud', '{}', '', NULL)",
+      `app:${appId}:t3-vps.example.com`,
+    );
+    (instance as unknown as { accessCache: unknown }).accessCache = null;
+    // As the alarm does after the Access sync: the access push with the new audience goes out.
+    (instance as unknown as { pushGrants(): void }).pushGrants();
+  });
+  await run((instance) => instance.syncTunnels(api, 6));
+  expect(calls.at(-1)?.endsWith("/cfd_tunnel/tunnel-vps/configurations with the host")).toBe(true);
+  // The portal's Bypass path comes first, with no check; the host keeps kitshn's.
+  expect(tunnelIngress.slice(0, 2)).toMatchObject([
+    { hostname: "t3-vps.example.com", path: "^/assets/.*" },
+    { hostname: "t3-vps.example.com", originRequest: { access: { audTag: ["aud"] } } },
+  ]);
+  expect(tunnelIngress[0]).not.toHaveProperty("originRequest");
+  expect(await run((instance) => instance.handoverOf(appId)?.ingressAt)).not.toBeNull();
+  // The zone's records path, as kitshn asked for the record of the address.
+  const records = calls
+    .find((call) => call.startsWith("GET") && call.includes("/dns_records"))!
+    .slice("GET ".length);
+  await run((instance) => instance.syncDns(api, 5));
+  expect(calls.some((call) => call.includes("dns_records/"))).toBe(false);
+  await run((instance) =>
+    instance.setHandover(appId, { ...instance.handoverOf(appId), ingressAt: Date.now() - 61_000 }),
+  );
+  // The record waits until the machine applied the access push that holds kitshn's audience.
+  await run((instance) => instance.syncDns(api, 5));
+  expect(calls.some((call) => call.includes("dns_records/"))).toBe(false);
+  const hash = await run((instance) => instance.hashesOf("vps").get("access:t3"));
+  await runInDurableObject(stub, (instance) =>
+    instance.webSocketMessage(
+      daemonSocket("signed"),
+      JSON.stringify({ type: "applied", key: "access:t3", hash }),
+    ),
+  );
+  await run((instance) => instance.syncDns(api, 5));
+  // The kept record changes in place; kitshn makes no second one and deletes none.
+  expect(calls.filter((call) => call.includes("dns_records") && !call.startsWith("GET"))).toEqual([
+    `PUT ${records}/portal-record tunnel-vps.cfargotunnel.com`,
+  ]);
+  expect(await state()).toEqual({ site: "ok", records: ["portal-record"] });
+  expect(await run((instance) => instance.handoverOf(appId)?.switched)).toBe(true);
+
+  // Giving it back points the record at what served it, forgets the record, and takes the address off the card.
+  calls.length = 0;
+  expect(
+    await statusOf(run((instance) => instance.giveAddressBack(person("owner@example.com"), appId, api))),
+  ).toBe(200);
+  expect(calls).toEqual([`PUT ${records}/portal-record portal.cfargotunnel.com`]);
+  expect(await state()).toEqual({ site: "refused", records: [] });
+  expect(await card()).toMatchObject({ addresses: [], provider: { stickers: [{ text: "address in use" }] } });
+  // After the portal let go of the host, the address stays with kitshn: no give-back, and the action goes.
+  expect(
+    await statusOf(run((instance) => instance.takeAddress(person("owner@example.com"), appId, api))),
+  ).toBe(200);
+  await run((instance) => instance.setHandover(appId, { ...instance.handoverOf(appId), switched: true }));
+  portalHolds = false;
+  expect(
+    await statusOf(run((instance) => instance.giveAddressBack(person("owner@example.com"), appId, api))),
+  ).toBe(409);
+  expect(await run((instance) => instance.handoverOf(appId))).toMatchObject({ released: true });
+  // When the daemon stops reporting the site, its handover goes with it.
+  await sites();
+  expect(await run((instance) => instance.handoverOf(appId))).toBeNull();
+  // An open socket keeps the Durable Object busy, and the next test evicts it.
+  await runInDurableObject(stub, (_, state) => {
+    for (const socket of state.getWebSockets("vps")) socket.close(1000, "test over");
+  });
+  await sql("DELETE FROM access_objects WHERE key LIKE 'app:p-%'");
+  await sql("DELETE FROM places WHERE id LIKE 'p-%'");
+});
+
+/** A Response from the Durable Object, read whole, so a later eviction does not wait for its body. */
+const statusOf = async (answer: Promise<unknown>) => {
+  const response = await answer;
+  if (!(response instanceof Response)) throw new Error("The Durable Object gave no Response.");
+  await response.text();
+  return response.status;
+};
+
+const isRecordLike = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;

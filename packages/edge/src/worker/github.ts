@@ -89,6 +89,28 @@ const record = (value: unknown): Record<string, unknown> => {
  * that repo id and only Actions, and the current name comes from that token. Returns the current full name.
  */
 export async function dispatchDeploy(app: GitHubApp, repoId: string, branch: string, workflow: string) {
+  const { token, name } = await actionsToken(app, repoId);
+  // A full branch ref, so a tag with the same name never runs.
+  await call(token, "POST", `/repos/${name}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
+    ref: `refs/heads/${branch}`,
+  });
+  return name;
+}
+
+/** K-1767: runs a workflow run of the repo with this id again, for an approved preview of a pull request of the App. */
+export async function rerunWorkflowRun(app: GitHubApp, repoId: string, runId: string) {
+  if (runId === "" || ![...runId].every((char) => char >= "0" && char <= "9"))
+    throw new Error(`${runId} is not a workflow run id.`);
+  const { token, name } = await actionsToken(app, repoId);
+  await call(token, "POST", `/repos/${name}/actions/runs/${runId}/rerun`);
+  return name;
+}
+
+/**
+ * K-718, K-819: a token for the repo with this id and only Actions, and the repo's current full name from that token.
+ * kitshn names the repo by its id, never by a name that a rename or a new repo can take over.
+ */
+async function actionsToken(app: GitHubApp, repoId: string) {
   const id = repositoryId(repoId);
   const jwt = await appJwt(app);
   // GitHub looks up an installation only by a repo name, so kitshn asks each installation for a token of
@@ -126,11 +148,7 @@ export async function dispatchDeploy(app: GitHubApp, repoId: string, branch: str
     .find((item) => item["id"] === id);
   const name = repo?.["full_name"];
   if (typeof name !== "string") throw new Error(`The installation token does not reach the repo ${repoId}.`);
-  // A full branch ref, so a tag with the same name never runs.
-  await call(token, "POST", `/repos/${name}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
-    ref: `refs/heads/${branch}`,
-  });
-  return name;
+  return { token, name };
 }
 
 /** K-819: what GitHub says about one repo id. "unknown" never changes what kitshn shows. */
@@ -214,4 +232,112 @@ export async function reposOnGitHub(
     found.set(repo.repoId, answer);
   }
   return found;
+}
+
+/** K-1761: the permissions of a repo token; read is Contents and Metadata, write adds Pull requests. */
+const TOKEN_PERMISSIONS = {
+  read: { contents: "read", metadata: "read" },
+  write: { contents: "write", pull_requests: "write", metadata: "read" },
+} as const;
+
+/** K-1766: the App has no installation that holds the repo. */
+export class NotInstalled extends Error {}
+
+/**
+ * K-1762: an installation token for one repo with the permissions of one right. `installationId` is the one that kitshn
+ * keeps for the owner, or null to look it up (one call). GitHub fixes the life of the token at one hour.
+ */
+export async function repoToken(
+  app: GitHubApp,
+  fullName: string,
+  permission: "read" | "write",
+  installationId: number | null,
+  /** The repo id when kitshn knows it, so a rename or a new repo with the old name gets no token (K-819). */
+  repoId: string | null,
+): Promise<{ readonly token: string; readonly expiresAt: string; readonly installationId: number }> {
+  const [owner, name] = fullName.split("/");
+  if (!owner || !name) throw new Error(`${fullName} is not owner/name.`);
+  const jwt = await appJwt(app);
+  let id = installationId;
+  if (id === null) {
+    try {
+      const found = record(await call(jwt, "GET", `/repos/${owner}/${name}/installation`))["id"];
+      if (typeof found !== "number") throw new Error("GitHub sent an installation without an id.");
+      id = found;
+    } catch (error) {
+      if (error instanceof GitHubError && error.status === 404)
+        throw new NotInstalled(`The kitshn App is not installed on ${owner} (K-1766).`);
+      throw error;
+    }
+  }
+  const access = record(
+    await call(jwt, "POST", `/app/installations/${id}/access_tokens`, {
+      ...(repoId === null ? { repositories: [name] } : { repository_ids: [repositoryId(repoId)] }),
+      permissions: TOKEN_PERMISSIONS[permission],
+    }),
+  );
+  if (typeof access["token"] !== "string" || typeof access["expires_at"] !== "string")
+    throw new Error("GitHub sent no installation token.");
+  return { token: access["token"], expiresAt: access["expires_at"], installationId: id };
+}
+
+/**
+ * K-1716: a token sealed with AES-GCM under a key that HKDF derives from the App private key, a Worker secret. Revoking
+ * needs the token itself, so `github_tokens` keeps this sealed copy; backups leave the table out (K-1831).
+ */
+async function tokenKey(appKey: string) {
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(appKey), "HKDF", false, [
+    "deriveKey",
+  ]);
+  return crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: new Uint8Array(),
+      info: new TextEncoder().encode("kitshn github_tokens"),
+    },
+    base,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+export async function sealToken(appKey: string, token: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      await tokenKey(appKey),
+      new TextEncoder().encode(token),
+    ),
+  );
+  return `${btoa(String.fromCharCode(...iv))}.${btoa(String.fromCharCode(...sealed))}`;
+}
+
+export async function openToken(appKey: string, sealed: string): Promise<string> {
+  const [iv, data] = sealed
+    .split(".")
+    .map((part) => Uint8Array.from(atob(part), (char) => char.charCodeAt(0)));
+  if (!iv || !data) throw new Error("A sealed token is not iv.data.");
+  return new TextDecoder().decode(
+    await crypto.subtle.decrypt({ name: "AES-GCM", iv }, await tokenKey(appKey), data),
+  );
+}
+
+/** K-1716: ends an installation token before its hour; a token that is gone already counts as ended. */
+export async function revokeToken(token: string): Promise<void> {
+  try {
+    await call(token, "DELETE", "/installation/token");
+  } catch (error) {
+    if (error instanceof GitHubError && error.status === 401) return;
+    throw error;
+  }
+}
+
+/** K-1767: the bot login of the App (`<slug>[bot]`), which GitHub writes as the `actor` of its pushes. */
+export async function appBotLogin(app: GitHubApp): Promise<string> {
+  const slug = record(await call(await appJwt(app), "GET", "/app"))["slug"];
+  if (typeof slug !== "string") throw new Error("GitHub sent no App slug.");
+  return `${slug}[bot]`;
 }

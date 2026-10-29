@@ -200,6 +200,39 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
      p256dh TEXT NOT NULL, auth TEXT NOT NULL, email TEXT NOT NULL, label TEXT NOT NULL, levels TEXT NOT NULL,
      quiet_start INTEGER, quiet_end INTEGER, time_zone TEXT, created_at INTEGER NOT NULL, last_ok_at INTEGER)`,
   ],
+  // 30: section 17. A proposal is an ask that waits for its approver circle (K-1722); `body` and `labels` are JSON,
+  // and one conditional update moves `state` from pending (K-1723). Ask events are the History of asks (K-1717): not
+  // revisions, with their own cap.
+  [
+    `CREATE TABLE proposals (id TEXT PRIMARY KEY, machine_id TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL,
+      body TEXT NOT NULL, reason TEXT, labels TEXT NOT NULL, right_name TEXT NOT NULL, circle_id TEXT NOT NULL,
+      shown TEXT NOT NULL, shown_hash TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, decided_at INTEGER,
+      decided_by TEXT, result TEXT, verified TEXT NOT NULL DEFAULT '[]')`,
+    "CREATE INDEX proposals_state ON proposals (state, expires_at)",
+    "CREATE INDEX proposals_machine ON proposals (machine_id, state)",
+    `CREATE TABLE ask_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, machine_id TEXT NOT NULL,
+      action TEXT NOT NULL, target TEXT NOT NULL, reason TEXT, labels TEXT NOT NULL, outcome TEXT NOT NULL,
+      detail TEXT NOT NULL, verified TEXT NOT NULL DEFAULT '[]')`,
+    "CREATE INDEX ask_events_machine ON ask_events (machine_id, id)",
+    // K-1756: one row for each label of an ask event, so a search by key=value reads at most its 50 rows.
+    "CREATE TABLE ask_labels (event_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL)",
+    "CREATE INDEX ask_labels_search ON ask_labels (key, value, event_id)",
+    "CREATE INDEX ask_labels_event ON ask_labels (event_id)",
+    // K-1762: the App installation of each GitHub owner, so a token costs one GitHub call.
+    "CREATE TABLE github_installations (owner TEXT PRIMARY KEY, installation_id INTEGER NOT NULL)",
+    // K-1771: the pass keys; backups and the state export leave this table out. K-1773: the pass audiences.
+    `CREATE TABLE pass_keys (kid TEXT PRIMARY KEY, private_jwk TEXT NOT NULL, public_jwk TEXT NOT NULL,
+      created_at INTEGER NOT NULL, retired_at INTEGER)`,
+    // K-1767: a run of a pull request of the kitshn App that waits for the owner's Deploy, by repo, pull request and
+    // the commit of the run; an approval counts for that commit only.
+    `CREATE TABLE bot_runs (repo_id TEXT NOT NULL, repo TEXT NOT NULL, pr INTEGER NOT NULL, sha TEXT NOT NULL,
+      run_id TEXT NOT NULL, at INTEGER NOT NULL, approved INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (repo_id, pr, sha))`,
+    "CREATE TABLE pass_audiences (address TEXT PRIMARY KEY, labels INTEGER NOT NULL, added_by TEXT, added_at INTEGER NOT NULL)",
+    // K-1716: the live GitHub tokens, so a reset, a removal, the pause or a lost right revokes them after a sleep.
+    // `sealed` is the token under a key from a Worker secret (github.ts); backups leave the table out.
+    `CREATE TABLE github_tokens (id TEXT PRIMARY KEY, machine_id TEXT NOT NULL, repo TEXT NOT NULL,
+      right_name TEXT NOT NULL, expires_at INTEGER NOT NULL, sealed TEXT NOT NULL)`,
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

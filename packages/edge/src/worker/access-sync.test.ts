@@ -1117,3 +1117,34 @@ describe("sign out everywhere (K-110)", () => {
     expect(signOutWarning(null)).toBeNull();
   });
 });
+
+describe("the approve applications (K-1723)", () => {
+  it("puts a passkey circle on the passkey application, alone with its 10-minute check, with its cookie on the path", () => {
+    const state = start();
+    const agents = {
+      ...state.circles.get("owner")!,
+      id: "agents",
+      name: "Agents",
+      members: [
+        {
+          _tag: "machine" as const,
+          machineId: "vps",
+          rights: { deploys: { mode: "ask" as const, circleId: "owner" } },
+        },
+      ],
+    };
+    const desired = desiredAccess({ ...state, circles: new Map(state.circles).set("agents", agents) }, 0);
+    expect(desired.apps.get("app:approve:passkey")).toMatchObject({
+      domain: "kit.example.com/api/approve/passkey",
+      session_duration: "10m",
+      path_cookie_attribute: true,
+      policyKeys: ["policy:approve-passkey:owner"],
+    });
+    expect(desired.policies.get("policy:approve-passkey:owner")).toMatchObject({
+      mfa_config: { session_duration: "10m" },
+    });
+    expect(desired.apps.has("app:approve:login")).toBe(false);
+    // No ask right: no approve application.
+    expect(desiredAccess(state, 0).apps.has("app:approve:passkey")).toBe(false);
+  });
+});

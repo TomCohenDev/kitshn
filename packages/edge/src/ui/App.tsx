@@ -11,6 +11,7 @@ import {
 } from "../core/changes.ts";
 import {
   type Circle,
+  type GitHubWay,
   type Level,
   RESOURCE_KINDS,
   type Resource,
@@ -52,6 +53,7 @@ import type {
   MachineView,
   OrphanWorker,
   RepoView,
+  ProposalView,
   RevisionView,
   Snapshot,
 } from "../core/protocol.ts";
@@ -105,6 +107,7 @@ import {
 } from "./actions.ts";
 import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
+import { AddRepoGroup, GitHubDefaultWay, RepoGroupPanel, matchedCards } from "./RepoGroups.tsx";
 import { Palette } from "./Palette.tsx";
 import {
   LOCKDOWN_TIP,
@@ -117,6 +120,8 @@ import {
 } from "./Pause.tsx";
 import { playResumeSound, pressSound, showPanic, unlockAudio } from "./panic.ts";
 import { GONE_STICKER, REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
+import { AskEvents, AskList, BotRuns, approveFromHash } from "./Asks.tsx";
+import { PassSettingsPanel } from "./Passes.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TRAY_CARDS_TYPE, type View } from "./Map.tsx";
@@ -284,6 +289,7 @@ export function App() {
   const [wantedTray, setTrayWidth] = useStoredWidth("kitshn.trayWidth", TRAY_WIDTH);
   const screenWidth = useScreenWidth();
   const [addingSite, setAddingSite] = useState(false);
+  const [addingRepoGroup, setAddingRepoGroup] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
   /** Where the next upload of the file chooser lands: a map point, or null for the tray. */
   const uploadAt = useRef<Point | null>(null);
@@ -662,6 +668,49 @@ export function App() {
     );
   };
 
+  /**
+   * K-1722, K-1723: Access sends an approver back here with the proposal and the hash of the text that the button
+   * showed. A link alone never approves: the approver reads the full text of the map's own snapshot once more, and a
+   * text that differs from the hash stops it.
+   */
+  const pendingApprove = useRef(approveFromHash(location.hash));
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- runs once the first snapshot arrives
+  useEffect(() => {
+    const pending = pendingApprove.current;
+    if (pending === null || !store.snapshot || !state) return;
+    pendingApprove.current = null;
+    void finishApprove(pending);
+  }, [store.snapshot]);
+
+  const finishApprove = async ({ id, seen }: { readonly id: string; readonly seen: string }) => {
+    history.replaceState(null, "", location.pathname + location.search);
+    const proposal = store.snapshot?.proposals.find((each) => each.id === id);
+    if (!proposal) return showToast({ text: "This ask is no longer open.", error: true, undo: null });
+    if (proposal.shownHash !== seen)
+      return showToast({
+        text: "This ask changed since you opened it. Read it again in Asks.",
+        error: true,
+        undo: null,
+      });
+    const kind = state?.circles.get(proposal.circleId)?.needsPasskey ? "passkey" : "login";
+    if (
+      !(await ask(
+        `Approve this ask of ${proposal.machineName}? kitshn runs it at once:\n\n${proposal.shown}`,
+      ))
+    )
+      return;
+    const result = await callApi<{ result: unknown }>(
+      "POST",
+      `/api/approve/${kind}/${encodeURIComponent(id)}`,
+      { hash: seen },
+    );
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: "Approved. kitshn ran the ask.", error: false, undo: null },
+    );
+  };
+
   /** K-1822: Access sends the owner back to `#restore-time` after the passkey check; the confirm names the time. */
   const finishRestoreTime = async () => {
     history.replaceState(null, "", location.pathname + location.search);
@@ -864,6 +913,7 @@ export function App() {
           state={state}
           onUndo={(id) => historyUndo.current(id)}
           onShow={(revision) => historyShow.current(revision)}
+          askEvents={<AskEvents events={store.snapshot.askEvents} />}
         />
       ) : null,
     [store.snapshot, state],
@@ -1043,6 +1093,15 @@ export function App() {
       : document.querySelector<HTMLElement>(".bar .seg button, .bar button[aria-label='Menu']")
     )?.focus();
   };
+
+  // K-1734: a selected repo group lights up the cards of the repos that it matches, until the selection changes.
+  const selectedId = selection.cards.size === 1 ? [...selection.cards][0] : undefined;
+  const selectedGroup = selectedId ? state?.resources.get(selectedId) : undefined;
+  const groupFlash = new Set(
+    selectedGroup?.kind === "repo.group" && store.snapshot
+      ? matchedCards(selectedGroup, store.snapshot.repos).map((id) => itemKey({ kind: "card", id }))
+      : [],
+  );
 
   historyShow.current = showOnMap;
   historyUndo.current = (id) => void undo(id);
@@ -1262,6 +1321,7 @@ export function App() {
     newCircle: (at) => void newCircle(at),
     upload: uploadTo,
     addSite: () => setAddingSite(true),
+    addRepoGroup: () => setAddingRepoGroup(true),
     addMachine: () => setAddingMachine(true),
     newCircleFor: (ids) => void newCircleFor(ids),
     fit,
@@ -1303,7 +1363,7 @@ export function App() {
           }}
           panelLeft={floating && wideScreen() ? panelLeft() : null}
           trayRight={shelfRight()}
-          flash={flash}
+          flash={groupFlash.size > 0 ? new Set([...flash, ...groupFlash]) : flash}
           openStacks={openStacks}
           pullRequests={pullRequests}
           onToggleStack={(key) => {
@@ -1400,6 +1460,9 @@ export function App() {
               zone={store.snapshot.zone}
               peek={!wide}
               repos={store.snapshot.repos}
+              proposals={store.snapshot.proposals}
+              githubDefaultWay={store.snapshot.githubDefaultWay}
+              botRuns={store.snapshot.botRuns}
               selection={selection}
               access={store.snapshot.access}
               me={store.snapshot.me}
@@ -1454,6 +1517,12 @@ export function App() {
         </OverlayPanel>
       ) : null}
       {addingMachine ? <AddMachine onClose={() => setAddingMachine(false)} /> : null}
+      {addingRepoGroup ? (
+        <AddRepoGroup
+          onClose={() => setAddingRepoGroup(false)}
+          onDone={(text) => showToast({ text, error: false, undo: null })}
+        />
+      ) : null}
       {addingSite ? (
         <AddSite
           zone={store.snapshot.zone}
@@ -1932,6 +2001,12 @@ function Panel(props: {
   peek: boolean;
   /** K-819: the repos that deploy or wait to deploy. */
   repos: ReadonlyArray<RepoView>;
+  /** K-1722: the asks that wait for an approver circle. */
+  proposals: ReadonlyArray<ProposalView>;
+  /** K-1760: the GitHub way of owners with no owner group. */
+  githubDefaultWay: GitHubWay;
+  /** K-1767: App pull request runs that wait for Deploy. */
+  botRuns: Snapshot["botRuns"];
   selection: Selection;
   access: Readonly<Record<string, import("../core/protocol.ts").AccessState>>;
   me: Actor;
@@ -2011,6 +2086,7 @@ function Panel(props: {
         zone={props.zone}
         peek={props.peek}
         repo={props.repos.find((repo) => repo.resourceIds.includes(cards[0]?.id ?? "")) ?? null}
+        repos={props.repos}
         access={props.access[cards[0].id] ?? null}
         onEdit={props.onEdit}
         onPlace={props.onPlace}
@@ -2125,6 +2201,15 @@ function Panel(props: {
             </li>
           ))}
         </ul>
+        <GitHubDefaultWay way={props.githubDefaultWay} onToast={props.onToast} />
+        <PassSettingsPanel onToast={props.onToast} />
+        <BotRuns runs={props.botRuns} onToast={props.onToast} />
+        <AskList
+          proposals={props.proposals}
+          circleName={(id) => props.state.circles.get(id)?.name ?? id}
+          needsPasskey={(id) => props.state.circles.get(id)?.needsPasskey === true}
+          onToast={props.onToast}
+        />
         <RepoList repos={props.repos} onToast={props.onToast} />
         <p class="muted">You are {actorLabel(props.me)}.</p>
         {props.warnings.length > 0 || props.signOutWarning ? (
@@ -2320,6 +2405,8 @@ function AddressName(props: { address: string; onSave: (name: string) => Promise
 
 function CardPanel(props: {
   resource: Resource;
+  /** K-1733: every repo that kitshn knows, for the matches of a repo group. */
+  repos: ReadonlyArray<RepoView>;
   /** K-303: the pull request of a preview card, from its deploy environment. */
   pullRequest: number | null;
   state: State;
@@ -2426,6 +2513,9 @@ function CardPanel(props: {
         resource.kind === "file" ||
         (resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo)) ? (
         <AddressName address={address} onSave={(name) => props.onSetAddress(resource, name)} />
+      ) : null}
+      {resource.kind === "repo.group" ? (
+        <RepoGroupPanel group={resource} repos={props.repos} onToast={props.onToast} />
       ) : null}
       {address && props.repo ? (
         <p class="help">Its repo sets this address: change it in kitshn.config.ts.</p>

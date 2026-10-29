@@ -28,7 +28,11 @@ async function accessIdentity(
     }
   | string
 > {
-  const wanted = audiences.filter(Boolean);
+  // K-1209: during the host move, an `ACCESS_*_AUD` value lists the new and the old tag, comma-separated.
+  const wanted = audiences
+    .flatMap((value) => value.split(","))
+    .map((tag) => tag.trim())
+    .filter(Boolean);
   if (!env.ACCESS_TEAM_DOMAIN || wanted.length === 0) return "kitshn has no Access configuration.";
   if (jwks?.team !== env.ACCESS_TEAM_DOMAIN) {
     const certs = new URL(`https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`);
@@ -214,6 +218,8 @@ export interface Deployer {
   readonly runAttempt: string;
   /** K-1121: the file in `.github/workflows` of the run, from `workflow_ref`; null when the claim names none. */
   readonly workflow: string | null;
+  /** K-1767: the login that started the run, for example `kitshn[bot]` for a push of the App. */
+  readonly actor: string;
 }
 
 /** K-1121: `owner/repo/.github/workflows/<file>@<ref>` names the workflow file of the caller, also for a reusable one. */
@@ -270,8 +276,37 @@ export async function deployerOf(request: Request, env: Env): Promise<Deployer |
       runId: text("run_id"),
       runAttempt: text("run_attempt"),
       workflow: workflowFile(text("workflow_ref"), repo),
+      actor: text("actor"),
     };
   } catch (error) {
     return `The GitHub token is not valid: ${error instanceof Error ? error.message : String(error)}`;
   }
+}
+
+/**
+ * K-1723: a person on an approve path, from the Access token of that path's own application (`audience`). On the passkey
+ * path, the login must be at most ten minutes old, because that application only has policies with the passkey check.
+ */
+export async function approverOf(
+  request: Request,
+  env: Env,
+  audience: string | null,
+  fresh: boolean,
+  now: number,
+): Promise<Caller | string> {
+  if (env.DEV_IDENTITY && isLocal(new URL(request.url))) return callerOf(request, env, "");
+  if (!audience)
+    return "kitshn makes the approve application with its next Access sync. Try again in a minute.";
+  const token = request.headers.get("cf-access-jwt-assertion");
+  if (!token) return "The request has no Cloudflare Access token.";
+  const identity = await accessIdentity(token, env, [audience]);
+  if (typeof identity === "string") return identity;
+  if (!identity.email) return "An approve needs a person, not a service token.";
+  if (fresh && (identity.issuedAt === null || now / 1000 - identity.issuedAt > FRESH_SECONDS))
+    return "The passkey check is older than 10 minutes. Approve again.";
+  const ip = request.headers.get("cf-connecting-ip");
+  return {
+    visitor: { email: identity.email, clientId: null, ip },
+    actor: { _tag: "person", email: identity.email },
+  };
 }

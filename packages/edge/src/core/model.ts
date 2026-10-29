@@ -14,6 +14,8 @@ export const RESOURCE_KINDS = {
   page: ["view"],
   file: ["view"],
   repo: ["view"],
+  /** K-1733: the repos of one owner, or of a name pattern with one `*`. */
+  "repo.group": ["view"],
 } as const satisfies Record<string, ReadonlyArray<Level>>;
 export type ResourceKind = keyof typeof RESOURCE_KINDS;
 
@@ -40,8 +42,57 @@ export type Member =
       readonly addsApps?: true;
       readonly publishes?: true;
     }
-  | { readonly _tag: "machine"; readonly machineId: string }
+  /** K-1730: a machine; in an agent circle it may also have agent rights, each with its mode (K-1720). */
+  | {
+      readonly _tag: "machine";
+      readonly machineId: string;
+      readonly rights?: Readonly<Partial<Record<MachineRight, RightMode>>>;
+    }
   | { readonly _tag: "everyone" };
+
+/** K-1730: the agent rights of a machine. Every right starts off. */
+export const MACHINE_RIGHTS = [
+  "addsApps",
+  "publishes",
+  "deploys",
+  "runsCommands",
+  "readsCode",
+  "writesCode",
+  "addsAudiences",
+  "getsPasses",
+] as const;
+export type MachineRight = (typeof MACHINE_RIGHTS)[number];
+export const MACHINE_RIGHT_NAMES: Record<MachineRight, string> = {
+  addsApps: "adds apps",
+  publishes: "publishes",
+  deploys: "deploys",
+  runsCommands: "runs commands",
+  readsCode: "reads code",
+  writesCode: "writes code",
+  addsAudiences: "adds audiences",
+  getsPasses: "gets passes",
+};
+/** K-1725: the rights that the map warns about when no person approves them. */
+export const HIGH_RISK_RIGHTS: ReadonlySet<MachineRight> = new Set([
+  "runsCommands",
+  "deploys",
+  "writesCode",
+  "addsApps",
+]);
+
+/** K-1754: an attested label must have one of these values. */
+export interface RightCondition {
+  readonly key: string;
+  readonly values: ReadonlyArray<string>;
+}
+
+/**
+ * K-1720: a right that is on runs at once, or asks one circle. A right that is off has no mode. K-1754: its conditions
+ * on attested labels must all hold.
+ */
+export type RightMode =
+  | { readonly mode: "automatic"; readonly conditions?: ReadonlyArray<RightCondition> }
+  | { readonly mode: "ask"; readonly circleId: string; readonly conditions?: ReadonlyArray<RightCondition> };
 
 /** K-718: the rights that the owner can give an agent key on its device member. */
 export const AGENT_RIGHTS = ["addsApps", "publishes"] as const;
@@ -59,6 +110,8 @@ export interface Circle {
   readonly members: ReadonlyArray<Member>;
   readonly match: "any" | "all";
   readonly needsPasskey: boolean;
+  /** K-1727: in a circle that needs a passkey, a machine approves asks only while this is on. Off by default. */
+  readonly machinesMayApprove?: boolean;
   readonly endsAt: Time | null;
   readonly x: number;
   readonly y: number;
@@ -76,7 +129,15 @@ export interface Resource {
   /** Cards with the same group stack together (K-508). */
   readonly group: string | null;
   readonly machine: string | null;
+  /** K-1733: what a `repo.group` card matches: an owner (`Yarden-zamir`) or a pattern with one `*`. */
+  readonly match?: string;
+  /** K-1760: the GitHub way of an owner group (a match with no `/`). */
+  readonly githubWay?: GitHubWay;
 }
+
+/** K-1760: kitshn makes App tokens for the repos of an owner, or the machine uses its own login. */
+export type GitHubWay = "app" | "not-kitshn";
+export const GITHUB_WAYS: ReadonlyArray<GitHubWay> = ["app", "not-kitshn"];
 
 export interface Point {
   readonly x: number;

@@ -120,6 +120,8 @@ export interface ActionHandlers {
   readonly newCircle: (at: Point | null) => void;
   readonly upload: (at: Point | null) => void;
   readonly addSite: () => void;
+  /** K-1733: a new repo group card. */
+  readonly addRepoGroup: () => void;
   readonly addMachine: () => void;
   /** K-529: one new circle around these cards (the selection, or one card from "Share with"). */
   readonly newCircleFor: (ids: ReadonlyArray<string>) => void;
@@ -835,6 +837,13 @@ export function addActions(ctx: ActionContext, h: ActionHandlers, at: Point | nu
       keywords: "live from a machine or static from a repo",
       tip: "Share a local server of a machine, or set up a static site from a repo. Its card starts in the tray, private.",
       run: h.addSite,
+    },
+    {
+      id: "add-repo-group",
+      label: "Add a repo group",
+      keywords: "github owner pattern agent code rights",
+      tip: "The repos of an owner, or of a name pattern with one *. In an agent circle, its code rights cover each repo that it matches.",
+      run: h.addRepoGroup,
     },
     {
       id: "add-machine",

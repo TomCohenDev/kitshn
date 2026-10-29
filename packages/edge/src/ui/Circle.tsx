@@ -22,6 +22,9 @@ import { isAgentKey } from "../core/agent.ts";
 import { callApi } from "./store.ts";
 import { Check, Switch } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
+import { MachineRights, withMode } from "./MachineRights.tsx";
+import { selfApprovers } from "../core/asks.ts";
+import type { ComponentChildren } from "preact";
 import { levelEdit } from "./actions.ts";
 
 /** The sticker of each member kind: its name and a light sticker colour with black text. */
@@ -238,6 +241,8 @@ function MemberSticker(props: {
   onRemove: () => void;
   /** Set only for an agent key in an agent circle: a right turns on or off. */
   onRight: ((right: AgentRight, on: boolean) => void) | null;
+  /** K-1720: the rights of a machine in an agent circle. */
+  extra?: ComponentChildren;
 }) {
   const { member, onRight } = props;
   const kind = MEMBER_STICKERS[member._tag];
@@ -278,6 +283,7 @@ function MemberSticker(props: {
           <span class="help">A right counts from any agent circle of this key.</span>
         </div>
       ) : null}
+      {props.extra}
     </li>
   );
 }
@@ -604,7 +610,8 @@ export function CircleEditor(props: {
     circlesHolding(state, resource.id).includes(circle),
   );
   // K-718: rights count only in a circle of devices only.
-  const agentCircle = circle.members.every((member) => member._tag === "device");
+  // K-1730: an agent circle holds devices and machines only.
+  const agentCircle = circle.members.every((member) => member._tag === "device" || member._tag === "machine");
   const hasPeople = circle.members.some((member) => member._tag === "email" || member._tag === "domain");
   return (
     <section class="editor">
@@ -665,7 +672,28 @@ export function CircleEditor(props: {
                     })
                 : null
             }
+            extra={
+              member._tag === "machine" && agentCircle ? (
+                <MachineRights
+                  member={member}
+                  circles={state.circles}
+                  onChange={(right, mode) =>
+                    void put({
+                      members: circle.members.map((other, at) =>
+                        at === index ? withMode(member, right, mode) : other,
+                      ),
+                    })
+                  }
+                />
+              ) : null
+            }
           />
+        ))}
+        {selfApprovers(state.circles, circle).map((machineId) => (
+          <li key={`self-${machineId}`} class="warning">
+            ⚠️ {state.machines.get(machineId)?.name ?? machineId} can approve its own asks here: a right of it
+            asks this circle (K-1727).
+          </li>
         ))}
         {circle.members.length === 0 ? (
           <li class="help">Nobody yet. A circle with no members matches nobody.</li>
@@ -744,6 +772,14 @@ export function CircleEditor(props: {
                 <code>{props.accessTeam}/AddMfaDevice</code>
               </a>
             </p>
+          ) : null}
+          {circle.needsPasskey && circle.members.some((member) => member._tag === "machine") ? (
+            <Switch
+              checked={circle.machinesMayApprove === true}
+              label="Machines may approve"
+              tip="Machines may approve: a machine of this circle approves asks with no passkey. Off: only people approve (K-1727)."
+              onChange={(machinesMayApprove) => void put({ machinesMayApprove })}
+            />
           ) : null}
         </div>
       </div>

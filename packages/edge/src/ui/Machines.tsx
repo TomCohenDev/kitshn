@@ -111,6 +111,15 @@ function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error
           Failed check {ago(keyFailure.at)} ago: {keyFailure.reason}
         </p>
       ) : null}
+      {props.view.status?.attesters?.length ? (
+        <p
+          class="muted"
+          data-tip="Attesters: local services that vouch for the thread of an ask; only their labels count for rights (K-1751)."
+        >
+          Attesters:{" "}
+          {props.view.status.attesters.map((attester) => `${attester.prefix} ${attester.address}`).join(", ")}
+        </p>
+      ) : null}
       {rekey ? (
         <>
           <p>

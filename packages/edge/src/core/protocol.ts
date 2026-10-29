@@ -3,8 +3,32 @@ import type { Command, Machine, MachineStatus, ProjectVolume, Sample } from "./m
 import type { BackupRun, BucketSize } from "./backups.ts";
 import type { MachineOs } from "./icons.ts";
 import type { LogLine, TailAnswer } from "./logs.ts";
-import type { Circle, PauseMode, Point, Resource, ShareSetting, Stack } from "./model.ts";
+import type { Circle, GitHubWay, PauseMode, Point, Resource, ShareSetting, Stack } from "./model.ts";
 import type { RepoGate } from "./repos.ts";
+import type { Proposal } from "./asks.ts";
+
+/** K-1717: one ask of an agent on a machine, as History shows it: an event, with no Undo. */
+export interface AskEventView {
+  readonly id: number;
+  readonly at: number;
+  readonly machineName: string;
+  readonly action: string;
+  readonly target: string;
+  readonly reason: string | null;
+  readonly labels: Readonly<Record<string, string>>;
+  readonly outcome: "done" | "waiting" | "refused" | "not-kitshn";
+  /** The reason of a refusal, or the proposal id of a waiting ask. */
+  readonly detail: string;
+  /** K-1752: the label keys that an attester set; the rest are claims. */
+  readonly verified: ReadonlyArray<string>;
+}
+
+/** K-1722: an open proposal, with the name of the machine that asked, for the Asks list. */
+export type ProposalView = Proposal & {
+  readonly machineName: string;
+  /** K-1752: the label keys that an attester set; the rest are claims. */
+  readonly verified: ReadonlyArray<string>;
+};
 
 /** K-819: `resourceIds` are the cards that this repo deployed, which the card panel matches. */
 export type RepoView = RepoGate & {
@@ -88,6 +112,20 @@ export interface Snapshot {
   /** K-1504: who paused and when, while paused. */
   readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;
+  /** K-1722: the asks that wait for an approver circle, oldest first. */
+  readonly proposals: ReadonlyArray<ProposalView>;
+  /** K-1767: runs of pull requests of the kitshn App that wait for the owner's Deploy. */
+  readonly botRuns: ReadonlyArray<{
+    readonly repoId: string;
+    readonly repo: string;
+    readonly pr: number;
+    readonly sha: string;
+    readonly at: number;
+  }>;
+  /** K-1760: the GitHub way of an owner with no owner group. */
+  readonly githubDefaultWay: GitHubWay;
+  /** K-1717: the newest 50 ask events. */
+  readonly askEvents: ReadonlyArray<AskEventView>;
   /** The newest jobs, with their output cut to 4,000 characters. */
   readonly jobs: ReadonlyArray<JobView>;
   /** K-1819: the newest backup run of each Compose card that has one. */

@@ -140,6 +140,7 @@ describe("state export (K-1831)", () => {
       // K-1831: each named secret holds a value that must not reach the export.
       for (const row of SECRET_ROWS)
         if ("table" in row) {
+          // A secret table may exist already with its real columns (pass_keys of K-1771); a row of secrets goes in either way.
           durable.storage.sql.exec(
             `CREATE TABLE IF NOT EXISTS "${row.table}" (id TEXT PRIMARY KEY, value TEXT)`,
           );
@@ -399,8 +400,11 @@ describe("restore to a time (K-1822, K-1771)", () => {
     });
     expect(rotated).toEqual([[actor]]);
     const after = await runInDurableObject(stub(), (_instance, durable) => ({
+      // The pass key rotation writes its own revision after the restore (K-1771).
       summary: durable.storage.sql
-        .exec<{ summary: string }>("SELECT summary FROM revisions ORDER BY id DESC LIMIT 1")
+        .exec<{ summary: string }>(
+          "SELECT summary FROM revisions WHERE summary LIKE 'Restored kitshn to%' ORDER BY id DESC LIMIT 1",
+        )
         .one().summary,
       seq: durable.storage.sql
         .exec<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'jobs'")

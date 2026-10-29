@@ -3,8 +3,10 @@ import type { Kitshn } from "./kitshn.ts";
 export interface Env {
   readonly ASSETS: Fetcher;
   readonly KITSHN: DurableObjectNamespace<Kitshn>;
-  /** The admin host, for example `kit.yarden-zamir.com` (K-1208). */
+  /** The admin host, for example `kitshn.yarden-zamir.com` (K-1208). */
   readonly KITSHN_HOST: string;
+  /** K-1209: the old admin host, set by the bootstrap only during the host move. */
+  readonly KITSHN_OLD_HOST?: string;
   /** The Zero Trust team domain, for example `team.cloudflareaccess.com`. */
   readonly ACCESS_TEAM_DOMAIN: string;
   /** The audience tag of the admin Access application (the map and `/api`). */
@@ -52,4 +54,18 @@ export interface Env {
   readonly DEV_IDENTITY?: string;
   /** Local development only: seed sample cards. The Durable Object honours it only when the host is localhost. */
   readonly DEV_DEMO?: string;
+}
+
+/**
+ * K-1209: the admin host, then the old one during the host move. An old host outside the kitshn zone does not count,
+ * so a broken value fails closed.
+ */
+export function adminHosts(
+  env: Pick<Env, "KITSHN_HOST" | "KITSHN_OLD_HOST" | "KITSHN_ZONE">,
+): ReadonlyArray<string> {
+  const trimmed = (env.KITSHN_OLD_HOST ?? "").trim().toLowerCase();
+  const old = trimmed.endsWith(".") ? trimmed.slice(0, -1) : trimmed;
+  return old !== "" && old !== env.KITSHN_HOST && old.endsWith(`.${env.KITSHN_ZONE}`)
+    ? [env.KITSHN_HOST, old]
+    : [env.KITSHN_HOST];
 }

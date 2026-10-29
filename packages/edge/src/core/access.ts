@@ -35,6 +35,8 @@ export interface AppBody {
   readonly session_duration: string;
   /** Another site cannot send the Access cookie in a request that changes state. */
   readonly same_site_cookie_attribute: "lax";
+  /** K-1723: the cookie stays on the path, so the admin cookie of the whole host never replaces it. */
+  readonly path_cookie_attribute?: true;
   /** Keys of `DesiredAccess.policies`, in precedence order. */
   readonly policyKeys: ReadonlyArray<string>;
 }
@@ -45,6 +47,9 @@ export interface DesiredAccess {
   /** K-1004: keys of `policies` for the login applications of pages and files, in precedence order. */
   readonly logins: { readonly login: ReadonlyArray<string>; readonly passkey: ReadonlyArray<string> };
 }
+
+/** K-1723: the keys of the two approve applications. */
+export const APPROVE_APPS = { passkey: "app:approve:passkey", login: "app:approve:login" } as const;
 
 export const PASSKEY_MFA = {
   allowed_authenticators: ["biometrics", "security_key"],
@@ -296,6 +301,52 @@ export function desiredAccess(
       include: [...enrolling.values()],
       require: [],
       exclude: [],
+    });
+  }
+  // K-1723: the people of each approver circle of a machine right reach the approve path of their kind. A circle with
+  // "needs passkey" gets a policy with the passkey check of 10 minutes on `/api/approve/passkey`, whose application has
+  // no other policy, so its token proves a fresh passkey; a circle without it goes on `/api/approve/login`, where the
+  // Durable Object refuses a passkey circle. "All must match" is left out, as for K-113. During a pause no ask runs.
+  const host = state.resources.get(ADMIN_RESOURCE_ID)?.addresses[0];
+  const asked = new Set(
+    [...state.circles.values()].flatMap((circle) =>
+      circle.members.flatMap((member) =>
+        member._tag === "machine"
+          ? Object.values(member.rights ?? {}).flatMap((mode) =>
+              mode?.mode === "ask" ? [mode.circleId] : [],
+            )
+          : [],
+      ),
+    ),
+  );
+  const approvers = { passkey: [] as Array<string>, login: [] as Array<string> };
+  for (const id of state.paused || !host ? [] : asked) {
+    const circle = state.circles.get(id);
+    if (!circle || circle.match === "all" || (circle.endsAt !== null && circle.endsAt <= now)) continue;
+    const include = present(circle.members.map(personRule));
+    if (include.length === 0) continue;
+    const kind = circle.needsPasskey ? "passkey" : "login";
+    const key = `policy:approve-${kind}:${circle.id}`;
+    policies.set(key, {
+      name: `${ACCESS_NAME_PREFIX}approvers ${circle.name}${circle.needsPasskey ? " (passkey)" : ""}`,
+      decision: "allow",
+      include,
+      require: [],
+      exclude: [],
+      ...(circle.needsPasskey ? { mfa_config: { ...PASSKEY_MFA, session_duration: "10m" } } : {}),
+    });
+    approvers[kind].push(key);
+  }
+  for (const kind of ["passkey", "login"] as const) {
+    if (!host || approvers[kind].length === 0) continue;
+    apps.set(APPROVE_APPS[kind], {
+      name: `${ACCESS_NAME_PREFIX}approve (${kind})`,
+      type: "self_hosted",
+      domain: `${host}/api/approve/${kind}`,
+      session_duration: kind === "passkey" ? "10m" : "24h",
+      same_site_cookie_attribute: "lax",
+      path_cookie_attribute: true,
+      policyKeys: approvers[kind],
     });
   }
   return { policies, apps, logins: { login, passkey } };

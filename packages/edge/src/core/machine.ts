@@ -56,6 +56,8 @@ export interface MachineStatus {
   readonly capabilities?: ReadonlyArray<string>;
   /** K-821: the bytes of the images that the daemon keeps for rollbacks, at most; shared layers count once per image. */
   readonly keptBytes?: number;
+  /** K-1751: the attesters of `machine.json`; their prefixes are the labels that rights may check (K-1754). */
+  readonly attesters?: ReadonlyArray<{ readonly prefix: string; readonly address: string }>;
 }
 
 /** K-605, K-606: the latest resource sample. The Durable Object keeps it in memory only. */
@@ -178,6 +180,33 @@ export interface LiveSiteReport {
 }
 
 /** Messages from a daemon to kitshn over `/connect`. The text "ping" is answered by the auto response. */
+/** K-1710: one ask of an agent, as the daemon sends it over its signed connection. */
+export interface AskWire {
+  readonly action: string;
+  readonly target: string;
+  readonly body?: unknown;
+  readonly reason?: string;
+  readonly labels?: Readonly<Record<string, string>>;
+  /** K-1752: the labels that an attester of the machine set; only these count for rights (K-1754). */
+  readonly attested?: Readonly<Record<string, string>>;
+}
+
+/** K-1710, K-1722: kitshn's answer to one ask. */
+export type AskOutcome =
+  | { readonly outcome: "done"; readonly result: unknown }
+  | { readonly outcome: "waiting"; readonly proposalId: string }
+  | { readonly outcome: "refused"; readonly reason: string }
+  /** K-1760: the owner of the repo is "not kitshn"; the machine uses its own login. */
+  | { readonly outcome: "not-kitshn"; readonly reason: string };
+
+/** K-1722 to K-1724: the answer to a proposal, sent to the machine that asked. */
+export interface AskResult {
+  readonly proposalId: string;
+  readonly outcome: "approved" | "denied" | "expired";
+  readonly result?: unknown;
+  readonly reason?: string;
+}
+
 export type DaemonMessage =
   /** K-1704: the signature of `connectText` with the key that the challenge names. */
   | { readonly type: "answer"; readonly signature: string }
@@ -202,7 +231,9 @@ export type DaemonMessage =
       readonly skipped: number;
     }
   /** K-1805: a tail stopped on the daemon, with why. */
-  | { readonly type: "tailEnd"; readonly id: string; readonly reason: string };
+  | { readonly type: "tailEnd"; readonly id: string; readonly reason: string }
+  /** K-1710: an ask of a local agent; kitshn answers with `askAnswer` and the same `requestId`. */
+  | { readonly type: "ask"; readonly requestId: string; readonly ask: AskWire };
 
 /** Messages from kitshn to a daemon. */
 export type ServerToDaemon =
@@ -216,12 +247,16 @@ export type ServerToDaemon =
   | { readonly type: "accepted"; readonly fingerprint: string }
   /** K-1705: "Rotate key" in the machine panel. */
   | { readonly type: "rotateKey" }
+  /** K-1762: the daemon drops its kept GitHub tokens of one repo, or all with null, because kitshn revoked them. */
+  | { readonly type: "dropTokens"; readonly repo: string | null }
   | { readonly type: "job"; readonly id: number; readonly command: Command }
   /** K-1804: search the logs of the Compose app `project`. */
   | { readonly type: "logs"; readonly id: string; readonly project: string; readonly search: LogSearch }
   /** K-1805: follow the logs of the Compose app `project` until `tailStop`. */
   | { readonly type: "tail"; readonly id: string; readonly project: string }
-  | { readonly type: "tailStop"; readonly id: string };
+  | { readonly type: "tailStop"; readonly id: string }
+  | ({ readonly type: "askAnswer"; readonly requestId: string } & AskOutcome)
+  | ({ readonly type: "askResult" } & AskResult);
 
 const ED25519 = { name: "Ed25519" } as const;
 
@@ -290,6 +325,17 @@ export const rotateText = (host: string, machineId: string, challenge: string, p
 export async function signText(key: MachinePrivateKey, text: string): Promise<string> {
   const privateKey = await crypto.subtle.importKey("jwk", key, ED25519, false, ["sign"]);
   return base64url(new Uint8Array(await crypto.subtle.sign(ED25519, privateKey, bytes(text))));
+}
+
+/** K-1209: true when the signature fits the text of one of the hosts; during the host move, the daemon signs either. */
+export async function verifyForHosts(
+  publicKey: string,
+  hosts: ReadonlyArray<string>,
+  textFor: (host: string) => string,
+  signature: unknown,
+): Promise<boolean> {
+  for (const host of hosts) if (await verifyText(publicKey, textFor(host), signature)) return true;
+  return false;
 }
 
 /** False for a wrong signature and for a key or a signature that is not one. */

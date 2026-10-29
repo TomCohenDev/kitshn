@@ -19,6 +19,21 @@ describe("local socket framing (K-702)", () => {
     expect(readRequest('{"type":"status"}')).toMatchObject({ ok: false, answer: { id: null } });
   });
 
+  it("reads an ask, and its waiting answer and result event (K-1710, K-1722)", () => {
+    expect(
+      readRequest('{"id":"a","type":"ask","action":"deploy","target":"card","labels":{"t3.thread.id":"x"}}'),
+    ).toMatchObject({
+      ok: true,
+    });
+    expect(readRequest('{"id":"a","type":"ask","action":"steal","target":""}')).toMatchObject({ ok: false });
+    expect(readAnswer('{"id":"a","type":"ask","outcome":"waiting","proposalId":"p"}')).toMatchObject({
+      outcome: "waiting",
+    });
+    expect(readAnswer('{"type":"ask-result","proposalId":"p","outcome":"denied"}')).toMatchObject({
+      type: "ask-result",
+    });
+  });
+
   it("throws on an answer that does not match, since daemon and client then disagree", () => {
     expect(() => readAnswer('{"id":"a","type":"status"}')).toThrow();
     expect(readAnswer('{"id":"a","type":"reconnect"}')).toEqual({ id: "a", type: "reconnect" });

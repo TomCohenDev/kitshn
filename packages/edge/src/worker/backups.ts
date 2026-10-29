@@ -11,6 +11,7 @@ const LEFT_OUT = new Set(["join_codes", "rekey_codes", "jobs"]);
 export const SECRET_ROWS: ReadonlyArray<{ readonly table: string } | { readonly metaPrefix: string }> = [
   // K-1771: the pass key of section 17.
   { table: "pass_keys" },
+  { table: "github_tokens" },
   { metaPrefix: "pass_key" },
   // K-1907: the VAPID private key of Web Push, and the subscriptions, whose endpoints and auth secrets are keys too.
   { metaPrefix: "push_vapid_jwk" },

@@ -53,13 +53,15 @@ function readPeer(calls: Calls, fd: number): number | null {
 }
 
 /**
- * K-701: who may send each request. A user in `localUsers` only reads the status; the machine-admin requests stay
- * with the daemon user and root. A new request kind must take a side here.
+ * K-701: who may send each request. A user in `localUsers` reads the status and asks kitshn (K-1710); the
+ * machine-admin requests stay with the daemon user and root. A new request kind must take a side here.
  */
 const REQUEST_SENDERS: Record<Request["type"], "local-users" | "daemon-user-or-root"> = {
   status: "local-users",
   "rotate-key": "daemon-user-or-root",
   reconnect: "daemon-user-or-root",
+  ask: "local-users",
+  "forget-token": "local-users",
 };
 
 export const requestAllowed = (type: Request["type"], uid: number, own: number) =>

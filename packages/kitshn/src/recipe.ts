@@ -331,6 +331,9 @@ export function plan(
       reason: `The address ${listed[0]} is not under the kitshn zone ${zone} (K-1111). One address must be.`,
     };
   }
+  // K-817: the main address never takes a name that kitshn uses on its zone either.
+  if (main !== undefined && RESERVED_SITE_NAMES.has(main.slice(0, -zone.length - 1)))
+    return { kind: "error", reason: `${main} is a name that kitshn keeps for itself (K-817).` };
   for (const address of listed) {
     if (address === main) continue;
     if (zoneOfAddress(address, [zone, ...otherZones]) === null)

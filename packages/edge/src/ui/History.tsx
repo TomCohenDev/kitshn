@@ -1,4 +1,4 @@
-import { Fragment } from "preact";
+import { type ComponentChildren, Fragment } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import type { Actor, Item, RevisionKind } from "../core/changes.ts";
 import type { State } from "../core/model.ts";
@@ -48,6 +48,8 @@ export function HistoryView(props: {
   state: State;
   onUndo: (id: number) => void;
   onShow: (revision: RevisionView) => void;
+  /** K-1717: the asks of agents, shown after the changes. */
+  askEvents?: ComponentChildren;
 }) {
   const [filter, setFilter] = useState(NO_FILTER);
   const { state } = props;
@@ -212,6 +214,7 @@ export function HistoryView(props: {
           </div>
         </Fragment>
       ))}
+      {props.askEvents}
     </div>
   );
 }

@@ -14,15 +14,18 @@ import {
   type MachinePrivateKey,
   type ProjectVolume,
   type ServerToDaemon,
+  type AskOutcome,
 } from "@kitshn/edge/machine";
 import type { BackupReport } from "@kitshn/edge/backups";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import type { Answer, Request } from "@kitshn/local";
+import { ASK_ACTIONS, type Answer, type AskAction, type Request, WINDOW_ACTIONS } from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { backup, finishRestores, restore, unpauseMarked } from "./backup.ts";
 import { keyPlan } from "./keys.ts";
+import { attest, attesterPrefixes, attestersOf, dropAttested } from "./attest.ts";
+import { credentialAnswer, readCredentialInput, repoOfCredential, repoOfRemote } from "./gitCredential.ts";
 import { composeLogs, followLogs, rangeArgs, searchLogs, withLogLimits } from "./logs.ts";
 import { type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from "./local.ts";
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
@@ -82,6 +85,7 @@ import {
 import { type SiteEntry, addSite, parseSiteFile, probe, targetOf } from "./sites.ts";
 import { RUNNING_FORMAT, VOLUME_FORMAT, idleVolumes, volumeRemoveRefusal } from "./volumes.ts";
 import { keepBuild, keptId, keptTag, rollbackOverride, serviceImages, staleTags } from "./keep.ts";
+import { TokenCache } from "./tokens.ts";
 
 declare const KITSHN_VERSION: string;
 const VERSION = typeof KITSHN_VERSION === "string" ? KITSHN_VERSION : "dev";
@@ -255,6 +259,209 @@ async function ask(request: Request): Promise<Exclude<Answer, { type: "error" }>
   if (outcome.kind === "not-running") return null;
   if (outcome.answer.type === "error") fail(outcome.answer.error);
   return outcome.answer;
+}
+
+/**
+ * K-1752: the values of the token variables that this machine's attesters read, from the environment of this
+ * command; the daemon names the variables, so a command never needs to read `machine.json`.
+ */
+async function attestationsFromEnv(): Promise<Record<string, string>> {
+  if (typeof daemonUid === "string") return {};
+  const outcome = await askLocal(socketPath, { id: "1", type: "status" }, 5_000, {
+    platform,
+    daemonUid: daemonUid as number,
+  }).catch(() => null);
+  const names =
+    outcome?.kind === "answer" && outcome.answer.type === "status"
+      ? (outcome.answer.status.attesterEnv ?? [])
+      : [];
+  return Object.fromEntries(
+    names.flatMap((name) => (process.env[name] ? [[name, process.env[name] as string]] : [])),
+  );
+}
+
+/** K-1763, K-1764: one `github-token` ask for a repo; the answer, or null when the daemon does not run. */
+async function askToken(repo: string): Promise<Answer | null> {
+  if (typeof daemonUid === "string") return null;
+  const outcome = await askLocal(
+    socketPath,
+    {
+      id: "1",
+      type: "ask",
+      action: "github-token",
+      target: repo,
+      body: { permission: "auto" },
+      attestations: await attestationsFromEnv(),
+    },
+    90_000,
+    { platform, daemonUid: daemonUid as number },
+  ).catch(() => null);
+  return outcome?.kind === "answer" ? outcome.answer : null;
+}
+
+/**
+ * K-1763: `kitshn git-credential get` gives git a token for a repo of an owner with the kitshn App way. For a "not kitshn"
+ * owner, a daemon that does not run, or another host, it prints nothing, so git tries the next helper. A refusal or
+ * a waiting ask of a kitshn owner prints `quit=1`, so git never falls back to the machine's own login.
+ */
+async function gitCredentialCommand(operation: string | undefined) {
+  if (operation !== "get" && operation !== "erase") return;
+  const repo = repoOfCredential(readCredentialInput(await Bun.stdin.text()));
+  if (repo === null) return;
+  // Git erases a credential that GitHub refused, so the daemon drops the kept token of that repo.
+  if (operation === "erase") {
+    if (typeof daemonUid !== "string")
+      await askLocal(socketPath, { id: "1", type: "forget-token", repo }, 10_000, {
+        platform,
+        daemonUid: daemonUid as number,
+      }).catch(() => null);
+    return;
+  }
+  const answer = await askToken(repo);
+  if (answer === null || answer.type !== "ask" || answer.outcome === "not-kitshn") return;
+  if (answer.outcome === "done" && typeof answer.result === "object" && answer.result !== null) {
+    const { token, expiresAt } = answer.result as { token?: unknown; expiresAt?: unknown };
+    if (typeof token === "string" && typeof expiresAt === "string") {
+      process.stdout.write(credentialAnswer(token, expiresAt));
+      return;
+    }
+  }
+  const why =
+    answer.outcome === "refused"
+      ? answer.reason
+      : answer.outcome === "waiting"
+        ? `the token waits for an approval (proposal ${answer.proposalId}); push again after it`
+        : "kitshn gave no token";
+  console.error(`kitshn: ${why}`);
+  process.stdout.write("quit=1\n");
+}
+
+/**
+ * K-1763: `kitshn setup-git` puts `kitshn git-credential` first for https://github.com, with useHttpPath, and keeps the
+ * helpers that the user had after it.
+ */
+function setupGitCommand() {
+  const scope = "credential.https://github.com.helper";
+  const read = (key: string) =>
+    spawnSync("git", ["config", "--global", "--get-all", key], { encoding: "utf8" })
+      .stdout.split("\n")
+      .filter((line) => line !== "");
+  const ours = `!${process.execPath} git-credential`;
+  const previous = [...new Set([...read(scope), ...read("credential.helper")])].filter(
+    (helper) => helper !== ours && !helper.endsWith(" git-credential"),
+  );
+  const git = (...args: Array<string>) => {
+    const result = spawnSync("git", ["config", "--global", ...args], { encoding: "utf8" });
+    if (result.status !== 0 && args[0] !== "--unset-all")
+      fail(`git config ${args.join(" ")} failed: ${result.stderr}`);
+  };
+  git("--unset-all", scope);
+  // An empty helper clears the list that git collected so far, so kitshn goes first.
+  git("--add", scope, "");
+  git("--add", scope, ours);
+  for (const helper of previous) git("--add", scope, helper);
+  git("credential.https://github.com.useHttpPath", "true");
+  console.log(
+    `git asks kitshn first for github.com, then: ${previous.length > 0 ? previous.join(", ") : "nothing else"}.`,
+  );
+}
+
+/** K-1764: `kitshn gh <args>` runs gh with a token for the repo of --repo or of the remote origin. */
+async function ghCommand(argv: ReadonlyArray<string>) {
+  const at = argv.indexOf("--repo");
+  const remote = spawnSync("git", ["remote", "get-url", "origin"], { encoding: "utf8" }).stdout ?? "";
+  const repo = at >= 0 ? (argv[at + 1] ?? null) : repoOfRemote(remote);
+  const env = { ...process.env };
+  if (repo !== null) {
+    const answer = await askToken(repo);
+    if (
+      answer?.type === "ask" &&
+      answer.outcome === "done" &&
+      typeof answer.result === "object" &&
+      answer.result !== null
+    ) {
+      const token = (answer.result as { token?: unknown }).token;
+      if (typeof token === "string") env["GH_TOKEN"] = token;
+    } else if (answer?.type === "ask" && (answer.outcome === "refused" || answer.outcome === "waiting"))
+      fail(
+        answer.outcome === "refused"
+          ? answer.reason
+          : `the token waits for an approval (proposal ${answer.proposalId}).`,
+      );
+  }
+  const run = spawnSync("gh", [...argv], { stdio: "inherit", env });
+  process.exit(run.status ?? 1);
+}
+
+/**
+ * K-1710: `kitshn agent <action> [target] [--reason <text>] [--label <key>=<value>]... [--body <json>]` asks kitshn
+ * through the daemon and prints the result as JSON. A waiting ask follows its proposal to the end (K-1722).
+ */
+async function agentCommand(argv: ReadonlyArray<string>) {
+  const [action, ...rest] = argv;
+  if (!(ASK_ACTIONS as ReadonlyArray<string>).includes(action ?? ""))
+    fail(`kitshn agent <action>: the action is one of ${ASK_ACTIONS.join(", ")}.`);
+  let target = "";
+  let reason: string | undefined;
+  let body: unknown;
+  const labels: Record<string, string> = {};
+  for (let index = 0; index < rest.length; index++) {
+    const word = rest[index] ?? "";
+    const value = () => rest[++index] ?? fail(`${word} needs a value.`);
+    if (word === "--reason") reason = value();
+    // K-1774: `--aud` is the alias of the JWT claim name.
+    else if (word === "--audience" || word === "--aud") target = value();
+    else if (word === "--body") {
+      const text = value();
+      try {
+        body = JSON.parse(text);
+      } catch {
+        fail("--body is not JSON.");
+      }
+    } else if (word === "--label") {
+      const pair = value();
+      const equals = pair.indexOf("=");
+      if (equals <= 0) fail(`--label ${pair}: write <key>=<value>.`);
+      labels[pair.slice(0, equals)] = pair.slice(equals + 1);
+    } else if (word.startsWith("--")) fail(`kitshn agent does not know ${word}.`);
+    else if (target === "") target = word;
+    else fail(`kitshn agent takes one target, not also ${word}.`);
+  }
+  if (typeof daemonUid === "string") fail(daemonUid);
+  const request: Request = {
+    id: "1",
+    type: "ask",
+    action: action as AskAction,
+    target,
+    ...(body === undefined ? {} : { body }),
+    ...(reason === undefined ? {} : { reason }),
+    ...(Object.keys(labels).length === 0 ? {} : { labels }),
+    attestations: await attestationsFromEnv(),
+  };
+  const outcome = await askLocal(
+    socketPath,
+    request,
+    90_000,
+    { platform, daemonUid: daemonUid as number },
+    (answer) => answer.type === "ask" && answer.outcome === "waiting",
+    (answer) => {
+      if (answer.type === "ask" && answer.outcome === "waiting")
+        console.error(`waiting: proposal ${answer.proposalId} asks its approver circle (K-1722).`);
+    },
+  ).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+  if (outcome.kind === "not-running") fail(notRunning());
+  const answer = outcome.answer;
+  if (answer.type === "error") fail(answer.error);
+  if (answer.type === "ask" && answer.outcome === "refused") fail(answer.reason);
+  if (answer.type === "ask-result" && answer.outcome !== "approved")
+    fail(`${answer.outcome}: proposal ${answer.proposalId}${answer.reason ? ` (${answer.reason})` : ""}.`);
+  const result =
+    answer.type === "ask" && answer.outcome === "done"
+      ? answer.result
+      : answer.type === "ask-result"
+        ? answer.result
+        : null;
+  console.log(JSON.stringify(result ?? null, null, 2));
 }
 
 /**
@@ -1234,6 +1441,8 @@ function report() {
       arch: arch(),
       hostname: hostname(),
       tunnel: tunnelState,
+      // K-1751: the map shows the attesters of each machine.
+      attesters: attestersOf(readMachineFile()).attesters.map(({ prefix, address }) => ({ prefix, address })),
     },
   };
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -1335,6 +1544,96 @@ async function answerChallenge(
 type RotationOutcome = { readonly fingerprint: string } | { readonly error: string };
 /** K-1705: the `rotate-key` requests of the local socket that wait for kitshn to store the new key. */
 const rotationWaiters: Array<(outcome: RotationOutcome) => void> = [];
+const keptTokens = new TokenCache();
+/** K-1710: the asks that wait for kitshn's answer, by request id. */
+const askWaiters = new Map<string, (outcome: AskOutcome) => void>();
+/** K-1722: the local connections that wait for the answer to a proposal, by proposal id. */
+const proposalWaiters = new Map<string, Array<(event: Answer) => void>>();
+
+/** K-1723: after an approval of a token, the same ask runs once more, and its answer becomes the approved result. */
+async function askAgain(
+  request: Extract<Request, { type: "ask" }>,
+  event: Answer,
+  emit: (event: Answer) => void,
+) {
+  if (event.type !== "ask-result" || event.outcome !== "approved") return emit(event);
+  const again = await askKitshn(request, () => {}).catch((error: unknown) => ({
+    type: "ask" as const,
+    outcome: "refused" as const,
+    reason: String(error),
+  }));
+  emit(
+    again.type === "ask" && again.outcome === "done"
+      ? { ...event, result: again.result }
+      : {
+          type: "ask-result",
+          proposalId: event.proposalId,
+          outcome: "denied",
+          reason:
+            again.type === "ask" && again.outcome === "refused" ? again.reason : "kitshn gave no token.",
+        },
+  );
+}
+
+/** K-1710: sends an ask of a local agent over the signed connection, and gives the answer back on the socket. */
+async function askKitshn(
+  request: Extract<Request, { type: "ask" }>,
+  emit: (event: Answer) => void,
+): Promise<Answer> {
+  const ws = socket;
+  if (ws === null || challenge === null)
+    throw new Error(
+      "the daemon has no signed connection to kitshn, so it cannot ask (K-1710). See kitshn status.",
+    );
+  const requestId = crypto.randomUUID();
+  const { id, type: _type, labels, attestations, ...rest } = request;
+  // K-1752, K-1753: only an attester sets the labels of its prefix; the caller's token goes to that attester only.
+  const { attesters } = attestersOf(readMachineFile());
+  const attested: Record<string, string> = {};
+  for (const attester of attesters) {
+    const token = attestations?.[attester.tokenEnv];
+    if (!token) continue;
+    Object.assign(attested, (await attest(attester, token)) ?? {});
+  }
+  const ask = {
+    ...rest,
+    ...(labels ? { labels: dropAttested(labels, attesterPrefixes(attesters)) } : {}),
+    ...(Object.keys(attested).length > 0 ? { attested } : {}),
+  };
+  // K-1762: a kept token goes only to the same repo and the same attested thread; an ask without one always asks kitshn.
+  const thread = request.action === "github-token" ? attested["t3.thread.id"] : undefined;
+  const body = request.body;
+  const wanted =
+    typeof body === "object" && body !== null ? (body as Record<string, unknown>)["permission"] : "auto";
+  const kept = thread ? keptTokens.get(request.target, thread, wanted, Date.now()) : null;
+  if (kept) return { id, type: "ask", outcome: "done", result: kept };
+  const outcome = await new Promise<AskOutcome>((resolve) => {
+    const timer = setTimeout(() => {
+      askWaiters.delete(requestId);
+      resolve({ outcome: "refused", reason: "kitshn did not answer within 60 seconds." });
+    }, 60_000);
+    askWaiters.set(requestId, (value) => {
+      clearTimeout(timer);
+      resolve(value);
+    });
+    ws.send(JSON.stringify({ type: "ask", requestId, ask } satisfies DaemonMessage));
+  });
+  if (outcome.outcome === "waiting")
+    proposalWaiters.set(outcome.proposalId, [
+      ...(proposalWaiters.get(outcome.proposalId) ?? []),
+      WINDOW_ACTIONS.has(request.action) ? (event) => void askAgain(request, event, emit) : emit,
+    ]);
+  if (thread && outcome.outcome === "done" && typeof outcome.result === "object" && outcome.result !== null) {
+    const { token, expiresAt, permission } = outcome.result as Record<string, unknown>;
+    if (typeof token === "string" && typeof expiresAt === "string")
+      keptTokens.set(request.target, thread, {
+        token,
+        expiresAt,
+        permission: permission === "write" ? "write" : "read",
+      });
+  }
+  return { id, type: "ask", ...outcome };
+}
 const settleRotation = (outcome: RotationOutcome) => {
   for (const waiter of rotationWaiters.splice(0)) waiter(outcome);
 };
@@ -1344,6 +1643,7 @@ let rotatingTo: string | null = null;
 /** K-1705: makes a new pair and hands over to it with a signature of the old key, bound to this connection. */
 async function rotateKey(ws: WebSocket) {
   if (rotating || challenge === null || socket !== ws || !joined) return;
+  keptTokens.drop(null);
   const current = readKey(keyFile);
   if (!current) {
     log(`no key to rotate in ${keyFile}`);
@@ -1419,6 +1719,8 @@ function connect(config: JoinSecrets) {
     /** K-1704: kitshn reads this connection from now on. */
     const accepted = (how: string) => {
       log(`connected to kitshn ${how}`);
+      // K-1762: a new connection can follow a reset or a lost right that the daemon did not hear of.
+      keptTokens.drop(null);
       socket = ws;
       delay = 1000;
       stopped = false;
@@ -1452,6 +1754,8 @@ function connect(config: JoinSecrets) {
         accepted(`with the key ${message.fingerprint}`);
       } else if (message.type === "rotateKey") {
         void rotateKey(ws);
+      } else if (message.type === "dropTokens") {
+        keptTokens.drop(message.repo);
       } else if (message.type === "logs") {
         // K-1804: the data folder holds no Compose file, so Compose finds the app by its project label alone.
         void (
@@ -1480,6 +1784,15 @@ function connect(config: JoinSecrets) {
       } else if (message.type === "tailStop") {
         tails.get(message.id)?.();
         tails.delete(message.id);
+      } else if (message.type === "askAnswer") {
+        const { type: _type, requestId, ...outcome } = message;
+        askWaiters.get(requestId)?.(outcome);
+        askWaiters.delete(requestId);
+      } else if (message.type === "askResult") {
+        const { type: _type, ...result } = message;
+        for (const emit of proposalWaiters.get(result.proposalId) ?? [])
+          emit({ type: "ask-result", ...result });
+        proposalWaiters.delete(result.proposalId);
       } else if (message.type === "job") {
         log(`job ${message.id}: ${message.command.kind}`);
         // A job that throws (for example a file it cannot delete) still sends a result, and never ends the daemon.
@@ -1504,6 +1817,14 @@ function connect(config: JoinSecrets) {
       // K-1805: kitshn forgets the tails of a closed connection.
       if (socket === ws) stopTails();
       if (socket === ws) socket = null;
+      // K-1716: an ask in flight gets no result from a closed connection; its proposal stays.
+      for (const [requestId, settle] of askWaiters) {
+        settle({
+          outcome: "refused",
+          reason: `the connection to kitshn closed (${event.code}) before its answer.`,
+        });
+        askWaiters.delete(requestId);
+      }
       // K-1705: kitshn stored the new key; the next connection signs with it.
       if (event.code === 4004 && existsSync(nextKeyFile)) renameSync(nextKeyFile, keyFile);
       settleRotation(
@@ -1702,8 +2023,13 @@ function readMachineFile(): unknown {
 }
 
 /** K-701, K-702: the requests of the local socket. */
-async function answerLocal(request: Request): Promise<Answer> {
+async function answerLocal(
+  request: Request,
+  _caller: unknown,
+  emit: (event: Answer) => void,
+): Promise<Answer> {
   const { id } = request;
+  if (request.type === "ask") return askKitshn(request, emit);
   if (request.type === "status") {
     if (!joined) throw new Error("the daemon has not read machine.json yet.");
     const key = readKey(keyFile);
@@ -1716,8 +2042,13 @@ async function answerLocal(request: Request): Promise<Answer> {
         fingerprint: key ? await fingerprintOf(key.x) : null,
         connection: socket === null ? "disconnected" : challenge === null ? "token-only" : "connected",
         tunnel: tunnelState,
+        attesterEnv: attestersOf(readMachineFile()).attesters.map((attester) => attester.tokenEnv),
       },
     };
+  }
+  if (request.type === "forget-token") {
+    keptTokens.drop(request.repo);
+    return { id, type: "forget-token" };
   }
   if (request.type === "reconnect") {
     log("kitshn rekey saved a new key; connecting again");
@@ -1762,6 +2093,18 @@ switch (command) {
   case "status":
     await statusCommand();
     break;
+  case "git-credential":
+    await gitCredentialCommand(args[0]);
+    break;
+  case "setup-git":
+    setupGitCommand();
+    break;
+  case "gh":
+    await ghCommand(args);
+    break;
+  case "agent":
+    await agentCommand(args);
+    break;
   case "local-users":
     localUsersCommand(args[0], args[1]);
     break;
@@ -1788,6 +2131,9 @@ kitshn rotate-key                       replace the machine key over the live co
 kitshn rekey <code>                     make a new machine key with the key code of its panel (K-1706, K-1708)
 kitshn status                           the machine, its key, its connection to kitshn and its tunnel
 kitshn local-users list|add|remove <u>  who else may use the local socket, as the daemon user (K-701)
+kitshn agent <action> [target]          ask kitshn as this machine (K-1710): --reason, --label k=v, --body json
+kitshn setup-git                        git asks kitshn first for github.com tokens (K-1763)
+kitshn gh <args>                        gh with a kitshn token for this repo (K-1764)
 kitshn expose <port|socket> --name <n>  share a local server at <n>.<zone> (K-1104); --dev sets Host localhost
 kitshn unexpose <name>                  stop sharing it
 kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>

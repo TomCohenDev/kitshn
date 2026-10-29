@@ -22,7 +22,7 @@ import {
 import { type BadgeState, badgeSvg } from "../core/badge.ts";
 import type { Usage } from "../core/usage.ts";
 import { escapeHtml, originDown, seenText } from "./live.ts";
-import type { Env } from "./env.ts";
+import { adminHosts, type Env } from "./env.ts";
 import { readUsage } from "./usage.ts";
 import { zoneFor, zonesOf, zonesOrMain } from "./zones.ts";
 
@@ -197,7 +197,7 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
   const headers = new Headers({
     "content-type": kind === "page" ? "text/html; charset=utf-8" : item.contentType,
     "content-length": String(item.size),
-    "content-security-policy": contentSecurityPolicy(env.KITSHN_HOST),
+    "content-security-policy": contentSecurityPolicy(adminHosts(env)),
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
     "cache-control": "private, no-store",
@@ -362,7 +362,7 @@ export default {
     if (url.hostname === `files.${env.KITSHN_ZONE}`) return content(request, env, "file");
     // K-1108, K-817: only an offline route brings a live site's request here, on any zone that kitshn publishes on.
     if (
-      url.hostname !== env.KITSHN_HOST &&
+      !adminHosts(env).includes(url.hostname) &&
       (url.hostname.endsWith(`.${env.KITSHN_ZONE}`) || onOtherZone(url.hostname, env))
     ) {
       return offline(request, env, ctx);
@@ -411,6 +411,35 @@ export default {
         headers.set("x-kitshn-caller", JSON.stringify(fresh));
         return env.KITSHN.getByName("kitshn").fetch(
           new Request(`${url.origin}/fresh/resume`, { method: "POST", headers }),
+        );
+      }
+      // K-1723: the approve paths have their own Access applications; the Durable Object checks the token against the
+      // audience tag of the application of that path, and the approver circle.
+      if (
+        url.pathname.startsWith("/api/approve/passkey/") ||
+        url.pathname.startsWith("/api/approve/login/")
+      ) {
+        const kind = url.pathname.startsWith("/api/approve/passkey/") ? "passkey" : "login";
+        const rest = url.pathname.slice(`/api/approve/${kind}/`.length);
+        if (rest === "start" && request.method === "GET") {
+          // Access sends the approver back to the map with the proposal and the hash of the text to read (K-1722).
+          const approve = url.searchParams.get("approve") ?? "";
+          const seen = url.searchParams.get("hash") ?? "";
+          const safe =
+            approve !== "" &&
+            approve.length <= 64 &&
+            [...approve].every((char) => "0123456789abcdef-".includes(char)) &&
+            seen.length === 64 &&
+            [...seen].every((char) => "0123456789abcdef".includes(char));
+          return Response.redirect(`${url.origin}/${safe ? `#approve/${approve}/${seen}` : ""}`, 302);
+        }
+        if (request.method !== "POST") return Response.json({ error: "Not found." }, { status: 404 });
+        return env.KITSHN.getByName("kitshn").fetch(
+          new Request(`${url.origin}/approve/${kind}/${rest}`, {
+            method: "POST",
+            headers: request.headers,
+            body: await request.text(),
+          }),
         );
       }
       // K-1822: a restore to a time also needs a fresh passkey. The restart takes a moment, so the Worker asks
@@ -519,6 +548,13 @@ export default {
       headers.delete("x-kitshn-caller");
       headers.set("x-kitshn-deployer", JSON.stringify(deployer));
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
+    }
+    // K-1770: exactly the discovery document and the JWKS answer below /.well-known; every other path is "not found".
+    if (url.pathname.startsWith("/.well-known/")) {
+      const file = url.pathname.slice("/.well-known/".length);
+      if ((file !== "openid-configuration" && file !== "jwks.json") || request.method !== "GET")
+        return Response.json({ error: "Not found." }, { status: 404 });
+      return env.KITSHN.getByName("kitshn").fetch(`https://kitshn.internal/internal/well-known/${file}`);
     }
     if (url.pathname === "/public/cards.json" && (request.method === "GET" || request.method === "HEAD"))
       return publicCards(request, env, ctx);

@@ -3,15 +3,21 @@
 export type NotificationLevel = "info" | "warn" | "error";
 
 /** K-1904: the sources of this version; a mute names one of them. */
-export const NOTIFICATION_SOURCES = ["deploy", "uptime"] as const;
+export const NOTIFICATION_SOURCES = ["deploy", "uptime", "kitshn.ask"] as const;
 
 /** K-1903: "run" calls the handler of the source at once; "link" opens a path of the map. */
 export type NotificationAction =
   | { readonly id: string; readonly label: string; readonly kind: "run" }
   | { readonly id: string; readonly label: string; readonly kind: "link"; readonly path: string };
 
-/** K-1902: who gets a notification. The owner gets every one; a circle adds the people of that circle. */
-export type Recipients = { readonly _tag: "owner" } | { readonly _tag: "circle"; readonly circle: string };
+/**
+ * K-1902: who gets a notification. The owner gets every one; a circle adds the people of that circle. K-1722:
+ * "approvers" goes to the members of that circle only, also when the owner is not one.
+ */
+export type Recipients =
+  | { readonly _tag: "owner" }
+  | { readonly _tag: "circle"; readonly circle: string }
+  | { readonly _tag: "approvers"; readonly circle: string };
 
 export interface NotificationInput {
   readonly source: string;

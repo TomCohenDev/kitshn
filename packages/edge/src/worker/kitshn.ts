@@ -44,6 +44,10 @@ import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
   OWNER_CIRCLE_ID,
+  MACHINE_RIGHT_NAMES,
+  type MachineRight,
+  type GitHubWay,
+  GITHUB_WAYS,
   type Circle,
   type Member,
   type Point,
@@ -63,6 +67,8 @@ import {
   type ProjectVolume,
   type Sample,
   type ServerToDaemon,
+  type AskOutcome,
+  type AskResult,
   allowedFor,
   connectText,
   fingerprintOf,
@@ -73,7 +79,7 @@ import {
   newJoinCode,
   rotateText,
   sealJoin,
-  verifyText,
+  verifyForHosts,
 } from "../core/machine.ts";
 import { placeInside } from "../core/place.ts";
 import {
@@ -109,6 +115,8 @@ import type {
   DeployNote,
   MachineView,
   OrphanWorker,
+  AskEventView,
+  ProposalView,
   RepoView,
   RevisionView,
   ServerMessage,
@@ -137,6 +145,9 @@ import {
   isPreview,
   mayDeployOn,
   agentUploadPlace,
+  codeRightMode,
+  machineOf,
+  machineRightMode,
 } from "../core/agent.ts";
 import { DEMO_MACHINES, DEMO_ICONS, demo, demoUsage } from "../core/demo.ts";
 import type { Usage } from "../core/usage.ts";
@@ -155,6 +166,26 @@ import {
   probeUp,
   stored,
 } from "../core/uptime.ts";
+import { githubWayOf, matchProblem, repoGroupId } from "../core/repoGroups.ts";
+import {
+  ASK_EVENT_COUNT,
+  ASK_EVENT_DAYS,
+  ASK_RIGHT,
+  type AskAction,
+  PROPOSAL_MS,
+  type Proposal,
+  APPROVED_WINDOW_MS,
+  MAX_OPEN_PROPOSALS,
+  MAX_SHOWN,
+  askRequest,
+  isAskAction,
+  conditionProblem,
+  labelProblem,
+  shownAsk,
+  shownHash,
+  WINDOW_ACTIONS,
+  machinesApprove,
+} from "../core/asks.ts";
 import { type MachineOs, machineOs } from "../core/icons.ts";
 import {
   contentSecurityPolicy,
@@ -178,6 +209,7 @@ import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
 import { seed } from "../core/seed.ts";
 import { type Visitor, circleMatches, visitorLevel } from "../core/visitor.ts";
+import { APPROVE_APPS } from "../core/access.ts";
 import {
   DEFAULT_LEVELS,
   PUSH_SENDS_PER_RUN,
@@ -229,9 +261,22 @@ import {
   verifyAccess,
   verifyPasskeys,
 } from "./access-sync.ts";
+import { approverOf } from "./auth.ts";
+import { MAX_KEYS, type PassKey, RETIRED_MS, discovery, jwks, newPassKey, signPass } from "./passes.ts";
 import type { Caller, Deployer } from "./auth.ts";
 import { CloudflareError, cloudflare } from "./cloudflare.ts";
-import { type RepoOnGitHub, dispatchDeploy, reposOnGitHub } from "./github.ts";
+import {
+  NotInstalled,
+  type RepoOnGitHub,
+  appBotLogin,
+  rerunWorkflowRun,
+  dispatchDeploy,
+  repoToken,
+  reposOnGitHub,
+  revokeToken,
+  sealToken,
+  openToken,
+} from "./github.ts";
 import { REPLACED, dropLiveSite, failQueuedDowns, removalDown, requeueDowns } from "./downs.ts";
 import { REPO_GATE_MIGRATION, migrate } from "./migrations.ts";
 import {
@@ -291,7 +336,7 @@ import {
   rekeyDecision,
   socketStart,
 } from "./machines.ts";
-import type { Env } from "./env.ts";
+import { adminHosts, type Env } from "./env.ts";
 
 /** What a WebSocket of this Durable Object belongs to. */
 type Attachment =
@@ -564,7 +609,8 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1903: the handler of "run" actions, per source. */
   private readonly actionHandlers = new Map<
     string,
-    (notification: Notification, action: string, caller: Caller) => Promise<void> | void
+    /** The error text when the action does not run, else null. */
+    (notification: Notification, action: string, caller: Caller) => Promise<string | null> | string | null
   >();
   private get revisions(): Array<RevisionView> {
     this.revisionCache ??= this.loadRevisions();
@@ -600,6 +646,8 @@ export class Kitshn extends DurableObject<Env> {
   }
   /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
   private stuckShares = new Set<string>();
+  /** K-1716: false once `github_tokens` is known to be empty, so a broadcast reads no row of it. True after a wake. */
+  private tokensLive = true;
   private accessWarnings: Array<string> = [];
   /** K-819: a GitHub check of the repos runs, so a second open tab starts none. */
   private checkingRepos = false;
@@ -661,6 +709,16 @@ export class Kitshn extends DurableObject<Env> {
     super(ctx, env);
     // K-604: a daemon ping never wakes the Durable Object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+    // K-1722: "Deny" of an ask runs from its notification; "Approve" is a link, because it needs the approver's proof.
+    this.actionHandlers.set("kitshn.ask", async (notification, action, caller) => {
+      if (action !== "deny") return `The ask has no action ${action}.`;
+      const decided = await this.decide(notification.key, "denied", {
+        ...caller,
+        machineId: null,
+        reason: null,
+      });
+      return decided.ok ? null : decided.error;
+    });
     void ctx.blockConcurrencyWhile(async () => {
       // Numbered migrations: each runs once per database, with its version, in one transaction.
       ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
@@ -1207,6 +1265,8 @@ export class Kitshn extends DurableObject<Env> {
           `UPDATE jobs SET state = 'failed', output = 'The emergency pause ended this job.'
            WHERE state = 'queued' AND json_extract(visitor, '$.email') IS NULL AND json_extract(visitor, '$.clientId') IS NOT NULL`,
         );
+        // K-1716: the pause denies every open ask.
+        this.denyOpenProposals(null, "the emergency pause");
       }
       if (merge) {
         this.sql(
@@ -1277,6 +1337,13 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-1504: "Resume", after the Worker checked a passkey login of at most ten minutes. */
   private resume(caller: Caller) {
+    // K-1504: only the owner emails of the bootstrap resume, also when an approver policy let another person pass Access.
+    const owners = this.env.OWNER_EMAILS.split(",").map((email) => email.trim().toLowerCase());
+    if (caller.actor._tag !== "person" || !owners.includes(caller.actor.email.toLowerCase()))
+      return Response.json(
+        { error: "Only an owner email of the bootstrap resumes (K-1504)." },
+        { status: 403 },
+      );
     if (!this.authorized(caller))
       return Response.json(
         { error: "You have no control level on the kitshn admin (K-104)." },
@@ -2164,12 +2231,6 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json(finish);
   }
 
-  /**
-   * K-1771, K-1822: the pass key rotation of section 17. It does nothing until section 17 lands; then it runs the
-   * same rule as "Rotate pass key".
-   */
-  private async rotatePassKey(_actor: Actor): Promise<void> {}
-
   /** K-1822: the Worker's poll after the restart, with the finish that the restore sent it. */
   private async restored(caller: Caller, body: unknown) {
     if (!this.authorized(caller))
@@ -2909,6 +2970,13 @@ export class Kitshn extends DurableObject<Env> {
         ),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
+      proposals: this.openProposals(),
+      askEvents: this.recentAskEvents(),
+      githubDefaultWay: this.meta("github_default_way") === "app" ? "app" : "not-kitshn",
+      // K-1767: the newest 20 runs of pull requests of the App that wait for Deploy.
+      botRuns: this.sql<{ repo_id: string; repo: string; pr: number; sha: string; at: number }>(
+        "SELECT repo_id, repo, pr, sha, at FROM bot_runs WHERE approved = 0 ORDER BY at DESC LIMIT 20",
+      ).map((row) => ({ repoId: row.repo_id, repo: row.repo, pr: row.pr, sha: row.sha, at: row.at })),
       jobs: this.recentJobs(10, 2000),
       backups: Object.fromEntries(this.latestBackups()),
       r2Bucket: this.bucket(),
@@ -2961,6 +3029,8 @@ export class Kitshn extends DurableObject<Env> {
   private broadcast() {
     // K-1904: the sources that kitshn derives from its own state follow each change before the maps hear of it.
     this.reconcileNotifications();
+    // K-1716: a change can take a code right away.
+    this.revokeTokens(null, true);
     const repos = this.repoViews();
     for (const socket of this.ctx.getWebSockets("map")) {
       const attachment = attachmentOf(socket);
@@ -3005,6 +3075,8 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/internal/backup-access")
       return this.backupAccess((await request.json()) as { card: string; clientId: string });
     if (path === "/internal/content") return this.contentDecision((await request.json()) as ContentRequest);
+    if (path === "/internal/well-known/openid-configuration" || path === "/internal/well-known/jwks.json")
+      return this.wellKnown(path.slice("/internal/well-known/".length).replace(".json", ""));
     if (path.startsWith("/deploy/")) {
       const header = request.headers.get("x-kitshn-deployer");
       if (!header) return new Response("The Worker sent no deployer.", { status: 500 });
@@ -3012,12 +3084,43 @@ export class Kitshn extends DurableObject<Env> {
         return this.deployFile(path, JSON.parse(header) as Deployer, request);
       return this.deployStep(path, JSON.parse(header) as Deployer, await request.json().catch(() => null));
     }
+    // K-1723: an approve or a deny on the approve path of one kind; the token must come from its own application.
+    if (path.startsWith("/approve/passkey/") || path.startsWith("/approve/login/")) {
+      const via = path.startsWith("/approve/passkey/") ? "passkey" : "login";
+      const rest = path.slice(`/approve/${via}/`.length);
+      const deny = rest.endsWith("/deny");
+      const id = decodeURIComponent(deny ? rest.slice(0, -"/deny".length) : rest);
+      const approver = await approverOf(
+        request,
+        this.env,
+        this.access.get(APPROVE_APPS[via])?.aud ?? null,
+        via === "passkey",
+        Date.now(),
+      );
+      if (typeof approver === "string") return Response.json({ error: approver }, { status: 401 });
+      return this.answerProposal(
+        id,
+        deny ? "denied" : "approved",
+        approver,
+        via,
+        await request.json().catch(() => null),
+      );
+    }
     const header = request.headers.get("x-kitshn-caller");
     if (!header) return new Response("The Worker sent no caller.", { status: 500 });
     const caller = JSON.parse(header) as Caller;
     if (path === "/connect") return this.connectMachine(request, caller);
     // Only the Worker's fresh passkey route sends this path (K-1504).
     if (path === "/fresh/resume" && request.method === "POST") return this.resume(caller);
+    // K-1723: the owner denies an ask from the map.
+    if (path.startsWith("/api/proposals/") && path.endsWith("/deny") && request.method === "POST")
+      return this.answerProposal(
+        decodeURIComponent(path.slice("/api/proposals/".length, -"/deny".length)),
+        "denied",
+        caller,
+        null,
+        await request.json().catch(() => null),
+      );
     if (path === "/fresh/restore-time" && request.method === "POST")
       return await this.restoreTime(caller, await request.json().catch(() => null));
     if (path === "/fresh/restored" && request.method === "POST")
@@ -3105,6 +3208,145 @@ export class Kitshn extends DurableObject<Env> {
     if (path.startsWith("/api/apps/") && request.method === "DELETE")
       return this.removeApp(caller, decodeURIComponent(path.slice("/api/apps/".length)));
     if (path === "/api/repos/check" && request.method === "POST") return await this.checkReposOnGitHub();
+    // K-1770 to K-1774: the passes of Settings: on or off, the audiences, and "Rotate pass key".
+    if (path === "/api/passes" && request.method === "GET") return Response.json(this.passSettings());
+    if (path === "/api/passes" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      if (!isRecord(body) || typeof body["on"] !== "boolean")
+        return Response.json({ error: 'Send {"on": true | false}.' }, { status: 400 });
+      const on = body["on"];
+      // K-1504: while paused, access only goes down.
+      if (on && this.state.paused)
+        return Response.json(
+          { error: "kitshn is paused, so passes stay off until Resume (K-1504)." },
+          { status: 409 },
+        );
+      this.ctx.storage.transactionSync(() => {
+        this.setMeta("passes_on", on ? "1" : "0");
+        this.insertRevision(caller.actor, on ? "Turned on passes" : "Turned off passes", [], null);
+      });
+      this.broadcast();
+      return Response.json(this.passSettings());
+    }
+    if (path === "/api/passes/rotate" && request.method === "POST") {
+      await this.rotatePassKey(caller.actor);
+      this.broadcast();
+      return Response.json(this.passSettings());
+    }
+    if (path === "/api/passes/audiences" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      const address = isRecord(body) && typeof body["address"] === "string" ? body["address"].trim() : "";
+      // An audience that exists already changes only whether its passes carry labels.
+      if (this.sql("SELECT 1 AS one FROM pass_audiences WHERE address = ?", address).length > 0) {
+        const labels = isRecord(body) && body["labels"] === true;
+        this.ctx.storage.transactionSync(() => {
+          this.sql("UPDATE pass_audiences SET labels = ? WHERE address = ?", labels ? 1 : 0, address);
+          this.insertRevision(
+            caller.actor,
+            `${labels ? "Put" : "Took"} labels ${labels ? "in" : "out of"} the passes for ${address}`,
+            [],
+            null,
+          );
+        });
+        return Response.json(this.passSettings());
+      }
+      const added = this.addAudience(
+        address,
+        { machineId: null, name: "the owner" },
+        isRecord(body) && body["labels"] === true,
+      );
+      if (added.outcome !== "done")
+        return Response.json({ error: added.outcome === "refused" ? added.reason : "No." }, { status: 400 });
+      return Response.json(this.passSettings());
+    }
+    if (path.startsWith("/api/passes/audiences/") && request.method === "DELETE") {
+      const address = decodeURIComponent(path.slice("/api/passes/audiences/".length));
+      this.ctx.storage.transactionSync(() => {
+        this.sql("DELETE FROM pass_audiences WHERE address = ?", address);
+        this.insertRevision(caller.actor, `Removed the pass audience ${address}`, [], null);
+      });
+      this.broadcast();
+      return Response.json(this.passSettings());
+    }
+    // K-1767: the owner's Deploy of a pull request of the kitshn App approves its run's commit and runs it again.
+    if (path === "/api/bot-runs/deploy" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      const repoId = isRecord(body) && typeof body["repoId"] === "string" ? body["repoId"] : "";
+      const pr = isRecord(body) && typeof body["pr"] === "number" ? body["pr"] : -1;
+      const sha = isRecord(body) && typeof body["sha"] === "string" ? body["sha"] : "";
+      const [run] = this.sql<{ run_id: string; repo: string }>(
+        "SELECT run_id, repo FROM bot_runs WHERE repo_id = ? AND pr = ? AND sha = ?",
+        repoId,
+        pr,
+        sha,
+      );
+      if (!run) return Response.json({ error: "kitshn knows no such waiting run." }, { status: 404 });
+      if (!this.env.GITHUB_APP_ID || !this.env.GITHUB_APP_KEY)
+        return Response.json({ error: NO_GITHUB_APP }, { status: 503 });
+      this.ctx.storage.transactionSync(() => {
+        this.sql(
+          "UPDATE bot_runs SET approved = 1 WHERE repo_id = ? AND pr = ? AND sha = ?",
+          repoId,
+          pr,
+          sha,
+        );
+        this.insertRevision(
+          caller.actor,
+          `Deployed pull request #${pr} of ${run.repo} (${sha.slice(0, 7)})`,
+          [],
+          null,
+        );
+      });
+      try {
+        await rerunWorkflowRun(
+          { id: this.env.GITHUB_APP_ID, key: this.env.GITHUB_APP_KEY },
+          repoId,
+          run.run_id,
+        );
+      } catch (error) {
+        return Response.json(
+          { error: error instanceof Error ? error.message : String(error) },
+          { status: 502 },
+        );
+      }
+      this.broadcast();
+      return Response.json({ deployed: pr });
+    }
+    // K-1756: History searches the ask events by one label.
+    if (path === "/api/ask-events" && request.method === "GET") {
+      const label = new URL(request.url).searchParams.get("label") ?? "";
+      const equals = label.indexOf("=");
+      if (equals <= 0) return Response.json({ error: "Send ?label=key=value." }, { status: 400 });
+      return Response.json({
+        events: this.askEventsWithLabel(label.slice(0, equals), label.slice(equals + 1), null),
+      });
+    }
+    // K-1733, K-1760: repo groups and the default GitHub way.
+    if (path === "/api/repo-groups" && request.method === "POST")
+      return this.addRepoGroup(caller, await request.json().catch(() => null));
+    if (path.startsWith("/api/repo-groups/") && (request.method === "POST" || request.method === "DELETE"))
+      return this.changeRepoGroup(
+        caller,
+        decodeURIComponent(path.slice("/api/repo-groups/".length)),
+        request.method === "DELETE" ? null : await request.json().catch(() => null),
+      );
+    if (path === "/api/settings/github-way" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      const way = isRecord(body) ? body["githubWay"] : null;
+      if (way !== "app" && way !== "not-kitshn")
+        return Response.json({ error: 'Send {"githubWay": "app" | "not-kitshn"}.' }, { status: 400 });
+      this.ctx.storage.transactionSync(() => {
+        this.setMeta("github_default_way", way);
+        this.insertRevision(
+          caller.actor,
+          `Set the default GitHub way to ${way === "app" ? "kitshn App token" : "not kitshn"}`,
+          [],
+          null,
+        );
+      });
+      this.broadcast();
+      return Response.json({ githubWay: way });
+    }
     if (path.startsWith("/api/repos/") && request.method === "POST")
       return await this.setRepoState(
         caller,
@@ -3389,9 +3631,10 @@ export class Kitshn extends DurableObject<Env> {
     const plan = answerCheck(machine.key, attachment);
     if (plan.kind === "refuse") return this.refuseSocket(socket, machine, plan.reason);
     socket.serializeAttachment({ ...attachment, answered: true } satisfies Attachment);
-    const valid = await verifyText(
+    const valid = await verifyForHosts(
       plan.publicKey,
-      connectText(this.env.KITSHN_HOST, machine.id, attachment.challenge),
+      adminHosts(this.env),
+      (host) => connectText(host, machine.id, attachment.challenge),
       message["signature"],
     );
     // The socket can close and the key can change during the check: a rotation, a reset or a removal.
@@ -3424,9 +3667,10 @@ export class Kitshn extends DurableObject<Env> {
     if (publicKey === null)
       return this.refuseSocket(socket, machine, "The rotation has no valid public key.");
     const key = await this.publicKey(publicKey);
-    const valid = await verifyText(
+    const valid = await verifyForHosts(
       machine.key.publicKey,
-      rotateText(this.env.KITSHN_HOST, machine.id, attachment.challenge, publicKey),
+      adminHosts(this.env),
+      (host) => rotateText(host, machine.id, attachment.challenge, publicKey),
       message["signature"],
     );
     const now = this.state.machines.get(machine.id);
@@ -3445,6 +3689,7 @@ export class Kitshn extends DurableObject<Env> {
       `Rotated the key of ${machine.name} from ${machine.key.fingerprint} to ${key.fingerprint}`,
     );
     for (const old of this.ctx.getWebSockets(machine.id)) old.close(ROTATED, "key rotated");
+    this.denyOpenProposals(machine.id, "the key of the machine rotated");
   }
 
   private async publicKey(publicKey: string): Promise<Extract<MachineKey, { kind: "public" }>> {
@@ -3492,6 +3737,9 @@ export class Kitshn extends DurableObject<Env> {
     // K-1708: a connection on the token alone only reports; it changes no site, volume or job.
     if (attachment.check === "token" && message.type !== "status" && message.type !== "sample") return;
     if (message.type === "rotate") return this.rotateKey(socket, attachment, machine, message);
+    // K-1710: an ask of a local agent, only on a signed connection.
+    if (message.type === "ask" && attachment.check === "signed")
+      return this.answerAsk(socket, machine, message);
     if (message.type === "status" && isRecord(message.status)) {
       const status: MachineStatus = {
         version: String(message.status.version).slice(0, 40),
@@ -3510,6 +3758,20 @@ export class Kitshn extends DurableObject<Env> {
         Number.isSafeInteger(message.status.keptBytes) &&
         message.status.keptBytes >= 0
           ? { keptBytes: message.status.keptBytes }
+          : {}),
+        // K-1751: the attesters that the daemon reports; their prefixes are the only labels that rights check.
+        ...(Array.isArray(message.status.attesters)
+          ? {
+              attesters: message.status.attesters
+                .filter(
+                  (item): item is { prefix: string; address: string } =>
+                    isRecord(item) &&
+                    typeof item["prefix"] === "string" &&
+                    typeof item["address"] === "string",
+                )
+                .slice(0, 10)
+                .map((item) => ({ prefix: item.prefix.slice(0, 32), address: item.address.slice(0, 200) })),
+            }
           : {}),
       };
       socket.serializeAttachment({ ...attachment, status } satisfies Attachment);
@@ -3873,6 +4135,7 @@ export class Kitshn extends DurableObject<Env> {
     );
     for (const socket of this.ctx.getWebSockets(id))
       socket.close(KEY_RESET, "The owner reset the key of this machine.");
+    this.denyOpenProposals(machine.id, "the owner reset the key of the machine");
     return answer;
   }
 
@@ -3884,6 +4147,7 @@ export class Kitshn extends DurableObject<Env> {
     if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
     const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}`;
     for (const socket of this.ctx.getWebSockets(id)) socket.close(4002, "The owner removed this machine.");
+    this.denyOpenProposals(id, "the owner removed the machine");
     const notFound = (error: unknown) =>
       error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error);
     try {
@@ -4723,6 +4987,11 @@ export class Kitshn extends DurableObject<Env> {
       "SELECT MIN(expires_at) AS expires_at FROM jobs WHERE state IN ('queued', 'sent')",
     );
     if (job?.expires_at) next = Math.min(next, Math.max(job.expires_at, now));
+    // K-1724: the next proposal that expires.
+    const [proposal] = this.sql<{ expires_at: number | null }>(
+      "SELECT MIN(expires_at) AS expires_at FROM proposals WHERE state = 'pending'",
+    );
+    if (proposal?.expires_at) next = Math.min(next, Math.max(proposal.expires_at, now));
     const desired = this.desired(now);
     if (
       this.env.CLOUDFLARE_API_TOKEN &&
@@ -4845,6 +5114,17 @@ export class Kitshn extends DurableObject<Env> {
         "DELETE FROM jobs WHERE state NOT IN ('queued', 'sent') AND id <= (SELECT id FROM jobs ORDER BY id DESC LIMIT 1 OFFSET 1000)",
       );
       this.sql("DELETE FROM join_codes WHERE expires_at < ?", now);
+      // K-1717: ask events stay 30 days, at most 5,000; a decided proposal stays as long.
+      this.sql(
+        "DELETE FROM ask_events WHERE at < ? OR id <= (SELECT id FROM ask_events ORDER BY id DESC LIMIT 1 OFFSET ?)",
+        now - ASK_EVENT_DAYS * DAY,
+        ASK_EVENT_COUNT,
+      );
+      this.sql(
+        "DELETE FROM proposals WHERE state != 'pending' AND decided_at < ?",
+        now - ASK_EVENT_DAYS * DAY,
+      );
+      this.sql("DELETE FROM ask_labels WHERE event_id < (SELECT MIN(id) FROM ask_events)");
       this.sql("DELETE FROM rekey_codes WHERE expires_at < ?", now);
       // K-1901, K-1905: closed notifications stay 30 days and 500 at most; an ended mute goes.
       this.sql(
@@ -5547,6 +5827,54 @@ export class Kitshn extends DurableObject<Env> {
     }
     const event = eventOf(deployer, input["event"]);
     if (typeof event === "string") return Response.json({ error: event }, { status: 400 });
+    // K-1767: a push or a pull request of the kitshn App never deploys by itself. A push waits for a deploy ask, which
+    // builds by workflow_dispatch; a pull request waits for the owner's Deploy of its run's commit.
+    const bot =
+      deployer.actor.endsWith("[bot]") && deployer.eventName !== "workflow_dispatch"
+        ? await this.appBot()
+        : null;
+    // Fails closed: with an App but no known bot name, any bot push or pull request waits.
+    if (bot === "unknown")
+      return Response.json(
+        {
+          error: "kitshn cannot read the bot name of its App, so a bot run waits. Try again later (K-1767).",
+        },
+        { status: 409 },
+      );
+    if (bot !== null && deployer.actor === bot) {
+      if (deployer.eventName === "pull_request" && deployer.pr !== null) {
+        const [run] = this.sql<{ approved: number }>(
+          "SELECT approved FROM bot_runs WHERE repo_id = ? AND pr = ? AND sha = ?",
+          deployer.repoId,
+          deployer.pr,
+          deployer.sha,
+        );
+        if (run?.approved !== 1) {
+          this.sql(
+            `INSERT OR REPLACE INTO bot_runs (repo_id, repo, pr, sha, run_id, at, approved) VALUES (?, ?, ?, ?, ?, ?, 0)`,
+            deployer.repoId,
+            deployer.repo,
+            deployer.pr,
+            deployer.sha,
+            deployer.runId,
+            Date.now(),
+          );
+          this.broadcast();
+          return Response.json(
+            {
+              error: `This pull request of the kitshn App waits for a deploy click: Deploy in the map panel (K-1767).`,
+            },
+            { status: 409 },
+          );
+        }
+      } else
+        return Response.json(
+          {
+            error: `This push of the kitshn App waits for a deploy ask: kitshn agent deploy <card> --body '{"mode":"build"}' (K-1767).`,
+          },
+          { status: 409 },
+        );
+    }
     // K-804: a CLI from before several apps sends no key; its one app is the app `app`.
     const key = input["key"] ?? DEFAULT_APP;
     if (!Schema.is(AppKey)(key))
@@ -5755,12 +6083,10 @@ export class Kitshn extends DurableObject<Env> {
         { status: 409 },
       );
     }
-    // K-817: the plan refuses kitshn's own names; the admin host can have another name.
-    if (result.addresses.slice(1).includes(this.env.KITSHN_HOST))
-      return Response.json(
-        { error: `${this.env.KITSHN_HOST} is the kitshn admin host (K-817).` },
-        { status: 409 },
-      );
+    // K-817, K-1209: the plan refuses kitshn's own names; the admin hosts can have other names, the main address too.
+    const adminHost = result.addresses.find((address) => adminHosts(this.env).includes(address));
+    if (adminHost)
+      return Response.json({ error: `${adminHost} is the kitshn admin host (K-817).` }, { status: 409 });
     const addressRefused = await this.addressRefusal(
       api,
       result.addresses,
@@ -6682,8 +7008,42 @@ export class Kitshn extends DurableObject<Env> {
    * K-718: an agent key sees the cards that it manages and the circles that it is in (no members), moves
    * those cards between those circles, and runs jobs on the machines that it controls (K-614).
    */
-  private async agentRequest(path: string, request: Request, caller: Caller) {
+  /**
+   * K-718: the agent paths. K-1710: a machine runs them too, through its asks; `approved` is the right that its
+   * approver circle gave for this one ask (K-1723).
+   */
+  private async agentRequest(
+    path: string,
+    request: Request,
+    caller: Caller,
+    approved: MachineRight | null = null,
+  ) {
     const now = Date.now();
+    // K-1714: a machine asks only over its signed connection (`ask`), never with its token over HTTP, so the
+    // modes, the pause check and the ask events always apply.
+    const machine = machineOf(this.state, caller.visitor);
+    if (machine && caller.actor._tag !== "machine")
+      return Response.json(
+        {
+          error:
+            "A machine asks kitshn over its signed connection with kitshn agent, not over HTTP (K-1714).",
+        },
+        { status: 403 },
+      );
+    // K-1712: a machine's job and deploy need their right now: automatic, or the approval of this ask.
+    const machineMay = (right: MachineRight) => {
+      if (!machine) return true;
+      const mode = machineRightMode(this.state, machine.id, right, now);
+      return mode !== null && (mode.mode === "automatic" || approved === right);
+    };
+    const machinePaths = ["/agent/state", "/agent/apply", "/agent/jobs", "/agent/deploy"];
+    if (
+      machine &&
+      !machinePaths.includes(path) &&
+      !path.startsWith("/agent/jobs/") &&
+      !path.startsWith("/agent/repos/")
+    )
+      return Response.json({ error: `A machine has no ask for ${path} yet (K-1711).` }, { status: 403 });
     const own = circlesOf(this.state, caller.visitor, now);
     if (own.size === 0)
       return Response.json(
@@ -6695,11 +7055,14 @@ export class Kitshn extends DurableObject<Env> {
     const device = [...own]
       .flatMap((id) => this.state.circles.get(id)?.members ?? [])
       .find((member) => member._tag === "device" && member.clientId === caller.visitor.clientId);
+    // K-1730: a machine acts under its own name.
+    const agentName =
+      device?._tag === "device" ? device.name : caller.actor._tag === "machine" ? caller.actor.name : null;
     const agent: Caller =
       caller.actor._tag === "device" && device?._tag === "device"
         ? { ...caller, actor: { ...caller.actor, name: device.name } }
         : caller;
-    const rights = AGENT_RIGHTS.filter((right) => agentHas(this.state, caller.visitor, right, now));
+    const rights = AGENT_RIGHTS.filter((right) => agentHas(this.state, caller.visitor, right, now, approved));
     // A key that publishes also sees the Everyone circle, where its published cards sit.
     const visible = (id: string) => {
       const circle = this.state.circles.get(id);
@@ -6727,6 +7090,7 @@ export class Kitshn extends DurableObject<Env> {
           changes,
           now,
           added,
+          approved,
         );
         if (refusal) return Response.json({ error: refusal }, { status: 403 });
         return Response.json({ revision: this.commit(agent.actor, changes, null) });
@@ -6736,8 +7100,17 @@ export class Kitshn extends DurableObject<Env> {
       }
     };
     if (path === "/agent/state" && request.method === "GET") {
+      // K-1726: a machine sees the open asks of the circles that it is a member of, so its agent can answer them.
+      const answerable = machine
+        ? this.openProposals().filter((proposal) =>
+            this.state.circles
+              .get(proposal.circleId)
+              ?.members.some((member) => member._tag === "machine" && member.machineId === machine.id),
+          )
+        : [];
       return Response.json({
         rights,
+        ...(machine ? { proposals: answerable } : {}),
         // K-819: with "may add apps", the waiting repos that the key may allow.
         repos: rights.includes("addsApps")
           ? this.sql<RepoRow>(
@@ -6819,6 +7192,11 @@ export class Kitshn extends DurableObject<Env> {
     if (path.startsWith("/agent/library/") && path.endsWith("/previous") && request.method === "POST")
       return this.restorePrevious(agent, path.slice("/agent/library/".length, -"/previous".length), "agent");
     if (path === "/agent/jobs" && request.method === "POST") {
+      if (!machineMay("runsCommands"))
+        return Response.json(
+          { error: 'The right "runs commands" is off for this machine (K-1720).' },
+          { status: 403 },
+        );
       const body: unknown = await request.json().catch(() => null);
       const machineId =
         typeof body === "object" && body !== null && "machineId" in body ? body.machineId : undefined;
@@ -6864,18 +7242,18 @@ export class Kitshn extends DurableObject<Env> {
       const refusal = agentAllowRefusal(
         row ? repoGateOf(row) : undefined,
         isRecord(body) ? body["state"] : null,
-        agentHas(this.state, caller.visitor, "addsApps", Date.now()),
+        agentHas(this.state, caller.visitor, "addsApps", Date.now(), approved),
         row?.gone_at !== null && row?.gone_at !== undefined,
       );
       if (refusal) return Response.json({ error: refusal.error }, { status: refusal.status });
-      // An agent circle names this key, so its device member exists.
-      if (device?._tag !== "device")
-        throw new Error("An agent key without its device member allowed a repo.");
+      // An agent circle names this key or machine, so its member exists.
+      if (agentName === null || caller.visitor.clientId === null)
+        throw new Error("An agent without its member in an agent circle allowed a repo.");
       return this.setRepoState(
         agent,
         repoId,
         { state: "allowed" },
-        { clientId: device.clientId, name: device.name },
+        { clientId: caller.visitor.clientId, name: agentName },
       );
     }
     // K-1810: a key reads the logs of a card only while it controls the card; the same search as the map.
@@ -6900,6 +7278,11 @@ export class Kitshn extends DurableObject<Env> {
       return await this.logsResponse(card, body);
     }
     if (path === "/agent/deploy" && request.method === "POST") {
+      if (!machineMay("deploys"))
+        return Response.json(
+          { error: 'The right "deploys" is off for this machine (K-1720).' },
+          { status: 403 },
+        );
       const body: unknown = await request.json().catch(() => null);
       const card = isRecord(body) && typeof body["card"] === "string" ? body["card"] : null;
       const mode = isRecord(body) ? body["mode"] : null;
@@ -6927,6 +7310,1024 @@ export class Kitshn extends DurableObject<Env> {
       return this.agentRedeploy(agent, machine.id, plan.command);
     }
     return Response.json({ error: `The agent path has no ${request.method} ${path}.` }, { status: 404 });
+  }
+
+  /** K-1710: answers one ask of a machine on its own connection. */
+  private async answerAsk(socket: WebSocket, machine: Machine, message: Record<string, unknown>) {
+    const requestId = typeof message["requestId"] === "string" ? message["requestId"].slice(0, 64) : null;
+    if (requestId === null) return;
+    const outcome = await this.ask(machine, isRecord(message["ask"]) ? message["ask"] : {});
+    send(socket, { type: "askAnswer", requestId, ...outcome });
+  }
+
+  /** K-1710 to K-1722: checks one ask, runs it, makes a proposal, or refuses it with the reason. */
+  private async ask(machine: Machine, raw: Record<string, unknown>): Promise<AskOutcome> {
+    const now = Date.now();
+    const action = raw["action"];
+    const target = typeof raw["target"] === "string" ? raw["target"].slice(0, 512) : "";
+    const reason = typeof raw["reason"] === "string" ? raw["reason"].slice(0, 500) : null;
+    const problem = labelProblem(raw["labels"]);
+    // K-1752, K-1753: labels of an attester prefix count only from the daemon's `attested`; a caller's own are dropped.
+    const prefixes = this.attesterPrefixesOf(machine.id);
+    const reserved = [...prefixes, "t3."];
+    const claimed = Object.fromEntries(
+      Object.entries(
+        problem === null && isRecord(raw["labels"]) ? (raw["labels"] as Record<string, string>) : {},
+      ).filter(([key]) => !reserved.some((prefix) => key.startsWith(prefix))),
+    );
+    const attested = Object.fromEntries(
+      Object.entries(isRecord(raw["attested"]) ? raw["attested"] : {})
+        .filter(
+          (entry): entry is [string, string] =>
+            typeof entry[1] === "string" &&
+            entry[0].length <= 64 &&
+            entry[1].length <= 256 &&
+            prefixes.some((prefix) => entry[0].startsWith(prefix)),
+        )
+        .slice(0, 20),
+    );
+    const labels: Record<string, string> = { ...claimed, ...attested };
+    const event = (outcome: AskOutcome) => {
+      if (isAskAction(action)) this.askEvent(now, machine, action, target, reason, labels, outcome);
+      return outcome;
+    };
+    if (!isAskAction(action))
+      return { outcome: "refused", reason: `kitshn does not know the action ${String(action)}.` };
+    if (problem !== null) return event({ outcome: "refused", reason: problem });
+    if (this.state.paused)
+      return event({
+        outcome: "refused",
+        reason: "kitshn is paused (Emergency pause). Asks wait until Resume (K-1504).",
+      });
+    if (action === "approve" || action === "deny") {
+      const visitor = { email: null, clientId: machine.clientId, ip: null };
+      const decided = await this.decide(target, action === "approve" ? "approved" : "denied", {
+        actor: { _tag: "machine", machineId: machine.id, name: machine.name },
+        visitor,
+        machineId: machine.id,
+        reason,
+      });
+      return event(
+        decided.ok
+          ? { outcome: "done", result: decided.result ?? null }
+          : { outcome: "refused", reason: decided.error },
+      );
+    }
+    if (action === "github-token")
+      return event(await this.askGitHubToken(machine, target, raw["body"], reason, labels, now));
+    // K-1773: an agent removes an audience that its machine added at once, because that lowers access (K-715).
+    if (action === "audience-remove") {
+      const [row] = this.sql<{ added_by: string | null }>(
+        "SELECT added_by FROM pass_audiences WHERE address = ?",
+        target,
+      );
+      if (row?.added_by !== machine.id)
+        return event({
+          outcome: "refused",
+          reason: "A machine removes only an audience that it added (K-1773).",
+        });
+      this.ctx.storage.transactionSync(() => {
+        this.sql("DELETE FROM pass_audiences WHERE address = ?", target);
+        this.insertRevision(
+          { _tag: "machine", machineId: machine.id, name: machine.name },
+          `Removed the pass audience ${target}`,
+          [],
+          null,
+        );
+      });
+      this.broadcast();
+      return event({ outcome: "done", result: { removed: target } });
+    }
+    // K-1774: passes stay off until the owner turns them on after the host move (K-1209).
+    if (action === "pass" && this.meta("passes_on") !== "1")
+      return event({
+        outcome: "refused",
+        reason: 'Passes are off. The owner turns on "Passes" in Settings after the host move (17.7).',
+      });
+    if (
+      action === "pass" &&
+      this.sql("SELECT 1 AS one FROM pass_audiences WHERE address = ?", target).length === 0
+    )
+      return event({ outcome: "refused", reason: `${target} is not in the pass audiences (K-1773).` });
+    // K-1756: the ask events of this machine with one label, `target` is key=value; it writes no event itself.
+    if (action === "history") {
+      const equals = target.indexOf("=");
+      if (equals <= 0)
+        return { outcome: "refused", reason: "history takes key=value, for example t3.thread.id=abc." };
+      return {
+        outcome: "done",
+        result: this.askEventsWithLabel(target.slice(0, equals), target.slice(equals + 1), machine.id),
+      };
+    }
+    const needs = ASK_RIGHT[action];
+    if (needs === "member")
+      throw new Error(`The action ${action} needs membership, and only approve and deny do.`);
+    if (needs !== "none" && needs !== "apply") {
+      const mode = machineRightMode(this.state, machine.id, needs, now);
+      if (mode === null)
+        return event({
+          outcome: "refused",
+          reason: `The right "${MACHINE_RIGHT_NAMES[needs]}" is off for this machine. The owner turns it on in its agent circle (K-1720).`,
+        });
+      const failed = conditionProblem(mode.conditions, labels, prefixes);
+      if (failed) return event({ outcome: "refused", reason: failed });
+      if (
+        mode.mode === "ask" &&
+        !(
+          WINDOW_ACTIONS.has(action) &&
+          this.inApprovedWindow(machine.id, action, target, needs, mode.circleId, now)
+        )
+      )
+        return event(
+          await this.propose(machine, action, target, raw["body"], reason, labels, needs, mode.circleId, now),
+        );
+    }
+    if (needs === "apply") {
+      const edits = this.askEdits(machine, action, target, raw["body"], now, null);
+      if (typeof edits === "string") {
+        // K-1720: a move into Everyone needs "publishes"; with "ask <circle>" it waits for an approval.
+        const mode = machineRightMode(this.state, machine.id, "publishes", now);
+        const failed = conditionProblem(mode?.conditions, labels, prefixes);
+        if (failed) return event({ outcome: "refused", reason: failed });
+        const withApproval = this.askEdits(machine, action, target, raw["body"], now, "publishes");
+        if (mode?.mode === "ask" && typeof withApproval !== "string")
+          return event(
+            await this.propose(
+              machine,
+              action,
+              target,
+              raw["body"],
+              reason,
+              labels,
+              "publishes",
+              mode.circleId,
+              now,
+            ),
+          );
+        return event({ outcome: "refused", reason: edits });
+      }
+    }
+    return event(await this.runAsk(machine, action, target, raw["body"], null, labels));
+  }
+
+  /**
+   * K-1711: the edits of `apply`, or of `publish` (a move into or out of Everyone), checked by the rules of K-718 as
+   * the machine; a string names why not.
+   */
+  private askEdits(
+    machine: Machine,
+    action: AskAction,
+    target: string,
+    body: unknown,
+    now: number,
+    approved: MachineRight | null,
+  ): ReadonlyArray<Edit> | string {
+    const visitor = { email: null, clientId: machine.clientId, ip: null };
+    let edits: ReadonlyArray<Edit>;
+    if (action === "publish") {
+      const wantsPublic = !(isRecord(body) && body["public"] === false);
+      const to = agentUploadPlace(this.state, visitor, null, wantsPublic, now, approved);
+      if (to === null || typeof to === "string")
+        return to ?? "This machine has no agent circle with control (K-718).";
+      edits = [{ _tag: "place", id: target, after: to }];
+    } else {
+      try {
+        const message = decodeClientMessage({
+          edits: isRecord(body) ? body["edits"] : undefined,
+          type: "apply",
+          requestId: "ask",
+        });
+        if (message.type !== "apply") return "Send edits.";
+        edits = message.edits;
+      } catch (error) {
+        return `The edits do not decode: ${String(error)}`;
+      }
+    }
+    try {
+      const changes = resolveEdits(this.state, edits);
+      const refusal = agentRefusal(
+        this.state,
+        applyChanges(this.state, changes),
+        visitor,
+        changes,
+        now,
+        this.agentAdded(machine.clientId),
+        approved,
+      );
+      return refusal ?? edits;
+    } catch (error) {
+      if (error instanceof RuleError) return error.message;
+      throw error;
+    }
+  }
+
+  /** K-718: the cards of repos that this agent allowed (K-819), and the pages and files that it published. */
+  private agentAdded(clientId: string | null) {
+    return new Set(
+      this.sql<{ resource_id: string }>(
+        `SELECT DISTINCT deploys.resource_id FROM deploys JOIN repos ON repos.repo_id = deploys.repo_id AND deploys.kind = 'deploy'
+         WHERE repos.allowed_by_client = ?
+         UNION SELECT id FROM library WHERE added_by = ?`,
+        clientId,
+        clientId,
+      ).map((row) => row.resource_id),
+    );
+  }
+
+  /** K-1710: runs an ask through the agent path of its action, as the machine. */
+  private async runAsk(
+    machine: Machine,
+    action: AskAction,
+    target: string,
+    body: unknown,
+    approved: MachineRight | null,
+    labels: Readonly<Record<string, string>> = {},
+  ): Promise<AskOutcome> {
+    if (action === "pass") return this.issuePass(machine, target, labels);
+    if (action === "audience-add")
+      return this.addAudience(target, { machineId: machine.id, name: machine.name });
+    if (action === "github-token") {
+      const permission = isRecord(body) && body["permission"] === "write" ? "write" : "read";
+      return this.mintToken(machine, target, permission);
+    }
+    let mapped = askRequest(action, target, body);
+    if (action === "publish") {
+      const edits = this.askEdits(machine, action, target, body, Date.now(), approved);
+      if (typeof edits === "string") return { outcome: "refused", reason: edits };
+      mapped = { method: "POST", path: "/agent/apply", body: { edits } };
+    }
+    if (typeof mapped === "string")
+      return { outcome: "refused", reason: `${action} comes with a later part of section 17.` };
+    const caller: Caller = {
+      visitor: { email: null, clientId: machine.clientId, ip: null },
+      actor: { _tag: "machine", machineId: machine.id, name: machine.name },
+    };
+    const request = new Request(`https://kitshn.internal${mapped.path}`, {
+      method: mapped.method,
+      headers: { "content-type": "application/json" },
+      ...(mapped.method === "POST" ? { body: JSON.stringify(mapped.body) } : {}),
+    });
+    const response = await this.agentRequest(mapped.path, request, caller, approved);
+    const json: unknown = await response.json().catch(() => null);
+    if (response.ok) return { outcome: "done", result: json };
+    return {
+      outcome: "refused",
+      reason:
+        isRecord(json) && typeof json["error"] === "string"
+          ? json["error"]
+          : `kitshn answered ${response.status}.`,
+    };
+  }
+
+  /** K-1733: a new repo group card, in the tray. */
+  private addRepoGroup(caller: Caller, body: unknown) {
+    const match = isRecord(body) && typeof body["match"] === "string" ? body["match"].trim() : "";
+    const problem = matchProblem(match);
+    if (problem) return Response.json({ error: problem }, { status: 400 });
+    const id = repoGroupId(match);
+    if (id === null)
+      return Response.json({ error: "This match is too long for a card id." }, { status: 400 });
+    if (this.state.resources.has(id))
+      return Response.json({ error: `The repo group ${match} exists already.` }, { status: 409 });
+    const resource: Resource = {
+      id,
+      kind: "repo.group",
+      name: match,
+      addresses: [],
+      status: "unknown",
+      group: null,
+      machine: null,
+      match,
+    };
+    this.ctx.storage.transactionSync(() => {
+      this.putResource(resource);
+      this.insertRevision(caller.actor, `Added the repo group ${match}`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    return Response.json({ id });
+  }
+
+  /** K-1733, K-1760: sets the GitHub way of an owner group, or deletes a repo group with its place. */
+  private changeRepoGroup(caller: Caller, id: string, body: unknown) {
+    const group = this.state.resources.get(id);
+    if (group?.kind !== "repo.group")
+      return Response.json({ error: `No repo group "${id}" exists.` }, { status: 404 });
+    if (body === null) {
+      this.ctx.storage.transactionSync(() => {
+        this.sql("DELETE FROM resources WHERE id = ?", id);
+        this.sql("DELETE FROM places WHERE id = ?", id);
+        this.insertRevision(caller.actor, `Deleted the repo group ${group.name}`, [], null);
+      });
+      this.load();
+      this.broadcast();
+      return Response.json({ deleted: id });
+    }
+    const way = isRecord(body) ? body["githubWay"] : null;
+    if (!GITHUB_WAYS.includes(way as GitHubWay))
+      return Response.json({ error: 'Send {"githubWay": "app" | "not-kitshn"}.' }, { status: 400 });
+    if (group.match?.includes("/"))
+      return Response.json({ error: "Only an owner group has a GitHub way (K-1760)." }, { status: 409 });
+    this.ctx.storage.transactionSync(() => {
+      this.putResource({ ...group, githubWay: way as GitHubWay });
+      this.insertRevision(
+        caller.actor,
+        `Set the GitHub way of ${group.name} to ${way === "app" ? "kitshn App token" : "not kitshn"}`,
+        [],
+        null,
+      );
+    });
+    this.load();
+    this.broadcast();
+    return Response.json({ githubWay: way });
+  }
+
+  /**
+   * K-1767: the bot login of the kitshn App, asked once and kept. Null without the App, because then no bot run is
+   * kitshn's; "unknown" when GitHub does not answer.
+   */
+  private async appBot(): Promise<string | null> {
+    const kept = this.meta("github_app_bot");
+    if (kept) return kept;
+    if (!this.env.GITHUB_APP_ID || !this.env.GITHUB_APP_KEY) return null;
+    const login = await appBotLogin({ id: this.env.GITHUB_APP_ID, key: this.env.GITHUB_APP_KEY }).catch(
+      () => null,
+    );
+    if (login) this.setMeta("github_app_bot", login);
+    return login ?? "unknown";
+  }
+
+  /** K-1751: the label prefixes of the attesters that the machine reports now; none while it is offline. */
+  private attesterPrefixesOf(machineId: string): Array<string> {
+    const socket = this.openSocket(machineId);
+    const attachment = socket ? attachmentOf(socket) : null;
+    return attachment?.kind === "machine"
+      ? (attachment.status?.attesters ?? []).map((item) => item.prefix)
+      : [];
+  }
+
+  /** K-1771: the pass keys, newest first; the first is current. One read of a small table. */
+  private passKeys(): Array<PassKey> {
+    return this.sql<{
+      kid: string;
+      private_jwk: string;
+      public_jwk: string;
+      created_at: number;
+      retired_at: number | null;
+    }>("SELECT * FROM pass_keys ORDER BY created_at DESC").map((row) => ({
+      kid: row.kid,
+      privateJwk: JSON.parse(row.private_jwk) as PassKey["privateJwk"],
+      publicJwk: JSON.parse(row.public_jwk) as PassKey["publicJwk"],
+      createdAt: row.created_at,
+      retiredAt: row.retired_at,
+    }));
+  }
+
+  /**
+   * K-1771, K-1822: "Rotate pass key", and the last step of kitshn's own restore to a time. A new key becomes current;
+   * the old one stays in the JWKS for 6 minutes, and keys past that, or past 5, go.
+   */
+  private async rotatePassKey(actor: Actor): Promise<void> {
+    const now = Date.now();
+    const key = await newPassKey(now);
+    this.ctx.storage.transactionSync(() => {
+      this.sql("UPDATE pass_keys SET retired_at = ? WHERE retired_at IS NULL", now);
+      this.sql("DELETE FROM pass_keys WHERE retired_at IS NOT NULL AND retired_at < ?", now - RETIRED_MS);
+      this.sql(
+        "INSERT INTO pass_keys (kid, private_jwk, public_jwk, created_at, retired_at) VALUES (?, ?, ?, ?, NULL)",
+        key.kid,
+        JSON.stringify(key.privateJwk),
+        JSON.stringify(key.publicJwk),
+        now,
+      );
+      this.sql(
+        "DELETE FROM pass_keys WHERE kid NOT IN (SELECT kid FROM pass_keys ORDER BY created_at DESC LIMIT ?)",
+        MAX_KEYS,
+      );
+      this.insertRevision(actor, "Rotated the pass key", [], null);
+    });
+    // K-1762: a rotation answers a doubt about kitshn's secrets, so the daemons ask again for each token.
+    for (const socket of this.ctx.getWebSockets("machines"))
+      if (attachmentOf(socket)?.kind === "machine") send(socket, { type: "dropTokens", repo: null });
+  }
+
+  /** K-1770 to K-1773: what Settings shows of the passes: on or off, the audiences and the public keys. Never a private half. */
+  private passSettings() {
+    return {
+      on: this.meta("passes_on") === "1",
+      issuer: `https://${this.env.KITSHN_HOST}`,
+      audiences: this.sql<{ address: string; labels: number; added_by: string | null }>(
+        "SELECT address, labels, added_by FROM pass_audiences ORDER BY added_at",
+      ).map((row) => ({ address: row.address, labels: row.labels === 1, addedBy: row.added_by })),
+      keys: this.passKeys().map((key) => ({
+        kid: key.kid,
+        createdAt: key.createdAt,
+        retiredAt: key.retiredAt,
+      })),
+    };
+  }
+
+  /** K-1770, K-1771: the discovery document and the JWKS, with no login; "not found" while passes are off. */
+  private async wellKnown(file: string): Promise<Response> {
+    if (this.meta("passes_on") !== "1") return Response.json({ error: "Not found." }, { status: 404 });
+    const issuer = `https://${this.env.KITSHN_HOST}`;
+    const headers = { "cache-control": "public, max-age=300" };
+    if (file === "openid-configuration") return Response.json(discovery(issuer), { headers });
+    if (this.passKeys().length === 0) await this.rotatePassKey({ _tag: "kitshn", reason: "first pass key" });
+    return Response.json(jwks(this.passKeys(), Date.now()), { headers });
+  }
+
+  /** K-1772, K-1774: a 5-minute pass for one audience; the attested labels go in only when the audience allows them. */
+  private async issuePass(
+    machine: Machine,
+    audience: string,
+    labels: Readonly<Record<string, string>>,
+  ): Promise<AskOutcome> {
+    const [row] = this.sql<{ labels: number }>(
+      "SELECT labels FROM pass_audiences WHERE address = ?",
+      audience,
+    );
+    if (!row) return { outcome: "refused", reason: `${audience} is not in the pass audiences (K-1773).` };
+    if (this.passKeys().length === 0) await this.rotatePassKey({ _tag: "kitshn", reason: "first pass key" });
+    const [key] = this.passKeys();
+    if (!key) throw new Error("kitshn made a pass key and has none.");
+    const verified = Object.fromEntries(
+      Object.entries(labels).filter(([name]) => this.verifiedKeys(machine.id, labels).includes(name)),
+    );
+    const signed = await signPass(
+      key,
+      {
+        issuer: `https://${this.env.KITSHN_HOST}`,
+        audience,
+        machineId: machine.id,
+        labels: row.labels === 1 ? verified : null,
+      },
+      Date.now(),
+    );
+    return {
+      outcome: "done",
+      result: { pass: signed.pass, expiresAt: new Date(signed.expiresAt).toISOString() },
+    };
+  }
+
+  /** K-1773: adds an outside service to the pass audiences; an exact https address, never more than 50. */
+  private addAudience(
+    address: string,
+    by: { readonly machineId: string | null; readonly name: string },
+    labels = false,
+  ): AskOutcome {
+    let url: URL;
+    try {
+      url = new URL(address);
+    } catch {
+      return { outcome: "refused", reason: `${address} is not an address (K-1773).` };
+    }
+    if (url.protocol !== "https:")
+      return { outcome: "refused", reason: "A pass audience is an https address (K-1773)." };
+    const [count] = this.sql<{ count: number }>("SELECT COUNT(*) AS count FROM pass_audiences");
+    if ((count?.count ?? 0) >= 50)
+      return { outcome: "refused", reason: "kitshn keeps at most 50 pass audiences." };
+    const actor: Actor = by.machineId
+      ? { _tag: "machine", machineId: by.machineId, name: by.name }
+      : { _tag: "kitshn", reason: by.name };
+    this.ctx.storage.transactionSync(() => {
+      this.sql(
+        "INSERT OR IGNORE INTO pass_audiences (address, labels, added_by, added_at) VALUES (?, ?, ?, ?)",
+        address,
+        labels ? 1 : 0,
+        by.machineId,
+        Date.now(),
+      );
+      this.insertRevision(actor, `Added the pass audience ${address}`, [], null);
+    });
+    this.broadcast();
+    return { outcome: "done", result: { added: address } };
+  }
+
+  /** K-1760: the GitHub way of an owner, from its owner group or the default of Settings. */
+  private githubWay(owner: string): GitHubWay {
+    return githubWayOf(this.state, owner, this.meta("github_default_way") === "app" ? "app" : "not-kitshn");
+  }
+
+  /**
+   * K-1762: a token for one repo. The owner's way decides first (K-1760); then "writes code" or "reads code" on a card
+   * that covers the repo, with its mode. `permission` "auto" asks for write when the machine may write (K-1763).
+   */
+  private async askGitHubToken(
+    machine: Machine,
+    fullName: string,
+    body: unknown,
+    reason: string | null,
+    labels: Readonly<Record<string, string>>,
+    now: number,
+  ): Promise<AskOutcome> {
+    const owner = fullName.split("/")[0] ?? "";
+    if (matchProblem(fullName) !== null || !fullName.includes("/") || fullName.includes("*"))
+      return { outcome: "refused", reason: `${fullName} is not owner/name (K-1762).` };
+    if (this.githubWay(owner) !== "app")
+      return {
+        outcome: "not-kitshn",
+        reason: `${owner} is "not kitshn"; the machine uses its own login (K-1760).`,
+      };
+    const wanted = isRecord(body) ? body["permission"] : "auto";
+    const write =
+      wanted === "write" ||
+      (wanted !== "read" && codeRightMode(this.state, machine.id, "writesCode", fullName, now) !== null);
+    const right: MachineRight = write ? "writesCode" : "readsCode";
+    const mode = codeRightMode(this.state, machine.id, right, fullName, now);
+    const failed = mode
+      ? conditionProblem(mode.conditions, labels, this.attesterPrefixesOf(machine.id))
+      : null;
+    if (failed) return { outcome: "refused", reason: failed };
+    if (mode === null)
+      return {
+        outcome: "refused",
+        reason: `The right "${MACHINE_RIGHT_NAMES[right]}" is off for ${fullName} on this machine: a repo group or repo card in its agent circle gives it (K-1733).`,
+      };
+    if (
+      mode.mode === "ask" &&
+      !this.inApprovedWindow(machine.id, "github-token", fullName, right, mode.circleId, now)
+    )
+      return this.propose(
+        machine,
+        "github-token",
+        fullName,
+        { permission: write ? "write" : "read" },
+        reason,
+        labels,
+        right,
+        mode.circleId,
+        now,
+      );
+    return this.mintToken(machine, fullName, write ? "write" : "read");
+  }
+
+  /**
+   * K-1723: the same ask of this machine, approved by the circle that the right asks now, within the last hour. A
+   * token never waits in a queue, so the approval opens this window and the next ask gets the token.
+   */
+  private inApprovedWindow(
+    machineId: string,
+    action: AskAction,
+    target: string,
+    right: MachineRight,
+    circleId: string,
+    now: number,
+  ) {
+    return (
+      this.sql(
+        `SELECT 1 AS one FROM proposals WHERE machine_id = ? AND action = ? AND target = ? AND right_name = ?
+         AND circle_id = ? AND state = 'approved' AND decided_at > ? LIMIT 1`,
+        machineId,
+        action,
+        target,
+        right,
+        circleId,
+        now - APPROVED_WINDOW_MS,
+      ).length > 0
+    );
+  }
+
+  /** K-1762: makes the token through the App, keeps a sealed copy for revocation (K-1716), and gives it to the daemon. */
+  private async mintToken(
+    machine: Machine,
+    fullName: string,
+    permission: "read" | "write",
+  ): Promise<AskOutcome> {
+    const appId = this.env.GITHUB_APP_ID;
+    const key = this.env.GITHUB_APP_KEY;
+    if (!appId || !key) return { outcome: "refused", reason: NO_GITHUB_APP };
+    const owner = (fullName.split("/")[0] ?? "").toLowerCase();
+    const [known] = this.sql<{ installation_id: number }>(
+      "SELECT installation_id FROM github_installations WHERE owner = ?",
+      owner,
+    );
+    try {
+      const minted = await repoToken(
+        { id: appId, key },
+        fullName,
+        permission,
+        known?.installation_id ?? null,
+        this.sql<{ repo_id: string }>(
+          "SELECT repo_id FROM repos WHERE name = ? COLLATE NOCASE AND gone_at IS NULL LIMIT 1",
+          fullName,
+        )[0]?.repo_id ?? null,
+      );
+      if (minted.installationId !== known?.installation_id)
+        this.sql(
+          "INSERT OR REPLACE INTO github_installations (owner, installation_id) VALUES (?, ?)",
+          owner,
+          minted.installationId,
+        );
+      this.tokensLive = true;
+      this.sql(
+        "INSERT INTO github_tokens (id, machine_id, repo, right_name, expires_at, sealed) VALUES (?, ?, ?, ?, ?, ?)",
+        crypto.randomUUID(),
+        machine.id,
+        fullName,
+        permission === "write" ? "writesCode" : "readsCode",
+        Date.parse(minted.expiresAt),
+        await sealToken(key, minted.token),
+      );
+      return { outcome: "done", result: { token: minted.token, expiresAt: minted.expiresAt, permission } };
+    } catch (error) {
+      if (error instanceof NotInstalled) return { outcome: "refused", reason: error.message };
+      // A stale installation id fails once; the next ask looks it up again.
+      if (known) this.sql("DELETE FROM github_installations WHERE owner = ?", owner);
+      return { outcome: "refused", reason: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * K-1716: revokes the live GitHub tokens of one machine, or of every machine with null. With `onlyLost`, it keeps
+   * the tokens whose right the machine still has, so a right turned off revokes only what it gave.
+   */
+  private revokeTokens(machineId: string | null, onlyLost: boolean) {
+    if (!this.tokensLive) return;
+    const now = Date.now();
+    this.sql("DELETE FROM github_tokens WHERE expires_at <= ?", now);
+    const rows = this.sql<{
+      id: string;
+      machine_id: string;
+      repo: string;
+      right_name: string;
+      sealed: string;
+    }>("SELECT id, machine_id, repo, right_name, sealed FROM github_tokens");
+    this.tokensLive = rows.length > 0;
+    const key = this.env.GITHUB_APP_KEY;
+    for (const row of rows) {
+      if (machineId !== null && row.machine_id !== machineId) continue;
+      const right = row.right_name === "writesCode" ? "writesCode" : "readsCode";
+      if (onlyLost && codeRightMode(this.state, row.machine_id, right, row.repo, now) !== null) continue;
+      this.sql("DELETE FROM github_tokens WHERE id = ?", row.id);
+      const socket = this.openSocket(row.machine_id);
+      if (socket) send(socket, { type: "dropTokens", repo: row.repo });
+      if (!key) continue;
+      this.ctx.waitUntil(
+        openToken(key, row.sealed)
+          .then(revokeToken)
+          .catch((error: unknown) => console.warn(`kitshn could not revoke a token: ${String(error)}`)),
+      );
+    }
+  }
+
+  /** K-1722: an ask that waits for one member of its approver circle. */
+  private async propose(
+    machine: Machine,
+    action: AskAction,
+    target: string,
+    body: unknown,
+    reason: string | null,
+    labels: Readonly<Record<string, string>>,
+    right: MachineRight,
+    circleId: string,
+    now: number,
+  ): Promise<AskOutcome> {
+    // K-1722: a loop of asks cannot fill the Inbox or each snapshot.
+    const [open] = this.sql<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM proposals WHERE machine_id = ? AND state = 'pending'",
+      machine.id,
+    );
+    if ((open?.count ?? 0) >= MAX_OPEN_PROPOSALS)
+      return {
+        outcome: "refused",
+        reason: `This machine has ${MAX_OPEN_PROPOSALS} open asks already. Wait for their answers (K-1722).`,
+      };
+    const shown = shownAsk(action, target, body);
+    if (shown.length > MAX_SHOWN)
+      return {
+        outcome: "refused",
+        reason: `This ask is too long for an approver to read (${shown.length} characters, at most ${MAX_SHOWN}). Split it (K-1722).`,
+      };
+    const id = crypto.randomUUID();
+    this.sql(
+      `INSERT INTO proposals (id, machine_id, action, target, body, reason, labels, right_name, circle_id, shown, shown_hash, state, created_at, expires_at, verified)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+      id,
+      machine.id,
+      action,
+      target,
+      JSON.stringify(body ?? null),
+      reason,
+      JSON.stringify(labels),
+      right,
+      circleId,
+      shown,
+      await shownHash(shown),
+      now,
+      now + PROPOSAL_MS,
+      JSON.stringify(this.verifiedKeys(machine.id, labels)),
+    );
+    this.broadcast();
+    void this.scheduleAlarm();
+    return { outcome: "waiting", proposalId: id };
+  }
+
+  /**
+   * K-1723: one answer to a proposal. Only a member of its approver circle answers; one conditional write decides,
+   * and every later answer gets "already decided". An approval runs the ask at once, with every check of K-1712.
+   */
+  private async decide(
+    proposalId: string,
+    decision: "approved" | "denied",
+    by: {
+      readonly actor: Actor;
+      readonly visitor: Visitor;
+      readonly machineId: string | null;
+      readonly reason: string | null;
+    },
+    /** K-1722: the hash of the text that the approver read; a different one refuses, so nothing else runs. */
+    seenHash: string | null = null,
+    /** K-1723: the approve path that the person came through; null for a machine. */
+    via: "passkey" | "login" | null = null,
+  ): Promise<
+    { readonly ok: true; readonly result?: unknown } | { readonly ok: false; readonly error: string }
+  > {
+    const [row] = this.sql<ProposalRow>("SELECT * FROM proposals WHERE id = ?", proposalId);
+    if (!row) return { ok: false, error: `kitshn has no proposal ${proposalId}.` };
+    const proposal = proposalOf(row);
+    const circle = this.state.circles.get(proposal.circleId);
+    if (!circle || !circleMatches(circle, by.visitor, this.state.machines))
+      return {
+        ok: false,
+        error: `Only a member of the approver circle ${circle?.name ?? proposal.circleId} answers this ask (K-1723).`,
+      };
+    if (by.machineId !== null && !machinesApprove(circle))
+      return {
+        ok: false,
+        error: `${circle.name} needs a passkey, and "machines may approve" is off, so a machine does not answer its asks (K-1727).`,
+      };
+    // K-1723: a passkey circle approves only through the passkey application, whose token proves a fresh passkey.
+    if (decision === "approved" && via === "login" && circle.needsPasskey)
+      return {
+        ok: false,
+        error: `${circle.name} needs a passkey: approve through the passkey check (K-1723).`,
+      };
+    if (proposal.state !== "pending")
+      return { ok: false, error: `This ask is already decided (${proposal.state}).` };
+    if (decision === "approved" && seenHash !== null && seenHash !== proposal.shownHash)
+      return {
+        ok: false,
+        error: "The ask changed since you read it. Read it again in the Asks list (K-1722).",
+      };
+    const now = Date.now();
+    // K-1712: an approval checks again that the ask may still run: the right still asks this circle, the circle is in
+    // force, and the target is still there. Otherwise the proposal ends "no longer allowed".
+    const gone = decision === "approved" ? this.proposalGone(proposal, now) : null;
+    if (gone !== null) {
+      const [ended] = this.sql<{ id: string }>(
+        "UPDATE proposals SET state = 'denied', decided_at = ?, decided_by = ? WHERE id = ? AND state = 'pending' RETURNING id",
+        now,
+        JSON.stringify({ actor: { _tag: "kitshn", reason: "no longer allowed" }, reason: gone }),
+        proposalId,
+      );
+      if (ended) {
+        this.sendAskResult(proposal.machineId, {
+          proposalId,
+          outcome: "denied",
+          reason: `no longer allowed: ${gone}`,
+        });
+        this.broadcast();
+      }
+      return { ok: false, error: `This ask is no longer allowed: ${gone}` };
+    }
+    const [won] = this.sql<{ id: string }>(
+      "UPDATE proposals SET state = ?, decided_at = ?, decided_by = ? WHERE id = ? AND state = 'pending' AND expires_at > ? RETURNING id",
+      decision,
+      now,
+      JSON.stringify({ actor: by.actor, reason: by.reason }),
+      proposalId,
+      now,
+    );
+    if (!won) return { ok: false, error: `This ask is already decided (${proposal.state}).` };
+    const machine = this.state.machines.get(proposal.machineId);
+    const what = `${proposal.action} ${proposal.target}`.trim();
+    this.insertRevision(
+      by.actor,
+      `${decision === "approved" ? "Approved" : "Denied"} the ask of ${machine?.name ?? proposal.machineId}: ${what}${by.reason ? ` (${by.reason})` : ""}`,
+      [],
+      null,
+    );
+    if (decision === "denied") {
+      this.sendAskResult(proposal.machineId, {
+        proposalId,
+        outcome: "denied",
+        ...(by.reason ? { reason: by.reason } : {}),
+      });
+      this.broadcast();
+      return { ok: true };
+    }
+    // K-1723: the approval of a token opens the window; the daemon asks again and gets the token, so no row holds it.
+    if (WINDOW_ACTIONS.has(proposal.action)) {
+      this.sendAskResult(proposal.machineId, { proposalId, outcome: "approved" });
+      this.broadcast();
+      return { ok: true };
+    }
+    const outcome = machine
+      ? await this.runAsk(
+          machine,
+          proposal.action,
+          proposal.target,
+          proposal.body,
+          proposal.right,
+          proposal.labels,
+        )
+      : ({ outcome: "refused", reason: "The machine that asked is gone." } as const);
+    const result = outcome.outcome === "done" ? outcome.result : null;
+    this.sql("UPDATE proposals SET result = ? WHERE id = ?", JSON.stringify(outcome), proposalId);
+    this.sendAskResult(proposal.machineId, {
+      proposalId,
+      outcome: outcome.outcome === "refused" ? "denied" : "approved",
+      ...(outcome.outcome === "done" ? { result } : {}),
+      ...(outcome.outcome === "refused" ? { reason: outcome.reason } : {}),
+    });
+    this.broadcast();
+    return outcome.outcome === "refused" ? { ok: false, error: outcome.reason } : { ok: true, result };
+  }
+
+  /** K-1723: an answer of a person to a proposal; an approve carries the hash of the text that its approver read. */
+  private async answerProposal(
+    id: string,
+    decision: "approved" | "denied",
+    caller: Caller,
+    via: "passkey" | "login" | null,
+    body: unknown,
+  ) {
+    const reason = isRecord(body) && typeof body["reason"] === "string" ? body["reason"].slice(0, 500) : null;
+    const seen = isRecord(body) && typeof body["hash"] === "string" ? body["hash"] : null;
+    if (decision === "approved" && seen === null)
+      return Response.json({ error: "Send the hash of the ask that you read (K-1722)." }, { status: 400 });
+    const decided = await this.decide(
+      id,
+      decision,
+      { actor: caller.actor, visitor: caller.visitor, machineId: null, reason },
+      seen,
+      via,
+    );
+    return decided.ok
+      ? Response.json({ result: decided.result ?? null })
+      : Response.json({ error: decided.error }, { status: 409 });
+  }
+
+  /** K-1712: why an approved ask may no longer run, or null. */
+  private proposalGone(proposal: Proposal, now: number): string | null {
+    const mode =
+      proposal.right === "readsCode" || proposal.right === "writesCode"
+        ? codeRightMode(this.state, proposal.machineId, proposal.right, proposal.target, now)
+        : machineRightMode(this.state, proposal.machineId, proposal.right, now);
+    if (mode?.mode !== "ask" || mode.circleId !== proposal.circleId)
+      return `the right "${MACHINE_RIGHT_NAMES[proposal.right]}" no longer asks this circle.`;
+    const failed = conditionProblem(
+      mode.conditions,
+      proposal.labels,
+      this.attesterPrefixesOf(proposal.machineId),
+    );
+    if (failed) return failed;
+    const circle = this.state.circles.get(proposal.circleId);
+    if (!circle || (circle.endsAt !== null && circle.endsAt <= now)) return "the approver circle ended.";
+    if (!this.state.machines.has(proposal.machineId)) return "the machine that asked is gone.";
+    if (
+      (proposal.action === "deploy" || proposal.action === "publish") &&
+      !this.state.resources.has(proposal.target)
+    )
+      return `the card ${proposal.target} is gone.`;
+    if (proposal.action === "job" && !this.state.machines.has(proposal.target))
+      return `the machine ${proposal.target} is gone.`;
+    if (
+      proposal.action === "allow" &&
+      this.sql("SELECT 1 AS one FROM repos WHERE repo_id = ?", proposal.target).length === 0
+    )
+      return `kitshn no longer knows the repo ${proposal.target}.`;
+    return null;
+  }
+
+  /** K-1722 to K-1724: the answer goes to the machine's open connection; an offline machine misses it. */
+  private sendAskResult(machineId: string, result: AskResult) {
+    const socket = this.openSocket(machineId);
+    if (socket) send(socket, { type: "askResult", ...result });
+  }
+
+  /**
+   * K-1716: "Rotate key", "Reset key" and "Remove machine" deny the open proposals of one machine; the pause denies
+   * every open proposal.
+   */
+  private denyOpenProposals(machineId: string | null, why: string) {
+    const rows = this.sql<{ id: string; machine_id: string }>(
+      machineId === null
+        ? "UPDATE proposals SET state = 'denied', decided_at = ?, decided_by = ? WHERE state = 'pending' RETURNING id, machine_id"
+        : "UPDATE proposals SET state = 'denied', decided_at = ?, decided_by = ? WHERE state = 'pending' AND machine_id = ? RETURNING id, machine_id",
+      Date.now(),
+      JSON.stringify({ actor: { _tag: "kitshn", reason: why }, reason: why }),
+      ...(machineId === null ? [] : [machineId]),
+    );
+    for (const row of rows)
+      this.sendAskResult(row.machine_id, { proposalId: row.id, outcome: "denied", reason: why });
+    this.revokeTokens(machineId, false);
+  }
+
+  /** K-1724: a proposal expires 24 hours after its ask, and its agent hears so. */
+  private expireProposals(now: number) {
+    const rows = this.sql<{ id: string; machine_id: string }>(
+      "UPDATE proposals SET state = 'expired', decided_at = ? WHERE state = 'pending' AND expires_at <= ? RETURNING id, machine_id",
+      now,
+      now,
+    );
+    for (const row of rows) this.sendAskResult(row.machine_id, { proposalId: row.id, outcome: "expired" });
+    if (rows.length > 0) this.broadcast();
+  }
+
+  /** K-1717: one event for each ask, not a revision; the daily run keeps 30 days and at most 5,000. */
+  private askEvent(
+    at: number,
+    machine: Machine,
+    action: AskAction,
+    target: string,
+    reason: string | null,
+    labels: Readonly<Record<string, string>>,
+    outcome: AskOutcome,
+  ) {
+    this.sql(
+      `INSERT INTO ask_events (at, machine_id, action, target, reason, labels, outcome, detail, verified)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      at,
+      machine.id,
+      action,
+      target,
+      reason,
+      JSON.stringify(labels),
+      outcome.outcome,
+      outcome.outcome === "refused"
+        ? outcome.reason
+        : outcome.outcome === "waiting"
+          ? outcome.proposalId
+          : "",
+      JSON.stringify(this.verifiedKeys(machine.id, labels)),
+    );
+    // K-1717: at most 5,000 events, trimmed on insert by id, so a burst of asks cannot grow the table within a day.
+    const [last] = this.sql<{ id: number }>("SELECT last_insert_rowid() AS id");
+    if (!last) return;
+    // K-1756: the label index of this event, for the search of History.
+    for (const [key, value] of Object.entries(labels))
+      this.sql("INSERT INTO ask_labels (event_id, key, value) VALUES (?, ?, ?)", last.id, key, value);
+    this.sql("DELETE FROM ask_events WHERE id <= ?", last.id - ASK_EVENT_COUNT);
+    this.sql("DELETE FROM ask_labels WHERE event_id <= ?", last.id - ASK_EVENT_COUNT);
+  }
+
+  /** K-1717: the newest 50 ask events, for History; a snapshot reads at most 50 rows for them. */
+  private recentAskEvents(): Array<AskEventView> {
+    return this.sql<AskEventRow>("SELECT * FROM ask_events ORDER BY id DESC LIMIT 50").map((row) =>
+      this.askEventView(row),
+    );
+  }
+
+  /** K-1756: the newest 50 ask events with one label, of one machine or of all; it reads at most 50 index rows. */
+  private askEventsWithLabel(key: string, value: string, machineId: string | null): Array<AskEventView> {
+    return this.sql<AskEventRow>(
+      `SELECT ask_events.* FROM ask_labels JOIN ask_events ON ask_events.id = ask_labels.event_id
+       WHERE ask_labels.key = ? AND ask_labels.value = ?${machineId === null ? "" : " AND ask_events.machine_id = ?"}
+       ORDER BY ask_labels.event_id DESC LIMIT 50`,
+      key,
+      value,
+      ...(machineId === null ? [] : [machineId]),
+    ).map((row) => this.askEventView(row));
+  }
+
+  private askEventView(row: AskEventRow): AskEventView {
+    return {
+      id: row.id,
+      at: row.at,
+      machineName: this.state.machines.get(row.machine_id)?.name ?? row.machine_id,
+      action: row.action,
+      target: row.target,
+      reason: row.reason,
+      labels: JSON.parse(row.labels) as Record<string, string>,
+      outcome: row.outcome as AskEventView["outcome"],
+      detail: row.detail,
+      verified: JSON.parse(row.verified) as Array<string>,
+    };
+  }
+
+  /**
+   * K-1752: the labels of an attester prefix are attested, because the daemon drops a caller's own of them. Asks store
+   * the result, because the attesters that a machine reports change later.
+   */
+  private verifiedKeys(machineId: string, labels: Readonly<Record<string, string>>): Array<string> {
+    const prefixes = [...this.attesterPrefixesOf(machineId), "t3."];
+    return Object.keys(labels).filter((key) => prefixes.some((prefix) => key.startsWith(prefix)));
+  }
+
+  /** K-1722: the open proposals, for the Asks list of the map. */
+  private openProposals(): Array<ProposalView> {
+    return this.sql<ProposalRow>("SELECT * FROM proposals WHERE state = 'pending' ORDER BY created_at").map(
+      (row) => {
+        const proposal = proposalOf(row);
+        return {
+          ...proposal,
+          machineName: this.state.machines.get(proposal.machineId)?.name ?? proposal.machineId,
+          verified: JSON.parse(row.verified) as Array<string>,
+        };
+      },
+    );
   }
 
   /** K-718: why a machine may not start the last good build of a card now, or null. */
@@ -8133,7 +9534,7 @@ export class Kitshn extends DurableObject<Env> {
     return new Response(object.body, {
       headers: {
         "content-type": row.kind === "page" ? "text/html; charset=utf-8" : row.content_type,
-        "content-security-policy": contentSecurityPolicy(this.env.KITSHN_HOST),
+        "content-security-policy": contentSecurityPolicy(adminHosts(this.env)),
         "x-content-type-options": "nosniff",
         "cache-control": "private, no-store",
       },
@@ -8563,6 +9964,35 @@ export class Kitshn extends DurableObject<Env> {
     for (const notification of this.openNotifications.values())
       if (notification.source === "uptime" && !down.has(notification.key))
         this.setNotificationState("uptime", notification.key, "closed");
+    // K-1722: each open ask is a notification for the people of its approver circle; an answer closes it for all.
+    const asks = new Set<string>();
+    for (const proposal of this.openProposals()) {
+      asks.add(proposal.id);
+      const kind = this.state.circles.get(proposal.circleId)?.needsPasskey ? "passkey" : "login";
+      this.notify({
+        source: "kitshn.ask",
+        key: proposal.id,
+        episode: proposal.id,
+        card: null,
+        recipients: { _tag: "approvers", circle: proposal.circleId },
+        level: "warn",
+        priority: "high",
+        title: clip(`${proposal.machineName} asks: ${MACHINE_RIGHT_NAMES[proposal.right]}`, TITLE_MAX),
+        text: clip(`${proposal.shown}${proposal.reason ? ` · ${proposal.reason}` : ""}`, TEXT_MAX),
+        actions: [
+          {
+            id: "approve",
+            label: "Approve",
+            kind: "link",
+            path: `/api/approve/${kind}/start?approve=${encodeURIComponent(proposal.id)}&hash=${proposal.shownHash}`,
+          },
+          { id: "deny", label: "Deny", kind: "run" },
+        ],
+      });
+    }
+    for (const notification of this.openNotifications.values())
+      if (notification.source === "kitshn.ask" && !asks.has(notification.key))
+        this.setNotificationState("kitshn.ask", notification.key, "closed");
   }
 
   /** K-1902: the owner gets every notification; a circle adds its people. */
@@ -8576,10 +10006,9 @@ export class Kitshn extends DurableObject<Env> {
         circleMatches(circle, visitor, this.state.machines)
       );
     };
-    return (
-      member(OWNER_CIRCLE_ID) ||
-      (notification.recipients._tag === "circle" && member(notification.recipients.circle))
-    );
+    const recipients = notification.recipients;
+    if (recipients._tag === "approvers") return member(recipients.circle);
+    return member(OWNER_CIRCLE_ID) || (recipients._tag === "circle" && member(recipients.circle));
   }
 
   /** K-1902: a member of the Owner circle. */
@@ -8669,9 +10098,9 @@ export class Kitshn extends DurableObject<Env> {
       const handler = this.actionHandlers.get(notification.source);
       if (!known || known.kind !== "run" || !handler)
         return Response.json({ error: `The notification has no action ${action} to run.` }, { status: 400 });
-      await handler(notification, action, caller);
+      const error = await handler(notification, action, caller);
       this.broadcast();
-      return Response.json({ ok: true });
+      return error === null ? Response.json({ ok: true }) : Response.json({ error }, { status: 409 });
     }
     return Response.json({ error: "Not found." }, { status: 404 });
   }
@@ -8884,6 +10313,7 @@ export class Kitshn extends DurableObject<Env> {
     // The alarm runs every 2 minutes while a daemon is connected, so it tells the maps only about real changes.
     let changed = this.expireJobs(now) > 0;
     if (this.settleRollbacks() > 0) changed = true;
+    this.expireProposals(now);
     const before = JSON.stringify(accessStates(this.desired(now), this.access));
     this.endShares(now);
     const daily = this.dailyAt() <= now;
@@ -9277,6 +10707,7 @@ const folderDeployer = (folder: string): Deployer => ({
   runId: "",
   runAttempt: "",
   workflow: null,
+  actor: "",
 });
 
 /** K-1127: how long a handover waits for the first push of its repo. */
@@ -9369,4 +10800,56 @@ async function readStart(stream: ReadableStream<Uint8Array>, limit: number): Pro
     at += chunk.length;
   }
   return bytes.subarray(0, limit);
+}
+
+/** K-1722: a row of the proposals table. */
+interface ProposalRow extends Record<string, SqlStorageValue> {
+  readonly id: string;
+  readonly machine_id: string;
+  readonly action: string;
+  readonly target: string;
+  readonly body: string;
+  readonly reason: string | null;
+  readonly labels: string;
+  readonly right_name: string;
+  readonly circle_id: string;
+  readonly shown: string;
+  readonly shown_hash: string;
+  readonly state: string;
+  readonly created_at: number;
+  readonly expires_at: number;
+  /** K-1752: the label keys that an attester of the machine set, as JSON, fixed at ask time. */
+  readonly verified: string;
+}
+
+const proposalOf = (row: ProposalRow): Proposal => ({
+  id: row.id,
+  machineId: row.machine_id,
+  action: row.action as AskAction,
+  target: row.target,
+  body: JSON.parse(row.body) as unknown,
+  reason: row.reason,
+  labels: JSON.parse(row.labels) as Record<string, string>,
+  right: row.right_name as MachineRight,
+  circleId: row.circle_id,
+  shown: row.shown,
+  shownHash: row.shown_hash,
+  state: row.state as Proposal["state"],
+  createdAt: row.created_at,
+  expiresAt: row.expires_at,
+});
+
+/** K-1717: a row of the ask events table. */
+interface AskEventRow extends Record<string, SqlStorageValue> {
+  readonly id: number;
+  readonly at: number;
+  readonly machine_id: string;
+  readonly action: string;
+  readonly target: string;
+  readonly reason: string | null;
+  readonly labels: string;
+  readonly outcome: string;
+  readonly detail: string;
+  /** K-1752: the label keys that an attester of the machine set, as JSON, fixed at ask time. */
+  readonly verified: string;
 }

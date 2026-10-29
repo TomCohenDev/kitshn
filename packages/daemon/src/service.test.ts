@@ -3,12 +3,14 @@ import {
   cloudflaredUrl,
   expectedDaemonUid,
   expectedHash,
+  localSocket,
   pathsFor,
   releaseAsset,
   serviceCommands,
   serviceFile,
   tunnelServiceFile,
   tunnelStateOf,
+  versionJson,
 } from "./service.ts";
 
 describe("daemon service (K-601)", () => {
@@ -86,5 +88,51 @@ describe("daemon service (K-601)", () => {
     expect(expectedDaemonUid({ KITSHN_DAEMON_UID: "kitshn" }, "/srv/k.sock", 1001)).toMatch(/not a user id/);
     expect(expectedDaemonUid({ KITSHN_DAEMON_UID: "1e3" }, "/srv/k.sock", 1001)).toMatch(/not a user id/);
     expect(expectedDaemonUid({}, "/tmp/kitshn-x/kitshn.sock", 5)).toBe(5);
+  });
+
+  it("finds the socket with no setting: its own, else the one shared socket of the user kitshn (K-701)", () => {
+    const root = pathsFor("linux", {}, "/root", 0);
+    const folder = { uid: 1000, mode: 0o40711, directory: true, socket: false };
+    const sock = { uid: 1000, mode: 0o140666, directory: false, socket: true };
+    const at =
+      (entries: Record<string, { uid: number; mode: number; directory: boolean; socket: boolean }>) =>
+      (path: string) =>
+        entries[path] ?? null;
+    const named = (uid: number) => (uid === 1000 ? "kitshn" : uid === 1001 ? "mallory" : null);
+    const daemon = { "/tmp/kitshn-1000": folder, "/tmp/kitshn-1000/kitshn.sock": sock };
+    const tmp = ["kitshn-1000", "kitshn-x", "other"];
+    expect(localSocket({ KITSHN_LOCAL_SOCKET: "/srv/k.sock" }, root, at({}), tmp, named)).toBe("/srv/k.sock");
+    expect(localSocket({}, root, at({ ...daemon, [root.socket]: sock }), tmp, named)).toBe(root.socket);
+    expect(localSocket({}, root, at(daemon), tmp, named)).toBe("/tmp/kitshn-1000/kitshn.sock");
+    expect(localSocket({}, root, at({}), tmp, named)).toBe(root.socket);
+    // The folder of another user, also with the right modes, is not the daemon's.
+    const mallory = {
+      "/tmp/kitshn-1001": { ...folder, uid: 1001 },
+      "/tmp/kitshn-1001/kitshn.sock": { ...sock, uid: 1001 },
+    };
+    expect(localSocket({}, root, at(mallory), ["kitshn-1001"], named)).toBe(root.socket);
+    // Another user's fake socket next to the daemon's neither counts nor blocks the daemon's.
+    expect(localSocket({}, root, at({ ...daemon, ...mallory }), [...tmp, "kitshn-1001"], named)).toBe(
+      "/tmp/kitshn-1000/kitshn.sock",
+    );
+    // A folder of kitshn that names another uid than its owner.
+    const renamed = { "/tmp/kitshn-1002": folder, "/tmp/kitshn-1002/kitshn.sock": sock };
+    expect(localSocket({}, root, at(renamed), ["kitshn-1002"], named)).toEqual({
+      refused: expect.stringContaining("belongs to user id 1000, not 1002"),
+    });
+    expect(
+      localSocket({}, root, at({ ...daemon, "/tmp/kitshn-1000": { ...folder, mode: 0o40777 } }), tmp, named),
+    ).toEqual({ refused: expect.stringContaining("mode 777") });
+    expect(localSocket({}, root, at({ ...daemon, ...renamed }), [...tmp, "kitshn-1002"], named)).toEqual({
+      several: ["/tmp/kitshn-1000/kitshn.sock", "/tmp/kitshn-1002/kitshn.sock"],
+    });
+  });
+
+  it("names itself kitshn 2 in one stable JSON line, so tools can tell it from KitSHn 1 (K-1714)", () => {
+    expect(JSON.parse(versionJson("edge-abc"))).toEqual({
+      product: "kitshn",
+      generation: 2,
+      version: "edge-abc",
+    });
   });
 });

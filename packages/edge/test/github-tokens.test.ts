@@ -90,7 +90,7 @@ const daemonSocket = (sent: Array<ServerToDaemon>) =>
     close() {},
   }) as unknown as WebSocket;
 
-async function askToken(stub: DurableObjectStub, repo: string) {
+async function askToken(stub: DurableObjectStub, repo: string, extra: object = {}) {
   const sent: Array<ServerToDaemon> = [];
   await runInDurableObject(stub, (instance) =>
     (instance as unknown as { webSocketMessage(s: WebSocket, t: string): Promise<void> }).webSocketMessage(
@@ -98,7 +98,7 @@ async function askToken(stub: DurableObjectStub, repo: string) {
       JSON.stringify({
         type: "ask",
         requestId: "r",
-        ask: { action: "github-token", target: repo, body: { permission: "auto" } },
+        ask: { action: "github-token", target: repo, body: { permission: "auto" }, ...extra },
       }),
     ),
   );
@@ -189,12 +189,54 @@ it("opens the one-hour window on approval with no token; the next ask of the mac
   expect(await askToken(stub, "Yarden-zamir/riffle")).toMatchObject({ outcome: "waiting" });
 });
 
-it("answers not kitshn for another owner, and refuses an App owner's repo without a right (K-1760, K-1733)", async () => {
+it("asks the Owner for a read token when only writes code is off (K-1776)", async () => {
   fakeGitHub();
-  const stub = await setup({});
+  const stub = await setup({ writesCode: { mode: "off" } });
+  expect(await askToken(stub, "Yarden-zamir/riffle")).toMatchObject({ outcome: "waiting" });
+  const right = await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec<{ right_name: string }>("SELECT right_name FROM proposals").one(),
+  );
+  expect(right.right_name).toBe("readsCode");
+});
+
+it("answers not kitshn for another owner, and refuses an App owner's repo whose code rights are off (K-1760, K-1733)", async () => {
+  fakeGitHub();
+  const stub = await setup({ readsCode: { mode: "off" }, writesCode: { mode: "off" } });
   expect(await askToken(stub, "qlik-trial/app")).toMatchObject({ outcome: "not-kitshn" });
   expect(await askToken(stub, "Yarden-zamir/riffle")).toMatchObject({
     outcome: "refused",
     reason: expect.stringContaining('"reads code" is off'),
+    need: "readsCode",
+  });
+});
+
+it("asks the Owner for a token when no code right is set; the approval opens the hour for git's auto ask (K-1776)", async () => {
+  fakeGitHub();
+  const stub = await setup({});
+  // git asks "auto"; with no code right set, the Owner approves write.
+  const waiting = await askToken(stub, "Yarden-zamir/riffle");
+  if (waiting.outcome !== "waiting") throw new Error(`The ask did not wait: ${waiting.outcome}`);
+  const decided = await runInDurableObject(stub, async (instance, state) => {
+    const kitshn = instance as unknown as {
+      openSocket(id: string): WebSocket | null;
+      decide(id: string, d: string, by: object): Promise<{ ok: boolean; error?: string }>;
+    };
+    kitshn.openSocket = () => null;
+    const circle = state.storage.sql
+      .exec<{ circle_id: string }>("SELECT circle_id FROM proposals WHERE id = ?", waiting.proposalId)
+      .one().circle_id;
+    const result = await kitshn.decide(waiting.proposalId, "approved", {
+      actor: { _tag: "person", email: "owner@example.com" },
+      visitor: { email: "owner@example.com", clientId: null, ip: null },
+      machineId: null,
+      reason: null,
+    });
+    return { circle, result };
+  });
+  expect(decided).toEqual({ circle: "owner", result: { ok: true } });
+  // git asks with "auto" and no askOwner; the open hour gives it the write token.
+  expect(await askToken(stub, "Yarden-zamir/riffle")).toMatchObject({
+    outcome: "done",
+    result: { token: "ghs_test", permission: "write" },
   });
 });

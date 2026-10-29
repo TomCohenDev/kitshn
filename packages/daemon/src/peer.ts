@@ -62,6 +62,7 @@ const REQUEST_SENDERS: Record<Request["type"], "local-users" | "daemon-user-or-r
   reconnect: "daemon-user-or-root",
   ask: "local-users",
   "forget-token": "local-users",
+  forward: "local-users",
 };
 
 export const requestAllowed = (type: Request["type"], uid: number, own: number) =>

@@ -10,7 +10,9 @@
     "./icon": "./src/icon.ts",
     "./names": "./src/names.ts",
     "./media": "./src/media.ts",
-    "./templates": "./src/templates.ts"
+    "./templates": "./src/templates.ts",
+    "./agent": "./src/agent.ts",
+    "./cli-error": "./src/cli-error.ts"
   },
   "publishConfig": {
     "exports": {

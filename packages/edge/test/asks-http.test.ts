@@ -1,53 +1,60 @@
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, expect, it, vi } from "vitest";
-import type { Machine } from "../src/core/machine.ts";
-import type { Circle, RightMode } from "../src/core/model.ts";
+import { newMachineKey } from "../src/core/machine.ts";
 import { accessToken, send, stubAccessCerts } from "./access.ts";
+import { forwarded, setup } from "./machine-http.ts";
 
 afterEach(() => vi.restoreAllMocks());
 
-/** The machine vps in the agent circle "agents" with these rights. */
-async function setup(rights: Partial<Record<string, RightMode>>) {
-  const machine: Machine = {
-    id: "vps",
-    name: "vps",
-    labels: [],
-    order: 0,
-    serviceTokenId: "token-vps",
-    clientId: "vps.access",
-    tunnelId: "tunnel-vps",
-  };
-  const agents: Circle = {
-    id: "agents",
-    name: "Agents",
-    color: "#ffcc00",
-    level: "control",
-    members: [{ _tag: "machine", machineId: "vps", rights }],
-    match: "any",
-    needsPasskey: false,
-    endsAt: null,
-    x: 5000,
-    y: 5000,
-    r: 200,
-  };
-  const stub = env.KITSHN.getByName("kitshn");
-  await runInDurableObject(stub, (_, state) => {
-    state.storage.sql.exec(
-      "INSERT OR REPLACE INTO machines (id, body) VALUES (?, ?)",
-      "vps",
-      JSON.stringify(machine),
-    );
-    state.storage.sql.exec(
-      "INSERT OR REPLACE INTO circles (id, body) VALUES (?, ?)",
-      "agents",
-      JSON.stringify(agents),
-    );
+it("takes a call that the daemon forwarded and signed, with the right of its path, once per nonce (K-1714)", async () => {
+  stubAccessCerts();
+  const key = await newMachineKey();
+  await setup({ deploys: { mode: "automatic" } }, key);
+  const address = "/agent/cards/no-such-card/address";
+  const off = await forwarded(key, "POST", address, "nonce-off-0123456789");
+  expect(off.status).toBe(403);
+  // A forwarded call cannot wait for the Owner, so an unset right refuses it too, and says how to fix it.
+  expect(await off.json()).toEqual({
+    error: expect.stringContaining('"adds pages" is not set'),
+    need: "addsPages",
   });
-  await evictDurableObject(stub);
-}
+  await setup({ deploys: { mode: "automatic" }, addsPages: { mode: "automatic" } }, key);
+  const passed = await forwarded(
+    key,
+    "POST",
+    address,
+    "nonce-on-01234567890",
+    JSON.stringify({ address: "x" }),
+  );
+  // The right passes; the path itself answers for the unknown card.
+  expect((await passed.json()) as { error?: string }).toEqual({
+    error: expect.not.stringMatching(/K-1714|adds pages/),
+  });
+  // A path that decodes out of a card, or out of /agent/, never reaches a route (K-1714).
+  for (const [index, path] of [
+    "/agent/cards/a%2f..%2f..%2fconnect/address",
+    "/agent/cards/a%252e%252e/address",
+  ].entries()) {
+    const climbing = await forwarded(key, "POST", path, `nonce-climb-${index}-0123456789`);
+    expect(climbing.status, path).toBe(403);
+    expect(await climbing.json()).toEqual({ error: expect.stringContaining("forwards no call") });
+  }
+  // The used nonce stays in storage, so a restart of the object does not let a copied call run again.
+  await evictDurableObject(env.KITSHN.getByName("kitshn"));
+  const again = await forwarded(key, "POST", address, "nonce-on-01234567890");
+  expect(again.status).toBe(403);
+  expect(await again.json()).toEqual({ error: expect.stringContaining("nonce") });
+  const events = await runInDurableObject(env.KITSHN.getByName("kitshn"), (_, state) =>
+    state.storage.sql
+      .exec<{ action: string; target: string }>("SELECT action, target FROM ask_events ORDER BY id")
+      .toArray(),
+  );
+  // A call whose signature or nonce fails is no call of the machine, so it writes no event.
+  expect(events).toEqual([{ action: "forward", target: `POST ${address}` }]);
+});
 
-it("refuses the machine's own token on every agent path over HTTP, so asks always go through kitshn agent (K-1714)", async () => {
+it("refuses the machine's own token on every agent path over HTTP without the daemon's signature (K-1714)", async () => {
   stubAccessCerts();
   await setup({ runsCommands: { mode: "automatic" }, deploys: { mode: "automatic" } });
   const token = await accessToken("agent-aud", { common_name: "vps.access" });

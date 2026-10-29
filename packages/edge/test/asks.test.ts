@@ -107,15 +107,66 @@ const owner = {
   reason: null,
 };
 
-it("refuses a right that is off, and names it (K-1720)", async () => {
-  // One right makes the circle an agent circle of the machine (K-1730); "adds apps" stays off.
-  const stub = await setup({ deploys: { mode: "automatic" } });
+it("refuses a right that is off and names it; a right that no circle sets asks the Owner (K-1720, K-1776)", async () => {
+  const stub = await setup({ deploys: { mode: "automatic" }, addsApps: { mode: "off" } });
   expect(await ask(stub, "allow", "123")).toEqual({
     outcome: "refused",
     reason: expect.stringContaining('"adds apps" is off'),
+    need: "addsApps",
   });
-  // `state` needs no right.
-  expect(await ask(stub, "state")).toMatchObject({ outcome: "done" });
+  const unset = await setup({ deploys: { mode: "automatic" } });
+  const waiting = await ask(unset, "allow", "123");
+  expect(waiting).toMatchObject({ outcome: "waiting" });
+  const circle = await runInDurableObject(
+    unset,
+    (_, state) =>
+      state.storage.sql.exec<{ circle_id: string }>("SELECT circle_id FROM proposals").one().circle_id,
+  );
+  expect(circle).toBe("owner");
+  // `state` needs no right, and names the newest deploy, backup and uptime of each managed card (K-718).
+  await runInDurableObject(stub, (_, state) => {
+    const card = {
+      id: "money",
+      kind: "site.compose",
+      name: "money",
+      addresses: [],
+      status: "running",
+      group: null,
+      machine: "vps",
+    };
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO resources (id, body) VALUES (?, ?)",
+      card.id,
+      JSON.stringify(card),
+    );
+    state.storage.sql.exec("INSERT OR REPLACE INTO places (id, x, y) VALUES ('money', 5000, 5000)");
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO backups (run, card, machine_id, at, state, error) VALUES ('b1', 'money', 'vps', 7, 'done', NULL)",
+    );
+  });
+  await evictDurableObject(stub);
+  const answer = await ask(stub, "state");
+  expect(answer).toMatchObject({ outcome: "done" });
+  // K-1819: "back up now" of a managed card runs under "deploys"; a card that the machine does not manage refuses.
+  expect(await ask(stub, "backup", "elsewhere")).toEqual({
+    outcome: "refused",
+    reason: expect.stringContaining("does not manage"),
+  });
+  expect(await ask(stub, "backup", "money")).not.toMatchObject({
+    reason: expect.stringContaining("does not manage"),
+  });
+  const cards =
+    answer.outcome === "done" ? (answer.result as { cards: Array<Record<string, unknown>> }).cards : [];
+  expect(cards.find((card) => card["id"] === "money")).toMatchObject({
+    deploy: null,
+    backup: { at: 7, state: "done", error: null },
+    uptime: null,
+  });
+  await runInDurableObject(stub, (_, state) => {
+    for (const table of ["resources", "places", "backups"])
+      state.storage.sql.exec(`DELETE FROM ${table} WHERE ${table === "backups" ? "card" : "id"} = 'money'`);
+  });
+  await evictDurableObject(stub);
 });
 
 it("refuses bad labels and asks during the pause (K-1750, K-1504)", async () => {
@@ -184,7 +235,7 @@ it("expires a proposal after its time, so no later answer runs it (K-1724)", asy
 });
 
 it("writes one ask event for each ask, not a revision (K-1717)", async () => {
-  const stub = await setup({});
+  const stub = await setup({ addsApps: { mode: "off" } });
   await ask(stub, "allow", "123");
   const events = await runInDurableObject(stub, (_, state) =>
     state.storage.sql
@@ -195,7 +246,7 @@ it("writes one ask event for each ask, not a revision (K-1717)", async () => {
 });
 
 it("reads only what its own event write reads for a refused ask, and a few rows for a new proposal (K-1715)", async () => {
-  const stub = await setup({ deploys: { mode: "ask", circleId: "owner" } });
+  const stub = await setup({ deploys: { mode: "ask", circleId: "owner" }, addsApps: { mode: "off" } });
   // Wake the object first, so its load does not count.
   await ask(stub, "allow", "123");
   const counted = async (run: (instance: Instance) => Promise<unknown>) =>
@@ -448,4 +499,90 @@ it("opens a high-priority notification for each ask and closes it when the ask i
     return kitshn.actionHandlers.get("kitshn.ask")?.({ key: id }, "deny", owner);
   });
   expect(late).toMatch(/already decided/);
+});
+
+it("runs an approved Owner ask of an unset right, and refuses it once the owner sets the right to off (K-1776)", async () => {
+  const approve = (stub: DurableObjectStub, id: string) =>
+    runInDurableObject(stub, (instance) => (instance as unknown as Instance).decide(id, "approved", owner));
+  const waitingId = (outcome: AskOutcome) => (outcome.outcome === "waiting" ? outcome.proposalId : "");
+  // "adds apps" unset: the approval allows the waiting repo.
+  const stub = await setup({ deploys: { mode: "automatic" } });
+  await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO repos (repo_id, name, state, first_seen) VALUES ('123', 'Yarden-zamir/x', 'waiting', 0)",
+    ),
+  );
+  const allow = await ask(stub, "allow", "123");
+  expect(allow).toMatchObject({ outcome: "waiting" });
+  expect(await approve(stub, waitingId(allow))).toMatchObject({ ok: true });
+  const repo = await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec<{ state: string }>("SELECT state FROM repos WHERE repo_id = '123'").one(),
+  );
+  expect(repo.state).toBe("allowed");
+  // "publishes" unset: a page that the machine added goes into Everyone after the approval.
+  const near = await setup({ deploys: { mode: "automatic" } }, { x: 1000, y: 0 });
+  await runInDurableObject(near, (_, state) => {
+    const sql = state.storage.sql;
+    sql.exec(
+      "INSERT OR REPLACE INTO library (id, kind, title, size, content_type, created_at, added_by) VALUES ('pg', 'page', 'pg', 1, 'text/html', 0, 'vps.access')",
+    );
+    const page = {
+      id: "pg",
+      kind: "page",
+      name: "pg",
+      addresses: [],
+      status: "running",
+      group: null,
+      machine: null,
+    };
+    sql.exec("INSERT OR REPLACE INTO resources (id, body) VALUES ('pg', ?)", JSON.stringify(page));
+    sql.exec("INSERT OR REPLACE INTO places (id, x, y) VALUES ('pg', 1150, 0)");
+  });
+  await evictDurableObject(near);
+  const publish = await ask(near, "publish", "pg");
+  expect(publish).toMatchObject({ outcome: "waiting" });
+  expect(await approve(near, waitingId(publish))).toMatchObject({ ok: true });
+  // The reviewer's deploy probe: "deploys" unset waits for the Owner; set to off meanwhile, the approval refuses.
+  const offLater = await setup({ addsApps: { mode: "automatic" } });
+  const deploy = await ask(offLater, "deploy", "card");
+  expect(deploy).toMatchObject({ outcome: "waiting" });
+  await runInDurableObject(offLater, (_, state) => {
+    const [row] = state.storage.sql
+      .exec<{ body: string }>("SELECT body FROM circles WHERE id = 'agents'")
+      .toArray();
+    const circle = JSON.parse(row?.body ?? "{}") as Circle;
+    const members = [
+      {
+        _tag: "machine",
+        machineId: "vps",
+        rights: { addsApps: { mode: "automatic" }, deploys: { mode: "off" } },
+      },
+    ];
+    state.storage.sql.exec(
+      "UPDATE circles SET body = ? WHERE id = 'agents'",
+      JSON.stringify({ ...circle, members }),
+    );
+  });
+  await evictDurableObject(offLater);
+  expect(await approve(offLater, waitingId(deploy))).toMatchObject({
+    ok: false,
+    error: expect.stringContaining('"deploys" to off'),
+  });
+  // A backup of a card that the machine does not manage refuses at once, with no Owner ask.
+  expect(await ask(offLater, "backup", "elsewhere")).toMatchObject({ outcome: "refused" });
+  const open = await runInDurableObject(offLater, (_, state) =>
+    state.storage.sql
+      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM proposals WHERE state = 'pending'")
+      .one(),
+  );
+  expect(open.n).toBe(0);
+  await runInDurableObject(offLater, (_, state) => {
+    for (const sql of [
+      "DELETE FROM library WHERE id = 'pg'",
+      "DELETE FROM resources WHERE id = 'pg'",
+      "DELETE FROM places WHERE id = 'pg'",
+      "DELETE FROM repos WHERE repo_id = '123'",
+    ])
+      state.storage.sql.exec(sql);
+  });
 });

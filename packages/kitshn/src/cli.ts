@@ -1,30 +1,14 @@
 #!/usr/bin/env node
 // The kitshn CLI for app repos: `kitshn check` (K-802) and `kitshn deploy` (K-803, K-805, K-811).
-import { execFileSync, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import {
-  cpSync,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { execFileSync } from "node:child_process";
+import { cpSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { extname, join, relative, resolve, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
-import { headersWarnings, redirectsWarnings } from "./headers.ts";
-import { pickSiteIcon } from "./icon.ts";
-import { contentType } from "./media.ts";
-import { isHiddenName } from "./names.ts";
-import { cardOutput, errorOutput } from "./output.ts";
-import { type DeployRun, type LogAnswer, logArgs, logLineText, logRange } from "./logs.ts";
-import { type HandoverAnswer, repoFiles } from "./repo-files.ts";
+import { AGENT_USAGE, isAgentCommand, keyTransport, runAgentCommand } from "./agent.ts";
+import { type AssetSession, uploadAssets } from "./assets.ts";
+import { CliError, fail } from "./cli-error.ts";
+import { errorOutput } from "./output.ts";
 import { type Artifact, artifactsByApp } from "./artifacts.ts";
 import { RecipeError, readApps } from "./parse.ts";
 import {
@@ -37,13 +21,6 @@ import {
   deployOrder,
   missingNeeds,
 } from "./recipe.ts";
-
-/** A step that cannot go on. The deploy of one app ends with it; the apps that do not need it go on (K-820). */
-class CliError extends Error {}
-
-const fail = (text: string): never => {
-  throw new CliError(text);
-};
 
 function loadApps(dir: string): Apps {
   const file = join(dir, "kitshn.config.ts");
@@ -103,19 +80,6 @@ async function call<T>(server: string, path: string, body: object): Promise<T> {
   if (!response.ok || !data) fail(data?.error ?? `${path} answered ${response.status}.`);
   return data as T;
 }
-
-/**
- * The files of a static site. It skips dotfiles and dot folders (.git holds the checkout token) and does
- * not follow symlinks, so nothing outside the output folder is published.
- */
-const files = (dir: string): Array<string> =>
-  readdirSync(dir).flatMap((name) => {
-    if (isHiddenName(name)) return [];
-    const path = join(dir, name);
-    const stat = lstatSync(path);
-    if (stat.isSymbolicLink()) return [];
-    return stat.isDirectory() ? files(path) : [path];
-  });
 
 /**
  * K-804, K-820: deploys each app of the repo as its own deploy, after the apps that it needs. When an app does not
@@ -259,88 +223,6 @@ function insideRepo(dir: string, path: string, what: string): string {
   if (real !== root && !real.startsWith(root + sep)) fail(`${what} ${path} is outside the repo.`);
   if (!existsSync(full)) fail(`${what} ${path} does not exist after the build.`);
   return full;
-}
-
-/**
- * K-805: uploads a folder of files through the Workers direct upload flow, and picks the card icon (K-1112).
- * `_headers` and `_redirects` are config that Cloudflare reads, not files to serve.
- */
-type AssetSession = { jwt: string; buckets: Array<Array<string>>; uploadUrl: string };
-
-/**
- * K-805, K-1123: uploads the files of `output` as Workers static assets. `open` asks kitshn for the upload session of
- * the manifest: a repo deploy with its GitHub token, a folder site with the agent key.
- */
-async function uploadAssets(
-  output: string,
-  open: (manifest: Record<string, { hash: string; size: number }>) => Promise<AssetSession>,
-) {
-  const manifest: Record<string, { hash: string; size: number }> = {};
-  const byHash = new Map<string, { path: string; type: string }>();
-  const byPath = new Map<string, string>();
-  let headers: string | null = null;
-  let redirects: string | null = null;
-  for (const path of files(output)) {
-    if (relative(output, path) === "_headers") {
-      headers = readFileSync(path, "utf8");
-      for (const warning of headersWarnings(headers)) console.log(`kitshn: warning: ${warning}`);
-      continue;
-    }
-    if (relative(output, path) === "_redirects") {
-      redirects = readFileSync(path, "utf8");
-      for (const warning of redirectsWarnings(redirects)) console.log(`kitshn: warning: ${warning}`);
-      continue;
-    }
-    const bytes = readFileSync(path);
-    const extension = extname(path).toLowerCase();
-    const hash = createHash("sha256")
-      .update(bytes.toString("base64") + extension.slice(1))
-      .digest("hex")
-      .slice(0, 32);
-    const sitePath = `/${relative(output, path).split("\\").join("/")}`;
-    manifest[sitePath] = { hash, size: bytes.length };
-    byPath.set(sitePath, path);
-    byHash.set(hash, { path, type: contentType(path) });
-  }
-  if (Object.keys(manifest).length === 0) fail(`the folder ${output} is empty.`);
-  const session = await open(manifest);
-  let completion = session.jwt;
-  for (const bucket of session.buckets) {
-    const form = new FormData();
-    for (const hash of bucket) {
-      const file = byHash.get(hash);
-      if (!file) fail(`Cloudflare asked for an unknown file ${hash}.`);
-      form.append(hash, new Blob([readFileSync(file!.path).toString("base64")], { type: file!.type }), hash);
-    }
-    const response = await fetch(session.uploadUrl, {
-      method: "POST",
-      headers: { authorization: `Bearer ${session.jwt}` },
-      body: form,
-    });
-    const body = (await response.json()) as { success: boolean; result?: { jwt?: string }; errors?: unknown };
-    if (!body.success) fail(`the file upload failed: ${JSON.stringify(body.errors)}`);
-    if (body.result?.jwt) completion = body.result.jwt;
-  }
-  // K-1112: the card icon comes from the files; a site without one gets its kind icon.
-  const { icon, notes } = await pickSiteIcon((path) => {
-    const file = byPath.get(path);
-    return file === undefined ? null : readFileSync(file);
-  });
-  for (const note of notes) console.log(`kitshn: icon: ${note}`);
-  console.log(
-    icon
-      ? `kitshn: the card icon is ${icon.path}.`
-      : "kitshn: the site has no icon; the card shows the kind icon.",
-  );
-  if (headers !== null) console.log("kitshn: the site sets its own headers with _headers.");
-  if (redirects !== null) console.log("kitshn: the site sets its own redirects with _redirects.");
-  return {
-    jwt: completion,
-    icon: icon ? Buffer.from(icon.bytes).toString("base64") : null,
-    headers,
-    redirects,
-    count: Object.keys(manifest).length,
-  };
 }
 
 /**
@@ -535,390 +417,37 @@ async function deployCompose(
   console.log(`\nkitshn: deployed to https://${address}`);
 }
 
-/**
- * K-1116: `kitshn publish <file>` for an agent key. It sends the file to `kit.<zone>/agent/library` with the
- * service token of the key (CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET), so it needs no other login. The
- * same name again updates the card and keeps the previous version (K-1117).
- */
-/** K-1116, K-1120: the service token headers of an agent key, for the `/agent` routes of `server`. */
-function agentHeaders(server: string): Record<string, string> {
-  if (!server)
-    fail("name the kitshn server with --server or KITSHN_SERVER, for example https://kit.example.com.");
-  const id = process.env["CF_ACCESS_CLIENT_ID"];
-  const secret = process.env["CF_ACCESS_CLIENT_SECRET"];
-  if (!id || !secret)
-    fail("set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET to the service token of your agent key.");
-  return { "cf-access-client-id": id ?? "", "cf-access-client-secret": secret ?? "" };
-}
-
-/** K-1116, K-1120, K-1123: one JSON call to an `/agent` route with the agent key. */
-async function agentCall<T>(server: string, path: string, body: object): Promise<T> {
-  const response = await fetch(new URL(path, server), {
-    method: "POST",
-    headers: { ...agentHeaders(server), "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = (await response.json().catch(() => null)) as (T & { error?: string }) | null;
-  if (!response.ok || !data) fail(data?.error ?? `${path} answered ${response.status}.`);
-  return data as T;
-}
-
-interface PublishOptions {
-  readonly name: string;
-  readonly circle: string;
-  readonly address: string;
-  readonly zone: string;
-  readonly open: boolean;
-}
-
-async function publish(server: string, file: string, options: PublishOptions) {
-  const credentials = agentHeaders(server);
-  if (!existsSync(file)) fail(`${file} does not exist.`);
-  if (statSync(file).isDirectory()) return publishFolder(server, file, options);
-  if (options.zone) fail("--zone is for a folder site; a page or a file lives on the kitshn zone.");
-  const { name, circle, address, open } = options;
-  const body = readFileSync(file);
-  const fileName = name || file.slice(file.lastIndexOf(sep) + 1);
-  const headers: Record<string, string> = {
-    ...credentials,
-    "x-kitshn-name": encodeURIComponent(fileName),
-    "content-type": contentType(fileName),
-  };
-  if (circle) headers["x-kitshn-circle"] = encodeURIComponent(circle);
-  if (address) headers["x-kitshn-address"] = encodeURIComponent(address);
-  if (open) headers["x-kitshn-public"] = "true";
-  const response = await fetch(new URL("/agent/library", server), { method: "POST", headers, body });
-  const data = (await response.json().catch(() => null)) as {
-    error?: string;
-    id?: string;
-    address?: string | null;
-    updated?: boolean;
-    revision?: number | null;
-  } | null;
-  if (!response.ok) fail(data?.error ?? `/agent/library answered ${response.status}.`);
-  if (json)
-    return void process.stdout.write(
-      cardOutput({
-        address: data?.address,
-        card: data?.id,
-        kind: fileName.toLowerCase().endsWith(".html") ? "page" : "file",
-        updated: data?.updated === true,
-        revision: data?.revision ?? null,
-      }),
-    );
-  console.log(
-    `kitshn: ${data?.updated ? "updated" : "published"} ${fileName}${data?.address ? ` at https://${data.address}` : ""}`,
-  );
-}
-
-/**
- * K-1123: a folder becomes a static site at `<name>.<zone>`, in the steps of a repo deploy: plan, the upload of the
- * files straight to Cloudflare, finish. The same folder name again deploys the same site.
- */
-async function publishFolder(server: string, folder: string, options: PublishOptions) {
-  const name = options.name || resolve(folder).slice(resolve(folder).lastIndexOf(sep) + 1);
-  const plan = await agentCall<{ deployId: string; card: string; address: string; updated: boolean }>(
-    server,
-    "/agent/sites/plan",
-    {
-      folder: name,
-      circle: options.circle,
-      address: options.address,
-      zone: options.zone,
-      public: options.open,
-    },
-  );
-  const assets = await uploadAssets(folder, (manifest) =>
-    agentCall<AssetSession>(server, "/agent/sites/assets", { deployId: plan.deployId, manifest }),
-  );
-  const done = await agentCall<{ address: string; status: number }>(server, "/agent/sites/finish", {
-    deployId: plan.deployId,
-    jwt: assets.jwt,
-    icon: assets.icon,
-    headers: assets.headers,
-    redirects: assets.redirects,
-  });
-  if (json)
-    return void process.stdout.write(
-      cardOutput({ address: done.address, card: plan.card, kind: "folder", updated: plan.updated }),
-    );
-  console.log(
-    `kitshn: ${plan.updated ? "updated" : "published"} ${name} (${assets.count} files) at https://${done.address} (answered ${done.status})`,
-  );
-}
-
-/** K-1120: gives a page or a file card, by its id or its address name, a new address name. */
-async function setAddress(server: string, card: string, name: string) {
-  const data = await agentCall<{
-    address: string;
-    card: string;
-    kind: "page" | "file" | "folder";
-    revision: number | null;
-  }>(server, `/agent/cards/${encodeURIComponent(card)}/address`, {
-    address: name,
-  });
-  if (json)
-    return void process.stdout.write(
-      cardOutput({
-        address: data.address,
-        card: data.card,
-        kind: data.kind,
-        updated: true,
-        revision: data.revision,
-      }),
-    );
-  console.log(`kitshn: ${card} is now at https://${data.address}`);
-}
-
-/** K-1809: an agent key searches the logs of a card that it controls (K-1810); no Live, which needs the map. */
-async function logs(
-  server: string,
-  card: string,
-  text: string,
-  range: { from: number; to: number },
-  options: { deploys: boolean; json: boolean },
-) {
-  const answer = await agentCall<{ answer?: LogAnswer; runs?: ReadonlyArray<DeployRun> }>(
-    server,
-    "/agent/logs",
-    {
-      card,
-      tab: options.deploys ? "deploys" : "app",
-      text,
-      from: range.from,
-      to: range.to,
-    },
-  );
-  // An error answer fails (exit 1), also with --json, where the catch prints it as {"error"} (K-1809).
-  const found = answer.answer;
-  if (found?.state === "error") fail(found.error);
-  if (found?.state === "needs-permission")
-    fail('search in Worker logs needs the token permission "Workers Observability: Edit" (K-1806).');
-  // With --json, stdout holds only the answer; console.log goes to stderr in that mode.
-  if (options.json) return void process.stdout.write(`${JSON.stringify(found ?? answer.runs)}\n`);
-  if (options.deploys) {
-    for (const run of answer.runs ?? []) {
-      console.log(
-        `${new Date(run.at).toISOString()} ${run.sha.slice(0, 7)} ${run.state}${run.reason ? ` ${run.reason}` : ""}${run.runUrl ? ` ${run.runUrl}` : ""}`,
-      );
-      for (const line of run.lines ?? []) console.log(`  ${line}`);
-    }
-    return;
-  }
-  if (!found) fail("kitshn sent no answer.");
-  if (found?.state !== "lines") return;
-  for (const line of found.lines) console.log(logLineText(line));
-  if (found.cut)
-    console.error(
-      "kitshn: the search stopped at 15 s, so the newest lines may be missing; narrow the range.",
-    );
-  else if (found.matched > found.lines.length)
-    console.error(`kitshn: the newest ${found.lines.length} of ${found.matched} lines that match.`);
-}
-
-/**
- * K-1127: makes a new GitHub repo of a page or a folder site with the user's own `gh` login, and hands the card over
- * to it by the repo's ids: the repo's first push deploys the same card. The files come from `path`; for a page
- * without one, from kitshn.
- */
-async function makeRepo(server: string, card: string, path: string, repo: string) {
-  const credentials = agentHeaders(server);
-  const gh = (...ghArgs: Array<string>) => execFileSync("gh", ghArgs, { encoding: "utf8" }).trim();
-  // A new repo only: the handover is for the repo that this command makes.
-  const known = spawnSync("gh", ["repo", "view", repo, "--json", "name"], { stdio: "ignore" });
-  if (known.error) fail("install the GitHub CLI and log in with gh auth login.");
-  if (known.status === 0) fail(`${repo} exists already; name a new repo.`);
-  if (path && !existsSync(path)) fail(`${path} does not exist.`);
-  gh("repo", "create", repo, "--private");
-  const [repoId = "", ownerId = ""] = gh("api", `repos/${repo}`, "--jq", ".id, .owner.id").split("\n");
-  let handover: HandoverAnswer;
-  try {
-    handover = await agentCall<HandoverAnswer>(server, `/agent/cards/${encodeURIComponent(card)}/handover`, {
-      repo,
-      repoId,
-      ownerId,
-    });
-  } catch (error) {
-    console.error(
-      `kitshn: ${repo} is made but empty; delete it with gh repo delete ${repo} if you do not need it.`,
-    );
-    throw error;
-  }
-  const dir = mkdtempSync(join(tmpdir(), "kitshn-repo-"));
-  try {
-    const site = join(dir, "site");
-    mkdirSync(site);
-    if (path && statSync(path).isDirectory())
-      cpSync(path, site, {
-        recursive: true,
-        filter: (from) =>
-          !relative(path, from)
-            .split(sep)
-            .some((part) => part.startsWith(".")),
-      });
-    else if (path && handover.kind === "page") cpSync(path, join(site, "index.html"));
-    else if (path) fail(`${path} is a file; a folder site becomes a repo from its folder.`);
-    else if (handover.kind === "page") {
-      const page = await fetch(
-        new URL(`/agent/library/${encodeURIComponent(handover.card)}/content`, server),
-        {
-          headers: credentials,
-        },
-      );
-      if (!page.ok) fail(`kitshn did not send the page: ${page.status}.`);
-      writeFileSync(join(site, "index.html"), Buffer.from(await page.arrayBuffer()));
-    } else fail("name the folder of the site: kitshn cannot read the files of a folder site back.");
-    for (const [file, text] of Object.entries(repoFiles(handover, repo, server))) {
-      mkdirSync(join(dir, file, ".."), { recursive: true });
-      writeFileSync(join(dir, file), text);
-    }
-    const git = (...gitArgs: Array<string>) => execFileSync("git", gitArgs, { cwd: dir, stdio: "inherit" });
-    git("init", "--quiet", "--initial-branch", "main");
-    git("add", "--all");
-    git("commit", "--quiet", "--message", `kitshn: ${repo} from its kitshn card`);
-    // The user's gh login pushes, so the first deploy comes from the user's push.
-    git(
-      "-c",
-      "credential.helper=",
-      "-c",
-      "credential.helper=!gh auth git-credential",
-      "push",
-      "--quiet",
-      `https://github.com/${repo}.git`,
-      "main",
-    );
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  console.log(
-    `kitshn: made ${repo}; its first push deploys the card at https://${handover.addresses[0] ?? ""} (K-1127).`,
-  );
-}
-
-/** K-1128: adds a hostname that only sends visitors on to a site card, or with `remove` takes it away again. */
-async function redirect(server: string, card: string, address: string, remove: boolean) {
-  const path = `/agent/cards/${encodeURIComponent(card)}/redirects`;
-  const response = await fetch(new URL(remove ? `${path}/${encodeURIComponent(address)}` : path, server), {
-    method: remove ? "DELETE" : "POST",
-    headers: { ...agentHeaders(server), "content-type": "application/json" },
-    ...(remove ? {} : { body: JSON.stringify({ address }) }),
-  });
-  const data = (await response.json().catch(() => null)) as {
-    error?: string;
-    card?: string;
-    address?: string;
-    to?: string;
-    revision?: number;
-  } | null;
-  if (!response.ok || !data) fail(data?.error ?? `${path} answered ${response.status}.`);
-  if (json) return void process.stdout.write(`${JSON.stringify({ ...data, removed: remove })}\n`);
-  console.log(
-    remove
-      ? `kitshn: ${address} no longer sends visitors on to ${card}.`
-      : `kitshn: ${address} sends visitors on to https://${data?.to ?? ""} once its domain is up (K-1128).`,
-  );
-}
-
 const [command, ...args] = process.argv.slice(2);
 
-/** K-1809: bad arguments exit with 2, and with --json the reason is the one object on stdout. */
-function usage(reason: string): never {
-  if (args.includes("--json")) process.stdout.write(errorOutput(reason));
-  console.error(`kitshn: ${reason}`);
-  process.exit(2);
-}
 /** K-1116: with `--json`, stdout holds only the result object; progress and notes go to stderr. */
 const json = args.includes("--json");
-if (json) console.log = console.error.bind(console);
 const flag = (name: string, fallback: string) => {
   const index = args.indexOf(name);
   return index >= 0 ? (args[index + 1] ?? fallback) : fallback;
 };
 
-try {
-  if (command === "check") console.log(JSON.stringify(loadApps(flag("--dir", ".")), null, 2));
-  else if (command === "deploy") await deploy(flag("--server", ""), flag("--dir", "."));
-  else if (command === "publish") {
-    const valued = new Set(["--name", "--circle", "--address", "--zone", "--server"]);
-    const file = args.find((arg, index) => !arg.startsWith("--") && !valued.has(args[index - 1] ?? ""));
-    if (!file)
-      fail(
-        "name the file or folder to publish: kitshn publish <file|folder> [--name <name>] [--address <name>] [--zone <zone>] [--circle <circle>] [--public].",
-      );
-    await publish(flag("--server", process.env["KITSHN_SERVER"] ?? ""), file ?? "", {
-      name: flag("--name", ""),
-      circle: flag("--circle", ""),
-      address: flag("--address", ""),
-      zone: flag("--zone", ""),
-      open: args.includes("--public"),
-    });
-  } else if (command === "logs") {
-    const { card, text } = logArgs(args);
-    if (!card)
-      usage(
-        "name the card: kitshn logs <card> [text] [--since 1h | --from <time> [--to <time>]] [--deploys] [--json] [-- <text>].",
-      );
-    const range = logRange(
-      { since: flag("--since", ""), from: flag("--from", ""), to: flag("--to", "") },
-      Date.now(),
-    );
-    if (typeof range === "string") usage(range);
-    await logs(
-      flag("--server", process.env["KITSHN_SERVER"] ?? ""),
-      card ?? "",
-      text,
-      range as { from: number; to: number },
-      {
-        deploys: args.includes("--deploys"),
-        json: args.includes("--json"),
-      },
-    );
-  } else if (command === "redirect") {
-    const [card, address] = args.filter(
-      (arg, index) => !arg.startsWith("--") && args[index - 1] !== "--server",
-    );
-    if (!card || !address)
-      fail("name the site card and the hostname: kitshn redirect <card> <address> [--remove].");
-    await redirect(
-      flag("--server", process.env["KITSHN_SERVER"] ?? ""),
-      card ?? "",
-      address ?? "",
-      args.includes("--remove"),
-    );
-  } else if (command === "address") {
-    const [card, name] = args.filter((arg, index) => !arg.startsWith("--") && args[index - 1] !== "--server");
-    if (!card || !name) fail("name the card and its new address name: kitshn address <card> <name>.");
-    await setAddress(flag("--server", process.env["KITSHN_SERVER"] ?? ""), card ?? "", name ?? "");
-  } else if (command === "repo") {
-    const valued = new Set(["--repo", "--server"]);
-    const [card, path] = args.filter(
-      (arg, index) => !arg.startsWith("--") && !valued.has(args[index - 1] ?? ""),
-    );
-    const repo = flag("--repo", "");
-    if (!card || !repo)
-      fail("name the card and the new repo: kitshn repo <card> [<folder|file>] --repo <owner/name>.");
-    await makeRepo(flag("--server", process.env["KITSHN_SERVER"] ?? ""), card ?? "", path ?? "", repo);
-  }
-} catch (error) {
-  if (json) {
-    process.stdout.write(errorOutput(error instanceof Error ? error.message : String(error)));
+if (isAgentCommand(command))
+  await runAgentCommand(command, args, () =>
+    keyTransport(flag("--server", process.env["KITSHN_SERVER"] ?? "")),
+  );
+else {
+  if (json) console.log = console.error.bind(console);
+  try {
+    if (command === "check") console.log(JSON.stringify(loadApps(flag("--dir", ".")), null, 2));
+    else if (command === "deploy") await deploy(flag("--server", ""), flag("--dir", "."));
+  } catch (error) {
+    if (json) {
+      process.stdout.write(errorOutput(error instanceof Error ? error.message : String(error)));
+      process.exit(1);
+    }
+    if (!(error instanceof CliError)) throw error;
+    console.error(`kitshn: ${error.message}`);
     process.exit(1);
   }
-  if (!(error instanceof CliError)) throw error;
-  console.error(`kitshn: ${error.message}`);
-  process.exit(1);
 }
-if (!["check", "deploy", "publish", "address", "logs", "repo", "redirect"].includes(command ?? "")) {
+if (command !== "check" && command !== "deploy" && !isAgentCommand(command)) {
   console.log(`kitshn check [--dir <app>]                  check kitshn.config.ts and print it as JSON (K-802)
 kitshn deploy --server <address> [--dir <app>]   deploy from GitHub Actions (K-803)
-kitshn publish <file|folder> [--name <name>] [--address <name>] [--zone <zone>] [--circle <circle>] [--public] [--json]
-                                             publish a page, a file (K-1116) or a folder site (K-1123) with an agent key
-kitshn address <card> <name> [--json]        give a page, a file (K-1120) or a folder site (K-1124) a new address name
-                                             --json prints one JSON object on stdout: the card, or {"error"}
-kitshn logs <card> [text] [--since 1h | --from <time> [--to <time>]] [--deploys] [--json] [-- <text>]
-                                             search the logs of a card that your agent key controls (K-1809)
-kitshn repo <card> [<folder|file>] --repo <owner/name>
-                                             make a new repo of a page or a folder site with gh (K-1127)
-kitshn redirect <card> <address> [--remove] [--json]
-                                             a hostname that only sends visitors on to a site card (K-1128)`);
+${AGENT_USAGE}
+                                             with an agent key: --server or KITSHN_SERVER, and CF_ACCESS_CLIENT_ID and _SECRET`);
 }

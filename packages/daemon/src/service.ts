@@ -52,6 +52,62 @@ export function pathsFor(
 /** K-701: the private socket folder sits in a folder that only its user can pass, so the shared one is in /tmp. */
 const sharedSocketOf = (uid: number) => `/tmp/kitshn-${uid}/kitshn.sock`;
 
+/** The owner and the permission bits of a path, from `lstat`; null when it is missing. */
+export interface PathFacts {
+  readonly uid: number;
+  readonly mode: number;
+  readonly directory: boolean;
+  readonly socket: boolean;
+}
+
+/** K-701: the only user whose shared socket the commands find by themselves. */
+export const DAEMON_USER = "kitshn";
+
+/**
+ * K-701: the socket that the commands use. `KITSHN_LOCAL_SOCKET` wins; else the user's own socket; else the one shared
+ * socket in /tmp of the system user `kitshn`, in its own folder with mode 0711, so an allowed local user needs no
+ * setting. Another user can make a folder in /tmp under its own uid, so only the user name anchors the trust.
+ */
+export function localSocket(
+  env: Record<string, string | undefined>,
+  own: Paths,
+  facts: (path: string) => PathFacts | null,
+  tmpEntries: ReadonlyArray<string>,
+  userName: (uid: number) => string | null,
+): string | { readonly several: ReadonlyArray<string> } | { readonly refused: string } {
+  const given = env["KITSHN_LOCAL_SOCKET"];
+  if (given) return given;
+  if (facts(own.socket)?.socket) return own.socket;
+  // Only folders of the user `kitshn` count, so another user's folder can neither pose as the daemon nor block it.
+  const found = tmpEntries
+    .filter((name) => name.startsWith("kitshn-") && isDigits(name.slice("kitshn-".length)))
+    .map((name) => ({ folder: `/tmp/${name}`, uid: Number(name.slice("kitshn-".length)) }))
+    .filter(({ folder }) => {
+      const owner = facts(folder);
+      return facts(`${folder}/kitshn.sock`) !== null && owner !== null && userName(owner.uid) === DAEMON_USER;
+    });
+  if (found.length > 1) return { several: found.map(({ folder }) => `${folder}/kitshn.sock`) };
+  const [one] = found;
+  if (!one) return own.socket;
+  const folder = facts(one.folder);
+  const socket = facts(`${one.folder}/kitshn.sock`);
+  const problem =
+    folder === null || !folder.directory
+      ? "is not a real folder"
+      : folder.uid !== one.uid
+        ? `belongs to user id ${folder.uid}, not ${one.uid}`
+        : (folder.mode & 0o777) !== 0o711
+          ? `has mode ${(folder.mode & 0o777).toString(8)}, not 711`
+          : !socket?.socket || socket.uid !== one.uid
+            ? "holds a socket of another user"
+            : null;
+  return problem === null
+    ? `${one.folder}/kitshn.sock`
+    : {
+        refused: `kitshn does not trust ${one.folder}: it ${problem}. Set KITSHN_LOCAL_SOCKET to the socket of your daemon.`,
+      };
+}
+
 /**
  * K-701: the user id of the daemon that a client expects at the socket: `KITSHN_DAEMON_UID`, else the id in the
  * name of a shared socket folder, else its own. A string is the reason when `KITSHN_DAEMON_UID` is not a user id.
@@ -245,3 +301,9 @@ export function expectedHash(sums: string, file: string): string | null {
   }
   return null;
 }
+
+/**
+ * K-1714: the one stable answer that marks kitshn 2 for tools that pick a `kitshn` binary. KitSHn 1 has no
+ * `version --json`, so its failure or another answer marks it. Fields are only added, never renamed.
+ */
+export const versionJson = (version: string) => JSON.stringify({ product: "kitshn", generation: 2, version });

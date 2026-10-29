@@ -60,6 +60,8 @@ export const MACHINE_RIGHTS = [
   "writesCode",
   "addsAudiences",
   "getsPasses",
+  "addsPages",
+  "restores",
 ] as const;
 export type MachineRight = (typeof MACHINE_RIGHTS)[number];
 export const MACHINE_RIGHT_NAMES: Record<MachineRight, string> = {
@@ -71,6 +73,8 @@ export const MACHINE_RIGHT_NAMES: Record<MachineRight, string> = {
   writesCode: "writes code",
   addsAudiences: "adds audiences",
   getsPasses: "gets passes",
+  addsPages: "adds pages",
+  restores: "restores",
 };
 /** K-1725: the rights that the map warns about when no person approves them. */
 export const HIGH_RISK_RIGHTS: ReadonlySet<MachineRight> = new Set([
@@ -78,6 +82,7 @@ export const HIGH_RISK_RIGHTS: ReadonlySet<MachineRight> = new Set([
   "deploys",
   "writesCode",
   "addsApps",
+  "restores",
 ]);
 
 /** K-1754: an attested label must have one of these values. */
@@ -90,9 +95,15 @@ export interface RightCondition {
  * K-1720: a right that is on runs at once, or asks one circle. A right that is off has no mode. K-1754: its conditions
  * on attested labels must all hold.
  */
+/**
+ * K-1720, K-1776: the mode of one right. A right that no circle sets asks the Owner; only "off" refuses.
+ */
 export type RightMode =
   | { readonly mode: "automatic"; readonly conditions?: ReadonlyArray<RightCondition> }
-  | { readonly mode: "ask"; readonly circleId: string; readonly conditions?: ReadonlyArray<RightCondition> };
+  | { readonly mode: "ask"; readonly circleId: string; readonly conditions?: ReadonlyArray<RightCondition> }
+  | { readonly mode: "off" };
+/** A mode that lets a call through, now or after an approval. */
+export type OpenRightMode = Exclude<RightMode, { readonly mode: "off" }>;
 
 /** K-718: the rights that the owner can give an agent key on its device member. */
 export const AGENT_RIGHTS = ["addsApps", "publishes"] as const;

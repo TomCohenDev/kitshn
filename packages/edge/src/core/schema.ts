@@ -23,8 +23,9 @@ const Conditions = Schema.Array(
 const RightMode = Schema.Union([
   Schema.Struct({ mode: Schema.Literal("automatic"), conditions: Schema.optionalKey(Conditions) }),
   Schema.Struct({ mode: Schema.Literal("ask"), circleId: Id, conditions: Schema.optionalKey(Conditions) }),
+  Schema.Struct({ mode: Schema.Literal("off") }),
 ]);
-/** K-1730: each right of a machine in an agent circle; a missing right is off. */
+/** K-1730, K-1776: each right of a machine in an agent circle; a missing right asks the Owner, "off" refuses. */
 const MachineRights = Schema.Struct({
   addsApps: Schema.optionalKey(RightMode),
   publishes: Schema.optionalKey(RightMode),
@@ -34,6 +35,8 @@ const MachineRights = Schema.Struct({
   writesCode: Schema.optionalKey(RightMode),
   addsAudiences: Schema.optionalKey(RightMode),
   getsPasses: Schema.optionalKey(RightMode),
+  addsPages: Schema.optionalKey(RightMode),
+  restores: Schema.optionalKey(RightMode),
 });
 // A new right of MACHINE_RIGHTS fails here until the schema decodes it.
 const _everyRight: Record<Model.MachineRight, unknown> = MachineRights.fields;

@@ -14,8 +14,8 @@ A repo with `.kitshn.yaml` and `Caddyfile.j2` is a KitSHn 1 repo. Do not mix the
 
 ## The two programs named `kitshn`
 
-- **App CLI** (`kitshn.mjs` in each `edge-<version>` release): `check`, `deploy`, and for agent keys `publish` and `address`. GitHub Actions downloads it; you rarely run it by hand.
-- **Daemon** (one binary per machine, installed by the join command): `status`, `expose`, `unexpose`, `join`, `rekey`, `skill`. See `kitshn` with no arguments on a machine.
+- **`kitshn` on a machine** (installed by the join command): what you, as an agent, call. It also carries this skill (`kitshn skill`). `kitshn` with no arguments lists its commands.
+- **App CLI** (`kitshn.mjs` in each `edge-<version>` release): `check` and `deploy` for GitHub Actions. You rarely run it by hand.
 
 ## This skill
 
@@ -75,20 +75,24 @@ The daemon carries the skill of its release (K-618). The line under the front ma
    A build that needs its own job, or runs untrusted code, uploads an artifact; the header of `kitshn2-deploy.yml` shows the pattern (K-805).
 4. Values: a GitHub secret or variable `KITSHN_<NAME>` reaches the app as `<NAME>` (K-808). Put production-only secrets in the GitHub Environment `prod`.
 5. Run `kitshn skill install --repo` and commit `.claude/skills/kitshn/SKILL.md`, so agents in the repo know kitshn.
-6. Push. The first deploy of a new repo waits: "waits on the kitshn map" (K-819). The owner clicks **Allow**, or an agent key with "may add apps" sends `{"state": "allowed"}` to `POST kit.<zone>/agent/repos/<repoId>` (the id is in `GET kit.<zone>/agent/state`).
+6. Push. The first deploy of a new repo waits: "waits on the kitshn map" (K-819). The owner clicks **Allow**, or you run `kitshn agent allow <repo id>` (the id is in `kitshn agent state`).
 
 A Compose app listens on the Unix socket `$KITSHN_DEFAULT_SOCKET` and publishes no ports (K-607). Only safe Compose keys pass; the deploy output names each refused setting, and only the owner can allow one on a machine (K-818).
 
-## Agent keys: publish pages, files and folders
+## As an agent: call `kitshn`
 
-After [#115](https://github.com/Yarden-zamir/kitshn/pull/115) merges. An agent key is a Cloudflare Access service token. Set `KITSHN_SERVER`, `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`, then:
+Call `kitshn` on the machine where you run. kitshn knows the machine and your thread, and gives you the access that the owner gave them. You set nothing yourself.
 
-- `kitshn publish <file> [--name <name>] [--circle <circle>] [--public]` puts a page or a file on the map (K-1116). The same file name again updates its card (K-1117).
-- After [#118](https://github.com/Yarden-zamir/kitshn/pull/118): `--address <name>` and `kitshn address <card> <name>` set a readable address, `pages.<zone>/<name>` (K-1120).
-- After [#121](https://github.com/Yarden-zamir/kitshn/pull/121): `kitshn publish <folder>` publishes a static site with no repo (K-1123).
-- `kitshn logs <card> [text] [--since 1h | --from <time> [--to <time>]] [--deploys] [--json]` searches the logs of a Compose or Worker card that the key controls, or its deploy runs with `--deploys` (K-1809, K-1810). It shows at most the newest 500 lines that match. It has no live follow.
+- `kitshn agent state`: the cards that you manage, with the newest deploy, backup and uptime of each, and your rights.
+- `kitshn agent deploy <card> --body '{"mode":"redeploy"}'`: redeploy a card (`"build"` runs its workflow again). `kitshn agent backup <card>` backs it up now.
+- `kitshn agent job <machine> --body '{"command": ...}'` runs a job; `kitshn agent history t3.thread.id=<id>` lists what a thread asked.
+- `kitshn publish <file|folder> [--name <name>] [--address <name>] [--circle <circle>] [--public]` puts a page, a file or a folder site on the map (K-1116, K-1123). The same name again updates its card.
+- `kitshn address <card> <name>`, `kitshn redirect <card> <address> [--remove]`, `kitshn logs <card> [text] [--since 1h] [--deploys]` and `kitshn repo <card> --repo <owner/name>` do what their names say (K-1120, K-1128, K-1809, K-1127).
+- `git push` to github.com works after `kitshn setup-git` once on the machine (K-1763).
 
-A key never raises access on its own: `--public` needs "may publish" (K-718).
+When a call needs the owner, kitshn asks the owner and prints `waiting:`; the call ends when the owner answers. `--reason <text>` tells the owner why. When kitshn says no, its one line names the right and what to ask the owner.
+
+If `kitshn` says that no daemon runs, the machine is not joined: tell the user.
 
 ## Rollback and badges
 

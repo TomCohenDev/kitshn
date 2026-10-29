@@ -246,6 +246,9 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "CREATE TABLE notify_tokens (hash TEXT PRIMARY KEY, card_id TEXT NOT NULL, created_at INTEGER NOT NULL, pending TEXT)",
     "CREATE INDEX notify_tokens_card ON notify_tokens (card_id, created_at)",
   ],
+  // 33: the nonces of calls that daemons forwarded in the last minute (K-1714), with the time that the daemon signed,
+  // so a copied call does not run twice, also after a restart. Each forward deletes the rows older than its window.
+  ["CREATE TABLE forward_nonces (nonce TEXT PRIMARY KEY, at INTEGER NOT NULL)"],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

@@ -24,6 +24,8 @@ export const ASK_ACTIONS = [
   "approve",
   "deny",
   "history",
+  "backup",
+  "restore",
 ] as const;
 export type AskAction = (typeof ASK_ACTIONS)[number];
 
@@ -49,6 +51,8 @@ export const ASK_RIGHT: Record<AskAction, MachineRight | "none" | "member" | "ap
   approve: "member",
   deny: "member",
   history: "none",
+  backup: "deploys",
+  restore: "restores",
 };
 
 /** K-1750: at most 10 labels, each key with a prefix, of `a-z`, `0-9`, `.` and `-`, at most 64 characters. */
@@ -113,6 +117,8 @@ export function askRequest(
     case "approve":
     case "deny":
     case "history":
+    case "backup":
+    case "restore":
       return `kitshn runs ${action} itself, not through an agent path.`;
   }
 }
@@ -134,6 +140,10 @@ export function shownAsk(action: AskAction, target: string, body: unknown): stri
       return `${object["public"] === false ? "unpublish" : "publish"} ${target}`;
     case "allow":
       return `allow the repo ${target}`;
+    case "backup":
+      return `back up ${target} now`;
+    case "restore":
+      return `restore ${target} to the backup run ${JSON.stringify(object["run"] ?? null)}`;
     default:
       return `${action} ${target} ${JSON.stringify(body ?? null)}`.trim();
   }
@@ -200,7 +210,7 @@ export function rightWarnings(
 ): Array<string> {
   const warnings: Array<string> = [];
   for (const [right, mode] of Object.entries(rights) as Array<[MachineRight, RightMode | undefined]>) {
-    if (!mode) continue;
+    if (!mode || mode.mode === "off") continue;
     const name = MACHINE_RIGHT_NAMES[right];
     if (mode.mode === "automatic") {
       if (right === "writesCode" && (mode.conditions ?? []).length === 0)

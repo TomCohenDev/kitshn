@@ -8,6 +8,7 @@ import {
   EVERYONE_CIRCLE_ID,
   type MachineRight,
   type Member,
+  type OpenRightMode,
   type Point,
   type RightMode,
   type ResourceKind,
@@ -68,19 +69,33 @@ export function machineRightMode(
   machineId: string,
   right: MachineRight,
   now: number,
-): RightMode | null {
-  const machine = state.machines.get(machineId);
-  if (!machine) return null;
-  const visitor = { email: null, clientId: machine.clientId, ip: null };
-  const modes = [...circlesOf(state, visitor, now)].flatMap((id) =>
-    (state.circles.get(id)?.members ?? []).flatMap((member) =>
-      member._tag === "machine" && member.machineId === machineId && member.rights?.[right]
-        ? [member.rights[right]]
-        : [],
-    ),
-  );
-  return modes.find((mode) => mode.mode === "automatic") ?? modes[0] ?? null;
+): OpenRightMode | null {
+  return pickMode(machineModes(state, machineId, right, now));
 }
+
+/** K-1776: true when a circle of the machine sets this right to "off", so a call refuses instead of asking the Owner. */
+export const machineRightOff = (state: State, machineId: string, right: MachineRight, now: number) =>
+  machineModes(state, machineId, right, now).some((mode) => mode.mode === "off") &&
+  machineRightMode(state, machineId, right, now) === null;
+
+function machineModes(state: State, machineId: string, right: MachineRight, now: number): Array<RightMode> {
+  const machine = state.machines.get(machineId);
+  if (!machine) return [];
+  const visitor = { email: null, clientId: machine.clientId, ip: null };
+  return [...circlesOf(state, visitor, now)].flatMap((id) =>
+    (state.circles.get(id)?.members ?? []).flatMap((member) => {
+      const mode =
+        member._tag === "machine" && member.machineId === machineId ? member.rights?.[right] : undefined;
+      return mode ? [mode] : [];
+    }),
+  );
+}
+
+/** K-1720: automatic wins over ask; "off" never lets a call through. */
+const pickMode = (modes: ReadonlyArray<RightMode>): OpenRightMode | null => {
+  const open = modes.filter((mode): mode is OpenRightMode => mode.mode !== "off");
+  return open.find((mode) => mode.mode === "automatic") ?? open[0] ?? null;
+};
 
 /** K-1730: the machine whose token the visitor carries, or undefined for a person or an agent key. */
 export const machineOf = (state: State, visitor: Visitor) =>
@@ -101,10 +116,10 @@ export function agentHas(
   approved: MachineRight | null = null,
 ) {
   const machine = machineOf(state, visitor);
-  if (machine) {
-    const mode = machineRightMode(state, machine.id, right, now);
-    return mode !== null && (mode.mode === "automatic" || approved === right);
-  }
+  // K-1723, K-1776: an approval of exactly this call counts also for a right that no circle sets; "off" never gets
+  // this far, because the approval refuses first (proposalGone).
+  if (machine)
+    return approved === right || machineRightMode(state, machine.id, right, now)?.mode === "automatic";
   return [...circlesOf(state, visitor, now)].some((id) =>
     state.circles
       .get(id)
@@ -379,18 +394,39 @@ export function agentDeployPlan(
  * card covering the repo (a repo group or its repo card) at `control`. "writes code" includes "reads code". Automatic
  * from any such circle wins, else the first "ask <circle>"; null is off.
  */
-export function codeRightMode(
+export const codeRightMode = (
   state: State,
   machineId: string,
   right: "readsCode" | "writesCode",
   fullName: string,
   now: number,
-): RightMode | null {
+): OpenRightMode | null => pickMode(codeModes(state, machineId, right, fullName, now));
+
+/** K-1776: true when a card that covers the repo sets the code right to "off" and none lets it through. */
+export const codeRightOff = (
+  state: State,
+  machineId: string,
+  right: "readsCode" | "writesCode",
+  fullName: string,
+  now: number,
+) =>
+  codeModes(state, machineId, right, fullName, now, true).some((mode) => mode.mode === "off") &&
+  codeRightMode(state, machineId, right, fullName, now) === null;
+
+function codeModes(
+  state: State,
+  machineId: string,
+  right: "readsCode" | "writesCode",
+  fullName: string,
+  now: number,
+  exact = false,
+): Array<RightMode> {
   const machine = state.machines.get(machineId);
-  if (!machine) return null;
+  if (!machine) return [];
   const covering = coveringCards(state, fullName);
+  // "writes code" includes reading for an open mode; "off" counts only for its own right (K-1776).
   const rights: ReadonlyArray<MachineRight> =
-    right === "readsCode" ? ["readsCode", "writesCode"] : ["writesCode"];
+    right === "readsCode" && !exact ? ["readsCode", "writesCode"] : [right];
   const modes = [...circlesOf(state, { email: null, clientId: machine.clientId, ip: null }, now)].flatMap(
     (id) => {
       const circle = state.circles.get(id);
@@ -408,5 +444,5 @@ export function codeRightMode(
       );
     },
   );
-  return modes.find((mode) => mode.mode === "automatic") ?? modes[0] ?? null;
+  return modes;
 }

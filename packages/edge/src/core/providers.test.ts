@@ -10,6 +10,7 @@ import {
   machineBusy,
   providerCards,
   providerPushes,
+  siteAudiences,
   reachOf,
 } from "./providers.ts";
 
@@ -230,8 +231,7 @@ describe("pushes to a machine (K-709, K-717, K-1608)", () => {
     const app = [...served.values()].find((card) => card.kind === "t3.app")!;
     const access = (aud: string | null) => ({
       teamDomain: "team.cloudflareaccess.com",
-      audienceOf: (cardId: string, address: string) =>
-        cardId === app.id && address === "t3-vps.example.com" ? aud : null,
+      audiencesOf: (cardId: string) => (cardId === app.id && aud ? [aud] : []),
     });
     const desired = new Map([
       [
@@ -277,6 +277,9 @@ describe("pushes to a machine (K-709, K-717, K-1608)", () => {
     expect(stale[2]).toMatchObject({ values: { app: { updateChannel: "nightly" } } });
     // No application yet: no audience, so the provider accepts only what it accepted before.
     expect(stale[3]).toMatchObject({ access: { audiences: [] } });
+    // A give-back takes the address off the card at once, but the application answers until the sync deletes it.
+    const givenBack: State = { ...value, resources: new Map([[app.id, { ...app, addresses: [] }]]) };
+    expect(siteAudiences(givenBack, "vps", "t3", access("aud-app").audiencesOf)).toEqual(["aud-app"]);
   });
 });
 

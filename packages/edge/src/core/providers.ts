@@ -188,7 +188,7 @@ export function providerPushes(
   now: number,
   access: {
     readonly teamDomain: string;
-    readonly audienceOf: (cardId: string, address: string) => string | null;
+    readonly audiencesOf: (cardId: string) => ReadonlyArray<string>;
   },
 ): Array<ProviderPush> {
   return regs.flatMap(({ name, kinds }) => {
@@ -221,7 +221,7 @@ export function providerPushes(
         provider: name,
         access: {
           teamDomain: access.teamDomain,
-          audiences: siteAudiences(state, machineId, name, access.audienceOf),
+          audiences: siteAudiences(state, machineId, name, access.audiencesOf),
         },
       },
       ...kinds
@@ -241,22 +241,20 @@ export function providerPushes(
 }
 
 /**
- * K-1623: the AUD tags of kitshn's Access applications on the site hosts of one provider's cards on a machine, so
- * the provider accepts tokens of those applications. A host without an application yet adds none.
+ * K-1623: the AUD tags of kitshn's Access applications of one provider's site cards on a machine, so the provider
+ * accepts tokens of those applications. `audiencesOf` gives the applications that exist, also one whose address the
+ * card just gave back, because it answers until the sync deletes it. A card without an application adds none.
  */
 export function siteAudiences(
   state: State,
   machineId: string,
   provider: string,
-  audienceOf: (cardId: string, address: string) => string | null,
+  audiencesOf: (cardId: string) => ReadonlyArray<string>,
 ): Array<string> {
   const audiences = new Set<string>();
   for (const card of state.resources.values())
     if (card.machine === machineId && card.provider?.name === provider && card.provider.site)
-      for (const address of card.addresses) {
-        const aud = audienceOf(card.id, address);
-        if (aud) audiences.add(aud);
-      }
+      for (const aud of audiencesOf(card.id)) audiences.add(aud);
   return [...audiences].sort();
 }
 

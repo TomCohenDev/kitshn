@@ -277,6 +277,7 @@ import {
   type ProviderKind,
   type ProviderReport,
   decodeProviderReports,
+  pushKey,
   reportProblem,
 } from "@kitshn/local";
 import { seed } from "../core/seed.ts";
@@ -3418,7 +3419,11 @@ export class Kitshn extends DurableObject<Env> {
       now,
       {
         teamDomain: this.env.ACCESS_TEAM_DOMAIN,
-        audienceOf: (cardId, address) => this.access.get(`app:${cardId}:${address}`)?.aud || null,
+        // An application lives until the sync deletes it, so its audience stays until then, also after a give-back.
+        audiencesOf: (cardId) =>
+          [...this.access.values()].flatMap((row) =>
+            row.key.startsWith(`app:${cardId}:`) && row.cfId && row.aud ? [row.aud] : [],
+          ),
       },
     ).map((push) => {
       const text = JSON.stringify(push);
@@ -5148,10 +5153,6 @@ export class Kitshn extends DurableObject<Env> {
     return { ...parsed, resource: card.provider?.localId ?? null };
   }
 
-  /**
-   * K-704: "Forget provider" removes the cards of a provider that does not run, with their shares, as one revision
-   * with Undo, and its registration. A running provider would bring its cards back at once, so kitshn refuses it.
-   */
   /** K-1623: the Access applications of the account, as Cloudflare lists them. */
   private accessApps(api: Api) {
     return api<ReadonlyArray<AccessAppListing>>(
@@ -5178,6 +5179,17 @@ export class Kitshn extends DurableObject<Env> {
     if (!before)
       return Response.json(
         { error: "Only a provider card whose address is in use takes it over." },
+        { status: 409 },
+      );
+    // K-1623: kitshn's application answers on the host as soon as it exists, so T3 must get its audience first.
+    const socket = this.openSocket(before.site.machineId);
+    const attachment = socket ? attachmentOf(socket) : null;
+    if (attachment?.kind !== "machine" || !attachment.status?.capabilities?.includes("access"))
+      return Response.json(
+        {
+          error:
+            "The machine must be online, with a kitshn daemon that passes Access audiences on (K-1623). Update kitshn there, and T3 to a version with fork #415, then try again.",
+        },
         { status: 409 },
       );
     const address = before.site.address;
@@ -5318,6 +5330,10 @@ export class Kitshn extends DurableObject<Env> {
     return 1;
   }
 
+  /**
+   * K-704: "Forget provider" removes the cards of a provider that does not run, with their shares, as one revision
+   * with Undo, and its registration. A running provider would bring its cards back at once, so kitshn refuses it.
+   */
   private forgetProvider(caller: Caller, machineId: string, name: string, card: string | null) {
     const machine = this.state.machines.get(machineId);
     if (!machine) return Response.json({ error: `No machine "${machineId}" exists.` }, { status: 404 });
@@ -5918,6 +5934,23 @@ export class Kitshn extends DurableObject<Env> {
     });
   }
 
+  /**
+   * K-1623: the machine applied the access push that holds the audience of kitshn's application on the site, so its
+   * provider accepts kitshn's tokens before the record sends visitors through kitshn.
+   */
+  private audienceApplied(site: LiveSite) {
+    const aud = this.access.get(`app:${site.id}:${site.address}`)?.aud;
+    const provider = this.state.resources.get(site.id)?.provider?.name;
+    if (!aud || !provider) return false;
+    const key = pushKey.access(provider);
+    const push = this.pushesOf(site.machineId).find((item) => item.key === key);
+    return (
+      push?.push.type === "access" &&
+      push.push.access.audiences.includes(aud) &&
+      this.applied.get(`${site.machineId}/${key}`) === push.hash
+    );
+  }
+
   /** K-1623: the ingress of a machine: its protected sites, and an address that it takes over once its application exists. */
   private ingressSites(machineId: string) {
     const taking = [...this.liveSites.values()].filter(
@@ -6167,7 +6200,8 @@ export class Kitshn extends DurableObject<Env> {
       if (
         handover?.ingressAt != null &&
         now - handover.ingressAt >= HANDOVER_INGRESS_MS &&
-        tunnel !== undefined
+        tunnel !== undefined &&
+        this.audienceApplied(site)
       )
         wanted.set(site.address, { content: `${tunnel}.cfargotunnel.com`, cardId: site.id });
     }
@@ -6255,6 +6289,19 @@ export class Kitshn extends DurableObject<Env> {
           const record = recordId
             ? await api<{ id: string }>("PUT", `${zone}/${recordId}`, body)
             : await api<{ id: string }>("POST", zone, body);
+          // A give-back can run during the PUT: the record goes back to what it served, and kitshn keeps nothing.
+          const taking = site?.state === "handover" && handover !== null;
+          const current = taking ? this.handoverOf(site.id) : null;
+          if (taking && (current === null || this.liveSites.get(site.id)?.state !== "handover")) {
+            await api("PUT", `${zone}/${record.id}`, {
+              type: "CNAME",
+              name: work.address,
+              content: handover.content,
+              proxied: true,
+              comment: handover.comment ?? "",
+            });
+            continue;
+          }
           this.ctx.storage.transactionSync(() => {
             this.sql(
               "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error, retry_at, card_id) VALUES (?, ?, ?, NULL, 0, ?)",
@@ -6263,9 +6310,9 @@ export class Kitshn extends DurableObject<Env> {
               work.content,
               work.cardId,
             );
-            if (site?.state === "handover" && handover) {
+            if (taking && current) {
               this.sql("UPDATE live_sites SET state = 'ok' WHERE id = ?", site.id);
-              this.setHandover(site.id, { ...handover, switched: true });
+              this.setHandover(site.id, { ...current, switched: true });
               this.load();
             }
           });

@@ -813,6 +813,7 @@ it("takes over a provider site's address with its application first, then ingres
     handoverOf(id: string): { ingressAt: number | null; switched: boolean } | null;
     setHandover(id: string, value: unknown): void;
     desired(now: number): { apps: ReadonlyMap<string, { domain: string }> };
+    hashesOf(machineId: string): ReadonlyMap<string, string>;
   };
   const run = <T>(fn: (instance: Internals) => T) =>
     runInDurableObject(stub, async (instance) => await fn(instance as unknown as Internals));
@@ -830,6 +831,33 @@ it("takes over a provider site's address with its application first, then ingres
   expect(
     await statusOf(run((instance) => instance.takeAddress(person("someone@example.com"), appId, api))),
   ).toBe(403);
+  // T3 must get kitshn's audience first, so the machine must be online with a daemon that passes it on.
+  expect(
+    await statusOf(run((instance) => instance.takeAddress(person("owner@example.com"), appId, api))),
+  ).toBe(409);
+  await runInDurableObject(stub, (_, state) => {
+    const pair = new WebSocketPair();
+    state.acceptWebSocket(pair[1], ["vps", "machines"]);
+    pair[0].accept();
+    pair[1].serializeAttachment({
+      kind: "machine",
+      machineId: "vps",
+      since: Date.now(),
+      challenge: "",
+      check: "signed",
+      answered: true,
+      rotateBy: null,
+      status: {
+        version: "dev",
+        os: "linux",
+        arch: "x64",
+        hostname: "vps",
+        tunnel: "running",
+        capabilities: ["applied", "access"],
+      },
+      sample: null,
+    });
+  });
   expect(
     await statusOf(run((instance) => instance.takeAddress(person("owner@example.com"), appId, api))),
   ).toBe(200);
@@ -843,10 +871,16 @@ it("takes over a provider site's address with its application first, then ingres
   await run((instance) => instance.syncTunnels(api, 6));
   expect(calls.some((call) => call.endsWith("with the host"))).toBe(false);
   expect(await run((instance) => instance.handoverOf(appId)?.ingressAt)).toBeNull();
-  await sql(
-    "INSERT OR REPLACE INTO access_objects (key, cf_id, aud, body, tried, error) VALUES (?, 'cf-app', 'aud', '{}', '', NULL)",
-    `app:${appId}:t3-vps.example.com`,
-  );
+  // The machine's socket is open, so the row goes in without an eviction, and the Access rows load again.
+  await runInDurableObject(stub, (instance, state) => {
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO access_objects (key, cf_id, aud, body, tried, error) VALUES (?, 'cf-app', 'aud', '{}', '', NULL)",
+      `app:${appId}:t3-vps.example.com`,
+    );
+    (instance as unknown as { accessCache: unknown }).accessCache = null;
+    // As the alarm does after the Access sync: the access push with the new audience goes out.
+    (instance as unknown as { pushGrants(): void }).pushGrants();
+  });
   await run((instance) => instance.syncTunnels(api, 6));
   expect(calls.at(-1)?.endsWith("/cfd_tunnel/tunnel-vps/configurations with the host")).toBe(true);
   // The portal's Bypass path comes first, with no check; the host keeps kitshn's.
@@ -864,6 +898,16 @@ it("takes over a provider site's address with its application first, then ingres
   expect(calls.some((call) => call.includes("dns_records/"))).toBe(false);
   await run((instance) =>
     instance.setHandover(appId, { ...instance.handoverOf(appId), ingressAt: Date.now() - 61_000 }),
+  );
+  // The record waits until the machine applied the access push that holds kitshn's audience.
+  await run((instance) => instance.syncDns(api, 5));
+  expect(calls.some((call) => call.includes("dns_records/"))).toBe(false);
+  const hash = await run((instance) => instance.hashesOf("vps").get("access:t3"));
+  await runInDurableObject(stub, (instance) =>
+    instance.webSocketMessage(
+      daemonSocket("signed"),
+      JSON.stringify({ type: "applied", key: "access:t3", hash }),
+    ),
   );
   await run((instance) => instance.syncDns(api, 5));
   // The kept record changes in place; kitshn makes no second one and deletes none.
@@ -894,6 +938,10 @@ it("takes over a provider site's address with its application first, then ingres
   // When the daemon stops reporting the site, its handover goes with it.
   await sites();
   expect(await run((instance) => instance.handoverOf(appId))).toBeNull();
+  // An open socket keeps the Durable Object busy, and the next test evicts it.
+  await runInDurableObject(stub, (_, state) => {
+    for (const socket of state.getWebSockets("vps")) socket.close(1000, "test over");
+  });
   await sql("DELETE FROM access_objects WHERE key LIKE 'app:p-%'");
   await sql("DELETE FROM places WHERE id LIKE 'p-%'");
 });

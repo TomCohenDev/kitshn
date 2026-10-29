@@ -987,11 +987,10 @@ export function App() {
     if ("error" in result) showToast({ text: result.error, error: true, undo: null });
   };
 
-  /** K-704: no confirm; the toast and History undo it. */
   const takeAddress = async (resource: Resource) => {
     if (
       !(await ask(
-        `Take over the address of ${resource.name}? kitshn makes its Access application, then its tunnel route, and then moves the DNS record that serves the address now. Then take the address out of what served it.`,
+        `Take over the address of ${resource.name}? Its machine needs a T3 that takes kitshn's Access audiences (fork #415). kitshn makes its Access application, then its tunnel route, and moves the DNS record once T3 has the new audience. Then take the address out of what served it.`,
       ))
     )
       return;
@@ -1024,6 +1023,7 @@ export function App() {
     );
   };
 
+  /** K-704: no confirm; the toast and History undo it. */
   const forgetProvider = async (machineId: string, provider: string, card: Resource | null) => {
     const result = await callApi<{ revision: number | null }>(
       "POST",

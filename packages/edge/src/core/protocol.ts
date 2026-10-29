@@ -18,10 +18,10 @@ import type { RepoGate } from "./repos.ts";
 import type { Proposal } from "./asks.ts";
 import type { ProviderCommand } from "@kitshn/local";
 
-/** K-1717: one ask of an agent on a machine, as History shows it: an event, with no Undo. */
 /** K-1623: a provider card's address that something else serves, that kitshn takes over now, or took over. */
 export type AddressHold = "in-use" | "taking" | "taken";
 
+/** K-1717: one ask of an agent on a machine, as History shows it: an event, with no Undo. */
 export interface AskEventView {
   readonly id: number;
   readonly at: number;

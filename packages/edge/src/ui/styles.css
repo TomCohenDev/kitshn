@@ -2336,6 +2336,11 @@ a > code {
   flex-wrap: wrap;
   gap: 12px;
 }
+/* A grid fills its entry, unlike a single sample. */
+.guide-swatches,
+.guide-values {
+  justify-self: stretch;
+}
 .guide-swatches {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
@@ -2413,4 +2418,23 @@ a > code {
 }
 .guide-differences li + li {
   margin-top: 4px;
+}
+
+/* The concepts page (/concepts): a numbered marker on the overview map, its legend, and each concept's K numbers. */
+.concept-marker {
+  position: absolute;
+  z-index: 8;
+  font-size: 0.9rem;
+}
+.concept-legend {
+  margin: 0;
+  padding-left: 1.4rem;
+}
+.concept-legend li + li {
+  margin-top: 4px;
+}
+.concept header .row {
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
 }

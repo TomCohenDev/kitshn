@@ -274,17 +274,33 @@ export function wantedRecords(
 }
 
 /**
- * K-619, K-909: Cloudflare keeps at most 16,384 bytes on a socket attachment. A machine's attachment keeps its status,
- * sample, volumes and servers, so the lists that only inform lose their last entries, servers first, until the JSON
- * fits this budget. The budget leaves room for the structured clone that Cloudflare stores.
+ * K-619, K-909: an estimate of the bytes that a value takes as a structured clone, as workerd stores an attachment. A
+ * string with any character above U+00FF takes two bytes for each of its characters, so neither JSON characters nor
+ * UTF-8 bytes measure it.
  */
-export const ATTACHMENT_BUDGET = 14_000;
+export function cloneBytes(value: unknown): number {
+  if (typeof value === "string")
+    return 5 + value.length * ([...value].some((c) => (c.codePointAt(0) ?? 0) > 0xff) ? 2 : 1);
+  if (typeof value === "number") return 9;
+  if (value === null || value === undefined || typeof value === "boolean") return 1;
+  if (Array.isArray(value)) return 5 + value.reduce((sum: number, item) => sum + cloneBytes(item), 0);
+  if (typeof value === "object")
+    return Object.entries(value).reduce((sum, [key, item]) => sum + cloneBytes(key) + cloneBytes(item), 5);
+  throw new Error(`cloneBytes: a ${typeof value} has no size here.`);
+}
+
+/**
+ * K-619, K-909: Cloudflare keeps at most 16,384 bytes on a socket attachment. A machine's attachment keeps its status,
+ * sample, volumes and servers, so the lists that only inform lose their last entries, servers first, until the clone
+ * estimate fits this budget, which keeps a margin under the limit.
+ */
+export const ATTACHMENT_BUDGET = 15_000;
 
 export function fitAttachment<
   T extends { readonly servers?: ReadonlyArray<unknown>; readonly volumes?: ReadonlyArray<unknown> },
 >(attachment: T): T {
   let fitted = attachment;
-  while (JSON.stringify(fitted).length > ATTACHMENT_BUDGET) {
+  while (cloneBytes(fitted) > ATTACHMENT_BUDGET) {
     if (fitted.servers && fitted.servers.length > 0)
       fitted = { ...fitted, servers: fitted.servers.slice(0, -1) };
     else if (fitted.volumes && fitted.volumes.length > 0)

@@ -3,6 +3,7 @@ import type { PolicyBody } from "../core/access.ts";
 import type { AccessRow } from "./access-sync.ts";
 import {
   ATTACHMENT_BUDGET,
+  cloneBytes,
   fitAttachment,
   type IngressAccess,
   type LiveSite,
@@ -320,7 +321,7 @@ describe("fitAttachment (K-619, K-909)", () => {
       fitAttachment({ ...fitAttachment({ ...base, volumes }), servers }),
       fitAttachment({ ...fitAttachment({ ...base, servers }), volumes }),
     ]) {
-      expect(JSON.stringify(attachment).length).toBeLessThanOrEqual(ATTACHMENT_BUDGET);
+      expect(cloneBytes(attachment)).toBeLessThanOrEqual(ATTACHMENT_BUDGET);
       expect(attachment.volumes.length).toBeGreaterThan(0);
     }
     const small = { ...base, servers: servers.slice(0, 2), volumes: volumes.slice(0, 2) };

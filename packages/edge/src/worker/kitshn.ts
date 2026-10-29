@@ -416,6 +416,10 @@ type MapTail =
 /** The attachment of a socket; null for one that never got one, which every reader skips. */
 const attachmentOf = (socket: WebSocket) => socket.deserializeAttachment() as Attachment | null;
 
+/** K-619, K-909: every write of a machine socket's attachment, trimmed to the attachment budget. */
+const saveMachine = (socket: WebSocket, attachment: Extract<Attachment, { kind: "machine" }>) =>
+  socket.serializeAttachment(fitAttachment(attachment));
+
 /** K-704: what kitshn keeps of one provider's registration; its cards are rows of `resources`. */
 interface ProviderRegistration {
   readonly name: string;
@@ -725,12 +729,17 @@ export class Kitshn extends DurableObject<Env> {
    */
   private drawn: DrawnSizes | null = null;
   /**
-   * K-212, K-1131: end times for live site cards that the address check has not made yet, with the actor who asked:
-   * the owner of the site wizard, or the machine of `kitshn expose --time`. The card's end runs as that actor, so the
-   * actor can undo it (K-1506). Known limit: in memory only, so a wake in between forgets one; that card then has no
-   * end, in the tray (K-509).
+   * K-212: the end times that site reports carry (`kitshn expose --time` or `--ends-at`) for live site cards that the
+   * address check has not made yet. Known limit: in memory only, so a wake between the report and the check, a few
+   * seconds, forgets one; that card then has no end, in the tray (K-509).
    */
-  private pendingEnds = new Map<string, { readonly endsAt: number; readonly by: Actor }>();
+  private pendingEnds = new Map<string, number>();
+  /**
+   * K-1131: who asked for each site of the site wizard, by job id; `done` once that job succeeded. The new card's end
+   * runs as that person, so the person can undo it (K-1506). Known limit: in memory only; after a wake the end runs as
+   * the machine.
+   */
+  private siteAskers = new Map<number, { readonly siteId: string; readonly by: Actor; done: boolean }>();
   /** K-1716: false once `github_tokens` is known to be empty, so a broadcast reads no row of it. True after a wake. */
   private tokensLive = true;
   private accessWarnings: Array<string> = [];
@@ -4003,7 +4012,7 @@ export class Kitshn extends DurableObject<Env> {
       status: null,
       sample: null,
     } satisfies Attachment;
-    server.serializeAttachment(attachment);
+    saveMachine(server, attachment);
     const fingerprint = start.kind === "challenge" ? start.fingerprint : null;
     send(server, { type: "challenge", challenge, fingerprint } satisfies ServerToDaemon);
     if (attachment.check === "token") this.acceptMachine(server, attachment);
@@ -4017,7 +4026,7 @@ export class Kitshn extends DurableObject<Env> {
     if (!machine) throw new Error(`kitshn accepted a socket of the unknown machine ${attachment.machineId}.`);
     for (const old of this.ctx.getWebSockets(machine.id))
       if (old !== socket) old.close(4001, "A newer connection of this machine replaced it.");
-    socket.serializeAttachment(attachment);
+    saveMachine(socket, attachment);
     if (attachment.check === "signed") {
       this.keyFailures.delete(machine.id);
       if (machine.key?.kind !== "public") throw new Error(`${machine.name} signed without a key.`);
@@ -4055,7 +4064,7 @@ export class Kitshn extends DurableObject<Env> {
   ) {
     const plan = answerCheck(machine.key, attachment);
     if (plan.kind === "refuse") return this.refuseSocket(socket, machine, plan.reason);
-    socket.serializeAttachment({ ...attachment, answered: true } satisfies Attachment);
+    saveMachine(socket, { ...attachment, answered: true });
     const valid = await verifyForHosts(
       plan.publicKey,
       adminHosts(this.env),
@@ -4199,7 +4208,7 @@ export class Kitshn extends DurableObject<Env> {
             }
           : {}),
       };
-      socket.serializeAttachment({ ...attachment, status } satisfies Attachment);
+      saveMachine(socket, { ...attachment, status });
       this.setMachineOs(machine.id, machineOs(status.os));
       this.sendMachine(machine);
       // An update job waits for the status; it can go now.
@@ -4212,7 +4221,7 @@ export class Kitshn extends DurableObject<Env> {
         memory: share(message.sample.memory),
         disk: share(message.sample.disk),
       };
-      socket.serializeAttachment({ ...attachment, sample } satisfies Attachment);
+      saveMachine(socket, { ...attachment, sample });
       this.sendMachine(machine);
       // K-1107: the sample woke the Durable Object anyway, so it checks the pings of every machine now.
       this.checkLiveness(Date.now());
@@ -4223,9 +4232,7 @@ export class Kitshn extends DurableObject<Env> {
     } else if (message.type === "icon") {
       await this.liveIcon(machine, message.site, message.icon);
     } else if (message.type === "servers") {
-      socket.serializeAttachment(
-        fitAttachment({ ...attachment, servers: serversOf(message.servers) } satisfies Attachment),
-      );
+      saveMachine(socket, { ...attachment, servers: serversOf(message.servers) });
       this.sendMachine(machine);
     } else if (message.type === "volumes" && Array.isArray(message.volumes)) {
       const volumes = message.volumes
@@ -4237,7 +4244,7 @@ export class Kitshn extends DurableObject<Env> {
           name: item.name.slice(0, 255),
           project: item.project.slice(0, 63),
         }));
-      socket.serializeAttachment(fitAttachment({ ...attachment, volumes } satisfies Attachment));
+      saveMachine(socket, { ...attachment, volumes });
       this.sendMachine(machine);
     } else if (message.type === "logs" && typeof message.id === "string") {
       this.logSearches.get(message.id)?.(logAnswerOf(message.answer));
@@ -4273,6 +4280,10 @@ export class Kitshn extends DurableObject<Env> {
       );
       // Only a result that this machine's job took counts; a stray or late one changes no deploy.
       const [{ taken } = { taken: 0 }] = this.sql<{ taken: number }>("SELECT changes() AS taken");
+      // K-1131: the asker of a wizard site counts only when its job made the site.
+      const asker = taken ? this.siteAskers.get(message.id) : undefined;
+      if (asker && result.ok === true) asker.done = true;
+      else if (asker) this.siteAskers.delete(message.id);
       // K-812: the source and params of a Compose deploy live only as long as its job.
       const [job] = taken
         ? this.sql<{ command: string; actor: string }>(
@@ -4532,7 +4543,7 @@ export class Kitshn extends DurableObject<Env> {
     const attachment = socket ? attachmentOf(socket) : null;
     if (!socket || attachment?.kind !== "machine" || attachment.check !== "signed")
       return Response.json({ error: `${machine.name} is offline. Use Reset key instead.` }, { status: 409 });
-    socket.serializeAttachment({ ...attachment, rotateBy: caller.actor } satisfies Attachment);
+    saveMachine(socket, { ...attachment, rotateBy: caller.actor });
     send(socket, { type: "rotateKey" } satisfies ServerToDaemon);
     return Response.json({ rotating: id });
   }
@@ -4741,7 +4752,7 @@ export class Kitshn extends DurableObject<Env> {
    * address a card or a live site has already is refused here, and `kitshn expose --new` refuses a name that the
    * machine shares already, also when two owners add at once. The end time waits for the card with the caller.
    */
-  private addLiveSite(caller: Caller, body: unknown): Response {
+  private async addLiveSite(caller: Caller, body: unknown): Promise<Response> {
     const input = isRecord(body) ? body : {};
     const machineId = typeof input["machineId"] === "string" ? input["machineId"] : "";
     const name = typeof input["name"] === "string" ? input["name"] : "";
@@ -4771,10 +4782,12 @@ export class Kitshn extends DurableObject<Env> {
         `${address} is ${card ? `the card ${card.name}` : "a site of another machine"} already. Pick another name; a card's own panel changes that card.`,
       );
     // An older daemon has no $KITSHN; the join script installs the binary in ~/.local/bin.
-    const script = `"\${KITSHN:-$HOME/.local/bin/kitshn}" expose '${target}' --name '${name}' --new${input["dev"] === true ? " --dev" : ""}`;
+    // The end time goes with the job, so the site report carries it, as for `kitshn expose --time` (K-212).
+    const script = `"\${KITSHN:-$HOME/.local/bin/kitshn}" expose '${target}' --name '${name}' --new${input["dev"] === true ? " --dev" : ""}${typeof endsAt === "number" ? ` --ends-at ${Math.round(endsAt)}` : ""}`;
     const queued = this.addJob(caller, { machineId, command: { kind: "shell", script } });
-    if (queued.ok && typeof endsAt === "number")
-      this.pendingEnds.set(liveSiteId(machineId, name), { endsAt, by: caller.actor });
+    const { id } = (await queued.clone().json()) as { id?: number | null };
+    if (queued.ok && typeof id === "number" && typeof endsAt === "number")
+      this.siteAskers.set(id, { siteId: liveSiteId(machineId, name), by: caller.actor, done: false });
     return queued;
   }
 
@@ -5201,16 +5214,8 @@ export class Kitshn extends DurableObject<Env> {
           continue;
         }
         // K-212: the end time of `kitshn expose --time` waits for the card that the address check makes.
-        if (
-          report.endsAt !== undefined &&
-          report.endsAt > now &&
-          !this.state.resources.has(id) &&
-          !this.pendingEnds.has(id)
-        )
-          this.pendingEnds.set(id, {
-            endsAt: report.endsAt,
-            by: { _tag: "machine", machineId: machine.id, name: machine.name },
-          });
+        if (report.endsAt !== undefined && report.endsAt > now && !this.state.resources.has(id))
+          this.pendingEnds.set(id, report.endsAt);
         keep.add(id);
         const old = this.liveSites.get(id);
         if (old && old.target === report.target && old.dev === report.dev && old.up === report.up) continue;
@@ -5306,9 +5311,16 @@ export class Kitshn extends DurableObject<Env> {
       this.ctx.storage.transactionSync(() => {
         this.sql("UPDATE live_sites SET state = 'ok' WHERE id = ?", site.id);
         const card = this.state.resources.get(site.id);
-        const pending = card ? undefined : this.pendingEnds.get(site.id);
-        const endsAt = pending?.endsAt;
+        const endsAt = card ? undefined : this.pendingEnds.get(site.id);
         this.pendingEnds.delete(site.id);
+        // The person whose wizard job made this site, else the machine of `kitshn expose --time`.
+        const asked = [...this.siteAskers].find(([, each]) => each.done && each.siteId === site.id);
+        if (asked) this.siteAskers.delete(asked[0]);
+        const by: Actor = asked?.[1].by ?? {
+          _tag: "machine",
+          machineId: site.machineId,
+          name: machine?.name ?? site.machineId,
+        };
         this.putResource(
           card
             ? // K-705: a provider reports the status of its own cards.
@@ -5331,8 +5343,8 @@ export class Kitshn extends DurableObject<Env> {
             ? [{ _tag: "cardEnd", id: site.id, before: null, after: endsAt }]
             : [];
         this.persist(ends);
-        if (pending && ends.length > 0)
-          this.sql("UPDATE card_ends SET set_by = ? WHERE id = ?", JSON.stringify(pending.by), site.id);
+        if (ends.length > 0)
+          this.sql("UPDATE card_ends SET set_by = ? WHERE id = ?", JSON.stringify(by), site.id);
         this.insertRevision(
           { _tag: "kitshn", reason: `live site on ${machine?.name ?? site.machineId}` },
           `${machine?.name ?? site.machineId} exposed ${site.address} (K-1104)${ends.length > 0 ? ` until ${endText(endsAt ?? 0)}` : ""}`,

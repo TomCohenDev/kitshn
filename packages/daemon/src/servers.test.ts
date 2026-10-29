@@ -38,6 +38,10 @@ describe("running servers (K-619)", () => {
       { port: 5173, process: "node" },
       { port: 8080, process: "caddy" },
     ]);
+    // A root daemon: root's own lines have no uid field.
+    const root =
+      'LISTEN 0      4096       0.0.0.0:443       0.0.0.0:*    users:(("nginx",pid=5,fd=6)) ino:9 sk:5';
+    expect(parseSs(`${output}${root}\n`, 0)).toEqual([{ port: 443, process: "nginx" }]);
   });
 
   it("reads at most the byte limit of a page, also from one big chunk", async () => {

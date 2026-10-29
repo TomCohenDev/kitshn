@@ -2308,9 +2308,17 @@ function exposeCommand(
   if (!value || !name) fail(usage);
   const target = targetOf(value);
   if (typeof target !== "string") fail(target.error);
-  const end = time === undefined ? undefined : timeBody(time, Date.now());
-  const endsAt = end !== undefined && "endsAt" in end && end.endsAt !== null ? end.endsAt : undefined;
-  if (time !== undefined && endsAt === undefined) fail(`--time takes 30m, 1h, 4h or 1d, not ${time}.`);
+  // `--ends-at` is the time in milliseconds, as the site wizard sends it (K-1131); `--time` is a span from now.
+  const at = time !== undefined && isDigits(time) ? Number(time) : undefined;
+  const end = time === undefined || at !== undefined ? undefined : timeBody(time, Date.now());
+  const endsAt =
+    at !== undefined && at > Date.now()
+      ? at
+      : end !== undefined && "endsAt" in end && end.endsAt !== null
+        ? end.endsAt
+        : undefined;
+  if (time !== undefined && endsAt === undefined)
+    fail(`--time takes 30m, 1h, 4h or 1d, and --ends-at a future time in milliseconds, not ${time}.`);
   const current = readSites();
   if (current === null) fail(`${sitesFile()} is broken. Fix it or delete it, then expose the sites again.`);
   // K-1131: the site wizard only makes sites; it never points a shared name at another server.
@@ -2787,7 +2795,13 @@ switch (command) {
     skillCommand(args[0], args.includes("--repo"));
     break;
   case "expose":
-    exposeCommand(args[0], flag("--name"), args.includes("--dev"), flag("--time"), args.includes("--new"));
+    exposeCommand(
+      args[0],
+      flag("--name"),
+      args.includes("--dev"),
+      flag("--time") ?? flag("--ends-at"),
+      args.includes("--new"),
+    );
     break;
   case "servers":
     await serversCommand(args.includes("--json"));

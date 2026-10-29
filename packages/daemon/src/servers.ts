@@ -51,7 +51,9 @@ export function parseSs(output: string, uid: number): Array<Listener> {
   for (const line of output.split("\n")) {
     const fields = line.split(" ").filter((field) => field !== "");
     const local = fields[3];
-    if (fields[0] !== "LISTEN" || !local || !fields.includes(`uid:${uid}`)) continue;
+    // `ss -e` prints no `uid:` for root's own sockets, so a root daemon takes the lines without one.
+    const owner = fields.find((field) => field.startsWith("uid:"));
+    if (fields[0] !== "LISTEN" || !local || owner !== (uid === 0 ? undefined : `uid:${uid}`)) continue;
     const users = fields.slice(5).join(" ");
     const start = users.indexOf('(("');
     const end = start < 0 ? -1 : users.indexOf('"', start + 3);

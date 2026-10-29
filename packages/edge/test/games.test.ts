@@ -225,3 +225,33 @@ it("removes the game cards, doors and wanted records of a removed machine (K-200
   });
   expect(left).toEqual({ status: 200, games: 0, doors: 0, card: false });
 });
+
+it("makes the A and SRV records of a game in one run (K-2007)", async () => {
+  const stub = await setup();
+  const result = await runInDurableObject(stub, async (instance) => {
+    const kitshn = instance as unknown as {
+      syncGameDns: (api: unknown, budget: number) => Promise<number>;
+      sql: (query: string) => Array<{ type: string; error: string | null }>;
+    };
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const api = async (method: string, path: string, body?: unknown) => {
+      calls.push({ method, path, body });
+      return method === "GET" ? [] : { id: `record-${calls.length}` };
+    };
+    const spent = await kitshn.syncGameDns(api, 4);
+    return { spent, calls, rows: kitshn.sql("SELECT type, error FROM game_records ORDER BY type") };
+  });
+  expect(result.spent).toBe(4);
+  expect(result.rows).toEqual([
+    { type: "A", error: null },
+    { type: "SRV", error: null },
+  ]);
+  expect(
+    result.calls.find((call) => call.method === "POST" && call.path.includes("dns_records")),
+  ).toBeDefined();
+  expect(result.calls.at(-1)?.body).toMatchObject({
+    type: "SRV",
+    name: "_minecraft._tcp.mc.example.com",
+    data: { port: 25565, target: "mc.example.com" },
+  });
+});

@@ -3,6 +3,8 @@ import type { State } from "../core/model.ts";
 import { type Mute, type Notification, onBell } from "../core/notifications.ts";
 import { Menu, MenuItem } from "./controls.tsx";
 import type { Rect } from "./popover.ts";
+import type { ProposalView } from "../core/protocol.ts";
+import { AskList } from "./Asks.tsx";
 import { PushSection } from "./Push.tsx";
 import { callApi } from "./store.ts";
 
@@ -20,6 +22,8 @@ export function NotificationsView(props: {
   state: State;
   /** The open count of the snapshot; the list loads again when it changes. */
   bell: number;
+  /** K-1607, K-1722: the asks that wait for an approver circle; the snapshot keeps them, so the Inbox is live. */
+  proposals: ReadonlyArray<ProposalView>;
   onToast: (text: string, error: boolean) => void;
 }) {
   const [list, setList] = useState<{
@@ -82,6 +86,14 @@ export function NotificationsView(props: {
           ))}
         </Menu>
       ) : null}
+      <h3>Inbox</h3>
+      {props.proposals.length === 0 ? <p class="muted">No ask waits for an answer.</p> : null}
+      <AskList
+        proposals={props.proposals}
+        circleName={(id) => props.state.circles.get(id)?.name ?? id}
+        needsPasskey={(id) => props.state.circles.get(id)?.needsPasskey === true}
+        onToast={props.onToast}
+      />
       <PushSection onToast={props.onToast} />
       <h3>Notifications</h3>
       {list === null ? <p class="muted">Reading the notifications…</p> : null}

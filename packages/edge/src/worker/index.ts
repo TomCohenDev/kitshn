@@ -21,6 +21,7 @@ import {
 } from "./auth.ts";
 import { type BadgeState, badgeSvg } from "../core/badge.ts";
 import type { Usage } from "../core/usage.ts";
+import { NOTIFY_BODY_MAX } from "../core/notify.ts";
 import { escapeHtml, originDown, seenText } from "./live.ts";
 import { adminHosts, type Env } from "./env.ts";
 import { readUsage } from "./usage.ts";
@@ -545,6 +546,22 @@ export default {
       return new Response(`${env.KITSHN_VERSION}\n`, {
         headers: { "content-type": "text/plain", "cache-control": "no-store" },
       });
+    }
+    // K-1908: app events. Access lets the path through (a Bypass application); the token is the only check.
+    if (url.pathname === "/notify" && request.method === "POST") {
+      // A declared size over the cap ends here; the Durable Object checks the bytes that arrive too.
+      if (Number(request.headers.get("content-length") ?? 0) > NOTIFY_BODY_MAX)
+        return Response.json(
+          { error: `A notification is at most ${NOTIFY_BODY_MAX} bytes.` },
+          { status: 413 },
+        );
+      return env.KITSHN.getByName("kitshn").fetch(
+        new Request("https://kitshn.internal/internal/notify", {
+          method: "POST",
+          headers: { authorization: request.headers.get("authorization") ?? "" },
+          body: request.body,
+        }),
+      );
     }
     if (url.pathname.startsWith("/deploy/") && request.method === "POST") {
       // K-811: GitHub Actions deploys here with its OIDC token; Access lets the path through.

@@ -379,6 +379,11 @@ describe("Worker deploys (K-806, K-909)", () => {
     cloudflare.state.failUploads = 1;
     expect((await deploy(app)).status).toBe(502);
     expect(cloudflare.scripts.has(app.script)).toBe(false);
+    // K-1908: a failed deploy keeps no notify token.
+    const tokens = await runInDurableObject(env.KITSHN.getByName("kitshn"), (_instance, state) =>
+      state.storage.sql.exec("SELECT hash FROM notify_tokens WHERE card_id = ?", app.card).toArray(),
+    );
+    expect(tokens).toEqual([]);
     const removed = await admin(`/api/apps/${app.card}`, "DELETE");
     expect(removed.status, JSON.stringify(removed.body)).toBe(200);
     expect(await storageRows(app.card)).toEqual([]);
@@ -399,6 +404,24 @@ describe("Worker deploys (K-806, K-909)", () => {
     expect((await deploy(app, { kv: ["DATA"] })).status).toBe(200);
     expect(bound(1)).toEqual(expect.any(String));
     expect(bound(1)).not.toBe(first);
+    // K-1908: each deploy gives the app the notify address and a new token; the older token still works (rollback).
+    const notify = (index: number) => {
+      const bindings = cloudflare.uploads[index]?.["bindings"] as Array<Record<string, string>> | undefined;
+      const text = (name: string) => bindings?.find((item) => item["name"] === name)?.["text"];
+      return { url: text("KITSHN_NOTIFY_URL"), token: text("KITSHN_NOTIFY_TOKEN") ?? "" };
+    };
+    expect(notify(0).url).toBe("https://kit.example.com/notify");
+    expect(notify(1).token).not.toBe(notify(0).token);
+    const sent = await call(
+      "/notify",
+      "POST",
+      { authorization: `Bearer ${notify(0).token}` },
+      { title: "Backup done" },
+    );
+    expect(sent.status, JSON.stringify(sent.body)).toBe(200);
+    expect((await call("/notify", "POST", { authorization: "Bearer wrong" }, { title: "x" })).status).toBe(
+      401,
+    );
   });
 
   it("deletes orphaned storage only while no deploy runs, and refuses a deploy that starts during the delete", async () => {

@@ -14,6 +14,20 @@ const list = {
   notifications: [
     {
       ...notification,
+      id: 4,
+      source: "app",
+      key: "riffle:Backup done",
+      card: "riffle",
+      level: "info",
+      title: "Backup done",
+      text: "The nightly backup of riffle finished: 2.1 GB, 14 new files.",
+      actions: [{ id: "show", label: "Show card", kind: "link", path: "#map/riffle" }],
+      state: "open",
+      openedAt: now - 5 * 60_000,
+      closedAt: null,
+    },
+    {
+      ...notification,
       id: 3,
       source: "deploy",
       key: "riffle",
@@ -67,7 +81,30 @@ export default {
       const server = socket.connectToServer();
       server.onMessage((message) => {
         const data = JSON.parse(String(message)) as { type: string; snapshot?: Record<string, unknown> };
-        if (data.type === "snapshot" && data.snapshot) data.snapshot["bell"] = 2;
+        if (data.type === "snapshot" && data.snapshot) {
+          data.snapshot["bell"] = 3;
+          // K-1607: one ask waits in the Inbox.
+          data.snapshot["proposals"] = [
+            {
+              id: "p1",
+              machineId: "mac",
+              machineName: "Mac",
+              action: "apply",
+              target: "riffle",
+              body: null,
+              reason: "share the preview with Her for the review",
+              labels: { thread: "Review riffle" },
+              verified: ["thread"],
+              right: "publishes",
+              circleId: "owner",
+              shown: "Share riffle with the circle Her at view",
+              shownHash: "h",
+              state: "pending",
+              createdAt: now - 4 * 60_000,
+              expiresAt: now + 20 * hour,
+            },
+          ];
+        }
         socket.send(JSON.stringify(data));
       });
     });

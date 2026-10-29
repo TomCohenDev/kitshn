@@ -133,22 +133,17 @@ it("sends at most 5 pushes in one run and keeps the rest for the next alarm (K-1
 });
 
 it("sends at most 5 pushes in one alarm run, also when its reconcile opens another notification (K-1907, K-406)", async () => {
-  stubAccessCerts();
+  // A fresh object of its own: in the shared one, an alarm that workerd started for an earlier test can still run, and
+  // its end flush would send pushes too. Here nothing schedules work before the test takes the alarm away.
+  const stub = env.KITSHN.getByName("push-budget");
   // Exactly 5 devices: a first flush empties the queue, so before the fix the reconcile's push started a second one.
-  await runInDurableObject(env.KITSHN.getByName("kitshn"), (_i, state) => {
-    state.storage.sql.exec("DELETE FROM push_subscriptions");
-  });
-  for (const n of [11, 12, 13, 14, 15])
-    expect(
-      (await call("/api/push/subscribe", await browserDevice(`https://push.example.com/send/${n}`))).status,
-    ).toBe(200);
+  const devices = await Promise.all(
+    [11, 12, 13, 14, 15].map((n) => browserDevice(`https://push.example.com/send/${n}`)),
+  );
   vi.restoreAllMocks();
   const sent = vi
     .spyOn(globalThis, "fetch")
     .mockImplementation(async () => new Response(null, { status: 201 }));
-  const stub = env.KITSHN.getByName("kitshn");
-  // workerd runs the alarms that kitshn schedules on its own. One of them between this setup and the run below would
-  // send pushes too, so the test takes the pending alarm away, schedules none, and runs one alarm itself.
   await runInDurableObject(stub, async (instance, state) => {
     await state.storage.deleteAlarm();
     const kitshn = instance as unknown as Pushes & {
@@ -156,6 +151,14 @@ it("sends at most 5 pushes in one alarm run, also when its reconcile opens anoth
       load(): void;
     };
     kitshn.scheduleAlarm = async () => {};
+    for (const device of devices)
+      kitshn.sql(
+        `INSERT INTO push_subscriptions (endpoint, p256dh, auth, email, label, levels, created_at)
+         VALUES (?, ?, ?, 'owner@example.com', 'Pixel', '["warn","error"]', 0)`,
+        device.endpoint,
+        device.p256dh,
+        device.auth,
+      );
     // A push waits already, and the alarm's broadcast (an ended mute changes the bell) opens a deploy notification.
     kitshn.sql(
       "INSERT INTO resources (id, body) VALUES ('shop', ?)",

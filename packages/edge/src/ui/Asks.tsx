@@ -4,8 +4,8 @@ import type { AskEventView, ProposalView } from "../core/protocol.ts";
 import { callApi } from "./store.ts";
 
 /**
- * K-1722: the asks that wait for an approver circle. One small component: the notifications work folds it into its
- * Inbox later, and the proposals of the snapshot stay the source of truth.
+ * K-1722: the asks that wait for an approver circle. The Inbox of the Notifications view shows it (K-1607), and
+ * the proposals of the snapshot stay the source of truth.
  */
 export function AskList(props: {
   readonly proposals: ReadonlyArray<ProposalView>;

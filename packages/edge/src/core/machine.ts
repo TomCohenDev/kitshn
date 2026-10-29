@@ -249,7 +249,13 @@ export type ServerToDaemon =
   | { readonly type: "rotateKey" }
   /** K-1762: the daemon drops its kept GitHub tokens of one repo, or all with null, because kitshn revoked them. */
   | { readonly type: "dropTokens"; readonly repo: string | null }
-  | { readonly type: "job"; readonly id: number; readonly command: Command }
+  | {
+      readonly type: "job";
+      readonly id: number;
+      readonly command: Command;
+      /** K-1908: the notify address and a new token for a Compose app; the daemon passes both to `docker compose`. */
+      readonly notify?: { readonly url: string; readonly token: string };
+    }
   /** K-1804: search the logs of the Compose app `project`. */
   | { readonly type: "logs"; readonly id: string; readonly project: string; readonly search: LogSearch }
   /** K-1805: follow the logs of the Compose app `project` until `tailStop`. */

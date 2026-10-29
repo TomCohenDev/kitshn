@@ -777,6 +777,7 @@ const KITSHN1_PERSISTENT = process.env["KITSHN1_PERSISTENT"] ?? "/persistent";
  */
 async function composeUp(
   command: Extract<Command, { kind: "compose" | "compose-redeploy" | "compose-rollback" }>,
+  notify?: { readonly url: string; readonly token: string },
 ): Promise<JobOutcome> {
   const dir = join(paths.data, "apps", command.project);
   // K-818: each deploy unpacks into a new folder that no running container mounts, so the old app runs on
@@ -857,6 +858,8 @@ async function composeUp(
       KITSHN_DATA_DIR: data,
       KITSHN_LOG_DIR: join(dir, "logs"),
       KITSHN_PARAMS_FILE: join(dir, "params.env"),
+      // K-1908: the app passes these on in its Compose file, as it does with KITSHN_DATA_DIR.
+      ...(notify ? { KITSHN_NOTIFY_URL: notify.url, KITSHN_NOTIFY_TOKEN: notify.token } : {}),
     };
     // KitSHn 1 apps join this network; it exists on a KitSHn 1 host and is made elsewhere.
     if (!(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok) {
@@ -1363,13 +1366,16 @@ function oneAtATime(project: string, work: () => Promise<JobOutcome>): Promise<J
   return next;
 }
 
-function runJob(command: Command): Promise<JobOutcome> {
+function runJob(
+  command: Command,
+  notify?: { readonly url: string; readonly token: string },
+): Promise<JobOutcome> {
   if (
     command.kind === "compose" ||
     command.kind === "compose-redeploy" ||
     command.kind === "compose-rollback"
   )
-    return oneAtATime(command.project, () => composeUp(command));
+    return oneAtATime(command.project, () => composeUp(command, notify));
   if (command.kind === "compose-down") return oneAtATime(command.project, () => composeDown(command));
   if (command.kind === "compose-volume-remove")
     return oneAtATime(command.project, () => removeVolume(command));
@@ -1796,7 +1802,7 @@ function connect(config: JoinSecrets) {
       } else if (message.type === "job") {
         log(`job ${message.id}: ${message.command.kind}`);
         // A job that throws (for example a file it cannot delete) still sends a result, and never ends the daemon.
-        void runJob(message.command)
+        void runJob(message.command, message.notify)
           .catch((error: unknown): JobOutcome => ({
             ok: false,
             exitCode: null,

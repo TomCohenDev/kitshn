@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync, statSync, symlinkSync } from "node:fs"
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MAX_LINE_LENGTH, type Request } from "@kitshn/local";
+import type { Request } from "@kitshn/local";
 import { describe, expect, it } from "vitest";
 import {
   type Caller,
@@ -23,7 +23,11 @@ const daemonPeer = { platform, daemonUid: own } as const;
 const sharedTestFolder = () => join("/tmp", `kitshn-test-${randomUUID()}`);
 
 /** A daemon on a socket in a new temporary folder, never the path of a live daemon. */
-async function daemon(decide: LocalOptions["decide"], access: LocalOptions["access"] = "private") {
+async function daemon(
+  decide: LocalOptions["decide"],
+  access: LocalOptions["access"] = "private",
+  maxLineLength?: number,
+) {
   const folder =
     access === "shared" ? sharedTestFolder() : join(mkdtempSync(join(tmpdir(), "kitshn-local-")), "kitshn");
   const path = join(folder, "kitshn.sock");
@@ -32,6 +36,7 @@ async function daemon(decide: LocalOptions["decide"], access: LocalOptions["acce
   const closed = Promise.withResolvers<number>();
   const server = await listenLocal(path, {
     platform,
+    ...(maxLineLength === undefined ? {} : { maxLineLength }),
     closed: closed.resolve,
     decide: (peer) => {
       peers.push(peer);
@@ -160,7 +165,8 @@ describe("local socket (K-701, K-702)", () => {
   });
 
   it("refuses to start next to a daemon that listens, and ends a connection with a line that is too long", async () => {
-    using local = await daemon(() => ({ accept: true }));
+    // A small limit checks the same rule as the 17 MiB one, without sending 17 MiB.
+    using local = await daemon(() => ({ accept: true }), "private", 1024);
     await expect(
       listenLocal(local.path, {
         platform,
@@ -172,7 +178,7 @@ describe("local socket (K-701, K-702)", () => {
     ).rejects.toThrow("another kitshn daemon");
     const [answer] = await raw(
       local.path,
-      `${JSON.stringify({ id: "9", type: "status", pad: "x".repeat(MAX_LINE_LENGTH + 1) })}\n`,
+      `${JSON.stringify({ id: "9", type: "status", pad: "x".repeat(1025) })}\n`,
       1,
     );
     expect(answer).toMatchObject({ id: null, type: "error" });

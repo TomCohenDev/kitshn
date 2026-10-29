@@ -212,7 +212,7 @@ import {
   shownAsk,
   shownHash,
   WINDOW_ACTIONS,
-  machinesApprove,
+  answerRefusal,
 } from "../core/asks.ts";
 import { type MachineOs, machineOs } from "../core/icons.ts";
 import {
@@ -3143,7 +3143,8 @@ export class Kitshn extends DurableObject<Env> {
           regs.map(({ name, commands }) => ({ name, commands })),
         ]),
       ),
-      proposals: this.openProposals(),
+      // K-1902: the live asks go only to who may answer them; History keeps every ask for the owner (K-1717).
+      proposals: this.answerableProposals(caller.visitor),
       askEvents: this.recentAskEvents(),
       githubDefaultWay: this.meta("github_default_way") === "app" ? "app" : "not-kitshn",
       // K-1767: the newest 20 runs of pull requests of the App that wait for Deploy.
@@ -7734,13 +7735,7 @@ export class Kitshn extends DurableObject<Env> {
       const deploys = this.deploys();
       const checked = new Set(this.uptimeTargets().map((card) => card.id));
       // K-1726: a machine sees the open asks of the circles that it is a member of, so its agent can answer them.
-      const answerable = machine
-        ? this.openProposals().filter((proposal) =>
-            this.state.circles
-              .get(proposal.circleId)
-              ?.members.some((member) => member._tag === "machine" && member.machineId === machine.id),
-          )
-        : [];
+      const answerable = machine ? this.answerableProposals(caller.visitor) : [];
       return Response.json({
         rights,
         ...(machine ? { proposals: answerable } : {}),
@@ -8796,16 +8791,14 @@ export class Kitshn extends DurableObject<Env> {
     if (!row) return { ok: false, error: `kitshn has no proposal ${proposalId}.` };
     const proposal = proposalOf(row);
     const circle = this.state.circles.get(proposal.circleId);
-    if (!circle || !circleMatches(circle, by.visitor, this.state.machines))
-      return {
-        ok: false,
-        error: `Only a member of the approver circle ${circle?.name ?? proposal.circleId} answers this ask (K-1723).`,
-      };
-    if (by.machineId !== null && !machinesApprove(circle))
-      return {
-        ok: false,
-        error: `${circle.name} needs a passkey, and "machines may approve" is off, so a machine does not answer its asks (K-1727).`,
-      };
+    const refusal = answerRefusal(
+      circle,
+      proposal.circleId,
+      by.visitor,
+      this.state.machines,
+      by.machineId !== null,
+    );
+    if (refusal !== null || !circle) return { ok: false, error: refusal ?? "kitshn has no approver circle." };
     // K-1723: a passkey circle approves only through the passkey application, whose token proves a fresh passkey.
     if (decision === "approved" && via === "login" && circle.needsPasskey)
       return {
@@ -9076,6 +9069,23 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-1722: the open proposals, for the Asks list of the map. */
+  /** K-1723, K-1902: the open asks that this visitor may answer, with the answer check of `decide`. */
+  private answerableProposals(visitor: Visitor): Array<ProposalView> {
+    const machine =
+      visitor.clientId !== null &&
+      [...this.state.machines.values()].some((item) => item.clientId === visitor.clientId);
+    return this.openProposals().filter(
+      (proposal) =>
+        answerRefusal(
+          this.state.circles.get(proposal.circleId),
+          proposal.circleId,
+          visitor,
+          this.state.machines,
+          machine,
+        ) === null,
+    );
+  }
+
   private openProposals(): Array<ProposalView> {
     return this.sql<ProposalRow>("SELECT * FROM proposals WHERE state = 'pending' ORDER BY created_at").map(
       (row) => {

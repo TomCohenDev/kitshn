@@ -2,7 +2,8 @@ import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, expect, it, vi } from "vitest";
 import type { AskOutcome, Machine, ServerToDaemon } from "../src/core/machine.ts";
-import type { Circle, RightMode } from "../src/core/model.ts";
+import { type Circle, OWNER_CIRCLE_ID, type RightMode } from "../src/core/model.ts";
+import { accessToken, send, stubAccessCerts } from "./access.ts";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -585,4 +586,92 @@ it("runs an approved Owner ask of an unset right, and refuses it once the owner 
     ])
       state.storage.sql.exec(sql);
   });
+});
+
+it("shows a live ask only to who may answer it, on /api/state and on the socket (K-1902, K-1723, K-1727)", async () => {
+  stubAccessCerts();
+  const stub = await setup({ deploys: { mode: "ask", circleId: "agents" } });
+  const mac: Machine = {
+    ...machine,
+    id: "mac",
+    name: "mac",
+    clientId: "mac.access",
+    serviceTokenId: "token-mac",
+  };
+  // A device and a second machine in the Owner circle, so both may read the map, but neither is in Agents.
+  await runInDurableObject(stub, (_, state) => {
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO machines (id, body) VALUES (?, ?)",
+      "mac",
+      JSON.stringify(mac),
+    );
+    const [row] = state.storage.sql
+      .exec<{ body: string }>("SELECT body FROM circles WHERE id = ?", OWNER_CIRCLE_ID)
+      .toArray();
+    const ownerCircle = JSON.parse(row!.body) as Circle;
+    state.storage.sql.exec(
+      "UPDATE circles SET body = ? WHERE id = ?",
+      JSON.stringify({
+        ...ownerCircle,
+        members: [
+          ...ownerCircle.members.filter((member) => member._tag === "email"),
+          { _tag: "device", tokenId: "token-laptop", clientId: "laptop.access", name: "laptop" },
+          { _tag: "machine", machineId: "mac" },
+        ],
+      }),
+      OWNER_CIRCLE_ID,
+    );
+  });
+  await evictDurableObject(stub);
+  expect(await ask(stub, "deploy", "card")).toMatchObject({ outcome: "waiting" });
+  const token = (claims: { email: string } | { common_name: string }) => accessToken("admin-aud", claims);
+  const person = await token({ email: "owner@example.com" });
+  const live = async (jwt: string) => {
+    const answer = await send("/api/state", { headers: { "cf-access-jwt-assertion": jwt } });
+    expect(answer.status).toBe(200);
+    return ((await answer.json()) as { proposals: Array<{ machineId: string }> }).proposals;
+  };
+  // Outside Agents: no live ask, though each may read the map. History keeps the ask for the owner (K-1717).
+  for (const jwt of [
+    person,
+    await token({ common_name: "laptop.access" }),
+    await token({ common_name: "mac.access" }),
+  ])
+    expect(await live(jwt)).toEqual([]);
+  const socket = await send("/api/ws", {
+    headers: { upgrade: "websocket", "cf-access-jwt-assertion": person },
+  });
+  const ws = socket.webSocket;
+  if (!ws) throw new Error("kitshn opened no socket.");
+  ws.accept();
+  const snapshot = await new Promise<{ proposals: Array<unknown> }>((resolve) =>
+    ws.addEventListener("message", (event) => {
+      const message = JSON.parse(String(event.data)) as {
+        type: string;
+        snapshot?: { proposals: Array<unknown> };
+      };
+      if (message.type === "snapshot" && message.snapshot) resolve(message.snapshot);
+    }),
+  );
+  ws.close();
+  expect(snapshot.proposals).toEqual([]);
+
+  // A machine in a passkey circle answers only while "machines may approve" is on, so only then it sees the ask.
+  const members = [
+    { _tag: "machine", machineId: "vps", rights: { deploys: { mode: "ask", circleId: "agents" } } },
+    { _tag: "machine", machineId: "mac" },
+  ];
+  const locked = await setup({ deploys: { mode: "ask", circleId: "agents" } }, {
+    needsPasskey: true,
+    members,
+  } as Partial<Circle>);
+  expect(await ask(locked, "deploy", "card")).toMatchObject({ outcome: "waiting" });
+  expect(await live(await token({ common_name: "mac.access" }))).toEqual([]);
+  const open = await setup({ deploys: { mode: "ask", circleId: "agents" } }, {
+    needsPasskey: true,
+    machinesMayApprove: true,
+    members,
+  } as Partial<Circle>);
+  expect(await ask(open, "deploy", "card")).toMatchObject({ outcome: "waiting" });
+  expect(await live(await token({ common_name: "mac.access" }))).toMatchObject([{ machineId: "vps" }]);
 });

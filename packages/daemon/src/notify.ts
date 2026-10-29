@@ -1,7 +1,8 @@
 /**
  * K-1908: every service of a Compose app gets `KITSHN_NOTIFY_URL` and `KITSHN_NOTIFY_TOKEN`, so the app needs no
- * Compose change. The token goes in as null, so Compose takes it from its own environment at `up`, and no file holds
- * it; the checked config stays with the last good build. A value that the app sets itself wins.
+ * Compose change; a value that the app sets itself wins. No file holds the token: the key goes in as null, and each
+ * place where Compose interpolated the token (another key, a command, a label, a build arg) becomes
+ * `${KITSHN_NOTIFY_TOKEN}` again, which Compose fills in from its own environment at `up`.
  */
 export function withNotify(
   config: unknown,
@@ -11,7 +12,7 @@ export function withNotify(
   if (typeof config !== "object" || config === null || Array.isArray(config)) return config;
   const services = (config as { services?: unknown }).services;
   if (typeof services !== "object" || services === null || Array.isArray(services)) return config;
-  return {
+  const added = {
     ...config,
     services: Object.fromEntries(
       Object.entries(services as Record<string, Record<string, unknown>>).map(([name, service]) => {
@@ -21,11 +22,11 @@ export function withNotify(
           throw new Error(`the environment of the service ${name} is not a map (K-1908)`);
         const environment = { ...(own as Record<string, string | null> | undefined) };
         if (!("KITSHN_NOTIFY_URL" in environment)) environment["KITSHN_NOTIFY_URL"] = notify.url;
-        // An explicit `${KITSHN_NOTIFY_TOKEN}` arrives interpolated, as the token itself; it goes out as null too.
-        const token = environment["KITSHN_NOTIFY_TOKEN"];
-        if (token === undefined || token === notify.token) environment["KITSHN_NOTIFY_TOKEN"] = null;
+        if (!("KITSHN_NOTIFY_TOKEN" in environment)) environment["KITSHN_NOTIFY_TOKEN"] = null;
         return [name, { ...service, environment }];
       }),
     ),
   };
+  // `config --format json` writes a literal `$` as `$$`, so only this text is interpolated again at `up`.
+  return JSON.parse(JSON.stringify(added).replaceAll(notify.token, "${KITSHN_NOTIFY_TOKEN}")) as unknown;
 }

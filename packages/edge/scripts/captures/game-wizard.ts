@@ -1,4 +1,5 @@
-// K-534: the Game step of the site wizard with a reason of K-2001, and the door list of a game card. The demo has no
+// K-534: the Game step of the site wizard with a reason of K-2001, the door list of a game card with its Close
+// confirm, and the Remove game confirm. The demo has no
 // daemon and no game, so the scenario marks the first machine online with the capability `doors`, adds a game card
 // to the snapshots and answers `GET /api/games` itself.
 import { DESKTOP, type Scenario } from "../capture-views.ts";
@@ -120,8 +121,16 @@ export default {
     await page.getByRole("button", { name: "Fit", exact: true }).click();
     await page.locator('.world > .card[data-card="mc"] .name').click();
     await page.getByText("her@example.com", { exact: false }).waitFor();
+    // The first Close asks first.
+    await page.getByRole("button", { name: "Close…", exact: true }).first().click();
+    await page.getByText("Close for everyone on this address?").waitFor();
     await page.mouse.move(5, 500);
     await page.waitForTimeout(300);
     await shot("door-list");
+    await page.getByRole("button", { name: "No", exact: true }).click();
+    await page.getByRole("button", { name: "Remove game…", exact: true }).click();
+    await page.getByText(/^Remove the game minecraft\?/).waitFor();
+    await page.mouse.move(5, 500);
+    await shot("remove-confirm");
   },
 } satisfies Scenario;

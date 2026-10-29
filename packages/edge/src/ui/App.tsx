@@ -1433,6 +1433,22 @@ export function App() {
     );
   };
 
+  /** K-534: the way out of a game card, from its menu, its panel and the palette; it has no Undo, so it asks. */
+  const removeGame = async (resource: Resource) => {
+    if (
+      !(await ask(
+        `Remove the game ${resource.name}? Its doors close for everyone at once and its records go. This has no Undo.`,
+      ))
+    )
+      return;
+    const result = await callApi<object>("DELETE", `/api/games/${encodeURIComponent(resource.id)}`);
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: `Removed the game ${resource.name}.`, error: false, undo: null },
+    );
+  };
+
   /** K-523: the menu and the palette run these, the same as the toolbar and the panel. */
   const handlers: ActionHandlers = {
     select: (selected) => {
@@ -1492,6 +1508,7 @@ export function App() {
         'input[aria-label="Stack name"]',
       ),
     removeApp: (resource) => void removeApp(resource),
+    removeGame: (resource) => void removeGame(resource),
     forgetProvider: (machineId, provider, card) => void forgetProvider(machineId, provider, card),
     rollback: (resource, mode) => setRollback({ card: resource, mode }),
     restorePrevious: (resource) => void restorePrevious(resource),
@@ -1700,6 +1717,7 @@ export function App() {
               onPlace={placeInView}
               onReshare={(resource, circle, share, part) => void reshare(resource, circle, share, part)}
               onTime={handlers.setTime}
+              onRemoveGame={handlers.removeGame}
               onNewCircle={(ids) => void newCircleFor(ids)}
               onRemoveApp={(resource) => void removeApp(resource)}
               onRollback={(resource, mode) => setRollback({ card: resource, mode })}
@@ -2252,6 +2270,8 @@ function Panel(props: {
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   /** K-212: a new end time, null for no end, or "now". */
   onTime: (resource: Resource, endsAt: number | null | "now") => void;
+  /** K-534: removes a game card after a confirm. */
+  onRemoveGame: (resource: Resource) => void;
   onNewCircle: (ids: ReadonlyArray<string>) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
@@ -2332,6 +2352,7 @@ function Panel(props: {
         onPlace={props.onPlace}
         onReshare={props.onReshare}
         onTime={props.onTime}
+        onRemoveGame={props.onRemoveGame}
         onNewCircle={props.onNewCircle}
         onRemoveApp={props.onRemoveApp}
         onRollback={props.onRollback}
@@ -2720,6 +2741,8 @@ function CardPanel(props: {
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   /** K-212: a new end time, null for no end, or "now". */
   onTime: (resource: Resource, endsAt: number | null | "now") => void;
+  /** K-534: removes a game card after a confirm. */
+  onRemoveGame: (resource: Resource) => void;
   onNewCircle: (ids: ReadonlyArray<string>) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
@@ -3127,7 +3150,9 @@ function CardPanel(props: {
           })}
         </ul>
       )}
-      {isGameCard(resource) ? <GameDoors resource={resource} /> : null}
+      {isGameCard(resource) ? (
+        <GameDoors resource={resource} onRemove={() => props.onRemoveGame(resource)} />
+      ) : null}
       {state.places.has(resource.id) && resource.id !== ADMIN_RESOURCE_ID ? (
         <div class="field-row">
           <span

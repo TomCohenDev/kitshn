@@ -13,7 +13,7 @@ import {
 } from "../core/game.ts";
 import type { ServerReport } from "../core/sites.ts";
 import { Radio } from "./controls.tsx";
-import { callApi } from "./store.ts";
+import { callApi, useStore } from "./store.ts";
 
 /** K-534: a game card as `GET /api/games` gives it (K-2001 to K-2008). */
 export type GameView = Game & {
@@ -88,6 +88,10 @@ export function GameForm(props: {
   // The ports alone, while the owner types them, so a missing name does not show as a port problem.
   const portsAlone = gamePorts({ ports, name: "game", hours, srv: "" }, machine?.servers ?? []);
   const without = props.machines.filter((view) => view.online && !able.includes(view));
+  // The running servers that a game card may take: another service of the machine is no game (K-2001).
+  const offered = (machine?.servers ?? []).filter(
+    (server) => busyPort([{ port: server.port, proto: "tcp" }], [server]) === null,
+  );
   const add = async () => {
     if (!machine)
       return setError("No online machine can hold a game: install its doors first (kitshn doors install).");
@@ -165,9 +169,9 @@ export function GameForm(props: {
               setError(null);
             }}
           />
-          {machine && machine.servers.length > 0 ? (
+          {offered.length > 0 ? (
             <div class="pills">
-              {machine.servers.map((server) => (
+              {offered.map((server) => (
                 <button
                   key={server.port}
                   type="button"
@@ -206,17 +210,16 @@ export function GameForm(props: {
         <span class="label" data-tip="Doors: how long a door stays open after a player opens it.">
           Doors
         </span>
-        <div class="pills" role="radiogroup" aria-label="Door time">
+        <div class="choices" role="radiogroup" aria-label="Door time">
           {HOURS.map((each) => (
-            <button
+            <Radio
               key={each}
-              type="button"
-              aria-pressed={hours === each}
-              data-tip={`A door stays open ${hoursLabel(each)}, then the player opens it again.`}
-              onClick={() => setHours(each)}
-            >
-              {hoursLabel(each)}
-            </button>
+              name="game-door-time"
+              checked={hours === each}
+              label={hoursLabel(each)}
+              tip={`A door stays open ${hoursLabel(each)}, then the player opens it again.`}
+              onSelect={() => setHours(each)}
+            />
           ))}
         </div>
       </div>
@@ -256,26 +259,37 @@ export function GameForm(props: {
 }
 
 /** K-534: the open doors of a game card in its panel, each with Close; the owner's view of K-2003. */
-export function GameDoors(props: { resource: Resource }) {
+export function GameDoors(props: { resource: Resource; onRemove: () => void }) {
   const [game, setGame] = useState<GameView | null | "error">(null);
   const [error, setError] = useState<string | null>(null);
+  /** The door whose Close waits for "Yes", and whether its call runs. */
+  const [asking, setAsking] = useState<string | null>(null);
+  const [closing, setClosing] = useState(false);
+  // K-2004: each door that opens or closes is a revision, so a new revision reads the doors again.
+  const revision = useStore().snapshot?.revision ?? 0;
   const load = async () => {
     const result = await callApi<ReadonlyArray<GameView>>("GET", "/api/games");
     if ("error" in result) return setGame("error");
     setGame(result.find((each) => each.card === props.resource.id) ?? "error");
   };
-  useEffect(() => void load(), [props.resource.id]);
+  useEffect(() => void load(), [props.resource.id, revision]);
   if (game === null) return <p class="help">Loading the doors…</p>;
   if (game === "error") return <p class="help">kitshn could not read the doors of this game.</p>;
   const close = async (door: Door) => {
+    setClosing(true);
     const result = await callApi<object>(
       "DELETE",
       `/api/games/${encodeURIComponent(game.card)}/doors/${encodeURIComponent(door.address)}`,
     );
+    setClosing(false);
+    setAsking(null);
     if ("error" in result) return setError(result.error);
     setError(null);
     await load();
   };
+  // A door that ended is shut already; the alarm removes it soon.
+  const now = Date.now();
+  const doors = game.doors.filter((door) => door.endsAt > now);
   return (
     <div>
       <div class="label" data-tip="Doors: the addresses that may reach the game ports now (K-2003).">
@@ -286,28 +300,63 @@ export function GameDoors(props: { resource: Resource }) {
         Join page <code>{game.join}</code> · listening{" "}
         {game.listening.length > 0 ? game.listening.join(", ") : "nothing"}
       </p>
-      {game.doors.length === 0 ? (
+      {doors.length === 0 ? (
         <p class="help">No door is open. A player opens one on the join page.</p>
       ) : (
         <ul class="opens">
-          {game.doors.map((door) => (
+          {doors.map((door) => (
             <li key={`${door.person}/${door.address}`} class="row">
               <span class="grow">
                 {door.person} · <code>{door.address}</code> · until {new Date(door.endsAt).toLocaleString()}
               </span>
-              <button
-                type="button"
-                class="btn"
-                data-tip={`Close ${door.address} for every player now.`}
-                onClick={() => void close(door)}
-              >
-                Close
-              </button>
+              {asking === door.address ? (
+                <>
+                  <span>Close for everyone on this address?</span>
+                  <button
+                    type="button"
+                    class="btn danger"
+                    disabled={closing}
+                    data-tip={`Close ${door.address} now for everyone on this address; their connections end. There is no Undo.`}
+                    onClick={() => void close(door)}
+                  >
+                    Yes
+                  </button>
+                  <button
+                    type="button"
+                    class="btn"
+                    disabled={closing}
+                    data-tip="Keep the door open."
+                    onClick={() => setAsking(null)}
+                  >
+                    No
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  class="btn"
+                  disabled={closing}
+                  data-tip={`Close ${door.address} for everyone on this address. kitshn asks first.`}
+                  onClick={() => setAsking(door.address)}
+                >
+                  Close…
+                </button>
+              )}
             </li>
           ))}
         </ul>
       )}
       {error ? <p class="error">{error}</p> : null}
+      <div class="row">
+        <button
+          type="button"
+          class="btn danger"
+          data-tip={`Remove ${props.resource.name}: its doors close for everyone and its records go. kitshn asks first.`}
+          onClick={props.onRemove}
+        >
+          Remove game…
+        </button>
+      </div>
     </div>
   );
 }

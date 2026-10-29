@@ -350,6 +350,32 @@ export const forwardText = (
     call.labelsHash,
   ].join("\n");
 
+/**
+ * K-1714: why a forwarded path, after URL normalization, is not one that a daemon may send; null when it is. It must stay
+ * below `/agent/` and hold no encoded slash, backslash, dot or percent, so no later decoding can climb out of it.
+ */
+export function forwardPathProblem(pathname: string): string | null {
+  if (!pathname.startsWith("/agent/")) return `${pathname} is not below /agent/`;
+  const lower = pathname.toLowerCase();
+  for (const bad of ["%2f", "%5c", "%2e", "%25", "\\", "/./", "/../"])
+    if (lower.includes(bad)) return `${pathname} holds ${bad}`;
+  if (lower.endsWith("/.") || lower.endsWith("/..")) return `${pathname} ends in a dot segment`;
+  return null;
+}
+
+/** K-1714: the URL of a forwarded call on `server`, or why the daemon refuses to send it. */
+export function forwardUrl(server: string, path: string): URL | string {
+  let url: URL;
+  try {
+    url = new URL(path, server);
+  } catch {
+    return `${path} is not a path.`;
+  }
+  if (url.origin !== new URL(server).origin) return `${path} leaves the kitshn server.`;
+  const problem = forwardPathProblem(url.pathname);
+  return problem === null ? url : `${problem}.`;
+}
+
 /** K-1714: the headers of a forwarded call. */
 export const FORWARD_HEADERS = {
   signature: "x-kitshn-machine-signature",

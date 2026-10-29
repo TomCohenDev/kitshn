@@ -96,6 +96,7 @@ import { type SiteEntry, addSite, parseSiteFile, probe, targetOf } from "./sites
 import { RUNNING_FORMAT, VOLUME_FORMAT, idleVolumes, volumeRemoveRefusal } from "./volumes.ts";
 import { keepBuild, keptId, keptTag, rollbackOverride, serviceImages, staleTags } from "./keep.ts";
 import { TokenCache } from "./tokens.ts";
+import { MAX_FORWARDS, forwardTarget, passedHeaders, readBounded } from "./forward.ts";
 import { AGENT_USAGE, type AgentTransport, runAgentCommand } from "kitshn/agent";
 import { CliError } from "kitshn/cli-error";
 
@@ -1679,12 +1680,26 @@ async function attestedFor(attestations: Readonly<Record<string, string>> | unde
  * K-1714: one call of a local agent to `/agent`, with the machine token and a signature of the machine key over the
  * method, the path, the time, a nonce and the attested labels. Only `x-kitshn-` headers and the content type pass.
  */
+let forwards = 0;
+
 async function forwardCall(request: Extract<Request, { type: "forward" }>): Promise<Answer> {
+  if (forwards >= MAX_FORWARDS)
+    throw new Error(`the daemon forwards at most ${MAX_FORWARDS} calls at once; try again (K-1714).`);
+  forwards++;
+  try {
+    return await forwardOnce(request);
+  } finally {
+    forwards--;
+  }
+}
+
+async function forwardOnce(request: Extract<Request, { type: "forward" }>): Promise<Answer> {
   if (!joined) throw new Error("the daemon has not read machine.json yet.");
   const key = readKey(keyFile);
   if (!key)
     throw new Error("this machine has no key, so it cannot forward a call (K-1714). Run kitshn rekey.");
-  if (!request.path.startsWith("/agent/")) throw new Error("the daemon forwards only /agent calls (K-1714).");
+  const url = forwardTarget(joined.server, request.path);
+  if (typeof url === "string") throw new Error(`the daemon forwards only /agent calls: ${url} (K-1714)`);
   const body = request.body === undefined ? undefined : Buffer.from(request.body, "base64");
   if (body && body.length > MAX_FORWARD_BYTES)
     throw new Error(
@@ -1698,18 +1713,14 @@ async function forwardCall(request: Extract<Request, { type: "forward" }>): Prom
     key,
     forwardText(joined.server, joined.machineId, {
       method: request.method,
-      path: request.path,
+      path: `${url.pathname}${url.search}`,
       at,
       nonce,
       labelsHash,
     }),
   );
-  const passed = Object.fromEntries(
-    Object.entries(request.headers ?? {}).filter(
-      ([name]) => name.toLowerCase().startsWith("x-kitshn-") || name.toLowerCase() === "content-type",
-    ),
-  );
-  const response = await fetch(new URL(request.path, joined.server), {
+  const passed = passedHeaders(request.headers ?? {});
+  const response = await fetch(url, {
     method: request.method,
     redirect: "error",
     headers: {
@@ -1723,11 +1734,7 @@ async function forwardCall(request: Extract<Request, { type: "forward" }>): Prom
     },
     ...(body ? { body } : {}),
   });
-  const answer = Buffer.from(await response.arrayBuffer());
-  if (answer.length > MAX_FORWARD_BYTES)
-    throw new Error(
-      `kitshn answered more than ${MAX_FORWARD_BYTES} bytes, the limit of a forwarded call (K-1714).`,
-    );
+  const answer = await readBounded(response, MAX_FORWARD_BYTES);
   return {
     id: request.id,
     type: "forward",

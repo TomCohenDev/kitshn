@@ -109,18 +109,21 @@ describe("daemon service (K-601)", () => {
       "/tmp/kitshn-1001": { ...folder, uid: 1001 },
       "/tmp/kitshn-1001/kitshn.sock": { ...sock, uid: 1001 },
     };
-    expect(localSocket({}, root, at(mallory), ["kitshn-1001"], named)).toEqual({
-      refused: expect.stringContaining("belongs to mallory, not the user kitshn"),
+    expect(localSocket({}, root, at(mallory), ["kitshn-1001"], named)).toBe(root.socket);
+    // Another user's fake socket next to the daemon's neither counts nor blocks the daemon's.
+    expect(localSocket({}, root, at({ ...daemon, ...mallory }), [...tmp, "kitshn-1001"], named)).toBe(
+      "/tmp/kitshn-1000/kitshn.sock",
+    );
+    // A folder of kitshn that names another uid than its owner.
+    const renamed = { "/tmp/kitshn-1002": folder, "/tmp/kitshn-1002/kitshn.sock": sock };
+    expect(localSocket({}, root, at(renamed), ["kitshn-1002"], named)).toEqual({
+      refused: expect.stringContaining("belongs to user id 1000, not 1002"),
     });
-    // A folder that names the daemon's uid but belongs to another uid.
-    expect(
-      localSocket({}, root, at({ ...daemon, "/tmp/kitshn-1000": { ...folder, uid: 1001 } }), tmp, named),
-    ).toEqual({ refused: expect.stringContaining("belongs to user id 1001, not 1000") });
     expect(
       localSocket({}, root, at({ ...daemon, "/tmp/kitshn-1000": { ...folder, mode: 0o40777 } }), tmp, named),
     ).toEqual({ refused: expect.stringContaining("mode 777") });
-    expect(localSocket({}, root, at({ ...daemon, ...mallory }), [...tmp, "kitshn-1001"], named)).toEqual({
-      several: ["/tmp/kitshn-1000/kitshn.sock", "/tmp/kitshn-1001/kitshn.sock"],
+    expect(localSocket({}, root, at({ ...daemon, ...renamed }), [...tmp, "kitshn-1002"], named)).toEqual({
+      several: ["/tmp/kitshn-1000/kitshn.sock", "/tmp/kitshn-1002/kitshn.sock"],
     });
   });
 });

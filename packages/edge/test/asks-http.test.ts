@@ -1,84 +1,11 @@
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, expect, it, vi } from "vitest";
-import {
-  FORWARD_HEADERS,
-  type Machine,
-  type MachinePrivateKey,
-  forwardText,
-  newMachineKey,
-  signText,
-} from "../src/core/machine.ts";
-import type { Circle, RightMode } from "../src/core/model.ts";
+import { newMachineKey } from "../src/core/machine.ts";
 import { accessToken, send, stubAccessCerts } from "./access.ts";
+import { forwarded, setup } from "./machine-http.ts";
 
 afterEach(() => vi.restoreAllMocks());
-
-/** The machine vps in the agent circle "agents" with these rights. */
-async function setup(rights: Partial<Record<string, RightMode>>, key: MachinePrivateKey | null = null) {
-  const machine: Machine = {
-    ...(key ? { key: { kind: "public" as const, publicKey: key.x, fingerprint: "f", since: 0 } } : {}),
-    id: "vps",
-    name: "vps",
-    labels: [],
-    order: 0,
-    serviceTokenId: "token-vps",
-    clientId: "vps.access",
-    tunnelId: "tunnel-vps",
-  };
-  const agents: Circle = {
-    id: "agents",
-    name: "Agents",
-    color: "#ffcc00",
-    level: "control",
-    members: [{ _tag: "machine", machineId: "vps", rights }],
-    match: "any",
-    needsPasskey: false,
-    endsAt: null,
-    x: 5000,
-    y: 5000,
-    r: 200,
-  };
-  const stub = env.KITSHN.getByName("kitshn");
-  await runInDurableObject(stub, (_, state) => {
-    state.storage.sql.exec(
-      "INSERT OR REPLACE INTO machines (id, body) VALUES (?, ?)",
-      "vps",
-      JSON.stringify(machine),
-    );
-    state.storage.sql.exec(
-      "INSERT OR REPLACE INTO circles (id, body) VALUES (?, ?)",
-      "agents",
-      JSON.stringify(agents),
-    );
-    state.storage.sql.exec("DELETE FROM ask_events");
-  });
-  await evictDurableObject(stub);
-}
-
-/** One call as the daemon forwards it: the machine token, and the machine key's signature (K-1714). */
-async function forwarded(key: MachinePrivateKey, method: string, path: string, nonce: string, body = "{}") {
-  const at = Date.now();
-  const labels = "{}";
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(labels)));
-  const labelsHash = [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  const signature = await signText(
-    key,
-    forwardText("kit.example.com", "vps", { method, path, at, nonce, labelsHash }),
-  );
-  return send(path, {
-    method,
-    headers: {
-      "cf-access-jwt-assertion": await accessToken("agent-aud", { common_name: "vps.access" }),
-      "content-type": "application/json",
-      [FORWARD_HEADERS.signature]: signature,
-      [FORWARD_HEADERS.at]: String(at),
-      [FORWARD_HEADERS.nonce]: nonce,
-      [FORWARD_HEADERS.labels]: labels,
-    },
-    body,
-  });
-}
 
 it("takes a call that the daemon forwarded and signed, with the right of its path, once per nonce (K-1714)", async () => {
   stubAccessCerts();
@@ -104,6 +31,17 @@ it("takes a call that the daemon forwarded and signed, with the right of its pat
   expect((await passed.json()) as { error?: string }).toEqual({
     error: expect.not.stringMatching(/K-1714|adds pages/),
   });
+  // A path that decodes out of a card, or out of /agent/, never reaches a route (K-1714).
+  for (const [index, path] of [
+    "/agent/cards/a%2f..%2f..%2fconnect/address",
+    "/agent/cards/a%252e%252e/address",
+  ].entries()) {
+    const climbing = await forwarded(key, "POST", path, `nonce-climb-${index}-0123456789`);
+    expect(climbing.status, path).toBe(403);
+    expect(await climbing.json()).toEqual({ error: expect.stringContaining("forwards no call") });
+  }
+  // The used nonce stays in storage, so a restart of the object does not let a copied call run again.
+  await evictDurableObject(env.KITSHN.getByName("kitshn"));
   const again = await forwarded(key, "POST", address, "nonce-on-01234567890");
   expect(again.status).toBe(403);
   expect(await again.json()).toEqual({ error: expect.stringContaining("nonce") });

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   connectText,
   fingerprintOf,
+  forwardPathProblem,
+  forwardUrl,
   newChallenge,
   newMachineKey,
   parseAllowances,
@@ -96,5 +98,24 @@ describe("machine keys (K-1701 to K-1705)", () => {
     const fingerprint = await fingerprintOf(key.x);
     expect(fingerprint.startsWith("SHA256:") && fingerprint.length === "SHA256:".length + 43).toBe(true);
     expect(await fingerprintOf(key.x)).not.toBe(await fingerprintOf((await newMachineKey()).x));
+  });
+});
+
+describe("forwarded paths (K-1714)", () => {
+  it("stay below /agent/ on the server after normalizing, with no encoded slash, dot or percent", () => {
+    const server = "https://kit.example.com";
+    expect(String(forwardUrl(server, "/agent/cards/x/address"))).toBe(
+      "https://kit.example.com/agent/cards/x/address",
+    );
+    for (const path of [
+      "/agent/../connect/deploys/1/params.env",
+      "/agent/%2e%2e/connect",
+      "/agent/cards/a%2fb/address",
+      "/agent/cards/a%252e%252e/address",
+      "//evil.example.com/agent/x",
+    ])
+      expect(forwardUrl(server, path), path).toEqual(expect.any(String));
+    expect(forwardPathProblem("/agent/library")).toBeNull();
+    expect(forwardPathProblem("/connect")).toEqual(expect.any(String));
   });
 });

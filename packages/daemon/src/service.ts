@@ -78,10 +78,14 @@ export function localSocket(
   const given = env["KITSHN_LOCAL_SOCKET"];
   if (given) return given;
   if (facts(own.socket)?.socket) return own.socket;
+  // Only folders of the user `kitshn` count, so another user's folder can neither pose as the daemon nor block it.
   const found = tmpEntries
     .filter((name) => name.startsWith("kitshn-") && isDigits(name.slice("kitshn-".length)))
     .map((name) => ({ folder: `/tmp/${name}`, uid: Number(name.slice("kitshn-".length)) }))
-    .filter(({ folder }) => facts(`${folder}/kitshn.sock`) !== null);
+    .filter(({ folder }) => {
+      const owner = facts(folder);
+      return facts(`${folder}/kitshn.sock`) !== null && owner !== null && userName(owner.uid) === DAEMON_USER;
+    });
   if (found.length > 1) return { several: found.map(({ folder }) => `${folder}/kitshn.sock`) };
   const [one] = found;
   if (!one) return own.socket;
@@ -96,9 +100,7 @@ export function localSocket(
           ? `has mode ${(folder.mode & 0o777).toString(8)}, not 711`
           : !socket?.socket || socket.uid !== one.uid
             ? "holds a socket of another user"
-            : userName(one.uid) !== DAEMON_USER
-              ? `belongs to ${userName(one.uid) ?? `user id ${one.uid}`}, not the user ${DAEMON_USER}`
-              : null;
+            : null;
   return problem === null
     ? `${one.folder}/kitshn.sock`
     : {

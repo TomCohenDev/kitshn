@@ -74,6 +74,7 @@ import {
   connectText,
   FORWARD_HEADERS,
   FORWARD_WINDOW_MS,
+  forwardPathProblem,
   forwardText,
   fingerprintOf,
   parseAllowances,
@@ -674,8 +675,6 @@ export class Kitshn extends DurableObject<Env> {
   }
   /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
   private stuckShares = new Set<string>();
-  /** K-1714: the nonces of forwarded calls in the last minute, so a copied call does not run twice. */
-  private forwardNonces = new Map<string, number>();
   /** K-1716: false once `github_tokens` is known to be empty, so a broadcast reads no row of it. True after a wake. */
   private tokensLive = true;
   private accessWarnings: Array<string> = [];
@@ -7142,17 +7141,23 @@ export class Kitshn extends DurableObject<Env> {
     const at = Number(header(FORWARD_HEADERS.at));
     const nonce = header(FORWARD_HEADERS.nonce);
     const labelsText = header(FORWARD_HEADERS.labels) || "{}";
-    const refuse = (status: number, error: string, need?: MachineRight) =>
-      Response.json({ error, ...(need ? { need } : {}) }, { status });
+    // A refusal drops the body that it does not read, so the connection does not wait on it.
+    const refuse = async (status: number, error: string, need?: MachineRight) => {
+      if (!request.bodyUsed) await request.body?.cancel().catch(() => undefined);
+      return Response.json({ error, ...(need ? { need } : {}) }, { status });
+    };
+    const pathProblem = forwardPathProblem(url.pathname);
+    if (pathProblem !== null || forwardRight(url.pathname, request.method) === undefined)
+      return refuse(403, `A machine forwards no call to ${request.method} ${url.pathname} (K-1714).`);
     if (machine.key?.kind !== "public")
       return refuse(403, "This machine has no key, so it cannot forward a call (K-1714).");
     if (
       !Number.isFinite(at) ||
       Math.abs(now - at) > FORWARD_WINDOW_MS ||
       nonce.length < 16 ||
-      this.forwardNonces.has(nonce)
+      nonce.length > 64
     )
-      return refuse(403, "The forwarded call is too old, or its nonce was used (K-1714).");
+      return refuse(403, "The forwarded call is too old, or its nonce is not one (K-1714).");
     const labelsHash = await sha256Hex(labelsText);
     const valid = await verifyForHosts(
       machine.key.publicKey,
@@ -7162,8 +7167,14 @@ export class Kitshn extends DurableObject<Env> {
     );
     if (!valid)
       return refuse(403, "The signature of the forwarded call does not fit the machine key (K-1714).");
-    for (const [old, until] of this.forwardNonces) if (until < now) this.forwardNonces.delete(old);
-    this.forwardNonces.set(nonce, now + FORWARD_WINDOW_MS);
+    // K-1714: one use per nonce, also after a restart; a nonce older than the window fails the time check above.
+    this.sql("DELETE FROM forward_nonces WHERE at < ?", now - FORWARD_WINDOW_MS);
+    const [fresh] = this.sql<{ nonce: string }>(
+      "INSERT OR IGNORE INTO forward_nonces (nonce, at) VALUES (?, ?) RETURNING nonce",
+      nonce,
+      at,
+    );
+    if (!fresh) return refuse(403, "The nonce of this forwarded call was used (K-1714).");
     const prefixes = this.attesterPrefixesOf(machine.id);
     let parsed: unknown = null;
     try {
@@ -7200,6 +7211,23 @@ export class Kitshn extends DurableObject<Env> {
             `The right "${MACHINE_RIGHT_NAMES[right]}" asks ${this.state.circles.get(mode.circleId)?.name ?? mode.circleId}, and this call cannot wait for an approval. The owner sets it to automatic (K-1714).`,
           );
         const failed = conditionProblem(mode.conditions, labels, prefixes);
+        if (failed) return refuse(403, failed);
+      }
+      // A page or a folder site into Everyone also needs the conditions of "publishes", as `apply` does (K-1754).
+      const publishes =
+        (path === "/agent/library" && request.headers.get("x-kitshn-public") === "true") ||
+        (path === "/agent/sites/plan" &&
+          (await request
+            .clone()
+            .json()
+            .then((input: unknown) => isRecord(input) && input["public"] === true)
+            .catch(() => false)));
+      if (publishes) {
+        const failed = conditionProblem(
+          machineRightMode(this.state, machine.id, "publishes", now)?.conditions,
+          labels,
+          prefixes,
+        );
         if (failed) return refuse(403, failed);
       }
       return this.agentRequest(path, request, {

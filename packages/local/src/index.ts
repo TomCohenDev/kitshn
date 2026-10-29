@@ -1,6 +1,16 @@
 // K-702: the messages of the daemon's local socket (K-701). One JSON value per line. A request carries an id,
 // its answer the same id. An event carries no id (K-703): the result of an ask that waited (K-1722).
 import { Schema } from "effect";
+import {
+  GrantTables,
+  PROVIDER_LIMITS,
+  ProviderCommand,
+  ProviderKind,
+  ProviderName,
+  ProviderResource,
+} from "./provider.ts";
+
+export * from "./provider.ts";
 
 /** The longest line, in UTF-16 code units, that the daemon reads; a longer line ends the connection. */
 /** K-1714: room for a forwarded body of `MAX_FORWARD_BYTES` in base64 and its request. */
@@ -105,9 +115,49 @@ export const Request = Schema.Union([
     type: Schema.Literal("forget-token"),
     repo: Schema.String.check(Schema.isMaxLength(512)),
   }),
+  /**
+   * K-704: a provider names its kinds, its commands and all its resources; this replaces what an earlier connection
+   * registered. The connection then gets `grants` and `command` events. Only the daemon user and root send it.
+   */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("register"),
+    provider: ProviderName,
+    kinds: Schema.Array(ProviderKind).check(Schema.isMaxLength(PROVIDER_LIMITS.kinds)),
+    commands: Schema.Array(ProviderCommand).check(Schema.isMaxLength(PROVIDER_LIMITS.commands)),
+    resources: Schema.Array(ProviderResource).check(Schema.isMaxLength(PROVIDER_LIMITS.resources)),
+  }),
+  /** K-705: adds or replaces resources of a provider that this connection registered. */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("upsert"),
+    provider: ProviderName,
+    resources: Schema.Array(ProviderResource).check(Schema.isMaxLength(PROVIDER_LIMITS.resources)),
+  }),
+  /** K-705: removes resources of a provider that this connection registered, by their ids. */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("remove"),
+    provider: ProviderName,
+    ids: Schema.Array(Schema.String.check(Schema.isMaxLength(64))).check(
+      Schema.isMaxLength(PROVIDER_LIMITS.resources),
+    ),
+  }),
+  /** K-704: `kitshn provider forget <name>`: the daemon drops a provider that does not run, so it no longer reports it. */
+  Schema.Struct({ id: Id, type: Schema.Literal("provider-forget"), provider: ProviderName }),
+  /** K-707: the result of a `command` event. */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("command-result"),
+    provider: ProviderName,
+    commandId: Schema.Int,
+    ok: Schema.Boolean,
+    output: Schema.String.check(Schema.isMaxLength(64 * 1024)),
+  }),
   Ask,
 ]);
 export type Request = typeof Request.Type;
+export type ProviderRequest = Extract<Request, { type: "register" | "upsert" | "remove" | "command-result" }>;
 
 export const Status = Schema.Struct({
   version: Schema.String,
@@ -181,6 +231,30 @@ export const Answer = Schema.Union([
     outcome: Schema.Literals(["approved", "denied", "expired"]),
     result: Schema.optionalKey(Schema.Unknown),
     reason: Schema.optionalKey(Schema.String),
+  }),
+  /** K-704, K-706: the machine of the daemon, and the grant tables that kitshn last sent for this provider. */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("register"),
+    machineId: Schema.String,
+    grants: GrantTables,
+  }),
+  Schema.Struct({ id: Id, type: Schema.Literal("upsert") }),
+  Schema.Struct({ id: Id, type: Schema.Literal("remove") }),
+  Schema.Struct({ id: Id, type: Schema.Literal("command-result") }),
+  Schema.Struct({ id: Id, type: Schema.Literal("provider-forget") }),
+  /** K-706: an event: the grant tables of every resource of the provider, sent on each change. */
+  Schema.Struct({ type: Schema.Literal("grants"), provider: Schema.String, tables: GrantTables }),
+  /**
+   * K-707: an event: run one command. `resource` is the provider's id of the card, null for a command of the machine.
+   * The provider answers with `command-result` and the same `commandId`.
+   */
+  Schema.Struct({
+    type: Schema.Literal("command"),
+    provider: Schema.String,
+    commandId: Schema.Int,
+    command: Schema.String,
+    resource: Schema.NullOr(Schema.String),
   }),
   /** The id is null when the line has no valid id. */
   Schema.Struct({ id: Schema.NullOr(Id), type: Schema.Literal("error"), error: Schema.String }),

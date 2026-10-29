@@ -8,13 +8,14 @@ import {
   LEVELS,
   type Level,
   type Member,
-  RESOURCE_KINDS,
   type Resource,
   type State,
   circlesHolding,
   memberLabel,
   shareKey,
   shareLevel,
+  levelName,
+  levelsOf,
 } from "../core/model.ts";
 import { CIRCLE_COLORS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { TYPED_KINDS, type TypedKind, memberFrom } from "./members.ts";
@@ -208,7 +209,7 @@ export function LevelOverride(props: {
 }) {
   const { resource, circle, state } = props;
   const setting = state.shareSettings.get(shareKey(resource.id, circle.id));
-  const levels: ReadonlyArray<Level> = RESOURCE_KINDS[resource.kind];
+  const levels = levelsOf(resource);
   const put = (level: Level | null) => props.onEdit([levelEdit(state, resource, circle, level)]);
   return (
     <div class="seg small">
@@ -225,10 +226,10 @@ export function LevelOverride(props: {
           key={level}
           type="button"
           aria-pressed={setting?.level === level}
-          data-tip={`${level}: this card gets ${level} in ${circle.name}, whatever the default. The card shows the override as a chip.`}
+          data-tip={`${levelName(resource, level)}: this card gets ${levelName(resource, level)} in ${circle.name}, whatever the default. The card shows the override as a chip.`}
           onClick={() => void put(level)}
         >
-          {level}
+          {levelName(resource, level)}
         </button>
       ))}
     </div>
@@ -825,7 +826,7 @@ export function CircleEditor(props: {
                   {level ?? "none"}
                 </span>
               </button>
-              {RESOURCE_KINDS[resource.kind].length > 1 ? (
+              {levelsOf(resource).length > 1 ? (
                 <LevelOverride resource={resource} circle={circle} state={state} onEdit={props.onEdit} />
               ) : null}
             </li>

@@ -203,6 +203,9 @@ importers:
 
   packages/edge:
     dependencies:
+      '@kitshn/local':
+        specifier: workspace:*
+        version: link:../local
       effect:
         specifier: 4.0.6
         version: 4.0.6

@@ -56,6 +56,23 @@ export function parseCommand(value: unknown): Command | string {
     if (typeof volume !== "string" || !volume || volume.length > 255) return "Name the volume to delete.";
     return { kind: "compose-volume-remove", project: "", volume };
   }
+  // K-707: kitshn checks the provider, the command and the card against the machine's providers when it queues it.
+  if (value.kind === "provider") {
+    const field = (key: string) => (key in value ? (value as Record<string, unknown>)[key] : undefined);
+    const provider = field("provider");
+    const command = field("command");
+    const resource = field("resource") ?? null;
+    if (
+      typeof provider !== "string" ||
+      provider.length > 32 ||
+      typeof command !== "string" ||
+      command.length > 40
+    )
+      return "A provider command names its provider and its command.";
+    if (resource !== null && (typeof resource !== "string" || resource.length > 64))
+      return "A provider command names a card id, or none for the machine.";
+    return { kind: "provider", provider, command, resource };
+  }
   return `kitshn has no command "${String(value.kind)}".`;
 }
 

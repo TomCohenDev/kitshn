@@ -1,0 +1,269 @@
+// Section 7: what a provider (K-704) tells the daemon, and what the daemon passes on to kitshn over `/connect`.
+import { Schema, SchemaGetter } from "effect";
+
+/** K-704: names that a provider cannot take, because kitshn's own kinds start with them (K-301). */
+export const RESERVED_PROVIDERS: ReadonlySet<string> = new Set([
+  "kitshn",
+  "site",
+  "repo",
+  "machine",
+  "page",
+  "file",
+]);
+
+/** K-704: limits per machine, so one provider cannot fill the Durable Object. */
+export const PROVIDER_LIMITS = {
+  providers: 8,
+  kinds: 20,
+  commands: 40,
+  /** The cards of all providers of one machine. */
+  resources: 500,
+  facts: 20,
+  stickers: 8,
+} as const;
+
+const LOWER = "abcdefghijklmnopqrstuvwxyz";
+const DIGITS = "0123456789";
+const only = (chars: string) => (text: string) => [...text].every((char) => chars.includes(char));
+
+export const isProviderName = (name: string) =>
+  name.length >= 1 &&
+  name.length <= 32 &&
+  LOWER.includes(name[0] ?? "") &&
+  only(`${LOWER}${DIGITS}-`)(name) &&
+  !RESERVED_PROVIDERS.has(name);
+
+export const ProviderName = Schema.String.check(
+  Schema.makeFilter((name: string) => isProviderName(name) || "a provider name of a-z, 0-9 and -"),
+);
+/** K-302: a kind id starts with the provider name and a dot, for example `t3.thread`. */
+const KindId = Schema.String.check(
+  Schema.isMinLength(3),
+  Schema.isMaxLength(64),
+  Schema.makeFilter((id: string) => only(`${LOWER}${DIGITS}.-`)(id) || "a kind id of a-z, 0-9, . and -"),
+);
+/** The provider's own id of a resource, unique within the provider. */
+const LocalId = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(64),
+  Schema.makeFilter(
+    (id: string) =>
+      only(`${LOWER}${LOWER.toUpperCase()}${DIGITS}._-`)(id) || "an id of a-z, A-Z, 0-9, ., _ and -",
+  ),
+);
+const LevelName = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(20),
+  Schema.makeFilter((name: string) => only(`${LOWER}-`)(name) || "a level name of a-z and -"),
+);
+
+/**
+ * K-713: the levels of a provider kind, each named by the kitshn level that it stands for, so a circle level
+ * maps to it by K-206: `{ view: "view", use: "send" }` gives "send" to a circle with `use` or `control`. A kind
+ * without levels is not shareable, and the map hides it.
+ */
+export const ProviderLevels = Schema.Struct({
+  view: Schema.optionalKey(LevelName),
+  use: Schema.optionalKey(LevelName),
+  control: Schema.optionalKey(LevelName),
+});
+export type ProviderLevels = typeof ProviderLevels.Type;
+
+export const ProviderKind = Schema.Struct({
+  id: KindId,
+  name: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(40)),
+  levels: ProviderLevels,
+});
+export type ProviderKind = typeof ProviderKind.Type;
+
+/** K-707: a command that the provider runs. With no kinds, it is a command of the machine card. */
+export const ProviderCommand = Schema.Struct({
+  id: Schema.String.check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(40),
+    Schema.makeFilter((id: string) => only(`${LOWER}${DIGITS}-`)(id) || "a command id of a-z, 0-9 and -"),
+  ),
+  title: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(60)),
+  kinds: Schema.Array(KindId).check(Schema.isMaxLength(20)),
+  /** K-1615: the map asks before it runs the command. */
+  confirm: Schema.Boolean,
+});
+export type ProviderCommand = typeof ProviderCommand.Type;
+
+/** K-1625: `version` is compared within one kind, and `busy` holds "when online and idle" jobs (K-1608). */
+export const FACT_ROLES = ["version", "busy"] as const;
+export const ProviderFact = Schema.Struct({
+  label: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(40)),
+  value: Schema.String.check(Schema.isMaxLength(200)),
+  role: Schema.optionalKey(Schema.Literals(FACT_ROLES)),
+});
+export type ProviderFact = typeof ProviderFact.Type;
+
+export const STICKER_TONES = ["info", "good", "warn", "bad"] as const;
+const Link = Schema.String.check(
+  Schema.isMaxLength(512),
+  Schema.makeFilter(
+    (link: string) => link.startsWith("https://") || link.startsWith("http://") || "an http or https link",
+  ),
+);
+export const ProviderSticker = Schema.Struct({
+  text: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(24)),
+  tone: Schema.Literals(STICKER_TONES),
+  link: Schema.optionalKey(Link),
+});
+export type ProviderSticker = typeof ProviderSticker.Type;
+
+/** K-304: what a provider reports; kitshn sets "offline" itself while the provider is not connected. */
+export const PROVIDER_STATUSES = ["running", "stopped", "deploying", "failed", "unknown"] as const;
+
+/**
+ * K-705: one resource. `parent` stacks it with the card of another resource of the same provider (K-508). `site`
+ * makes the card the live site `<name>.<zone>` of its machine (K-1104), served from a local port.
+ */
+export const ProviderResource = Schema.Struct({
+  id: LocalId,
+  kind: KindId,
+  name: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(80)),
+  status: Schema.Literals(PROVIDER_STATUSES),
+  parent: Schema.optionalKey(LocalId),
+  site: Schema.optionalKey(
+    Schema.Struct({
+      name: Schema.String.check(
+        Schema.isMinLength(1),
+        Schema.isMaxLength(63),
+        Schema.makeFilter(
+          (name: string) =>
+            (only(`${LOWER}${DIGITS}-`)(name) && !name.startsWith("-") && !name.endsWith("-")) ||
+            "a DNS label of a-z, 0-9 and -",
+        ),
+      ),
+      port: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 })),
+    }),
+  ),
+  facts: Schema.optionalKey(Schema.Array(ProviderFact).check(Schema.isMaxLength(PROVIDER_LIMITS.facts))),
+  stickers: Schema.optionalKey(
+    Schema.Array(ProviderSticker).check(Schema.isMaxLength(PROVIDER_LIMITS.stickers)),
+  ),
+});
+export type ProviderResource = typeof ProviderResource.Type;
+
+/** K-704: one provider of a machine as the daemon reports it to kitshn: its last registration and its resources. */
+export const ProviderReport = Schema.Struct({
+  name: ProviderName,
+  /** False while no connection of the provider is open; kitshn then shows its cards as offline. */
+  online: Schema.Boolean,
+  kinds: Schema.Array(ProviderKind).check(Schema.isMaxLength(PROVIDER_LIMITS.kinds)),
+  commands: Schema.Array(ProviderCommand).check(Schema.isMaxLength(PROVIDER_LIMITS.commands)),
+  resources: Schema.Array(ProviderResource).check(Schema.isMaxLength(PROVIDER_LIMITS.resources)),
+});
+export type ProviderReport = typeof ProviderReport.Type;
+export const decodeProviderReports = Schema.decodeUnknownSync(
+  Schema.Array(ProviderReport).check(Schema.isMaxLength(PROVIDER_LIMITS.providers)),
+);
+
+/**
+ * K-706: one member rule of a circle. `clientId` is what the Access JWT carries in `common_name`, so the provider
+ * matches a device or a machine from the JWT alone.
+ */
+const KnownRule = Schema.Union([
+  Schema.Struct({ email: Schema.String }),
+  Schema.Struct({ domain: Schema.String }),
+  Schema.Struct({ ip: Schema.String }),
+  Schema.Struct({ device: Schema.Struct({ clientId: Schema.String, name: Schema.String }) }),
+  Schema.Struct({ machine: Schema.Struct({ machineId: Schema.String, clientId: Schema.String }) }),
+  Schema.Struct({ everyone: Schema.Literal(true) }),
+]);
+/** A rule of a type that this reader does not know. It never matches, and in an "all" circle it fails the grant. */
+const UnknownRule = Schema.Struct({ unknown: Schema.String });
+const isKnownRule = Schema.is(KnownRule);
+
+/**
+ * K-706: a rule decodes forward compatibly: a type that a newer kitshn adds becomes `{ unknown: <its key> }`, so the
+ * rest of the table still decodes and the new rule never widens access.
+ */
+export const GrantRule = Schema.Unknown.pipe(
+  Schema.decodeTo(Schema.Union([KnownRule, UnknownRule]), {
+    decode: SchemaGetter.transform((value: unknown) =>
+      isKnownRule(value)
+        ? value
+        : {
+            unknown:
+              typeof value === "object" && value !== null ? (Object.keys(value)[0] ?? "") : typeof value,
+          },
+    ),
+    encode: SchemaGetter.transform((rule) => rule),
+  }),
+);
+export type GrantRule = typeof GrantRule.Type;
+
+/**
+ * K-706: one share of a resource. `level` is the provider's name of the level. `endsAt` is the earlier of the end
+ * of the circle and of the share (K-209), in ms; the provider ends the sessions of the share at that time itself.
+ */
+export const Grant = Schema.Struct({
+  circle: Schema.Struct({
+    id: Schema.String,
+    name: Schema.String,
+    match: Schema.Literals(["any", "all"]),
+    needsPasskey: Schema.Boolean,
+    rules: Schema.Array(GrantRule),
+  }),
+  level: Schema.String,
+  endsAt: Schema.NullOr(Schema.Number),
+});
+export type Grant = typeof Grant.Type;
+
+/** K-706: the grant table of each resource of one provider, by the provider's resource id. */
+export const GrantTables = Schema.Record(Schema.String, Schema.Array(Grant));
+export type GrantTables = typeof GrantTables.Type;
+
+/**
+ * K-704, K-705: why a provider's set of resources is not valid, or null. Each kind id starts with the provider name,
+ * each command names known kinds, each resource has a known kind with levels and a known parent, and the cards and
+ * the site names of all providers of the machine stay within the limits.
+ */
+export function reportProblem(
+  report: ProviderReport,
+  others: ReadonlyArray<ProviderReport>,
+  takenSites: ReadonlySet<string>,
+  /** The site names of kitshn itself, such as `pages` (K-817). */
+  reserved: ReadonlySet<string>,
+): string | null {
+  const kinds = new Map(report.kinds.map((kind) => [kind.id, kind]));
+  if (kinds.size !== report.kinds.length) return "two kinds have the same id.";
+  for (const id of kinds.keys())
+    if (!id.startsWith(`${report.name}.`) || id.length === report.name.length + 1)
+      return `the kind ${id} does not start with ${report.name}. (K-302).`;
+  if (new Set(report.commands.map((command) => command.id)).size !== report.commands.length)
+    return "two commands have the same id.";
+  for (const command of report.commands)
+    for (const kind of command.kinds)
+      if (!kinds.has(kind)) return `the command ${command.id} names the unknown kind ${kind}.`;
+  const ids = new Set(report.resources.map((resource) => resource.id));
+  if (ids.size !== report.resources.length) return "two resources have the same id.";
+  const sites = new Set<string>();
+  for (const resource of report.resources) {
+    const kind = kinds.get(resource.kind);
+    if (!kind) return `the resource ${resource.id} has the unknown kind ${resource.kind}.`;
+    if (Object.keys(kind.levels).length === 0)
+      return `the kind ${kind.id} has no levels, so it has no cards; desired state (K-709) is not built yet.`;
+    if (resource.parent !== undefined && (resource.parent === resource.id || !ids.has(resource.parent)))
+      return `the resource ${resource.id} names the unknown parent ${resource.parent}.`;
+    if (resource.site) {
+      const name = resource.site.name;
+      if (reserved.has(name)) return `the site name ${name} is a name of kitshn itself.`;
+      if (sites.has(name) || takenSites.has(name)) return `the site name ${name} is in use on this machine.`;
+      sites.add(name);
+    }
+  }
+  for (const other of others)
+    for (const resource of other.resources)
+      if (resource.site && sites.has(resource.site.name))
+        return `the site name ${resource.site.name} belongs to the provider ${other.name}.`;
+  const total = others.reduce((sum, other) => sum + other.resources.length, report.resources.length);
+  if (total > PROVIDER_LIMITS.resources)
+    return `the providers of this machine would have ${total} resources, more than ${PROVIDER_LIMITS.resources}.`;
+  if (!others.some((other) => other.name === report.name) && others.length >= PROVIDER_LIMITS.providers)
+    return `this machine has ${PROVIDER_LIMITS.providers} providers already.`;
+  return null;
+}

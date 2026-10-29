@@ -1,21 +1,38 @@
-import type { Level, Member, ResourceKind } from "../core/model.ts";
+import type { Level, Member, Resource, ResourceKind } from "../core/model.ts";
+
+export interface KindInfo {
+  readonly label: string;
+  /** What a card of this kind is (K-301), for its tooltip. */
+  readonly help: string;
+  readonly icon: string;
+  readonly color: string;
+  readonly ink?: string;
+  readonly tilt: string;
+}
+
+/** K-302: the sticker of a card's kind; a provider kind gets one look, with the name that its provider gives it. */
+export const kindInfo = (resource: Pick<Resource, "kind" | "provider">): KindInfo =>
+  resource.provider
+    ? {
+        label: resource.provider.kindName,
+        help: `A ${resource.provider.kindName} of the provider ${resource.provider.name} on its machine (K-704).`,
+        icon: "🧩",
+        color: "var(--info)",
+        tilt: "1.5deg",
+      }
+    : (KINDS[resource.kind as ResourceKind] ?? {
+        label: resource.kind,
+        help: `A card of the kind ${resource.kind}.`,
+        icon: "❔",
+        color: "var(--info)",
+        tilt: "0deg",
+      });
 
 /**
  * Sticker colours follow tick3d: black text on the light sticker colours, white text on the accent.
  * `ink` is the text colour, so each pair passes WCAG AA.
  */
-export const KINDS: Record<
-  ResourceKind,
-  {
-    readonly label: string;
-    /** What a card of this kind is (K-301), for its tooltip. */
-    readonly help: string;
-    readonly icon: string;
-    readonly color: string;
-    readonly ink?: string;
-    readonly tilt: string;
-  }
-> = {
+export const KINDS: Record<ResourceKind, KindInfo> = {
   "kitshn.admin": {
     label: "Admin",
     help: "kitshn administration: whoever opens it changes kitshn.",

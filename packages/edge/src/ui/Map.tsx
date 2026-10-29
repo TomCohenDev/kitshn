@@ -4,7 +4,6 @@ import {
   type Circle,
   type Point,
   type Resource,
-  type ResourceKind,
   type State,
   circleAloneKey,
   circlesHolding,
@@ -13,12 +12,13 @@ import {
   shareKey,
   shareLevel,
   stackTitle,
+  type CardKind,
 } from "../core/model.ts";
 import type { AccessState, MachineView, Snapshot } from "../core/protocol.ts";
 import { isAgentKey } from "../core/agent.ts";
 import { AGENT_TIP, LEVEL_TIPS, MATCH_TIPS, MEMBER_HELP, PASSKEY_TIP, RightStickers } from "./Circle.tsx";
 import { MachineRightStickers } from "./MachineRights.tsx";
-import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
+import { type KindInfo, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS, kindInfo } from "./kinds.ts";
 import { KeySticker, PresenceSticker } from "./Machines.tsx";
 import { type MenuTarget, USER_STACK } from "./actions.ts";
 import { MoreButton } from "./controls.tsx";
@@ -110,7 +110,7 @@ interface Props {
   readonly machines: ReadonlyMap<string, MachineView>;
   readonly selection: Selection;
   readonly onSelect: (selection: Selection) => void;
-  readonly hidden: ReadonlySet<ResourceKind>;
+  readonly hidden: ReadonlySet<CardKind>;
   readonly view: View;
   /** Live previews of site and page cards (when the zoom allows). */
   readonly previews: boolean;
@@ -732,13 +732,13 @@ export function MapView(props: Props) {
                 style={{
                   left: px(at.x),
                   top: px(at.y),
-                  background: KINDS[resource.kind].color,
+                  background: kindInfo(resource).color,
                   ...(layer === null ? {} : { "--layer": layer }),
                 }}
                 tabIndex={0}
                 role="img"
                 aria-label={resource.name}
-                data-tip={`${resource.name}: ${KINDS[resource.kind].help} Zoom in to see its card.`}
+                data-tip={`${resource.name}: ${kindInfo(resource).help} Zoom in to see its card.`}
               />
             );
           }
@@ -847,7 +847,7 @@ export function CircleView(props: {
   /** Where the head sits on the edge, in radians from the top (layout.ts). */
   headAngle: number;
   zoomedOut: boolean;
-  hidden: ReadonlySet<ResourceKind>;
+  hidden: ReadonlySet<CardKind>;
   onMenu: (anchor: Rect) => void;
 }) {
   const { circle } = props;
@@ -856,12 +856,15 @@ export function CircleView(props: {
   // K-1730: an agent circle holds devices and machines only.
   const agentCircle = circle.members.every((member) => member._tag === "device" || member._tag === "machine");
   const extra = circle.members.length - shown.length;
-  const counts = new Map<ResourceKind, number>();
+  const counts = new Map<CardKind, { readonly count: number; readonly info: KindInfo }>();
   if (props.zoomedOut) {
     for (const resource of props.state.resources.values()) {
       const place = props.state.places.get(resource.id);
       if (place && insideCircle(place, circle))
-        counts.set(resource.kind, (counts.get(resource.kind) ?? 0) + 1);
+        counts.set(resource.kind, {
+          count: (counts.get(resource.kind)?.count ?? 0) + 1,
+          info: kindInfo(resource),
+        });
     }
   }
   return (
@@ -909,12 +912,12 @@ export function CircleView(props: {
       </div>
       {props.zoomedOut ? (
         <div class="counts">
-          {[...counts].map(([kind, count]) => (
+          {[...counts].map(([kind, { count, info }]) => (
             <span
               key={kind}
-              data-tip={`${count} ${KINDS[kind].label.toLowerCase()} in ${circle.name}. Zoom in to see the cards.`}
+              data-tip={`${count} ${info.label.toLowerCase()} in ${circle.name}. Zoom in to see the cards.`}
             >
-              {KINDS[kind].icon} {count}
+              {info.icon} {count}
             </span>
           ))}
         </div>

@@ -31,7 +31,10 @@ import {
   shareLevel,
   stackTitle,
   type UndoSource,
+  type CardKind,
+  type ProviderCard,
 } from "../core/model.ts";
+import type { ProviderSticker } from "@kitshn/local";
 import { MAX_UPLOAD_BYTES, isLibraryId } from "../core/library.ts";
 import { circleForCards, placeInside } from "../core/place.ts";
 import { awaitsAllow } from "../core/repos.ts";
@@ -59,7 +62,7 @@ import type {
   RevisionView,
   Snapshot,
 } from "../core/protocol.ts";
-import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS } from "./kinds.ts";
+import { CIRCLE_COLORS, KINDS, LEVEL_COLORS, MEMBER_ICONS, kindInfo } from "./kinds.ts";
 import {
   CircleEditor,
   type DeviceSecret,
@@ -272,7 +275,7 @@ const routeFromHash = (): {
 export function App() {
   const store = useStore();
   const [selection, setSelection] = useState<Selection>({ cards: new Set(), circle: null });
-  const [hidden, setHidden] = useState<ReadonlySet<ResourceKind>>(new Set());
+  const [hidden, setHidden] = useState<ReadonlySet<CardKind>>(new Set());
   const [savedView] = useState(loadView);
   const [view, setView] = useState<View>(() => savedView ?? { x: 0, y: 0, s: 1 });
   /** K-514: once the owner pans or zooms, the map stops fitting on its own until the next load. */
@@ -958,6 +961,25 @@ export function App() {
     });
   };
 
+  /** K-704: no confirm; the toast and History undo it. */
+  const forgetProvider = async (machineId: string, provider: string, card: Resource | null) => {
+    const result = await callApi<{ revision: number | null }>(
+      "POST",
+      `/api/machines/${encodeURIComponent(machineId)}/providers/${encodeURIComponent(provider)}/forget`,
+      { card: card?.id ?? null },
+    );
+    if ("error" in result) {
+      showToast({ text: result.error, error: true, undo: null });
+      return;
+    }
+    setSelection({ cards: new Set(), circle: null });
+    showToast({
+      text: card ? `Forgot ${card.name}.` : `Forgot the provider ${provider} and its cards.`,
+      error: false,
+      undo: result.revision,
+    });
+  };
+
   const fullPage = route.tab !== "map";
   const shownPanel: PanelKind | null = fullPage ? route.tab : panel;
   const large = fullPage || ((panel === "details" || panel === "safety") && detailsLarge);
@@ -1418,6 +1440,7 @@ export function App() {
         'input[aria-label="Stack name"]',
       ),
     removeApp: (resource) => void removeApp(resource),
+    forgetProvider: (machineId, provider, card) => void forgetProvider(machineId, provider, card),
     rollback: (resource, mode) => setRollback({ card: resource, mode }),
     restorePrevious: (resource) => void restorePrevious(resource),
     editAddress: (resource) =>
@@ -1427,6 +1450,11 @@ export function App() {
     logs: setLogs,
     backups: setBackupsCard,
     runJob: (machine, command) => void runJob(machine, command),
+    runProviderCommand: (machine, command, question) =>
+      void (async () => {
+        if (question !== null && !(await ask(question))) return;
+        await runJob(machine, command);
+      })(),
     removeMachine: (machine) => void removeMachine(machine),
     editCircle: (circleId) => {
       select({ cards: new Set(), circle: circleId });
@@ -1462,6 +1490,7 @@ export function App() {
     handoverCards,
     openStacks,
     folderSites,
+    providerCommands: store.snapshot.providerCommands,
   };
 
   const waitingRepos = store.snapshot?.repos.filter(awaitsAllow).length ?? 0;
@@ -1825,25 +1854,36 @@ export function App() {
             ) : null}
             {showMenu ? (
               <Menu label="Show kinds on the map" anchor={showMenu} onClose={() => setShowMenu(null)}>
-                {(Object.keys(RESOURCE_KINDS) as Array<ResourceKind>)
-                  .filter((kind) => [...state.resources.values()].some((resource) => resource.kind === kind))
-                  .map((kind) => (
-                    <MenuItem
-                      key={kind}
-                      checkbox
-                      checked={!hidden.has(kind)}
-                      keepOpen
-                      tip={`${hidden.has(kind) ? "Show" : "Hide"} ${KINDS[kind].label.toLowerCase()} on the map.`}
-                      onSelect={() => {
-                        const next = new Set(hidden);
-                        if (next.has(kind)) next.delete(kind);
-                        else next.add(kind);
-                        setHidden(next);
-                      }}
-                    >
-                      {KINDS[kind].icon} {KINDS[kind].label}
-                    </MenuItem>
-                  ))}
+                {/* K-501: each kind on the map, the built-in ones first, then the kinds of providers (K-302). */}
+                {[
+                  ...(Object.keys(RESOURCE_KINDS) as Array<ResourceKind>).flatMap((kind) => {
+                    const card = [...state.resources.values()].find((resource) => resource.kind === kind);
+                    return card ? [{ kind: kind as CardKind, info: KINDS[kind] }] : [];
+                  }),
+                  ...[
+                    ...new Map(
+                      [...state.resources.values()]
+                        .filter((resource) => resource.provider)
+                        .map((resource) => [resource.kind, kindInfo(resource)] as const),
+                    ),
+                  ].map(([kind, info]) => ({ kind, info })),
+                ].map(({ kind, info }) => (
+                  <MenuItem
+                    key={kind}
+                    checkbox
+                    checked={!hidden.has(kind)}
+                    keepOpen
+                    tip={`${hidden.has(kind) ? "Show" : "Hide"} ${info.label.toLowerCase()} on the map.`}
+                    onSelect={() => {
+                      const next = new Set(hidden);
+                      if (next.has(kind)) next.delete(kind);
+                      else next.add(kind);
+                      setHidden(next);
+                    }}
+                  >
+                    {info.icon} {info.label}
+                  </MenuItem>
+                ))}
               </Menu>
             ) : null}
             {wide ? <span class="sep" /> : null}
@@ -2666,13 +2706,14 @@ function CardPanel(props: {
           ))}
         </Menu>
       ) : null}
-      <div class="label" data-tip={KINDS[resource.kind].help}>
-        {KINDS[resource.kind].label}
+      <div class="label" data-tip={kindInfo(resource).help}>
+        {kindInfo(resource).label}
       </div>
       <h2>
         <ItemIcon resource={resource} />
         {resource.name}
       </h2>
+      {resource.provider ? <ProviderFacts card={resource.provider} /> : null}
       {address ? (
         <div class="row">
           <code>{address}</code>
@@ -3079,7 +3120,7 @@ export function TrayCard(props: {
   return (
     <div
       class={`card${props.selected ? " sel" : ""}`}
-      data-tip={`${KINDS[resource.kind].help} Drag it onto the map; it lands in exactly the circles there.`}
+      data-tip={`${kindInfo(resource).help} Drag it onto the map; it lands in exactly the circles there.`}
       draggable
       onDragStart={props.onDragStart}
       onContextMenu={(event) => {
@@ -3133,5 +3174,63 @@ export function AccessRow(props: { readonly access: AccessState }) {
         </span>
       ) : null}
     </div>
+  );
+}
+
+const STICKER_CLASSES: Record<ProviderSticker["tone"], string> = {
+  info: "info",
+  good: "ok",
+  warn: "wait",
+  bad: "",
+};
+
+/** K-1625: the stickers and facts that a provider attaches to its card; kitshn shows them without reading them. */
+function ProviderFacts(props: { card: ProviderCard }) {
+  const { card } = props;
+  return (
+    <>
+      {card.droppedAt !== undefined ? (
+        <p class="help">
+          {card.name} no longer reports this card, since {new Date(card.droppedAt).toLocaleString()}. It keeps
+          its place and shares, offline, until {card.name} reports it again or you forget it.
+        </p>
+      ) : null}
+      {card.stickers.length > 0 ? (
+        <div class="row">
+          {card.stickers.map((sticker, index) => {
+            const tip = `${card.name} reports: ${sticker.text}.${sticker.link ? " Opens its link in a new tab." : ""}`;
+            const className = `sticker ${STICKER_CLASSES[sticker.tone]}`;
+            return sticker.link ? (
+              <a
+                key={index}
+                class={className}
+                href={sticker.link}
+                target="_blank"
+                rel="noreferrer"
+                data-tip={tip}
+              >
+                {sticker.text}
+              </a>
+            ) : (
+              <span key={index} class={className} data-tip={tip}>
+                {sticker.text}
+              </span>
+            );
+          })}
+        </div>
+      ) : null}
+      {card.facts.length > 0 ? (
+        <dl class="facts">
+          {card.facts.map((fact) => (
+            <div key={fact.label} class="row">
+              <dt class="label" data-tip={`${fact.label}, as ${card.name} reports it.`}>
+                {fact.label}
+              </dt>
+              <dd>{fact.value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+    </>
   );
 }

@@ -16,17 +16,19 @@ import {
   type Level,
   OWNER_CIRCLE_ID,
   type Point,
-  RESOURCE_KINDS,
   type Resource,
   type Stack,
   type State,
   circlesHolding,
   shareKey,
   stackTitle,
+  levelName,
+  levelsOf,
 } from "../core/model.ts";
 import { circleForCards, placeInside } from "../core/place.ts";
-import type { MachineView } from "../core/protocol.ts";
-import { KINDS } from "./kinds.ts";
+import type { MachineView, Snapshot } from "../core/protocol.ts";
+import { commandsFor } from "../core/providers.ts";
+import { kindInfo } from "./kinds.ts";
 import { ROLLBACK_DATA } from "./Rollback.tsx";
 import { hasLogs } from "../core/logs.ts";
 
@@ -87,6 +89,8 @@ export interface ActionContext {
   readonly openStacks: ReadonlySet<string>;
   /** K-1129: the folder sites that a folder from the owner can give a new version. */
   readonly folderSites: ReadonlySet<string>;
+  /** K-707: the commands of the providers of each machine, by machine id. */
+  readonly providerCommands: Snapshot["providerCommands"];
 }
 
 export interface ActionHandlers {
@@ -107,6 +111,8 @@ export interface ActionHandlers {
   readonly toggleStack: (key: string) => void;
   readonly renameStack: (stackId: string) => void;
   readonly removeApp: (resource: Resource) => void;
+  /** K-704: forgets the provider of a card on its machine, or with `card` only that dropped card (K-705), with Undo. */
+  readonly forgetProvider: (machineId: string, provider: string, card: Resource | null) => void;
   /** K-821: opens the rollback of one card, or of the run that made its current deploy. */
   readonly rollback: (resource: Resource, mode: "card" | "run") => void;
   /** K-1117: swaps a page or a file with its previous version. */
@@ -120,6 +126,8 @@ export interface ActionHandlers {
   /** K-1819: opens the backups of a Compose card. */
   readonly backups: (resource: Resource) => void;
   readonly runJob: (view: MachineView, command: Command) => void;
+  /** K-707, K-1615: a provider command; `confirm` asks first. */
+  readonly runProviderCommand: (view: MachineView, command: Command, confirm: string | null) => void;
   readonly removeMachine: (view: MachineView) => void;
   readonly editCircle: (circleId: string) => void;
   readonly renameCircle: (circleId: string) => void;
@@ -426,7 +434,7 @@ function shareActions(state: State, h: ActionHandlers, resource: Resource): Arra
 
 /** K-205: a level override per circle, only for a kind with more than one level. */
 function levelActions(state: State, h: ActionHandlers, resource: Resource): Array<Action> {
-  const levels: ReadonlyArray<Level> = RESOURCE_KINDS[resource.kind];
+  const levels = levelsOf(resource);
   if (levels.length < 2) return [];
   return circlesHolding(state, resource.id).map((circle) => {
     const current = state.shareSettings.get(shareKey(resource.id, circle.id))?.level ?? null;
@@ -436,13 +444,13 @@ function levelActions(state: State, h: ActionHandlers, resource: Resource): Arra
       tip: `Give ${resource.name} its own level in ${circle.name}, or follow the circle.`,
       items: [null, ...levels].map((level) => ({
         id: `level:${circle.id}:${level ?? "default"}`,
-        label: level ?? `default (${circle.level})`,
+        label: level === null ? `default (${levelName(resource, circle.level)})` : levelName(resource, level),
         checked: level === current,
         ...(level === current ? {} : refusedBy(state, [levelEdit(state, resource, circle, level)])),
         tip:
           level === null
             ? `Default: ${resource.name} follows the level of ${circle.name}, now ${circle.level}.`
-            : `${resource.name} gets ${level} in ${circle.name}, whatever the default.`,
+            : `${resource.name} gets ${levelName(resource, level)} in ${circle.name}, whatever the default.`,
         run: () => h.setLevel(resource, circle, level),
       })),
     };
@@ -519,6 +527,24 @@ export function selectionActions(ctx: ActionContext, h: ActionHandlers): Array<A
   ];
 }
 
+/** K-707: the commands that the providers of the card's machine have for it, or for the machine card itself. */
+function providerActions(ctx: ActionContext, h: ActionHandlers, resource: Resource): Array<Action> {
+  const machineId = resource.provider ? resource.machine : resource.kind === "machine" ? resource.id : null;
+  const view = machineId === null ? undefined : ctx.machines.get(machineId);
+  if (!view) return [];
+  return commandsFor(ctx.providerCommands[view.machine.id] ?? [], resource).map(({ provider, command }) => ({
+    id: `provider:${provider}:${command.id}`,
+    label: command.confirm ? `${command.title}…` : command.title,
+    tip: `${provider} runs ${command.title} on ${view.machine.name}; an offline machine runs it when it connects (K-613).`,
+    run: () =>
+      h.runProviderCommand(
+        view,
+        { kind: "provider", provider, command: command.id, resource: resource.provider ? resource.id : null },
+        command.confirm ? `${command.title} on ${resource.name}?` : null,
+      ),
+  }));
+}
+
 export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Resource): ActionGroups {
   const { state } = ctx;
   const address = resource.addresses[0];
@@ -526,7 +552,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
   const stack = ownStack(state, resource.id);
   const stacks = [...state.stacks.values()].filter((other) => other !== stack);
   const machine = ctx.machines.get(resource.id);
-  const kind = KINDS[resource.kind].label.toLowerCase();
+  const kind = kindInfo(resource).label.toLowerCase();
   const forSelection = ctx.selected.has(resource.id) ? selectionActions(ctx, h) : [];
   return [
     ...(forSelection.length > 0 ? [forSelection] : []),
@@ -684,6 +710,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
             : []),
         ]
       : [],
+    providerActions(ctx, h, resource),
     // K-1117: an update keeps one previous version; restoring it twice gets the newer one back.
     ctx.previousVersions.has(resource.id)
       ? [
@@ -729,6 +756,30 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
                   },
                 ]
               : []),
+          ]
+        : []),
+      // K-704: only a provider that does not run can go; a running one brings its cards back at once.
+      ...(resource.provider && resource.machine !== null && resource.status === "offline"
+        ? [
+            {
+              id: "forget-provider",
+              label: `Forget provider ${resource.provider.name}`,
+              tip: `Remove every card of ${resource.provider.name} on this machine, with their shares. Undo brings them back.`,
+              danger: true as const,
+              run: () => h.forgetProvider(resource.machine!, resource.provider!.name, null),
+            },
+          ]
+        : []),
+      // K-705: a card that its provider dropped goes alone, also while the provider runs.
+      ...(resource.provider?.droppedAt !== undefined && resource.machine !== null
+        ? [
+            {
+              id: "forget-card",
+              label: "Forget this card",
+              tip: `Remove ${resource.name}, which ${resource.provider!.name} no longer reports, with its shares. Undo brings it back.`,
+              danger: true as const,
+              run: () => h.forgetProvider(resource.machine!, resource.provider!.name, resource),
+            },
           ]
         : []),
       ...(isAppCard(resource) && ctx.deployed.has(resource.id)
@@ -798,7 +849,7 @@ export function stackActions(ctx: ActionContext, h: ActionHandlers, stack: Stack
         tip: "Take one card out. It lands next to the stack, in the same circles, so no share changes.",
         items: members.map((member) => ({
           id: `pull-out:${member.id}`,
-          label: `${KINDS[member.kind].icon} ${member.name}`,
+          label: `${kindInfo(member).icon} ${member.name}`,
           tip: `Take ${member.name} out of ${stackTitle(state, stack)}.`,
           run: () => h.pullOut(stack.id, member.id),
         })),
@@ -1036,7 +1087,7 @@ export function paletteEntries(ctx: ActionContext, h: ActionHandlers): Array<Pal
       // The selection's actions come once, with the map's, not once per selected card.
       flatten(
         cardActions(ctx, h, resource).map((group) => group.filter((action) => !SELECTION_IDS.has(action.id))),
-        `${KINDS[resource.kind].icon} ${resource.name}`,
+        `${kindInfo(resource).icon} ${resource.name}`,
       ),
     ),
     ...[...state.stacks.values()].flatMap((stack) =>

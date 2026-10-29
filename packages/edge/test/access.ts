@@ -42,6 +42,8 @@ export async function send(path: string, init: RequestInit<IncomingRequestCfProp
   const request = new Request<unknown, IncomingRequestCfProperties>(`https://kit.example.com${path}`, init);
   const ctx = createExecutionContext();
   const response = await worker.fetch(request, env, ctx);
+  // Read the whole body here: an unread body keeps the request to the Durable Object open, so a later eviction waits.
+  const body = [101, 204, 205, 304].includes(response.status) ? null : await response.arrayBuffer();
   await waitOnExecutionContext(ctx);
-  return response;
+  return new Response(body, response);
 }

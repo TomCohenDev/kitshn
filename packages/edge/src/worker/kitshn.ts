@@ -32,6 +32,7 @@ import {
   refuseRaiseWhilePaused,
   refuseResume,
   removeAppChanges,
+  forgetProviderChanges,
   resolveEdits,
   restoredResource,
   revisionTargets,
@@ -226,6 +227,14 @@ import {
 } from "../core/library.ts";
 import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
+import { commandsFor, grantTables, providerCards } from "../core/providers.ts";
+import {
+  type ProviderCommand,
+  type ProviderKind,
+  type ProviderReport,
+  decodeProviderReports,
+  reportProblem,
+} from "@kitshn/local";
 import { seed } from "../core/seed.ts";
 import { type Visitor, circleMatches, visitorLevel } from "../core/visitor.ts";
 import { APPROVE_APPS } from "../core/access.ts";
@@ -391,6 +400,13 @@ type MapTail =
 
 /** The attachment of a socket; null for one that never got one, which every reader skips. */
 const attachmentOf = (socket: WebSocket) => socket.deserializeAttachment() as Attachment | null;
+
+/** K-704: what kitshn keeps of one provider's registration; its cards are rows of `resources`. */
+interface ProviderRegistration {
+  readonly name: string;
+  readonly kinds: ReadonlyArray<ProviderKind>;
+  readonly commands: ReadonlyArray<ProviderCommand>;
+}
 
 /** K-1704 */
 const CHALLENGE_MS = 10_000;
@@ -719,6 +735,10 @@ export class Kitshn extends DurableObject<Env> {
   }
   /** K-1104: live sites of the machines. */
   private liveSites = new Map<string, LiveSite>();
+  /** K-704: the kinds and commands of each machine's providers, by machine id. */
+  private providerRegs = new Map<string, Array<ProviderRegistration>>();
+  /** K-706: the grant tables that each signed connection got last, by `<machine id>/<provider>`, as JSON. */
+  private sentGrants = new Map<string, string>();
   /** K-1117: the library items that an update, a restore or a delete changes now. */
   private busyItems = new Set<string>();
   /**
@@ -844,6 +864,14 @@ export class Kitshn extends DurableObject<Env> {
         },
       ]),
     );
+    this.providerRegs = new Map();
+    for (const row of this.sql<{ machine_id: string; body: string }>(
+      "SELECT machine_id, body FROM providers ORDER BY machine_id, name",
+    ))
+      (
+        this.providerRegs.get(row.machine_id) ??
+        this.providerRegs.set(row.machine_id, []).get(row.machine_id)!
+      ).push(JSON.parse(row.body) as ProviderRegistration);
     this.presence = new Map(
       this.sql<{ id: string; online: number; last_seen: number; os: string | null }>(
         "SELECT id, online, last_seen, os FROM presence",
@@ -1014,6 +1042,11 @@ export class Kitshn extends DurableObject<Env> {
       }
       if (change._tag === "app") {
         if (change.after) this.putResource(restoredResource(change.after));
+        else this.sql("DELETE FROM resources WHERE id = ?", change.id);
+        continue;
+      }
+      if (change._tag === "providerCard") {
+        if (change.after) this.putResource({ ...change.after, status: "offline" });
         else this.sql("DELETE FROM resources WHERE id = ?", change.id);
         continue;
       }
@@ -3010,7 +3043,12 @@ export class Kitshn extends DurableObject<Env> {
     const loginError = this.meta("login_error");
     return {
       circles: [...this.state.circles.values()],
-      resources: [...this.state.resources.values()],
+      // K-304: a provider card of an offline machine is offline, whatever its provider reported last.
+      resources: [...this.state.resources.values()].map((card) =>
+        card.provider && card.machine !== null && this.presence.get(card.machine)?.online !== true
+          ? { ...card, status: "offline" as const }
+          : card,
+      ),
       places: Object.fromEntries(this.state.places) as Record<string, Point>,
       shareSettings: Object.fromEntries(this.state.shareSettings) as Record<string, ShareSetting>,
       stacks: [...this.state.stacks.values()],
@@ -3066,6 +3104,12 @@ export class Kitshn extends DurableObject<Env> {
       }, {}),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
+      providerCommands: Object.fromEntries(
+        [...this.providerRegs].map(([machineId, regs]) => [
+          machineId,
+          regs.map(({ name, commands }) => ({ name, commands })),
+        ]),
+      ),
       proposals: this.openProposals(),
       askEvents: this.recentAskEvents(),
       githubDefaultWay: this.meta("github_default_way") === "app" ? "app" : "not-kitshn",
@@ -3138,6 +3182,150 @@ export class Kitshn extends DurableObject<Env> {
       }
       send(socket, { type: "snapshot", snapshot: this.snapshot(caller, repos) });
     }
+    this.pushGrants();
+  }
+
+  /** K-706: sends each provider of each signed connection its grant tables when they changed since the last send. */
+  private pushGrants(now = Date.now()) {
+    for (const [machineId, regs] of this.providerRegs) {
+      const socket = this.ctx.getWebSockets(machineId).find((item) => {
+        const attachment = attachmentOf(item);
+        return attachment?.kind === "machine" && attachment.check === "signed";
+      });
+      if (!socket) continue;
+      for (const { name } of regs) {
+        const tables = grantTables(this.state, machineId, name, now);
+        const key = `${machineId}/${name}`;
+        const text = JSON.stringify(tables);
+        if (this.sentGrants.get(key) === text) continue;
+        this.sentGrants.set(key, text);
+        send(socket, { type: "grants", provider: name, tables } satisfies ServerToDaemon);
+      }
+    }
+  }
+
+  /**
+   * K-704, K-705: the providers of one machine, as its daemon reports them. Cards of a named provider that its report
+   * no longer has go, with their shares, as one History revision; the cards of a provider that the report does not
+   * name stay, offline. An address that another card or another machine's site holds stays off the card.
+   */
+  private updateProviders(machine: Machine, value: unknown) {
+    let reports: ReadonlyArray<ProviderReport>;
+    try {
+      reports = decodeProviderReports(value);
+    } catch (error) {
+      console.warn(`kitshn refused the providers of ${machine.name}: ${String(error)}`);
+      return;
+    }
+    // K-704: a forgotten provider that the daemon still reports offline stays forgotten; one that runs is back.
+    const forgotten = new Set(
+      this.sql<{ name: string }>("SELECT name FROM forgotten_providers WHERE machine_id = ?", machine.id).map(
+        (row) => row.name,
+      ),
+    );
+    for (const name of forgotten)
+      if (!reports.some((report) => report.name === name && !report.online))
+        this.sql("DELETE FROM forgotten_providers WHERE machine_id = ? AND name = ?", machine.id, name);
+    reports = reports.filter((report) => !(forgotten.has(report.name) && !report.online));
+    const valid = reports.filter((report) => {
+      const problem = reportProblem(
+        report,
+        reports.filter((other) => other.name !== report.name),
+        new Set(),
+        RESERVED_SITE_NAMES,
+      );
+      if (problem) console.warn(`kitshn refused the provider ${report.name} of ${machine.name}: ${problem}`);
+      return problem === null;
+    });
+    const named = new Set(valid.map((report) => report.name));
+    const wanted = providerCards(machine, valid, this.env.KITSHN_ZONE);
+    for (const [id, card] of wanted) {
+      const refusals = card.addresses.flatMap((address) => {
+        const label = address.slice(0, -`.${this.env.KITSHN_ZONE}`.length);
+        const refusal =
+          RESERVED_SITE_NAMES.has(label) || address === this.env.KITSHN_HOST
+            ? `${address} is a name of kitshn itself.`
+            : (this.addressTaken(address, id) ??
+              ([...this.liveSites.values()].some((site) => site.id !== id && site.address === address)
+                ? `${address} is a live site of another card.`
+                : null));
+        return refusal ? [{ address, refusal }] : [];
+      });
+      if (refusals.length === 0) continue;
+      for (const { refusal } of refusals)
+        console.warn(`kitshn kept an address off the card ${card.name}: ${refusal}`);
+      const off = new Set(refusals.map((item) => item.address));
+      wanted.set(id, { ...card, addresses: card.addresses.filter((address) => !off.has(address)) });
+    }
+    const existing = [...this.state.resources.values()].filter(
+      (card) => card.machine === machine.id && card.provider !== undefined,
+    );
+    // K-705: a card that a report drops stays, offline with its place and shares and no grants, until its provider
+    // reports it again or the owner forgets it. kitshn never forgets a share by itself.
+    const now = Date.now();
+    const dropped = existing.filter((card) => named.has(card.provider!.name) && !wanted.has(card.id));
+    const changed = [
+      ...[...wanted.values()].filter((card) => !deepEqual(this.state.resources.get(card.id), card)),
+      ...dropped
+        .filter((card) => card.provider!.droppedAt === undefined)
+        .map((card): Resource => ({
+          ...card,
+          status: "offline",
+          provider: { ...card.provider!, droppedAt: now },
+        })),
+      ...existing
+        .filter((card) => !named.has(card.provider!.name) && card.status !== "offline")
+        .map((card): Resource => ({ ...card, status: "offline" })),
+    ];
+    // K-713: a provider that changes the levels of a kind changes what existing shares give, so History says so.
+    const levelChanges = valid.flatMap((report) => {
+      const old = this.providerRegs.get(machine.id)?.find((reg) => reg.name === report.name);
+      return report.kinds.flatMap((kind) => {
+        const before = old?.kinds.find((item) => item.id === kind.id)?.levels;
+        return before && !deepEqual(before, kind.levels)
+          ? [`${kind.id}: ${Object.values(before).join(", ")} → ${Object.values(kind.levels).join(", ")}`]
+          : [];
+      });
+    });
+    const added = changed.filter((card) => !this.state.resources.has(card.id));
+    const kept = (this.providerRegs.get(machine.id) ?? []).filter((reg) => !named.has(reg.name));
+    const regs = [...kept, ...valid.map(({ name, kinds, commands }) => ({ name, kinds, commands }))];
+    const regsChanged = !deepEqual(
+      [...(this.providerRegs.get(machine.id) ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
+      [...regs].sort((a, b) => a.name.localeCompare(b.name)),
+    );
+    if (changed.length === 0 && !regsChanged) return;
+    this.ctx.storage.transactionSync(() => {
+      for (const card of changed) this.putResource(card);
+      if (regsChanged) {
+        this.sql("DELETE FROM providers WHERE machine_id = ?", machine.id);
+        for (const reg of regs)
+          this.sql(
+            "INSERT INTO providers (machine_id, name, body) VALUES (?, ?, ?)",
+            machine.id,
+            reg.name,
+            JSON.stringify(reg),
+          );
+      }
+      if (levelChanges.length > 0)
+        this.insertRevision(
+          { _tag: "kitshn", reason: `providers on ${machine.name}` },
+          `The providers of ${machine.name} changed levels (K-713): ${levelChanges.join("; ")}`.slice(0, 500),
+          [],
+          null,
+        );
+      // K-1502: new cards are History; a status, a fact or a sticker that changes is not.
+      if (added.length > 0)
+        this.insertRevision(
+          { _tag: "kitshn", reason: `providers on ${machine.name}` },
+          `The providers of ${machine.name} added ${added.map((card) => card.name).join(", ")}`.slice(0, 500),
+          [],
+          null,
+        );
+    });
+    this.load();
+    this.broadcast();
+    void this.scheduleAlarm();
   }
 
   /** `via`: an HTTP request without a source is the API (K-1509); the map always names its source. */
@@ -3252,6 +3440,17 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/api/sign-out/retry" && request.method === "POST") return this.retrySignOut(caller);
     if (path === "/api/machines" && request.method === "POST")
       return this.addMachine(caller, await request.json().catch(() => null), new URL(request.url).origin);
+    if (path.startsWith("/api/machines/") && path.includes("/providers/") && path.endsWith("/forget")) {
+      const [machineId = "", name = ""] = path
+        .slice("/api/machines/".length, -"/forget".length)
+        .split("/providers/")
+        .map(decodeURIComponent);
+      if (request.method === "POST") {
+        const body: unknown = await request.json().catch(() => null);
+        const card = isRecord(body) && typeof body["card"] === "string" ? body["card"] : null;
+        return this.forgetProvider(caller, machineId, name, card);
+      }
+    }
     if (path.startsWith("/api/machines/") && path.endsWith("/rotate-key") && request.method === "POST")
       return this.rotateFromPanel(
         caller,
@@ -3716,6 +3915,11 @@ export class Kitshn extends DurableObject<Env> {
       this.keyFailures.delete(machine.id);
       if (machine.key?.kind !== "public") throw new Error(`${machine.name} signed without a key.`);
       send(socket, { type: "accepted", fingerprint: machine.key.fingerprint } satisfies ServerToDaemon);
+      // K-706: a new connection gets every grant table again, from the registrations that kitshn keeps.
+      for (const key of this.sentGrants.keys())
+        if (key.startsWith(`${machine.id}/`)) this.sentGrants.delete(key);
+      this.pushGrants();
+      this.sendForgotten(machine.id);
     }
     if (this.presence.get(machine.id)?.online) this.sendMachine(machine);
     else this.setPresence(machine.id, true);
@@ -3907,6 +4111,8 @@ export class Kitshn extends DurableObject<Env> {
       this.checkLiveness(Date.now());
     } else if (message.type === "sites") {
       this.updateLiveSites(machine, message.sites);
+    } else if (message.type === "providers") {
+      this.updateProviders(machine, message.providers);
     } else if (message.type === "icon") {
       await this.liveIcon(machine, message.site, message.icon);
     } else if (message.type === "volumes" && Array.isArray(message.volumes)) {
@@ -4292,6 +4498,11 @@ export class Kitshn extends DurableObject<Env> {
         this.sql("DELETE FROM live_sites WHERE id = ?", site.id);
         forgotten.push(this.forgetCard(site.id));
       }
+      // K-615, K-704: the providers of the machine and their cards go with it.
+      this.sql("DELETE FROM providers WHERE machine_id = ?", id);
+      for (const card of this.state.resources.values())
+        if (card.machine === id && card.provider && !this.sitesOf(id).some((site) => site.id === card.id))
+          forgotten.push(this.forgetCard(card.id));
       const key = machine.key?.kind === "public" ? ` and its key ${machine.key.fingerprint}` : "";
       this.insertRevision(caller.actor, `Removed machine ${machine.name}${key}`, forgotten, null);
     });
@@ -4311,6 +4522,94 @@ export class Kitshn extends DurableObject<Env> {
     return this.hasAdmin(visitor)
       ? this.canControl(visitor, machineId)
       : agentMayRunOn(this.state, visitor, machineId, Date.now());
+  }
+
+  /**
+   * K-707: the command for the daemon, with the provider's own id of the card, or why kitshn refuses it. The card is
+   * a card of that provider on the machine; with none, the command is one of the machine card.
+   */
+  private providerCommand(
+    machine: Machine | null,
+    parsed: Extract<Command, { kind: "provider" }>,
+  ): Extract<Command, { kind: "provider" }> | string {
+    if (!machine) return "A provider command runs on one machine.";
+    const card =
+      parsed.resource === null
+        ? this.state.resources.get(machine.id)
+        : this.state.resources.get(parsed.resource);
+    if (!card || (card.provider ? card.machine !== machine.id : card.id !== machine.id))
+      return `${parsed.resource ?? machine.id} is not a card of ${machine.name}.`;
+    const fits = commandsFor(this.providerRegs.get(machine.id) ?? [], card).some(
+      (item) => item.provider === parsed.provider && item.command.id === parsed.command,
+    );
+    if (!fits)
+      return `The provider ${parsed.provider} of ${machine.name} has no command ${parsed.command} for ${card.name}.`;
+    return { ...parsed, resource: card.provider?.localId ?? null };
+  }
+
+  /**
+   * K-704: "Forget provider" removes the cards of a provider that does not run, with their shares, as one revision
+   * with Undo, and its registration. A running provider would bring its cards back at once, so kitshn refuses it.
+   */
+  private forgetProvider(caller: Caller, machineId: string, name: string, card: string | null) {
+    const machine = this.state.machines.get(machineId);
+    if (!machine) return Response.json({ error: `No machine "${machineId}" exists.` }, { status: 404 });
+    if (!this.canControl(caller.visitor, machineId))
+      return Response.json({ error: "Forgetting a provider needs control on its machine." }, { status: 403 });
+    // The status that the daemon last reported: an offline machine whose daemon still has the provider brings it back.
+    const running = [...this.state.resources.values()].some(
+      (card) => card.machine === machineId && card.provider?.name === name && card.status !== "offline",
+    );
+    // K-705: one card that its provider dropped can go while the provider runs.
+    const dropped = card !== null && this.state.resources.get(card)?.provider?.droppedAt !== undefined;
+    if (card !== null && !dropped)
+      return Response.json({ error: "Only a card that its provider dropped can go alone." }, { status: 409 });
+    if (running && !dropped)
+      return Response.json(
+        {
+          error: `${name} runs on ${machine.name}. Stop it, or run kitshn provider forget ${name} on the machine, then forget it here.`,
+        },
+        { status: 409 },
+      );
+    try {
+      const revision = this.commit(
+        caller.actor,
+        forgetProviderChanges(this.state, machineId, name, card),
+        null,
+      );
+      // Undo brings the cards back offline; the provider's next report brings its commands back.
+      if (card === null) {
+        this.sql("DELETE FROM providers WHERE machine_id = ? AND name = ?", machineId, name);
+        // The daemon keeps the provider in providers.json; it hears of the forget now, or on its next connection.
+        this.sql(
+          "INSERT OR REPLACE INTO forgotten_providers (machine_id, name) VALUES (?, ?)",
+          machineId,
+          name,
+        );
+        this.sendForgotten(machineId);
+      }
+      this.load();
+      this.broadcast();
+      void this.scheduleAlarm();
+      return Response.json({ revision });
+    } catch (error) {
+      if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
+      throw error;
+    }
+  }
+
+  /** K-704: tells a signed connection of the machine about each provider that the owner forgot. */
+  private sendForgotten(machineId: string) {
+    const socket = this.ctx.getWebSockets(machineId).find((item) => {
+      const attachment = attachmentOf(item);
+      return attachment?.kind === "machine" && attachment.check === "signed";
+    });
+    if (!socket) return;
+    for (const { name } of this.sql<{ name: string }>(
+      "SELECT name FROM forgotten_providers WHERE machine_id = ?",
+      machineId,
+    ))
+      send(socket, { type: "forgetProvider", provider: name } satisfies ServerToDaemon);
   }
 
   /** K-614: the sender of a command needs control on the machine card itself, not only on the admin. */
@@ -4354,12 +4653,16 @@ export class Kitshn extends DurableObject<Env> {
         { error: `${parsed.volume} is not an orphaned volume of this machine (K-909).` },
         { status: 409 },
       );
+    // K-707: a provider command names a command that a provider of this machine has for that card.
+    const providerCommand = parsed.kind === "provider" ? this.providerCommand(target ?? null, parsed) : null;
+    if (typeof providerCommand === "string")
+      return Response.json({ error: providerCommand }, { status: 409 });
     const command: Command =
       parsed.kind === "update"
         ? { kind: "update", version: this.env.KITSHN_VERSION }
         : parsed.kind === "compose-volume-remove" && orphan
           ? { ...parsed, project: orphan.project }
-          : parsed;
+          : (providerCommand ?? parsed);
     if (machineId !== null && !this.canControl(caller.visitor, machineId)) {
       return Response.json(
         {
@@ -4717,9 +5020,10 @@ export class Kitshn extends DurableObject<Env> {
       for (const report of sites) {
         const address = `${report.name}.${this.env.KITSHN_ZONE}`;
         // K-812: the socket of a Compose app on this machine is the address of its card.
+        // K-705: so is the site of a provider card on this machine.
         const app = [...this.state.resources.values()].find(
           (resource) =>
-            resource.kind === "site.compose" &&
+            (resource.kind === "site.compose" || resource.provider !== undefined) &&
             resource.machine === machine.id &&
             resource.addresses.includes(address),
         );
@@ -4759,12 +5063,16 @@ export class Kitshn extends DurableObject<Env> {
           old?.state ?? "checking",
         );
         const resource = this.state.resources.get(id);
-        if (resource) this.putResource({ ...resource, status: report.up ? "running" : "stopped" });
+        // K-705: a provider reports the status of its own cards.
+        if (resource && !resource.provider)
+          this.putResource({ ...resource, status: report.up ? "running" : "stopped" });
       }
       for (const site of this.sitesOf(machine.id)) {
         if (keep.has(site.id)) continue;
         changed = true;
         this.sql("DELETE FROM live_sites WHERE id = ?", site.id);
+        // K-705: a provider card stays when its site goes; the provider removes the card itself.
+        if (this.state.resources.get(site.id)?.provider) continue;
         // A removed app has its History entry already (K-909).
         const hadCard = this.state.resources.has(site.id);
         const forgotten = this.forgetCard(site.id);
@@ -4832,7 +5140,10 @@ export class Kitshn extends DurableObject<Env> {
         const card = this.state.resources.get(site.id);
         this.putResource(
           card
-            ? { ...card, status: site.up ? "running" : "stopped" }
+            ? // K-705: a provider reports the status of its own cards.
+              card.provider
+              ? card
+              : { ...card, status: site.up ? "running" : "stopped" }
             : {
                 id: site.id,
                 kind: "site.live",
@@ -5856,6 +6167,27 @@ export class Kitshn extends DurableObject<Env> {
    * K-817, K-1404, K-408: why a card may not take these addresses, or null. With `onCloudflare`, it also refuses a
    * hostname that another Worker, a foreign Access application or a DNS record that kitshn did not make holds.
    */
+  /**
+   * Why another card holds `address`, or null: it is another card's address, a folder site plan holds it (K-1123), or
+   * it sends visitors on to another card (K-1124). Deploys and provider cards (K-705) check the same rules.
+   */
+  private addressTaken(address: string, resourceId: string): string | null {
+    const other = [...this.state.resources.values()].find(
+      (resource) => resource.id !== resourceId && resource.addresses.includes(address),
+    );
+    if (other) return `${address} belongs to the card ${other.name}.`;
+    // K-1123: a folder site plan holds its address until its files arrive or the plan expires.
+    if (
+      this.heldSiteAddresses(Date.now()).some((row) => row.address === address && row.card_id !== resourceId)
+    )
+      return `${address} is held by a folder site that is being published (K-1123).`;
+    // K-1124: an old address of another card sends its visitors on to that card until it goes free (K-1122).
+    const sends = this.oldAddresses().find((item) => item.address === address && item.cardId !== resourceId);
+    const sendsFor = sends ? this.state.resources.get(sends.cardId) : undefined;
+    if (sendsFor) return `${address} sends visitors on to the card ${sendsFor.name} (K-1124).`;
+    return null;
+  }
+
   private async addressRefusal(
     api: Api,
     addresses: ReadonlyArray<string>,
@@ -5866,31 +6198,8 @@ export class Kitshn extends DurableObject<Env> {
   ): Promise<Response | null> {
     const zones = zonesOf(this.env);
     for (const address of addresses) {
-      const other = [...this.state.resources.values()].find(
-        (resource) => resource.id !== resourceId && resource.addresses.includes(address),
-      );
-      if (other)
-        return Response.json({ error: `${address} belongs to the card ${other.name}.` }, { status: 409 });
-      // K-1123: a folder site plan holds its address until its files arrive or the plan expires.
-      if (
-        this.heldSiteAddresses(Date.now()).some(
-          (row) => row.address === address && row.card_id !== resourceId,
-        )
-      )
-        return Response.json(
-          { error: `${address} is held by a folder site that is being published (K-1123).` },
-          { status: 409 },
-        );
-      // K-1124: an old address of another card sends its visitors on to that card until it goes free (K-1122).
-      const sends = this.oldAddresses().find(
-        (item) => item.address === address && item.cardId !== resourceId,
-      );
-      const sendsFor = sends ? this.state.resources.get(sends.cardId) : undefined;
-      if (sendsFor)
-        return Response.json(
-          { error: `${address} sends visitors on to the card ${sendsFor.name} (K-1124).` },
-          { status: 409 },
-        );
+      const refusal = this.addressTaken(address, resourceId);
+      if (refusal) return Response.json({ error: refusal }, { status: 409 });
     }
     if (!onCloudflare) return null;
     // Never take over a hostname that another Worker serves, or that a foreign Access app covers (K-408).

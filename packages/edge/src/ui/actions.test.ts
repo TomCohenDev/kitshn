@@ -119,6 +119,7 @@ function context(version = "0123456789ab"): ActionContext {
     handoverCards: new Set(),
     openStacks: new Set(),
     folderSites: new Set(),
+    providerCommands: {},
   };
 }
 

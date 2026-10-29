@@ -89,6 +89,16 @@ export type Change =
       readonly before: AppCard | null;
       readonly after: AppCard | null;
     }
+  /**
+   * K-704: a provider card goes ("Forget provider") or comes back (its undo). Its status is live data, so History
+   * leaves it out; a card that comes back is offline until its provider reports it.
+   */
+  | {
+      readonly _tag: "providerCard";
+      readonly id: string;
+      readonly before: Omit<Resource, "status"> | null;
+      readonly after: Omit<Resource, "status"> | null;
+    }
   /** K-1120: the main address of a page or a file card, `pages.<zone>/<name>` or `files.<zone>/<name>/<file>`. */
   | {
       readonly _tag: "address";
@@ -154,7 +164,8 @@ const current = (state: State, change: Pick<Change, "_tag" | "id">) => {
       return state.paused;
     case "stack":
       return state.stacks.get(change.id) ?? null;
-    case "app": {
+    case "app":
+    case "providerCard": {
       const resource = state.resources.get(change.id);
       return resource ? withoutStatus(resource) : null;
     }
@@ -235,6 +246,46 @@ export function withStackMates(state: State, changes: ReadonlyArray<Change>): Ar
     }
   }
   return [...changes, ...mates];
+}
+
+/**
+ * K-704: the changes that forget one provider of a machine: each card, its place, its share settings and its place
+ * in a stack. Undo brings the cards back in the same places and circles.
+ */
+export function forgetProviderChanges(
+  state: State,
+  machineId: string,
+  provider: string,
+  /** One card only, a card that its provider dropped (K-705); null for every card of the provider. */
+  only: string | null = null,
+): Array<Change> {
+  const cards = [...state.resources.values()].filter(
+    (resource) =>
+      resource.machine === machineId &&
+      resource.provider?.name === provider &&
+      (only === null || resource.id === only),
+  );
+  if (cards.length === 0) throw new RuleError(`The machine has no such card of the provider ${provider}.`);
+  const edits: Array<Edit> = cards.flatMap((card) => [
+    ...(state.places.has(card.id) ? [{ _tag: "place", id: card.id, after: null } as const] : []),
+    ...[...state.shareSettings.keys()]
+      .filter((key) => key.startsWith(`${card.id}/`))
+      .map((key): Edit => ({
+        _tag: "shareSetting",
+        resourceId: card.id,
+        circleId: key.slice(card.id.length + 1),
+        after: null,
+      })),
+  ]);
+  return [
+    ...resolveEdits(state, edits),
+    ...cards.map((card): Change => ({
+      _tag: "providerCard",
+      id: card.id,
+      before: withoutStatus(card),
+      after: null,
+    })),
+  ];
 }
 
 /**
@@ -378,6 +429,7 @@ export function revisionTargets(changes: ReadonlyArray<RevisionTarget>): {
     else if (
       change._tag === "place" ||
       change._tag === "app" ||
+      change._tag === "providerCard" ||
       change._tag === "address" ||
       change._tag === "forget"
     )
@@ -404,6 +456,7 @@ export function touches(change: Change, item: Item): boolean {
   switch (change._tag) {
     case "place":
     case "app":
+    case "providerCard":
     case "address":
       return change.id === item.id;
     case "shareSetting":
@@ -459,6 +512,7 @@ function footprint(changes: ReadonlyArray<Change | Forget>, state: State, pool: 
     if (
       change._tag === "place" ||
       change._tag === "app" ||
+      change._tag === "providerCard" ||
       change._tag === "address" ||
       change._tag === "forget"
     )
@@ -591,7 +645,9 @@ export function undoTarget(
     );
   // A card that is gone gets nothing back, also when a later card has its id; an app removal restores its card.
   const restored = new Set(
-    changes.flatMap((change) => (change._tag === "app" && change.before ? [change.id] : [])),
+    changes.flatMap((change) =>
+      (change._tag === "app" || change._tag === "providerCard") && change.before ? [change.id] : [],
+    ),
   );
   const missing = changes
     .flatMap((change) =>
@@ -629,6 +685,8 @@ export function applyChanges(state: State, changes: ReadonlyArray<Change>): Stat
     else if (change._tag === "shareSetting") put(shareSettings, change.id, change.after);
     else if (change._tag === "stack") put(stacks, change.id, change.after);
     else if (change._tag === "app") put(resources, change.id, change.after && restoredResource(change.after));
+    else if (change._tag === "providerCard")
+      put(resources, change.id, change.after && { ...change.after, status: "offline" });
     else if (change._tag === "address") {
       const resource = resources.get(change.id);
       if (!resource) throw new RuleError(`No card "${change.id}" exists.`);
@@ -734,6 +792,14 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
   const app = changes.find((change) => change._tag === "app");
   if (app?.after) return `Restored the app ${app.after.name} (K-909)`;
   if (app?.before) return `Removed the app ${app.before.name} (K-909)`;
+  const cards = changes.flatMap((change) => (change._tag === "providerCard" ? [change] : []));
+  const card = cards[0];
+  if (card) {
+    const provider = (card.before ?? card.after)?.provider?.name ?? "a provider";
+    return card.before
+      ? `Forgot ${cards.length} ${cards.length === 1 ? "card" : "cards"} of the provider ${provider} (K-704)`
+      : `Brought back ${cards.length} ${cards.length === 1 ? "card" : "cards"} of the provider ${provider} (K-704)`;
+  }
   const address = changes.find((change) => change._tag === "address");
   if (address)
     return `Moved ${after.resources.get(address.id)?.name ?? address.id} to ${address.after} (K-1120)`;

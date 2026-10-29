@@ -47,7 +47,14 @@ import {
 } from "./attest.ts";
 import { credentialReply, readCredentialInput, repoOfCredential, repoOfRemote } from "./gitCredential.ts";
 import { composeLogs, followLogs, rangeArgs, searchLogs, withLogLimits } from "./logs.ts";
-import { type Caller, type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from "./local.ts";
+import {
+  type Caller,
+  type LocalOutcome,
+  askLocal,
+  bridgeLocal,
+  listenLocal,
+  sharedFolderProblem,
+} from "./local.ts";
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
 import { localUsersOf, peerDecision } from "./peer.ts";
 import { movedVolume, takeoverPlan } from "./kitshn1.ts";
@@ -109,6 +116,7 @@ import { type SiteEntry, addSite, parseSiteFile, probe, targetOf } from "./sites
 import { RUNNING_FORMAT, VOLUME_FORMAT, idleVolumes, volumeRemoveRefusal } from "./volumes.ts";
 import { keepBuild, keptId, keptTag, rollbackOverride, serviceImages, staleTags } from "./keep.ts";
 import { TokenCache } from "./tokens.ts";
+import { Providers, parseSaved } from "./providers.ts";
 import { listenerUid, portOf } from "./listener.ts";
 import { MAX_FORWARDS, forwardTarget, passedHeaders, readBounded } from "./forward.ts";
 import { AGENT_USAGE, type AgentTransport, runAgentCommand } from "kitshn/agent";
@@ -301,6 +309,32 @@ function notRunning(): string {
       return `${folder} belongs to another user or is not safe (${problem}), so the daemon cannot listen there. Ask root to remove it, then restart the daemon.`;
   }
   return `the daemon is not running (no daemon listens on ${socketPath}). Start it with: kitshn service install`;
+}
+
+/**
+ * K-704: `kitshn provider`: stdin and stdout become one connection to the daemon, for a provider such as T3 Code.
+ * `kitshn provider forget <name>` drops a provider that does not run.
+ */
+async function providerCommand(argv: ReadonlyArray<string>) {
+  if (argv[0] === "forget") {
+    const name = argv[1];
+    if (!name) fail("usage: kitshn provider forget <name>");
+    const answer = await ask({ id: "1", type: "provider-forget", provider: name! });
+    if (answer === null) fail(notRunning());
+    console.log(
+      `Forgot the provider ${name}. Its cards stay on the map, offline, until you use "Forget provider" there.`,
+    );
+    return;
+  }
+  if (argv.length > 0) fail("usage: kitshn provider [forget <name>]");
+  if (typeof daemonUid === "string") fail(daemonUid);
+  const outcome = await bridgeLocal(
+    socketPath,
+    { platform, daemonUid: daemonUid as number },
+    process.stdin,
+    (bytes) => process.stdout.write(bytes),
+  ).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+  if (outcome !== "closed") fail(notRunning());
 }
 
 /** K-702: one request to the running daemon; null when it does not run. An error answer ends the command. */
@@ -1484,6 +1518,7 @@ function oneAtATime(project: string, work: () => Promise<JobOutcome>): Promise<J
 }
 
 function runJob(
+  jobId: number,
   command: Command,
   notify?: { readonly url: string; readonly token: string },
 ): Promise<JobOutcome> {
@@ -1508,6 +1543,7 @@ function runJob(
     return Promise.resolve({ ok: true, exitCode: 0, output: text });
   }
   if (command.kind === "update") return updateDaemon(command.version);
+  if (command.kind === "provider") return runProviderCommand(command, jobId);
   if (command.kind === "backup" || command.kind === "backup-restore") {
     if (!joined)
       return Promise.resolve({ ok: false, exitCode: null, output: "The daemon has no machine token." });
@@ -1557,6 +1593,7 @@ function report() {
         "logs",
         "backup",
         "backup-restore",
+        "provider",
       ],
       ...(keptBytes === undefined ? {} : { keptBytes }),
       version: VERSION,
@@ -1984,6 +2021,7 @@ function connect(config: JoinSecrets) {
       stopped = false;
       flushResults();
       report();
+      sendProviders();
       lastSites = "";
       iconMemory = new Map();
       void checkSites().catch((error: unknown) => log(`site check failed: ${String(error)}`));
@@ -2012,6 +2050,20 @@ function connect(config: JoinSecrets) {
         accepted(`with the key ${message.fingerprint}`);
       } else if (message.type === "rotateKey") {
         void rotateKey(ws);
+      } else if (message.type === "grants") {
+        // K-706: the provider gets each change at once, and the saved copy after a restart (K-1608).
+        if (registry().setGrants(message.provider, message.tables)) {
+          const connection = registry().connectionOf(message.provider);
+          const emit = connection === null ? undefined : providerEmitters.get(connection);
+          emit?.({ type: "grants", provider: message.provider, tables: message.tables });
+        }
+      } else if (message.type === "forgetProvider") {
+        // K-704: a provider that a connection holds runs, so the forget does not apply to it.
+        if (
+          registry().connectionOf(message.provider) === null &&
+          registry().forget(message.provider) === null
+        )
+          sendProviders();
       } else if (message.type === "dropTokens") {
         keptTokens.drop(message.repo);
       } else if (message.type === "logs") {
@@ -2054,7 +2106,7 @@ function connect(config: JoinSecrets) {
       } else if (message.type === "job") {
         log(`job ${message.id}: ${message.command.kind}`);
         // A job that throws (for example a file it cannot delete) still sends a result, and never ends the daemon.
-        void runJob(message.command, message.notify)
+        void runJob(message.id, message.command, message.notify)
           .catch((error: unknown): JobOutcome => ({
             ok: false,
             exitCode: null,
@@ -2170,7 +2222,13 @@ async function checkSites() {
     log(`${sitesFile()} is broken; kitshn keeps the last report until it is fixed.`);
     return;
   }
-  const reports = await Promise.all(sites.map(async (site) => ({ ...site, up: await probe(site.target) })));
+  // K-705: the live sites of provider cards come after the hand-made ones; a hand-made site of the same name yields.
+  const providerSites = registry().sites();
+  const held = new Set(providerSites.map((site) => site.name));
+  for (const site of sites)
+    if (held.has(site.name)) log(`sites.json: ${site.name} belongs to a provider card; it is not exposed.`);
+  const all = [...sites.filter((site) => !held.has(site.name)), ...providerSites];
+  const reports = await Promise.all(all.map(async (site) => ({ ...site, up: await probe(site.target) })));
   const text = JSON.stringify({ type: "sites", sites: reports } satisfies DaemonMessage);
   if (socket?.readyState !== WebSocket.OPEN) return;
   if (text !== lastSites) {
@@ -2261,6 +2319,7 @@ async function runCommand() {
     decide: (peer: number) => peerDecision(peer, own, localUsersOf(readMachineFile())),
     handle: answerLocal,
     log,
+    closed: providerClosed,
   };
   const local = await listenLocal(paths.socket, { ...socketOptions, access: "private" });
   process.on("exit", local.stop);
@@ -2302,6 +2361,123 @@ function readMachineFile(): unknown {
   }
 }
 
+/** K-704: the providers of this machine, saved in `providers.json`. */
+const providersFile = () => join(paths.data, "providers.json");
+let providerRegistry: Providers | null = null;
+/** Read on first use, so only the daemon reads `providers.json`, not each command. */
+const registry = (): Providers => (providerRegistry ??= loadProviders());
+function loadProviders(): Providers {
+  let value: unknown = null;
+  try {
+    value = existsSync(providersFile()) ? JSON.parse(readFileSync(providersFile(), "utf8")) : null;
+  } catch (error) {
+    value = { broken: String(error) };
+  }
+  const { saved, problem } = parseSaved(value);
+  if (problem) log(`${providersFile()} is broken, so the daemon starts with no providers: ${problem}`);
+  return new Providers(saved, (next) => {
+    mkdirSync(paths.data, { recursive: true });
+    const temporary = `${providersFile()}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+    renameSync(temporary, providersFile());
+  });
+}
+/** K-703: the event channel of each local connection that registered a provider. */
+const providerEmitters = new Map<number, (event: Answer) => void>();
+/** K-707: the provider commands that wait for their `command-result`, by job id. */
+const commandWaiters = new Map<
+  number,
+  { readonly provider: string; readonly settle: (outcome: JobOutcome) => void }
+>();
+const COMMAND_TIMEOUT_MS = 5 * 60_000;
+
+let providersTimer: ReturnType<typeof setTimeout> | null = null;
+/** K-704: the whole list goes to kitshn on connect and after a change, at most once a second. */
+function sendProviders() {
+  if (providersTimer) return;
+  providersTimer = setTimeout(() => {
+    providersTimer = null;
+    if (socket?.readyState === WebSocket.OPEN)
+      socket.send(
+        JSON.stringify({ type: "providers", providers: registry().reports() } satisfies DaemonMessage),
+      );
+  }, 1000);
+}
+
+function providerClosed(connection: number) {
+  providerEmitters.delete(connection);
+  const names = registry()
+    .reports()
+    .filter((report) => registry().connectionOf(report.name) === connection);
+  if (!registry().disconnect(connection)) return;
+  for (const [commandId, waiter] of commandWaiters)
+    if (names.some((report) => report.name === waiter.provider)) {
+      commandWaiters.delete(commandId);
+      waiter.settle({
+        ok: false,
+        exitCode: null,
+        output: `The provider ${waiter.provider} closed its connection.`,
+      });
+    }
+  sendProviders();
+}
+
+/** K-707: who waits for a provider to register; a queued job reaches a restarted daemon before its provider does. */
+const registerWaiters = new Map<string, Array<() => void>>();
+const PROVIDER_WAIT_MS = 60_000;
+
+function registered(provider: string): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, PROVIDER_WAIT_MS);
+    const waiters = registerWaiters.get(provider) ?? [];
+    waiters.push(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+    registerWaiters.set(provider, waiters);
+  });
+}
+
+/** K-707: passes a provider command to the provider's connection, and waits for its result. */
+async function runProviderCommand(
+  command: Extract<Command, { kind: "provider" }>,
+  jobId: number,
+): Promise<JobOutcome> {
+  if (registry().connectionOf(command.provider) === null) await registered(command.provider);
+  const connection = registry().connectionOf(command.provider);
+  const emit = connection === null ? undefined : providerEmitters.get(connection);
+  if (!emit)
+    return Promise.resolve({
+      ok: false,
+      exitCode: null,
+      output: `The provider ${command.provider} did not connect within 60 seconds.`,
+    });
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      commandWaiters.delete(jobId);
+      resolve({
+        ok: false,
+        exitCode: null,
+        output: `The provider ${command.provider} gave no result in 5 minutes.`,
+      });
+    }, COMMAND_TIMEOUT_MS);
+    commandWaiters.set(jobId, {
+      provider: command.provider,
+      settle: (outcome) => {
+        clearTimeout(timer);
+        resolve(outcome);
+      },
+    });
+    emit({
+      type: "command",
+      provider: command.provider,
+      commandId: jobId,
+      command: command.command,
+      resource: command.resource,
+    });
+  });
+}
+
 /** K-701, K-702: the requests of the local socket. */
 async function answerLocal(request: Request, caller: Caller, emit: (event: Answer) => void): Promise<Answer> {
   const { id } = request;
@@ -2324,6 +2500,45 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
     };
   }
   if (request.type === "forward") return forwardCall(request);
+  if (request.type === "command-result") {
+    const waiter = commandWaiters.get(request.commandId);
+    if (
+      !waiter ||
+      waiter.provider !== request.provider ||
+      registry().connectionOf(request.provider) !== caller.connection
+    )
+      throw new Error(`no command ${request.commandId} of ${request.provider} waits for a result (K-707).`);
+    commandWaiters.delete(request.commandId);
+    waiter.settle({ ok: request.ok, exitCode: request.ok ? 0 : 1, output: request.output });
+    return { id, type: "command-result" };
+  }
+  if (request.type === "provider-forget") {
+    const problem = registry().forget(request.provider);
+    if (problem) throw new Error(problem);
+    sendProviders();
+    return { id, type: "provider-forget" };
+  }
+  if (request.type === "register" || request.type === "upsert" || request.type === "remove") {
+    if (!joined) throw new Error("the daemon has not read machine.json yet.");
+    const handMade = readSites() ?? [];
+    const outcome = registry().apply(request, caller.connection, new Set(handMade.map((site) => site.name)));
+    if (!outcome.ok) throw new Error(outcome.error);
+    if (outcome.changed) {
+      sendProviders();
+      void checkSites().catch((error: unknown) => log(`site check failed: ${String(error)}`));
+    }
+    if (request.type !== "register") return { id, type: request.type };
+    providerEmitters.set(caller.connection, emit);
+    for (const wake of registerWaiters.get(request.provider) ?? []) wake();
+    registerWaiters.delete(request.provider);
+    log(`provider ${request.provider} registered with ${request.resources.length} resources`);
+    return {
+      id,
+      type: "register",
+      machineId: joined.machineId,
+      grants: registry().grantsOf(request.provider),
+    };
+  }
   if (request.type === "attester-set") return setAttester(request, caller);
   if (request.type === "forget-token") {
     keptTokens.drop(request.repo);
@@ -2387,6 +2602,9 @@ switch (command) {
   case "attester":
     await attesterCommand(args);
     break;
+  case "provider":
+    await providerCommand(args);
+    break;
   case "publish":
   case "address":
   case "logs":
@@ -2425,6 +2643,8 @@ kitshn status                           the machine, its key, its connection to 
 kitshn local-users list|add|remove <u>  who else may use the local socket, as the daemon user (K-701)
 kitshn attester set --prefix <p.> --url <loopback url> --token-env <NAME>
                                         register an attester of thread labels, as the daemon user or root (K-1751)
+kitshn provider                         join stdin and stdout to the local socket, for a provider (K-704)
+kitshn provider forget <name>           drop a provider that does not run, as the daemon user or root (K-704)
 kitshn agent <action> [target]          ask kitshn as this machine (K-1710): --reason, --label k=v, --body json
 ${AGENT_USAGE}
 kitshn setup-git                        git asks kitshn first for github.com tokens (K-1763)

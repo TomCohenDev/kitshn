@@ -11,6 +11,7 @@ describe("Durable Object migrations", () => {
     db.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     expect(migrate((query) => db.exec(query), 0)).toBe(MIGRATIONS.length);
     expect(columns(db, "tunnel_objects")).toEqual(["machine_id", "body", "error", "applied", "retry_at"]);
+    expect(columns(db, "providers")).toEqual(["machine_id", "name", "body"]);
     expect(db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({
       value: String(MIGRATIONS.length),
     });

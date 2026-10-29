@@ -1,39 +1,13 @@
 import type { CardKind, Circle, Point, State } from "../core/model.ts";
-import { CARD_BOX } from "../core/place.ts";
+import { type Box, cardBox, circleBox, union } from "../core/place.ts";
 
 /** Map geometry for fit, pan and circle heads. Pure, so the rules are testable without a DOM. */
-
-export interface Box {
-  readonly left: number;
-  readonly top: number;
-  readonly right: number;
-  readonly bottom: number;
-}
 
 export interface View {
   readonly x: number;
   readonly y: number;
   readonly s: number;
 }
-
-const CARD = CARD_BOX;
-/** A circle head sits this far above the circle edge and is about this tall (`.circle .head`). */
-const HEAD = { above: 20, below: 16 } as const;
-
-/**
- * The width of a circle head, estimated from its name: about 11px for each letter at 1rem, and 130px for the
- * level sticker, the "⋯" button and the padding. Known limit: very wide or narrow letters miss by a few
- * pixels. Revisit when heads get more stickers or a different font size.
- */
-export const headWidth = (circle: Circle) =>
-  11 * circle.name.length + 130 + (circle.needsPasskey ? 24 : 0) + (circle.match === "all" ? 24 : 0);
-
-export const cardBox = (at: Point): Box => ({
-  left: at.x - CARD.half,
-  top: at.y - CARD.above,
-  right: at.x + CARD.half,
-  bottom: at.y + CARD.below,
-});
 
 /** The cards that the map draws, for the head rule: every placed card of a shown kind. */
 export const shownCardBoxes = (state: Pick<State, "places" | "resources">, hidden: ReadonlySet<CardKind>) =>
@@ -42,52 +16,11 @@ export const shownCardBoxes = (state: Pick<State, "places" | "resources">, hidde
     return kind !== undefined && !hidden.has(kind) ? [cardBox(place)] : [];
   });
 
-/** The head of a circle at `angle` (radians from the top, positive to the right), in map units. */
-export const headBox = (circle: Circle, angle: number): Box => {
-  const x = circle.x + circle.r * Math.sin(angle);
-  const y = circle.y - circle.r * Math.cos(angle);
-  const half = headWidth(circle) / 2;
-  return { left: x - half, top: y - HEAD.above, right: x + half, bottom: y + HEAD.below };
-};
-
-const overlaps = (a: Box, b: Box) =>
-  a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
-
-/** The spots that a head tries along its circle edge, in this order: the top, then further to each side. */
-const HEAD_ANGLES = [0, -30, 30, -55, 55].map((degrees) => (degrees * Math.PI) / 180);
-
-/**
- * Where a circle head sits (K-506): the first spot along the top of the edge whose head covers no card. When
- * every spot covers a card, the head stays at the top; heads draw above cards, so the head stays readable.
- */
-export function headAngle(circle: Circle, cards: ReadonlyArray<Box>): number {
-  return HEAD_ANGLES.find((angle) => !cards.some((card) => overlaps(headBox(circle, angle), card))) ?? 0;
-}
-
-/** A circle with its head at every spot that the head can slide to (`headAngle`). */
-export const circleBox = (circle: Circle): Box =>
-  union([
-    {
-      left: circle.x - circle.r,
-      top: circle.y - circle.r,
-      right: circle.x + circle.r,
-      bottom: circle.y + circle.r,
-    },
-    ...HEAD_ANGLES.map((angle) => headBox(circle, angle)),
-  ]);
-
 /** Everything on the map: circles with their heads, and placed cards. Null for an empty map. */
 export function mapBox(circles: Iterable<Circle>, places: Iterable<Point>): Box | null {
   const boxes = [...[...circles].map(circleBox), ...[...places].map(cardBox)];
   return boxes.length === 0 ? null : union(boxes);
 }
-
-export const union = (boxes: ReadonlyArray<Box>): Box => ({
-  left: Math.min(...boxes.map((box) => box.left)),
-  top: Math.min(...boxes.map((box) => box.top)),
-  right: Math.max(...boxes.map((box) => box.right)),
-  bottom: Math.max(...boxes.map((box) => box.bottom)),
-});
 
 /**
  * The part of the screen that the map shows clear of the toolbar, the tray and an open panel. On a wide
@@ -308,4 +241,34 @@ export function stackOffsets(
     y += Math.max(row, (height ?? 0) + gap);
   }
   return offsets;
+}
+
+/** K-532: a card that the map draws now, around its place, and the height of the frame that it shows now, if any. */
+export interface DrawnCard {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
+  /** The height of its preview frame with the margin, or 0 without one. */
+  readonly frame: number;
+  /** Whether Previews can give it a frame (K-520). */
+  readonly framable: boolean;
+}
+
+/**
+ * K-532: the box of a card, or of an open stack with its cards in column order, as if every framable card showed a
+ * frame of `frameRoom`, spaced as `stackOffsets` spaces a column. So the box does not depend on which cards show a
+ * frame now.
+ */
+export function steadyBox(cards: ReadonlyArray<DrawnCard>, frameRoom: number, row: number, gap: number): Box {
+  const first = cards[0];
+  if (!first) throw new Error("steadyBox needs a card.");
+  const heights = cards.map((card) => card.height - card.frame + (card.framable ? frameRoom : 0));
+  const offsets = cards.length > 1 ? stackOffsets(heights, row, gap) : [0];
+  return union(
+    cards.map((card, index) => {
+      const top = first.top + (offsets[index] ?? 0);
+      return { left: card.left, right: card.left + card.width, top, bottom: top + (heights[index] ?? 0) };
+    }),
+  );
 }

@@ -28,6 +28,7 @@ const Id = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64));
 export const ASK_ACTIONS = [
   "state",
   "apply",
+  "organize",
   "publish",
   "allow",
   "deploy",

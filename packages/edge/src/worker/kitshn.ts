@@ -89,6 +89,14 @@ import {
   sealJoin,
   verifyForHosts,
 } from "../core/machine.ts";
+import {
+  NO_SIZES,
+  ORGANIZE_SUMMARY,
+  type DrawnSizes,
+  drawnSizes,
+  organize,
+  organizeSummary,
+} from "../core/organize.ts";
 import { placeInside } from "../core/place.ts";
 import {
   type LogAnswer,
@@ -610,6 +618,7 @@ const API_MESSAGES: Readonly<Record<string, ClientMessage["type"]>> = {
   "/api/apply": "apply",
   "/api/undo": "undo",
   "/api/undo-item": "undoItem",
+  "/api/organize": "organize",
 };
 
 /** K-003: the one Durable Object. It holds all state in SQLite and a copy in memory. */
@@ -703,6 +712,11 @@ export class Kitshn extends DurableObject<Env> {
   }
   /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
   private stuckShares = new Set<string>();
+  /**
+   * K-532: the sizes of the last map Organize, in memory, so an agent Organize keeps the map's spacing. Known limit:
+   * a new wake forgets them and an agent then uses plain card sizes; revisit if agents organize often.
+   */
+  private drawn: DrawnSizes | null = null;
   /** K-1716: false once `github_tokens` is known to be empty, so a broadcast reads no row of it. True after a wake. */
   private tokensLive = true;
   private accessWarnings: Array<string> = [];
@@ -1335,14 +1349,20 @@ export class Kitshn extends DurableObject<Env> {
 
   /**
    * One write: checks the rules (K-105), stores the changes and one revision (K-1501), then tells everyone.
-   * Moves that follow a move or drop of the same actor join its revision (K-1505).
+   * Moves that follow a move or drop of the same actor join its revision (K-1505). A `named` revision, such as
+   * Organize (K-532), has that summary and never joins another.
    */
-  private commit(actor: Actor, changes: ReadonlyArray<Change>, undo: UndoOf | null): number | null {
+  private commit(
+    actor: Actor,
+    changes: ReadonlyArray<Change>,
+    undo: UndoOf | null,
+    named: string | null = null,
+  ): number | null {
     if (changes.length === 0) return null;
     const before = this.state;
     const after = this.checked(changes);
     const now = Date.now();
-    const merge = undo === null ? this.movesToMerge(actor, now, changes) : null;
+    const merge = undo === null && named === null ? this.movesToMerge(actor, now, changes) : null;
     const label =
       undo === null
         ? ""
@@ -1357,7 +1377,7 @@ export class Kitshn extends DurableObject<Env> {
           after,
           merge.changes,
         )
-      : label + summarize(before, after, changes);
+      : (named ?? label + summarize(before, after, changes));
     // A per-item undo is a change of its own (K-1507); only a whole undo marks its revision as undone.
     const undoes = undo?.item === null ? undo.revision : null;
     const id = this.ctx.storage.transactionSync(() => {
@@ -1433,8 +1453,8 @@ export class Kitshn extends DurableObject<Env> {
       undoes: number | null;
       item_undo: number | null;
     }>("SELECT id, at, actor, summary, changes, undoes, item_undo FROM revisions ORDER BY id DESC LIMIT 1");
-    // A per-item undo keeps `undoes` null (K-1507), and moves never join an undo.
-    if (!row || row.item_undo !== null) return null;
+    // A per-item undo keeps `undoes` null (K-1507), and moves never join an undo or an Organize (K-532).
+    if (!row || row.item_undo !== null || row.summary.startsWith(`${ORGANIZE_SUMMARY}:`)) return null;
     const previous = JSON.parse(row.changes) as Array<Change>;
     const merged = mergeMoves(
       { actor: JSON.parse(row.actor) as Actor, at: row.at, changes: previous, undoes: row.undoes },
@@ -1447,6 +1467,19 @@ export class Kitshn extends DurableObject<Env> {
 
   private apply(actor: Actor, edits: ReadonlyArray<Edit>) {
     return this.commit(actor, refuseResume(resolveEdits(this.state, edits)), null);
+  }
+
+  /**
+   * K-532: Organize, as one revision. It moves only the cards that `movable` names; a refusal throws and saves
+   * nothing. `organize` checks already that no share changes.
+   */
+  private organize(actor: Actor, sizes: DrawnSizes, movable: (id: string) => boolean) {
+    this.drawn = sizes;
+    const plan = organize(this.state, sizes, movable);
+    if ("refused" in plan) throw new RuleError(plan.refused);
+    if (plan.edits.length === 0) return { revision: null, summary: "Every card is in order already" };
+    const summary = organizeSummary(plan.moved);
+    return { revision: this.commit(actor, resolveEdits(this.state, plan.edits), null, summary), summary };
   }
 
   /** K-1504: "Resume", after the Worker checked a passkey login of at most ten minutes. */
@@ -3338,13 +3371,22 @@ export class Kitshn extends DurableObject<Env> {
       const { revision, notes, summary } =
         message.type === "apply"
           ? { revision: this.apply(caller.actor, message.edits), notes: [], summary: null }
-          : message.type === "undo"
-            ? await this.undo(
-                caller.actor,
-                message.revision,
-                message.source ?? (via === "http" ? "api" : null),
-              )
-            : await this.undoItem(caller.actor, message.item);
+          : message.type === "organize"
+            ? {
+                ...this.organize(caller.actor, drawnSizes(message), (id) => {
+                  // K-532: the map does not draw a hidden kind, so its cards stay where they are.
+                  const kind = this.state.resources.get(id)?.kind;
+                  return kind !== undefined && !message.hiddenKinds.includes(kind);
+                }),
+                notes: [],
+              }
+            : message.type === "undo"
+              ? await this.undo(
+                  caller.actor,
+                  message.revision,
+                  message.source ?? (via === "http" ? "api" : null),
+                )
+              : await this.undoItem(caller.actor, message.item);
       return { type: "result", requestId: message.requestId, ok: true, revision, notes, summary };
     } catch (error) {
       if (!(error instanceof RuleError)) throw error;
@@ -7624,7 +7666,7 @@ export class Kitshn extends DurableObject<Env> {
       // An approval of this call (K-1723, K-1776) counts also when the right is off.
       return approved === right || machineRightMode(this.state, machine.id, right, now)?.mode === "automatic";
     };
-    const machinePaths = ["/agent/state", "/agent/apply", "/agent/jobs", "/agent/deploy"];
+    const machinePaths = ["/agent/state", "/agent/apply", "/agent/organize", "/agent/jobs", "/agent/deploy"];
     if (
       machine &&
       !machinePaths.includes(path) &&
@@ -7669,7 +7711,7 @@ export class Kitshn extends DurableObject<Env> {
         caller.visitor.clientId,
       ).map((row) => row.resource_id),
     );
-    const move = (edits: ReadonlyArray<Edit>) => {
+    const move = (edits: ReadonlyArray<Edit>, named: string | null = null) => {
       try {
         const changes = resolveEdits(this.state, edits);
         const refusal = agentRefusal(
@@ -7682,7 +7724,7 @@ export class Kitshn extends DurableObject<Env> {
           approved,
         );
         if (refusal) return Response.json({ error: refusal }, { status: 403 });
-        return Response.json({ revision: this.commit(agent.actor, changes, null) });
+        return Response.json({ revision: this.commit(agent.actor, changes, null, named) });
       } catch (error) {
         if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
         throw error;
@@ -7756,6 +7798,22 @@ export class Kitshn extends DurableObject<Env> {
         return Response.json({ error: String(error) }, { status: 400 });
       }
       return move(edits);
+    }
+    // K-532: Organize of the cards that this agent may move, with the sizes of the last map Organize, and the checks
+    // of a move. A card that a circle outside the agent's own holds stays put, so it does not refuse the others.
+    if (path === "/agent/organize" && request.method === "POST") {
+      const mayMove = (id: string) => {
+        const place = this.state.places.get(id);
+        if (!managed.has(id) || !place) return false;
+        const probe: Change = { _tag: "place", id, before: place, after: place };
+        // A separate after state, so a published card in Everyone needs "publishes" now, as the real move does.
+        const after = applyChanges(this.state, [probe]);
+        return agentRefusal(this.state, after, caller.visitor, [probe], now, added, null) === null;
+      };
+      const plan = organize(this.state, this.drawn ?? NO_SIZES, mayMove);
+      if ("refused" in plan) return Response.json({ error: plan.refused }, { status: 409 });
+      if (plan.edits.length === 0) return Response.json({ revision: null });
+      return move(plan.edits, organizeSummary(plan.moved));
     }
     // K-1123: an agent key publishes a folder as a static site, in the steps of a repo deploy (K-805).
     if (path.startsWith("/agent/sites/") && request.method === "POST") {
@@ -8072,7 +8130,8 @@ export class Kitshn extends DurableObject<Env> {
           await this.propose(machine, action, target, raw["body"], reason, labels, needs, mode.circleId, now),
         );
     }
-    if (needs === "apply") {
+    // K-532: Organize keeps every share, so it never moves a card into Everyone and needs no "publishes".
+    if (needs === "apply" && action !== "organize") {
       const edits = this.askEdits(machine, action, target, raw["body"], now, null);
       if (typeof edits === "string") {
         // K-1720: a move into Everyone needs "publishes"; with "ask <circle>" it waits for an approval.

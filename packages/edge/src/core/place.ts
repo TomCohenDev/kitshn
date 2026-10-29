@@ -1,8 +1,100 @@
 import type { Edit } from "./changes.ts";
-import { type Circle, type Point, type State, insideCircle } from "./model.ts";
+import { type Circle, type Point, type State, circlesHolding, insideCircle } from "./model.ts";
 
 /** A card on the map, around its place: the width and the top margin come from `.card` in styles.css. */
 export const CARD_BOX = { half: 95, above: 36, below: 50 } as const;
+
+export interface Box {
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+}
+
+/** A circle head sits this far above the circle edge and is about this tall (`.circle .head`). */
+export const HEAD = { above: 20, below: 16 } as const;
+
+/**
+ * The width of a circle head, estimated from its name: about 11px for each letter at 1rem, and 130px for the
+ * level sticker, the "⋯" button and the padding. Known limit: very wide or narrow letters miss by a few
+ * pixels. Revisit when heads get more stickers or a different font size.
+ */
+export const headWidth = (circle: Circle) =>
+  11 * circle.name.length + 130 + (circle.needsPasskey ? 24 : 0) + (circle.match === "all" ? 24 : 0);
+
+export const cardBox = (at: Point): Box => ({
+  left: at.x - CARD_BOX.half,
+  top: at.y - CARD_BOX.above,
+  right: at.x + CARD_BOX.half,
+  bottom: at.y + CARD_BOX.below,
+});
+
+/** The head of a circle at `angle` (radians from the top, positive to the right), in map units. */
+export const headBox = (circle: Circle, angle: number): Box => {
+  const x = circle.x + circle.r * Math.sin(angle);
+  const y = circle.y - circle.r * Math.cos(angle);
+  const half = headWidth(circle) / 2;
+  return { left: x - half, top: y - HEAD.above, right: x + half, bottom: y + HEAD.below };
+};
+
+export const boxesOverlap = (a: Box, b: Box) =>
+  a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+
+/** The spots that a head tries along its circle edge, in this order: the top, then further to each side. */
+const HEAD_ANGLES = [0, -30, 30, -55, 55].map((degrees) => (degrees * Math.PI) / 180);
+
+/**
+ * Where a circle head sits (K-506): the first spot along the top of the edge whose head covers no card. When
+ * every spot covers a card, the head stays at the top; heads draw above cards, so the head stays readable.
+ */
+export function headAngle(circle: Circle, cards: ReadonlyArray<Box>): number {
+  return HEAD_ANGLES.find((angle) => !cards.some((card) => boxesOverlap(headBox(circle, angle), card))) ?? 0;
+}
+
+/** A circle with its head at every spot that the head can slide to (`headAngle`). */
+export const circleBox = (circle: Circle): Box =>
+  union([
+    {
+      left: circle.x - circle.r,
+      top: circle.y - circle.r,
+      right: circle.x + circle.r,
+      bottom: circle.y + circle.r,
+    },
+    ...HEAD_ANGLES.map((angle) => headBox(circle, angle)),
+  ]);
+
+export const union = (boxes: ReadonlyArray<Box>): Box => ({
+  left: Math.min(...boxes.map((box) => box.left)),
+  top: Math.min(...boxes.map((box) => box.top)),
+  right: Math.max(...boxes.map((box) => box.right)),
+  bottom: Math.max(...boxes.map((box) => box.bottom)),
+});
+
+/** The key prefix of a stack that the owner made, as opposed to a stack by group (K-508). */
+export const USER_STACK = "stack:";
+
+/** Cards with one group stack when they share the same circles (K-508). */
+export function stacksOf(state: State): Map<string, Array<string>> {
+  const stacks = new Map<string, Array<string>>();
+  // K-521: the owner's stacks come first; their cards leave the stacks by group.
+  const owned = new Set<string>();
+  for (const stack of state.stacks.values()) {
+    const placed = stack.members.filter((id) => state.places.has(id));
+    for (const id of placed) owned.add(id);
+    if (placed.length > 1) stacks.set(`${USER_STACK}${stack.id}`, placed);
+  }
+  for (const resource of state.resources.values()) {
+    if (!resource.group || owned.has(resource.id) || !state.places.has(resource.id)) continue;
+    const circles = circlesHolding(state, resource.id)
+      .map((circle) => circle.id)
+      .sort()
+      .join(",");
+    const key = `${resource.group}|${circles}`;
+    stacks.set(key, [...(stacks.get(key) ?? []), resource.id]);
+  }
+  for (const [key, ids] of stacks) if (ids.length < 2) stacks.delete(key);
+  return stacks;
+}
 
 /** Two cards whose boxes overlap on the map; a card keeps this clear of the spots in `taken`. */
 const cardsOverlap = (a: Point, b: Point) =>
@@ -11,7 +103,7 @@ const cardsOverlap = (a: Point, b: Point) =>
 /** Distance a card centre keeps from every circle edge, so a small move does not change its shares. */
 const EDGE_MARGIN = 24;
 
-const fits = (point: Point, circles: Iterable<Circle>, wanted: ReadonlySet<string>) => {
+export const fits = (point: Point, circles: Iterable<Circle>, wanted: ReadonlySet<string>) => {
   for (const circle of circles) {
     const distance = Math.hypot(point.x - circle.x, point.y - circle.y);
     if (Math.abs(distance - circle.r) < EDGE_MARGIN) return false;

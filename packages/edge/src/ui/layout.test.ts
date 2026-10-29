@@ -1,18 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { Circle } from "../core/model.ts";
+import { type Box, cardBox, circleBox, headAngle, headBox } from "../core/place.ts";
 import {
-  type Box,
-  cardBox,
   cardLayer,
   stackOffsets,
   toastPlace,
   FOCUS_LAYER,
   HEAD_LAYER,
-  circleBox,
   fitMap,
   fitView,
-  headAngle,
-  headBox,
   MAP_MIN_WIDTH,
   keyWidth,
   mapBox,
@@ -22,6 +18,8 @@ import {
   ZOOM,
   shownWidths,
   storedWidth,
+  steadyBox,
+  type DrawnCard,
 } from "./layout.ts";
 
 const circle = (x: number, y: number, r: number, name = "Agents"): Circle => ({
@@ -235,5 +233,28 @@ describe("stackOffsets (K-508, K-521)", () => {
     // A card with a preview frame (260 high) pushes the card below it to 260 + 16.
     expect(stackOffsets([90, 260, 90], 124, 16)).toEqual([0, 124, 400]);
     expect(stackOffsets([], 124, 16)).toEqual([]);
+  });
+});
+
+describe("steadyBox (K-532)", () => {
+  /** An open stack of three page cards of 86 px, as the map draws it, with frames on the cards in `framed`. */
+  const column = (framed: ReadonlySet<number>, frame: number): Array<DrawnCard> => {
+    const heights = [0, 1, 2].map((index) => 86 + (framed.has(index) ? frame : 0));
+    const offsets = stackOffsets(heights, 124, 16);
+    return heights.map((height, index) => ({
+      left: -95,
+      top: -36 + (offsets[index] ?? 0),
+      width: 190,
+      height,
+      frame: framed.has(index) ? frame : 0,
+      framable: true,
+    }));
+  };
+
+  it("gives an open stack the same box whichever cards show a frame now", () => {
+    const none = steadyBox(column(new Set(), 0), 150, 124, 16);
+    expect(steadyBox(column(new Set([0, 2]), 150), 150, 124, 16)).toEqual(none);
+    // A frame with login help is taller; the room of the tallest frame counts for every card.
+    expect(steadyBox(column(new Set([1]), 170), 170, 124, 16).bottom).toBeGreaterThan(none.bottom);
   });
 });

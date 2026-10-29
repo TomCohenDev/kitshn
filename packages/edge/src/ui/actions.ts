@@ -25,7 +25,7 @@ import {
   levelName,
   levelsOf,
 } from "../core/model.ts";
-import { circleForCards, placeInside } from "../core/place.ts";
+import { USER_STACK, circleForCards, placeInside } from "../core/place.ts";
 import type { MachineView, Snapshot } from "../core/protocol.ts";
 import { commandsFor } from "../core/providers.ts";
 import { kindInfo } from "./kinds.ts";
@@ -144,6 +144,8 @@ export interface ActionHandlers {
   /** K-529: one new circle around these cards (the selection, or one card from "Share with"). */
   readonly newCircleFor: (ids: ReadonlyArray<string>) => void;
   readonly fit: () => void;
+  /** K-532: puts the cards in a tidy grid in their own circles. */
+  readonly organize: () => void;
   readonly undoItem: (item: Item) => void;
 }
 
@@ -808,9 +810,6 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
   ].filter((group) => group.length > 0);
 }
 
-/** The key prefix of a stack that the owner made, as opposed to a stack by group (K-508). */
-export const USER_STACK = "stack:";
-
 /** K-521, K-522: a closed stack of the owner. Shares go through its first card, which takes the stack along. */
 export function stackActions(ctx: ActionContext, h: ActionHandlers, stack: Stack): ActionGroups {
   const { state } = ctx;
@@ -970,13 +969,26 @@ export function addActions(ctx: ActionContext, h: ActionHandlers, at: Point | nu
   ];
 }
 
+/** K-532: the tooltip of Organize, in the toolbar, the "☰" menu, the map menu and the palette. */
+export const ORGANIZE_TIP =
+  "Put the cards of each circle in a tidy grid, by kind and then by name. No card changes its circles, and one Undo puts them back.";
+
 /** An empty spot of the map, or `at: null` for the palette, which adds in the middle of the view. */
 export function mapActions(ctx: ActionContext, h: ActionHandlers, at: Point | null): ActionGroups {
   const forSelection = selectionActions(ctx, h);
   return [
     ...(forSelection.length > 0 ? [forSelection] : []),
     addActions(ctx, h, at),
-    [{ id: "fit", label: "Fit the map", tip: "Fit every circle and card in the view.", run: h.fit }],
+    [
+      { id: "fit", label: "Fit the map", tip: "Fit every circle and card in the view.", run: h.fit },
+      {
+        id: "organize",
+        label: "Organize the cards",
+        keywords: "tidy arrange sort grid",
+        tip: ORGANIZE_TIP,
+        run: h.organize,
+      },
+    ],
   ];
 }
 

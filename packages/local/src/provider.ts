@@ -107,6 +107,8 @@ export const ProviderKind = Schema.Struct({
   state: Schema.optionalKey(Schema.Struct({ schema: Schema.optionalKey(Schema.Unknown) })),
   /** K-717: settings of each card of this kind. */
   settings: Schema.optionalKey(Schema.Array(ProviderCardSetting).check(Schema.isMaxLength(4))),
+  /** K-719: the Owner circle holds every card of this kind at its top level, and nothing removes that share. */
+  ownerControl: Schema.optionalKey(Schema.Boolean),
 });
 export type ProviderKind = typeof ProviderKind.Type;
 

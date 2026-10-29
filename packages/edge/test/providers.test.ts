@@ -483,3 +483,121 @@ it("forgets only a provider that does not run, and an offline report does not br
   await message("signed", [report([app])]);
   expect(await card()).toBeDefined();
 });
+
+it("lists for a device the provider cards with an address that its token opens, in the portal's shape (K-1601)", async () => {
+  stubAccessCerts();
+  const { message, sql } = await setup();
+  const phone: Circle = {
+    id: "phone",
+    name: "Phone",
+    color: "#00B3FF",
+    level: "use",
+    members: [{ _tag: "device", tokenId: "t-phone", clientId: "phone.access", name: "Yarden's phone" }],
+    match: "any",
+    needsPasskey: false,
+    endsAt: null,
+    x: 9000,
+    y: 9000,
+    r: 200,
+  };
+  await sql("INSERT OR REPLACE INTO circles (id, body) VALUES ('phone', ?)", JSON.stringify(phone));
+  await message("signed", [
+    report([
+      { ...app, site: { name: "t3-vps", port: 3773 } },
+      { ...app, id: "hidden", name: "Hidden" },
+    ]),
+  ]);
+  await sql("INSERT OR REPLACE INTO places (id, x, y) VALUES (?, 9000, 9000)", appId);
+  const list = async (clientId: string) =>
+    (await (
+      await send("/device/machines", {
+        headers: { "cf-access-jwt-assertion": await accessToken("device-aud", { common_name: clientId }) },
+      })
+    ).json()) as { machines: Array<unknown> };
+  expect(await list("phone.access")).toEqual({
+    machines: [
+      {
+        id: "vps",
+        name: "vps",
+        origin: "https://t3-vps.example.com",
+        card: appId,
+        kind: "t3.app",
+        level: "use",
+      },
+    ],
+  });
+  // A token that no circle holds gets an empty list.
+  expect(await list("stranger.access")).toEqual({ machines: [] });
+  // A person's login is not a device.
+  const person = await send("/device/machines", {
+    headers: { "cf-access-jwt-assertion": await accessToken("device-aud", { email: "owner@example.com" }) },
+  });
+  expect(person.status).toBe(403);
+  await sql("DELETE FROM circles WHERE id = 'phone'");
+});
+
+it("clears an Owner share setting when its card gains owner control, so later changes still commit (K-719)", async () => {
+  stubAccessCerts();
+  const { message, sql } = await setup();
+  await message("signed", [report([app])]);
+  // Before owner control, the owner lowered the Owner share of this card; that was legal then.
+  await sql(
+    "INSERT OR REPLACE INTO share_settings (id, body) VALUES (?, ?)",
+    `${appId}/${OWNER_CIRCLE_ID}`,
+    JSON.stringify({ level: "view", endsAt: 1 }),
+  );
+  await message("signed", [{ ...report([app]), kinds: [{ ...report([]).kinds[0]!, ownerControl: true }] }]);
+  const left = await runInDurableObject(env.KITSHN.getByName("kitshn"), (_, state) =>
+    state.storage.sql
+      .exec("SELECT id FROM share_settings WHERE id = ?", `${appId}/${OWNER_CIRCLE_ID}`)
+      .toArray(),
+  );
+  expect(left).toEqual([]);
+  const token = await accessToken("admin-aud", { email: "owner@example.com" });
+  const moved = await send("/api/apply", {
+    method: "POST",
+    headers: { "cf-access-jwt-assertion": token, "content-type": "application/json" },
+    body: JSON.stringify({ edits: [{ _tag: "place", id: appId, after: { x: 9100, y: 9100 } }] }),
+  });
+  expect(moved.status).toBe(200);
+});
+
+it("lets a machine cancel only the queued jobs that it queued itself (K-1612)", async () => {
+  const { stub } = await setup();
+  const sent: Array<{ type: string; error?: string | null }> = [];
+  const raw = (message: object) =>
+    runInDurableObject(stub, (instance) =>
+      instance.webSocketMessage(daemonSocket("signed", sent as Array<unknown>), JSON.stringify(message)),
+    );
+  const ids = await runInDurableObject(stub, (_, state) => {
+    const byVps = JSON.stringify({ _tag: "machine", machineId: "vps", name: "vps" });
+    const byOwner = JSON.stringify({ _tag: "person", email: "owner@example.com" });
+    const insert = (machine: string, jobState: string, actor: string) =>
+      state.storage.sql
+        .exec<{ id: number }>(
+          `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
+           VALUES (?, '[]', '{"kind":"restart"}', ?, 0, 9999999999999, ?, '{}', NULL, '') RETURNING id`,
+          machine,
+          jobState,
+          actor,
+        )
+        .one().id;
+    return {
+      // The owner queued it for vps: a local user of vps cannot cancel it.
+      ownerQueued: insert("vps", "queued", byOwner),
+      sentAlready: insert("mac", "sent", byVps),
+      own: insert("mac", "queued", byVps),
+    };
+  });
+  await raw({ type: "cancelJob", requestId: "a", jobId: ids.ownerQueued });
+  await raw({ type: "cancelJob", requestId: "b", jobId: ids.sentAlready });
+  await raw({ type: "cancelJob", requestId: "c", jobId: ids.own });
+  const answers = sent.filter((item) => item.type === "requestAnswer").map((item) => item.error === null);
+  expect(answers).toEqual([false, false, true]);
+  const state = await runInDurableObject(stub, (_, storage) =>
+    storage.storage.sql
+      .exec<{ state: string; output: string }>("SELECT state, output FROM jobs WHERE id = ?", ids.own)
+      .one(),
+  );
+  expect(state).toEqual({ state: "failed", output: "Cancelled by vps." });
+});

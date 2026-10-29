@@ -127,6 +127,7 @@ import { TokenCache } from "./tokens.ts";
 import { Providers, parseSaved } from "./providers.ts";
 import { desiredProblem } from "@kitshn/local";
 import { serveLinks } from "./link.ts";
+import { lastHour, lastSamples } from "./samples.ts";
 import { pushKey } from "@kitshn/local";
 import { listenerUid, portOf } from "./listener.ts";
 import { MAX_FORWARDS, forwardTarget, passedHeaders, readBounded } from "./forward.ts";
@@ -835,11 +836,16 @@ function sample() {
   };
 }
 
+/** K-605: the samples of the last hour, for `samples` on the local socket; read from the file at start. */
+const RECENT_SAMPLES = 60;
+let recentSamples: Array<ReturnType<typeof sample>> = [];
+
 /** K-606: the daemon keeps 30 days of samples on its own disk. */
 function keepSample(value: ReturnType<typeof sample>) {
   const file = join(paths.data, "samples.jsonl");
   mkdirSync(paths.data, { recursive: true });
   appendFileSync(file, `${JSON.stringify(value)}\n`);
+  recentSamples = [...recentSamples, value].slice(-RECENT_SAMPLES);
 }
 
 function pruneSamples() {
@@ -2273,6 +2279,9 @@ function connect(config: JoinSecrets) {
           emit?.(event);
         }
         sendOn(ws, { type: "applied", key, hash: message.hash });
+      } else if (message.type === "name") {
+        // K-704: the answer to register names the machine, also before the next connection.
+        registry().setPushed(MACHINE_NAME_KEY, message.name);
       } else if (message.type === "forgetProvider") {
         // K-704: a provider that a connection holds runs, so the forget does not apply to it.
         if (
@@ -2621,6 +2630,12 @@ async function runCommand() {
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => process.exit(0));
   pruneSamples();
   startDoors();
+  recentSamples = lastSamples(
+    existsSync(join(paths.data, "samples.jsonl"))
+      ? readFileSync(join(paths.data, "samples.jsonl"), "utf8")
+      : "",
+    RECENT_SAMPLES,
+  );
   await ensureTunnel(config);
   watchTunnel();
   // K-821: the machine card shows what the kept builds take on disk.
@@ -2671,6 +2686,9 @@ function readMachineFile(): unknown {
 
 /** The requests to kitshn that wait for its `answer`, by request id: null, or why kitshn refused. */
 const answerWaiters = new Map<string, (error: string | null) => void>();
+/** K-704: where the daemon keeps the machine's name among its saved pushes. */
+const MACHINE_NAME_KEY = "machine:name";
+
 /** K-1609: the Unix socket of the link proxy, next to the private local socket. */
 // Known limit: Windows has no link proxy, because its local socket is a named pipe with no private folder (K-621).
 // Revisit with a pipe of its own, under the pipe rules of K-621.
@@ -2828,6 +2846,21 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
     waiter.settle({ ok: request.ok, exitCode: request.ok ? 0 : 1, output: request.output });
     return { id, type: "command-result" };
   }
+  if (request.type === "samples") {
+    return { id, type: "samples", newest: sample(), history: lastHour(recentSamples, Date.now()) };
+  }
+  if (request.type === "job-cancel") {
+    const ws = socket;
+    if (ws === null || challenge === null)
+      throw new Error("the daemon has no signed connection to kitshn, so it cannot cancel a job now.");
+    const requestId = crypto.randomUUID();
+    const error = await new Promise<string | null>((resolve) => {
+      answerWaiters.set(requestId, resolve);
+      sendOn(ws, { type: "cancelJob", requestId, jobId: request.jobId });
+    });
+    if (error !== null) throw new Error(error);
+    return { id, type: "job-cancel" };
+  }
   if (request.type === "audit") {
     // K-1610: only the provider's own connection, and only over a signed connection; kitshn names the source.
     if (registry().connectionOf(request.provider) !== caller.connection)
@@ -2887,6 +2920,7 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
       machineId: joined.machineId,
       ...registry().savedFor(request.provider),
       linkSocket,
+      machineName: registry().pushedValue(MACHINE_NAME_KEY) as string | null,
     };
   }
   if (request.type === "attester-set") return setAttester(request, caller);

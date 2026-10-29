@@ -48,6 +48,7 @@ import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
   OWNER_CIRCLE_ID,
+  shareKey,
   MACHINE_RIGHT_NAMES,
   type MachineRight,
   type GitHubWay,
@@ -64,6 +65,7 @@ import {
   type UndoSource,
   circlesHolding,
   fnv,
+  levelName,
 } from "../core/model.ts";
 import {
   type Command,
@@ -3620,8 +3622,22 @@ export class Kitshn extends DurableObject<Env> {
       [...regs].sort((a, b) => a.name.localeCompare(b.name)),
     );
     if (changed.length === 0 && !regsChanged) return;
+    // K-719: a card that gains owner control loses the settings of its Owner share that the guard now refuses, in the
+    // same transaction, so an older override or end date never blocks a later change, also a pause.
+    const ownerKeys = changed
+      .filter((card) => card.provider?.ownerControl === true)
+      .map((card) => shareKey(card.id, OWNER_CIRCLE_ID))
+      .filter((key) => this.state.shareSettings.has(key));
     this.ctx.storage.transactionSync(() => {
       for (const card of changed) this.putResource(card);
+      for (const key of ownerKeys) this.sql("DELETE FROM share_settings WHERE id = ?", key);
+      if (ownerKeys.length > 0)
+        this.insertRevision(
+          { _tag: "kitshn", reason: `providers on ${machine.name}` },
+          `The Owner circle keeps control of ${ownerKeys.length} provider cards of ${machine.name}, so their Owner share settings went (K-719)`,
+          [],
+          null,
+        );
       if (regsChanged) {
         this.sql("DELETE FROM providers WHERE machine_id = ?", machine.id);
         for (const reg of regs)
@@ -3754,6 +3770,8 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/fresh/restored" && request.method === "POST")
       return await this.restored(caller, await request.json().catch(() => null));
     if (path.startsWith("/agent/")) return this.agentRequest(path, request, caller);
+    if (path === "/device/machines" && request.method === "GET")
+      return Response.json(this.deviceMachines(caller));
     if (path.startsWith("/connect/deploys/")) return this.deploySource(path, caller);
     if (!this.authorized(caller)) {
       return Response.json(
@@ -4004,6 +4022,14 @@ export class Kitshn extends DurableObject<Env> {
         decodeURIComponent(path.slice("/api/repos/".length)),
         await request.json().catch(() => null),
       );
+    if (path.startsWith("/api/jobs/") && path.endsWith("/cancel") && request.method === "POST") {
+      const error = this.cancelJob(
+        Number(path.slice("/api/jobs/".length, -"/cancel".length)),
+        { caller },
+        caller.actor,
+      );
+      return error === null ? Response.json({ ok: true }) : Response.json({ error }, { status: 409 });
+    }
     if (path === "/api/jobs" && request.method === "POST")
       return this.addJob(caller, await request.json().catch(() => null));
     if (path === "/api/sites/live" && request.method === "POST")
@@ -4286,6 +4312,8 @@ export class Kitshn extends DurableObject<Env> {
       this.keyFailures.delete(machine.id);
       if (machine.key?.kind !== "public") throw new Error(`${machine.name} signed without a key.`);
       send(socket, { type: "accepted", fingerprint: machine.key.fingerprint } satisfies ServerToDaemon);
+      // K-704: the daemon gives this name in its answer to register.
+      send(socket, { type: "name", name: machine.name } satisfies ServerToDaemon);
       // K-706: a new connection gets every grant table again, from the registrations that kitshn keeps.
       for (const key of this.sentGrants.keys())
         if (key.startsWith(`${machine.id}/`)) this.sentGrants.delete(key);
@@ -4492,6 +4520,17 @@ export class Kitshn extends DurableObject<Env> {
       this.updateLiveSites(machine, message.sites);
     } else if (message.type === "providers") {
       this.updateProviders(machine, message.providers);
+    } else if (message.type === "cancelJob" && typeof message.requestId === "string") {
+      const error = this.cancelJob(
+        message.jobId,
+        { machine },
+        { _tag: "machine", machineId: machine.id, name: machine.name },
+      );
+      send(socket, {
+        type: "requestAnswer",
+        requestId: message.requestId.slice(0, 64),
+        error,
+      } satisfies ServerToDaemon);
     } else if (message.type === "audit") {
       this.recordLinkEvent(machine, message.audit);
     } else if (message.type === "desiredSet" && typeof message.kind === "string") {
@@ -5051,6 +5090,72 @@ export class Kitshn extends DurableObject<Env> {
       machineId,
     ))
       send(socket, { type: "forgetProvider", provider: name } satisfies ServerToDaemon);
+  }
+
+  /**
+   * K-1601, K-1617: the machines that a device reaches: each provider card with an address that its token opens, with
+   * its machine. The shape of the portal's `/client/machines`, plus the card, its kind and the level.
+   */
+  private deviceMachines(caller: Caller) {
+    const now = Date.now();
+    return {
+      machines: [...this.state.resources.values()].flatMap((card) => {
+        const address = card.addresses[0];
+        const machine = card.machine === null ? undefined : this.state.machines.get(card.machine);
+        if (!card.provider || !address || !machine) return [];
+        const level = visitorLevel(this.state, card, caller.visitor, now);
+        return level === null
+          ? []
+          : [
+              {
+                id: machine.id,
+                name: machine.name,
+                origin: `https://${address}`,
+                card: card.id,
+                kind: card.kind,
+                level: levelName(card, level),
+              },
+            ];
+      }),
+    };
+  }
+
+  /**
+   * K-1612, K-613: cancels a job while it waits in the queue, or says why not. A machine cancels only its own jobs: one
+   * that runs on it, or one that it queued. The map needs control on the job's machine. History records the cancel.
+   */
+  private cancelJob(
+    id: number,
+    who: { readonly machine: Machine } | { readonly caller: Caller },
+    actor: Actor,
+  ): string | null {
+    const [job] = Number.isSafeInteger(id)
+      ? this.sql<{ machine_id: string | null; state: string; actor: string }>(
+          "SELECT machine_id, state, actor FROM jobs WHERE id = ?",
+          id,
+        )
+      : [];
+    if (!job) return `No job ${id} exists.`;
+    if ("machine" in who) {
+      // A local user cancels only what its machine queued; a job that someone else queued needs control, on the map.
+      const queuedBy = JSON.parse(job.actor) as Actor;
+      if (queuedBy._tag !== "machine" || queuedBy.machineId !== who.machine.id)
+        return `Job ${id} was not queued by ${who.machine.name}; cancel it on the map, with control on its machine (K-1612).`;
+    } else if (job.machine_id !== null && !this.canControl(who.caller.visitor, job.machine_id))
+      return "Cancelling a job needs control on its machine.";
+    if (job.state !== "queued") return `Job ${id} is ${job.state}, so it cannot be cancelled.`;
+    const name = actor._tag === "person" ? actor.email : actor._tag === "kitshn" ? "kitshn" : actor.name;
+    this.ctx.storage.transactionSync(() => {
+      this.sql(
+        "UPDATE jobs SET state = 'failed', output = ? WHERE id = ? AND state = 'queued'",
+        `Cancelled by ${name}.`,
+        id,
+      );
+      this.insertRevision(actor, `Cancelled job #${id}`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    return null;
   }
 
   /** K-614: the sender of a command needs control on the machine card itself, not only on the admin. */

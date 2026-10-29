@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 import { AGENT_USAGE, isAgentCommand, keyTransport, runAgentCommand } from "./agent.ts";
-import { type AssetSession, uploadAssets } from "./assets.ts";
+import { type AssetSession, jsonOf, uploadAssets } from "./assets.ts";
 import { CliError, fail } from "./cli-error.ts";
 import { errorOutput } from "./output.ts";
 import { type Artifact, artifactsByApp } from "./artifacts.ts";
@@ -45,10 +45,11 @@ async function oidcToken(audience: string): Promise<string> {
   const response = await fetch(`${url}&audience=${encodeURIComponent(audience)}`, {
     headers: { authorization: `bearer ${token}` },
   });
-  const body = (await response.json()) as { value?: string };
-  if (!body.value) fail(`GitHub gave no OIDC token (${response.status}).`);
-  cachedToken = { value: body.value as string, until: Date.now() + 4 * 60_000 };
-  return body.value as string;
+  const body = jsonOf<{ value?: string }>(await response.text());
+  const value = body.ok ? body.value.value : undefined;
+  if (!value) fail(`GitHub gave no OIDC token (${response.status})${body.ok ? "" : `: ${body.text}`}.`);
+  cachedToken = { value: value as string, until: Date.now() + 4 * 60_000 };
+  return value as string;
 }
 
 function githubEvent(): DeployEvent {

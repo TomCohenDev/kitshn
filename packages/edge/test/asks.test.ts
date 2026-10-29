@@ -210,8 +210,9 @@ it("reads only what its own event write reads for a refused ask, and a few rows 
   const proposalReads = await counted((instance) =>
     instance.webSocketMessage(daemonSocket(sent), message("deploy")),
   );
-  // The proposal itself reads nothing; the alarm schedule reads its next due items (jobs, retries, the expiry).
-  expect(proposalReads).toBeLessThanOrEqual(20);
+  // The proposal itself reads nothing; the alarm schedule reads its next due items (jobs, retries, the expiry), and the
+  // notification of the ask reads the open asks and its own row (K-1722).
+  expect(proposalReads).toBeLessThanOrEqual(30);
 });
 
 it("ends an approval that is no longer allowed, and refuses one for a text that the approver did not read (K-1712, K-1722)", async () => {
@@ -351,4 +352,28 @@ it("issues a pass only while passes are on and for a listed audience, and serves
     state.storage.sql.exec("DELETE FROM meta WHERE key = 'passes_on'"),
   );
   await evictDurableObject(stub);
+});
+
+it("opens a high-priority notification for each ask and closes it when the ask is answered (K-1722)", async () => {
+  const stub = await setup({ deploys: { mode: "ask", circleId: "owner" } });
+  const waiting = await ask(stub, "deploy", "card");
+  const id = waiting.outcome === "waiting" ? waiting.proposalId : "";
+  const state = () =>
+    runInDurableObject(stub, (_, durable) =>
+      durable.storage.sql
+        .exec<{ state: string; priority: string; recipients: string; actions: string }>(
+          "SELECT state, priority, recipients, actions FROM notifications WHERE source = 'kitshn.ask' AND key = ?",
+          id,
+        )
+        .toArray(),
+    );
+  const [open] = await state();
+  expect(open).toMatchObject({ state: "open", priority: "high" });
+  expect(JSON.parse(open?.recipients ?? "{}")).toEqual({ _tag: "circle", circle: "owner" });
+  expect(JSON.parse(open?.actions ?? "[]").map((action: { id: string }) => action.id)).toEqual([
+    "approve",
+    "deny",
+  ]);
+  await runInDurableObject(stub, (instance) => (instance as unknown as Instance).decide(id, "denied", owner));
+  expect((await state())[0]?.state).toBe("closed");
 });

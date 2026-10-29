@@ -603,6 +603,11 @@ export class Kitshn extends DurableObject<Env> {
     super(ctx, env);
     // K-604: a daemon ping never wakes the Durable Object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+    // K-1722: "Deny" of an ask runs from its notification; "Approve" is a link, because it needs the approver's proof.
+    this.actionHandlers.set("kitshn.ask", async (notification, action, caller) => {
+      if (action === "deny")
+        await this.decide(notification.key, "denied", { ...caller, machineId: null, reason: null });
+    });
     void ctx.blockConcurrencyWhile(async () => {
       // Numbered migrations: each runs once per database, with its version, in one transaction.
       ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
@@ -9234,6 +9239,35 @@ export class Kitshn extends DurableObject<Env> {
     for (const notification of this.openNotifications.values())
       if (notification.source === "uptime" && !down.has(notification.key))
         this.setNotificationState("uptime", notification.key, "closed");
+    // K-1722: each open ask is a notification for the people of its approver circle; an answer closes it for all.
+    const asks = new Set<string>();
+    for (const proposal of this.openProposals()) {
+      asks.add(proposal.id);
+      const kind = this.state.circles.get(proposal.circleId)?.needsPasskey ? "passkey" : "login";
+      this.notify({
+        source: "kitshn.ask",
+        key: proposal.id,
+        episode: proposal.id,
+        card: null,
+        recipients: { _tag: "circle", circle: proposal.circleId },
+        level: "warn",
+        priority: "high",
+        title: clip(`${proposal.machineName} asks: ${MACHINE_RIGHT_NAMES[proposal.right]}`, TITLE_MAX),
+        text: clip(`${proposal.shown}${proposal.reason ? ` · ${proposal.reason}` : ""}`, TEXT_MAX),
+        actions: [
+          {
+            id: "approve",
+            label: "Approve",
+            kind: "link",
+            path: `/api/approve/${kind}/start?approve=${encodeURIComponent(proposal.id)}&hash=${proposal.shownHash}`,
+          },
+          { id: "deny", label: "Deny", kind: "run" },
+        ],
+      });
+    }
+    for (const notification of this.openNotifications.values())
+      if (notification.source === "kitshn.ask" && !asks.has(notification.key))
+        this.setNotificationState("kitshn.ask", notification.key, "closed");
   }
 
   /** K-1902: the owner gets every notification; a circle adds its people. */

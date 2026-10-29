@@ -194,6 +194,45 @@ describe("admin guard (K-105)", () => {
 });
 
 describe("changes and undo (K-1501, K-1502)", () => {
+  it("keeps a passed end time unless the same Undo puts the card back on the map (K-209, K-212)", () => {
+    const share = shareKey("riffle", "her");
+    // At 10:00 the owner sets an end at 11:00 and extends it to 12:00 at 10:30; the Undo comes at 11:15.
+    const extended = { ...start(), ends: new Map([["riffle", 12]]) };
+    const extension: Array<Change> = [{ _tag: "cardEnd", id: "riffle", before: 11, after: 12 }];
+    expect(prepareUndo(extended, extension, 11.25)).toEqual([
+      { _tag: "cardEnd", id: "riffle", before: 12, after: 11 },
+    ]);
+    const sharedLonger = { ...start(), shareSettings: new Map([[share, { level: null, endsAt: 12 }]]) };
+    const shareExtension: Array<Change> = [
+      {
+        _tag: "shareSetting",
+        id: share,
+        before: { level: null, endsAt: 11 },
+        after: { level: null, endsAt: 12 },
+      },
+    ];
+    expect(prepareUndo(sharedLonger, shareExtension, 11.25)).toEqual([
+      {
+        _tag: "shareSetting",
+        id: share,
+        before: { level: null, endsAt: 12 },
+        after: { level: null, endsAt: 11 },
+      },
+    ]);
+    // The Undo of the expiry gives the place back, so the passed end goes and the shares stay.
+    const ended = { ...start(), places: new Map([...start().places].filter(([id]) => id !== "riffle")) };
+    const expiry: Array<Change> = [
+      { _tag: "place", id: "riffle", before: { x: 0, y: -200 }, after: null },
+      { _tag: "cardEnd", id: "riffle", before: 11, after: null },
+    ];
+    expect(prepareUndo(ended, expiry, 11.25)).toContainEqual({
+      _tag: "cardEnd",
+      id: "riffle",
+      before: null,
+      after: null,
+    });
+  });
+
   it("drops edits that change nothing", () => {
     const state = start();
     expect(resolveEdits(state, [{ _tag: "place", id: "riffle", after: { x: 0, y: -200 } }])).toEqual([]);

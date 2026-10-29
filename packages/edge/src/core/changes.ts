@@ -326,11 +326,19 @@ export function removeAppChanges(state: State, id: string): Array<Change> {
   return [...resolveEdits(state, edits), { _tag: "app", id, before: card, after: null }];
 }
 
-/** K-209, K-212: a change that would set an end time that passed already sets no end instead. */
-function withoutPastEnd(change: Change, now: number): Change {
-  if (change._tag === "cardEnd" && change.after !== null && change.after <= now)
+/**
+ * K-209, K-212: in the Undo of an expiry, which gives the card its place back (`placed`), an end time that passed
+ * already goes, so the shares come back for good. Any other Undo keeps a passed end, so the card ends at once.
+ */
+function withoutPastEnd(change: Change, now: number, placed: ReadonlySet<string>): Change {
+  if (change._tag === "cardEnd" && placed.has(change.id) && change.after !== null && change.after <= now)
     return { ...change, after: null };
-  if (change._tag === "shareSetting" && change.after?.endsAt != null && change.after.endsAt <= now)
+  if (
+    change._tag === "shareSetting" &&
+    placed.has(change.id.slice(0, change.id.lastIndexOf("/"))) &&
+    change.after?.endsAt != null &&
+    change.after.endsAt <= now
+  )
     return { ...change, after: change.after.level === null ? null : { ...change.after, endsAt: null } };
   return change;
 }
@@ -1007,11 +1015,14 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
  * K-1502: the changes that an undo of `original` commits, after every check that a write runs: the values are
  * still the ones the revision set, no card becomes public without the question of K-210 (which an undo does
  * not ask), the rules of K-105 and K-521, and the pause (K-1504). The Compose stop of K-909 depends on live
- * jobs, so the worker checks it when it commits. An end time that the undo would bring back in the past goes
- * (K-209, K-212): the undo of an expiry gives the shares back, and the alarm must not end them again at once.
+ * jobs, so the worker checks it when it commits. In the undo of an expiry, a passed end time goes (K-209, K-212).
  */
 export function prepareUndo(state: State, original: ReadonlyArray<Change>, now: number): Array<Change> {
-  const inverted = invert(original).map((change) => withoutPastEnd(change, now));
+  const reversed = invert(original);
+  const placed = new Set(
+    reversed.flatMap((change) => (change._tag === "place" && change.after !== null ? [change.id] : [])),
+  );
+  const inverted = reversed.map((change) => withoutPastEnd(change, now, placed));
   const conflict = conflictOf(state, inverted);
   if (conflict?._tag === "app")
     throw new RuleError(

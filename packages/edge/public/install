@@ -527,6 +527,8 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
   --arg import_at "${IMPORT_AT:-}" '
   {
     main_module: "worker.js",
+    # K-1806: the kitshn Worker logs to Workers Logs too, so its alarm runs can be searched and timed.
+    observability: {enabled: true},
     compatibility_date: $date,
     compatibility_flags: ["nodejs_compat"],
     assets: {jwt: $jwt, config: {not_found_handling: "single-page-application", run_worker_first: true}},

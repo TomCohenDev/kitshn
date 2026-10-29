@@ -43,7 +43,6 @@ name: kitshn 2 deploy
 # A repo secret also reaches the previews of pull requests; a secret for production only goes in the Environment "prod".
 #
 # It reads kitshn.config.ts without running it, and sends it with the GitHub OIDC token (K-811).
-# KitSHn 1 apps keep calling deploy.yml in this repo.
 on:
   workflow_call:
     inputs:

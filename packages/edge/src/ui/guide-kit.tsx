@@ -235,6 +235,7 @@ export function fixtureCard(
       preview={false}
       peek={false}
       zone="example.invalid"
+      now={Date.now()}
       onMenu={noop}
       onClose={noop}
       {...extra}

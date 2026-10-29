@@ -157,6 +157,7 @@ import { overlay } from "./held.ts";
 import { HistoryView } from "./History.tsx";
 import { UsageView } from "./Usage.tsx";
 import { UptimeRow } from "./Uptime.tsx";
+import { ReachList } from "./Reach.tsx";
 import { NotificationsView } from "./Notifications.tsx";
 import {
   fitMap,
@@ -3253,6 +3254,7 @@ function CardPanel(props: {
           })}
         </ul>
       )}
+      {state.places.has(resource.id) ? <ReachList state={state} selected={resource.id} /> : null}
       {isGameCard(resource) ? (
         <GameDoors resource={resource} onRemove={() => props.onRemoveGame(resource)} />
       ) : null}

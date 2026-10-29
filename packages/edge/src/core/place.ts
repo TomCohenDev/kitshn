@@ -2,7 +2,7 @@ import type { Edit } from "./changes.ts";
 import { type Circle, type Point, type State, circlesHolding, insideCircle } from "./model.ts";
 
 /** A card on the map, around its place: the width and the top margin come from `.card` in styles.css. */
-export const CARD_BOX = { half: 95, above: 36, below: 50 } as const;
+export const CARD_BOX = { half: 95, above: 36, below: 80 } as const;
 
 export interface Box {
   readonly left: number;

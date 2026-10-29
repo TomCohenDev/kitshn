@@ -466,6 +466,39 @@ describe("several apps per repo (K-804, K-820)", () => {
   });
 });
 
+describe("DNS records at plan time (K-817, K-901)", () => {
+  type Run = { card: string; addresses: Array<string>; machineId: string | null; expiresAt: number };
+  // The alarm may sync DNS between the steps of this test, so it reads the deploys memo, which the alarm never writes;
+  // live.test.ts checks which records those runs want.
+  const runs = () =>
+    runInDurableObject(
+      env.KITSHN.getByName("kitshn"),
+      (instance) => (instance as unknown as { deploys(): { composeRuns: Array<Run> } }).deploys().composeRuns,
+    );
+
+  it("counts a planned Compose deploy for the DNS of its address, and no failed one", async () => {
+    fakeCloudflare();
+    const app = repo("97", "early");
+    await allow(app);
+    const planned = await step(app, "/deploy/plan", { recipe: recipe(), event: {} });
+    const deployId = String(planned.body["deployId"]);
+    const stub = env.KITSHN.getByName("kitshn");
+    await runInDurableObject(stub, (_instance, durable) =>
+      durable.storage.sql.exec(
+        "UPDATE deploys SET app = 'compose', machine_id = 'm-97' WHERE id = ?",
+        deployId,
+      ),
+    );
+    // The Durable Object reads the deploy rows again when it starts.
+    await evictDurableObject(stub);
+    expect(await runs()).toContainEqual(
+      expect.objectContaining({ card: app.card, addresses: [app.address], machineId: "m-97" }),
+    );
+    expect((await step(app, "/deploy/fail", { deployId, reason: "the build failed." })).status).toBe(200);
+    expect((await runs()).map((run) => run.card)).not.toContain(app.card);
+  });
+});
+
 describe("rollback (K-821)", () => {
   type Choice = { deployId: string; sha: string; why: string | null };
   const choices = async (card: string) =>

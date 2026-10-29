@@ -127,3 +127,95 @@ it("refuses a mute of a card that does not exist or of an unknown source (K-1905
   expect((await mute({ card: "no-such-card", source: "deploy", until: null })).status).toBe(400);
   expect((await mute({ card: ADMIN_RESOURCE_ID, source: "anything", until: null })).status).toBe(400);
 });
+
+it("runs the later alarm steps when one throws, skips it with backoff, and tells the owner until it works (K-406, K-1910)", async () => {
+  const stub = env.KITSHN.getByName("alarm-steps");
+  const t0 = Date.parse("2026-10-30T12:00:00Z");
+  const result = await runInDurableObject(stub, async (instance, state) => {
+    const kitshn = instance as unknown as Kitshn & Record<string, unknown> & { alarm(): Promise<void> };
+    let clock = t0;
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // The daily run and the backups are far away, so only the steps set the next alarm.
+    for (const key of ["daily_at", "backup_at"])
+      kitshn.sql("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", key, String(t0 + 86_400_000));
+    // K-406, K-409: a timed card ends while the Access step waits (below), and that change runs Access at once.
+    const timer: Resource = {
+      id: "timer",
+      // A Compose card that no machine serves, so uptime fetches nothing.
+      kind: "site.compose",
+      name: "timer",
+      addresses: ["timer.example.com"],
+      status: "running",
+      group: null,
+      machine: null,
+    };
+    kitshn.sql("INSERT INTO resources (id, body) VALUES ('timer', ?)", JSON.stringify(timer));
+    kitshn.sql("INSERT INTO places (id, x, y) VALUES ('timer', 0, 0)");
+    kitshn.sql("INSERT INTO card_ends (id, ends_at) VALUES ('timer', ?)", t0 + 16.5 * 60_000);
+    kitshn.load();
+    let ran: Array<string> = [];
+    const fails = new Set(["syncGameDns"]);
+    kitshn["api"] = () => async () => [];
+    // Game records wait, as on 2026-10-29: this work woke the alarm at once while the step threw.
+    kitshn["gameDnsWork"] = () => true;
+    const step = (name: string, calls: number) => async () => {
+      ran.push(name);
+      if (fails.has(name)) throw new Error("zonePath takes one label.");
+      return calls;
+    };
+    for (const name of ["fillAudiences", "refreshForeignPaths", "syncTunnels", "checkSites", "syncDns"])
+      kitshn[name] = step(name, 0);
+    kitshn["syncGameDns"] = step("syncGameDns", 4);
+    kitshn["syncRoutes"] = step("syncRoutes", 0);
+    kitshn["syncRedirects"] = step("syncRedirects", 0);
+    kitshn["syncLauncher"] = step("syncLauncher", 0);
+    let accessBudget = 0;
+    kitshn["syncAccessLocked"] = async (_api: unknown, budget: number) => {
+      ran.push("syncAccessLocked");
+      if (fails.has("syncAccessLocked")) throw new Error("Cloudflare answered 503.");
+      accessBudget = budget;
+    };
+    const read = () => kitshn.sql("SELECT key, state FROM notifications WHERE source = 'alarm' ORDER BY id");
+    const run = async (at: number) => {
+      clock = at;
+      ran = [];
+      await kitshn.alarm();
+      return { ran, accessBudget, alarm: await state.storage.getAlarm() };
+    };
+    const failed = { ...(await run(t0)), rows: read() };
+    const skipped = await run(t0 + 1_000);
+    const again = await run(t0 + 5 * 60_000);
+    fails.clear();
+    const works = await run(t0 + 15 * 60_000);
+    const rows = read();
+    fails.add("syncAccessLocked");
+    await run(t0 + 16 * 60_000);
+    fails.clear();
+    const ended = await run(t0 + 17 * 60_000);
+    return { failed, skipped, again, works, rows, ended, endedRows: read() };
+  });
+  const later = ["syncRoutes", "syncRedirects", "syncLauncher", "syncAccessLocked", "syncLauncher"];
+  const before = ["fillAudiences", "refreshForeignPaths", "syncTunnels", "checkSites", "syncDns"];
+  expect(result.failed.ran).toEqual([...before, "syncGameDns", ...later]);
+  // The failed step counts its whole budget of 4, so Access keeps 40 - 4 - 16 - 3.
+  expect(result.failed.accessBudget).toBe(17);
+  expect(result.failed.rows).toEqual([{ key: "game DNS", state: "open" }]);
+  // The next second sends the push of the new notification (K-1907).
+  expect(result.failed.alarm).toBe(t0 + 1_000);
+  // Until its retry time the step is skipped, spends nothing, and its waiting records wake no alarm.
+  expect(result.skipped.ran).toEqual([...before, ...later]);
+  expect(result.skipped.accessBudget).toBe(21);
+  expect(result.skipped.alarm).toBe(t0 + 5 * 60_000);
+  // The second failure waits twice as long.
+  expect(result.again.ran).toContain("syncGameDns");
+  expect(result.again.alarm).toBe(t0 + 15 * 60_000);
+  expect(result.works.ran).toContain("syncGameDns");
+  expect(result.rows).toEqual([{ key: "game DNS", state: "closed" }]);
+  // The end of the card is a map change, so the waiting Access step runs in the same alarm and closes.
+  expect(result.ended.ran).toContain("syncAccessLocked");
+  expect(result.endedRows).toEqual([
+    { key: "game DNS", state: "closed" },
+    { key: "Access", state: "closed" },
+  ]);
+});

@@ -1,5 +1,6 @@
+import { spawnSync } from "node:child_process";
 import { expect, it } from "vitest";
-import { helperInput, listening, planOf, sudoersLine } from "./doors.ts";
+import { helperInput, listening, planOf, sudoersLine, systemTool, toolProblem } from "./doors.ts";
 
 it("gives the root helper one line per port and per open door and port, without ended doors (K-2005)", () => {
   const plan = {
@@ -43,4 +44,18 @@ it("reads a kept plan only in this daemon's shape, so an old one never stops the
   expect(planOf({ ports: "25565/tcp", doors: [] })).toBeNull();
   expect(planOf({ ports: [], doors: [{ address: "203.0.113.9", endsAt: "soon", ports: [] }] })).toBeNull();
   expect(planOf(null)).toBeNull();
+});
+
+it("finds a system tool outside the PATH, and names a missing tool instead of an empty output (K-2002)", () => {
+  expect(systemTool("visudo", (path) => path === "/usr/sbin/visudo")).toBe("/usr/sbin/visudo");
+  expect(systemTool("visudo", () => false)).toBe("visudo");
+  const missing = spawnSync("kitshn-no-such-tool", ["-cf", "x"], { encoding: "utf8" });
+  expect(toolProblem("visudo", missing, "refused the sudoers line")).toBe("visudo was not found");
+  const refused = spawnSync("/bin/sh", ["-c", "echo '>>> line 1: syntax error' >&2; exit 1"], {
+    encoding: "utf8",
+  });
+  expect(toolProblem("visudo", refused, "refused the sudoers line")).toBe(
+    "visudo refused the sudoers line: >>> line 1: syntax error",
+  );
+  expect(toolProblem("visudo", spawnSync("/bin/sh", ["-c", "exit 0"], { encoding: "utf8" }))).toBeNull();
 });

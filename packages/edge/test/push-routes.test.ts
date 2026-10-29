@@ -58,6 +58,34 @@ interface Pushes {
   flushPushes(): Promise<void>;
   pushQueue: Array<{ notification: Notification; device: number | null; tries: number }>;
   scheduleAlarm(): Promise<void>;
+  sql(query: string, ...bindings: Array<string | number | null>): unknown;
+  load(): void;
+}
+
+/**
+ * A fresh object with one device per number and no alarm. Objects share the isolate and its fetch spy, and an alarm
+ * of another object can send while a test runs, so a test counts only the pushes to its own devices.
+ */
+async function pushObject(name: string, numbers: ReadonlyArray<number>) {
+  const stub = env.KITSHN.getByName(name);
+  const devices = await Promise.all(numbers.map((n) => browserDevice(`https://push.example.com/send/${n}`)));
+  await runInDurableObject(stub, async (instance, state) => {
+    await state.storage.deleteAlarm();
+    const kitshn = instance as unknown as Pushes;
+    kitshn.scheduleAlarm = async () => {};
+    for (const device of devices)
+      kitshn.sql(
+        `INSERT INTO push_subscriptions (endpoint, p256dh, auth, email, label, levels, created_at)
+         VALUES (?, ?, ?, 'owner@example.com', 'Pixel', '["warn","error"]', 0)`,
+        device.endpoint,
+        device.p256dh,
+        device.auth,
+      );
+  });
+  const endpoints = new Set(devices.map((device) => device.endpoint));
+  const pushesIn = (sent: { mock: { calls: Array<Parameters<typeof fetch>> } }) =>
+    sent.mock.calls.filter(([input]) => endpoints.has(input instanceof Request ? input.url : String(input)));
+  return { stub, pushesIn };
 }
 
 it("keeps the VAPID key out of the snapshot, checks the keys, limits the test push, and removes a device (K-1907)", async () => {
@@ -112,53 +140,30 @@ it("deletes a device on 404 or 410, and keeps it on 401 or 403 (K-1907)", async 
 });
 
 it("sends at most 5 pushes in one run and keeps the rest for the next alarm (K-1907, K-406)", async () => {
-  stubAccessCerts();
-  for (const n of [1, 2, 3, 4, 5, 6, 7])
-    expect(
-      (await call("/api/push/subscribe", await browserDevice(`https://push.example.com/send/${n}`))).status,
-    ).toBe(200);
-  vi.restoreAllMocks();
+  const { stub, pushesIn } = await pushObject("push-run", [1, 2, 3, 4, 5, 6, 7]);
   const sent = vi
     .spyOn(globalThis, "fetch")
     .mockImplementation(async () => new Response(null, { status: 201 }));
-  const waiting = await runInDurableObject(env.KITSHN.getByName("kitshn"), async (instance) => {
+  const waiting = await runInDurableObject(stub, async (instance) => {
     const kitshn = instance as unknown as Pushes;
-    kitshn.scheduleAlarm = async () => {};
     kitshn.pushQueue = [{ notification: failed, device: null, tries: 0 }];
     await kitshn.flushPushes();
     return kitshn.pushQueue.length;
   });
-  expect(sent).toHaveBeenCalledTimes(5);
+  expect(pushesIn(sent)).toHaveLength(5);
   expect(waiting).toBe(2);
 });
 
 it("sends at most 5 pushes in one alarm run, also when its reconcile opens another notification (K-1907, K-406)", async () => {
-  // A fresh object of its own: in the shared one, an alarm that workerd started for an earlier test can still run, and
-  // its end flush would send pushes too. Here nothing schedules work before the test takes the alarm away.
-  const stub = env.KITSHN.getByName("push-budget");
   // Exactly 5 devices: a first flush empties the queue, so before the fix the reconcile's push started a second one.
-  const devices = await Promise.all(
-    [11, 12, 13, 14, 15].map((n) => browserDevice(`https://push.example.com/send/${n}`)),
-  );
-  vi.restoreAllMocks();
+  const { stub, pushesIn } = await pushObject("push-budget", [11, 12, 13, 14, 15]);
+  // Another object sends 2 pushes while this alarm runs, as a leftover alarm of an earlier test does.
+  const other = await pushObject("push-other", [21, 22]);
   const sent = vi
     .spyOn(globalThis, "fetch")
     .mockImplementation(async () => new Response(null, { status: 201 }));
-  await runInDurableObject(stub, async (instance, state) => {
-    await state.storage.deleteAlarm();
-    const kitshn = instance as unknown as Pushes & {
-      sql(query: string, ...bindings: Array<string | number | null>): unknown;
-      load(): void;
-    };
-    kitshn.scheduleAlarm = async () => {};
-    for (const device of devices)
-      kitshn.sql(
-        `INSERT INTO push_subscriptions (endpoint, p256dh, auth, email, label, levels, created_at)
-         VALUES (?, ?, ?, 'owner@example.com', 'Pixel', '["warn","error"]', 0)`,
-        device.endpoint,
-        device.p256dh,
-        device.auth,
-      );
+  await runInDurableObject(stub, async (instance) => {
+    const kitshn = instance as unknown as Pushes;
     // A push waits already, and the alarm's broadcast (an ended mute changes the bell) opens a deploy notification.
     kitshn.sql(
       "INSERT INTO resources (id, body) VALUES ('shop', ?)",
@@ -183,10 +188,13 @@ it("sends at most 5 pushes in one alarm run, also when its reconcile opens anoth
     kitshn.load();
     kitshn.pushQueue = [{ notification: failed, device: null, tries: 0 }];
   });
-  sent.mockClear();
-  await runInDurableObject(stub, (instance) => instance.alarm());
-  const pushes = sent.mock.calls.filter(([input]) =>
-    String(input instanceof Request ? input.url : input).includes("push.example.com"),
-  );
-  expect(pushes).toHaveLength(5);
+  await runInDurableObject(other.stub, (instance) => {
+    (instance as unknown as Pushes).pushQueue = [{ notification: failed, device: null, tries: 0 }];
+  });
+  await Promise.all([
+    runInDurableObject(stub, (instance) => instance.alarm()),
+    runInDurableObject(other.stub, (instance) => instance.alarm()),
+  ]);
+  expect(pushesIn(sent)).toHaveLength(5);
+  expect(other.pushesIn(sent)).toHaveLength(2);
 });

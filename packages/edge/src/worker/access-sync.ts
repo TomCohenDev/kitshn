@@ -78,7 +78,38 @@ export const unclearAnswer = (error: unknown) =>
  * (after an unclear answer), so least access wins.
  */
 const lowers = (row: AccessRow, body: string) =>
-  row.body === "" ? row.cfId !== "" : removesPolicy(row.body, body);
+  row.body === ""
+    ? row.cfId !== ""
+    : row.key.startsWith("policy:")
+      ? narrowsPolicy(row.body, body)
+      : removesPolicy(row.body, body);
+
+/**
+ * K-407: a policy body takes access away when it drops a rule of `include`, or changes any other field of the wanted
+ * body but its name (a new `require`, a passkey check). Extra fields of a body that Cloudflare served count for nothing.
+ * A member out of an "all must match" circle also counts, which fails safe: one more retry and a red card.
+ */
+const narrowsPolicy = (before: string, after: string) => {
+  const { include: was = [], ...wasRest } = JSON.parse(before) as Record<string, unknown> & {
+    include?: ReadonlyArray<unknown>;
+  };
+  const { include: now = [], ...nowRest } = JSON.parse(after) as Record<string, unknown> & {
+    include?: ReadonlyArray<unknown>;
+  };
+  // "Everyone" lets anyone in, so it never takes access away.
+  if (nowRest["decision"] === "bypass" && now.some((rule) => deepEqual(rule, { everyone: {} }))) return false;
+  return (
+    was.some((rule) => !now.some((kept) => deepEqual(rule, kept))) ||
+    // The name gives no access, so a renamed circle does not lower it.
+    Object.entries(nowRest).some(([key, value]) => key !== "name" && !deepEqual(wasRest[key], value))
+  );
+};
+
+/** K-409: the Cloudflare ids of the applications whose accepted body uses this policy. */
+const appsUsing = (rows: ReadonlyMap<string, AccessRow>, policyId: string) =>
+  [...rows.values()]
+    .filter((row) => row.key.startsWith("app:") && row.cfId !== "" && policyIds(row.body).includes(policyId))
+    .map((row) => row.cfId);
 
 /**
  * True when the write of this body waits. A refusal (`tried` is this body) waits for the daily retry (K-408), and one
@@ -626,23 +657,31 @@ export async function syncAccess(
         : await api<Named>("POST", `${base}/${kind}`, request);
       // A missing tag is read again from the list of applications (K-603).
       const aud = kind === "apps" ? (result.aud ?? "") : "";
-      // K-409: a removed share takes effect at once, so the sessions of the application end. Until the
-      // revoke succeeds, the row keeps the old body (what Cloudflare served, read back when unknown), so the next run
-      // writes and revokes again. A create that landed after an unclear answer is read back too.
+      // K-409: a removed share, or a person out of a circle, takes effect at once, so the sessions of each application
+      // that loses access end. Until every revoke succeeds, the row keeps the old body (what Cloudflare served, read back
+      // when unknown), so the next run writes and revokes again. A create that landed after an unclear answer is read
+      // back too. Page and file logins need no revoke: the Worker checks the shares on each request (K-404).
       const before = live !== null ? JSON.stringify(live) : (row?.body ?? "");
-      if (
-        kind === "apps" &&
-        row !== undefined &&
-        (row.cfId || live !== null) &&
-        removesPolicy(before, body)
-      ) {
+      const known = row !== undefined && (row.cfId !== "" || live !== null) && before !== "";
+      const ending = !known
+        ? []
+        : kind === "apps"
+          ? removesPolicy(before, body)
+            ? [result.id]
+            : []
+          : narrowsPolicy(before, body)
+            ? appsUsing(store.rows, result.id)
+            : [];
+      for (const appId of ending) {
         if (!spend()) {
           store.put({ key, cfId: result.id, aud, body: before, tried: "", error: null });
           return false;
         }
         try {
-          await api("POST", `${base}/apps/${result.id}/revoke_tokens`);
+          await api("POST", `${base}/apps/${appId}/revoke_tokens`);
         } catch (error) {
+          // An application that is gone has no sessions left.
+          if (isNotFound(error)) continue;
           store.put({
             key,
             cfId: result.id,

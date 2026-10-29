@@ -22,6 +22,8 @@ const RIGHT_HELP: Record<MachineRight, string> = {
     "Writes code: a GitHub token that pushes to one repo and opens pull requests. It never deploys.",
   addsAudiences: "Adds audiences: the machine adds an outside service that may receive its passes.",
   getsPasses: "Gets passes: a 5-minute pass for an outside service of the audience list.",
+  addsPages:
+    "Adds pages: the machine publishes pages, files and folder sites into its agent circles, and sets their addresses and redirects.",
 };
 
 /**

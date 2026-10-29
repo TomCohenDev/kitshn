@@ -72,6 +72,9 @@ import {
   type AskResult,
   allowedFor,
   connectText,
+  FORWARD_HEADERS,
+  FORWARD_WINDOW_MS,
+  forwardText,
   fingerprintOf,
   parseAllowances,
   parsePublicKey,
@@ -567,6 +570,8 @@ interface DeployFacts {
   readonly repoCards: ReadonlyArray<{ repo_id: string; resource_id: string }>;
   /** K-817, K-901: the Compose deploys that are planned, running or done and not expired, with their addresses. */
   readonly composeRuns: ReadonlyArray<ComposeRun>;
+  /** K-718: the newest deploy of each card, for `/agent/state`. */
+  readonly newest: ReadonlyMap<string, { id: string; state: string; reason: string | null }>;
 }
 
 /** The POST paths that take a client message as their body. */
@@ -667,6 +672,8 @@ export class Kitshn extends DurableObject<Env> {
   }
   /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
   private stuckShares = new Set<string>();
+  /** K-1714: the nonces of forwarded calls in the last minute, so a copied call does not run twice. */
+  private forwardNonces = new Map<string, number>();
   /** K-1716: false once `github_tokens` is known to be empty, so a broadcast reads no row of it. True after a wake. */
   private tokensLive = true;
   private accessWarnings: Array<string> = [];
@@ -2845,6 +2852,7 @@ export class Kitshn extends DurableObject<Env> {
         [...cards].map((resource_id) => ({ repo_id, resource_id })),
       ),
       composeRuns,
+      newest,
     };
     return this.deployFacts;
   }
@@ -7119,6 +7127,104 @@ export class Kitshn extends DurableObject<Env> {
    * K-718: the agent paths. K-1710: a machine runs them too, through its asks; `approved` is the right that its
    * approver circle gave for this one ask (K-1723).
    */
+  /**
+   * K-1714: a call of a machine's token over HTTP comes only from its daemon, which forwards one call of a local agent
+   * and signs it with the machine key. kitshn checks the signature, the right of the path with its mode and
+   * conditions, the pause, and writes one ask event.
+   */
+  private async forwardedRequest(path: string, request: Request, caller: Caller, machine: Machine) {
+    const now = Date.now();
+    const url = new URL(request.url);
+    const call = { method: request.method, path: `${url.pathname}${url.search}` };
+    const header = (name: string) => request.headers.get(name) ?? "";
+    const at = Number(header(FORWARD_HEADERS.at));
+    const nonce = header(FORWARD_HEADERS.nonce);
+    const labelsText = header(FORWARD_HEADERS.labels) || "{}";
+    const refuse = (status: number, error: string, need?: MachineRight) =>
+      Response.json({ error, ...(need ? { need } : {}) }, { status });
+    if (machine.key?.kind !== "public")
+      return refuse(403, "This machine has no key, so it cannot forward a call (K-1714).");
+    if (
+      !Number.isFinite(at) ||
+      Math.abs(now - at) > FORWARD_WINDOW_MS ||
+      nonce.length < 16 ||
+      this.forwardNonces.has(nonce)
+    )
+      return refuse(403, "The forwarded call is too old, or its nonce was used (K-1714).");
+    const labelsHash = await sha256Hex(labelsText);
+    const valid = await verifyForHosts(
+      machine.key.publicKey,
+      adminHosts(this.env),
+      (host) => forwardText(host, machine.id, { ...call, at, nonce, labelsHash }),
+      header(FORWARD_HEADERS.signature),
+    );
+    if (!valid)
+      return refuse(403, "The signature of the forwarded call does not fit the machine key (K-1714).");
+    for (const [old, until] of this.forwardNonces) if (until < now) this.forwardNonces.delete(old);
+    this.forwardNonces.set(nonce, now + FORWARD_WINDOW_MS);
+    const prefixes = this.attesterPrefixesOf(machine.id);
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(labelsText);
+    } catch {
+      parsed = null;
+    }
+    const labels = Object.fromEntries(
+      Object.entries(isRecord(parsed) ? parsed : {}).filter(
+        (entry): entry is [string, string] =>
+          typeof entry[1] === "string" && prefixes.some((prefix) => entry[0].startsWith(prefix)),
+      ),
+    );
+    const target = `${call.method} ${call.path}`.slice(0, 512);
+    const answer = await (async (): Promise<Response> => {
+      if (this.state.paused) return refuse(409, "kitshn is paused, so machines wait until Resume (K-1504).");
+      const right = forwardRight(path, request.method);
+      if (right === undefined)
+        return refuse(403, `A machine forwards no call to ${request.method} ${path} (K-1714).`);
+      if (right !== null) {
+        const mode = machineRightMode(this.state, machine.id, right, now);
+        if (mode === null) {
+          // A forwarded call carries a body that a proposal does not keep, so it cannot wait for an approval.
+          return refuse(
+            403,
+            `The right "${MACHINE_RIGHT_NAMES[right]}" is off for this machine (K-1720). To ask the Owner, ask them to turn it on for this machine.`,
+            right,
+          );
+        }
+        if (mode.mode === "ask")
+          return refuse(
+            409,
+            `The right "${MACHINE_RIGHT_NAMES[right]}" asks ${this.state.circles.get(mode.circleId)?.name ?? mode.circleId}, and this call cannot wait for an approval. The owner sets it to automatic (K-1714).`,
+          );
+        const failed = conditionProblem(mode.conditions, labels, prefixes);
+        if (failed) return refuse(403, failed);
+      }
+      return this.agentRequest(path, request, {
+        ...caller,
+        actor: { _tag: "machine", machineId: machine.id, name: machine.name },
+      });
+    })();
+    const detail = answer.ok
+      ? null
+      : await answer
+          .clone()
+          .json()
+          .then((body) => (isRecord(body) && typeof body["error"] === "string" ? body["error"] : null))
+          .catch(() => null);
+    this.askEvent(
+      now,
+      machine,
+      "forward",
+      target,
+      null,
+      labels,
+      answer.ok
+        ? { outcome: "done", result: null }
+        : { outcome: "refused", reason: detail ?? `answered ${answer.status}` },
+    );
+    return answer;
+  }
+
   private async agentRequest(
     path: string,
     request: Request,
@@ -7126,29 +7232,23 @@ export class Kitshn extends DurableObject<Env> {
     approved: MachineRight | null = null,
   ) {
     const now = Date.now();
-    // K-1714: a machine asks only over its signed connection (`ask`), never with its token over HTTP, so the
-    // modes, the pause check and the ask events always apply.
+    // K-1714: a machine's token over HTTP is a call that its daemon forwarded and signed; asks use the connection.
     const machine = machineOf(this.state, caller.visitor);
     if (machine && caller.actor._tag !== "machine")
-      return Response.json(
-        {
-          error:
-            "A machine asks kitshn over its signed connection with kitshn agent, not over HTTP (K-1714).",
-        },
-        { status: 403 },
-      );
+      return this.forwardedRequest(path, request, caller, machine);
     // K-1712: a machine's job and deploy need their right now: automatic, or the approval of this ask.
     const machineMay = (right: MachineRight) => {
       if (!machine) return true;
-      const mode = machineRightMode(this.state, machine.id, right, now);
-      return mode !== null && (mode.mode === "automatic" || approved === right);
+      // An approval of this call (K-1723, K-1776) counts also when the right is off.
+      return approved === right || machineRightMode(this.state, machine.id, right, now)?.mode === "automatic";
     };
     const machinePaths = ["/agent/state", "/agent/apply", "/agent/jobs", "/agent/deploy"];
     if (
       machine &&
       !machinePaths.includes(path) &&
       !path.startsWith("/agent/jobs/") &&
-      !path.startsWith("/agent/repos/")
+      !path.startsWith("/agent/repos/") &&
+      forwardRight(path, request.method) === undefined
     )
       return Response.json({ error: `A machine has no ask for ${path} yet (K-1711).` }, { status: 403 });
     const own = circlesOf(this.state, caller.visitor, now);
@@ -7207,6 +7307,8 @@ export class Kitshn extends DurableObject<Env> {
       }
     };
     if (path === "/agent/state" && request.method === "GET") {
+      const deploys = this.deploys();
+      const checked = new Set(this.uptimeTargets().map((card) => card.id));
       // K-1726: a machine sees the open asks of the circles that it is a member of, so its agent can answer them.
       const answerable = machine
         ? this.openProposals().filter((proposal) =>
@@ -7235,6 +7337,8 @@ export class Kitshn extends DurableObject<Env> {
           const resource = this.state.resources.get(id);
           if (!resource) return [];
           const { kind, name, addresses, status } = resource;
+          const backup = this.latestBackups().get(id);
+          const uptime = checked.has(id) ? (this.uptime.get(id) ?? UP) : null;
           return [
             {
               id,
@@ -7247,6 +7351,10 @@ export class Kitshn extends DurableObject<Env> {
               circles: circlesHolding(this.state, id)
                 .map((c) => c.id)
                 .filter(visible),
+              // K-718: what the owner snapshot shows of the card, so an agent needs no owner read.
+              deploy: deploys.newest.get(id) ?? null,
+              backup: backup ? { at: backup.at, state: backup.state, error: backup.error } : null,
+              uptime: uptime ? { up: uptime.up, since: uptime.since } : null,
             },
           ];
         }),
@@ -7488,7 +7596,17 @@ export class Kitshn extends DurableObject<Env> {
       );
     }
     if (action === "github-token")
-      return event(await this.askGitHubToken(machine, target, raw["body"], reason, labels, now));
+      return event(
+        await this.askGitHubToken(
+          machine,
+          target,
+          raw["body"],
+          reason,
+          labels,
+          now,
+          raw["askOwner"] === true,
+        ),
+      );
     // K-1773: an agent removes an audience that its machine added at once, because that lowers access (K-715).
     if (action === "audience-remove") {
       const [row] = this.sql<{ added_by: string | null }>(
@@ -7533,16 +7651,34 @@ export class Kitshn extends DurableObject<Env> {
         result: this.askEventsWithLabel(target.slice(0, equals), target.slice(equals + 1), machine.id),
       };
     }
+    const askOwner = raw["askOwner"] === true;
     const needs = ASK_RIGHT[action];
     if (needs === "member")
       throw new Error(`The action ${action} needs membership, and only approve and deny do.`);
     if (needs !== "none" && needs !== "apply") {
       const mode = machineRightMode(this.state, machine.id, needs, now);
-      if (mode === null)
-        return event({
-          outcome: "refused",
-          reason: `The right "${MACHINE_RIGHT_NAMES[needs]}" is off for this machine. The owner turns it on in its agent circle (K-1720).`,
-        });
+      // K-1776: a right that is off refuses and names itself; `askOwner` sends this one call to the Owner instead.
+      if (mode === null) {
+        const owned =
+          WINDOW_ACTIONS.has(action) &&
+          this.inApprovedWindow(machine.id, action, target, needs, OWNER_CIRCLE_ID, now);
+        if (!owned && askOwner)
+          return event(
+            await this.propose(
+              machine,
+              action,
+              target,
+              raw["body"],
+              reason,
+              labels,
+              needs,
+              OWNER_CIRCLE_ID,
+              now,
+            ),
+          );
+        if (!owned) return event(offRight(needs));
+        return event(await this.runAsk(machine, action, target, raw["body"], needs, labels));
+      }
       const failed = conditionProblem(mode.conditions, labels, prefixes);
       if (failed) return event({ outcome: "refused", reason: failed });
       if (
@@ -7577,6 +7713,23 @@ export class Kitshn extends DurableObject<Env> {
               mode.circleId,
               now,
             ),
+          );
+        // K-1776: only "publishes" stands in the way, and it is off.
+        if (mode === null && typeof withApproval !== "string")
+          return event(
+            askOwner
+              ? await this.propose(
+                  machine,
+                  action,
+                  target,
+                  raw["body"],
+                  reason,
+                  labels,
+                  "publishes",
+                  OWNER_CIRCLE_ID,
+                  now,
+                )
+              : offRight("publishes"),
           );
         return event({ outcome: "refused", reason: edits });
       }
@@ -7934,6 +8087,7 @@ export class Kitshn extends DurableObject<Env> {
     reason: string | null,
     labels: Readonly<Record<string, string>>,
     now: number,
+    askOwner: boolean,
   ): Promise<AskOutcome> {
     const owner = fullName.split("/")[0] ?? "";
     if (matchProblem(fullName) !== null || !fullName.includes("/") || fullName.includes("*"))
@@ -7946,18 +8100,37 @@ export class Kitshn extends DurableObject<Env> {
     const wanted = isRecord(body) ? body["permission"] : "auto";
     const write =
       wanted === "write" ||
-      (wanted !== "read" && codeRightMode(this.state, machine.id, "writesCode", fullName, now) !== null);
+      (wanted !== "read" &&
+        (codeRightMode(this.state, machine.id, "writesCode", fullName, now) !== null ||
+          this.inApprovedWindow(machine.id, "github-token", fullName, "writesCode", OWNER_CIRCLE_ID, now)));
     const right: MachineRight = write ? "writesCode" : "readsCode";
     const mode = codeRightMode(this.state, machine.id, right, fullName, now);
     const failed = mode
       ? conditionProblem(mode.conditions, labels, this.attesterPrefixesOf(machine.id))
       : null;
     if (failed) return { outcome: "refused", reason: failed };
-    if (mode === null)
-      return {
-        outcome: "refused",
-        reason: `The right "${MACHINE_RIGHT_NAMES[right]}" is off for ${fullName} on this machine: a repo group or repo card in its agent circle gives it (K-1733).`,
-      };
+    // K-1776: an off right names itself, and `askOwner` sends this one token ask to the Owner.
+    if (mode === null) {
+      const permission = write ? "write" : "read";
+      if (this.inApprovedWindow(machine.id, "github-token", fullName, right, OWNER_CIRCLE_ID, now))
+        return this.mintToken(machine, fullName, permission);
+      if (askOwner)
+        return this.propose(
+          machine,
+          "github-token",
+          fullName,
+          { permission },
+          reason,
+          labels,
+          right,
+          OWNER_CIRCLE_ID,
+          now,
+        );
+      return offRight(
+        right,
+        `for ${fullName}: a repo group or repo card in its agent circle gives it (K-1733)`,
+      );
+    }
     if (
       mode.mode === "ask" &&
       !this.inApprovedWindow(machine.id, "github-token", fullName, right, mode.circleId, now)
@@ -8289,10 +8462,12 @@ export class Kitshn extends DurableObject<Env> {
       proposal.right === "readsCode" || proposal.right === "writesCode"
         ? codeRightMode(this.state, proposal.machineId, proposal.right, proposal.target, now)
         : machineRightMode(this.state, proposal.machineId, proposal.right, now);
-    if (mode?.mode !== "ask" || mode.circleId !== proposal.circleId)
+    // K-1776: an Owner ask of an off right stays allowed while the right stays off.
+    const ownerAsk = mode === null && proposal.circleId === OWNER_CIRCLE_ID;
+    if (!ownerAsk && (mode?.mode !== "ask" || mode.circleId !== proposal.circleId))
       return `the right "${MACHINE_RIGHT_NAMES[proposal.right]}" no longer asks this circle.`;
     const failed = conditionProblem(
-      mode.conditions,
+      mode?.conditions,
       proposal.labels,
       this.attesterPrefixesOf(proposal.machineId),
     );
@@ -8354,7 +8529,7 @@ export class Kitshn extends DurableObject<Env> {
   private askEvent(
     at: number,
     machine: Machine,
-    action: AskAction,
+    action: AskAction | "forward",
     target: string,
     reason: string | null,
     labels: Readonly<Record<string, string>>,
@@ -11442,6 +11617,37 @@ async function readStart(stream: ReadableStream<Uint8Array>, limit: number): Pro
 }
 
 /** K-1722: a row of the proposals table. */
+/**
+ * K-1714: the right that a call forwarded by a daemon needs: a machine right, null for a call that needs only a card
+ * that the machine manages (K-718 checks it), or undefined for a path that a machine never forwards.
+ */
+export function forwardRight(path: string, method: string): MachineRight | null | undefined {
+  const card = path.startsWith("/agent/cards/") ? path.slice("/agent/cards/".length) : null;
+  if (path === "/agent/library" && method === "POST") return "addsPages";
+  if (path.startsWith("/agent/library/") && path.endsWith("/previous") && method === "POST")
+    return "addsPages";
+  if (path.startsWith("/agent/library/") && path.endsWith("/content") && method === "GET") return null;
+  if (path.startsWith("/agent/sites/") && method === "POST") return "addsPages";
+  if (card !== null && card.endsWith("/address") && method === "POST") return "addsPages";
+  if (card !== null && card.includes("/redirects") && (method === "POST" || method === "DELETE"))
+    return "addsPages";
+  if (card !== null && card.endsWith("/handover") && method === "POST") return "addsApps";
+  if (path === "/agent/logs" && method === "POST") return null;
+  return undefined;
+}
+
+const sha256Hex = async (text: string) =>
+  [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+
+/** K-1776: the refusal of a right that is off: one line that names the right, and the right for the CLI's offer. */
+const offRight = (right: MachineRight, scope = "for this machine (K-1720)"): AskOutcome => ({
+  outcome: "refused",
+  reason: `The right "${MACHINE_RIGHT_NAMES[right]}" is off ${scope}.`,
+  need: right,
+});
+
 interface ProposalRow extends Record<string, SqlStorageValue> {
   readonly id: string;
   readonly machine_id: string;

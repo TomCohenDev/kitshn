@@ -1,5 +1,6 @@
 import type { LogAnswer, LogLine, LogSearch } from "./logs.ts";
 import type { BackupReport } from "./backups.ts";
+import type { MachineRight } from "./model.ts";
 /** A joined machine (K-602). Its resource card has the same id and the kind `machine`. */
 export interface Machine {
   readonly id: string;
@@ -189,13 +190,16 @@ export interface AskWire {
   readonly labels?: Readonly<Record<string, string>>;
   /** K-1752: the labels that an attester of the machine set; only these count for rights (K-1754). */
   readonly attested?: Readonly<Record<string, string>>;
+  /** K-1776: a right that is off sends this one call to the Owner instead of a refusal. */
+  readonly askOwner?: boolean;
 }
 
 /** K-1710, K-1722: kitshn's answer to one ask. */
 export type AskOutcome =
   | { readonly outcome: "done"; readonly result: unknown }
   | { readonly outcome: "waiting"; readonly proposalId: string }
-  | { readonly outcome: "refused"; readonly reason: string }
+  /** K-1776: `need` names the right that is off, so the CLI can offer the ask to the Owner. */
+  | { readonly outcome: "refused"; readonly reason: string; readonly need?: MachineRight }
   /** K-1760: the owner of the repo is "not kitshn"; the machine uses its own login. */
   | { readonly outcome: "not-kitshn"; readonly reason: string };
 
@@ -327,6 +331,37 @@ export const connectText = (host: string, machineId: string, challenge: string) 
 /** K-1705: what the old key signs to hand over to the new one, bound to the connection like `connectText`. */
 export const rotateText = (host: string, machineId: string, challenge: string, publicKey: string) =>
   ["kitshn-rotate-v1", signedHost(host), machineId, challenge, publicKey].join("\n");
+
+/**
+ * K-1714: what the daemon signs for one call that it forwards to `/agent` over HTTP for a local agent: the method, the
+ * path with its query, the time in ms, a random nonce and the SHA-256 hex of the attested labels as JSON.
+ */
+export const forwardText = (
+  host: string,
+  machineId: string,
+  call: { method: string; path: string; at: number; nonce: string; labelsHash: string },
+) =>
+  [
+    "kitshn-forward-v1",
+    signedHost(host),
+    machineId,
+    call.method,
+    call.path,
+    String(call.at),
+    call.nonce,
+    call.labelsHash,
+  ].join("\n");
+
+/** K-1714: the headers of a forwarded call. */
+export const FORWARD_HEADERS = {
+  signature: "x-kitshn-machine-signature",
+  at: "x-kitshn-machine-at",
+  nonce: "x-kitshn-machine-nonce",
+  labels: "x-kitshn-attested",
+} as const;
+
+/** K-1714: a forwarded call is valid this long after the daemon signed it. */
+export const FORWARD_WINDOW_MS = 60_000;
 
 export async function signText(key: MachinePrivateKey, text: string): Promise<string> {
   const privateKey = await crypto.subtle.importKey("jwk", key, ED25519, false, ["sign"]);

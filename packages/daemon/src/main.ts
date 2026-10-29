@@ -7,6 +7,8 @@ import {
   parsePrivateKey,
   rotateText,
   signText,
+  forwardText,
+  FORWARD_HEADERS,
   type Command,
   type DaemonMessage,
   type LiveSiteReport,
@@ -20,7 +22,14 @@ import type { BackupReport } from "@kitshn/edge/backups";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { ASK_ACTIONS, type Answer, type AskAction, type Request, WINDOW_ACTIONS } from "@kitshn/local";
+import {
+  ASK_ACTIONS,
+  type Answer,
+  type AskAction,
+  MAX_FORWARD_BYTES,
+  type Request,
+  WINDOW_ACTIONS,
+} from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { backup, finishRestores, restore, unpauseMarked } from "./backup.ts";
 import { keyPlan } from "./keys.ts";
@@ -74,6 +83,7 @@ import {
   expectedDaemonUid,
   expectedHash,
   isDigits,
+  localSocket,
   pathsFor,
   releaseAsset,
   serviceCommands,
@@ -86,6 +96,8 @@ import { type SiteEntry, addSite, parseSiteFile, probe, targetOf } from "./sites
 import { RUNNING_FORMAT, VOLUME_FORMAT, idleVolumes, volumeRemoveRefusal } from "./volumes.ts";
 import { keepBuild, keptId, keptTag, rollbackOverride, serviceImages, staleTags } from "./keep.ts";
 import { TokenCache } from "./tokens.ts";
+import { AGENT_USAGE, type AgentTransport, runAgentCommand } from "kitshn/agent";
+import { CliError } from "kitshn/cli-error";
 
 declare const KITSHN_VERSION: string;
 const VERSION = typeof KITSHN_VERSION === "string" ? KITSHN_VERSION : "dev";
@@ -234,11 +246,38 @@ async function statusCommand() {
   );
 }
 
-/** K-701: where the commands find the daemon. `KITSHN_LOCAL_SOCKET` names the socket for a user other than its own. */
-const socketPath = process.env["KITSHN_LOCAL_SOCKET"] || paths.socket;
+/** K-701: where the commands find the daemon: their own socket, or the one trusted shared socket in /tmp. */
+const foundSocket = localSocket(
+  process.env,
+  paths,
+  (path) => {
+    try {
+      const stat = lstatSync(path);
+      return { uid: stat.uid, mode: stat.mode, directory: stat.isDirectory(), socket: stat.isSocket() };
+    } catch {
+      return null;
+    }
+  },
+  (() => {
+    try {
+      return readdirSync("/tmp");
+    } catch {
+      return [];
+    }
+  })(),
+  (uid) => {
+    const name = spawnSync("id", ["-nu", String(uid)], { encoding: "utf8" });
+    return name.status === 0 ? name.stdout.trim() : null;
+  },
+);
+const socketPath = typeof foundSocket === "string" ? foundSocket : paths.socket;
 const daemonUid = expectedDaemonUid(process.env, socketPath, process.getuid!());
 /** K-701: why no daemon answers. A shared folder that another user made first keeps the daemon out of it. */
 function notRunning(): string {
+  if (typeof foundSocket !== "string")
+    return "refused" in foundSocket
+      ? foundSocket.refused
+      : `several daemons share a socket here (${foundSocket.several.join(", ")}); set KITSHN_LOCAL_SOCKET to the one to use.`;
   const folder = dirname(socketPath);
   if (socketPath.startsWith("/tmp/kitshn-") && typeof daemonUid === "number" && existsSync(folder)) {
     const problem = sharedFolderProblem(lstatSync(folder), statSync(dirname(folder)), daemonUid);
@@ -278,6 +317,49 @@ async function attestationsFromEnv(): Promise<Record<string, string>> {
   return Object.fromEntries(
     names.flatMap((name) => (process.env[name] ? [[name, process.env[name] as string]] : [])),
   );
+}
+
+/**
+ * K-1714: the agent commands (publish, address, logs, repo, redirect) reach `/agent` through the daemon, which adds
+ * the machine identity and the attested labels, so the agent needs no token.
+ */
+function daemonTransport(): AgentTransport {
+  if (typeof daemonUid === "string") throw new CliError(daemonUid);
+  const peer = { platform, daemonUid: daemonUid as number };
+  const ask = async (request: Request) => {
+    const outcome = await askLocal(socketPath, request, 120_000, peer).catch((error: unknown) => {
+      throw new CliError(error instanceof Error ? error.message : String(error));
+    });
+    if (outcome.kind === "not-running") throw new CliError(notRunning());
+    if (outcome.answer.type === "error") throw new CliError(outcome.answer.error);
+    return outcome.answer;
+  };
+  return {
+    server: async () => {
+      const answer = await ask({ id: "1", type: "status" });
+      const server = answer.type === "status" ? answer.status.server : undefined;
+      if (!server) throw new CliError("the daemon names no kitshn server; update the daemon.");
+      return server;
+    },
+    call: async (path, init) => {
+      const body = init.body === undefined ? undefined : Buffer.from(init.body).toString("base64");
+      const answer = await ask({
+        id: "1",
+        type: "forward",
+        method: init.method,
+        path,
+        ...(init.headers ? { headers: { ...init.headers } } : {}),
+        ...(body === undefined ? {} : { body }),
+        attestations: await attestationsFromEnv(),
+      });
+      if (answer.type !== "forward")
+        throw new CliError(`the daemon answered ${answer.type} to a forwarded call.`);
+      return new Response(Buffer.from(answer.body, "base64"), {
+        status: answer.status,
+        headers: answer.contentType ? { "content-type": answer.contentType } : {},
+      });
+    },
+  };
 }
 
 /** K-1763, K-1764: one `github-token` ask for a repo; the answer, or null when the daemon does not run. */
@@ -328,7 +410,12 @@ async function gitCredentialCommand(operation: string | undefined) {
   }
   const why =
     answer.outcome === "refused"
-      ? answer.reason
+      ? answer.need
+        ? offerLine(
+            answer.reason,
+            `run kitshn agent github-token ${repo} --body '{"permission":"write"}' --ask, then push again after the approval`,
+          )
+        : answer.reason
       : answer.outcome === "waiting"
         ? `the token waits for an approval (proposal ${answer.proposalId}); push again after it`
         : "kitshn gave no token";
@@ -393,9 +480,13 @@ async function ghCommand(argv: ReadonlyArray<string>) {
   process.exit(run.status ?? 1);
 }
 
+/** K-1776: one line for a right that is off: why, and how to send the same call to the Owner. */
+const offerLine = (reason: string, how: string) => `${reason} To ask the Owner, ${how}.`;
+
 /**
- * K-1710: `kitshn agent <action> [target] [--reason <text>] [--label <key>=<value>]... [--body <json>]` asks kitshn
- * through the daemon and prints the result as JSON. A waiting ask follows its proposal to the end (K-1722).
+ * K-1710: `kitshn agent <action> [target] [--reason <text>] [--label <key>=<value>]... [--body <json>] [--ask]` asks
+ * kitshn through the daemon and prints the result as JSON. A waiting ask follows its proposal to the end (K-1722).
+ * `--ask` sends a call whose right is off to the Owner (K-1776).
  */
 async function agentCommand(argv: ReadonlyArray<string>) {
   const [action, ...rest] = argv;
@@ -404,11 +495,13 @@ async function agentCommand(argv: ReadonlyArray<string>) {
   let target = "";
   let reason: string | undefined;
   let body: unknown;
+  let askOwner = false;
   const labels: Record<string, string> = {};
   for (let index = 0; index < rest.length; index++) {
     const word = rest[index] ?? "";
     const value = () => rest[++index] ?? fail(`${word} needs a value.`);
     if (word === "--reason") reason = value();
+    else if (word === "--ask") askOwner = true;
     // K-1774: `--aud` is the alias of the JWT claim name.
     else if (word === "--audience" || word === "--aud") target = value();
     else if (word === "--body") {
@@ -436,6 +529,7 @@ async function agentCommand(argv: ReadonlyArray<string>) {
     ...(body === undefined ? {} : { body }),
     ...(reason === undefined ? {} : { reason }),
     ...(Object.keys(labels).length === 0 ? {} : { labels }),
+    ...(askOwner ? { askOwner } : {}),
     attestations: await attestationsFromEnv(),
   };
   const outcome = await askLocal(
@@ -452,7 +546,8 @@ async function agentCommand(argv: ReadonlyArray<string>) {
   if (outcome.kind === "not-running") fail(notRunning());
   const answer = outcome.answer;
   if (answer.type === "error") fail(answer.error);
-  if (answer.type === "ask" && answer.outcome === "refused") fail(answer.reason);
+  if (answer.type === "ask" && answer.outcome === "refused")
+    fail(answer.need ? offerLine(answer.reason, "run the same command again with --ask") : answer.reason);
   if (answer.type === "ask-result" && answer.outcome !== "approved")
     fail(`${answer.outcome}: proposal ${answer.proposalId}${answer.reason ? ` (${answer.reason})` : ""}.`);
   const result =
@@ -489,7 +584,7 @@ function localUsersCommand(action: string | undefined, who: string | undefined) 
   renameSync(temporary, paths.config);
   console.log(`Local users: ${next.length > 0 ? next.join(", ") : "none"}, and the daemon user ${own}.`);
   if (action === "add")
-    console.log(`The user ${who} sets KITSHN_LOCAL_SOCKET=${paths.sharedSocket} to reach the daemon.`);
+    console.log(`The user ${who} now reaches the daemon with kitshn, through ${paths.sharedSocket}.`);
 }
 
 /** K-1404: the takeover of KitSHn 1 data by root, for a daemon user with rootless Docker. */
@@ -1581,6 +1676,79 @@ async function askAgain(
   );
 }
 
+/** K-1752, K-1753: the labels that the attesters of this machine vouch for, each asked with its own token only. */
+async function attestedFor(attestations: Readonly<Record<string, string>> | undefined) {
+  const attested: Record<string, string> = {};
+  for (const attester of attestersOf(readMachineFile()).attesters) {
+    const token = attestations?.[attester.tokenEnv];
+    if (!token) continue;
+    Object.assign(attested, (await attest(attester, token)) ?? {});
+  }
+  return attested;
+}
+
+/**
+ * K-1714: one call of a local agent to `/agent`, with the machine token and a signature of the machine key over the
+ * method, the path, the time, a nonce and the attested labels. Only `x-kitshn-` headers and the content type pass.
+ */
+async function forwardCall(request: Extract<Request, { type: "forward" }>): Promise<Answer> {
+  if (!joined) throw new Error("the daemon has not read machine.json yet.");
+  const key = readKey(keyFile);
+  if (!key)
+    throw new Error("this machine has no key, so it cannot forward a call (K-1714). Run kitshn rekey.");
+  if (!request.path.startsWith("/agent/")) throw new Error("the daemon forwards only /agent calls (K-1714).");
+  const body = request.body === undefined ? undefined : Buffer.from(request.body, "base64");
+  if (body && body.length > MAX_FORWARD_BYTES)
+    throw new Error(
+      `the body is larger than ${MAX_FORWARD_BYTES} bytes, the limit of a forwarded call (K-1714).`,
+    );
+  const labels = JSON.stringify(await attestedFor(request.attestations));
+  const at = Date.now();
+  const nonce = crypto.randomUUID();
+  const labelsHash = createHash("sha256").update(labels).digest("hex");
+  const signature = await signText(
+    key,
+    forwardText(joined.server, joined.machineId, {
+      method: request.method,
+      path: request.path,
+      at,
+      nonce,
+      labelsHash,
+    }),
+  );
+  const passed = Object.fromEntries(
+    Object.entries(request.headers ?? {}).filter(
+      ([name]) => name.toLowerCase().startsWith("x-kitshn-") || name.toLowerCase() === "content-type",
+    ),
+  );
+  const response = await fetch(new URL(request.path, joined.server), {
+    method: request.method,
+    redirect: "error",
+    headers: {
+      ...passed,
+      "CF-Access-Client-Id": joined.clientId,
+      "CF-Access-Client-Secret": joined.clientSecret,
+      [FORWARD_HEADERS.signature]: signature,
+      [FORWARD_HEADERS.at]: String(at),
+      [FORWARD_HEADERS.nonce]: nonce,
+      [FORWARD_HEADERS.labels]: labels,
+    },
+    ...(body ? { body } : {}),
+  });
+  const answer = Buffer.from(await response.arrayBuffer());
+  if (answer.length > MAX_FORWARD_BYTES)
+    throw new Error(
+      `kitshn answered more than ${MAX_FORWARD_BYTES} bytes, the limit of a forwarded call (K-1714).`,
+    );
+  return {
+    id: request.id,
+    type: "forward",
+    status: response.status,
+    contentType: response.headers.get("content-type") ?? "",
+    body: answer.toString("base64"),
+  };
+}
+
 /** K-1710: sends an ask of a local agent over the signed connection, and gives the answer back on the socket. */
 async function askKitshn(
   request: Extract<Request, { type: "ask" }>,
@@ -1595,12 +1763,7 @@ async function askKitshn(
   const { id, type: _type, labels, attestations, ...rest } = request;
   // K-1752, K-1753: only an attester sets the labels of its prefix; the caller's token goes to that attester only.
   const { attesters } = attestersOf(readMachineFile());
-  const attested: Record<string, string> = {};
-  for (const attester of attesters) {
-    const token = attestations?.[attester.tokenEnv];
-    if (!token) continue;
-    Object.assign(attested, (await attest(attester, token)) ?? {});
-  }
+  const attested = await attestedFor(attestations);
   const ask = {
     ...rest,
     ...(labels ? { labels: dropAttested(labels, attesterPrefixes(attesters)) } : {}),
@@ -2049,9 +2212,11 @@ async function answerLocal(
         connection: socket === null ? "disconnected" : challenge === null ? "token-only" : "connected",
         tunnel: tunnelState,
         attesterEnv: attestersOf(readMachineFile()).attesters.map((attester) => attester.tokenEnv),
+        server: joined.server,
       },
     };
   }
+  if (request.type === "forward") return forwardCall(request);
   if (request.type === "forget-token") {
     keptTokens.drop(request.repo);
     return { id, type: "forget-token" };
@@ -2111,6 +2276,13 @@ switch (command) {
   case "agent":
     await agentCommand(args);
     break;
+  case "publish":
+  case "address":
+  case "logs":
+  case "repo":
+  case "redirect":
+    await runAgentCommand(command, args, daemonTransport);
+    break;
   case "local-users":
     localUsersCommand(args[0], args[1]);
     break;
@@ -2138,6 +2310,8 @@ kitshn rekey <code>                     make a new machine key with the key code
 kitshn status                           the machine, its key, its connection to kitshn and its tunnel
 kitshn local-users list|add|remove <u>  who else may use the local socket, as the daemon user (K-701)
 kitshn agent <action> [target]          ask kitshn as this machine (K-1710): --reason, --label k=v, --body json
+kitshn agent ... --ask                  send a call whose right is off to the Owner (K-1776)
+${AGENT_USAGE}
 kitshn setup-git                        git asks kitshn first for github.com tokens (K-1763)
 kitshn gh <args>                        gh with a kitshn token for this repo (K-1764)
 kitshn expose <port|socket> --name <n>  share a local server at <n>.<zone> (K-1104); --dev sets Host localhost

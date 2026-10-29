@@ -3,7 +3,14 @@
 import { Schema } from "effect";
 
 /** The longest line, in UTF-16 code units, that the daemon reads; a longer line ends the connection. */
-export const MAX_LINE_LENGTH = 64 * 1024;
+/** K-1714: room for a forwarded body of `MAX_FORWARD_BYTES` in base64 and its request. */
+export const MAX_LINE_LENGTH = 17 * 1024 * 1024;
+
+/**
+ * K-1714: the largest body that the daemon forwards, each way. Known limit: a bigger file needs an agent key; revisit
+ * when an agent needs to publish one through its machine.
+ */
+export const MAX_FORWARD_BYTES = 12 * 1024 * 1024;
 
 const Id = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64));
 
@@ -54,6 +61,8 @@ const Ask = Schema.Struct({
   attestations: Schema.optionalKey(
     Schema.Record(Schema.String, Schema.String.check(Schema.isMaxLength(4096))),
   ),
+  /** K-1776: a right that is off sends this one call to the Owner for approval instead of refusing it. */
+  askOwner: Schema.optionalKey(Schema.Boolean),
 });
 export type Ask = typeof Ask.Type;
 
@@ -64,6 +73,21 @@ export const Request = Schema.Union([
   Schema.Struct({ id: Id, type: Schema.Literal("rotate-key") }),
   /** K-1706: `kitshn rekey` saved a new key; connect again with it. */
   Schema.Struct({ id: Id, type: Schema.Literal("reconnect") }),
+  /**
+   * K-1714: one HTTP call to `/agent` that the daemon sends with the machine token and signs with the machine key, for
+   * the commands that publish, set addresses, read logs and make repos. `body` is base64.
+   */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("forward"),
+    method: Schema.Literals(["GET", "POST", "DELETE"]),
+    path: Schema.String.check(Schema.isMaxLength(2048)),
+    headers: Schema.optionalKey(Schema.Record(Schema.String, Schema.String.check(Schema.isMaxLength(1024)))),
+    body: Schema.optionalKey(Schema.String),
+    attestations: Schema.optionalKey(
+      Schema.Record(Schema.String, Schema.String.check(Schema.isMaxLength(4096))),
+    ),
+  }),
   /** K-1762: `git credential erase` drops the kept tokens of one repo. */
   Schema.Struct({
     id: Id,
@@ -82,6 +106,8 @@ export const Status = Schema.Struct({
   /** `token-only`: kitshn has no key for this machine and reads only its status (K-1708). */
   connection: Schema.Literals(["connected", "token-only", "disconnected"]),
   tunnel: Schema.Literals(["starting", "running", "stopped"]),
+  /** K-1127: the address of kitshn, for the files of a new repo. */
+  server: Schema.optionalKey(Schema.String),
   /** K-1752: the variables whose values the commands send with an ask, for the attesters of this machine. */
   attesterEnv: Schema.optionalKey(Schema.Array(Schema.String)),
 });
@@ -92,6 +118,14 @@ export const Answer = Schema.Union([
   Schema.Struct({ id: Id, type: Schema.Literal("rotate-key"), fingerprint: Schema.String }),
   Schema.Struct({ id: Id, type: Schema.Literal("reconnect") }),
   Schema.Struct({ id: Id, type: Schema.Literal("forget-token") }),
+  /** K-1714: kitshn's answer to a forwarded call; `body` is base64. */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("forward"),
+    status: Schema.Number,
+    contentType: Schema.String,
+    body: Schema.String,
+  }),
   /** K-1710: kitshn ran the ask; `result` is what the action gives. */
   Schema.Struct({
     id: Id,
@@ -111,6 +145,8 @@ export const Answer = Schema.Union([
     type: Schema.Literal("ask"),
     outcome: Schema.Literal("refused"),
     reason: Schema.String,
+    /** K-1776: the right that is off; the command offers to send the same call to the Owner. */
+    need: Schema.optionalKey(Schema.String),
   }),
   /** K-1760: the repo's owner is "not kitshn", so the machine uses its own login. */
   Schema.Struct({

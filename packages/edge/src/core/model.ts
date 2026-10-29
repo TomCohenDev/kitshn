@@ -60,6 +60,7 @@ export const MACHINE_RIGHTS = [
   "writesCode",
   "addsAudiences",
   "getsPasses",
+  "addsPages",
 ] as const;
 export type MachineRight = (typeof MACHINE_RIGHTS)[number];
 export const MACHINE_RIGHT_NAMES: Record<MachineRight, string> = {
@@ -71,6 +72,7 @@ export const MACHINE_RIGHT_NAMES: Record<MachineRight, string> = {
   writesCode: "writes code",
   addsAudiences: "adds audiences",
   getsPasses: "gets passes",
+  addsPages: "adds pages",
 };
 /** K-1725: the rights that the map warns about when no person approves them. */
 export const HIGH_RISK_RIGHTS: ReadonlySet<MachineRight> = new Set([

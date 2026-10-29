@@ -113,9 +113,44 @@ it("refuses a right that is off, and names it (K-1720)", async () => {
   expect(await ask(stub, "allow", "123")).toEqual({
     outcome: "refused",
     reason: expect.stringContaining('"adds apps" is off'),
+    need: "addsApps",
   });
-  // `state` needs no right.
-  expect(await ask(stub, "state")).toMatchObject({ outcome: "done" });
+  // `state` needs no right, and names the newest deploy, backup and uptime of each managed card (K-718).
+  await runInDurableObject(stub, (_, state) => {
+    const card = {
+      id: "money",
+      kind: "site.compose",
+      name: "money",
+      addresses: [],
+      status: "running",
+      group: null,
+      machine: "vps",
+    };
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO resources (id, body) VALUES (?, ?)",
+      card.id,
+      JSON.stringify(card),
+    );
+    state.storage.sql.exec("INSERT OR REPLACE INTO places (id, x, y) VALUES ('money', 5000, 5000)");
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO backups (run, card, machine_id, at, state, error) VALUES ('b1', 'money', 'vps', 7, 'done', NULL)",
+    );
+  });
+  await evictDurableObject(stub);
+  const answer = await ask(stub, "state");
+  expect(answer).toMatchObject({ outcome: "done" });
+  const cards =
+    answer.outcome === "done" ? (answer.result as { cards: Array<Record<string, unknown>> }).cards : [];
+  expect(cards.find((card) => card["id"] === "money")).toMatchObject({
+    deploy: null,
+    backup: { at: 7, state: "done", error: null },
+    uptime: null,
+  });
+  await runInDurableObject(stub, (_, state) => {
+    for (const table of ["resources", "places", "backups"])
+      state.storage.sql.exec(`DELETE FROM ${table} WHERE ${table === "backups" ? "card" : "id"} = 'money'`);
+  });
+  await evictDurableObject(stub);
 });
 
 it("refuses bad labels and asks during the pause (K-1750, K-1504)", async () => {

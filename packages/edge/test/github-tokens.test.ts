@@ -90,7 +90,7 @@ const daemonSocket = (sent: Array<ServerToDaemon>) =>
     close() {},
   }) as unknown as WebSocket;
 
-async function askToken(stub: DurableObjectStub, repo: string) {
+async function askToken(stub: DurableObjectStub, repo: string, extra: object = {}) {
   const sent: Array<ServerToDaemon> = [];
   await runInDurableObject(stub, (instance) =>
     (instance as unknown as { webSocketMessage(s: WebSocket, t: string): Promise<void> }).webSocketMessage(
@@ -98,7 +98,7 @@ async function askToken(stub: DurableObjectStub, repo: string) {
       JSON.stringify({
         type: "ask",
         requestId: "r",
-        ask: { action: "github-token", target: repo, body: { permission: "auto" } },
+        ask: { action: "github-token", target: repo, body: { permission: "auto" }, ...extra },
       }),
     ),
   );
@@ -196,5 +196,39 @@ it("answers not kitshn for another owner, and refuses an App owner's repo withou
   expect(await askToken(stub, "Yarden-zamir/riffle")).toMatchObject({
     outcome: "refused",
     reason: expect.stringContaining('"reads code" is off'),
+    need: "readsCode",
+  });
+});
+
+it("sends a call whose right is off to the Owner with askOwner; the approval opens the hour for it (K-1776)", async () => {
+  fakeGitHub();
+  const stub = await setup({});
+  const waiting = await askToken(stub, "Yarden-zamir/riffle", {
+    body: { permission: "write" },
+    askOwner: true,
+  });
+  if (waiting.outcome !== "waiting") throw new Error(`The ask did not wait: ${waiting.outcome}`);
+  const decided = await runInDurableObject(stub, async (instance, state) => {
+    const kitshn = instance as unknown as {
+      openSocket(id: string): WebSocket | null;
+      decide(id: string, d: string, by: object): Promise<{ ok: boolean; error?: string }>;
+    };
+    kitshn.openSocket = () => null;
+    const circle = state.storage.sql
+      .exec<{ circle_id: string }>("SELECT circle_id FROM proposals WHERE id = ?", waiting.proposalId)
+      .one().circle_id;
+    const result = await kitshn.decide(waiting.proposalId, "approved", {
+      actor: { _tag: "person", email: "owner@example.com" },
+      visitor: { email: "owner@example.com", clientId: null, ip: null },
+      machineId: null,
+      reason: null,
+    });
+    return { circle, result };
+  });
+  expect(decided).toEqual({ circle: "owner", result: { ok: true } });
+  // git asks with "auto" and no askOwner; the open hour gives it the write token.
+  expect(await askToken(stub, "Yarden-zamir/riffle")).toMatchObject({
+    outcome: "done",
+    result: { token: "ghs_test", permission: "write" },
   });
 });

@@ -1,9 +1,9 @@
-import type { Request } from "@kitshn/local";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { MAX_LINE_LENGTH, type Request } from "@kitshn/local";
 import { describe, expect, it } from "vitest";
 import { type Caller, type LocalOptions, askLocal, listenLocal, sharedFolderProblem } from "./local.ts";
 import type { Platform } from "./service.ts";
@@ -118,7 +118,7 @@ describe("local socket (K-701, K-702)", () => {
     ).rejects.toThrow("another kitshn daemon");
     const [answer] = await raw(
       local.path,
-      `${JSON.stringify({ id: "9", type: "status", pad: "x".repeat(70_000) })}\n`,
+      `${JSON.stringify({ id: "9", type: "status", pad: "x".repeat(MAX_LINE_LENGTH + 1) })}\n`,
       1,
     );
     expect(answer).toMatchObject({ id: null, type: "error" });

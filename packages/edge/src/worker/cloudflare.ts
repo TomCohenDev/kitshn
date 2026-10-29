@@ -70,10 +70,13 @@ async function envelope<T>(
   path: string,
   body?: unknown,
 ): Promise<Envelope<T>> {
+  // K-408: no answer at all is status 0, so a caller tells it apart from a refusal and from a bug of its own.
   const response = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
     method,
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  }).catch((error: unknown) => {
+    throw new CloudflareError(0, `${method} ${path}: no answer from Cloudflare: ${String(error)}`);
   });
   const text = await response.text();
   // Some DELETE calls (for example of a Worker custom domain) answer 200 with no body at all.

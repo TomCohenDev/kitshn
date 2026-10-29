@@ -7,6 +7,7 @@ import {
 } from "../core/access.ts";
 import { Schema } from "effect";
 import { deepEqual } from "../core/changes.ts";
+import { CloudflareError } from "./cloudflare.ts";
 import type { AccessState } from "../core/protocol.ts";
 
 /**
@@ -21,6 +22,8 @@ export interface AccessRow {
   readonly body: string;
   readonly tried: string;
   readonly error: string | null;
+  /** K-407, K-408: in memory only, when a failed write or delete tries again; after a restart it tries at once. */
+  readonly retryAt?: number;
 }
 
 export interface AccessStore {
@@ -37,8 +40,30 @@ const PAGE = 1000;
 
 const policyBody = (policy: PolicyBody) => JSON.stringify(policy);
 
-/** True when an attempt with this body failed and waits for the daily retry (K-408). */
-const failedWith = (row: AccessRow | undefined, body: string) => row?.error != null && row.tried === body;
+/** K-407, K-408: how long a write waits after an unclear answer, and a write that lowers access after a refusal. */
+export const RETRY_AFTER_MS = 5 * 60_000;
+
+/** K-408: Cloudflare gave no clear answer (no answer, a 5xx or a 429), so the write may or may not have landed. */
+export const unclearAnswer = (error: unknown) =>
+  error instanceof CloudflareError && (error.status === 0 || error.status >= 500 || error.status === 429);
+
+/**
+ * K-407: the write may take access away: it drops a policy of the body that Cloudflare has, or that body is unknown
+ * (an unclear answer, or the daily compare), so least access wins.
+ */
+const lowers = (row: AccessRow, body: string) =>
+  row.body === "" ? row.cfId !== "" : removesPolicy(row.body, body);
+
+/**
+ * True when the write of this body waits. A refusal (`tried` is this body) waits for the daily retry (K-408), and one
+ * that lowers access only until its retry time (K-407). After an unclear answer the row has no `tried` and no `body`,
+ * and the next write of any body waits until its retry time.
+ */
+const failedWith = (row: AccessRow | undefined, body: string, now = Date.now()) => {
+  if (row?.error == null) return false;
+  if (row.tried === body) return !lowers(row, body) || (row.retryAt ?? 0) > now;
+  return row.tried === "" && (row.retryAt ?? 0) > now;
+};
 
 /**
  * The application body, or null while it must wait. A policy without a Cloudflare id is left out only
@@ -74,9 +99,15 @@ export function accessStates(
       }),
       { row: rows.get(key), body: appBody(key, app, rows) ?? "" },
     ];
-    const failed = parts.find((part) => failedWith(part.row, part.body));
+    // A refusal shows in red; one that may lower access says so, because the old access stays open until it lands.
+    const failed = parts.find((part) => part.row?.error != null && part.row.tried === part.body);
     const state: AccessState = failed?.row?.error
-      ? { state: "failed", error: failed.row.error }
+      ? {
+          state: "failed",
+          error: lowers(failed.row, failed.body)
+            ? `Access not lowered yet: ${failed.row.error}`
+            : failed.row.error,
+        }
       : parts.every((part) => part.row?.cfId && part.row.body === part.body)
         ? { state: "applied" }
         : { state: "applying" };
@@ -152,7 +183,14 @@ const isStale = (
   reachable: ReadonlySet<string>,
   kept: ReadonlySet<string> | null,
 ) => {
-  if (desired.policies.has(row.key) || desired.apps.has(row.key) || row.error !== null) return false;
+  if (desired.policies.has(row.key) || desired.apps.has(row.key)) return false;
+  // A failed delete waits for its retry time (an unclear answer, or an application, whose delete lowers access), or
+  // else for the daily retry (K-407, K-408).
+  if (
+    row.error !== null &&
+    (row.retryAt === undefined ? !row.key.startsWith("app:") : row.retryAt > Date.now())
+  )
+    return false;
   if (row.key.startsWith("app:")) {
     const domain = appDomain(row);
     return domain === null || !reachable.has(domain);
@@ -546,8 +584,9 @@ export async function syncAccess(
       // A missing tag is read again from the list of applications (K-603).
       const aud = kind === "apps" ? (result.aud ?? "") : "";
       // K-409: a removed share takes effect at once, so the sessions of the application end. Until the
-      // revoke succeeds, the row keeps its old body, so the next run writes and revokes again.
-      if (kind === "apps" && row?.body && removesPolicy(row.body, body)) {
+      // revoke succeeds, the row keeps its old body, so the next run writes and revokes again. An unknown old body
+      // (after an unclear answer) counts as changed, because it may hold a policy that this body drops.
+      if (kind === "apps" && row?.cfId && (row.body === "" || removesPolicy(row.body, body))) {
         if (!spend()) {
           store.put({ key, cfId: result.id, aud, body: row.body, tried: "", error: null });
           return false;
@@ -562,6 +601,7 @@ export async function syncAccess(
             body: row.body,
             tried: body,
             error: `sessions not ended: ${message(error)}`,
+            retryAt: Date.now() + RETRY_AFTER_MS,
           });
           return true;
         }
@@ -572,7 +612,29 @@ export async function syncAccess(
       if (isNotFound(error) && cfId) store.put({ key, cfId: "", aud: "", body: "", tried: "", error: null });
       else {
         const aud = cfId === row?.cfId ? row.aud : "";
-        store.put({ key, cfId, aud, body: row?.body ?? "", tried: body, error: message(error) });
+        if (unclearAnswer(error))
+          // K-408: the write may or may not have landed, so the body of the object is unknown, and the next run
+          // writes the wanted body, whatever it is then.
+          store.put({
+            key,
+            cfId,
+            aud,
+            body: "",
+            tried: "",
+            error: message(error),
+            retryAt: Date.now() + RETRY_AFTER_MS,
+          });
+        else {
+          const failed: AccessRow = {
+            key,
+            cfId,
+            aud,
+            body: row?.body ?? "",
+            tried: body,
+            error: message(error),
+          };
+          store.put(lowers(failed, body) ? { ...failed, retryAt: Date.now() + RETRY_AFTER_MS } : failed);
+        }
       }
     }
     return true;
@@ -606,7 +668,15 @@ export async function syncAccess(
       store.remove(row.key);
     } catch (error) {
       if (isNotFound(error)) store.remove(row.key);
-      else store.put({ ...row, tried: "", error: message(error) });
+      else {
+        const { retryAt: _, ...failed } = row;
+        // An unclear answer, or the delete of an application, which lowers access, tries again in five minutes.
+        store.put(
+          unclearAnswer(error) || row.key.startsWith("app:")
+            ? { ...failed, tried: "", error: message(error), retryAt: Date.now() + RETRY_AFTER_MS }
+            : { ...failed, tried: "", error: message(error) },
+        );
+      }
     }
   }
   return true;

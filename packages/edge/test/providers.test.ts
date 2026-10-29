@@ -431,7 +431,8 @@ it("records only the calls that a machine reports on machines that it reaches, a
 it("keeps an address that another card holds, or a name of kitshn, off a provider card (K-705)", async () => {
   const { stub, message, card, sql, site } = await setup();
   const withSite = report([{ ...app, site: { name: "t3-vps", port: 3773 } }]);
-  const accessHosts = () =>
+  // Whether an Access application covers the host, with or without a path.
+  const covered = () =>
     runInDurableObject(stub, (instance) =>
       [
         ...(
@@ -439,7 +440,7 @@ it("keeps an address that another card holds, or a name of kitshn, off a provide
         )
           .desired(Date.now())
           .apps.values(),
-      ].map((app) => app.domain),
+      ].some((app) => app.domain.split("/")[0] === "t3-vps.example.com"),
     );
   // In the Owner circle, so a card with an address gets an Access application.
   await sql("INSERT OR REPLACE INTO places (id, x, y) SELECT ?, x, y FROM places WHERE id = 'vps'", appId);
@@ -449,14 +450,14 @@ it("keeps an address that another card holds, or a name of kitshn, off a provide
   await site("t3-vps", true);
   await message("signed", [withSite]);
   expect(await card()).toMatchObject({ addresses: [], provider: { stickers: [{ text: "address in use" }] } });
-  expect(await accessHosts()).not.toContain("t3-vps.example.com");
+  expect(await covered()).toBe(false);
   // A free host comes on the card itself, not on a card of its own.
   await sql("DELETE FROM live_sites WHERE id LIKE 'p-%'");
   await site("t3-vps", false);
   expect(await card()).toMatchObject({ addresses: ["t3-vps.example.com"], provider: { stickers: [] } });
   await message("signed", [withSite]);
   expect((await card())?.addresses).toEqual(["t3-vps.example.com"]);
-  expect(await accessHosts()).toContain("t3-vps.example.com");
+  expect(await covered()).toBe(true);
   await sql("DELETE FROM live_sites WHERE id LIKE 'p-%'");
   await sql("DELETE FROM resources WHERE id LIKE 'p-%'");
   await sql("DELETE FROM places WHERE id LIKE 'p-%'");

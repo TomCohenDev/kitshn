@@ -9,7 +9,8 @@
     "./recipe": "./src/recipe.ts",
     "./icon": "./src/icon.ts",
     "./names": "./src/names.ts",
-    "./media": "./src/media.ts"
+    "./media": "./src/media.ts",
+    "./templates": "./src/templates.ts"
   },
   "publishConfig": {
     "exports": {

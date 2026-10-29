@@ -1065,3 +1065,259 @@ describe("folder sites (K-1123)", () => {
     expect(cloudflare.served("mover-one.example.com")).toEqual([app.script]);
   });
 });
+
+describe("make it a repo (K-1127)", () => {
+  /** One static deploy of a repo, from the plan to the finish. */
+  const staticDeploy = async (app: ReturnType<typeof repo>, address: string) => {
+    const plan = await step(app, "/deploy/plan", {
+      recipe: { static: { output: "site" }, deploy: [{ on: "push", branch: "main", name: "prod", address }] },
+      event: {},
+    });
+    const deployId = plan.body["deployId"];
+    if (typeof deployId !== "string") return plan;
+    const manifest = { "/index.html": { hash: "3".repeat(32), size: 3 } };
+    expect((await step(app, "/deploy/assets", { deployId, manifest })).status).toBe(200);
+    let finish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && finish.status === 503; attempt++)
+      finish = await step(app, "/deploy/finish", { deployId, jwt: "done" });
+    return finish;
+  };
+
+  it("hands a folder site over to a new repo, whose first push deploys the same card", async () => {
+    const cloudflare = fakeCloudflare();
+    const edits = [
+      { _tag: "circle", id: "handers", after: agentCircle("handers", "hand-key.access", true) },
+      { _tag: "circle", id: "plain", after: agentCircle("plain", "plain-key.access", false) },
+    ];
+    expect((await admin("/api/apply", "POST", { edits })).status).toBe(200);
+    const plan = await agentStep("hand-key.access", "/agent/sites/plan", {
+      folder: "hand",
+      address: "hand-site",
+    });
+    const deployId = plan.body["deployId"];
+    const manifest = { "/index.html": { hash: "4".repeat(32), size: 2 } };
+    expect((await agentStep("hand-key.access", "/agent/sites/assets", { deployId, manifest })).status).toBe(
+      200,
+    );
+    let finish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && finish.status === 503; attempt++)
+      finish = await agentStep("hand-key.access", "/agent/sites/finish", { deployId, jwt: "done" });
+    expect(finish.status, JSON.stringify(finish.body)).toBe(200);
+    const cards = async () =>
+      (await admin("/api/state", "GET")).body["resources"] as Array<{
+        id: string;
+        name: string;
+        kind: string;
+      }>;
+    const card = (await cards()).find((resource) => resource.name === "hand");
+    if (!card) throw new Error("The folder site has no card.");
+
+    // A key without "may add apps" cannot hand a card over; this key can.
+    expect(
+      (
+        await agentStep("plain-key.access", `/agent/cards/${card.id}/handover`, {
+          repo: "owner/handrepo",
+          repoId: "80",
+          ownerId: "1",
+        })
+      ).status,
+    ).toBe(403);
+    const handover = await agentStep("hand-key.access", `/agent/cards/${card.id}/handover`, {
+      repo: "owner/handrepo",
+      repoId: "80",
+      ownerId: "1",
+    });
+    expect(handover.body, JSON.stringify(handover.body)).toMatchObject({ address: "hand-site.example.com" });
+
+    // Another repo cannot use the handover; it waits at the gate as any new repo does.
+    const stranger = repo("81", "strangerrepo");
+    expect((await staticDeploy(stranger, "hand-site.example.com")).status).not.toBe(200);
+
+    // The repo's first push deploys the same card, its script and its address, with no Allow on the map.
+    const app = repo("80", "handrepo");
+    const deployed = await staticDeploy(app, "hand-site.example.com");
+    expect(deployed.status, JSON.stringify(deployed.body)).toBe(200);
+    expect(cloudflare.served("hand-site.example.com")).toEqual([`kitshn-${card.id}`]);
+    expect((await cards()).filter((resource) => resource.name === "hand")).toHaveLength(1);
+    // The folder no longer updates the site; the repo does.
+    expect((await agentStep("hand-key.access", "/agent/sites/plan", { folder: "hand" })).body).toMatchObject({
+      updated: false,
+    });
+  });
+
+  it("turns a page into a repo's site, its old address redirects, and an expired handover does nothing", async () => {
+    const cloudflare = fakeCloudflare();
+    const edits = [{ _tag: "circle", id: "pagers", after: agentCircle("pagers", "page-key.access", true) }];
+    expect((await admin("/api/apply", "POST", { edits })).status).toBe(200);
+    const page = await call(
+      "/agent/library",
+      "POST",
+      {
+        "cf-access-jwt-assertion": await new SignJWT({ common_name: "page-key.access" })
+          .setProtectedHeader({ alg: "RS256", kid: "team" })
+          .setIssuer("https://team.example.com")
+          .setAudience("agent-aud")
+          .setIssuedAt()
+          .setExpirationTime("5m")
+          .sign(team.privateKey),
+        "x-kitshn-name": "story.html",
+        "x-kitshn-address": "story",
+      },
+      "<p>story</p>",
+    );
+    expect(page.status, JSON.stringify(page.body)).toBe(201);
+    const id = String(page.body["id"]);
+
+    // An expired handover lets no repo take the card.
+    expect(
+      (
+        await agentStep("page-key.access", `/agent/cards/${id}/handover`, {
+          repo: "owner/late",
+          repoId: "82",
+          ownerId: "1",
+        })
+      ).status,
+    ).toBe(200);
+    await runInDurableObject(env.KITSHN.getByName("kitshn"), (_instance, durable) => {
+      durable.storage.sql.exec("UPDATE handovers SET expires_at = 0");
+    });
+    expect((await staticDeploy(repo("82", "late"), "story.example.com")).status).not.toBe(200);
+
+    const handover = await agentStep("page-key.access", `/agent/cards/${id}/handover`, {
+      repo: "owner/storyrepo",
+      repoId: "83",
+      ownerId: "1",
+    });
+    expect(handover.body, JSON.stringify(handover.body)).toMatchObject({
+      kind: "page",
+      address: "story.example.com",
+    });
+    const storyRepo = repo("83", "storyrepo");
+    const planned = await step(storyRepo, "/deploy/plan", {
+      recipe: {
+        static: { output: "site" },
+        deploy: [{ on: "push", branch: "main", name: "prod", address: "story.example.com" }],
+      },
+      event: {},
+    });
+    const deployId = planned.body["deployId"];
+    expect(deployId, JSON.stringify(planned.body)).toEqual(expect.any(String));
+    // Between the takeover and the first finish, no library write changes the page: no update, no restore.
+    const update = await call(
+      "/agent/library",
+      "POST",
+      {
+        "cf-access-jwt-assertion": await new SignJWT({ common_name: "page-key.access" })
+          .setProtectedHeader({ alg: "RS256", kid: "team" })
+          .setIssuer("https://team.example.com")
+          .setAudience("agent-aud")
+          .setIssuedAt()
+          .setExpirationTime("5m")
+          .sign(team.privateKey),
+        "x-kitshn-name": "story.html",
+      },
+      "<p>story two</p>",
+    );
+    expect([update.status, String(update.body["error"]).includes("repo's site")]).toEqual([409, true]);
+    expect((await admin(`/api/library/${id}/previous`, "POST", {})).status).toBe(409);
+    const manifest = { "/index.html": { hash: "3".repeat(32), size: 3 } };
+    expect((await step(storyRepo, "/deploy/assets", { deployId, manifest })).status).toBe(200);
+    let deployed = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && deployed.status === 503; attempt++)
+      deployed = await step(storyRepo, "/deploy/finish", { deployId, jwt: "done" });
+    expect(deployed.status, JSON.stringify(deployed.body)).toBe(200);
+    expect(cloudflare.served("story.example.com")).toEqual([`kitshn-${id}`]);
+    const state = await admin("/api/state", "GET");
+    const card = (
+      state.body["resources"] as Array<{ id: string; kind: string; addresses: Array<string> }>
+    ).find((resource) => resource.id === id);
+    expect(card).toMatchObject({ kind: "site.static", addresses: ["story.example.com"] });
+    // The old page address sends who may open the card on to the site.
+    const everyone = (state.body["circles"] as Array<{ id: string; x: number; y: number }>).find(
+      (circle) => circle.id === "everyone",
+    );
+    if (!everyone) throw new Error("The seed has no Everyone circle.");
+    expect(
+      (
+        await admin("/api/apply", "POST", {
+          edits: [{ _tag: "place", id, after: { x: everyone.x, y: everyone.y } }],
+        })
+      ).status,
+    ).toBe(200);
+    const ctx = createExecutionContext();
+    const visit = await worker.fetch(new Request("https://pages.example.com/story"), env, ctx);
+    await waitOnExecutionContext(ctx);
+    expect([visit.status, visit.headers.get("location")]).toEqual([302, "https://story.example.com/"]);
+  });
+
+  it("changes nothing when the first push is refused, and ends a handover whose key lost its right", async () => {
+    fakeCloudflare();
+    const edits = [
+      { _tag: "circle", id: "probers", after: agentCircle("probers", "probe-key.access", true) },
+    ];
+    expect((await admin("/api/apply", "POST", { edits })).status).toBe(200);
+    const page = await call(
+      "/agent/library",
+      "POST",
+      {
+        "cf-access-jwt-assertion": await new SignJWT({ common_name: "probe-key.access" })
+          .setProtectedHeader({ alg: "RS256", kid: "team" })
+          .setIssuer("https://team.example.com")
+          .setAudience("agent-aud")
+          .setIssuedAt()
+          .setExpirationTime("5m")
+          .sign(team.privateKey),
+        "x-kitshn-name": "probe.html",
+        "x-kitshn-address": "probe",
+      },
+      "<p>probe</p>",
+    );
+    const id = String(page.body["id"]);
+    const snapshot = () =>
+      runInDurableObject(env.KITSHN.getByName("kitshn"), (_instance, durable) => ({
+        handovers: durable.storage.sql.exec("SELECT card_id FROM handovers WHERE card_id = ?", id).toArray()
+          .length,
+        cards: durable.storage.sql.exec("SELECT 1 FROM repo_cards WHERE card_id = ?", id).toArray().length,
+        repos: durable.storage.sql
+          .exec("SELECT 1 FROM repos WHERE repo_id IN ('84', '85') AND state = 'allowed'")
+          .toArray().length,
+      }));
+    const kindOf = async () =>
+      ((await admin("/api/state", "GET")).body["resources"] as Array<{ id: string; kind: string }>).find(
+        (resource) => resource.id === id,
+      )?.kind;
+
+    // The first push sends a Worker recipe: the plan refuses, and the card, the handover and the gate stay as they were.
+    expect(
+      (
+        await agentStep("probe-key.access", `/agent/cards/${id}/handover`, {
+          repo: "owner/proberepo",
+          repoId: "84",
+          ownerId: "1",
+        })
+      ).status,
+    ).toBe(200);
+    const refused = await step(repo("84", "proberepo"), "/deploy/plan", { recipe: recipe(), event: {} });
+    expect(refused.status).toBe(409);
+    expect(await kindOf()).toBe("page");
+    expect(await snapshot()).toEqual({ handovers: 1, cards: 0, repos: 0 });
+
+    // The key loses "may add apps" within the hour: the handover ends unused, and the repo is not allowed.
+    expect(
+      (
+        await agentStep("probe-key.access", `/agent/cards/${id}/handover`, {
+          repo: "owner/lostright",
+          repoId: "85",
+          ownerId: "1",
+        })
+      ).status,
+    ).toBe(200);
+    const noRight = [
+      { _tag: "circle", id: "probers", after: agentCircle("probers", "probe-key.access", false) },
+    ];
+    expect((await admin("/api/apply", "POST", { edits: noRight })).status).toBe(200);
+    expect((await staticDeploy(repo("85", "lostright"), "probe.example.com")).status).not.toBe(200);
+    expect(await kindOf()).toBe("page");
+    expect(await snapshot()).toEqual({ handovers: 0, cards: 0, repos: 0 });
+  });
+});

@@ -341,6 +341,7 @@ export function App() {
   const previewCards = useMemo(() => new Set(store.snapshot?.previewCards ?? []), [store.snapshot]);
   const pullRequests = store.snapshot?.pullRequests ?? {};
   const previousVersions = useMemo(() => new Set(store.snapshot?.previousVersions ?? []), [store.snapshot]);
+  const handoverCards = useMemo(() => new Set(store.snapshot?.handoverCards ?? []), [store.snapshot]);
 
   /**
    * K-523, K-1507: the item whose per-item undo the open menu shows, or for the palette the selected card or
@@ -1207,6 +1208,18 @@ export function App() {
     },
     openAddress: (address) => void open(`https://${address}`, "_blank", "noreferrer"),
     copyAddress: (address) => void navigator.clipboard.writeText(`https://${address}`),
+    copyRepoCommand: (resource) =>
+      void navigator.clipboard
+        .writeText(
+          `kitshn repo ${resource.id}${resource.kind === "page" ? "" : " <folder>"} --repo <owner>/<name>`,
+        )
+        .then(() =>
+          showToast({
+            text: `Copied the kitshn repo command of ${resource.name}. An agent key runs it where gh is logged in.`,
+            error: false,
+            undo: null,
+          }),
+        ),
     reshare: (resource, circle, share, part) => void reshare(resource, circle, share, part),
     setLevel: (resource, circle, level) =>
       void applyEdits([levelEdit(state, resource, circle, level)]).then(
@@ -1263,6 +1276,7 @@ export function App() {
     undoCheck,
     selected: selection.cards,
     previousVersions,
+    handoverCards,
   };
 
   const waitingRepos = store.snapshot?.repos.filter(awaitsAllow).length ?? 0;
@@ -2400,7 +2414,9 @@ function CardPanel(props: {
         <PeekArrow resource={resource} state={state} zone={props.zone} />
       ) : null}
       {address &&
-      (resource.kind === "page" || resource.kind === "file" || resource.id.startsWith(FOLDER_SITE_PREFIX)) ? (
+      (resource.kind === "page" ||
+        resource.kind === "file" ||
+        (resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo)) ? (
         <AddressName address={address} onSave={(name) => props.onSetAddress(resource, name)} />
       ) : null}
       {address && props.repo ? (
@@ -2560,7 +2576,7 @@ function CardPanel(props: {
             Roll back…
           </button>
           {/* K-1123: a folder site comes from no workflow run. */}
-          {resource.id.startsWith(FOLDER_SITE_PREFIX) ? null : (
+          {resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo ? null : (
             <button
               class="btn"
               data-tip={`Roll back every card of the workflow run that made this deploy. ${ROLLBACK_DATA}`}

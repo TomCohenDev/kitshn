@@ -81,6 +81,8 @@ export interface Snapshot {
   readonly icons: Readonly<Record<string, string>>;
   /** K-1117: the pages and files that have a previous version to restore. */
   readonly previousVersions: ReadonlyArray<string>;
+  /** K-1127: the pages and folder sites that an agent key published, which it can hand over to a repo. */
+  readonly handoverCards: ReadonlyArray<string>;
   /** K-1504: who paused and when, while paused. */
   readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;

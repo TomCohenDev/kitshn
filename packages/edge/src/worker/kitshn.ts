@@ -269,6 +269,7 @@ import {
   loginWarnings,
   syncLogins,
   syncWithLogins,
+  ORPHAN_DELETES,
   verifyAccess,
   verifyPasskeys,
 } from "./access-sync.ts";
@@ -10965,12 +10966,12 @@ export class Kitshn extends DurableObject<Env> {
             api,
             this.env.CLOUDFLARE_ACCOUNT_ID,
           );
-          spent += 2;
+          spent += 2 + ORPHAN_DELETES;
           spent += await verifyPasskeys(this.accessStore(), api, this.env.CLOUDFLARE_ACCOUNT_ID, 10);
           this.setMeta("access_warnings", JSON.stringify(this.accessWarnings));
         } catch (error) {
           console.warn(`kitshn could not compare Access with the shares: ${String(error)}`);
-          spent = 12;
+          spent = 2 + ORPHAN_DELETES + 10;
         }
       }
       spent += await this.fillAudiences(api, now);
@@ -10993,7 +10994,7 @@ export class Kitshn extends DurableObject<Env> {
         }
       // K-113: take an unwanted enrollment policy off the App Launcher before the sync deletes it.
       spent += await this.syncLauncher(api, daily);
-      // K-406: at most 40 calls. `spent` counts the daily compare (12), the site checks (6), the redirect step (5)
+      // K-406: at most 40 calls. `spent` counts the daily compare (14), the site checks (6), the redirect step (5)
       // and the launcher step (3); the tunnels, DNS records and offline routes above made at most 6 + 5 + 5, and the launcher
       // step after the sync needs 3. The login step and the sync share what is left. A policy that the sync
       // makes goes on the login applications in the next alarm, which runs at once (loginWork).

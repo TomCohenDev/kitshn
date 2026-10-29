@@ -376,8 +376,26 @@ export async function verifyAccess(
       }
     }
   }
+  // K-408: a circle policy that no row holds and no application uses is left over from a crash between its create and
+  // its row. It grants nothing, so the compare deletes it, at most ORPHAN_DELETES a day; more wait for the next day.
+  const used = new Set(apps.flatMap((app) => app.policies?.map((policy) => policy.id) ?? []));
+  const orphans = policies.filter(
+    (policy) => policy.name.startsWith(CIRCLE_POLICY_PREFIX) && !ours.has(policy.id) && !used.has(policy.id),
+  );
+  for (const policy of orphans.slice(0, ORPHAN_DELETES)) {
+    try {
+      await api("DELETE", `${base}/policies/${policy.id}`);
+    } catch (error) {
+      if (!isNotFound(error))
+        warnings.push(`kitshn could not delete the unused Access policy "${policy.name}": ${message(error)}`);
+    }
+  }
   return warnings;
 }
+
+/** K-406: the deletes of unused circle policies that the daily compare may make; it counts them before it starts. */
+export const ORPHAN_DELETES = 2;
+const CIRCLE_POLICY_PREFIX = `${ACCESS_NAME_PREFIX}circle `;
 
 /** K-110: an application whose sessions a sign-out did not end yet, and why. */
 export interface LeftApp {
@@ -611,6 +629,8 @@ export async function syncAccess(
   const base = `/accounts/${accountId}/access`;
   let existingPolicies: ReadonlyArray<Named> | null = null;
   let existingApps: ReadonlyArray<Named> | null = null;
+  // K-409: the session ends that run while the sync goes on; the sync waits for them before it returns.
+  const revoking: Array<Promise<void>> = [];
 
   const write = async (
     key: string,
@@ -624,7 +644,11 @@ export async function syncAccess(
     let cfId = row?.cfId ?? "";
     try {
       if (!cfId) {
-        if (kind === "policies" && !existingPolicies) {
+        // A policy that kitshn never tried is new, so its name lookup is skipped. The lookup stays after a try (a
+        // create that may have landed, K-408) and for an empty store (a new kitshn adopts what an old one made).
+        // A crash between a create and its row leaves an unused policy, which the daily compare deletes.
+        const lookup = kind === "apps" || row !== undefined || store.rows.size === 0;
+        if (kind === "policies" && lookup && !existingPolicies) {
           if (!spend()) return false;
           existingPolicies = await api<ReadonlyArray<Named>>("GET", `${base}/policies?per_page=1000`);
         }
@@ -632,7 +656,9 @@ export async function syncAccess(
           if (!spend()) return false;
           existingApps = await api<ReadonlyArray<Named>>("GET", `${base}/apps?per_page=1000`);
         }
-        const found = find((kind === "policies" ? existingPolicies : existingApps) ?? []);
+        const found = lookup
+          ? find((kind === "policies" ? existingPolicies : existingApps) ?? [])
+          : undefined;
         // Never adopt an object that another row holds: one Cloudflare object belongs to one row (K-408).
         const taken = new Set([...store.rows.values()].map((item) => item.cfId));
         cfId = found && found.name.startsWith(ACCESS_NAME_PREFIX) && !taken.has(found.id) ? found.id : "";
@@ -672,27 +698,40 @@ export async function syncAccess(
           : narrowsPolicy(before, body)
             ? appsUsing(store.rows, result.id)
             : [];
-      for (const appId of ending) {
-        if (!spend()) {
+      if (ending.length > 0) {
+        // K-406: every revoke counts before it starts; they run together, while the run goes on (K-409).
+        if (calls + ending.length > budget) {
+          calls = budget;
           store.put({ key, cfId: result.id, aud, body: before, tried: "", error: null });
           return false;
         }
-        try {
-          await api("POST", `${base}/apps/${appId}/revoke_tokens`);
-        } catch (error) {
-          // An application that is gone has no sessions left.
-          if (isNotFound(error)) continue;
-          store.put({
-            key,
-            cfId: result.id,
-            aud,
-            body: before,
-            tried: body,
-            error: `sessions not ended: ${message(error)}`,
-            ...backoff(row, Date.now()),
-          });
-          return true;
-        }
+        calls += ending.length;
+        const id = result.id;
+        revoking.push(
+          Promise.allSettled(ending.map((appId) => api("POST", `${base}/apps/${appId}/revoke_tokens`))).then(
+            (results) => {
+              // An application that is gone has no sessions left.
+              const failed = results.find(
+                (item): item is PromiseRejectedResult =>
+                  item.status === "rejected" && !isNotFound(item.reason),
+              );
+              store.put(
+                failed
+                  ? {
+                      key,
+                      cfId: id,
+                      aud,
+                      body: before,
+                      tried: body,
+                      error: `sessions not ended: ${message(failed.reason)}`,
+                      ...backoff(row, Date.now()),
+                    }
+                  : { key, cfId: id, aud, body, tried: body, error: null },
+              );
+            },
+          ),
+        );
+        return true;
       }
       store.put({ key, cfId: result.id, aud, body, tried: body, error: null });
     } catch (error) {
@@ -728,46 +767,54 @@ export async function syncAccess(
     return true;
   };
 
-  for (const [key, policy] of desired.policies) {
-    const found = (list: ReadonlyArray<Named>) => list.find((item) => item.name === policy.name);
-    if (!(await write(key, "policies", policyBody(policy), found))) return false;
+  try {
+    return await syncObjects();
+  } finally {
+    await Promise.all(revoking);
   }
-  for (const [key, app] of desired.apps) {
-    const body = appBody(key, app, store.rows);
-    if (body === null) continue;
-    const found = (list: ReadonlyArray<Named>) => list.find((item) => item.domain === app.domain);
-    if (!(await write(key, "apps", body, found))) return false;
-  }
-  const kept = withHeld(keptPolicies(desired, store.rows, reachable), held);
-  const stale = [...store.rows.values()].filter((row) => isStale(desired, row, reachable, kept));
-  // Applications first: Access refuses to delete a policy that an application still uses.
-  stale.sort((a, b) => Number(a.key.startsWith("policy:")) - Number(b.key.startsWith("policy:")));
-  for (const row of stale) {
-    // A row without an object, or one whose object another row now holds, goes without a call.
-    const shared = [...store.rows.values()].some((item) => item.key !== row.key && item.cfId === row.cfId);
-    if (!row.cfId || shared) {
-      store.remove(row.key);
-      continue;
+
+  async function syncObjects() {
+    for (const [key, policy] of desired.policies) {
+      const found = (list: ReadonlyArray<Named>) => list.find((item) => item.name === policy.name);
+      if (!(await write(key, "policies", policyBody(policy), found))) return false;
     }
-    if (!spend()) return false;
-    const kind = row.key.startsWith("policy:") ? "policies" : "apps";
-    try {
-      await api("DELETE", `${base}/${kind}/${row.cfId}`);
-      store.remove(row.key);
-    } catch (error) {
-      if (isNotFound(error)) store.remove(row.key);
-      else {
-        const { retryAt: _, ...failed } = row;
-        // An unclear answer, or the delete of an application, which lowers access, tries again in five minutes.
-        store.put(
-          unclearAnswer(error) || row.key.startsWith("app:")
-            ? { ...failed, tried: "", error: message(error), ...backoff(row, Date.now()) }
-            : { ...failed, tried: "", error: message(error) },
-        );
+    for (const [key, app] of desired.apps) {
+      const body = appBody(key, app, store.rows);
+      if (body === null) continue;
+      const found = (list: ReadonlyArray<Named>) => list.find((item) => item.domain === app.domain);
+      if (!(await write(key, "apps", body, found))) return false;
+    }
+    const kept = withHeld(keptPolicies(desired, store.rows, reachable), held);
+    const stale = [...store.rows.values()].filter((row) => isStale(desired, row, reachable, kept));
+    // Applications first: Access refuses to delete a policy that an application still uses.
+    stale.sort((a, b) => Number(a.key.startsWith("policy:")) - Number(b.key.startsWith("policy:")));
+    for (const row of stale) {
+      // A row without an object, or one whose object another row now holds, goes without a call.
+      const shared = [...store.rows.values()].some((item) => item.key !== row.key && item.cfId === row.cfId);
+      if (!row.cfId || shared) {
+        store.remove(row.key);
+        continue;
+      }
+      if (!spend()) return false;
+      const kind = row.key.startsWith("policy:") ? "policies" : "apps";
+      try {
+        await api("DELETE", `${base}/${kind}/${row.cfId}`);
+        store.remove(row.key);
+      } catch (error) {
+        if (isNotFound(error)) store.remove(row.key);
+        else {
+          const { retryAt: _, ...failed } = row;
+          // An unclear answer, or the delete of an application, which lowers access, tries again in five minutes.
+          store.put(
+            unclearAnswer(error) || row.key.startsWith("app:")
+              ? { ...failed, tried: "", error: message(error), ...backoff(row, Date.now()) }
+              : { ...failed, tried: "", error: message(error) },
+          );
+        }
       }
     }
+    return true;
   }
-  return true;
 }
 
 interface LauncherApp {

@@ -117,7 +117,12 @@ export const ClientMessage = Schema.Union([
     requestId: Schema.String,
     edits: Schema.Array(Edit_).check(Schema.isMinLength(1), Schema.isMaxLength(500)),
   }),
-  Schema.Struct({ type: Schema.Literal("undo"), requestId: Schema.String, revision: Schema.Int }),
+  Schema.Struct({
+    type: Schema.Literal("undo"),
+    requestId: Schema.String,
+    revision: Schema.Int,
+    source: Schema.optional(Schema.Literals(Model.UNDO_SOURCES)),
+  }),
   Schema.Struct({
     type: Schema.Literal("undoItem"),
     requestId: Schema.String,

@@ -1,7 +1,7 @@
 import { type ComponentChildren, Fragment } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import type { Actor, Item, RevisionKind } from "../core/changes.ts";
-import type { State } from "../core/model.ts";
+import type { State, UndoSource } from "../core/model.ts";
 import type { RevisionView } from "../core/protocol.ts";
 import { CHECKING_TIP, type UndoAnswer } from "./actions.ts";
 import {
@@ -13,6 +13,9 @@ import {
   rowText,
   undoableRow,
 } from "./revisions.ts";
+
+/** K-1509: where a whole-revision Undo came from, as its History row says it. */
+const UNDO_FROM: Record<UndoSource, string> = { toast: "the toast", history: "History", api: "the API" };
 import { callApi } from "./store.ts";
 
 const KIND_LABELS: Record<RevisionKind, { readonly label: string; readonly tip: string }> = {
@@ -181,6 +184,7 @@ export function HistoryView(props: {
                         <span class="mono">#{revision.id}</span> ·{" "}
                         {timeOf(revision.at, group.day === "Older")}
                         {revision.actor._tag === "kitshn" ? ` · ${revision.actor.reason}` : ""}
+                        {revision.undoSource ? ` · from ${UNDO_FROM[revision.undoSource]}` : ""}
                       </span>
                     </button>
                     {revision.undoneBy !== null ? (

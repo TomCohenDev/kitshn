@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import type { Edit } from "../core/changes.ts";
-import type { State } from "../core/model.ts";
+import type { State, UndoSource } from "../core/model.ts";
 import type { LogLine, TailAnswer } from "../core/logs.ts";
 import type { ServerMessage, Snapshot } from "../core/protocol.ts";
 import { type Held, isNewer, settle } from "./held.ts";
@@ -240,7 +240,9 @@ export function hold(edits: ReadonlyArray<Edit>): string {
 export function release(requestId: string) {
   set({ held: current.held.filter((item) => item.requestId !== requestId) });
 }
-export const undoRevision = (revision: number) => request({ type: "undo", revision });
+/** K-1509: `source` says which button sent the Undo, so History can show where it came from. */
+export const undoRevision = (revision: number, source: UndoSource) =>
+  request({ type: "undo", revision, source });
 
 export function toState(snapshot: Snapshot): State {
   return {

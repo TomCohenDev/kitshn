@@ -249,6 +249,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   // 33: the nonces of calls that daemons forwarded in the last minute (K-1714), with the time that the daemon signed,
   // so a copied call does not run twice, also after a restart. Each forward deletes the rows older than its window.
   ["CREATE TABLE forward_nonces (nonce TEXT PRIMARY KEY, at INTEGER NOT NULL)"],
+  // 34: where a whole-revision Undo came from (K-1509): its toast, History, or the HTTP API; null before.
+  ["ALTER TABLE revisions ADD COLUMN undo_source TEXT"],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

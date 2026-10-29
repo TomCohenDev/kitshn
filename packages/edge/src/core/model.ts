@@ -20,6 +20,10 @@ export const RESOURCE_KINDS = {
 export type ResourceKind = keyof typeof RESOURCE_KINDS;
 
 export const ADMIN_RESOURCE_ID = "kitshn-admin";
+
+/** K-1509: where a whole-revision Undo came from: its toast, History, or the HTTP API (an agent or a script). */
+export const UNDO_SOURCES = ["toast", "history", "api"] as const;
+export type UndoSource = (typeof UNDO_SOURCES)[number];
 export const OWNER_CIRCLE_ID = "owner";
 export const EVERYONE_CIRCLE_ID = "everyone";
 

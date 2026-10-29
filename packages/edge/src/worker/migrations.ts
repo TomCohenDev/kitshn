@@ -261,6 +261,16 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   // 36: the end time of each timed card (K-212), in milliseconds, and who set it as a JSON actor: the end runs as
   // that actor, so its Undo works (K-1506). Null when an undo brought the time back.
   ["CREATE TABLE card_ends (id TEXT PRIMARY KEY, ends_at INTEGER NOT NULL, set_by TEXT)"],
+  // 37: section 20. A game card (K-2001) with the last public addresses of its machine, so its records stay while the
+  // machine is offline; the open doors (K-2004) with the address that opened each (K-2005); and the A, AAAA and SRV records that kitshn made for it (K-2007).
+  [
+    `CREATE TABLE games (card_id TEXT PRIMARY KEY, machine_id TEXT NOT NULL, name TEXT NOT NULL UNIQUE, ports TEXT NOT NULL,
+      door_ms INTEGER NOT NULL, srv TEXT, relay_id TEXT, v4 TEXT, v6 TEXT)`,
+    `CREATE TABLE doors (card_id TEXT NOT NULL, person TEXT NOT NULL, address TEXT NOT NULL, opened_at INTEGER NOT NULL,
+      ends_at INTEGER NOT NULL, seen_ip TEXT, PRIMARY KEY (card_id, person, address))`,
+    `CREATE TABLE game_records (type TEXT NOT NULL, name TEXT NOT NULL, card_id TEXT NOT NULL, content TEXT NOT NULL,
+      record_id TEXT NOT NULL, error TEXT, retry_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (type, name))`,
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

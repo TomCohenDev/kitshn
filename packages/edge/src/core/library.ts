@@ -63,8 +63,9 @@ export function addressNameError(name: string): string | null {
   );
   if (!allowed || name.startsWith("-") || name.endsWith("-"))
     return "An address name has only a to z, 0 to 9 and inner hyphens.";
-  // An id-shaped name would hide the item with that id; `login` is the login path of K-1004.
-  if (name === "login" || isLibraryId(name)) return `kitshn keeps the name "${name}" for itself.`;
+  // An id-shaped name would hide the item with that id; `login` is the login path of K-1004, and `join` the game join path of K-2003.
+  if (name === "login" || name === "join" || isLibraryId(name))
+    return `kitshn keeps the name "${name}" for itself.`;
   return null;
 }
 

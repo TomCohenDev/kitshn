@@ -17,6 +17,8 @@ export const RESOURCE_KINDS = {
   repo: ["view"],
   /** K-1733: the repos of one owner, or of a name pattern with one `*`. */
   "repo.group": ["view"],
+  /** K-2001: a game server on a machine; its join page lets a person open the ports for their address. */
+  game: ["view"],
 } as const satisfies Record<string, ReadonlyArray<Level>>;
 export type ResourceKind = keyof typeof RESOURCE_KINDS;
 /** K-302: a kind of a provider has the provider prefix, for example `t3.thread`. */
@@ -186,6 +188,8 @@ export interface Resource {
   readonly githubWay?: GitHubWay;
   /** K-704: present on the card of a provider resource. */
   readonly provider?: ProviderCard;
+  /** K-2008: the machine that relays a game card behind NAT; its relay host is the second address. */
+  readonly relay?: string;
 }
 
 /** K-301, K-713: the levels of a card's kind, lowest first; a provider kind names which of them it has. */

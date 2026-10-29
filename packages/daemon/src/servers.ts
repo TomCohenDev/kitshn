@@ -2,6 +2,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { MAX_SERVERS, type ServerReport } from "@kitshn/edge/sites";
+import { type Platform, ownUid } from "./service.ts";
 
 const run = promisify(execFile);
 
@@ -133,19 +134,17 @@ export async function firstBytes(response: Response, limit: number): Promise<str
   return text;
 }
 
-const uid = () => {
-  const id = process.getuid?.();
-  if (id === undefined) throw new Error("kitshn needs a user id to scan servers (K-619).");
-  return id;
-};
-
-/** K-619: the listening ports of the daemon's own user now. */
-export async function listeners(platform: "darwin" | "linux"): Promise<Array<Listener>> {
+/**
+ * K-619: the listening ports of the daemon's own user now. Known limit: Windows has no scan in the first version
+ * (K-624), so its list stays empty; revisit with `Get-NetTCPConnection` when owners add sites from Windows.
+ */
+export async function listeners(platform: Platform): Promise<Array<Listener>> {
+  if (platform === "win32") return [];
   try {
     if (platform === "darwin") {
       const { stdout } = await run(
         "lsof",
-        ["-nP", "-a", "-u", String(uid()), "-iTCP", "-sTCP:LISTEN", "-Fcn"],
+        ["-nP", "-a", "-u", String(ownUid()), "-iTCP", "-sTCP:LISTEN", "-Fcn"],
         {
           timeout: 5_000,
         },
@@ -153,7 +152,7 @@ export async function listeners(platform: "darwin" | "linux"): Promise<Array<Lis
       return parseLsof(stdout);
     }
     const { stdout } = await run("ss", ["-ltnpeH"], { timeout: 5_000 });
-    return parseSs(stdout, uid());
+    return parseSs(stdout, ownUid());
   } catch (error) {
     // lsof exits with 1 when nothing listens.
     const stdout = (error as { stdout?: unknown }).stdout;
@@ -166,7 +165,7 @@ export async function listeners(platform: "darwin" | "linux"): Promise<Array<Lis
  * checks only new servers; `recheck` checks all of them again.
  */
 export async function scanServers(
-  platform: "darwin" | "linux",
+  platform: Platform,
   known: ReadonlyArray<ServerReport>,
   recheck: boolean,
 ): Promise<Array<ServerReport>> {

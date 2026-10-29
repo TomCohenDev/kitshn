@@ -6,6 +6,7 @@ import {
   attesterPrefixes,
   attestersOf,
   dropAttested,
+  unregisteredT3,
   withAttester,
 } from "./attest.ts";
 
@@ -86,5 +87,20 @@ describe("attester answers and registration (K-1751, K-1752)", () => {
       attesters: [{ prefix: "x.", address: "http://[::1]:2/", tokenEnv: "X" }, t3],
     });
     expect(withAttester(machine, { ...t3, address: "http://example.com/x" })).toMatch(/not on loopback/);
+    expect(withAttester(machine, { ...t3, address: "file://localhost/etc/passwd" })).toMatch(
+      /not an http or https/,
+    );
+    // The registering user's uid stays with the entry, so each check can compare the port's user again.
+    expect(attestersOf(withAttester(machine, { ...t3, uid: 501 })).attesters).toContainEqual({
+      ...t3,
+      uid: 501,
+    });
+  });
+
+  it("refuses the T3 credential on a machine where no t3. attester is registered, and lets a call without it pass", () => {
+    const token = { T3_ACP_MCP_AUTHORIZATION: "Bearer x" };
+    expect(unregisteredT3(token, [])).toMatch(/T3 server has not registered/);
+    expect(unregisteredT3(token, [t3])).toBeNull();
+    expect(unregisteredT3({}, [])).toBeNull();
   });
 });

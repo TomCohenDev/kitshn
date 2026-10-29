@@ -3,11 +3,28 @@
 /** K-1755: `t3.` is the prefix of the T3 attester; it stays reserved also before a machine lists that attester. */
 export const RESERVED_PREFIXES: ReadonlyArray<string> = ["t3."];
 
+/** K-1752: the variable of a T3 thread's credential; a call that has it always sends it, also with no `t3.` attester. */
+export const T3_TOKEN_ENV = "T3_ACP_MCP_AUTHORIZATION";
+
+/** K-1752: a call that carries a token and that no attester could vouch for; it refuses, never the bare machine. */
+export class AttestationError extends Error {}
+
+/** K-1752: the refusal of a call with the T3 credential on a machine where no `t3.` attester is registered. */
+export const unregisteredT3 = (
+  attestations: Readonly<Record<string, string>> | undefined,
+  attesters: ReadonlyArray<Attester>,
+): string | null =>
+  attestations?.[T3_TOKEN_ENV] && !attesters.some((attester) => attester.prefix === "t3.")
+    ? "this T3 thread is not checked: the T3 server has not registered with kitshn."
+    : null;
+
 /** K-1751: one attester of `machine.json`: its label prefix, its loopback address and the variable of the token. */
 export interface Attester {
   readonly prefix: string;
   readonly address: string;
   readonly tokenEnv: string;
+  /** The user that registered it (`attester-set`); its listener must still be that user. A hand-written entry has none. */
+  readonly uid?: number;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "[::1]", "::1", "localhost"]);
@@ -34,17 +51,20 @@ export function attestersOf(machine: unknown): {
     const prefix = typeof item["prefix"] === "string" ? item["prefix"] : "";
     const address = typeof item["address"] === "string" ? item["address"] : "";
     const tokenEnv = typeof item["tokenEnv"] === "string" ? item["tokenEnv"] : "";
-    let host = "";
+    const uid = typeof item["uid"] === "number" && Number.isInteger(item["uid"]) ? item["uid"] : undefined;
+    let url: URL | null = null;
     try {
-      host = new URL(address).hostname;
+      url = new URL(address);
     } catch {
-      host = "";
+      url = null;
     }
     if (!prefix.endsWith(".") || prefix.length < 2)
       refused.push(`${prefix || "(none)"}: a prefix ends with a dot`);
-    else if (!LOOPBACK.has(host)) refused.push(`${prefix}: ${address} is not on loopback`);
+    else if (url?.protocol !== "http:" && url?.protocol !== "https:")
+      refused.push(`${prefix}: ${address} is not an http or https address`);
+    else if (!LOOPBACK.has(url.hostname)) refused.push(`${prefix}: ${address} is not on loopback`);
     else if (tokenEnv === "") refused.push(`${prefix}: no tokenEnv`);
-    else attesters.push({ prefix, address, tokenEnv });
+    else attesters.push({ prefix, address, tokenEnv, ...(uid === undefined ? {} : { uid }) });
   }
   return { attesters, refused };
 }

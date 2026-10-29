@@ -568,7 +568,10 @@ export class Kitshn extends DurableObject<Env> {
    * row and makes the namespace again. Revisit when a delete must survive a restart, for example with a row per delete.
    */
   private readonly deletingStorage = new Set<string>();
-  /** K-1302: the Access rows, read on first use; a wake for a daemon sample never needs them. */
+  /**
+   * K-1302: the Access rows, read on first use and then kept for the life of the object; a wake for a daemon sample
+   * never needs them. Every write goes through accessStore(), which writes the map and the table together.
+   */
   private accessCache: Map<string, AccessRow> | null = null;
   private get access(): Map<string, AccessRow> {
     this.accessCache ??= new Map(
@@ -733,7 +736,7 @@ export class Kitshn extends DurableObject<Env> {
     );
     this.iconCache = null;
     this.accessWarnings = JSON.parse(this.meta("access_warnings") ?? "[]") as Array<string>;
-    this.accessCache = null;
+    // The Access rows stay: every write goes through accessStore() or also sets the map (the daily reset).
     this.revisionCache = null;
     this.uptimeCache = null;
     this.openCache = null;
@@ -1206,6 +1209,7 @@ export class Kitshn extends DurableObject<Env> {
       return this.insertRevision(actor, summary, changes, undoes, undo?.item ? undo.revision : null);
     });
     this.state = after;
+    this.clearAccessFailures();
     for (const change of changes) {
       if (change._tag === "shareSetting") this.stuckShares.delete(change.id);
       if (change._tag === "place")
@@ -1275,6 +1279,16 @@ export class Kitshn extends DurableObject<Env> {
       if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
       throw error;
     }
+  }
+
+  /**
+   * K-407: a change on the map clears every failed Access write, so the next alarm writes the wanted bodies at once,
+   * also a body that failed before, such as a move back to earlier circles. Changes come at human speed.
+   */
+  private clearAccessFailures() {
+    const store = this.accessStore();
+    for (const { retryAt: _, attempts: __, ...row } of this.access.values())
+      if (row.error !== null) store.put({ ...row, tried: "", error: null });
   }
 
   /** K-1502, K-1506: Undo reverses the caller's own newest revision, and runs the same rules as an edit. */
@@ -4612,6 +4626,10 @@ export class Kitshn extends DurableObject<Env> {
       now,
     );
     if (retry?.at) next = Math.min(next, retry.at);
+    // K-407, K-408: a failed Access write or delete tries again at its retry time.
+    for (const row of this.access.values())
+      if (row.error !== null && row.retryAt !== undefined && row.retryAt > now)
+        next = Math.min(next, row.retryAt);
     // K-817: an expired Compose deploy gives up the DNS record that its plan made.
     for (const run of this.deploys().composeRuns)
       if (run.expiresAt > now) next = Math.min(next, run.expiresAt);

@@ -46,6 +46,8 @@ export interface RevisionView {
 export type AccessState =
   | { readonly state: "applied" }
   | { readonly state: "applying" }
+  /** K-407, K-408: Cloudflare gave no clear answer; kitshn tries again at `at`. */
+  | { readonly state: "retrying"; readonly error: string; readonly at: number }
   | { readonly state: "failed"; readonly error: string };
 
 export interface Snapshot {

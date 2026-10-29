@@ -98,6 +98,9 @@ import { basename, dirname, join } from "node:path";
 import {
   type Platform,
   RELEASES,
+  WINDOWS_CLOUDFLARED,
+  WINDOWS_TASKS,
+  ownUid,
   cloudflaredUrl,
   expectedDaemonUid,
   expectedHash,
@@ -128,8 +131,8 @@ const VERSION = typeof KITSHN_VERSION === "string" ? KITSHN_VERSION : "dev";
 
 const platform = ((): Platform => {
   const value = osPlatform();
-  if (value === "linux" || value === "darwin") return value;
-  throw new Error(`kitshn runs on Linux and macOS (K-601), not on ${value}.`);
+  if (value === "linux" || value === "darwin" || value === "win32") return value;
+  throw new Error(`kitshn runs on Linux, macOS and Windows (K-601), not on ${value}.`);
 })();
 const paths = pathsFor(platform, process.env);
 
@@ -186,6 +189,25 @@ function writeKey(file: string, key: MachinePrivateKey) {
  */
 async function joinCommand(code: string | undefined, server: string | undefined) {
   if (!code || !server) fail("usage: kitshn join <code> --server https://kit.example.com");
+  // K-623: Windows ignores file modes, so before the key goes in, only the user and SYSTEM get the folder, with no
+  // inherited access.
+  if (platform === "win32") {
+    mkdirSync(dirname(paths.config), { recursive: true });
+    const grant = spawnSync(
+      "icacls",
+      [
+        dirname(paths.config),
+        "/inheritance:r",
+        "/grant:r",
+        `${process.env["USERNAME"] ?? ""}:(OI)(CI)F`,
+        "/grant:r",
+        "SYSTEM:(OI)(CI)F",
+      ],
+      { encoding: "utf8", windowsHide: true },
+    );
+    if (grant.status !== 0)
+      fail(`icacls could not protect ${dirname(paths.config)}: ${grant.stdout}${grant.stderr}`);
+  }
   // K-1703: the key pair comes first, in machine.key.rekey before kitshn stores its public half, so a wrong code
   // never replaces a valid key. The next challenge that names it promotes it.
   const key = await newMachineKey();
@@ -271,31 +293,35 @@ async function statusCommand() {
 }
 
 /** K-701: where the commands find the daemon: their own socket, or the one trusted shared socket in /tmp. */
-const foundSocket = localSocket(
-  process.env,
-  paths,
-  (path) => {
-    try {
-      const stat = lstatSync(path);
-      return { uid: stat.uid, mode: stat.mode, directory: stat.isDirectory(), socket: stat.isSocket() };
-    } catch {
-      return null;
-    }
-  },
-  (() => {
-    try {
-      return readdirSync("/tmp");
-    } catch {
-      return [];
-    }
-  })(),
-  (uid) => {
-    const name = spawnSync("id", ["-nu", String(uid)], { encoding: "utf8" });
-    return name.status === 0 ? name.stdout.trim() : null;
-  },
-);
+// K-621: Windows has one pipe per user and no shared socket.
+const foundSocket =
+  platform === "win32"
+    ? paths.socket
+    : localSocket(
+        process.env,
+        paths,
+        (path) => {
+          try {
+            const stat = lstatSync(path);
+            return { uid: stat.uid, mode: stat.mode, directory: stat.isDirectory(), socket: stat.isSocket() };
+          } catch {
+            return null;
+          }
+        },
+        (() => {
+          try {
+            return readdirSync("/tmp");
+          } catch {
+            return [];
+          }
+        })(),
+        (uid) => {
+          const name = spawnSync("id", ["-nu", String(uid)], { encoding: "utf8" });
+          return name.status === 0 ? name.stdout.trim() : null;
+        },
+      );
 const socketPath = typeof foundSocket === "string" ? foundSocket : paths.socket;
-const daemonUid = expectedDaemonUid(process.env, socketPath, process.getuid!());
+const daemonUid = expectedDaemonUid(process.env, socketPath, ownUid());
 /** K-701: why no daemon answers. A shared folder that another user made first keeps the daemon out of it. */
 function notRunning(): string {
   if (typeof foundSocket !== "string")
@@ -623,7 +649,9 @@ function localUsersCommand(action: string | undefined, who: string | undefined) 
   const machine = JSON.parse(readFileSync(paths.config, "utf8")) as Record<string, unknown>;
   const users = localUsersOf(machine);
   if (users === null) fail(`localUsers in ${paths.config} is not a list of user ids. Fix it by hand.`);
-  const own = process.getuid!();
+  if (platform === "win32")
+    fail("Windows has no local users for kitshn yet; only the user who joined uses it (K-624).");
+  const own = ownUid();
   if (action === "list") {
     console.log([`${own} (the daemon user)`, ...users.map(String)].join("\n"));
     return;
@@ -646,8 +674,7 @@ function localUsersCommand(action: string | undefined, who: string | undefined) 
 async function kitshn1TakeoverCommand(repo?: string, environment?: string, project?: string, user?: string) {
   if (!repo || !environment || !project || !user)
     fail("usage: kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>");
-  if (process.getuid!() !== 0)
-    fail("kitshn1-takeover runs as root: it stops KitSHn 1 and reads /persistent.");
+  if (ownUid() !== 0) fail("kitshn1-takeover runs as root: it stops KitSHn 1 and reads /persistent.");
   const failWith = (error: unknown) =>
     fail(printable(error instanceof Error ? error.message : String(error)));
   const daemon = await daemonUser(user).catch(failWith);
@@ -677,13 +704,18 @@ const run = (argv: ReadonlyArray<string>, mayFail = false) => {
   if (result.status !== 0 && !mayFail) fail(`${argv.join(" ")} failed.`);
 };
 
-const tunnel = tunnelCommands(platform, paths.tunnelService, process.getuid?.() ?? 0);
+const tunnel = tunnelCommands(platform, paths.tunnelService, ownUid());
 
-/** Writes a file only when its text changes. Returns whether it changed. */
-function writeChanged(file: string, text: string, mode: number): boolean {
-  if (existsSync(file) && readFileSync(file, "utf8") === text) return false;
+/** K-622: Task Scheduler reads a task file as UTF-16 with its byte order mark; the other service files are UTF-8. */
+const serviceBytes = (text: string) =>
+  platform === "win32" ? Buffer.from(`\ufeff${text}`, "utf16le") : Buffer.from(text, "utf8");
+
+/** Writes a file only when its bytes change. Returns whether it changed. */
+function writeChanged(file: string, text: string | Buffer, mode: number): boolean {
+  const bytes = typeof text === "string" ? Buffer.from(text, "utf8") : text;
+  if (existsSync(file) && readFileSync(file).equals(bytes)) return false;
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, text, { mode });
+  writeFileSync(file, bytes, { mode });
   chmodSync(file, mode);
   return true;
 }
@@ -696,9 +728,17 @@ async function ensureTunnel(config: JoinSecrets) {
   const { file: binary, fresh } = await ensureCloudflared();
   const tokenFile = join(paths.data, "tunnel-token");
   const tokenChanged = writeChanged(tokenFile, config.tunnelToken, 0o600);
+  // K-622: the empty config keeps the tunnel off any `.cloudflared` config of the user.
+  if (platform === "win32")
+    writeChanged(
+      join(paths.data, "cloudflared.yml"),
+      // cloudflared logs an error for a config with only comments, so it holds one setting that the task also sets.
+      "# kitshn: no other local settings (K-622)\nno-autoupdate: true\n",
+      0o600,
+    );
   const unitChanged = writeChanged(
     paths.tunnelService,
-    tunnelServiceFile(platform, binary, tokenFile),
+    serviceBytes(tunnelServiceFile(platform, binary, tokenFile)),
     0o644,
   );
   const steps = fresh || tokenChanged || unitChanged ? tunnel.restart : tunnel.start;
@@ -717,7 +757,7 @@ function removeTunnel() {
 
 async function serviceCommand(action: string | undefined) {
   const file = paths.service;
-  const commands = serviceCommands(platform, file, process.getuid?.() ?? 0);
+  const commands = serviceCommands(platform, file, ownUid());
   if (action === "install") {
     // The tunnel service starts before the old daemon stops, so a daemon that still runs its own cloudflared
     // hands over with no gap.
@@ -725,7 +765,7 @@ async function serviceCommand(action: string | undefined) {
     mkdirSync(dirname(file), { recursive: true });
     // A second install replaces the running daemon, for example after a new download.
     for (const argv of commands.stop) run(argv, true);
-    writeFileSync(file, serviceFile(platform, process.execPath));
+    writeFileSync(file, serviceBytes(serviceFile(platform, process.execPath)));
     for (const argv of commands.start) run(argv);
     console.log(`kitshn runs as a user service (${file}).`);
     if (platform === "linux") {
@@ -746,7 +786,7 @@ async function serviceCommand(action: string | undefined) {
 
 /** K-603: the cloudflared of the tunnel service, downloaded once. `fresh` says that this call downloaded it. */
 async function ensureCloudflared(): Promise<{ file: string; fresh: boolean }> {
-  const file = join(paths.data, "cloudflared");
+  const file = join(paths.data, platform === "win32" ? WINDOWS_CLOUDFLARED : "cloudflared");
   if (existsSync(file)) return { file, fresh: false };
   mkdirSync(paths.data, { recursive: true });
   const { url, archive } = cloudflaredUrl(platform, arch());
@@ -766,7 +806,7 @@ async function ensureCloudflared(): Promise<{ file: string; fresh: boolean }> {
 }
 
 function sample() {
-  const disk = statfsSync("/");
+  const disk = statfsSync(platform === "win32" ? `${process.env["SystemDrive"] ?? "C:"}\\` : "/");
   return {
     at: Date.now(),
     cpu: Math.min(1, (loadavg()[0] ?? 0) / Math.max(1, cpus().length)),
@@ -821,24 +861,57 @@ async function updateDaemon(
     rmSync(next, { force: true });
     writeFileSync(next, bytes);
     chmodSync(next, 0o755);
+    // K-620: Windows cannot replace a running .exe, but it can rename one; the next start deletes the old one.
+    if (platform === "win32") {
+      rmSync(oldBinary(), { force: true });
+      renameSync(process.execPath, oldBinary());
+    }
     renameSync(next, process.execPath);
   } catch (error) {
     return failed(`The update failed: ${String(error)}`);
   }
-  setTimeout(() => process.exit(0), 500);
+  restartSoon();
   return { ok: true, exitCode: 0, output: `Updated ${VERSION} to ${version}; restarting.` };
+}
+
+const oldBinary = () => process.execPath.replace(/\.exe$/i, ".old.exe");
+
+/**
+ * K-601: exits so that the service manager starts the daemon again. K-622: Task Scheduler does not start an action
+ * that ended, so on Windows a hidden PowerShell runs the task again once this daemon is gone.
+ */
+function restartSoon() {
+  if (platform === "win32")
+    spawn(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `Start-Sleep 3; schtasks /Run /TN '${WINDOWS_TASKS.daemon}'`,
+      ],
+      { detached: true, stdio: "ignore", windowsHide: true },
+    ).unref();
+  setTimeout(() => process.exit(0), 500);
+}
+
+/** Ends a job and its children: its process group, or on Windows its process tree. */
+function killTree(pid: number) {
+  if (platform === "win32") {
+    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // Already gone.
+  }
 }
 
 /** Process groups of running shell jobs. They end with the daemon, also under launchd. */
 const runningGroups = new Set<number>();
 process.on("exit", () => {
-  for (const pid of runningGroups) {
-    try {
-      process.kill(-pid, "SIGKILL");
-    } catch {
-      // Already gone.
-    }
-  }
+  for (const pid of runningGroups) killTree(pid);
 });
 
 type JobOutcome = {
@@ -871,6 +944,7 @@ function runProgram(
     const child = spawn(program, [...args], {
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
+      windowsHide: true,
       cwd: options.cwd,
       env: options.env ?? process.env,
     });
@@ -882,13 +956,7 @@ function runProgram(
     child.stdout?.on("data", add);
     child.stderr?.on("data", add);
     const timer = setTimeout(() => {
-      if (child.pid) {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch {
-          // The group is gone already.
-        }
-      }
+      if (child.pid) killTree(child.pid);
       finish({
         ok: false,
         exitCode: null,
@@ -1565,13 +1633,16 @@ function runJob(
     });
   }
   if (command.kind === "restart") {
-    // The service manager starts the daemon again after this exit.
-    setTimeout(() => process.exit(0), 500);
+    restartSoon();
     return Promise.resolve({ ok: true, exitCode: 0, output: "restarting" });
   }
   // `$KITSHN` is this daemon's binary, so a job can run `"$KITSHN" expose …` (K-1104).
-  // From source, execPath is bun itself, not kitshn.
-  return runProgram("/bin/sh", ["-c", command.script], {
+  // From source, execPath is bun itself, not kitshn. K-624: Windows runs the script in Windows PowerShell.
+  const [shell, ...shellArgs] =
+    platform === "win32"
+      ? ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"]
+      : ["/bin/sh", "-c"];
+  return runProgram(shell ?? "/bin/sh", [...shellArgs, command.script], {
     env: VERSION === "dev" ? process.env : { ...process.env, KITSHN: process.execPath },
   });
 }
@@ -1583,18 +1654,22 @@ function report() {
   const message: DaemonMessage = {
     type: "status",
     status: {
-      capabilities: [
-        "update",
-        "update-gz",
-        "compose",
-        "compose-redeploy",
-        "compose-guard",
-        "compose-rollback",
-        "logs",
-        "backup",
-        "backup-restore",
-        "provider",
-      ],
+      // K-624: Windows has no Docker setup in v1, so the map refuses Compose, logs and backups there with a reason.
+      capabilities:
+        platform === "win32"
+          ? ["update", "update-gz", "provider"]
+          : [
+              "update",
+              "update-gz",
+              "compose",
+              "compose-redeploy",
+              "compose-guard",
+              "compose-rollback",
+              "logs",
+              "backup",
+              "backup-restore",
+              "provider",
+            ],
       ...(keptBytes === undefined ? {} : { keptBytes }),
       version: VERSION,
       os: `${osPlatform()} ${release()}`,
@@ -2312,7 +2387,9 @@ async function runCommand() {
       log(`the clean-up after a stopped backup or restore failed: ${String(error)}`),
     );
   // First, so a second daemon stops before it touches the tunnel or the connection of the running one.
-  const own = process.getuid!();
+  const own = ownUid();
+  // K-620: the binary that an update renamed on Windows.
+  if (platform === "win32") rmSync(oldBinary(), { force: true });
   const socketOptions = {
     platform,
     // Read at each connection, so `kitshn local-users` needs no restart.
@@ -2324,12 +2401,15 @@ async function runCommand() {
   const local = await listenLocal(paths.socket, { ...socketOptions, access: "private" });
   process.on("exit", local.stop);
   // K-701: the users in `localUsers` connect here. An unsafe folder costs only this socket, not the daemon.
-  const shared = await listenLocal(paths.sharedSocket, { ...socketOptions, access: "shared" }).catch(
-    (error: unknown) => {
-      log(`no shared socket: ${error instanceof Error ? error.message : String(error)}`);
-      return null;
-    },
-  );
+  const shared =
+    platform === "win32"
+      ? null
+      : await listenLocal(paths.sharedSocket, { ...socketOptions, access: "shared" }).catch(
+          (error: unknown) => {
+            log(`no shared socket: ${error instanceof Error ? error.message : String(error)}`);
+            return null;
+          },
+        );
   if (shared) process.on("exit", shared.stop);
   // The service manager stops the daemon with SIGTERM; an exit runs the clean-up of the socket and the jobs.
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => process.exit(0));

@@ -1,9 +1,11 @@
-// K-701, K-702: the daemon's local Unix socket, and the client that the `kitshn` commands use.
+// K-701, K-702: the daemon's local Unix socket (a named pipe on Windows, K-621), and the client that the `kitshn`
+// commands use.
 import { type Answer, type Request, MAX_LINE_LENGTH, line, readAnswer, readRequest } from "@kitshn/local";
 import { type Stats, chmodSync, existsSync, lstatSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { connect, createServer } from "node:net";
 import { dirname } from "node:path";
 import { type PeerDecision, peerUid, requestAllowed } from "./peer.ts";
-import type { Platform } from "./service.ts";
+import { type Platform, ownUid } from "./service.ts";
 
 /** The local user that sent a request. Each request records it (K-701). */
 export interface Caller {
@@ -101,6 +103,7 @@ export async function listenLocal(
   path: string,
   options: LocalOptions,
 ): Promise<{ readonly stop: () => void }> {
+  if (options.platform === "win32") return listenPipe(path, options);
   const folder = dirname(path);
   if (options.access === "private") {
     mkdirSync(folder, { recursive: true, mode: 0o700 });
@@ -111,7 +114,7 @@ export async function listenLocal(
     } catch (error) {
       if ((error as { code?: unknown }).code !== "EEXIST") throw error;
     }
-    const problem = sharedFolderProblem(lstatSync(folder), statSync(dirname(folder)), process.getuid!());
+    const problem = sharedFolderProblem(lstatSync(folder), statSync(dirname(folder)), ownUid());
     if (problem) throw new Error(`the shared socket folder ${folder} is not safe: ${problem}.`);
     chmodSync(folder, 0o711);
   }
@@ -137,34 +140,8 @@ export async function listenLocal(
   };
   const lastRefusal = new Map<number | null, number>();
   let connections = 0;
-  const answer = async (
-    socket: Bun.Socket<Connection | undefined>,
-    { uid, key }: Connection,
-    text: string,
-  ) => {
-    const read = readRequest(text);
-    if (!read.ok) return send(socket, read.answer);
-    const { request } = read;
-    if (!requestAllowed(request.type, uid, process.getuid!())) {
-      options.log(`local socket: refused ${request.type} from user id ${uid}`);
-      return send(socket, {
-        id: request.id,
-        type: "error",
-        error: `${request.type} is not allowed for the user id ${uid}; only the daemon user and root may send it (K-701).`,
-      });
-    }
-    options.log(`local socket: ${request.type} from user id ${uid}`);
-    send(
-      socket,
-      await Promise.resolve()
-        .then(() => options.handle(request, { uid, connection: key }, (event) => send(socket, event)))
-        .catch((error: unknown): Answer => ({
-          id: request.id,
-          type: "error",
-          error: error instanceof Error ? error.message : String(error),
-        })),
-    );
-  };
+  const answer = (socket: Bun.Socket<Connection | undefined>, { uid, key }: Connection, text: string) =>
+    answerLine(options, (reply) => send(socket, reply), { uid, connection: key }, text);
   const server = Bun.listen<Connection | undefined>({
     unix: path,
     socket: {
@@ -221,6 +198,89 @@ export async function listenLocal(
   };
 }
 
+/** K-701: answers one request line of a connection of `uid`. */
+async function answerLine(
+  options: LocalOptions,
+  send: (answer: Answer) => void,
+  { uid, connection }: Caller,
+  text: string,
+) {
+  const read = readRequest(text);
+  if (!read.ok) return send(read.answer);
+  const { request } = read;
+  if (!requestAllowed(request.type, uid, ownUid())) {
+    options.log(`local socket: refused ${request.type} from user id ${uid}`);
+    return send({
+      id: request.id,
+      type: "error",
+      error: `${request.type} is not allowed for the user id ${uid}; only the daemon user and root may send it (K-701).`,
+    });
+  }
+  options.log(`local socket: ${request.type} from user id ${uid}`);
+  send(
+    await Promise.resolve()
+      .then(() => options.handle(request, { uid, connection }, send))
+      .catch((error: unknown): Answer => ({
+        id: request.id,
+        type: "error",
+        error: error instanceof Error ? error.message : String(error),
+      })),
+  );
+}
+
+/** Splits chunks into lines; a line, or a rest, longer than the limit calls `tooLong` and stops. */
+function lineReader(onLine: (text: string) => void, tooLong: () => void) {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  return (chunk: Uint8Array) => {
+    buffer += decoder.decode(chunk, { stream: true });
+    for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
+      const text = buffer.slice(0, end);
+      buffer = buffer.slice(end + 1);
+      if (text.length > MAX_LINE_LENGTH) return tooLong();
+      onLine(text);
+    }
+    if (buffer.length > MAX_LINE_LENGTH) tooLong();
+  };
+}
+
+/**
+ * K-621: the daemon's named pipe on Windows. A pipe with no security descriptor gives read and write only to its
+ * owner, SYSTEM and Administrators; everyone else gets read only, so no other user opens it for a request (tested
+ * on Windows 11, also from a low integrity process). Each caller counts as the daemon user. The pipe is first come:
+ * a program that holds the name before the daemon starts makes the start fail here.
+ */
+async function listenPipe(path: string, options: LocalOptions): Promise<{ readonly stop: () => void }> {
+  let connections = 0;
+  const server = createServer((socket) => {
+    const key = ++connections;
+    const send = (answer: Answer) => void socket.write(line(answer));
+    socket.on("close", () => options.closed?.(key));
+    socket.on(
+      "data",
+      lineReader(
+        (text) => void answerLine(options, send, { uid: ownUid(), connection: key }, text),
+        () => {
+          send({ id: null, type: "error", error: `A line is longer than ${MAX_LINE_LENGTH} characters.` });
+          socket.end();
+        },
+      ),
+    );
+    socket.on("error", () => socket.destroy());
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", (error: NodeJS.ErrnoException) =>
+      reject(
+        error.code === "EADDRINUSE"
+          ? new Error(`another kitshn daemon or another program holds the pipe ${path} (K-621).`)
+          : error,
+      ),
+    );
+    server.listen(path, resolve);
+  });
+  return { stop: () => void server.close() };
+}
+
 export type LocalOutcome =
   | { readonly kind: "answer"; readonly answer: Answer }
   /** No socket file, or one that no daemon listens on. */
@@ -239,6 +299,7 @@ export function askLocal(
   follow: (answer: Answer) => boolean = () => false,
   onLine: (answer: Answer) => void = () => {},
 ): Promise<LocalOutcome> {
+  if (peer.platform === "win32") return askPipe(path, request, timeoutMs, follow, onLine);
   return new Promise((resolve, reject) => {
     let done = false;
     let buffer = "";
@@ -326,6 +387,7 @@ export function bridgeLocal(
   /** The bytes as they come: a character split across chunks stays whole for the reader. */
   output: (bytes: Uint8Array) => void,
 ): Promise<LocalOutcome | "closed"> {
+  if (peer.platform === "win32") return bridgePipe(path, input, output);
   let writer: SocketWriter | null = null;
   return new Promise((resolve, reject) => {
     Bun.connect({
@@ -362,5 +424,87 @@ export function bridgeLocal(
       if (code === "ENOENT" || code === "ECONNREFUSED") resolve({ kind: "not-running" });
       else reject(error);
     });
+  });
+}
+
+/** K-621, K-702: `askLocal` over the daemon's named pipe on Windows. */
+function askPipe(
+  path: string,
+  request: Request,
+  timeoutMs: number,
+  follow: (answer: Answer) => boolean,
+  onLine: (answer: Answer) => void,
+): Promise<LocalOutcome> {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const finish = (settle: () => void) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      socket.end();
+      settle();
+    };
+    const timer = setTimeout(
+      () => finish(() => reject(new Error(`the daemon did not answer within ${timeoutMs / 1000} seconds.`))),
+      timeoutMs,
+    );
+    const socket = connect(path, () => socket.write(line(request)));
+    socket.on(
+      "data",
+      lineReader(
+        (text) => {
+          if (done) return;
+          try {
+            const answer = readAnswer(text);
+            if ("id" in answer && answer.id !== request.id && answer.id !== null)
+              throw new Error(`the daemon answered the id ${answer.id}, not ${request.id}.`);
+            onLine(answer);
+            if (follow(answer)) return clearTimeout(timer);
+            finish(() => resolve({ kind: "answer", answer }));
+          } catch (error) {
+            finish(() => reject(error));
+          }
+        },
+        () =>
+          finish(() =>
+            reject(new Error(`the daemon sent a line longer than ${MAX_LINE_LENGTH} characters.`)),
+          ),
+      ),
+    );
+    socket.on("close", () =>
+      finish(() =>
+        reject(new Error("the daemon closed the connection without an answer; see the daemon log.")),
+      ),
+    );
+    socket.on("error", (error: NodeJS.ErrnoException) =>
+      finish(() =>
+        error.code === "ENOENT" || error.code === "ECONNREFUSED"
+          ? resolve({ kind: "not-running" })
+          : reject(error),
+      ),
+    );
+  });
+}
+
+/** K-621, K-704: `bridgeLocal` over the daemon's named pipe on Windows; the pipe admits only the daemon user. */
+function bridgePipe(
+  path: string,
+  input: AsyncIterable<Uint8Array>,
+  output: (bytes: Uint8Array) => void,
+): Promise<LocalOutcome | "closed"> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(path, () => {
+      void (async () => {
+        for await (const chunk of input) socket.write(chunk);
+        socket.end();
+      })().catch(reject);
+    });
+    socket.on("data", (chunk: Buffer) => output(new Uint8Array(chunk)));
+    socket.on("close", () => resolve("closed"));
+    socket.on("error", (error: NodeJS.ErrnoException) =>
+      error.code === "ENOENT" || error.code === "ECONNREFUSED"
+        ? resolve({ kind: "not-running" })
+        : reject(error),
+    );
   });
 }

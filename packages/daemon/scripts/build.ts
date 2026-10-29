@@ -10,6 +10,8 @@ const targets = [
   ["bun-linux-x64", "kitshn-linux-x64"],
   ["bun-darwin-arm64", "kitshn-darwin-arm64"],
   ["bun-darwin-x64", "kitshn-darwin-x64"],
+  // K-620: one console binary, so `kitshn status` prints in a terminal; the tasks start it without a window.
+  ["bun-windows-x64", "kitshn-windows-x64.exe"],
 ] as const;
 const only = process.argv[2];
 mkdirSync(new URL("../dist", import.meta.url), { recursive: true });

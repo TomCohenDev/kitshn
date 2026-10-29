@@ -538,6 +538,9 @@ export default {
     // K-1833: the bootstrap waits for its import here; the answer names the state and a reason, nothing more.
     if (url.pathname === "/join/import-status" && request.method === "GET")
       return env.KITSHN.getByName("kitshn").fetch("https://kitshn.internal/internal/import-status");
+    // K-625: the Windows join script, below the public Access path `/join`, so the bootstrap needs no new application.
+    if (url.pathname === "/join/windows.ps1" && request.method === "GET")
+      return env.ASSETS.fetch(new Request(new URL("/join.ps1", url.origin)));
     // K-617: the release that machines and deploy workflows download. Both paths are public in Access.
     if (
       (url.pathname === "/join/version" || url.pathname === "/deploy/version") &&

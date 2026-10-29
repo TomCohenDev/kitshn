@@ -4336,6 +4336,8 @@ export class Kitshn extends DurableObject<Env> {
         code,
         expiresAt,
         command: `curl -fsSL ${origin}/join | sh -s -- ${code} ${origin}`,
+        // K-625: the same join in Windows PowerShell.
+        windowsCommand: `& ([scriptblock]::Create((irm ${origin}/join/windows.ps1))) ${code} ${origin}`,
       });
     } catch (error) {
       // Leave nothing half made behind.
@@ -6535,7 +6537,10 @@ export class Kitshn extends DurableObject<Env> {
         )
           return Response.json(
             {
-              error: `Update the daemon on ${running.name} first: it does not check Compose settings yet (K-818).`,
+              // K-624: a Windows daemon has no Compose in v1, so an update would not help there.
+              error: this.machineView(running).status?.os.startsWith("win32")
+                ? `${running.name} runs Windows, where kitshn has no Compose apps yet (K-624).`
+                : `Update the daemon on ${running.name} first: it does not check Compose settings yet (K-818).`,
             },
             { status: 409 },
           );

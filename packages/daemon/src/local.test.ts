@@ -233,3 +233,31 @@ describe("local socket (K-701, K-702)", () => {
     expect(await askLocal(local.path, status, 5000, daemonPeer)).toEqual({ kind: "not-running" });
   });
 });
+
+it("answers over the Windows pipe code, and a second daemon cannot take the name (K-621)", async () => {
+  // On macOS and Linux, node:net makes a Unix socket of the path; the request and answer code is the same.
+  const path = join(mkdtempSync(join(tmpdir(), "kitshn-pipe-")), "pipe");
+  const options = {
+    platform: "win32" as const,
+    access: "private" as const,
+    decide: () => ({ accept: true as const }),
+    handle: async (request: { id: string }) => ({ id: request.id, type: "error" as const, error: "pong" }),
+    log: () => {},
+  };
+  const server = await listenLocal(path, options);
+  try {
+    const outcome = await askLocal(path, { id: "7", type: "status" } as never, 5000, {
+      platform: "win32",
+      daemonUid: -1,
+    });
+    expect(outcome).toMatchObject({ kind: "answer", answer: { id: "7", type: "error", error: "pong" } });
+    await expect(listenLocal(path, options)).rejects.toThrow(/holds the pipe/);
+  } finally {
+    server.stop();
+  }
+  expect(
+    await askLocal(path, { id: "8", type: "status" } as never, 5000, { platform: "win32", daemonUid: -1 }),
+  ).toEqual({
+    kind: "not-running",
+  });
+});

@@ -51,9 +51,15 @@ api() {
   method=$1
   path=$2
   [ $# -ge 3 ] && printf '%s' "$3" >"$WORK/body"
-  # A 5xx or Cloudflare's error 10013 ("An unknown error") often passes on the next try, so a call that is safe to
-  # repeat gets one more. A POST could land twice, so only the asset upload session, which makes nothing, repeats.
-  for attempt in 1 2; do
+  # A 5xx or Cloudflare's error 10013 ("An unknown error") often passes on a later try, so a call that is safe to
+  # repeat tries again: the asset upload session, which makes nothing and fails for minutes at a time, after 5 s and
+  # 15 s; GET, PUT, PATCH and DELETE once after 2 s. A POST that makes something could land twice, so it does not repeat.
+  case "$method $path" in
+  POST*/assets-upload-session) pauses="5 15" ;;
+  GET* | PUT* | PATCH* | DELETE*) pauses="2" ;;
+  *) pauses="" ;;
+  esac
+  for pause in $pauses last; do
     if [ $# -ge 3 ]; then
       http_status=$(curl -sS -o "$WORK/out" -w '%{http_code}' -X "$method" "$API$path" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
         -H "Content-Type: application/json" --data-binary "@$WORK/body") || die "$method $path: no answer from Cloudflare."
@@ -62,10 +68,9 @@ api() {
         die "$method $path: no answer from Cloudflare."
     fi
     [ "$(jq -r '.success // false' "$WORK/out" 2>/dev/null)" = "true" ] && break
-    [ "$attempt" = 1 ] || break
-    case "$method $path" in POST*/assets-upload-session | GET* | PUT* | PATCH* | DELETE*) ;; *) break ;; esac
+    [ "$pause" = last ] && break
     case "$http_status" in 5??) ;; *) jq -e 'any(.errors[]?; .code == 10013)' "$WORK/out" >/dev/null 2>&1 || break ;; esac
-    sleep 2
+    sleep "$pause"
   done
   if [ "$(jq -r '.success // false' "$WORK/out" 2>/dev/null)" != "true" ]; then
     errors=$(jq -r '[.errors[]? | "\(.code): \(.message)" + ([.error_chain[]?.message] | if length > 0 then " (" + join("; ") + ")" else "" end)] | join("; ")' "$WORK/out" 2>/dev/null || head -c 300 "$WORK/out")
@@ -463,8 +468,14 @@ for bucket in $(printf '%s' "$session" | jq -r '.buckets[]? | join(",")'); do
     base64 <"$WORK/bundle/assets/$(printf '%s' "$hash" | cut -c1-2)/$hash" | tr -d '\n' >"$WORK/$hash.b64"
     set -- "$@" -F "$hash=@$WORK/$hash.b64;filename=$hash;type=$type"
   done
-  curl -sS -X POST "$API/accounts/$ACCOUNT/workers/assets/upload?base64=true" -H "Authorization: Bearer $assets_jwt" "$@" >"$WORK/out"
-  [ "$(jq -r .success "$WORK/out")" = true ] || die "the asset upload failed: $(head -c 300 "$WORK/out")"
+  # Files are keyed by their hash, so a failed upload is safe to repeat; it tries again after 5 s and 15 s.
+  for pause in 5 15 last; do
+    curl -sS -X POST "$API/accounts/$ACCOUNT/workers/assets/upload?base64=true" -H "Authorization: Bearer $assets_jwt" "$@" >"$WORK/out" || true
+    [ "$(jq -r '.success // false' "$WORK/out" 2>/dev/null)" = true ] && break
+    [ "$pause" = last ] && break
+    sleep "$pause"
+  done
+  [ "$(jq -r '.success // false' "$WORK/out" 2>/dev/null)" = true ] || die "the asset upload failed: $(head -c 300 "$WORK/out")"
   next=$(jq -r '.result.jwt // empty' "$WORK/out")
   if [ -n "$next" ]; then assets_jwt=$next; fi
 done

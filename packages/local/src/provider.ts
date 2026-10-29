@@ -20,6 +20,11 @@ export const PROVIDER_LIMITS = {
   resources: 500,
   facts: 20,
   stickers: 8,
+  lists: 4,
+  rows: 100,
+  columns: 8,
+  /** K-709: each part of a desired state, in bytes of its JSON. */
+  stateBytes: 64 * 1024,
 } as const;
 
 const LOWER = "abcdefghijklmnopqrstuvwxyz";
@@ -69,10 +74,37 @@ export const ProviderLevels = Schema.Struct({
 });
 export type ProviderLevels = typeof ProviderLevels.Type;
 
+const SettingId = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(40),
+  Schema.makeFilter(
+    (id: string) => only(`${LOWER}${LOWER.toUpperCase()}${DIGITS}-`)(id) || "an id of a-z, A-Z, 0-9 and -",
+  ),
+);
+
+/** K-717: a setting of each card of a kind, with a closed list of values; kitshn keeps one value per card. */
+export const ProviderCardSetting = Schema.Struct({
+  id: SettingId,
+  title: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(60)),
+  values: Schema.Array(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(40))).check(
+    Schema.isMinLength(2),
+    Schema.isMaxLength(10),
+  ),
+  default: Schema.String,
+});
+export type ProviderCardSetting = typeof ProviderCardSetting.Type;
+
 export const ProviderKind = Schema.Struct({
   id: KindId,
   name: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(40)),
   levels: ProviderLevels,
+  /**
+   * K-709: a kind of desired state: one JSON value with a shared part and one part per machine, and no cards. The
+   * schema is a JSON Schema of the value, for the editor of the map.
+   */
+  state: Schema.optionalKey(Schema.Struct({ schema: Schema.optionalKey(Schema.Unknown) })),
+  /** K-717: settings of each card of this kind. */
+  settings: Schema.optionalKey(Schema.Array(ProviderCardSetting).check(Schema.isMaxLength(4))),
 });
 export type ProviderKind = typeof ProviderKind.Type;
 
@@ -113,6 +145,29 @@ export const ProviderSticker = Schema.Struct({
 });
 export type ProviderSticker = typeof ProviderSticker.Type;
 
+const Text = Schema.String.check(Schema.isMaxLength(200));
+/**
+ * K-1625: a list on a card, such as the scheduled tasks (K-1614) or the sessions (K-1602) of a machine. A row names
+ * the commands (K-707) that the card menu offers for it; the command event carries the row id.
+ */
+export const ProviderList = Schema.Struct({
+  id: SettingId,
+  title: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(60)),
+  columns: Schema.Array(
+    Schema.Struct({ id: SettingId, title: Schema.String.check(Schema.isMaxLength(40)) }),
+  ).check(Schema.isMinLength(1), Schema.isMaxLength(PROVIDER_LIMITS.columns)),
+  rows: Schema.Array(
+    Schema.Struct({
+      id: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64)),
+      cells: Schema.Record(Schema.String, Text),
+      commands: Schema.optionalKey(
+        Schema.Array(Schema.String.check(Schema.isMaxLength(40))).check(Schema.isMaxLength(8)),
+      ),
+    }),
+  ).check(Schema.isMaxLength(PROVIDER_LIMITS.rows)),
+});
+export type ProviderList = typeof ProviderList.Type;
+
 /** K-304: what a provider reports; kitshn sets "offline" itself while the provider is not connected. */
 export const PROVIDER_STATUSES = ["running", "stopped", "deploying", "failed", "unknown"] as const;
 
@@ -144,6 +199,7 @@ export const ProviderResource = Schema.Struct({
   stickers: Schema.optionalKey(
     Schema.Array(ProviderSticker).check(Schema.isMaxLength(PROVIDER_LIMITS.stickers)),
   ),
+  lists: Schema.optionalKey(Schema.Array(ProviderList).check(Schema.isMaxLength(PROVIDER_LIMITS.lists))),
 });
 export type ProviderResource = typeof ProviderResource.Type;
 
@@ -234,8 +290,12 @@ export function reportProblem(
   for (const id of kinds.keys())
     if (!id.startsWith(`${report.name}.`) || id.length === report.name.length + 1)
       return `the kind ${id} does not start with ${report.name}. (K-302).`;
-  if (new Set(report.commands.map((command) => command.id)).size !== report.commands.length)
-    return "two commands have the same id.";
+  for (const kind of kinds.values())
+    for (const setting of kind.settings ?? [])
+      if (!setting.values.includes(setting.default))
+        return `the setting ${setting.id} of ${kind.id} has a default that is not one of its values.`;
+  const commands = new Map(report.commands.map((command) => [command.id, command]));
+  if (commands.size !== report.commands.length) return "two commands have the same id.";
   for (const command of report.commands)
     for (const kind of command.kinds)
       if (!kinds.has(kind)) return `the command ${command.id} names the unknown kind ${kind}.`;
@@ -246,7 +306,12 @@ export function reportProblem(
     const kind = kinds.get(resource.kind);
     if (!kind) return `the resource ${resource.id} has the unknown kind ${resource.kind}.`;
     if (Object.keys(kind.levels).length === 0)
-      return `the kind ${kind.id} has no levels, so it has no cards; desired state (K-709) is not built yet.`;
+      return `the kind ${kind.id} has no levels, so it has no cards (K-709).`;
+    for (const list of resource.lists ?? [])
+      for (const row of list.rows)
+        for (const command of row.commands ?? [])
+          if (!commands.get(command)?.kinds.includes(resource.kind))
+            return `the list ${list.id} of ${resource.id} names the command ${command}, which its kind does not have.`;
     if (resource.parent !== undefined && (resource.parent === resource.id || !ids.has(resource.parent)))
       return `the resource ${resource.id} names the unknown parent ${resource.parent}.`;
     if (resource.site) {
@@ -267,3 +332,18 @@ export function reportProblem(
     return `this machine has ${PROVIDER_LIMITS.providers} providers already.`;
   return null;
 }
+
+/** K-709: the parts of a desired state that one machine gets: the shared part and its own; null where none is set. */
+export const DesiredParts = Schema.Struct({ shared: Schema.Unknown, machine: Schema.Unknown });
+export type DesiredParts = typeof DesiredParts.Type;
+
+/** K-717: card setting values, by the provider's resource id, then by setting id. */
+export const CardSettingValues = Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.String));
+export type CardSettingValues = typeof CardSettingValues.Type;
+
+/** K-1608: the keys of the pushes of kitshn, one per thing that a provider applies. */
+export const pushKey = {
+  grants: (provider: string) => `grants:${provider}`,
+  settings: (provider: string) => `settings:${provider}`,
+  desired: (provider: string, kind: string) => `desired:${provider}:${kind}`,
+} as const;

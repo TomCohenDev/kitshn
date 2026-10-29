@@ -1,11 +1,14 @@
 // K-704 to K-707: the providers of this machine. A provider belongs to the local connection that registered it; the
 // daemon keeps the last registration of each one in `providers.json`, so kitshn keeps its cards while it restarts.
 import {
-  GrantTables,
+  type CardSettingValues,
+  type DesiredParts,
+  type GrantTables,
   type ProviderReport,
   type ProviderRequest,
   type ProviderResource,
   decodeProviderReports,
+  pushKey,
   reportProblem,
 } from "@kitshn/local";
 import { Schema } from "effect";
@@ -17,28 +20,31 @@ interface Entry {
   readonly connection: number | null;
 }
 
-/** What `providers.json` holds: the providers without their connections, and the grant tables that kitshn sent. */
+/**
+ * What `providers.json` holds: the providers without their connections, and the last push of kitshn for each key
+ * (K-1608): `grants:<provider>`, `settings:<provider>` and `desired:<provider>:<kind>`.
+ */
 interface Saved {
   readonly providers: ReadonlyArray<ProviderReport>;
-  readonly grants: Readonly<Record<string, GrantTables>>;
+  readonly pushed: Readonly<Record<string, unknown>>;
 }
 
-const decodeGrants = Schema.decodeUnknownSync(Schema.Record(Schema.String, GrantTables));
+const decodePushed = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
 
 /** K-1608: the saved state of `providers.json`; a file that does not decode starts empty, and says why. */
 export function parseSaved(value: unknown): { saved: Saved; problem: string | null } {
-  if (value === null) return { saved: { providers: [], grants: {} }, problem: null };
+  if (value === null) return { saved: { providers: [], pushed: {} }, problem: null };
   try {
-    const record = value as { providers?: unknown; grants?: unknown };
+    const record = value as { providers?: unknown; pushed?: unknown };
     return {
       saved: {
         providers: decodeProviderReports(record.providers).map((report) => ({ ...report, online: false })),
-        grants: decodeGrants(record.grants ?? {}),
+        pushed: decodePushed(record.pushed ?? {}),
       },
       problem: null,
     };
   } catch (error) {
-    return { saved: { providers: [], grants: {} }, problem: String(error) };
+    return { saved: { providers: [], pushed: {} }, problem: String(error) };
   }
 }
 
@@ -48,14 +54,14 @@ export type ProviderOutcome =
 
 export class Providers {
   private readonly entries = new Map<string, Entry>();
-  private grants: Record<string, GrantTables>;
+  private pushed: Record<string, unknown>;
 
   constructor(
     saved: Saved,
     private readonly save: (saved: Saved) => void,
   ) {
     for (const report of saved.providers) this.entries.set(report.name, { report, connection: null });
-    this.grants = { ...saved.grants };
+    this.pushed = { ...saved.pushed };
   }
 
   /** K-704 to K-705: applies one request of the connection `connection`; `takenSites` are the names of `sites.json`. */
@@ -94,7 +100,13 @@ export class Providers {
     if (!entry) return `this machine has no provider ${provider}.`;
     if (entry.connection !== null) return `${provider} is connected; stop it first.`;
     this.entries.delete(provider);
-    delete this.grants[provider];
+    for (const key of Object.keys(this.pushed))
+      if (
+        key === pushKey.grants(provider) ||
+        key === pushKey.settings(provider) ||
+        key.startsWith(`desired:${provider}:`)
+      )
+        delete this.pushed[key];
     this.persist();
     return null;
   }
@@ -132,21 +144,36 @@ export class Providers {
   }
 
   /** K-706: stores the tables that kitshn sent; true when they differ from the last ones. */
-  setGrants(provider: string, tables: GrantTables): boolean {
-    if (JSON.stringify(this.grants[provider]) === JSON.stringify(tables)) return false;
-    this.grants[provider] = tables;
+  /** K-1608: stores the push of kitshn with this key; true when it differs from the last one. */
+  setPushed(key: string, value: unknown): boolean {
+    if (JSON.stringify(this.pushed[key]) === JSON.stringify(value)) return false;
+    this.pushed[key] = value;
     this.persist();
     return true;
   }
 
-  grantsOf(provider: string): GrantTables {
-    return this.grants[provider] ?? {};
+  /** K-706, K-709, K-717: what the answer to `register` gives a provider from the saved pushes. */
+  savedFor(provider: string): {
+    readonly grants: GrantTables;
+    readonly desired: Record<string, DesiredParts>;
+    readonly settings: CardSettingValues;
+  } {
+    const prefix = `desired:${provider}:`;
+    return {
+      grants: (this.pushed[pushKey.grants(provider)] as GrantTables | undefined) ?? {},
+      desired: Object.fromEntries(
+        Object.entries(this.pushed).flatMap(([key, value]) =>
+          key.startsWith(prefix) ? [[key.slice(prefix.length), value as DesiredParts]] : [],
+        ),
+      ),
+      settings: (this.pushed[pushKey.settings(provider)] as CardSettingValues | undefined) ?? {},
+    };
   }
 
   private persist() {
     this.save({
       providers: this.reports().map((report) => ({ ...report, online: false })),
-      grants: this.grants,
+      pushed: this.pushed,
     });
   }
 }

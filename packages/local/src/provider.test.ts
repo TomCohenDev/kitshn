@@ -36,6 +36,43 @@ describe("provider reports (K-704, K-705)", () => {
     ["a card of a kind without levels (K-709)", t3([{ ...app, kind: "t3.settings" }])],
     ["an unknown parent", t3([{ ...app, parent: "gone" }])],
     ["two resources with one id", t3([app, app])],
+    [
+      "a card setting whose default is not one of its values (K-717)",
+      t3([], {
+        kinds: [
+          {
+            id: "t3.app",
+            name: "T3 app",
+            levels: { view: "view" },
+            settings: [
+              {
+                id: "updateChannel",
+                title: "Update channel",
+                values: ["nightly", "daily"],
+                default: "weekly",
+              },
+            ],
+          },
+        ],
+      }),
+    ],
+    [
+      "a list row with a command that its kind does not have (K-1625)",
+      t3([
+        {
+          ...app,
+          kind: "t3.thread",
+          lists: [
+            {
+              id: "tasks",
+              title: "Tasks",
+              columns: [{ id: "name", title: "Name" }],
+              rows: [{ id: "r1", cells: {}, commands: ["restart"] }],
+            },
+          ],
+        },
+      ]),
+    ],
   ])("refuses %s", (_, report) => {
     expect(reportProblem(report, [], new Set(), new Set())).not.toBeNull();
   });

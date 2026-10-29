@@ -128,6 +128,8 @@ export interface Snapshot {
   /** K-1504: who paused and when, while paused. */
   readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;
+  /** K-717: the stored card setting values, by card id; a missing value is the default of its setting. */
+  readonly cardSettings: Readonly<Record<string, Readonly<Record<string, string>>>>;
   /** K-707: the commands of the providers of each machine, by machine id. */
   readonly providerCommands: Readonly<
     Record<
@@ -208,6 +210,8 @@ export interface MachineView {
   readonly keyFailure: { readonly at: number; readonly reason: string } | null;
   /** K-909: idle volumes of kitshn apps that have no card; each has its own delete. */
   readonly orphanVolumes: ReadonlyArray<ProjectVolume>;
+  /** K-1608: the pushes of state that the machine has not applied yet. */
+  readonly queued: number;
 }
 
 export interface JobView {

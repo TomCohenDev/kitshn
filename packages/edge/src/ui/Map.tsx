@@ -19,7 +19,7 @@ import { isAgentKey } from "../core/agent.ts";
 import { AGENT_TIP, LEVEL_TIPS, MATCH_TIPS, MEMBER_HELP, PASSKEY_TIP, RightStickers } from "./Circle.tsx";
 import { MachineRightStickers } from "./MachineRights.tsx";
 import { type KindInfo, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS, kindInfo } from "./kinds.ts";
-import { KeySticker, PresenceSticker } from "./Machines.tsx";
+import { KeySticker, QueuedSticker, PresenceSticker } from "./Machines.tsx";
 import { type MenuTarget, USER_STACK } from "./actions.ts";
 import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
@@ -1072,6 +1072,7 @@ export function CardView(props: {
         ) : null}
         {props.machine ? <PresenceSticker view={props.machine} /> : null}
         {props.machine ? <KeySticker view={props.machine} /> : null}
+        {props.machine ? <QueuedSticker view={props.machine} /> : null}
         {holding.map((circle) => {
           const level = shareLevel(state, resource, circle);
           return (

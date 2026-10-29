@@ -1,5 +1,14 @@
 // Section 7: the cards of a machine's providers (K-704, K-705) and the grant tables that kitshn pushes to them (K-706).
-import type { Grant, GrantRule, GrantTables, ProviderCommand, ProviderReport } from "@kitshn/local";
+import {
+  type DesiredParts,
+  type Grant,
+  type GrantRule,
+  type GrantTables,
+  type ProviderCommand,
+  type ProviderKind,
+  type ProviderReport,
+  pushKey,
+} from "@kitshn/local";
 import type { Machine } from "./machine.ts";
 import {
   type Member,
@@ -43,6 +52,8 @@ export function providerCards(
           levels: kind.levels,
           facts: item.facts ?? [],
           stickers: item.stickers ?? [],
+          lists: item.lists ?? [],
+          settings: kind.settings ?? [],
           site: item.site?.name ?? null,
         },
       });
@@ -129,3 +140,73 @@ export function commandsFor(
       .map((command) => ({ provider: report.name, command })),
   );
 }
+
+/** K-1608: one push of kitshn to a machine, by the key that the daemon reports back when it applied it. */
+export type ProviderPush =
+  | { readonly key: string; readonly type: "grants"; readonly provider: string; readonly tables: GrantTables }
+  | {
+      readonly key: string;
+      readonly type: "desired";
+      readonly provider: string;
+      readonly kind: string;
+      readonly state: DesiredParts;
+    }
+  | {
+      readonly key: string;
+      readonly type: "settings";
+      readonly provider: string;
+      readonly values: Record<string, Record<string, string>>;
+    };
+
+/**
+ * K-706, K-709, K-717: everything that the providers of one machine get: the grant tables and card settings of each
+ * provider, and the shared part and this machine's part of each desired state. `desired` holds the parts of each kind
+ * by machine id, with "" for the shared part; `settings` the stored values by card id.
+ */
+export function providerPushes(
+  state: State,
+  machineId: string,
+  regs: ReadonlyArray<{ readonly name: string; readonly kinds: ReadonlyArray<ProviderKind> }>,
+  desired: ReadonlyMap<string, ReadonlyMap<string, unknown>>,
+  settings: ReadonlyMap<string, Readonly<Record<string, string>>>,
+  now: number,
+): Array<ProviderPush> {
+  return regs.flatMap(({ name, kinds }) => {
+    const values: Record<string, Record<string, string>> = {};
+    for (const card of state.resources.values())
+      if (card.machine === machineId && card.provider?.name === name && card.provider.settings.length > 0)
+        values[card.provider.localId] = Object.fromEntries(
+          card.provider.settings.map((setting) => [
+            setting.id,
+            settingValue(setting, settings.get(card.id)?.[setting.id]),
+          ]),
+        );
+    return [
+      {
+        key: pushKey.grants(name),
+        type: "grants",
+        provider: name,
+        tables: grantTables(state, machineId, name, now),
+      },
+      { key: pushKey.settings(name), type: "settings", provider: name, values },
+      ...kinds
+        .filter((kind) => kind.state !== undefined)
+        .map((kind): ProviderPush => ({
+          key: pushKey.desired(name, kind.id),
+          type: "desired",
+          provider: name,
+          kind: kind.id,
+          state: {
+            shared: desired.get(kind.id)?.get("") ?? null,
+            machine: desired.get(kind.id)?.get(machineId) ?? null,
+          },
+        })),
+    ];
+  });
+}
+
+/** K-717: a stored value that the kind still offers, else its default. */
+const settingValue = (
+  setting: { readonly values: ReadonlyArray<string>; readonly default: string },
+  stored?: string,
+) => (stored !== undefined && setting.values.includes(stored) ? stored : setting.default);

@@ -126,6 +126,7 @@ import {
 } from "./actions.ts";
 import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
+import { GameDoors, isGameCard } from "./Games.tsx";
 import { AddRepoGroup, GitHubDefaultWay, RepoGroupPanel, matchedCards } from "./RepoGroups.tsx";
 import { Palette } from "./Palette.tsx";
 import {
@@ -3126,6 +3127,7 @@ function CardPanel(props: {
           })}
         </ul>
       )}
+      {isGameCard(resource) ? <GameDoors resource={resource} /> : null}
       {state.places.has(resource.id) && resource.id !== ADMIN_RESOURCE_ID ? (
         <div class="field-row">
           <span

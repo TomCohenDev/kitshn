@@ -355,7 +355,11 @@ export function sharesOf(state: State, resource: Resource): Array<Share> {
 export function activeShares(state: State, resource: Resource, now: number): Array<Share> {
   return sharesOf(state, resource).filter((share) => {
     if (share.circle.endsAt !== null && share.circle.endsAt <= now) return false;
-    const shareEnds = state.shareSettings.get(shareKey(resource.id, share.circle.id))?.endsAt ?? null;
+    // K-719: the Owner share of an owner-control card has no end date, also when an older setting has one.
+    const ownerKept = resource.provider?.ownerControl === true && share.circle.id === OWNER_CIRCLE_ID;
+    const shareEnds = ownerKept
+      ? null
+      : (state.shareSettings.get(shareKey(resource.id, share.circle.id))?.endsAt ?? null);
     if (shareEnds !== null && shareEnds <= now) return false;
     const cardEnds = state.ends.get(resource.id) ?? null;
     if (cardEnds !== null && cardEnds <= now) return false;

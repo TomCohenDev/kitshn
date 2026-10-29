@@ -48,6 +48,7 @@ import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
   OWNER_CIRCLE_ID,
+  shareKey,
   MACHINE_RIGHT_NAMES,
   type MachineRight,
   type GitHubWay,
@@ -3621,8 +3622,22 @@ export class Kitshn extends DurableObject<Env> {
       [...regs].sort((a, b) => a.name.localeCompare(b.name)),
     );
     if (changed.length === 0 && !regsChanged) return;
+    // K-719: a card that gains owner control loses the settings of its Owner share that the guard now refuses, in the
+    // same transaction, so an older override or end date never blocks a later change, also a pause.
+    const ownerKeys = changed
+      .filter((card) => card.provider?.ownerControl === true)
+      .map((card) => shareKey(card.id, OWNER_CIRCLE_ID))
+      .filter((key) => this.state.shareSettings.has(key));
     this.ctx.storage.transactionSync(() => {
       for (const card of changed) this.putResource(card);
+      for (const key of ownerKeys) this.sql("DELETE FROM share_settings WHERE id = ?", key);
+      if (ownerKeys.length > 0)
+        this.insertRevision(
+          { _tag: "kitshn", reason: `providers on ${machine.name}` },
+          `The Owner circle keeps control of ${ownerKeys.length} provider cards of ${machine.name}, so their Owner share settings went (K-719)`,
+          [],
+          null,
+        );
       if (regsChanged) {
         this.sql("DELETE FROM providers WHERE machine_id = ?", machine.id);
         for (const reg of regs)
@@ -5122,11 +5137,10 @@ export class Kitshn extends DurableObject<Env> {
       : [];
     if (!job) return `No job ${id} exists.`;
     if ("machine" in who) {
+      // A local user cancels only what its machine queued; a job that someone else queued needs control, on the map.
       const queuedBy = JSON.parse(job.actor) as Actor;
-      const own =
-        job.machine_id === who.machine.id ||
-        (queuedBy._tag === "machine" && queuedBy.machineId === who.machine.id);
-      if (!own) return `Job ${id} is not a job of ${who.machine.name} (K-1612).`;
+      if (queuedBy._tag !== "machine" || queuedBy.machineId !== who.machine.id)
+        return `Job ${id} was not queued by ${who.machine.name}; cancel it on the map, with control on its machine (K-1612).`;
     } else if (job.machine_id !== null && !this.canControl(who.caller.visitor, job.machine_id))
       return "Cancelling a job needs control on its machine.";
     if (job.state !== "queued") return `Job ${id} is ${job.state}, so it cannot be cancelled.`;

@@ -127,7 +127,7 @@ import { TokenCache } from "./tokens.ts";
 import { Providers, parseSaved } from "./providers.ts";
 import { desiredProblem } from "@kitshn/local";
 import { serveLinks } from "./link.ts";
-import { lastSamples } from "./samples.ts";
+import { lastHour, lastSamples } from "./samples.ts";
 import { pushKey } from "@kitshn/local";
 import { listenerUid, portOf } from "./listener.ts";
 import { MAX_FORWARDS, forwardTarget, passedHeaders, readBounded } from "./forward.ts";
@@ -2846,7 +2846,9 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
     waiter.settle({ ok: request.ok, exitCode: request.ok ? 0 : 1, output: request.output });
     return { id, type: "command-result" };
   }
-  if (request.type === "samples") return { id, type: "samples", newest: sample(), history: recentSamples };
+  if (request.type === "samples") {
+    return { id, type: "samples", newest: sample(), history: lastHour(recentSamples, Date.now()) };
+  }
   if (request.type === "job-cancel") {
     const ws = socket;
     if (ws === null || challenge === null)

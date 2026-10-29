@@ -536,7 +536,33 @@ it("lists for a device the provider cards with an address that its token opens, 
   await sql("DELETE FROM circles WHERE id = 'phone'");
 });
 
-it("lets a machine cancel only its own queued jobs (K-1612)", async () => {
+it("clears an Owner share setting when its card gains owner control, so later changes still commit (K-719)", async () => {
+  stubAccessCerts();
+  const { message, sql } = await setup();
+  await message("signed", [report([app])]);
+  // Before owner control, the owner lowered the Owner share of this card; that was legal then.
+  await sql(
+    "INSERT OR REPLACE INTO share_settings (id, body) VALUES (?, ?)",
+    `${appId}/${OWNER_CIRCLE_ID}`,
+    JSON.stringify({ level: "view", endsAt: 1 }),
+  );
+  await message("signed", [{ ...report([app]), kinds: [{ ...report([]).kinds[0]!, ownerControl: true }] }]);
+  const left = await runInDurableObject(env.KITSHN.getByName("kitshn"), (_, state) =>
+    state.storage.sql
+      .exec("SELECT id FROM share_settings WHERE id = ?", `${appId}/${OWNER_CIRCLE_ID}`)
+      .toArray(),
+  );
+  expect(left).toEqual([]);
+  const token = await accessToken("admin-aud", { email: "owner@example.com" });
+  const moved = await send("/api/apply", {
+    method: "POST",
+    headers: { "cf-access-jwt-assertion": token, "content-type": "application/json" },
+    body: JSON.stringify({ edits: [{ _tag: "place", id: appId, after: { x: 9100, y: 9100 } }] }),
+  });
+  expect(moved.status).toBe(200);
+});
+
+it("lets a machine cancel only the queued jobs that it queued itself (K-1612)", async () => {
   const { stub } = await setup();
   const sent: Array<{ type: string; error?: string | null }> = [];
   const raw = (message: object) =>
@@ -544,22 +570,26 @@ it("lets a machine cancel only its own queued jobs (K-1612)", async () => {
       instance.webSocketMessage(daemonSocket("signed", sent as Array<unknown>), JSON.stringify(message)),
     );
   const ids = await runInDurableObject(stub, (_, state) => {
-    const insert = (machine: string, jobState: string) =>
+    const byVps = JSON.stringify({ _tag: "machine", machineId: "vps", name: "vps" });
+    const byOwner = JSON.stringify({ _tag: "person", email: "owner@example.com" });
+    const insert = (machine: string, jobState: string, actor: string) =>
       state.storage.sql
         .exec<{ id: number }>(
           `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
-           VALUES (?, '[]', '{"kind":"restart"}', ?, 0, 9999999999999, '{"_tag":"kitshn","reason":"test"}', '{}', NULL, '') RETURNING id`,
+           VALUES (?, '[]', '{"kind":"restart"}', ?, 0, 9999999999999, ?, '{}', NULL, '') RETURNING id`,
           machine,
           jobState,
+          actor,
         )
         .one().id;
     return {
-      own: insert("vps", "queued"),
-      other: insert("mac", "queued"),
-      sentAlready: insert("vps", "sent"),
+      // The owner queued it for vps: a local user of vps cannot cancel it.
+      ownerQueued: insert("vps", "queued", byOwner),
+      sentAlready: insert("mac", "sent", byVps),
+      own: insert("mac", "queued", byVps),
     };
   });
-  await raw({ type: "cancelJob", requestId: "a", jobId: ids.other });
+  await raw({ type: "cancelJob", requestId: "a", jobId: ids.ownerQueued });
   await raw({ type: "cancelJob", requestId: "b", jobId: ids.sentAlready });
   await raw({ type: "cancelJob", requestId: "c", jobId: ids.own });
   const answers = sent.filter((item) => item.type === "requestAnswer").map((item) => item.error === null);

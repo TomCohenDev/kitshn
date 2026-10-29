@@ -27,3 +27,9 @@ export function lastSamples(text: string, count: number): Array<Sample> {
     })
     .slice(-count);
 }
+
+/** K-605: the samples of the last hour; after the daemon was down, older ones are left out. */
+export const lastHour = <T extends { readonly at: number }>(
+  samples: ReadonlyArray<T>,
+  now: number,
+): Array<T> => samples.filter((item) => item.at >= now - 60 * 60_000);

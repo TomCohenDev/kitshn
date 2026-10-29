@@ -122,6 +122,8 @@ const endOfDayIn = (days: string): number | null => {
 export function EndsPicker(props: {
   endsAt: number | null;
   ends: string;
+  /** The choices before Custom; the one with `after: null` means no end. */
+  presets?: ReadonlyArray<{ readonly label: string; readonly after: number | null }>;
   onChange: (endsAt: number | null) => void;
 }) {
   const [custom, setCustom] = useState(false);
@@ -132,14 +134,14 @@ export function EndsPicker(props: {
   return (
     <div>
       <div class="pills">
-        {END_PRESETS.map((preset) => (
+        {(props.presets ?? END_PRESETS).map((preset) => (
           <button
             key={preset.label}
             type="button"
             aria-pressed={!custom && preset.after === null && props.endsAt === null}
             data-tip={
               preset.after === null
-                ? "Never: no end date."
+                ? `${preset.label}: no end date.`
                 : `${preset.label}: ${props.ends} ${preset.label} from now.`
             }
             onClick={() => {

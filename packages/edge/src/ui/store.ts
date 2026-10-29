@@ -254,6 +254,7 @@ export function toState(snapshot: Snapshot): State {
     resources: new Map(snapshot.resources.map((resource) => [resource.id, resource])),
     places: new Map(Object.entries(snapshot.places)),
     shareSettings: new Map(Object.entries(snapshot.shareSettings)),
+    ends: new Map(Object.entries(snapshot.ends)),
     stacks: new Map(snapshot.stacks.map((stack) => [stack.id, stack])),
     paused: snapshot.paused,
     machines: new Map(snapshot.machines.map((view) => [view.machine.id, view.machine])),

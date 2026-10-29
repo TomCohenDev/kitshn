@@ -64,7 +64,7 @@ export const OWNER_CIRCLE_ID = "owner";
 export const EVERYONE_CIRCLE_ID = "everyone";
 
 /** Milliseconds since the epoch. */
-type Time = number;
+export type Time = number;
 
 export type Member =
   | { readonly _tag: "email"; readonly email: string }
@@ -239,6 +239,8 @@ export interface State {
   /** Card centres. A resource without a place sits in the tray (K-509). */
   readonly places: ReadonlyMap<string, Point>;
   readonly shareSettings: ReadonlyMap<string, ShareSetting>;
+  /** K-212: the end time of a timed card, by card id. At its end, every share of the card ends. */
+  readonly ends: ReadonlyMap<string, Time>;
   readonly stacks: ReadonlyMap<string, Stack>;
   /**
    * K-1504: null when not paused. While paused, the Owner circle keeps its share of the admin, and
@@ -334,6 +336,8 @@ export function activeShares(state: State, resource: Resource, now: number): Arr
     if (share.circle.endsAt !== null && share.circle.endsAt <= now) return false;
     const shareEnds = state.shareSettings.get(shareKey(resource.id, share.circle.id))?.endsAt ?? null;
     if (shareEnds !== null && shareEnds <= now) return false;
+    const cardEnds = state.ends.get(resource.id) ?? null;
+    if (cardEnds !== null && cardEnds <= now) return false;
     if (!state.paused || (resource.id === ADMIN_RESOURCE_ID && share.circle.id === OWNER_CIRCLE_ID))
       return true;
     return (

@@ -104,6 +104,8 @@ export interface ActionHandlers {
   readonly setLevel: (resource: Resource, circle: Circle, level: Level | null) => void;
   readonly place: (resource: Resource) => void;
   readonly toTray: (resource: Resource) => void;
+  /** K-212: a new end time, null for no end, or "now" to end the card at once. */
+  readonly setTime: (resource: Resource, endsAt: number | null | "now") => void;
   readonly stackOnto: (ids: Array<string>, target: string) => void;
   readonly pullOut: (stackId: string, id: string) => void;
   readonly unstack: (stackId: string) => void;
@@ -547,6 +549,74 @@ function providerActions(ctx: ActionContext, h: ActionHandlers, resource: Resour
   }));
 }
 
+const HOUR = 60 * 60 * 1000;
+/** K-212: the end times that the card menu, the palette and the card panel offer. */
+export const TIME_PRESETS = [
+  { label: "Until I stop it", after: null },
+  { label: "1 h", after: HOUR },
+  { label: "4 h", after: 4 * HOUR },
+  { label: "1 day", after: 24 * HOUR },
+] as const;
+
+/** K-212: "until 15:40" today, "until Oct 30, 15:40" on another day, in the owner's local time. */
+export function untilText(endsAt: number, now = Date.now()): string {
+  const end = new Date(endsAt);
+  const time = end.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return end.toDateString() === new Date(now).toDateString()
+    ? `until ${time}`
+    : `until ${end.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
+}
+
+/** K-212: a card on the map gets a time, or a timed card is extended, made permanent or ended now. */
+function timeAction(state: State, h: ActionHandlers, resource: Resource): Action {
+  const endsAt = state.ends.get(resource.id);
+  if (endsAt === undefined)
+    return {
+      id: "time",
+      label: "Set a time",
+      keywords: "timer timed expire end temporary",
+      tip: `Keep ${resource.name} in its circles for a while; at the end it moves to the tray, out of every circle.`,
+      items: TIME_PRESETS.flatMap((preset) =>
+        preset.after === null
+          ? []
+          : [
+              {
+                id: `time:${preset.label}`,
+                label: `For ${preset.label}`,
+                tip: `${resource.name} moves to the tray ${preset.label} from now. Undo puts it back.`,
+                run: () => h.setTime(resource, Date.now() + preset.after),
+              },
+            ],
+      ),
+    };
+  return {
+    id: "time",
+    label: `Time (${untilText(endsAt)})`,
+    keywords: "timer timed expire end extend permanent",
+    tip: `${resource.name} moves to the tray, out of every circle, ${untilText(endsAt).replace("until", "at")}.`,
+    items: [
+      {
+        id: "time:extend",
+        label: "Extend 1 h",
+        tip: "Move the end one hour later.",
+        run: () => h.setTime(resource, Math.max(endsAt, Date.now()) + HOUR),
+      },
+      {
+        id: "time:permanent",
+        label: "Make permanent",
+        tip: `Take the end time away: ${resource.name} stays until someone moves it.`,
+        run: () => h.setTime(resource, null),
+      },
+      {
+        id: "time:now",
+        label: "End now",
+        tip: `Move ${resource.name} to the tray now, out of every circle. Undo puts it back.`,
+        run: () => h.setTime(resource, "now"),
+      },
+    ],
+  };
+}
+
 export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Resource): ActionGroups {
   const { state } = ctx;
   const address = resource.addresses[0];
@@ -689,6 +759,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
               ...refusedBy(state, [{ _tag: "place", id: resource.id, after: null }]),
               run: () => h.toTray(resource),
             },
+            timeAction(state, h, resource),
           ]
         : []),
     ],

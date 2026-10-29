@@ -116,6 +116,8 @@ import {
   paletteEntries,
   NEW_CIRCLE,
   ORGANIZE_TIP,
+  TIME_PRESETS,
+  untilText,
   reshareEdits,
   selectionActions,
   type StackPart,
@@ -1405,6 +1407,30 @@ export function App() {
     if (next !== view) changeView(next);
   };
 
+  /** K-212: one service for the panel, the menu, the palette and agents; the toast offers Undo. */
+  const setTime = async (resource: Resource, endsAt: number | null | "now") => {
+    const result = await callApi<{ revision: number | null }>(
+      "POST",
+      `/api/cards/${encodeURIComponent(resource.id)}/time`,
+      endsAt === "now" ? { now: true } : { endsAt },
+    );
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : {
+            text:
+              endsAt === "now"
+                ? `Ended ${resource.name}: it is in the tray, out of every circle.`
+                : endsAt === null
+                  ? `${resource.name} stays until someone moves it.`
+                  : `${resource.name} moves to the tray ${untilText(endsAt).replace("until", "at")}.`,
+            error: false,
+            undo: result.revision,
+            card: resource.id,
+          },
+    );
+  };
+
   /** K-523: the menu and the palette run these, the same as the toolbar and the panel. */
   const handlers: ActionHandlers = {
     select: (selected) => {
@@ -1445,6 +1471,7 @@ export function App() {
         (result) => result.ok || showToast({ text: result.error, error: true, undo: null }),
       ),
     place: placeInView,
+    setTime: (resource, endsAt) => void setTime(resource, endsAt),
     toTray: (resource) => {
       const edits: Array<Edit> = [{ _tag: "place", id: resource.id, after: null }];
       void commit(
@@ -1668,6 +1695,7 @@ export function App() {
               onDeleteCircle={handlers.deleteCircle}
               onPlace={placeInView}
               onReshare={(resource, circle, share, part) => void reshare(resource, circle, share, part)}
+              onTime={handlers.setTime}
               onNewCircle={(ids) => void newCircleFor(ids)}
               onRemoveApp={(resource) => void removeApp(resource)}
               onRollback={(resource, mode) => setRollback({ card: resource, mode })}
@@ -2210,6 +2238,8 @@ function Panel(props: {
   onDeleteCircle: (circle: Circle) => void;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
+  /** K-212: a new end time, null for no end, or "now". */
+  onTime: (resource: Resource, endsAt: number | null | "now") => void;
   onNewCircle: (ids: ReadonlyArray<string>) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
@@ -2289,6 +2319,7 @@ function Panel(props: {
         onEdit={props.onEdit}
         onPlace={props.onPlace}
         onReshare={props.onReshare}
+        onTime={props.onTime}
         onNewCircle={props.onNewCircle}
         onRemoveApp={props.onRemoveApp}
         onRollback={props.onRollback}
@@ -2675,6 +2706,8 @@ function CardPanel(props: {
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
+  /** K-212: a new end time, null for no end, or "now". */
+  onTime: (resource: Resource, endsAt: number | null | "now") => void;
   onNewCircle: (ids: ReadonlyArray<string>) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
@@ -3082,6 +3115,35 @@ function CardPanel(props: {
           })}
         </ul>
       )}
+      {state.places.has(resource.id) && resource.id !== ADMIN_RESOURCE_ID ? (
+        <div class="field-row">
+          <span
+            class="label"
+            data-tip="Time: at its end, kitshn moves the card to the tray, out of every circle (K-212)."
+          >
+            Time
+          </span>
+          <div>
+            <EndsPicker
+              key={resource.id}
+              endsAt={state.ends.get(resource.id) ?? null}
+              ends="kitshn moves the card to the tray, out of every circle,"
+              presets={TIME_PRESETS}
+              onChange={(endsAt) => props.onTime(resource, endsAt)}
+            />
+            {state.ends.has(resource.id) ? (
+              <button
+                type="button"
+                class="btn"
+                data-tip={`Move ${resource.name} to the tray now, out of every circle. Undo puts it back.`}
+                onClick={() => props.onTime(resource, "now")}
+              >
+                End now
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
       {state.places.has(resource.id) ? (
         <>
           <div class="label" data-tip="Share with: put the card into one more circle, without a drag.">

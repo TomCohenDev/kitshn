@@ -85,6 +85,7 @@ function context(version = "0123456789ab"): ActionContext {
       ["b", { x: -500, y: 0 }],
     ]),
     shareSettings: new Map(),
+    ends: new Map(),
     stacks: new Map([["s1", { id: "s1", name: "Docs", members: ["a", "b"] }]]),
     paused: null,
     machines: new Map(),
@@ -161,11 +162,18 @@ describe("card actions", () => {
       "select-kind",
       "add-to-stack",
       "tray",
+      "time",
       "logs",
       "rollback",
       "rollback-run",
       "backups",
       "remove-app",
+    ]);
+    // K-212, K-533: a card without a time offers end times from now.
+    expect(items(find(groups, "time")).map((item) => item.label)).toEqual([
+      "For 1 h",
+      "For 4 h",
+      "For 1 day",
     ]);
     // K-1801: Logs opens the logs of this card.
     run(find(groups, "logs"));

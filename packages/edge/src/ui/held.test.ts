@@ -11,6 +11,7 @@ function start(): State {
     resources: new Map(s.resources.map((resource) => [resource.id, resource])),
     places: new Map(s.places),
     shareSettings: new Map(),
+    ends: new Map(),
     stacks: new Map(),
     paused: null,
     machines: new Map(),

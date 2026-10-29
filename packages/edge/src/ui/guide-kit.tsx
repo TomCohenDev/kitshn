@@ -23,6 +23,7 @@ export function fixtureState(): State {
     resources: new Map([...initial.resources, ...extra.resources].map((resource) => [resource.id, resource])),
     places: new Map([...initial.places, ...extra.places]),
     shareSettings: new Map(),
+    ends: new Map(),
     stacks: new Map(),
     paused: null,
     machines: new Map(DEMO_MACHINES.map(({ machine }) => [machine.id, machine])),

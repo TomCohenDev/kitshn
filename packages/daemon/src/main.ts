@@ -2712,6 +2712,7 @@ switch (command) {
   case "logs":
   case "repo":
   case "redirect":
+  case "time":
     await runAgentCommand(command, args, daemonTransport);
     break;
   case "local-users":

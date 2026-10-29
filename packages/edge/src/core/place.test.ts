@@ -38,6 +38,7 @@ function world(
     resources: new Map(Object.keys(places).map((id) => [id, card(id)])),
     places: new Map(Object.entries(places)),
     shareSettings: new Map(),
+    ends: new Map(),
     stacks: new Map(Object.entries(stacks).map(([id, members]) => [id, { id, name: id, members }])),
     paused: null,
     machines: new Map(),

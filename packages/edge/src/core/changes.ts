@@ -14,6 +14,7 @@ import {
   type ShareSetting,
   type Stack,
   type State,
+  type Time,
   circlesHolding,
   insideCircle,
   isPublicCircle,
@@ -34,7 +35,9 @@ export type Edit =
       readonly after: ShareSetting | null;
     }
   | { readonly _tag: "pause"; readonly after: PauseMode | null }
-  | { readonly _tag: "stack"; readonly id: string; readonly after: Stack | null };
+  | { readonly _tag: "stack"; readonly id: string; readonly after: Stack | null }
+  /** K-212: the end time of a card, or null for a card that stays until someone stops it. */
+  | { readonly _tag: "cardEnd"; readonly id: string; readonly after: Time | null };
 
 /** K-909: the card kinds that a deploy makes; only these come and go as an app. */
 export const APP_KINDS = ["site.static", "site.worker", "site.compose"] as const;
@@ -81,6 +84,12 @@ export type Change =
       readonly id: string;
       readonly before: Stack | null;
       readonly after: Stack | null;
+    }
+  | {
+      readonly _tag: "cardEnd";
+      readonly id: string;
+      readonly before: Time | null;
+      readonly after: Time | null;
     }
   /** K-909: an app card goes (removal) or comes back (its undo). The worker runs the teardown or the start. */
   | {
@@ -164,6 +173,8 @@ const current = (state: State, change: Pick<Change, "_tag" | "id">) => {
       return state.paused;
     case "stack":
       return state.stacks.get(change.id) ?? null;
+    case "cardEnd":
+      return state.ends.get(change.id) ?? null;
     case "app":
     case "providerCard": {
       const resource = state.resources.get(change.id);
@@ -198,7 +209,7 @@ export function resolveEdits(state: State, edits: ReadonlyArray<Edit>): Array<Ch
       const missing = edit.after.members.find((id) => !state.resources.has(id));
       if (missing) throw new RuleError(`No card "${missing}" exists.`);
     }
-    if (edit._tag === "place" && !state.resources.has(edit.id)) {
+    if ((edit._tag === "place" || edit._tag === "cardEnd") && !state.resources.has(edit.id)) {
       throw new RuleError(`No card "${edit.id}" exists.`);
     }
     if (edit._tag === "shareSetting" && edit.after) {
@@ -268,6 +279,8 @@ export function forgetProviderChanges(
   if (cards.length === 0) throw new RuleError(`The machine has no such card of the provider ${provider}.`);
   const edits: Array<Edit> = cards.flatMap((card) => [
     ...(state.places.has(card.id) ? [{ _tag: "place", id: card.id, after: null } as const] : []),
+    // K-212: the end time goes with the card, and its undo brings it back.
+    ...(state.ends.has(card.id) ? [{ _tag: "cardEnd", id: card.id, after: null } as const] : []),
     ...[...state.shareSettings.keys()]
       .filter((key) => key.startsWith(`${card.id}/`))
       .map((key): Edit => ({
@@ -299,6 +312,8 @@ export function removeAppChanges(state: State, id: string): Array<Change> {
   if (!isAppCard(card)) throw new RuleError(`${resource.name} is not an app that a deploy made (K-909).`);
   const edits: Array<Edit> = [
     ...(state.places.has(id) ? [{ _tag: "place", id, after: null } as const] : []),
+    // K-212: the end time goes with the card, and its undo brings it back.
+    ...(state.ends.has(id) ? [{ _tag: "cardEnd", id, after: null } as const] : []),
     ...[...state.shareSettings.keys()]
       .filter((key) => key.startsWith(`${id}/`))
       .map((key): Edit => ({
@@ -309,6 +324,15 @@ export function removeAppChanges(state: State, id: string): Array<Change> {
       })),
   ];
   return [...resolveEdits(state, edits), { _tag: "app", id, before: card, after: null }];
+}
+
+/** K-209, K-212: a change that would set an end time that passed already sets no end instead. */
+function withoutPastEnd(change: Change, now: number): Change {
+  if (change._tag === "cardEnd" && change.after !== null && change.after <= now)
+    return { ...change, after: null };
+  if (change._tag === "shareSetting" && change.after?.endsAt != null && change.after.endsAt <= now)
+    return { ...change, after: change.after.level === null ? null : { ...change.after, endsAt: null } };
+  return change;
 }
 
 export const invert = (changes: ReadonlyArray<Change>): Array<Change> =>
@@ -419,7 +443,7 @@ export function revisionTargets(changes: ReadonlyArray<RevisionTarget>): {
           ? "share"
           : tags.has("stack")
             ? "stack"
-            : tags.has("place") || tags.has("address")
+            : tags.has("place") || tags.has("address") || tags.has("cardEnd")
               ? "card"
               : "action";
   const items = new Map<string, Item>();
@@ -431,6 +455,7 @@ export function revisionTargets(changes: ReadonlyArray<RevisionTarget>): {
       change._tag === "app" ||
       change._tag === "providerCard" ||
       change._tag === "address" ||
+      change._tag === "cardEnd" ||
       change._tag === "forget"
     )
       add({ kind: "card", id: change.id });
@@ -458,6 +483,7 @@ export function touches(change: Change, item: Item): boolean {
     case "app":
     case "providerCard":
     case "address":
+    case "cardEnd":
       return change.id === item.id;
     case "shareSetting":
       return change.id.startsWith(`${item.id}/`);
@@ -514,6 +540,7 @@ function footprint(changes: ReadonlyArray<Change | Forget>, state: State, pool: 
       change._tag === "app" ||
       change._tag === "providerCard" ||
       change._tag === "address" ||
+      change._tag === "cardEnd" ||
       change._tag === "forget"
     )
       cards.add(change.id);
@@ -676,6 +703,7 @@ export function applyChanges(state: State, changes: ReadonlyArray<Change>): Stat
   const places = new Map(state.places);
   const shareSettings = new Map(state.shareSettings);
   const stacks = new Map(state.stacks);
+  const ends = new Map(state.ends);
   let paused = state.paused;
   const put = <V>(map: Map<string, V>, id: string, value: V | null) =>
     value === null ? map.delete(id) : map.set(id, value);
@@ -684,6 +712,7 @@ export function applyChanges(state: State, changes: ReadonlyArray<Change>): Stat
     else if (change._tag === "place") put(places, change.id, change.after);
     else if (change._tag === "shareSetting") put(shareSettings, change.id, change.after);
     else if (change._tag === "stack") put(stacks, change.id, change.after);
+    else if (change._tag === "cardEnd") put(ends, change.id, change.after);
     else if (change._tag === "app") put(resources, change.id, change.after && restoredResource(change.after));
     else if (change._tag === "providerCard")
       put(resources, change.id, change.after && { ...change.after, status: "offline" });
@@ -693,7 +722,7 @@ export function applyChanges(state: State, changes: ReadonlyArray<Change>): Stat
       resources.set(change.id, { ...resource, addresses: [change.after, ...resource.addresses.slice(1)] });
     } else paused = change.after;
   }
-  return { ...state, circles, resources, places, shareSettings, stacks, paused };
+  return { ...state, circles, resources, places, shareSettings, stacks, ends, paused };
 }
 
 /**
@@ -716,6 +745,8 @@ export function ruleViolation(state: State): string | null {
   }
   const admin = state.resources.get(ADMIN_RESOURCE_ID);
   if (!admin) return "The kitshn admin card is missing.";
+  // K-212: a timed admin would lock the owner out at its end.
+  if (state.ends.has(admin.id)) return "The kitshn admin cannot have an end time.";
   const all = circlesHolding(state, admin.id);
   const publicCircle = all.find((circle) => isPublicCircle(circle) && shareLevel(state, admin, circle));
   const holding = all.filter((circle) => !state.paused || circle.id === OWNER_CIRCLE_ID);
@@ -845,10 +876,20 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
       })
       .join("; ");
   }
+  const end = changes.find((change) => change._tag === "cardEnd");
+  if (end && changes.length === 1) {
+    const name = after.resources.get(end.id)?.name ?? end.id;
+    return end.after === null
+      ? `${name} stays until someone stops it (K-212)`
+      : `${name} ends at ${endText(end.after)} (K-212)`;
+  }
   const moved = changes.filter((change) => change._tag === "place").length;
   if (moved > 0 && moved === changes.length) return moved === 1 ? "Moved a card" : `Moved ${moved} cards`;
   return `Changed ${changes.length} items`;
 }
+
+/** K-212: an end time in History, which every reader reads in UTC: "2026-10-29 15:40 UTC". */
+export const endText = (time: number) => `${new Date(time).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 
 /** K-718: "Gave Bot may publish in Agents" for each agent right that a circle edit turns on or off. */
 function rightChanges(before: Circle | null, after: Circle | null): Array<string> {
@@ -926,6 +967,9 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
   for (const key of new Set([...before.shareSettings.keys(), ...after.shareSettings.keys()]))
     if (ends(after.shareSettings.get(key)?.endsAt) > ends(before.shareSettings.get(key)?.endsAt))
       throw new RuleError("While paused, access only goes down: a share would end later.");
+  for (const id of new Set([...before.ends.keys(), ...after.ends.keys()]))
+    if (ends(after.ends.get(id)) > ends(before.ends.get(id)))
+      throw new RuleError("While paused, access only goes down: a card would end later.");
   for (const circle of after.circles.values()) {
     const old = before.circles.get(circle.id);
     if (!old) continue;
@@ -962,10 +1006,11 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
  * K-1502: the changes that an undo of `original` commits, after every check that a write runs: the values are
  * still the ones the revision set, no card becomes public without the question of K-210 (which an undo does
  * not ask), the rules of K-105 and K-521, and the pause (K-1504). The Compose stop of K-909 depends on live
- * jobs, so the worker checks it when it commits.
+ * jobs, so the worker checks it when it commits. An end time that the undo would bring back in the past goes
+ * (K-209, K-212): the undo of an expiry gives the shares back, and the alarm must not end them again at once.
  */
-export function prepareUndo(state: State, original: ReadonlyArray<Change>): Array<Change> {
-  const inverted = invert(original);
+export function prepareUndo(state: State, original: ReadonlyArray<Change>, now: number): Array<Change> {
+  const inverted = invert(original).map((change) => withoutPastEnd(change, now));
   const conflict = conflictOf(state, inverted);
   if (conflict?._tag === "app")
     throw new RuleError(
@@ -1004,9 +1049,10 @@ export function undoAnswer(
   revisions: ReadonlyArray<StoredRevision>,
   actor: Actor,
   target: { readonly revision: number } | { readonly item: Item },
+  now: number,
 ): { readonly allowed: true } | { readonly allowed: false; readonly reason: string } {
   try {
-    prepareUndo(state, undoTarget(state, revisions, actor, target).changes);
+    prepareUndo(state, undoTarget(state, revisions, actor, target).changes, now);
     return { allowed: true };
   } catch (error) {
     if (!(error instanceof RuleError)) throw error;

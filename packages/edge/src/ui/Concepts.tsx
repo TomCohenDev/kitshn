@@ -113,6 +113,7 @@ function scene(
     circles: new Map(circles.map((each) => [each.id, each])),
     places: new Map(places),
     shareSettings: new Map(),
+    ends: new Map(),
     stacks: new Map(),
     ...extra,
   };

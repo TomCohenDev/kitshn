@@ -76,6 +76,7 @@ function start(): State {
     resources: new Map([...s.resources, site].map((resource) => [resource.id, resource])),
     places: new Map([...s.places, ["riffle", { x: 0, y: -200 }]]),
     shareSettings: new Map(),
+    ends: new Map(),
     stacks: new Map(),
     paused: null,
     machines: new Map(),
@@ -646,6 +647,10 @@ describe("pause (K-1504)", () => {
     expect(access.apps.get("app:kitshn-admin:kit.example.com")?.policyKeys).toEqual(["policy:owner:people"]);
     const owner = { email: OWNER, clientId: null, ip: null };
     expect(visitorLevel(after, after.resources.get("riffle")!, owner, 0)).toBeNull();
+    // K-212: a card end stops its shares at that time, before the alarm moves the card.
+    const timed = { ...state, ends: new Map([["riffle", 10]]) };
+    expect(visitorLevel(timed, timed.resources.get("riffle")!, owner, 9)).not.toBeNull();
+    expect(visitorLevel(timed, timed.resources.get("riffle")!, owner, 10)).toBeNull();
     expect(visitorLevel(after, after.resources.get(ADMIN_RESOURCE_ID)!, owner, 0)).toBe("control");
   });
 
@@ -922,6 +927,10 @@ describe("emergency pause (K-1504)", () => {
     expect(() => refuseRaiseWhilePaused(ending, { ...ending, shareSettings: new Map() })).toThrow(
       /end later/,
     );
+    // K-212: a card end that goes or moves later raises access; an earlier one lowers it.
+    const timed = { ...paused, ends: new Map([["riffle", 5]]) };
+    expect(() => refuseRaiseWhilePaused(timed, { ...timed, ends: new Map() })).toThrow(/end later/);
+    expect(() => refuseRaiseWhilePaused(timed, { ...timed, ends: new Map([["riffle", 2]]) })).not.toThrow();
     // K-718: an agent right that turns on raises access; one that turns off lowers it.
     const device = { _tag: "device" as const, tokenId: "t", clientId: "c", name: "Bot" };
     const withDevice = (member: typeof device & { publishes?: true }) => ({
@@ -1175,17 +1184,19 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
       [A, [herAs({ level: "view" })]],
       [B, [place("riffle", 400, 0)]],
     ]);
-    expect(undoAnswer(state, revisions, A, { item: { kind: "card", id: "box" } })).toEqual({ allowed: true });
-    expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: "her" } })).toEqual({
+    expect(undoAnswer(state, revisions, A, { item: { kind: "card", id: "box" } }, 0)).toEqual({
+      allowed: true,
+    });
+    expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: "her" } }, 0)).toEqual({
       allowed: false,
       reason:
         '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
     });
-    expect(undoAnswer(state, revisions, B, { item: { kind: "card", id: "box" } })).toEqual({
+    expect(undoAnswer(state, revisions, B, { item: { kind: "card", id: "box" } }, 0)).toEqual({
       allowed: false,
       reason: "You have no change to this item left to undo.",
     });
-    expect(undoAnswer(state, revisions, A, { revision: 2 })).toEqual({
+    expect(undoAnswer(state, revisions, A, { revision: 2 }, 0)).toEqual({
       allowed: false,
       reason:
         '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
@@ -1199,8 +1210,8 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     ]);
     const reason =
       "This undo would make riffle public in Everyone. An undo never does that without asking; share it by hand.";
-    expect(() => prepareUndo(state, revisions[0]!.changes)).toThrow(reason);
-    expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: EVERYONE_CIRCLE_ID } })).toEqual({
+    expect(() => prepareUndo(state, revisions[0]!.changes, 0)).toThrow(reason);
+    expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: EVERYONE_CIRCLE_ID } }, 0)).toEqual({
       allowed: false,
       reason,
     });

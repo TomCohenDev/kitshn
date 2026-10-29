@@ -40,6 +40,7 @@ import {
   targetOf,
   ruleViolation,
   stacksWithout,
+  shareDiff,
   summarize,
 } from "../core/changes.ts";
 import {
@@ -848,6 +849,12 @@ export class Kitshn extends DurableObject<Env> {
         ]),
       ),
       shareSettings: json<ShareSetting>(this.sql("SELECT id, body FROM share_settings")),
+      ends: new Map(
+        this.sql<{ id: string; ends_at: number }>("SELECT id, ends_at FROM card_ends").map((row) => [
+          row.id,
+          row.ends_at,
+        ]),
+      ),
       stacks: json<Stack>(this.sql("SELECT id, body FROM stacks")),
       paused: pauseModeOf(this.meta("paused")),
       machines: json<Machine>(this.sql("SELECT id, body FROM machines")),
@@ -1062,6 +1069,12 @@ export class Kitshn extends DurableObject<Env> {
       if (change._tag === "providerCard") {
         if (change.after) this.putResource({ ...change.after, status: "offline" });
         else this.sql("DELETE FROM resources WHERE id = ?", change.id);
+        continue;
+      }
+      if (change._tag === "cardEnd") {
+        if (change.after === null) this.sql("DELETE FROM card_ends WHERE id = ?", change.id);
+        else
+          this.sql("INSERT OR REPLACE INTO card_ends (id, ends_at) VALUES (?, ?)", change.id, change.after);
         continue;
       }
       if (change._tag === "address") {
@@ -1350,7 +1363,7 @@ export class Kitshn extends DurableObject<Env> {
   /**
    * One write: checks the rules (K-105), stores the changes and one revision (K-1501), then tells everyone.
    * Moves that follow a move or drop of the same actor join its revision (K-1505). A `named` revision, such as
-   * Organize (K-532), has that summary and never joins another.
+   * Organize (K-532) or the end of a timed card (K-212), has that summary and never joins another.
    */
   private commit(
     actor: Actor,
@@ -1416,7 +1429,8 @@ export class Kitshn extends DurableObject<Env> {
     this.state = after;
     this.clearAccessFailures();
     for (const change of changes) {
-      if (change._tag === "shareSetting") this.stuckShares.delete(change.id);
+      if (change._tag === "shareSetting" || change._tag === "cardEnd" || change._tag === "place")
+        this.stuckShares.delete(change.id);
       if (change._tag === "place")
         for (const id of this.stuckShares) if (id.startsWith(`${change.id}/`)) this.stuckShares.delete(id);
     }
@@ -1547,7 +1561,7 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private commitUndo(actor: Actor, original: ReadonlyArray<Change>, undo: UndoOf) {
-    return this.commitApps(actor, prepareUndo(this.state, original), undo);
+    return this.commitApps(actor, prepareUndo(this.state, original, Date.now()), undo);
   }
 
   /** K-909: the Worker storage whose card is gone: a script that "Remove app" kept, and KV namespaces. */
@@ -3103,6 +3117,7 @@ export class Kitshn extends DurableObject<Env> {
       ),
       places: Object.fromEntries(this.state.places) as Record<string, Point>,
       shareSettings: Object.fromEntries(this.state.shareSettings) as Record<string, ShareSetting>,
+      ends: Object.fromEntries(this.state.ends),
       stacks: [...this.state.stacks.values()],
       revisions: this.revisions,
       access: accessStates(desired, this.access),
@@ -3747,6 +3762,13 @@ export class Kitshn extends DurableObject<Env> {
       if (request.method === "DELETE" && rest.startsWith("/"))
         return this.removeRedirect(caller, card, decodeURIComponent(rest.slice(1)), false);
     }
+    if (path.startsWith("/api/cards/") && path.endsWith("/time") && request.method === "POST")
+      return this.cardTime(
+        caller,
+        decodeURIComponent(path.slice("/api/cards/".length, -"/time".length)),
+        await request.json().catch(() => null),
+        false,
+      );
     if (path.startsWith("/api/cards/") && path.endsWith("/address") && request.method === "POST")
       return this.setAddress(
         caller,
@@ -3769,7 +3791,7 @@ export class Kitshn extends DurableObject<Env> {
           { status: 400 },
         );
       return Response.json(
-        undoAnswer(this.state, this.storedRevisions(), caller.actor, { item: { kind, id } }),
+        undoAnswer(this.state, this.storedRevisions(), caller.actor, { item: { kind, id } }, Date.now()),
       );
     }
     if (path === "/api/undo" && request.method === "GET") {
@@ -3777,7 +3799,9 @@ export class Kitshn extends DurableObject<Env> {
       const revision = Number(new URL(request.url).searchParams.get("revision"));
       if (!Number.isSafeInteger(revision) || revision <= 0)
         return Response.json({ error: "Name the revision with revision=<id>." }, { status: 400 });
-      return Response.json(undoAnswer(this.state, this.storedRevisions(), caller.actor, { revision }));
+      return Response.json(
+        undoAnswer(this.state, this.storedRevisions(), caller.actor, { revision }, Date.now()),
+      );
     }
     const type = API_MESSAGES[path];
     if (type !== undefined) {
@@ -5037,7 +5061,8 @@ export class Kitshn extends DurableObject<Env> {
    * mark that the revision of the deletion stores, so an older undo never touches a new card of the same id (K-1506).
    */
   private forgetCard(id: string): Forget {
-    for (const table of ["resources", "places"]) this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
+    for (const table of ["resources", "places", "card_ends"])
+      this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
     // K-1124: a forgotten card does not come back, so its old addresses go free.
     this.sql("DELETE FROM old_addresses WHERE card_id = ?", id);
     this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);
@@ -5533,9 +5558,14 @@ export class Kitshn extends DurableObject<Env> {
     const ends = [
       ...[...this.state.shareSettings.values()].map((setting) => setting.endsAt),
       ...[...this.state.circles.values()].map((circle) => circle.endsAt),
+      ...this.state.ends.values(),
     ];
     for (const end of ends) if (end !== null && end > now && end < next) next = end;
-    if (ends.some((end) => end !== null && end <= now) && this.expiredShares(now).length > 0) next = now;
+    if (
+      ends.some((end) => end !== null && end <= now) &&
+      (this.expiredShares(now).length > 0 || this.expiredCards(now).length > 0)
+    )
+      next = now;
     // K-1126: a connected daemon keeps the 2-minute alarm going; without one, uptime wakes at most every 10 minutes.
     if (this.uptimeTargets().length > 0) next = Math.min(next, now + UPTIME_IDLE_MS);
     // K-1907: pushes that wait go out in the next second.
@@ -5567,8 +5597,47 @@ export class Kitshn extends DurableObject<Env> {
     });
   }
 
-  /** K-209: at its end date, a share moves its card out of the circle as a new revision. */
+  /** K-212: the timed cards whose end time passed; a card that could not leave waits in `stuckShares`. */
+  private expiredCards(now: number) {
+    return [...this.state.ends]
+      .filter(([id, end]) => end <= now && !this.stuckShares.has(id))
+      .map(([id]) => id);
+  }
+
+  /**
+   * K-212: the end of a timed card, from the alarm or from "End now": one revision that moves it to the tray, out
+   * of every circle and its stack, with no end time left. History names the end.
+   */
+  private endCard(actor: Actor, id: string): number | null {
+    const resource = this.state.resources.get(id);
+    if (!resource) throw new RuleError(`No card "${id}" exists.`);
+    const changes = resolveEdits(this.state, [
+      { _tag: "place", id, after: null },
+      { _tag: "cardEnd", id, after: null },
+    ]);
+    const after = applyChanges(this.state, changes);
+    const shares =
+      shareDiff(this.state, after).length > 0 ? `: ${summarize(this.state, after, changes)}` : "";
+    return this.commit(actor, changes, null, `Time of ${resource.name} ended${shares}`);
+  }
+
+  /** K-209: at its end date, a share moves its card out of the circle as a new revision. K-212: a timed card goes to the tray. */
   private endShares(now: number) {
+    for (const id of this.expiredCards(now)) {
+      const name = this.state.resources.get(id)?.name ?? id;
+      // The end runs as the actor who set the time, so that actor can undo it (K-1506).
+      const [row] = this.sql<{ set_by: string | null }>("SELECT set_by FROM card_ends WHERE id = ?", id);
+      const actor: Actor = row?.set_by
+        ? (JSON.parse(row.set_by) as Actor)
+        : { _tag: "kitshn", reason: `time of ${name} ended` };
+      try {
+        this.endCard(actor, id);
+      } catch (error) {
+        // The card gives no access after its end time already (K-212); only its place stays.
+        this.stuckShares.add(id);
+        console.warn(`kitshn could not end the time of ${id}: ${String(error)}`);
+      }
+    }
     for (const [id, setting] of this.expiredShares(now)) {
       const [resourceId = "", circleId = ""] = id.split("/");
       const from = this.state.places.get(resourceId);
@@ -7792,6 +7861,8 @@ export class Kitshn extends DurableObject<Env> {
               addresses,
               status,
               place: this.state.places.get(id) ?? null,
+              // K-212: when the card leaves every circle for the tray, or null.
+              endsAt: this.state.ends.get(id) ?? null,
               added: added.has(id),
               circles: circlesHolding(this.state, id)
                 .map((c) => c.id)
@@ -7865,6 +7936,13 @@ export class Kitshn extends DurableObject<Env> {
       if (request.method === "DELETE" && rest.startsWith("/"))
         return this.removeRedirect(agent, card, decodeURIComponent(rest.slice(1)), true);
     }
+    if (path.startsWith("/agent/cards/") && path.endsWith("/time") && request.method === "POST")
+      return this.cardTime(
+        agent,
+        decodeURIComponent(path.slice("/agent/cards/".length, -"/time".length)),
+        await request.json().catch(() => null),
+        true,
+      );
     if (path.startsWith("/agent/cards/") && path.endsWith("/address") && request.method === "POST")
       return this.setAddress(
         agent,
@@ -10390,6 +10468,67 @@ export class Kitshn extends DurableObject<Env> {
    * K-1120: gives a page or a file card a new address name. The old name stays with the item and sends its
    * visitors on, so no one else takes it; Undo moves the card back.
    */
+  /**
+   * K-212: sets, moves or removes the end time of a card (`{"endsAt": <ms> | null}`), or ends it now (`{"now": true}`).
+   * The map, `/api` and agents share it; an agent changes only a card that it manages (K-718).
+   */
+  private cardTime(caller: Caller, named: string, body: unknown, agent: boolean): Response {
+    const now = Date.now();
+    const candidates = this.cardCandidates(named);
+    if (candidates.length > 1)
+      return Response.json(
+        { error: `Several cards have the name "${named}"; name the card by its id.` },
+        { status: 409 },
+      );
+    const id = candidates[0] ?? named;
+    // A key learns nothing about cards that it does not manage: one answer for unknown and for not its own.
+    if (agent && !cardsControlledBy(this.state, caller.visitor, now).has(id))
+      return Response.json(
+        { error: `This key does not manage the card "${named}" (K-718).` },
+        { status: 403 },
+      );
+    const resource = this.state.resources.get(id);
+    if (!resource) return Response.json({ error: `No card "${named}" exists.` }, { status: 404 });
+    const wanted = !isRecord(body)
+      ? undefined
+      : body["now"] === true
+        ? "now"
+        : body["endsAt"] === null || (typeof body["endsAt"] === "number" && Number.isFinite(body["endsAt"]))
+          ? body["endsAt"]
+          : undefined;
+    if (wanted === undefined)
+      return Response.json(
+        { error: 'Send {"endsAt": <time in ms> or null} or {"now": true}.' },
+        { status: 400 },
+      );
+    if (typeof wanted === "number" && wanted <= now)
+      return Response.json(
+        { error: 'This end time has passed. Send {"now": true} to end the card now.' },
+        { status: 400 },
+      );
+    try {
+      if (wanted !== "now") {
+        const revision = this.commit(
+          caller.actor,
+          resolveEdits(this.state, [{ _tag: "cardEnd", id, after: wanted }]),
+          null,
+        );
+        if (wanted !== null)
+          this.sql("UPDATE card_ends SET set_by = ? WHERE id = ?", JSON.stringify(caller.actor), id);
+        return Response.json({ revision, endsAt: wanted });
+      }
+      if (!this.state.ends.has(id))
+        return Response.json(
+          { error: `${resource.name} has no end time. "Move to tray" takes it off the map.` },
+          { status: 409 },
+        );
+      return Response.json({ revision: this.endCard(caller.actor, id), endsAt: null });
+    } catch (error) {
+      if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
+      throw error;
+    }
+  }
+
   private async setAddress(caller: Caller, named: string, name: string, agent: boolean) {
     let card: string;
     if (agent) {
@@ -12149,6 +12288,8 @@ export function forwardRight(path: string, method: string): MachineRight | null 
   if (path.startsWith("/agent/library/") && path.endsWith("/content") && method === "GET") return null;
   if (path.startsWith("/agent/sites/") && method === "POST") return "addsPages";
   if (card !== null && card.endsWith("/address") && method === "POST") return "addsPages";
+  // K-212: the time of a card needs only a card that the machine manages.
+  if (card !== null && card.endsWith("/time") && method === "POST") return null;
   if (card !== null && card.includes("/redirects") && (method === "POST" || method === "DELETE"))
     return "addsPages";
   if (card !== null && card.endsWith("/handover") && method === "POST") return "addsApps";

@@ -599,3 +599,21 @@ describe("per-item undo (K-1507)", () => {
     expect(slowUndoCheck(settled, "circle:her")).toBe(settled);
   });
 });
+
+describe("game cards (K-534)", () => {
+  it("offer Remove game as a dangerous action, the way out of the Game step", () => {
+    const { handlers, calls } = recorder();
+    const base = context();
+    const game = card("mc", "game", ["mc.example.com"]);
+    const ctx = {
+      ...base,
+      state: { ...base.state, resources: new Map(base.state.resources).set("mc", game) },
+    };
+    const groups = actionsFor(ctx, handlers, { _tag: "card", id: "mc" });
+    const remove = find(groups, "remove-game");
+    expect(remove.danger).toBe(true);
+    run(remove);
+    expect(calls).toEqual([["removeGame", game]]);
+    expect(ids(actionsFor(base, handlers, { _tag: "card", id: "riffle" }))).not.toContain("remove-game");
+  });
+});

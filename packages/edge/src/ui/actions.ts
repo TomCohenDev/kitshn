@@ -113,6 +113,8 @@ export interface ActionHandlers {
   readonly toggleStack: (key: string) => void;
   readonly renameStack: (stackId: string) => void;
   readonly removeApp: (resource: Resource) => void;
+  /** K-534: removes a game card with its doors and records, after a confirm. */
+  readonly removeGame: (resource: Resource) => void;
   /** K-704: forgets the provider of a card on its machine, or with `card` only that dropped card (K-705), with Undo. */
   readonly forgetProvider: (machineId: string, provider: string, card: Resource | null) => void;
   /** K-821: opens the rollback of one card, or of the run that made its current deploy. */
@@ -852,6 +854,17 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
               tip: `Remove ${resource.name}, which ${resource.provider!.name} no longer reports, with its shares. Undo brings it back.`,
               danger: true as const,
               run: () => h.forgetProvider(resource.machine!, resource.provider!.name, resource),
+            },
+          ]
+        : []),
+      ...(resource.kind === "game"
+        ? [
+            {
+              id: "remove-game",
+              label: "Remove game…",
+              tip: `Remove ${resource.name}: its doors close for everyone at once, its records go, and its ports stay closed. kitshn asks first; there is no Undo.`,
+              danger: true as const,
+              run: () => h.removeGame(resource),
             },
           ]
         : []),

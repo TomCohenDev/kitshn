@@ -1,8 +1,10 @@
 // Builds one kitshn binary per platform with Bun (K-601), for the edge release and the join script.
 import { execFileSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 
 const version = process.env["GITHUB_SHA"]?.slice(0, 12) ?? "dev";
+// K-618: the skill of this release goes into the binary, so `kitshn skill install` writes the matching text.
+const skill = readFileSync(new URL("../../kitshn/skill/SKILL.md", import.meta.url), "utf8");
 const targets = [
   ["bun-linux-arm64", "kitshn-linux-arm64"],
   ["bun-linux-x64", "kitshn-linux-x64"],
@@ -21,6 +23,7 @@ for (const [target, name] of targets) {
       "--compile",
       `--target=${target}`,
       `--define=KITSHN_VERSION="${version}"`,
+      `--define=KITSHN_SKILL=${JSON.stringify(skill)}`,
       `--outfile=dist/${name}`,
     ],
     { stdio: "inherit", cwd: new URL("..", import.meta.url).pathname },

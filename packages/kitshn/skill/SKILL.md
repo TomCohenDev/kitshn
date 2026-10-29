@@ -15,7 +15,15 @@ A repo with `.kitshn.yaml` and `Caddyfile.j2` is a KitSHn 1 repo. Do not mix the
 ## The two programs named `kitshn`
 
 - **App CLI** (`kitshn.mjs` in each `edge-<version>` release): `check`, `deploy`, and for agent keys `publish` and `address`. GitHub Actions downloads it; you rarely run it by hand.
-- **Daemon** (one binary per machine, installed by the join command): `status`, `expose`, `unexpose`, `join`, `rekey`. See `kitshn` with no arguments on a machine.
+- **Daemon** (one binary per machine, installed by the join command): `status`, `expose`, `unexpose`, `join`, `rekey`, `skill`. See `kitshn` with no arguments on a machine.
+
+## This skill
+
+The daemon carries the skill of its release (K-618). The line under the front matter names that release and the update command.
+
+- Global: `kitshn skill install` writes `~/.local/share/kitshn/skills/kitshn` and links `~/.claude/skills/kitshn` to it. The join does this once, and the daemon writes it again after an update.
+- In an app repo: `kitshn skill install --repo` writes `.claude/skills/kitshn/SKILL.md`. Commit it with the repo.
+- `kitshn skill check` exits 1 when a copy is from another release. The deploy workflow warns about an old or missing repo copy and deploys anyway.
 
 ## Add kitshn to an app repo
 
@@ -66,7 +74,8 @@ A repo with `.kitshn.yaml` and `Caddyfile.j2` is a KitSHn 1 repo. Do not mix the
 
    A build that needs its own job, or runs untrusted code, uploads an artifact; the header of `kitshn2-deploy.yml` shows the pattern (K-805).
 4. Values: a GitHub secret or variable `KITSHN_<NAME>` reaches the app as `<NAME>` (K-808). Put production-only secrets in the GitHub Environment `prod`.
-5. Push. The first deploy of a new repo waits: "waits on the kitshn map" (K-819). The owner clicks **Allow**, or an agent key with "may add apps" sends `{"state": "allowed"}` to `POST kit.<zone>/agent/repos/<repoId>` (the id is in `GET kit.<zone>/agent/state`).
+5. Run `kitshn skill install --repo` and commit `.claude/skills/kitshn/SKILL.md`, so agents in the repo know kitshn.
+6. Push. The first deploy of a new repo waits: "waits on the kitshn map" (K-819). The owner clicks **Allow**, or an agent key with "may add apps" sends `{"state": "allowed"}` to `POST kit.<zone>/agent/repos/<repoId>` (the id is in `GET kit.<zone>/agent/state`).
 
 A Compose app listens on the Unix socket `$KITSHN_DEFAULT_SOCKET` and publishes no ports (K-607). Only safe Compose keys pass; the deploy output names each refused setting, and only the owner can allow one on a machine (K-818).
 

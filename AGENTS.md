@@ -55,4 +55,4 @@
 - When changing generated contract files, update `tests/test_repo_init.py` alongside the templates.
 
 ### Related Guidance
-- `.claude/skills/kitshn-deploy-service` is a symlink to `src/kitshn/resources/kitshn-deploy-service`, the skill for downstream service repos deployed with KitSHn, not for this CLI implementation itself. Edit the bundled copy.
+- `.claude/skills/kitshn` links to `packages/kitshn/skill`, the kitshn 2 skill (K-618). The KitSHn 1 skill in `src/kitshn/resources/kitshn-deploy-service` has no link here on purpose, so kitshn 2 agents do not read it. Edit the KitSHn 1 skill only in that folder.

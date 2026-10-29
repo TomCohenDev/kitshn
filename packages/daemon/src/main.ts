@@ -2172,6 +2172,6 @@ kitshn unexpose <name>                  stop sharing it
 kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>
                                         as root: move KitSHn 1 data into rootless Docker (K-1404)
 kitshn skill install [--repo]            the skill for coding agents, global or in this repo (K-618)
-kitshn skill check                      exit 1 when a copy of the skill is older than this kitshn
+kitshn skill check                      exit 1 when a copy of the skill is from another release
 kitshn version`);
 }

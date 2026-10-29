@@ -5,9 +5,10 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
+  renameSync,
   symlinkSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join, relative } from "node:path";
@@ -51,25 +52,51 @@ export const globalSkillPaths = (home: string) => ({
   link: join(home, ".claude", "skills", "kitshn"),
 });
 
+/** The end of the text of a link that kitshn made, also on a machine where it does not resolve. */
+const OWN_LINK_END = join(".local", "share", "kitshn", "skills", "kitshn");
+
+/**
+ * Why kitshn must leave `~/.claude/skills/kitshn` alone, or null when the path is free or kitshn's own link: a link
+ * that resolves to kitshn's folder, or whose text ends with that folder. A link or a folder of the user stays.
+ */
+export function globalLinkRefusal(home: string): string | null {
+  const { dir, link } = globalSkillPaths(home);
+  const stat = lstatSync(link, { throwIfNoEntry: false });
+  if (!stat) return null;
+  const fix = "Move it away, then run kitshn skill install.";
+  if (!stat.isSymbolicLink()) return `kitshn: ${link} is a folder that kitshn did not write. ${fix}`;
+  const text = readlinkSync(link);
+  if (text.endsWith(OWN_LINK_END)) return null;
+  if (existsSync(dir) && existsSync(link) && realpathSync(link) === realpathSync(dir)) return null;
+  return `kitshn: ${link} links to ${text}, which is not kitshn's skill, so kitshn leaves it. ${fix}`;
+}
+
+/** Writes `text` to `path` through a temporary file, so a reader never sees half a file. */
+function writeAtomic(path: string, text: string) {
+  const temporary = `${path}.tmp-${process.pid}`;
+  writeFileSync(temporary, text);
+  renameSync(temporary, path);
+}
+
 /**
  * Writes the global copy and links `~/.claude/skills/kitshn` to it. The link is relative to the real skills folder,
- * so where dotfiles stow `~/.claude` it is the same link as the one that the dotfiles track.
+ * so where dotfiles stow `~/.claude` it is the same link as the one that the dotfiles track. A refusal writes nothing.
  */
 export function installGlobalSkill(home: string, version: string, text = skillText()): string {
   const { dir, link } = globalSkillPaths(home);
+  const refusal = globalLinkRefusal(home);
+  if (refusal) throw new Error(refusal);
+  const copy = versionedSkill(text, version, "global");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "SKILL.md"), versionedSkill(text, version, "global"));
+  writeAtomic(join(dir, "SKILL.md"), copy);
   const skills = join(home, ".claude", "skills");
   mkdirSync(skills, { recursive: true });
   const target = relative(realpathSync(skills), realpathSync(dir));
-  const stat = lstatSync(link, { throwIfNoEntry: false });
-  if (stat && !stat.isSymbolicLink())
-    throw new Error(
-      `${link} holds files that kitshn did not write. Move them away, then run kitshn skill install.`,
-    );
-  if (!stat || !existsSync(link) || realpathSync(link) !== realpathSync(dir)) {
-    if (stat) unlinkSync(link);
-    symlinkSync(target, link);
+  if (lstatSync(link, { throwIfNoEntry: false }) === undefined || readlinkSync(link) !== target) {
+    // A new link under a temporary name replaces the old one in one step.
+    const temporary = `${link}.tmp-${process.pid}`;
+    symlinkSync(target, temporary);
+    renameSync(temporary, link);
   }
   return `kitshn: the skill of edge-${version} is in ${dir}, and ${link} links to it.`;
 }
@@ -96,13 +123,13 @@ export function installRepoSkill(cwd: string, version: string, text = skillText(
   if (lstatSync(dir, { throwIfNoEntry: false })?.isSymbolicLink())
     throw new Error(`${dir} is a link, so kitshn writes no copy there.`);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "SKILL.md"), versionedSkill(text, version, "repo"));
+  writeAtomic(join(dir, "SKILL.md"), versionedSkill(text, version, "repo"));
   return `kitshn: the skill of edge-${version} is in ${join(dir, "SKILL.md")}. Commit it with the repo.`;
 }
 
 /**
- * Checks the global copy and, inside a repo that has one, the repo copy against this release. A copy that names
- * another release counts as old, because a newer CLI is the one to follow.
+ * Checks the global copy with its link and, inside a repo that has one, the repo copy against this release. A copy
+ * of another release counts as out of date.
  */
 export function checkSkill(
   home: string,
@@ -121,6 +148,14 @@ export function checkSkill(
   )
     copies.push(["repo copy", repoCopy, "repo"]);
   let ok = true;
+  const { dir, link } = globalSkillPaths(home);
+  const refusal = globalLinkRefusal(home);
+  if (refusal || !existsSync(link) || !existsSync(dir) || realpathSync(link) !== realpathSync(dir)) {
+    ok = false;
+    lines.push(
+      refusal ?? `kitshn: ${link} does not link to the global copy. Fix it with: ${SKILL_UPDATE.global}`,
+    );
+  }
   for (const [name, path, scope] of copies) {
     if (!existsSync(path)) {
       ok = false;
@@ -132,16 +167,25 @@ export function checkSkill(
     else {
       ok = false;
       lines.push(
-        `kitshn: the ${name} (${path}) is edge-${named ?? "unknown"}, older than this kitshn (edge-${version}). Update it with: ${SKILL_UPDATE[scope]}`,
+        `kitshn: the ${name} (${path}) is edge-${named ?? "unknown"}, not edge-${version} (this kitshn). Update it with: ${SKILL_UPDATE[scope]}`,
       );
     }
   }
   return { ok, lines };
 }
 
-/** The daemon writes the global copy again at its start when the copy names another release, as after an update. */
+/**
+ * The daemon writes the global copy again at its start when the copy names another release, as after an update. A
+ * link of the user stops it with one line, which the daemon logs once per release.
+ */
 export function refreshGlobalSkill(home: string, version: string): string | null {
-  const file = join(globalSkillPaths(home).dir, "SKILL.md");
+  const { dir } = globalSkillPaths(home);
+  const file = join(dir, "SKILL.md");
   if (!existsSync(file) || skillVersion(readFileSync(file, "utf8")) === version) return null;
-  return installGlobalSkill(home, version);
+  const refusal = globalLinkRefusal(home);
+  if (!refusal) return installGlobalSkill(home, version);
+  const said = join(dir, "refused");
+  if (existsSync(said) && readFileSync(said, "utf8") === version) return null;
+  writeAtomic(said, version);
+  return refusal;
 }

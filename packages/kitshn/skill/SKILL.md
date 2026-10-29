@@ -23,7 +23,7 @@ The daemon carries the skill of its release (K-618). The line under the front ma
 
 - Global: `kitshn skill install` writes `~/.local/share/kitshn/skills/kitshn` and links `~/.claude/skills/kitshn` to it. The join does this once, and the daemon writes it again after an update.
 - In an app repo: `kitshn skill install --repo` writes `.claude/skills/kitshn/SKILL.md`. Commit it with the repo.
-- `kitshn skill check` exits 1 when a copy names another release. The deploy workflow warns about an old or missing repo copy and deploys anyway.
+- `kitshn skill check` exits 1 when a copy is from another release. The deploy workflow warns about an old or missing repo copy and deploys anyway.
 
 ## Add kitshn to an app repo
 

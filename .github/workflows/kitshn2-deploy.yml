@@ -123,14 +123,14 @@ jobs:
         env:
           SERVER: ${{ inputs.server }}
         run: |
-          version=$(curl -fsSL "$SERVER/deploy/version" || true)
+          version=$(curl -fsSL --max-time 20 "$SERVER/deploy/version" || true)
           copy=.claude/skills/kitshn/SKILL.md
           if [ ! -f "$copy" ]; then
             echo "::warning::This repo has no copy of the kitshn skill. Add it with: kitshn skill install --repo"
           elif [ -n "$version" ]; then
             named=$(sed -n 's/^<!-- kitshn edge-\([^.]*\)\..*/\1/p' "$copy" | head -n 1)
             if [ "$named" != "$version" ]; then
-              echo "::warning::$copy is edge-${named:-unknown}, older than kitshn (edge-$version). Update it with: kitshn skill install --repo"
+              echo "::warning::$copy is edge-${named:-unknown}, not edge-$version (the release of kitshn). Update it with: kitshn skill install --repo"
             fi
           fi
       - name: kitshn deploy

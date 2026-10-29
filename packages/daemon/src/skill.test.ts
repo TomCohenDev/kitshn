@@ -1,11 +1,13 @@
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readlinkSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -56,9 +58,47 @@ describe("kitshn skill (K-618)", () => {
     // A second run keeps the link, and a folder that kitshn did not write stops it.
     installGlobalSkill(home, B, SKILL);
     expect(lstatSync(join(home, ".claude", "skills", "kitshn")).isSymbolicLink()).toBe(true);
-    const other = stowedHome();
-    mkdirSync(join(other, ".claude", "skills", "kitshn"));
-    expect(() => installGlobalSkill(other, A, SKILL)).toThrow("did not write");
+    // kitshn's own link stays kitshn's, also when it does not resolve on this machine.
+    const moved = stowedHome();
+    symlinkSync("/elsewhere/.local/share/kitshn/skills/kitshn", join(moved, ".claude", "skills", "kitshn"));
+    installGlobalSkill(moved, A, SKILL);
+    expect(readlinkSync(join(moved, ".claude", "skills", "kitshn"))).toBe(
+      "../../../../../.local/share/kitshn/skills/kitshn",
+    );
+  });
+
+  it("leaves a folder or a link of the user alone and writes nothing, also at the daemon start", () => {
+    const mine = (setup: (link: string, home: string) => void) => {
+      const home = stowedHome();
+      setup(join(home, ".claude", "skills", "kitshn"), home);
+      return home;
+    };
+    const homes = {
+      folder: mine((link) => mkdirSync(link)),
+      link: mine((link, home) => {
+        mkdirSync(join(home, "mine"));
+        symlinkSync(join(home, "mine"), link);
+      }),
+      broken: mine((link) => symlinkSync("../../mine-gone", link)),
+    };
+    for (const [name, home] of Object.entries(homes)) {
+      expect(() => installGlobalSkill(home, A, SKILL), name).toThrow(
+        name === "folder" ? "folder" : "links to",
+      );
+      expect(existsSync(join(home, ".local", "share", "kitshn")), name).toBe(false);
+      expect(checkSkill(home, tmpdir(), A).ok, name).toBe(false);
+    }
+    expect(readlinkSync(join(homes.broken, ".claude", "skills", "kitshn"))).toBe("../../mine-gone");
+
+    // An old copy behind a link that the user changed later: the daemon says so once per release, and changes nothing.
+    const home = stowedHome();
+    installGlobalSkill(home, A, SKILL);
+    const link = join(home, ".claude", "skills", "kitshn");
+    unlinkSync(link);
+    symlinkSync("../../mine-gone", link);
+    expect(refreshGlobalSkill(home, B)).toContain("links to ../../mine-gone");
+    expect(refreshGlobalSkill(home, B)).toBeNull();
+    expect(readlinkSync(link)).toBe("../../mine-gone");
   });
 
   it("writes the repo copy, refuses a linked skill folder, and checks both copies against the release", () => {

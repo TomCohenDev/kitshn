@@ -1,7 +1,9 @@
 import { useState } from "preact/hooks";
 import type { Command } from "../core/machine.ts";
 import type { JobView, MachineView } from "../core/protocol.ts";
-import { MACHINE_TIPS, isRelease } from "./actions.ts";
+import { isRelease } from "../core/autoUpdate.ts";
+import { MACHINE_TIPS } from "./actions.ts";
+import { Switch } from "./controls.tsx";
 import { callApi, useStore } from "./store.ts";
 
 /** "5 min", "3 h", "2 d": how long ago a time was (K-515). */
@@ -97,8 +99,28 @@ function MachineStickers(props: { view: MachineView }) {
   // The snapshot holds only the asks that this viewer may answer (K-1902).
   const asks = snapshot.proposals.filter((proposal) => proposal.machineId === machine.id).length;
   const panel = `#map/${encodeURIComponent(machine.id)}`;
+  const update = props.view.update;
+  // K-628: an update in progress or a failed one shows also while the daemon restarts or is offline.
   const version =
-    !online || !status || !isRelease(snapshot.version) ? null : !isRelease(status.version) ? (
+    update?.state === "updating" ? (
+      <a
+        class="sticker wait"
+        href={panel}
+        onPointerDown={keepPress}
+        data-tip={`Updating: kitshn installs the daemon of edge-${snapshot.version}. Other machines wait for this one (K-627).`}
+      >
+        updating
+      </a>
+    ) : update?.state === "failed" ? (
+      <a
+        class="sticker"
+        href={panel}
+        onPointerDown={keepPress}
+        data-tip={`Update failed: ${update.reason} No other machine updates to edge-${snapshot.version} until this one does. Update daemon in its panel tries again.`}
+      >
+        update failed
+      </a>
+    ) : !online || !status || !isRelease(snapshot.version) ? null : !isRelease(status.version) ? (
       <span
         class="sticker info"
         tabIndex={0}
@@ -111,16 +133,20 @@ function MachineStickers(props: { view: MachineView }) {
         class="sticker ok"
         href={panel}
         onPointerDown={keepPress}
-        data-tip={`Newest: the daemon runs edge-${snapshot.version}, the release of the Worker (K-617). Its panel has Update daemon.`}
+        data-tip={
+          update?.state === "updated"
+            ? `Updated: kitshn updated this daemon to edge-${snapshot.version}, the release of the Worker (K-628).`
+            : `Newest: the daemon runs edge-${snapshot.version}, the release of the Worker (K-617). Its panel has Update daemon.`
+        }
       >
-        newest
+        {update?.state === "updated" ? "updated" : "newest"}
       </a>
     ) : (
       <a
         class="sticker wait"
         href={panel}
         onPointerDown={keepPress}
-        data-tip={`Behind: the daemon runs edge-${status.version}, the Worker runs edge-${snapshot.version}. Update daemon in its panel installs it (K-612).`}
+        data-tip={`Behind: the daemon runs edge-${status.version}, the Worker runs edge-${snapshot.version}. ${machine.autoUpdate === false ? "Update daemon in its panel installs it (K-612)." : "kitshn updates it when no other machine updates and no provider is busy (K-627)."}`}
       >
         behind
       </a>
@@ -400,6 +426,19 @@ export async function queueJob(
     : { text: `Job #${result.id} is queued.`, error: false };
 }
 
+/** K-626: sets "Update daemon automatically"; the answer is a toast text. */
+export async function setAutoUpdate(
+  machineId: string,
+  on: boolean,
+): Promise<{ text: string; error: boolean }> {
+  const result = await callApi<{ id: string }>("POST", `/api/machines/${encodeURIComponent(machineId)}`, {
+    autoUpdate: on,
+  });
+  return "error" in result
+    ? { text: result.error, error: true }
+    : { text: `Update daemon automatically is ${on ? "on" : "off"}. History can undo it.`, error: false };
+}
+
 /** K-1612: cancels a queued job; the answer is a toast text. */
 async function cancelJob(id: number): Promise<{ text: string; error: boolean }> {
   const result = await callApi<{ ok: true }>("POST", `/api/jobs/${id}/cancel`, {});
@@ -598,6 +637,19 @@ export function MachinePanel(props: {
           </button>
         ) : null}
       </div>
+      {isRelease(props.version) ? (
+        <div class="row">
+          <Switch
+            checked={view.machine.autoUpdate !== false}
+            label="Update daemon automatically"
+            tip={MACHINE_TIPS.autoUpdate}
+            onChange={async (on) => {
+              const { text, error } = await setAutoUpdate(view.machine.id, on);
+              props.onToast(text, error);
+            }}
+          />
+        </div>
+      ) : null}
       {view.orphanVolumes.length > 0 ? (
         <>
           <div

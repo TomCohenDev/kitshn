@@ -32,6 +32,8 @@ export interface Machine {
    * `kitshn rekey` gives it its first key (K-1708).
    */
   readonly key?: MachineKey;
+  /** K-626: "Update daemon automatically" is on unless this is false. */
+  readonly autoUpdate?: false;
 }
 
 export type MachineKey =

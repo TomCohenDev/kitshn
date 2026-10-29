@@ -23,6 +23,7 @@ import {
   shareLevel,
   stackTitle,
 } from "./model.ts";
+import type { Machine } from "./machine.ts";
 
 /** One edit that a client asks for. `after: null` deletes. */
 export type Edit =
@@ -114,6 +115,13 @@ export type Change =
       readonly id: string;
       readonly before: string;
       readonly after: string;
+    }
+  /** K-626: "Update daemon automatically" of a machine; its id is the machine's, which is also its card's. */
+  | {
+      readonly _tag: "autoUpdate";
+      readonly id: string;
+      readonly before: boolean;
+      readonly after: boolean;
     };
 
 /**
@@ -182,6 +190,10 @@ const current = (state: State, change: Pick<Change, "_tag" | "id">) => {
     }
     case "address":
       return state.resources.get(change.id)?.addresses[0] ?? null;
+    case "autoUpdate": {
+      const machine = state.machines.get(change.id);
+      return machine ? machine.autoUpdate !== false : null;
+    }
   }
 };
 
@@ -451,7 +463,7 @@ export function revisionTargets(changes: ReadonlyArray<RevisionTarget>): {
           ? "share"
           : tags.has("stack")
             ? "stack"
-            : tags.has("place") || tags.has("address") || tags.has("cardEnd")
+            : tags.has("place") || tags.has("address") || tags.has("cardEnd") || tags.has("autoUpdate")
               ? "card"
               : "action";
   const items = new Map<string, Item>();
@@ -464,6 +476,7 @@ export function revisionTargets(changes: ReadonlyArray<RevisionTarget>): {
       change._tag === "providerCard" ||
       change._tag === "address" ||
       change._tag === "cardEnd" ||
+      change._tag === "autoUpdate" ||
       change._tag === "forget"
     )
       add({ kind: "card", id: change.id });
@@ -492,6 +505,7 @@ export function touches(change: Change, item: Item): boolean {
     case "providerCard":
     case "address":
     case "cardEnd":
+    case "autoUpdate":
       return change.id === item.id;
     case "shareSetting":
       return change.id.startsWith(`${item.id}/`);
@@ -549,6 +563,7 @@ function footprint(changes: ReadonlyArray<Change | Forget>, state: State, pool: 
       change._tag === "providerCard" ||
       change._tag === "address" ||
       change._tag === "cardEnd" ||
+      change._tag === "autoUpdate" ||
       change._tag === "forget"
     )
       cards.add(change.id);
@@ -686,7 +701,7 @@ export function undoTarget(
   );
   const missing = changes
     .flatMap((change) =>
-      (change._tag === "place" && change.before) || change._tag === "address"
+      (change._tag === "place" && change.before) || change._tag === "address" || change._tag === "autoUpdate"
         ? [change.id]
         : change._tag === "shareSetting" && change.before
           ? [change.id.split("/")[0] ?? ""]
@@ -712,6 +727,7 @@ export function applyChanges(state: State, changes: ReadonlyArray<Change>): Stat
   const shareSettings = new Map(state.shareSettings);
   const stacks = new Map(state.stacks);
   const ends = new Map(state.ends);
+  const machines = new Map(state.machines);
   let paused = state.paused;
   const put = <V>(map: Map<string, V>, id: string, value: V | null) =>
     value === null ? map.delete(id) : map.set(id, value);
@@ -728,9 +744,13 @@ export function applyChanges(state: State, changes: ReadonlyArray<Change>): Stat
       const resource = resources.get(change.id);
       if (!resource) throw new RuleError(`No card "${change.id}" exists.`);
       resources.set(change.id, { ...resource, addresses: [change.after, ...resource.addresses.slice(1)] });
+    } else if (change._tag === "autoUpdate") {
+      const machine = machines.get(change.id);
+      if (!machine) throw new RuleError(`No machine "${change.id}" exists.`);
+      machines.set(change.id, withAutoUpdate(machine, change.after));
     } else paused = change.after;
   }
-  return { ...state, circles, resources, places, shareSettings, stacks, ends, paused };
+  return { ...state, circles, resources, places, shareSettings, stacks, ends, machines, paused };
 }
 
 /**
@@ -846,6 +866,9 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
       ? `Forgot ${cards.length} ${cards.length === 1 ? "card" : "cards"} of the provider ${provider} (K-704)`
       : `Brought back ${cards.length} ${cards.length === 1 ? "card" : "cards"} of the provider ${provider} (K-704)`;
   }
+  const autoUpdate = changes.find((change) => change._tag === "autoUpdate");
+  if (autoUpdate)
+    return `Turned ${autoUpdate.after ? "on" : "off"} Update daemon automatically for ${after.machines.get(autoUpdate.id)?.name ?? autoUpdate.id} (K-626)`;
   const address = changes.find((change) => change._tag === "address");
   if (address)
     return `Moved ${after.resources.get(address.id)?.name ?? address.id} to ${address.after} (K-1120)`;
@@ -901,6 +924,12 @@ export function summarize(before: State, after: State, changes: ReadonlyArray<Ch
   const moved = changes.filter((change) => change._tag === "place").length;
   if (moved > 0 && moved === changes.length) return moved === 1 ? "Moved a card" : `Moved ${moved} cards`;
   return `Changed ${changes.length} items`;
+}
+
+/** K-626: on is the default, so the machine body holds only `autoUpdate: false`. */
+export function withAutoUpdate(machine: Machine, on: boolean): Machine {
+  const { autoUpdate: _autoUpdate, ...rest } = machine;
+  return on ? rest : { ...rest, autoUpdate: false };
 }
 
 /** K-212: an end time in History, which every reader reads in UTC: "2026-10-29 15:40 UTC". */

@@ -143,7 +143,7 @@ import { GONE_STICKER, REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx
 import { AskEvents, LinkEvents, BotRuns, approveFromHash } from "./Asks.tsx";
 import { PassSettingsPanel } from "./Passes.tsx";
 import { LibraryView } from "./Library.tsx";
-import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
+import { AddMachine, MachinePanel, MachinesView, queueJob, setAutoUpdate } from "./Machines.tsx";
 import {
   ACCESS_TIPS,
   ALONE_KEY,
@@ -1572,6 +1572,10 @@ export function App() {
     logs: setLogs,
     backups: setBackupsCard,
     runJob: (machine, command) => void runJob(machine, command),
+    setAutoUpdate: (machine, on) =>
+      void setAutoUpdate(machine.machine.id, on).then(({ text, error }) =>
+        showToast({ text, error, undo: null }),
+      ),
     runProviderCommand: (machine, command, question) =>
       void (async () => {
         if (question !== null && !(await ask(question))) return;

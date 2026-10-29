@@ -104,7 +104,17 @@ import {
   uptime,
 } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { oldBinaries, oldBinaryName, swapBinary } from "./update.ts";
+import {
+  UPDATE_DEADLINE_MS,
+  type UpdateMarker,
+  nextBinaryName,
+  oldBinaries,
+  oldBinaryName,
+  parseMarker,
+  restorePrevious,
+  startStep,
+  swapBinary,
+} from "./update.ts";
 import { ownSid } from "./winpipe.ts";
 import {
   type PathFacts,
@@ -893,11 +903,11 @@ function pruneSamples() {
 
 /**
  * K-612, K-617: downloads the daemon of the release that kitshn names, checks it against the release's
- * SHA256SUMS, puts it in place of this binary, and exits; the service manager starts the new one.
+ * SHA256SUMS, puts it in place of this binary, and exits; the service manager starts the new one. K-629: the new
+ * one must pass a start check first, the previous one stays beside it, and the new one sends the job result once
+ * kitshn accepts it, so this returns null after a swap.
  */
-async function updateDaemon(
-  version: string,
-): Promise<{ ok: boolean; exitCode: number | null; output: string }> {
+async function updateDaemon(jobId: number, version: string): Promise<JobOutcome | null> {
   const failed = (output: string) => ({ ok: false, exitCode: null, output });
   if (!/^[0-9a-f]{12}$/.test(version)) return failed(`kitshn named no valid release (${version}).`);
   // A daemon run from source has the runtime as its execPath; replacing that would break the runtime.
@@ -915,25 +925,153 @@ async function updateDaemon(
     if (!expected || expected !== actual)
       return failed(`${name} of edge-${version} does not match its SHA256SUMS.`);
     const bytes = gunzipSync(packed);
-    const next = `${process.execPath}.new`;
+    const next = nextBinaryName(process.execPath, platform === "win32");
     // A leftover file keeps its old mode, so start fresh and set the mode explicitly.
     rmSync(next, { force: true });
     writeFileSync(next, bytes);
     chmodSync(next, 0o755);
-    // K-620: Windows cannot replace a running .exe, but it can rename one; the next start deletes the old one.
-    if (platform === "win32")
-      await swapBinary(
-        { rename: renameSync },
-        process.execPath,
-        next,
-        oldBinaryName(process.execPath, Date.now()),
-      );
-    else renameSync(next, process.execPath);
+    // K-629: the new binary must start and name its release before it replaces this one.
+    const check = spawnSync(next, ["version"], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+    if (check.status !== 0 || check.stdout.trim() !== version) {
+      rmSync(next, { force: true });
+      const why = check.error
+        ? String(check.error)
+        : `exit ${check.status}, ${(check.stdout + check.stderr).trim().slice(-300)}`;
+      return failed(`The new daemon failed its start check (${why}).`);
+    }
+    // K-620: Windows cannot replace a running .exe, but it can rename one; that copy is the previous daemon.
+    const previous =
+      platform === "win32" ? oldBinaryName(process.execPath, Date.now()) : `${process.execPath}.old`;
+    writeMarker({
+      jobId,
+      from: VERSION,
+      to: version,
+      previous,
+      deadline: Date.now() + UPDATE_DEADLINE_MS,
+      state: "pending",
+    });
+    try {
+      if (platform === "win32") await swapBinary({ rename: renameSync }, process.execPath, next, previous);
+      else {
+        copyFileSync(process.execPath, previous);
+        chmodSync(previous, 0o755);
+        renameSync(next, process.execPath);
+      }
+    } catch (error) {
+      rmSync(markerFile(), { force: true });
+      throw error;
+    }
   } catch (error) {
     return failed(`The update failed: ${String(error)}`);
   }
+  log(`updated ${VERSION} to ${version}; restarting`);
   restartSoon();
-  return { ok: true, exitCode: 0, output: `Updated ${VERSION} to ${version}; restarting.` };
+  return null;
+}
+
+/** K-629: the marker of the last update, which the next start reads. */
+const markerFile = () => join(paths.data, "update.json");
+
+function writeMarker(marker: UpdateMarker) {
+  mkdirSync(paths.data, { recursive: true });
+  writeFileSync(markerFile(), JSON.stringify(marker));
+}
+
+/** A marker that does not parse is dropped with a log line, so it never stops the daemon from starting. */
+function readMarker(): UpdateMarker | null {
+  if (!existsSync(markerFile())) return null;
+  try {
+    const marker = parseMarker(JSON.parse(readFileSync(markerFile(), "utf8")));
+    if (marker) return marker;
+  } catch {
+    // Logged below.
+  }
+  log(`${markerFile()} does not parse; kitshn drops it`);
+  rmSync(markerFile(), { force: true });
+  return null;
+}
+
+/** K-629: the timer that rolls a new daemon back when kitshn has not accepted it by the deadline. */
+let updateWatch: { readonly marker: UpdateMarker; readonly timer: ReturnType<typeof setTimeout> } | null =
+  null;
+
+/** K-629: called when kitshn accepts the connection. The result of the update goes out with the other results. */
+function confirmUpdate() {
+  if (!updateWatch) return;
+  clearTimeout(updateWatch.timer);
+  rmSync(markerFile(), { force: true });
+  log(
+    `kitshn accepted edge-${updateWatch.marker.to}; edge-${updateWatch.marker.from} stays at ${updateWatch.marker.previous}`,
+  );
+  updateWatch = null;
+}
+
+/** K-629: puts the previous daemon back and restarts; that daemon reports the reason to kitshn. */
+async function rollBackUpdate(marker: UpdateMarker, reason: string) {
+  log(`the update to edge-${marker.to} failed: ${reason} edge-${marker.from} comes back.`);
+  writeMarker({ ...marker, state: "rolled-back", reason });
+  try {
+    await restorePrevious(
+      { rename: renameSync },
+      process.execPath,
+      marker.previous,
+      platform === "win32",
+      Date.now(),
+    );
+  } catch (error) {
+    // This daemon keeps running, so it reports the failure itself.
+    log(`the previous daemon could not come back: ${String(error)}`);
+    rmSync(markerFile(), { force: true });
+    pendingResults.push({
+      type: "jobResult",
+      id: marker.jobId,
+      result: {
+        ok: false,
+        exitCode: null,
+        output: `${reason} The previous daemon could not come back: ${String(error)}`,
+      },
+    });
+    return;
+  }
+  restartSoon();
+}
+
+/** K-629: the first step of `run`, before anything else starts. Returns false when the previous daemon comes back. */
+async function checkUpdate(): Promise<boolean> {
+  const marker = readMarker();
+  const step = startStep(marker, VERSION, Date.now());
+  if (step.kind === "none" || marker === null) return true;
+  if (step.kind === "roll-back") {
+    await rollBackUpdate(marker, step.reason);
+    // The marker stays only when the previous daemon is back and starts next.
+    return !existsSync(markerFile());
+  }
+  if (step.kind === "report") {
+    rmSync(markerFile(), { force: true });
+    pendingResults.push({
+      type: "jobResult",
+      id: step.jobId,
+      result: { ok: false, exitCode: null, output: step.reason },
+    });
+    return true;
+  }
+  pendingResults.push({
+    type: "jobResult",
+    id: step.jobId,
+    result: {
+      ok: true,
+      exitCode: 0,
+      output: `Updated ${marker.from} to ${marker.to}; kitshn accepted the new daemon.`,
+    },
+  });
+  updateWatch = {
+    marker,
+    timer: setTimeout(
+      () => void rollBackUpdate(marker, "The new daemon did not reach kitshn within 5 minutes."),
+      Math.max(0, step.deadline - Date.now()),
+    ),
+  };
+  return true;
 }
 
 /**
@@ -1662,11 +1800,12 @@ function oneAtATime(project: string, work: () => Promise<JobOutcome>): Promise<J
   return next;
 }
 
+/** Resolves to null when the result comes later from another daemon (K-629). */
 function runJob(
   jobId: number,
   command: Command,
   notify?: { readonly url: string; readonly token: string },
-): Promise<JobOutcome> {
+): Promise<JobOutcome | null> {
   if (
     command.kind === "compose" ||
     command.kind === "compose-redeploy" ||
@@ -1687,7 +1826,7 @@ function runJob(
     ].join("\n");
     return Promise.resolve({ ok: true, exitCode: 0, output: text });
   }
-  if (command.kind === "update") return updateDaemon(command.version);
+  if (command.kind === "update") return updateDaemon(jobId, command.version);
   if (command.kind === "provider") return runProviderCommand(command, jobId);
   if (command.kind === "backup" || command.kind === "backup-restore") {
     if (!joined)
@@ -2253,6 +2392,7 @@ function connect(config: JoinSecrets) {
       socket = ws;
       delay = 1000;
       stopped = false;
+      confirmUpdate();
       flushResults();
       report();
       sendProviders();
@@ -2383,6 +2523,7 @@ function connect(config: JoinSecrets) {
             output: `[kitshn: ${String(error)}]`,
           }))
           .then((result) => {
+            if (result === null) return;
             // The connection can change while a job runs; the result goes out on the current one.
             pendingResults.push({ type: "jobResult", id: message.id, result });
             flushResults();
@@ -2616,6 +2757,8 @@ function skillCommand(action: string | undefined, repo: boolean) {
 async function runCommand() {
   const config = readConfig();
   log(`kitshn ${VERSION} starts as machine ${config.machineId}`);
+  // K-629: first, so a failed update puts the previous daemon back before this one touches anything.
+  if (!(await checkUpdate())) return;
   // K-618: after an update, the global skill follows the new release.
   try {
     const refreshed = refreshGlobalSkill(homedir(), VERSION);

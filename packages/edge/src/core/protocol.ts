@@ -1,4 +1,5 @@
 import type { Actor, Item, RevisionKind } from "./changes.ts";
+import type { DaemonUpdate } from "./autoUpdate.ts";
 import type { Command, Machine, MachineStatus, ProjectVolume, Sample } from "./machine.ts";
 import type { ServerReport } from "./sites.ts";
 import type { BackupRun, BucketSize } from "./backups.ts";
@@ -240,6 +241,8 @@ export interface MachineView {
   readonly servers: ReadonlyArray<ServerReport>;
   /** K-1608: the pushes of state that the machine has not applied yet; null when its daemon does not report it. */
   readonly queued: number | null;
+  /** K-628: the update of its daemon to the release of the Worker; null when no update job of that release exists. */
+  readonly update: DaemonUpdate | null;
 }
 
 export interface JobView {

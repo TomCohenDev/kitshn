@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { oldBinaries, swapBinary } from "./update.ts";
+import { type UpdateMarker, oldBinaries, restorePrevious, startStep, swapBinary } from "./update.ts";
 
 /** Files by name; `busy` names files whose rename fails that many times. */
 function folder(names: ReadonlyArray<string>, busy: Record<string, number> = {}) {
@@ -42,9 +42,52 @@ describe("the binary swap of an update (K-620)", () => {
     expect(files.files.has("k.old-1.exe")).toBe(false);
   });
 
-  it("finds only the old copies of its own binary", () => {
+  it("finds only the old copies of its own binary, and keeps the newest as the way back (K-629)", () => {
     expect(
-      oldBinaries("/p/kitshn.exe", ["kitshn.exe", "kitshn.old-1.exe", "kitshn.old-2.exe", "other.old-1.exe"]),
-    ).toEqual(["/p/kitshn.old-1.exe", "/p/kitshn.old-2.exe"]);
+      oldBinaries("/p/kitshn.exe", [
+        "kitshn.exe",
+        "kitshn.old-10.exe",
+        "kitshn.old-9.exe",
+        "kitshn.old-2.exe",
+        "other.old-1.exe",
+      ]),
+    ).toEqual(["/p/kitshn.old-2.exe", "/p/kitshn.old-9.exe"]);
+  });
+});
+
+describe("the way back of an update (K-629)", () => {
+  const marker: UpdateMarker = {
+    jobId: 7,
+    from: "bbbbbbbbbbbb",
+    to: "aaaaaaaaaaaa",
+    previous: "/p/kitshn.old",
+    deadline: 1000,
+    state: "pending",
+  };
+
+  it("waits for kitshn before the deadline, and rolls back at the first start after it", () => {
+    expect(startStep(marker, marker.to, 999)).toEqual({ kind: "wait", jobId: 7, deadline: 1000 });
+    expect(startStep(marker, marker.to, 1000)).toEqual({
+      kind: "roll-back",
+      reason: "The new daemon did not reach kitshn within 5 minutes.",
+    });
+  });
+
+  it("puts the previous binary back on Linux and macOS, and the previous daemon reports why", async () => {
+    const files = folder(["/p/kitshn", "/p/kitshn.old"]);
+    await restorePrevious(files, "/p/kitshn", marker.previous, false, 2000, none);
+    expect([...files.files]).toEqual(["/p/kitshn"]);
+    const back = { ...marker, state: "rolled-back" as const, reason: "The new daemon crashed." };
+    expect(startStep(back, marker.from, 2000)).toEqual({
+      kind: "report",
+      jobId: 7,
+      reason: "The new daemon crashed.",
+    });
+  });
+
+  it("swaps the previous .exe back on Windows, keeping the failed one aside (K-620)", async () => {
+    const files = folder(["k.exe", "k.old-1.exe"]);
+    await restorePrevious(files, "k.exe", "k.old-1.exe", true, 2, none);
+    expect([...files.files].sort()).toEqual(["k.exe", "k.old-2.exe"]);
   });
 });

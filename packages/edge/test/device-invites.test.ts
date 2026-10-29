@@ -1,6 +1,7 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, expect, it, vi } from "vitest";
+import { ADMIN_RESOURCE_ID, type Circle } from "../src/core/model.ts";
 import { accessToken, send, stubAccessCerts } from "./access.ts";
 
 /** K-1601: device invites, through the Worker, against a fake of the service token API of Cloudflare. */
@@ -34,6 +35,7 @@ async function setup() {
       rotations++;
       return { client_secret: `rotated-${rotations}` };
     }
+    if (method === "POST" && path.endsWith("/refresh")) return {};
     throw new Error(`Unexpected API call: ${method} ${path}`);
   };
   await runInDurableObject(stub, (instance, state) => {
@@ -125,23 +127,64 @@ it("cancels an invite without touching its token", async () => {
   expect(fake.calls).toEqual([]);
 });
 
-it("lets only the owner make or cancel an invite", async () => {
-  const { fake } = await setup();
-  expect((await asPerson("guest@example.com", "/api/devices/invites", "POST", { name: "X" })).status).toBe(
-    403,
+it("lets only the owner make or cancel an invite, not another admin", async () => {
+  const { fake, sql } = await setup();
+  // A second circle holds the admin card at control, so admin@example.com passes the admin gate but is no owner.
+  const [admin] = await sql("SELECT x, y FROM places WHERE id = ?", ADMIN_RESOURCE_ID);
+  const admins: Circle = {
+    id: "co-admins",
+    name: "Co-admins",
+    color: "#00B3FF",
+    level: "control",
+    members: [{ _tag: "email", email: "admin@example.com" }],
+    match: "any",
+    needsPasskey: true,
+    endsAt: null,
+    x: Number(admin!.x),
+    y: Number(admin!.y),
+    r: 50,
+  };
+  await sql("INSERT OR REPLACE INTO circles (id, body) VALUES ('co-admins', ?)", JSON.stringify(admins));
+  await runInDurableObject(env.KITSHN.getByName("kitshn"), (instance) =>
+    (instance as unknown as { load: () => void }).load(),
   );
-  expect((await asPerson("guest@example.com", "/api/devices/invites/t-x", "DELETE")).status).toBe(403);
-  expect(fake.calls).toEqual([]);
+  try {
+    expect((await asPerson("admin@example.com", "/api/state", "GET")).status).toBe(200);
+    expect((await asPerson("admin@example.com", "/api/devices/invites", "POST", { name: "X" })).status).toBe(
+      403,
+    );
+    expect((await asPerson("admin@example.com", "/api/devices/invites/t-x", "DELETE")).status).toBe(403);
+    expect(fake.calls).toEqual([]);
+  } finally {
+    await sql("DELETE FROM circles WHERE id = 'co-admins'");
+    await runInDurableObject(env.KITSHN.getByName("kitshn"), (instance) =>
+      (instance as unknown as { load: () => void }).load(),
+    );
+  }
+});
+
+it("gives one secret when two exchanges of one code race", async () => {
+  const { fake } = await setup();
+  const code = codeOf((await invite({ name: "Race" })).body.link);
+  const statuses = (await Promise.all([exchange(code), exchange(code)])).map((response) => response.status);
+  expect(statuses.sort()).toEqual([200, 404]);
+  expect(fake.calls.filter((call) => call.endsWith("/rotate"))).toHaveLength(1);
 });
 
 it("invites an existing device token again, never a machine token, and the new invite ends the old", async () => {
-  await setup();
+  const { fake } = await setup();
   expect((await invite({ tokenId: "t-machine" })).status).toBe(400);
   const first = codeOf((await invite({ tokenId: "t-old" })).body.link);
   const second = await invite({ tokenId: "t-old" });
   expect(second.body).toMatchObject({ name: "Old phone", clientId: "old.access" });
   expect((await exchange(first)).status).toBe(404);
+  fake.calls.length = 0;
   expect((await exchange(codeOf(second.body.link))).status).toBe(200);
+  // The old token gets a full year again with its new secret.
+  expect(fake.calls).toEqual([
+    "POST /accounts/acct/access/service_tokens/t-old/rotate",
+    "POST /accounts/acct/access/service_tokens/t-old/refresh",
+  ]);
 });
 
 it("keeps the invite when the rotate fails or kitshn is paused", async () => {

@@ -6660,7 +6660,10 @@ export class Kitshn extends DurableObject<Env> {
     const [row] = this.sql<InviteRow>("SELECT * FROM device_invites WHERE lookup = ?", lookup);
     if (!row)
       return Response.json(
-        { error: "This invite is not valid, was cancelled, or someone used it already." },
+        {
+          error:
+            "This invite code is used, cancelled or unknown. A code works once, also when its answer got lost. Ask the owner for a new invite.",
+        },
         { status: 404 },
       );
     if (row.expires_at < Date.now()) {
@@ -6697,8 +6700,26 @@ export class Kitshn extends DurableObject<Env> {
       );
       return Response.json({ error: `Cloudflare made no new secret: ${String(error)}` }, { status: 502 });
     }
+    // The secret is out, so a failed refresh must not lose it; the token then keeps its old expiry.
+    let refreshed = true;
+    try {
+      // A new invite of an old token gives the app a full year, not what is left of the token's first year.
+      await api(
+        "POST",
+        `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/service_tokens/${encodeURIComponent(row.token_id)}/refresh`,
+      );
+    } catch (error) {
+      refreshed = false;
+      console.error(`K-1601: the refresh of the device token ${row.token_id} failed: ${String(error)}`);
+    }
     const actor: Actor = { _tag: "device", clientId: row.client_id, name: row.name };
-    this.insertRevision(actor, `${row.name} joined with an invite${device ? ` (${device})` : ""}`, [], null);
+    // `device` comes from the anonymous caller, so History marks it as the app's own words.
+    this.insertRevision(
+      actor,
+      `${row.name} joined with an invite${device ? ` (the app says: ${device})` : ""}${refreshed ? "" : "; the token expiry did not refresh"}`,
+      [],
+      null,
+    );
     this.load();
     this.broadcast();
     const visitor: Visitor = { email: null, clientId: row.client_id, ip: null };
@@ -13437,7 +13458,6 @@ const DAY_MS = 24 * 3_600_000;
 /** K-819: GitHub calls of one repo check; a Free plan request may make 50 subrequests. */
 const GITHUB_CALLS_PER_CHECK = 40;
 
-/** A machine as the actor of what its daemon does, such as a key rotation (K-1705). */
 /** K-106: the Cloudflare name of each device token that kitshn makes. */
 const DEVICE_TOKEN_PREFIX = "kitshn device ";
 
@@ -13450,6 +13470,7 @@ type InviteRow = {
   expires_at: number;
 };
 
+/** A machine as the actor of what its daemon does, such as a key rotation (K-1705). */
 const deviceActor = (machine: Machine): Actor => ({
   _tag: "device",
   clientId: machine.clientId,

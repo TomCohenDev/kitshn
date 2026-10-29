@@ -71,13 +71,21 @@ type Drag =
  * K-532: the sizes that the map draws now, for Organize: each card or stack around the place of its first card,
  * each circle head and each chip row. A zoomed-out map draws dots, so then the server takes plain card sizes.
  */
-export function measureMap(state: State): DrawnWire {
+export function measureMap(state: State, previews: boolean): DrawnWire {
   const world = document.querySelector<HTMLElement>(".viewport > .world");
   if (!world) throw new Error("measureMap: the map is not on screen.");
   const firstOf = new Map<string, string>();
   for (const ids of stacksOf(state).values()) for (const id of ids) firstOf.set(id, ids[0] as string);
   const boxes = new Map<string, Box>();
-  for (const element of world.querySelectorAll<HTMLElement>(":scope > .card[data-card]")) {
+  const cards = [...world.querySelectorAll<HTMLElement>(":scope > .card[data-card]")];
+  // K-520: with Previews on, a frame goes to the cards near the centre of the view. Every card that can get one
+  // keeps the room of one, so the grid does not depend on the view.
+  const frames = cards.flatMap((card) => {
+    const frame = card.querySelector<HTMLElement>(".preview-frame");
+    return frame ? [frame.offsetHeight + FRAME_MARGIN] : [];
+  });
+  const frameRoom = previews ? Math.max(FRAME_ROOM, ...frames) : 0;
+  for (const element of cards) {
     const id = element.dataset["card"] ?? "";
     const first = firstOf.get(id) ?? id;
     const place = state.places.get(first);
@@ -86,7 +94,15 @@ export function measureMap(state: State): DrawnWire {
       left: element.offsetLeft - place.x,
       top: element.offsetTop - place.y,
       right: element.offsetLeft + element.offsetWidth - place.x,
-      bottom: element.offsetTop + element.offsetHeight - place.y,
+      bottom:
+        element.offsetTop +
+        element.offsetHeight -
+        place.y +
+        (FRAMED_KINDS.has(state.resources.get(id)?.kind ?? "file") &&
+        !element.classList.contains("stack-card") &&
+        !element.querySelector(".preview-frame")
+          ? frameRoom
+          : 0),
     };
     const before = boxes.get(first);
     boxes.set(first, before ? union([before, box]) : box);
@@ -155,6 +171,11 @@ interface Props {
 
 /** K-504: the circle-alone key of this device. */
 export const ALONE_KEY = circleAloneKey(navigator.platform);
+
+/** K-532: the room of a preview frame that no card shows now: the thumbnail at card width and its button row. */
+const FRAME_ROOM = 140;
+/** `.preview-frame` has `margin-top: 6px`. */
+const FRAME_MARGIN = 6;
 
 /** Preact 11 does not add a unit to numeric style values. */
 const px = (value: number) => `${value}px`;

@@ -712,6 +712,11 @@ export class Kitshn extends DurableObject<Env> {
   }
   /** Expired shares whose card has no place outside the circle. Retried once after each restart. */
   private stuckShares = new Set<string>();
+  /**
+   * K-532: the sizes of the last map Organize, in memory, so an agent Organize keeps the map's spacing. Known limit:
+   * a new wake forgets them and an agent then uses plain card sizes; revisit if agents organize often.
+   */
+  private drawn: DrawnSizes | null = null;
   /** K-1716: false once `github_tokens` is known to be empty, so a broadcast reads no row of it. True after a wake. */
   private tokensLive = true;
   private accessWarnings: Array<string> = [];
@@ -1469,6 +1474,7 @@ export class Kitshn extends DurableObject<Env> {
    * nothing. `organize` checks already that no share changes.
    */
   private organize(actor: Actor, sizes: DrawnSizes, movable: (id: string) => boolean) {
+    this.drawn = sizes;
     const plan = organize(this.state, sizes, movable);
     if ("refused" in plan) throw new RuleError(plan.refused);
     if (plan.edits.length === 0) return { revision: null, summary: "Every card is in order already" };
@@ -3366,7 +3372,14 @@ export class Kitshn extends DurableObject<Env> {
         message.type === "apply"
           ? { revision: this.apply(caller.actor, message.edits), notes: [], summary: null }
           : message.type === "organize"
-            ? { ...this.organize(caller.actor, drawnSizes(message), () => true), notes: [] }
+            ? {
+                ...this.organize(caller.actor, drawnSizes(message), (id) => {
+                  // K-532: the map does not draw a hidden kind, so its cards stay where they are.
+                  const kind = this.state.resources.get(id)?.kind;
+                  return kind !== undefined && !message.hiddenKinds.includes(kind);
+                }),
+                notes: [],
+              }
             : message.type === "undo"
               ? await this.undo(
                   caller.actor,
@@ -7786,9 +7799,16 @@ export class Kitshn extends DurableObject<Env> {
       }
       return move(edits);
     }
-    // K-532: Organize of the cards that this agent manages, by the sizes of plain cards, with the checks of a move.
+    // K-532: Organize of the cards that this agent may move, with the sizes of the last map Organize, and the checks
+    // of a move. A card that a circle outside the agent's own holds stays put, so it does not refuse the others.
     if (path === "/agent/organize" && request.method === "POST") {
-      const plan = organize(this.state, NO_SIZES, (id) => managed.has(id));
+      const mayMove = (id: string) => {
+        const place = this.state.places.get(id);
+        if (!managed.has(id) || !place) return false;
+        const probe: Change = { _tag: "place", id, before: place, after: place };
+        return agentRefusal(this.state, this.state, caller.visitor, [probe], now, added, null) === null;
+      };
+      const plan = organize(this.state, this.drawn ?? NO_SIZES, mayMove);
       if ("refused" in plan) return Response.json({ error: plan.refused }, { status: 409 });
       if (plan.edits.length === 0) return Response.json({ revision: null });
       return move(plan.edits, organizeSummary(plan.moved));

@@ -1138,7 +1138,7 @@ export function App() {
 
   /** K-532: one save on the server, which refuses when a share would change; the toast offers Undo. */
   const organize = async () => {
-    const result = await organizeMap(measureMap(state));
+    const result = await organizeMap(measureMap(state, previews), [...hidden]);
     showToast(
       result.ok
         ? { text: `${result.summary ?? "Organized"}.`, error: false, undo: result.revision }

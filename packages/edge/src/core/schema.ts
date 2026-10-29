@@ -147,6 +147,10 @@ export const ClientMessage = Schema.Union([
     ).check(Schema.isMaxLength(5000)),
     heads: Schema.Array(DrawnSize).check(Schema.isMaxLength(1000)),
     members: Schema.Array(DrawnSize).check(Schema.isMaxLength(1000)),
+    /** The kinds that the map hides; their cards stay where they are. */
+    hiddenKinds: Schema.Array(
+      Schema.Literals(Object.keys(Model.RESOURCE_KINDS) as Array<Model.ResourceKind>),
+    ),
   }),
 ]);
 export type ClientMessage = typeof ClientMessage.Type;

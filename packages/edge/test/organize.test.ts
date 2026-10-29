@@ -27,7 +27,7 @@ const post = async (path: string, token: string, body: string, headers: Record<s
 afterEach(() => vi.restoreAllMocks());
 
 describe("agent organize (K-532)", () => {
-  it("organizes the agent's cards as one revision that a later move does not join, and a second run moves nothing", async () => {
+  it("organizes the cards that the agent may move as one revision that a later move does not join, and a second run moves nothing", async () => {
     stubAccessCerts();
     const circle = { _tag: "circle", id: "tidy", after: agentCircle("tidy", "tidy.access", 6000) };
     const applied = await post("/api/apply", await owner(), JSON.stringify({ edits: [circle] }), {
@@ -44,6 +44,25 @@ describe("agent organize (K-532)", () => {
       expect(published.status, await published.clone().text()).toBe(201);
       ids.push(((await published.json()) as { id: string }).id);
     }
+    // A people circle also holds one card, so no agent may move it; it stays and the other cards still organize.
+    const friends: Circle = {
+      ...agentCircle("friends", "", 6150),
+      level: "view",
+      members: [{ _tag: "email", email: "friend@example.com" }],
+      r: 60,
+    };
+    const shared = await post(
+      "/api/apply",
+      await owner(),
+      JSON.stringify({
+        edits: [
+          { _tag: "circle", id: "friends", after: friends },
+          { _tag: "place", id: ids[2], after: { x: 6150, y: 2000 } },
+        ],
+      }),
+      { "content-type": "application/json" },
+    );
+    expect(shared.status).toBe(200);
     const organize = async () => {
       const response = await send("/agent/organize", {
         method: "POST",
@@ -70,6 +89,7 @@ describe("agent organize (K-532)", () => {
       const place = after.places[id];
       expect(place && Math.hypot(place.x - 6000, place.y - 2000)).toBeLessThan(300);
     }
+    expect(after.places[ids[2] ?? ""]).toEqual({ x: 6150, y: 2000 });
     expect(await organize()).toBeNull();
 
     const [first] = ids;

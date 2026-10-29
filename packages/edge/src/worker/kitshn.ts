@@ -1228,16 +1228,15 @@ export class Kitshn extends DurableObject<Env> {
     );
     // K-410, K-1124: an old address of a removed card keeps an Owner-only application while the redirect Worker still
     // serves it; the redirect step takes the custom domain off first.
-    const leaving = this.sql<{ address: string; card_id: string }>(
-      "SELECT address, card_id FROM old_addresses WHERE attached = 1",
-    )
+    const attached = this.sql<{ address: string; card_id: string; going: number }>(
+      "SELECT address, card_id, going FROM old_addresses WHERE attached = 1",
+    );
+    const leaving = attached
       .filter((row) => !this.state.resources.has(row.card_id))
       .map((row) => ({ id: row.card_id, name: row.address, address: row.address }));
     // K-1128: a redirect address that is being removed keeps its card's policies until its custom domain went.
-    const going = this.sql<{ address: string; card_id: string }>(
-      "SELECT address, card_id FROM old_addresses WHERE going = 1 AND attached = 1",
-    )
-      .filter((row) => this.state.resources.has(row.card_id))
+    const going = attached
+      .filter((row) => row.going === 1 && this.state.resources.has(row.card_id))
       .map((row) => ({ cardId: row.card_id, address: row.address }));
     return desiredAccess(this.state, now, [...removed, ...leaving], [...this.oldAddresses(), ...going]);
   }

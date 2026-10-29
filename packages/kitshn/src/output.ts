@@ -10,7 +10,32 @@ export interface CardOutput {
   readonly revision?: number | null;
 }
 
-export const cardOutput = (output: CardOutput) => `${JSON.stringify(output)}\n`;
+const KINDS: ReadonlyArray<string> = ["page", "file", "folder"];
+
+/**
+ * The answer as `--json` prints it. A missing or empty `address` or `card`, or another `kind`, throws, so a tool never
+ * reads an empty string as an address; the CLI prints that as `{"error"}` and exits with 1.
+ */
+export function cardOutput(answer: {
+  readonly address?: unknown;
+  readonly card?: unknown;
+  readonly kind?: unknown;
+  readonly updated: boolean;
+  readonly revision?: number | null;
+}): string {
+  const { address, card, kind } = answer;
+  if (typeof address !== "string" || address === "") throw new Error("kitshn answered without an address");
+  if (typeof card !== "string" || card === "") throw new Error("kitshn answered without a card");
+  if (typeof kind !== "string" || !KINDS.includes(kind)) throw new Error("kitshn answered without a kind");
+  const output: CardOutput = {
+    address,
+    card,
+    kind: kind as CardOutput["kind"],
+    updated: answer.updated,
+    ...(answer.revision === undefined ? {} : { revision: answer.revision }),
+  };
+  return `${JSON.stringify(output)}\n`;
+}
 
 /** A refusal or any failure: the reason, as the CLI says it without `--json`. */
 export const errorOutput = (error: string) => `${JSON.stringify({ error })}\n`;

@@ -595,8 +595,8 @@ async function publish(server: string, file: string, options: PublishOptions) {
   if (json)
     return void process.stdout.write(
       cardOutput({
-        address: data?.address ?? "",
-        card: data?.id ?? "",
+        address: data?.address,
+        card: data?.id,
         kind: fileName.toLowerCase().endsWith(".html") ? "page" : "file",
         updated: data?.updated === true,
         revision: data?.revision ?? null,

@@ -323,7 +323,8 @@ export function App() {
   const [wantedPanel, setPanelWidth] = useStoredWidth("kitshn.panelWidth", PANEL_WIDTH);
   const [wantedTray, setTrayWidth] = useStoredWidth("kitshn.trayWidth", TRAY_WIDTH);
   const screenWidth = useScreenWidth();
-  const [addingSite, setAddingSite] = useState(false);
+  /** K-1131: the site wizard with its first address ("" when empty), or null while it is closed. */
+  const [addingSite, setAddingSite] = useState<string | null>(null);
   const [addingRepoGroup, setAddingRepoGroup] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
   /** Where the next upload of the file chooser lands: a map point, or null for the tray. */
@@ -1521,7 +1522,7 @@ export function App() {
       location.hash = "map";
       setTimeout(() => folderInput.current?.click());
     },
-    addSite: () => setAddingSite(true),
+    addSite: () => setAddingSite(""),
     addRepoGroup: () => setAddingRepoGroup(true),
     addMachine: () => setAddingMachine(true),
     newCircleFor: (ids) => void newCircleFor(ids),
@@ -1564,6 +1565,7 @@ export function App() {
             )
           }
           onDropCards={(ids, at) => void placeFromTray(ids, at)}
+          onDropSite={setAddingSite}
           onStackOnto={(ids, target) => void stacks.stackOnto(ids, target)}
           previews={previews}
           peek={wide}
@@ -1741,11 +1743,19 @@ export function App() {
           onDone={(text) => showToast({ text, error: false, undo: null })}
         />
       ) : null}
-      {addingSite ? (
+      {addingSite !== null ? (
         <AddSite
           zone={store.snapshot.zone}
           machines={store.snapshot.machines}
-          onClose={() => setAddingSite(false)}
+          initial={addingSite}
+          cardOf={(host) =>
+            [...state.resources.values()].find((resource) => resource.addresses.includes(host)) ?? null
+          }
+          onShowCard={(card) => {
+            setAddingSite(null);
+            handlers.select({ cards: new Set([card.id]), circle: null });
+          }}
+          onClose={() => setAddingSite(null)}
           onDone={(text) => showToast({ text, error: false, undo: null })}
         />
       ) : null}

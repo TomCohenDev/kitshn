@@ -35,7 +35,8 @@ export default {
     await page.reload();
 
     await page.getByRole("button", { name: "Add" }).click();
-    await page.getByRole("menuitem", { name: "Upload a folder" }).waitFor();
+    await page.getByRole("menuitem", { name: "Upload…" }).click();
+    await page.getByRole("menuitem", { name: "A folder, as a site" }).waitFor();
     await shot("add-menu");
     await page.keyboard.press("Escape");
 

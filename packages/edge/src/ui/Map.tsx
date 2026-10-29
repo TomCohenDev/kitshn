@@ -23,6 +23,7 @@ import { KeySticker, PresenceSticker } from "./Machines.tsx";
 import { type MenuTarget, untilText } from "./actions.ts";
 import type { DrawnWire } from "../core/organize.ts";
 import { USER_STACK, headAngle, stacksOf } from "../core/place.ts";
+import { parseSiteInput } from "../core/sites.ts";
 import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import { FRAMED_KINDS, peekable } from "./frames.ts";
@@ -149,6 +150,8 @@ interface Props {
   onDropFolders: (folders: Array<FileSystemDirectoryEntry>, at: Point) => void;
   /** Cards dragged from the tray (K-509), with the map point under the pointer. */
   onDropCards: (ids: Array<string>, at: Point) => void;
+  /** K-1131: a dropped address or port, such as `localhost:5565`, opens the site wizard with it. */
+  onDropSite: (text: string) => void;
   readonly state: State;
   readonly access: Readonly<Record<string, AccessState>>;
   /** K-1125: up or down of each checked card. */
@@ -690,7 +693,8 @@ export function MapView(props: Props) {
       }}
       onDragOver={(event) => {
         const types = event.dataTransfer?.types ?? [];
-        if (!types.includes("Files") && !types.includes(TRAY_CARDS_TYPE)) return;
+        const site = types.includes("text/uri-list") || types.includes("text/plain");
+        if (!types.includes("Files") && !types.includes(TRAY_CARDS_TYPE) && !site) return;
         event.preventDefault();
         if (event.dataTransfer) event.dataTransfer.dropEffect = types.includes("Files") ? "copy" : "move";
       }}
@@ -708,7 +712,20 @@ export function MapView(props: Props) {
           .filter((entry): entry is FileSystemDirectoryEntry => entry?.isDirectory === true);
         const names = new Set(folders.map((folder) => folder.name));
         const files = [...(event.dataTransfer?.files ?? [])].filter((file) => !names.has(file.name));
-        if (files.length === 0 && folders.length === 0) return;
+        if (files.length === 0 && folders.length === 0) {
+          // K-1131: a link or text such as `localhost:5565`; a uri-list may carry comment lines that start with "#".
+          const link = (event.dataTransfer?.getData("text/uri-list") ?? "")
+            .split("\n")
+            .map((line) => line.trim())
+            .find((line) => line !== "" && !line.startsWith("#"));
+          const text = link ?? event.dataTransfer?.getData("text/plain").trim() ?? "";
+          // A bare word, such as a dragged card name, is no site.
+          const input = parseSiteInput(text);
+          if (input.kind === "invalid" || (input.kind === "remote" && !input.host.includes("."))) return;
+          event.preventDefault();
+          props.onDropSite(text);
+          return;
+        }
         event.preventDefault();
         if (files.length > 0) props.onDropFiles(files, at);
         if (folders.length > 0) props.onDropFolders(folders, at);

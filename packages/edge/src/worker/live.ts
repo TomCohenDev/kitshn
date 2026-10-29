@@ -42,7 +42,14 @@ export function parseSites(value: unknown): { sites: Array<LiveSiteReport>; refu
       refused.push(`${site.name}: kitshn itself uses this name on the zone.`);
     else if (typeof site.target !== "string" || !validTarget(site.target))
       refused.push(`${site.name}: the target is not valid.`);
-    else sites.push({ name: site.name, target: site.target, dev: site.dev === true, up: site.up === true });
+    else
+      sites.push({
+        name: site.name,
+        target: site.target,
+        dev: site.dev === true,
+        up: site.up === true,
+        ...(typeof site.endsAt === "number" && Number.isFinite(site.endsAt) ? { endsAt: site.endsAt } : {}),
+      });
   }
   return { sites, refused };
 }

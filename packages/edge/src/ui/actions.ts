@@ -986,23 +986,30 @@ export function addActions(ctx: ActionContext, h: ActionHandlers, at: Point | nu
       tip: `Make a new circle${at ? " at this spot" : " in the middle of the view"}. It matches nobody until you add members.`,
       run: () => h.newCircle(at),
     },
+    // K-1101, K-1129: one entry for every upload; a browser picks files or a folder, never both in one dialog.
     {
       id: "upload",
-      label: `Upload a page or a file${here}`,
-      keywords: "upload html",
-      tip: at
-        ? "Upload files to this spot: they land in exactly the circles here, so they get those shares. An HTML file becomes a page, any other file stays a file, at most 100 MB."
-        : "Upload files: they wait in the tray, private. An HTML file becomes a page, any other file stays a file, at most 100 MB. You can also drop files on the map.",
-      run: () => h.upload(at),
-    },
-    {
-      id: "upload-folder",
-      label: `Upload a folder${here}`,
-      keywords: "static site html",
-      tip: at
-        ? "Upload a folder as a new static site with a random address. Its card lands in exactly the circles here. You can also drop a folder on the map."
-        : "Upload a folder as a new static site with a random address. Its card waits in the tray, private. You can also drop a folder on the map.",
-      run: () => h.uploadFolder({ at }),
+      label: `Upload${here}…`,
+      keywords: "upload page file folder html static site",
+      tip: "Upload pages, files or a folder. You can also drop them on the map.",
+      items: [
+        {
+          id: "upload-files",
+          label: "Pages or files",
+          tip: at
+            ? "Upload files to this spot: they land in exactly the circles here, so they get those shares. An HTML file becomes a page, any other file stays a file, at most 100 MB."
+            : "Upload files: they wait in the tray, private. An HTML file becomes a page, any other file stays a file, at most 100 MB.",
+          run: () => h.upload(at),
+        },
+        {
+          id: "upload-folder",
+          label: "A folder, as a site",
+          tip: at
+            ? "Upload a folder as a new static site with a random address. Its card lands in exactly the circles here."
+            : "Upload a folder as a new static site with a random address. Its card waits in the tray, private.",
+          run: () => h.uploadFolder({ at }),
+        },
+      ],
     },
     {
       id: "add-site",

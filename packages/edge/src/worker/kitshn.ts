@@ -40,6 +40,7 @@ import {
   targetOf,
   ruleViolation,
   stacksWithout,
+  endText,
   shareDiff,
   summarize,
 } from "../core/changes.ts";
@@ -99,6 +100,7 @@ import {
   organizeSummary,
 } from "../core/organize.ts";
 import { placeInside } from "../core/place.ts";
+import { type ServerReport, serversOf } from "../core/sites.ts";
 import {
   type LogAnswer,
   type LogSearch,
@@ -400,6 +402,8 @@ type Attachment =
       readonly sample: Sample | null;
       /** K-909: the idle volumes of kitshn apps; a socket from before this field has none. */
       readonly volumes?: ReadonlyArray<ProjectVolume>;
+      /** K-619: the listening ports of the machine; an older daemon sends none. */
+      readonly servers?: ReadonlyArray<ServerReport>;
     };
 
 /** K-1805: a Compose tail runs on the daemon; K-1807: a Worker tail is a Cloudflare tail of the script. */
@@ -718,6 +722,11 @@ export class Kitshn extends DurableObject<Env> {
    * a new wake forgets them and an agent then uses plain card sizes; revisit if agents organize often.
    */
   private drawn: DrawnSizes | null = null;
+  /**
+   * K-212: end times of `kitshn expose --time` for live site cards that the address check has not made yet. Known
+   * limit: in memory only, so a wake in between forgets one; that card then has no end, in the tray (K-509).
+   */
+  private pendingEnds = new Map<string, number>();
   /** K-1716: false once `github_tokens` is known to be empty, so a broadcast reads no row of it. True after a wake. */
   private tokensLive = true;
   private accessWarnings: Array<string> = [];
@@ -3216,6 +3225,7 @@ export class Kitshn extends DurableObject<Env> {
       os: this.presence.get(machine.id)?.os ?? null,
       keyFailure: this.keyFailures.get(machine.id) ?? null,
       orphanVolumes: orphanVolumes(live?.volumes ?? [], this.state),
+      servers: live?.servers ?? [],
     };
   }
 
@@ -4206,6 +4216,9 @@ export class Kitshn extends DurableObject<Env> {
       this.updateProviders(machine, message.providers);
     } else if (message.type === "icon") {
       await this.liveIcon(machine, message.site, message.icon);
+    } else if (message.type === "servers") {
+      socket.serializeAttachment({ ...attachment, servers: serversOf(message.servers) } satisfies Attachment);
+      this.sendMachine(machine);
     } else if (message.type === "volumes" && Array.isArray(message.volumes)) {
       const volumes = message.volumes
         .filter(
@@ -5137,6 +5150,9 @@ export class Kitshn extends DurableObject<Env> {
           refused.push(`${address} belongs to ${other ? `the card ${other.name}` : "another machine"}.`);
           continue;
         }
+        // K-212: the end time of `kitshn expose --time` waits for the card that the address check makes.
+        if (report.endsAt !== undefined && report.endsAt > now && !this.state.resources.has(id))
+          this.pendingEnds.set(id, report.endsAt);
         keep.add(id);
         const old = this.liveSites.get(id);
         if (old && old.target === report.target && old.dev === report.dev && old.up === report.up) continue;
@@ -5232,6 +5248,8 @@ export class Kitshn extends DurableObject<Env> {
       this.ctx.storage.transactionSync(() => {
         this.sql("UPDATE live_sites SET state = 'ok' WHERE id = ?", site.id);
         const card = this.state.resources.get(site.id);
+        const endsAt = card ? undefined : this.pendingEnds.get(site.id);
+        this.pendingEnds.delete(site.id);
         this.putResource(
           card
             ? // K-705: a provider reports the status of its own cards.
@@ -5248,10 +5266,16 @@ export class Kitshn extends DurableObject<Env> {
                 machine: site.machineId,
               },
         );
+        // K-212: a card that `kitshn expose --time` made starts with its end time.
+        const ends: Array<Change> =
+          endsAt !== undefined && endsAt > Date.now()
+            ? [{ _tag: "cardEnd", id: site.id, before: null, after: endsAt }]
+            : [];
+        this.persist(ends);
         this.insertRevision(
           { _tag: "kitshn", reason: `live site on ${machine?.name ?? site.machineId}` },
-          `${machine?.name ?? site.machineId} exposed ${site.address} (K-1104)`,
-          [],
+          `${machine?.name ?? site.machineId} exposed ${site.address} (K-1104)${ends.length > 0 ? ` until ${endText(endsAt ?? 0)}` : ""}`,
+          ends,
           null,
         );
       });
@@ -7838,7 +7862,8 @@ export class Kitshn extends DurableObject<Env> {
       const answerable = machine ? this.answerableProposals(caller.visitor) : [];
       return Response.json({
         rights,
-        ...(machine ? { proposals: answerable } : {}),
+        // K-619: a machine sees its own listening ports, the list of the site wizard.
+        ...(machine ? { proposals: answerable, servers: this.machineView(machine).servers } : {}),
         // K-819: with "may add apps", the waiting repos that the key may allow.
         repos: rights.includes("addsApps")
           ? this.sql<RepoRow>(

@@ -5,9 +5,10 @@ import { addSite, parseSiteFile, probe, targetOf } from "./sites.ts";
 describe("exposed sites (K-1104, K-1107)", () => {
   it("turns a port or a socket path into a tunnel target", () => {
     expect(targetOf("5173")).toBe("http://localhost:5173");
+    expect(targetOf("http://127.0.0.1:5173/app")).toBe("http://localhost:5173");
     expect(targetOf("/run/app.sock")).toBe("unix:/run/app.sock");
-    expect(targetOf("70000")).toBeNull();
-    expect(targetOf("example.com")).toBeNull();
+    expect(targetOf("70000")).toEqual({ error: expect.any(String) });
+    expect(targetOf("example.com")).toEqual({ error: expect.stringContaining("another host") });
   });
 
   it("replaces a site with the same name and refuses a bad name", () => {

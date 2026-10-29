@@ -118,13 +118,15 @@ import {
   tunnelStateOf,
 } from "./service.ts";
 import { type SiteEntry, addSite, parseSiteFile, probe, targetOf } from "./sites.ts";
+import { scanServers } from "./servers.ts";
+import type { ServerReport } from "@kitshn/edge/sites";
 import { RUNNING_FORMAT, VOLUME_FORMAT, idleVolumes, volumeRemoveRefusal } from "./volumes.ts";
 import { keepBuild, keptId, keptTag, rollbackOverride, serviceImages, staleTags } from "./keep.ts";
 import { TokenCache } from "./tokens.ts";
 import { Providers, parseSaved } from "./providers.ts";
 import { listenerUid, portOf } from "./listener.ts";
 import { MAX_FORWARDS, forwardTarget, passedHeaders, readBounded } from "./forward.ts";
-import { AGENT_USAGE, type AgentTransport, runAgentCommand } from "kitshn/agent";
+import { AGENT_USAGE, type AgentTransport, runAgentCommand, timeBody } from "kitshn/agent";
 import { CliError } from "kitshn/cli-error";
 import { checkSkill, installGlobalSkill, installRepoSkill, refreshGlobalSkill } from "./skill.ts";
 
@@ -2121,8 +2123,10 @@ function connect(config: JoinSecrets) {
       report();
       sendProviders();
       lastSites = "";
+      lastServers = null;
       iconMemory = new Map();
       void checkSites().catch((error: unknown) => log(`site check failed: ${String(error)}`));
+      void sendServers().catch((error: unknown) => log(`server scan failed: ${String(error)}`));
       void reportVolumes().catch((error: unknown) => log(`volume report failed: ${String(error)}`));
       ws.send(JSON.stringify({ type: "sample", sample: sample() } satisfies DaemonMessage));
     };
@@ -2288,18 +2292,51 @@ function writeSites(sites: ReadonlyArray<SiteEntry>) {
   renameSync(temporary, sitesFile());
 }
 
-/** K-1104: `kitshn expose <port or socket> --name <name> [--dev]`. The running daemon picks it up. */
-function exposeCommand(value: string | undefined, name: string | undefined, dev: boolean) {
-  const target = value ? targetOf(value) : null;
-  if (!target || !name) fail("usage: kitshn expose <port or /path/to.sock> --name <name> [--dev]");
+/**
+ * K-1104, K-1131: `kitshn expose <port, address or socket> --name <name> [--dev] [--time 1h]`. With `--time`, the new
+ * card gets that end time (K-212); at the end it leaves every circle for the tray.
+ */
+function exposeCommand(
+  value: string | undefined,
+  name: string | undefined,
+  dev: boolean,
+  time: string | undefined,
+) {
+  const usage =
+    "usage: kitshn expose <port, localhost:port or /path/to.sock> --name <name> [--dev] [--time 30m|1h|4h|1d]";
+  if (!value || !name) fail(usage);
+  const target = targetOf(value);
+  if (typeof target !== "string") fail(target.error);
+  const end = time === undefined ? undefined : timeBody(time, Date.now());
+  const endsAt = end !== undefined && "endsAt" in end && end.endsAt !== null ? end.endsAt : undefined;
+  if (time !== undefined && endsAt === undefined) fail(`--time takes 30m, 1h, 4h or 1d, not ${time}.`);
   const current = readSites();
   if (current === null) fail(`${sitesFile()} is broken. Fix it or delete it, then expose the sites again.`);
-  const sites = addSite(current!, { name: name!, target: target!, dev });
+  const sites = addSite(current!, { name, target, dev, ...(endsAt === undefined ? {} : { endsAt }) });
   if (typeof sites === "string") fail(sites);
   writeSites(sites as Array<SiteEntry>);
   console.log(
-    `Exposed ${target} as ${name}. Its card arrives in the tray of the map, private until you share it.`,
+    `Exposed ${target} as ${name}. Its card arrives in the tray of the map, private until you share it${endsAt === undefined ? "" : `, and it leaves every circle at ${new Date(endsAt).toISOString()}`}.`,
   );
+}
+
+/** K-619: the listening ports of this machine, the same scan that the site wizard of the map shows. */
+async function serversCommand(asJson: boolean) {
+  const servers = await scanServers(platform, [], true);
+  if (asJson) return void process.stdout.write(`${JSON.stringify(servers)}\n`);
+  if (servers.length === 0) return void console.log("No server listens on this machine.");
+  for (const server of servers)
+    console.log(
+      [
+        String(server.port).padEnd(6),
+        (server.process ?? "?").padEnd(16),
+        server.status ?? "no http",
+        server.title ?? "",
+      ]
+        .join(" ")
+        .trimEnd(),
+    );
+  console.log("Share one with: kitshn expose <port> --name <name> [--time 1h]");
 }
 
 function unexposeCommand(name: string | undefined) {
@@ -2452,6 +2489,27 @@ async function runCommand() {
     () => void checkSites().catch((error: unknown) => log(`site check failed: ${String(error)}`)),
     10_000,
   );
+  setInterval(
+    () => void sendServers().catch((error: unknown) => log(`server scan failed: ${String(error)}`)),
+    SERVER_SCAN_MS,
+  );
+}
+
+/** K-619: a scan every 30 seconds; every 10th scan checks each server again, else only new ones. */
+const SERVER_SCAN_MS = 30_000;
+const SERVER_RECHECK = 10;
+/** The last report that this connection sent, or null after a new connection. */
+let lastServers: Array<ServerReport> | null = null;
+let serverScans = 0;
+
+/** K-619: sends the listening ports of this machine when they change, so the site wizard can list them. */
+async function sendServers() {
+  if (socket?.readyState !== WebSocket.OPEN) return;
+  const servers = await scanServers(platform, lastServers ?? [], serverScans++ % SERVER_RECHECK === 0);
+  const text = JSON.stringify({ type: "servers", servers } satisfies DaemonMessage);
+  if (lastServers !== null && JSON.stringify({ type: "servers", servers: lastServers }) === text) return;
+  lastServers = servers;
+  socket?.send(text);
 }
 
 /** `machine.json` as it is on disk now, or null when it cannot be read. */
@@ -2725,7 +2783,10 @@ switch (command) {
     skillCommand(args[0], args.includes("--repo"));
     break;
   case "expose":
-    exposeCommand(args[0], flag("--name"), args.includes("--dev"));
+    exposeCommand(args[0], flag("--name"), args.includes("--dev"), flag("--time"));
+    break;
+  case "servers":
+    await serversCommand(args.includes("--json"));
     break;
   case "unexpose":
     unexposeCommand(args[0]);
@@ -2752,8 +2813,10 @@ kitshn agent <action> [target]          ask kitshn as this machine (K-1710): --r
 ${AGENT_USAGE}
 kitshn setup-git                        git asks kitshn first for github.com tokens (K-1763)
 kitshn gh <args>                        gh with a kitshn token for this repo (K-1764)
-kitshn expose <port|socket> --name <n>  share a local server at <n>.<zone> (K-1104); --dev sets Host localhost
+kitshn expose <port|socket> --name <n>  share a local server at <n>.<zone> (K-1104); --dev sets Host localhost;
+                                        also localhost:5173 or http://127.0.0.1:5173/ (K-1131); --time 1h ends it (K-212)
 kitshn unexpose <name>                  stop sharing it
+kitshn servers [--json]                 the servers that listen on this machine, with their page title (K-619)
 kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>
                                         as root: move KitSHn 1 data into rootless Docker (K-1404)
 kitshn skill install [--repo]            the skill for coding agents, global or in this repo (K-618)

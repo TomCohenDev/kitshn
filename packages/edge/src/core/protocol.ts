@@ -1,5 +1,6 @@
 import type { Actor, Item, RevisionKind } from "./changes.ts";
 import type { Command, Machine, MachineStatus, ProjectVolume, Sample } from "./machine.ts";
+import type { ServerReport } from "./sites.ts";
 import type { BackupRun, BucketSize } from "./backups.ts";
 import type { MachineOs } from "./icons.ts";
 import type { LogLine, TailAnswer } from "./logs.ts";
@@ -210,6 +211,8 @@ export interface MachineView {
   readonly keyFailure: { readonly at: number; readonly reason: string } | null;
   /** K-909: idle volumes of kitshn apps that have no card; each has its own delete. */
   readonly orphanVolumes: ReadonlyArray<ProjectVolume>;
+  /** K-619: the listening ports of the machine while it is online, for the site wizard. */
+  readonly servers: ReadonlyArray<ServerReport>;
 }
 
 export interface JobView {

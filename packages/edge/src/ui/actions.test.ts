@@ -107,6 +107,7 @@ function context(version = "0123456789ab"): ActionContext {
     os: null,
     keyFailure: null,
     orphanVolumes: [],
+    servers: [],
   };
   return {
     state,
@@ -295,8 +296,7 @@ describe("stack, circle and map actions", () => {
     const { handlers, calls } = recorder();
     const groups = actionsFor(context(), handlers, { _tag: "map", at: { x: 5, y: 6 } });
     run(find(groups, "new-circle"));
-    run(find(groups, "upload"));
-    run(find(groups, "upload-folder"));
+    for (const upload of items(find(groups, "upload"))) run(upload);
     expect(calls).toEqual([
       ["newCircle", { x: 5, y: 6 }],
       ["upload", { x: 5, y: 6 }],
@@ -312,7 +312,6 @@ describe("stack, circle and map actions", () => {
     expect(ids(add)).toEqual([
       "new-circle",
       "upload",
-      "upload-folder",
       "add-site",
       "add-repo-group",
       "add-machine",

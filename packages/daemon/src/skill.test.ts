@@ -13,13 +13,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-  checkSkill,
-  installGlobalSkill,
-  installRepoSkill,
-  refreshGlobalSkill,
-  skillVersion,
-} from "./skill.ts";
+import { skillVersion } from "kitshn/skill";
+import { checkSkill, installGlobalSkill, installRepoSkill, refreshGlobalSkill } from "./skill.ts";
 
 const SKILL = "---\nname: kitshn\ndescription: Deploy with kitshn.\n---\n\n# kitshn\n";
 const A = "aaaaaaaaaaaa";

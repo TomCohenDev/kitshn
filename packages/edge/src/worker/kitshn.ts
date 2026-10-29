@@ -3416,6 +3416,10 @@ export class Kitshn extends DurableObject<Env> {
       this.desiredState,
       this.cardSettings,
       now,
+      {
+        teamDomain: this.env.ACCESS_TEAM_DOMAIN,
+        audienceOf: (cardId, address) => this.access.get(`app:${cardId}:${address}`)?.aud || null,
+      },
     ).map((push) => {
       const text = JSON.stringify(push);
       return { key: push.key, hash: `${fnv(text)}${fnv(text, 0x050c5d1f)}`, push };
@@ -3517,7 +3521,12 @@ export class Kitshn extends DurableObject<Env> {
     if (pushes.size === 0) return 0;
     // An online daemon that does not name `applied` never answers it, so its count is unknown.
     if (status !== null && !status.capabilities?.includes("applied")) return null;
-    return [...pushes].filter(([key, hash]) => this.applied.get(`${machine.id}/${key}`) !== hash).length;
+    // A daemon from before K-1623 never applies the access push, so its count leaves that push out.
+    const access = status === null || status.capabilities?.includes("access") === true;
+    return [...pushes].filter(
+      ([key, hash]) =>
+        (access || !key.startsWith("access:")) && this.applied.get(`${machine.id}/${key}`) !== hash,
+    ).length;
   }
 
   /** K-1608: the hash of each push of a machine, from the last `pushGrants`, or counted now after a restart. */
@@ -13498,6 +13507,8 @@ export class Kitshn extends DurableObject<Env> {
       await this.syncAccessLocked(api, CALLS_PER_RUN - spent - 16 - 3);
       // A policy that the sync just made goes on the App Launcher in the same run.
       await this.syncLauncher(api, false);
+      // K-1623: an application that the sync made or made again changes the audiences of its provider.
+      this.pushGrants();
 
       changed ||= daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
     }

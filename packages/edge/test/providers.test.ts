@@ -295,8 +295,10 @@ it("counts the pushes that a machine has not applied, and takes applied only for
       .map((row) => row.key),
   );
   expect(keys).toEqual(["grants:t3"]);
-  // Three pushes wait: the grant tables, with a stale hash, and the reach and the card settings, with none.
-  expect(await queued(keyed, null)).toBe(3);
+  // Four pushes wait: the grant tables, with a stale hash, and the reach, the card settings and the Access audiences,
+  // with none. A daemon from before K-1623 never applies the access push, so its count leaves that one out.
+  expect(await queued(keyed, null)).toBe(4);
+  expect(await queued(keyed, status(["applied", "access"]))).toBe(4);
   expect(await queued(keyed, status(["applied"]))).toBe(3);
   await sql("INSERT OR REPLACE INTO machines (id, body) VALUES ('vps', ?)", JSON.stringify(machine));
 });

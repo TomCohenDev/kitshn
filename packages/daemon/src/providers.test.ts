@@ -70,12 +70,17 @@ describe("the providers of a machine (K-704, K-705)", () => {
     expect(registry.setPushed(pushKey.grants("t3"), { a: [] })).toBe(true);
     expect(registry.setPushed(pushKey.grants("t3"), { a: [] })).toBe(false);
     registry.setPushed(pushKey.desired("t3", "t3.settings"), { shared: { theme: "dark" }, machine: null });
-    // K-1608: the answer to register gives the saved state, from before kitshn answers.
+    // K-1608: the answer to register gives the saved state, from before kitshn answers; access is null until kitshn
+    // sends it (K-1623).
+    expect(registry.savedFor("t3")).toMatchObject({ access: null });
+    const access = { teamDomain: "team.cloudflareaccess.com", audiences: ["aud-app"] };
+    registry.setPushed(pushKey.access("t3"), access);
     expect(registry.savedFor("t3")).toEqual({
       grants: { a: [] },
       desired: { "t3.settings": { shared: { theme: "dark" }, machine: null } },
       settings: {},
       reach: [],
+      access,
     });
   });
 

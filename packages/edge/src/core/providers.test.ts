@@ -217,8 +217,22 @@ describe("pushes to a machine (K-709, K-717, K-1608)", () => {
       [{ ...report, kinds: [...kinds, report.kinds[1]!] }],
       "example.com",
     );
-    const value: State = { ...state([]), resources: withSettings };
-    const app = [...withSettings.values()].find((card) => card.kind === "t3.app")!;
+    // K-1623: the app card serves its site, so its Access application's audience goes to the provider.
+    const served = new Map(
+      [...withSettings].map(([id, card]): [string, Resource] => [
+        id,
+        card.kind === "t3.app"
+          ? { ...card, addresses: ["t3-vps.example.com"], provider: { ...card.provider!, site: "t3-vps" } }
+          : card,
+      ]),
+    );
+    const value: State = { ...state([]), resources: served };
+    const app = [...served.values()].find((card) => card.kind === "t3.app")!;
+    const access = (aud: string | null) => ({
+      teamDomain: "team.cloudflareaccess.com",
+      audienceOf: (cardId: string, address: string) =>
+        cardId === app.id && address === "t3-vps.example.com" ? aud : null,
+    });
     const desired = new Map([
       [
         "t3.settings",
@@ -235,16 +249,21 @@ describe("pushes to a machine (K-709, K-717, K-1608)", () => {
       desired,
       new Map([[app.id, { updateChannel: "daily" }]]),
       0,
+      access("aud-app"),
     );
     expect(pushes.map((push) => push.key)).toEqual([
       "grants:t3",
       "reach:t3",
       "settings:t3",
+      "access:t3",
       "desired:t3:t3.settings",
     ]);
     expect(pushes[2]).toMatchObject({ values: { app: { updateChannel: "daily" } } });
+    expect(pushes[3]).toMatchObject({
+      access: { teamDomain: "team.cloudflareaccess.com", audiences: ["aud-app"] },
+    });
     // Another machine's part never reaches this one.
-    expect(pushes[3]).toMatchObject({ state: { shared: { theme: "dark" }, machine: null } });
+    expect(pushes[4]).toMatchObject({ state: { shared: { theme: "dark" }, machine: null } });
     // A stored value that the kind no longer offers falls back to the default.
     const stale = providerPushes(
       value,
@@ -253,8 +272,11 @@ describe("pushes to a machine (K-709, K-717, K-1608)", () => {
       desired,
       new Map([[app.id, { updateChannel: "weekly" }]]),
       0,
+      access(null),
     );
     expect(stale[2]).toMatchObject({ values: { app: { updateChannel: "nightly" } } });
+    // No application yet: no audience, so the provider accepts only what it accepted before.
+    expect(stale[3]).toMatchObject({ access: { audiences: [] } });
   });
 });
 

@@ -7,6 +7,7 @@ import {
   type ProviderCommand,
   type ProviderKind,
   type ProviderReport,
+  type ProviderAccess,
   type ReachedCard,
   pushKey,
 } from "@kitshn/local";
@@ -162,6 +163,12 @@ export type ProviderPush =
     }
   | {
       readonly key: string;
+      readonly type: "access";
+      readonly provider: string;
+      readonly access: ProviderAccess;
+    }
+  | {
+      readonly key: string;
       readonly type: "settings";
       readonly provider: string;
       readonly values: Record<string, Record<string, string>>;
@@ -179,6 +186,10 @@ export function providerPushes(
   desired: ReadonlyMap<string, ReadonlyMap<string, unknown>>,
   settings: ReadonlyMap<string, Readonly<Record<string, string>>>,
   now: number,
+  access: {
+    readonly teamDomain: string;
+    readonly audienceOf: (cardId: string, address: string) => string | null;
+  },
 ): Array<ProviderPush> {
   return regs.flatMap(({ name, kinds }) => {
     const values: Record<string, Record<string, string>> = {};
@@ -204,6 +215,15 @@ export function providerPushes(
         cards: reachOf(state, machineId, name, now),
       },
       { key: pushKey.settings(name), type: "settings", provider: name, values },
+      {
+        key: pushKey.access(name),
+        type: "access",
+        provider: name,
+        access: {
+          teamDomain: access.teamDomain,
+          audiences: siteAudiences(state, machineId, name, access.audienceOf),
+        },
+      },
       ...kinds
         .filter((kind) => kind.state !== undefined)
         .map((kind): ProviderPush => ({
@@ -218,6 +238,26 @@ export function providerPushes(
         })),
     ];
   });
+}
+
+/**
+ * K-1623: the AUD tags of kitshn's Access applications on the site hosts of one provider's cards on a machine, so
+ * the provider accepts tokens of those applications. A host without an application yet adds none.
+ */
+export function siteAudiences(
+  state: State,
+  machineId: string,
+  provider: string,
+  audienceOf: (cardId: string, address: string) => string | null,
+): Array<string> {
+  const audiences = new Set<string>();
+  for (const card of state.resources.values())
+    if (card.machine === machineId && card.provider?.name === provider && card.provider.site)
+      for (const address of card.addresses) {
+        const aud = audienceOf(card.id, address);
+        if (aud) audiences.add(aud);
+      }
+  return [...audiences].sort();
 }
 
 /** K-717: a stored value that the kind still offers, else its default. */

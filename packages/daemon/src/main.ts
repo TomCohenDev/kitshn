@@ -1720,7 +1720,7 @@ function report() {
       // K-624: Windows has no Docker setup in v1, so the map refuses Compose, logs and backups there with a reason.
       capabilities:
         platform === "win32"
-          ? ["update", "update-gz", "provider"]
+          ? ["update", "update-gz", "provider", "access"]
           : [
               "update",
               "update-gz",
@@ -1734,6 +1734,8 @@ function report() {
               "provider",
               // K-1608: this daemon answers `applied` for each push that it saved.
               "applied",
+              // K-1623: this daemon saves the Access audiences of its providers and gives them on.
+              "access",
               ...(doorState.problem === null ? ["doors"] : []),
             ],
       ...(keptBytes === undefined ? {} : { keptBytes }),
@@ -2266,7 +2268,8 @@ function connect(config: JoinSecrets) {
         message.type === "grants" ||
         message.type === "desired" ||
         message.type === "settings" ||
-        message.type === "reach"
+        message.type === "reach" ||
+        message.type === "access"
       ) {
         // K-1608: the daemon saves each push, gives it to the provider, and tells kitshn that it applied it.
         const key =
@@ -2276,7 +2279,9 @@ function connect(config: JoinSecrets) {
               ? pushKey.settings(message.provider)
               : message.type === "reach"
                 ? pushKey.reach(message.provider)
-                : pushKey.desired(message.provider, message.kind);
+                : message.type === "access"
+                  ? pushKey.access(message.provider)
+                  : pushKey.desired(message.provider, message.kind);
         const { hash: _hash, ...event } = message;
         const value =
           message.type === "grants"
@@ -2285,7 +2290,9 @@ function connect(config: JoinSecrets) {
               ? message.values
               : message.type === "reach"
                 ? message.cards
-                : message.state;
+                : message.type === "access"
+                  ? message.access
+                  : message.state;
         if (registry().setPushed(key, value)) {
           const connection = registry().connectionOf(message.provider);
           const emit = connection === null ? undefined : providerEmitters.get(connection);

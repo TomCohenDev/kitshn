@@ -4,6 +4,7 @@ import {
   type Box,
   cardBox,
   cardLayer,
+  stackOffsets,
   toastPlace,
   FOCUS_LAYER,
   HEAD_LAYER,
@@ -224,5 +225,15 @@ describe("toastPlace (K-503)", () => {
     const phone = { top: 100, bottom: 464 };
     expect(toastPlace(140, phone, 844)).toEqual({ bottom: 390 });
     expect(toastPlace(400, phone, 844)).toEqual({ top: 110 });
+  });
+});
+
+describe("stackOffsets (K-508, K-521)", () => {
+  it("keeps the row step for plain cards and moves the next card below a taller one", () => {
+    // Plain cards and cards not measured yet keep the step of 124.
+    expect(stackOffsets([90, undefined, 100], 124, 16)).toEqual([0, 124, 248]);
+    // A card with a preview frame (260 high) pushes the card below it to 260 + 16.
+    expect(stackOffsets([90, 260, 90], 124, 16)).toEqual([0, 124, 400]);
+    expect(stackOffsets([], 124, 16)).toEqual([]);
   });
 });

@@ -293,3 +293,22 @@ export function toastPlace(
     ? { top: area.top + gap }
     : { bottom: screen - area.bottom + gap };
 }
+
+/**
+ * K-508, K-521: the offset of each card of an open stack below its top card. Each step is `row`, or the height of
+ * the card above plus `gap` when that card is taller, such as a card that shows a preview frame; a card not
+ * measured yet steps by `row`. So no card covers the one below it.
+ */
+export function stackOffsets(
+  heights: ReadonlyArray<number | undefined>,
+  row: number,
+  gap: number,
+): Array<number> {
+  const offsets: Array<number> = [];
+  let y = 0;
+  for (const height of heights) {
+    offsets.push(y);
+    y += Math.max(row, (height ?? 0) + gap);
+  }
+  return offsets;
+}

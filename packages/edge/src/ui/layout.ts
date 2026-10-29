@@ -255,3 +255,21 @@ export function pinchView(start: View, from: Fingers, to: Fingers): View {
   const world = { x: (was.x - start.x) / start.s, y: (was.y - start.y) / start.s };
   return { s, x: now.x - world.x * s, y: now.y - world.y * s };
 }
+
+/**
+ * The stacking layer of a card on the map, above the circle heads (z-index 2): a dragged card first, then the card
+ * with keyboard focus (also focus inside its preview frame), then selected cards, then cards that show a live frame,
+ * which reaches over the cards below. Null leaves the card in document order.
+ */
+export function cardLayer(card: {
+  readonly dragging: boolean;
+  readonly focused: boolean;
+  readonly selected: boolean;
+  readonly framed: boolean;
+}): number | null {
+  if (card.dragging) return 6;
+  if (card.focused) return 5;
+  if (card.selected) return 4;
+  if (card.framed) return 3;
+  return null;
+}

@@ -27,7 +27,7 @@ import { FRAMED_KINDS, peekable } from "./frames.ts";
 import { CardPreview, PeekArrow } from "./Peek.tsx";
 import type { Rect } from "./popover.ts";
 import { HOLD_MS, type Press, fingerDown, startPress, stepPress } from "./press.ts";
-import { type Fingers, type View, ZOOM, headAngle, pinchView, shownCardBoxes } from "./layout.ts";
+import { type Fingers, type View, ZOOM, cardLayer, headAngle, pinchView, shownCardBoxes } from "./layout.ts";
 
 export type { View };
 
@@ -128,6 +128,9 @@ export const ALONE_KEY = circleAloneKey(navigator.platform);
 
 /** Preact 11 does not add a unit to numeric style values. */
 const px = (value: number) => `${value}px`;
+const cardIdOf = (target: EventTarget | null) =>
+  target instanceof Element ? (target.closest<HTMLElement>("[data-card]")?.dataset["card"] ?? null) : null;
+
 /** The row step of an open stack: a card with a row of stickers, such as a machine, plus a gap. */
 const STACK_ROW = 124;
 
@@ -155,6 +158,8 @@ export function MapView(props: Props) {
     readonly world: Point;
   } | null>(null);
   const [stackTarget, setStackTarget] = useState<string | null>(null);
+  /** The card that holds keyboard focus, also inside its preview frame; it draws above the others until focus leaves. */
+  const [focusedCard, setFocusedCard] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ state: State; diffs: Array<ShareDiff>; pointer: Point } | null>(null);
   /** K-523: a right press or a touch that may open the context menu. */
   const hold = useRef<{ press: Press; readonly target: MenuTarget; timer: number | null } | null>(null);
@@ -551,6 +556,9 @@ export function MapView(props: Props) {
     <div
       class="viewport"
       ref={viewport}
+      onFocusIn={(event) => setFocusedCard(cardIdOf(event.target))}
+      // Focus that moves into a preview frame leaves no related target; the next task reads where it went.
+      onFocusOut={() => setTimeout(() => setFocusedCard(cardIdOf(document.activeElement)))}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -654,13 +662,26 @@ export function MapView(props: Props) {
           const flash = (stack && !open ? stack[1] : [resource.id]).some((id) =>
             props.flash.has(`card:${id}`),
           );
+          // A closed stack draws through its face card, so focus or a selection of any of its cards raises it.
+          const shownIds = stack && !open ? stack[1] : [resource.id];
+          const layer = cardLayer({
+            dragging: draggedIds.has(resource.id),
+            focused: focusedCard !== null && shownIds.includes(focusedCard),
+            selected: shownIds.some((id) => props.selection.cards.has(id)),
+            framed: previewIds.has(resource.id),
+          });
           if (zoomedOut) {
             return (
               <div
                 key={resource.id}
                 data-card={resource.id}
                 class={`mini${selected ? " sel" : ""}${stackTarget === resource.id ? " stack-target" : ""}${flash ? " flash" : ""}`}
-                style={{ left: px(at.x), top: px(at.y), background: KINDS[resource.kind].color }}
+                style={{
+                  left: px(at.x),
+                  top: px(at.y),
+                  background: KINDS[resource.kind].color,
+                  ...(layer === null ? {} : { zIndex: layer }),
+                }}
                 tabIndex={0}
                 role="img"
                 aria-label={resource.name}
@@ -682,6 +703,7 @@ export function MapView(props: Props) {
                 dragging={draggedIds.has(resource.id)}
                 target={stackTarget === resource.id}
                 flash={flash}
+                layer={layer}
                 onMenu={(anchor) =>
                   props.onMenu({ target: { _tag: "stack", id: stack[0].slice(USER_STACK.length) }, anchor })
                 }
@@ -698,6 +720,7 @@ export function MapView(props: Props) {
               dragging={draggedIds.has(resource.id)}
               target={stackTarget === resource.id}
               flash={flash}
+              layer={layer}
               count={stack && index === 0 ? stack[1].length : null}
               open={open}
               access={props.access[resource.id] ?? null}
@@ -886,6 +909,8 @@ function CircleView(props: {
 
 function CardView(props: {
   resource: Resource;
+  /** `cardLayer`: its z-index on the map, or null for document order. */
+  layer: number | null;
   state: State;
   at: Point;
   selected: boolean;
@@ -913,7 +938,11 @@ function CardView(props: {
     <div
       class={`card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}${props.flash ? " flash" : ""}`}
       data-card={resource.id}
-      style={{ left: px(props.at.x), top: px(props.at.y) }}
+      style={{
+        left: px(props.at.x),
+        top: px(props.at.y),
+        ...(props.layer === null ? {} : { zIndex: props.layer }),
+      }}
     >
       {props.count !== null && props.open ? (
         <button
@@ -1024,6 +1053,7 @@ function CardView(props: {
 /** K-521: a closed stack of the owner, as one card that lists its cards. A click opens it. */
 function StackCard(props: {
   id: string;
+  layer: number | null;
   name: string;
   members: ReadonlyArray<Resource>;
   state: State;
@@ -1039,7 +1069,11 @@ function StackCard(props: {
     <div
       class={`card stack-card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}${props.flash ? " flash" : ""}`}
       data-card={props.id}
-      style={{ left: px(props.at.x), top: px(props.at.y) }}
+      style={{
+        left: px(props.at.x),
+        top: px(props.at.y),
+        ...(props.layer === null ? {} : { zIndex: props.layer }),
+      }}
     >
       <span
         class="sticker count"

@@ -3,6 +3,7 @@ import type { Circle } from "../core/model.ts";
 import {
   type Box,
   cardBox,
+  cardLayer,
   circleBox,
   fitMap,
   fitView,
@@ -191,5 +192,20 @@ describe("pinch (K-516)", () => {
     const from = { a: { x: 0, y: 0 }, b: { x: 10, y: 0 } };
     expect(pinchView(view, from, { a: { x: 0, y: 0 }, b: { x: 1000, y: 0 } }).s).toBe(ZOOM.max);
     expect(pinchView(view, from, { a: { x: 0, y: 0 }, b: { x: 0.1, y: 0 } }).s).toBe(ZOOM.min);
+  });
+});
+
+describe("cardLayer", () => {
+  it("puts a dragged card on top, then the focused card, then selected and framed cards", () => {
+    const card = (flags: Partial<Parameters<typeof cardLayer>[0]>) =>
+      cardLayer({ dragging: false, focused: false, selected: false, framed: false, ...flags });
+    const all = { dragging: true, focused: true, selected: true, framed: true };
+    expect([
+      card(all),
+      card({ ...all, dragging: false }),
+      card({ selected: true, framed: true }),
+      card({ framed: true }),
+      card({}),
+    ]).toEqual([6, 5, 4, 3, null]);
   });
 });

@@ -55,6 +55,11 @@
 * {
   box-sizing: border-box;
 }
+/* A sideways trackpad pan of the map must never become the browser's back or forward swipe (macOS). */
+html,
+body {
+  overscroll-behavior-x: none;
+}
 html {
   font-size: 18px;
 }
@@ -311,6 +316,7 @@ input[type="search"]::-webkit-search-cancel-button {
 
 /* Map */
 .viewport {
+  overscroll-behavior: none;
   position: absolute;
   inset: 0;
   /* Circles past the screen edge never widen the page; a phone would otherwise lay it out wider. */
@@ -420,8 +426,8 @@ input[type="search"]::-webkit-search-cancel-button {
   background: var(--select);
   color: var(--select-fg);
 }
+/* A card's z-index comes from `cardLayer` (layout.ts). */
 .card.dragging {
-  z-index: 3;
   cursor: grabbing;
 }
 /* K-1508: a History row highlights its cards and circles once; the outline fades and never repeats. */
@@ -2065,10 +2071,6 @@ a > code {
 .peek {
   margin-top: 6px;
 }
-/* An open preview reaches below its card, so the card sits above its neighbours (a drag stays on top). */
-.card:has(.peek) {
-  z-index: 2;
-}
 .peek-toggle {
   font-size: 0.75rem;
   padding: 1px 6px;
@@ -2087,11 +2089,34 @@ a > code {
   flex: 1;
   font-size: 1.15rem;
 }
-.peek-large iframe {
+.peek-large .frame {
+  position: relative;
   flex: 1;
-  width: 100%;
   background: #fff;
   border: var(--bw) solid var(--border);
+}
+.peek-large .frame iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+/* K-520: in place of a frame that is loading or never loaded; still, so it never repaints. */
+.frame-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px;
+  text-align: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--raised);
 }
 
 /* Usage (K-1303) */

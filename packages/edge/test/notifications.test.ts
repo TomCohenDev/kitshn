@@ -128,14 +128,22 @@ it("refuses a mute of a card that does not exist or of an unknown source (K-1905
   expect((await mute({ card: ADMIN_RESOURCE_ID, source: "anything", until: null })).status).toBe(400);
 });
 
-it("runs the later alarm steps when one throws, and tells the owner until it works again (K-406, K-1910)", async () => {
+it("runs the later alarm steps when one throws, skips it with backoff, and tells the owner until it works (K-406, K-1910)", async () => {
   const stub = env.KITSHN.getByName("alarm-steps");
-  const result = await runInDurableObject(stub, async (instance) => {
+  const t0 = Date.parse("2026-10-30T12:00:00Z");
+  const result = await runInDurableObject(stub, async (instance, state) => {
     const kitshn = instance as unknown as Kitshn & Record<string, unknown> & { alarm(): Promise<void> };
-    const ran: Array<string> = [];
-    let gameDnsFails = true;
+    let clock = t0;
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // The daily run and the backups are far away, so only the steps set the next alarm.
+    for (const key of ["daily_at", "backup_at"])
+      kitshn.sql("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", key, String(t0 + 86_400_000));
+    let ran: Array<string> = [];
+    let gameDnsFails = true;
     kitshn["api"] = () => async () => [];
+    // Game records wait, as on 2026-10-29: this work woke the alarm at once while the step threw.
+    kitshn["gameDnsWork"] = () => true;
     const step = (name: string, calls: number) => async () => {
       ran.push(name);
       if (name === "syncGameDns" && gameDnsFails) throw new Error("zonePath takes one label.");
@@ -153,33 +161,34 @@ it("runs the later alarm steps when one throws, and tells the owner until it wor
       accessBudget = budget;
     };
     const read = () => kitshn.sql("SELECT key, state FROM notifications WHERE source = 'alarm' ORDER BY id");
-    await kitshn.alarm();
-    const failed = {
-      ran: [...ran],
-      accessBudget,
-      rows: read(),
-      retryAt: kitshn.sql("SELECT value FROM meta WHERE key = 'alarm_retry_at'"),
+    const run = async (at: number) => {
+      clock = at;
+      ran = [];
+      await kitshn.alarm();
+      return { ran, accessBudget, alarm: await state.storage.getAlarm() };
     };
+    const failed = { ...(await run(t0)), rows: read() };
+    const skipped = await run(t0 + 1_000);
+    const again = await run(t0 + 5 * 60_000);
     gameDnsFails = false;
-    await kitshn.alarm();
-    return { failed, after: read() };
+    const works = await run(t0 + 15 * 60_000);
+    return { failed, skipped, again, works, rows: read() };
   });
-  expect(result.failed.ran).toEqual([
-    "fillAudiences",
-    "refreshForeignPaths",
-    "syncTunnels",
-    "checkSites",
-    "syncDns",
-    "syncGameDns",
-    "syncRoutes",
-    "syncRedirects",
-    "syncLauncher",
-    "syncAccessLocked",
-    "syncLauncher",
-  ]);
+  const later = ["syncRoutes", "syncRedirects", "syncLauncher", "syncAccessLocked", "syncLauncher"];
+  const before = ["fillAudiences", "refreshForeignPaths", "syncTunnels", "checkSites", "syncDns"];
+  expect(result.failed.ran).toEqual([...before, "syncGameDns", ...later]);
   // The failed step counts its whole budget of 4, so Access keeps 40 - 4 - 16 - 3.
   expect(result.failed.accessBudget).toBe(17);
   expect(result.failed.rows).toEqual([{ key: "game DNS", state: "open" }]);
-  expect(result.failed.retryAt).toHaveLength(1);
-  expect(result.after).toEqual([{ key: "game DNS", state: "closed" }]);
+  // The next second sends the push of the new notification (K-1907).
+  expect(result.failed.alarm).toBe(t0 + 1_000);
+  // Until its retry time the step is skipped, spends nothing, and its waiting records wake no alarm.
+  expect(result.skipped.ran).toEqual([...before, ...later]);
+  expect(result.skipped.accessBudget).toBe(21);
+  expect(result.skipped.alarm).toBe(t0 + 5 * 60_000);
+  // The second failure waits twice as long.
+  expect(result.again.ran).toContain("syncGameDns");
+  expect(result.again.alarm).toBe(t0 + 15 * 60_000);
+  expect(result.works.ran).toContain("syncGameDns");
+  expect(result.rows).toEqual([{ key: "game DNS", state: "closed" }]);
 });

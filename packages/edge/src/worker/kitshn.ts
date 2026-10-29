@@ -5885,20 +5885,30 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** True when a site check, a tunnel, a DNS record or an offline route waits for the alarm. */
+  /** Work for the tunnel, site check and record steps; a step that waits for its retry (K-406) has none. */
   private tunnelWork() {
     const now = Date.now();
+    const ready = (step: AlarmStep) => !this.alarmStepWaits(step, now);
     const tunnels = new Map(this.tunnelRows().map((row) => [row.machine_id, row]));
     const accessOf = this.ingressAccessOf();
-    const stale = [...this.state.machines.values()].some((machine) => {
-      const row = tunnels.get(machine.id);
-      if (row?.error && row.retry_at > now) return false;
-      return row?.applied !== JSON.stringify(tunnelConfig(this.ingressSites(machine.id), accessOf));
-    });
-    const checking = [...this.liveSites.values()].some(
-      (site) => site.state === "checking" && (this.checkRetryAt.get(site.id) ?? 0) <= Date.now(),
-    );
+    const stale =
+      ready("tunnels") &&
+      [...this.state.machines.values()].some((machine) => {
+        const row = tunnels.get(machine.id);
+        if (row?.error && row.retry_at > now) return false;
+        return row?.applied !== JSON.stringify(tunnelConfig(this.ingressSites(machine.id), accessOf));
+      });
+    const checking =
+      ready("site checks") &&
+      [...this.liveSites.values()].some(
+        (site) => site.state === "checking" && (this.checkRetryAt.get(site.id) ?? 0) <= Date.now(),
+      );
     return (
-      stale || checking || this.dnsWork().length > 0 || this.routeWork().length > 0 || this.gameDnsWork(now)
+      stale ||
+      checking ||
+      (ready("DNS") && this.dnsWork().length > 0) ||
+      (ready("routes") && this.routeWork().length > 0) ||
+      (ready("game DNS") && this.gameDnsWork(now))
     );
   }
 
@@ -6473,7 +6483,9 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1302: one alarm for the next due item. Access work, share end dates, and the daily run. */
   private async scheduleAlarm() {
     const now = Date.now();
-    let next = Math.min(this.dailyAt(), this.backupAt());
+    // K-406: the pending work of a step that waits for its retry wakes nothing; its retry time below does.
+    const waits = (step: AlarmStep) => this.alarmStepWaits(step, now);
+    let next = Math.min(waits("daily") ? Infinity : this.dailyAt(), this.backupAt());
     for (const socket of this.ctx.getWebSockets("machines")) {
       const attachment = attachmentOf(socket);
       next = Math.min(next, now + LIVENESS_CHECK_MS);
@@ -6485,29 +6497,31 @@ export class Kitshn extends DurableObject<Env> {
     const [job] = this.sql<{ expires_at: number }>(
       "SELECT MIN(expires_at) AS expires_at FROM jobs WHERE state IN ('queued', 'sent')",
     );
-    if (job?.expires_at) next = Math.min(next, Math.max(job.expires_at, now));
+    if (job?.expires_at && !waits("jobs")) next = Math.min(next, Math.max(job.expires_at, now));
     // K-1724: the next proposal that expires.
     const [proposal] = this.sql<{ expires_at: number | null }>(
       "SELECT MIN(expires_at) AS expires_at FROM proposals WHERE state = 'pending'",
     );
-    if (proposal?.expires_at) next = Math.min(next, Math.max(proposal.expires_at, now));
+    if (proposal?.expires_at && !waits("proposals"))
+      next = Math.min(next, Math.max(proposal.expires_at, now));
     // K-1623: a taken address moves its record as soon as its ingress waited long enough.
     for (const site of this.liveSites.values()) {
       const ingressAt = site.state === "handover" ? this.handoverOf(site.id)?.ingressAt : null;
-      if (typeof ingressAt === "number")
+      if (typeof ingressAt === "number" && !waits("tunnels"))
         next = Math.min(next, Math.max(ingressAt + HANDOVER_INGRESS_MS, now));
     }
     const desired = this.desired(now);
     if (
       this.env.CLOUDFLARE_API_TOKEN &&
-      (hasAccessWork(
-        desired,
-        this.access,
-        this.reachableAddresses(),
-        loginHeld(this.meta("login_held") ?? ""),
-      ) ||
-        this.launcherWork() ||
-        this.loginWork() ||
+      ((!waits("Access") &&
+        (hasAccessWork(
+          desired,
+          this.access,
+          this.reachableAddresses(),
+          loginHeld(this.meta("login_held") ?? ""),
+        ) ||
+          this.loginWork())) ||
+        (!waits("launcher") && !waits("launcher after Access") && this.launcherWork()) ||
         this.redirectWork())
     )
       next = now;
@@ -6531,9 +6545,9 @@ export class Kitshn extends DurableObject<Env> {
     const redirectRetry = Number(this.meta("redirects_retry_at") ?? 0);
     if (this.env.CLOUDFLARE_API_TOKEN && redirectRetry > now) next = Math.min(next, redirectRetry);
     // K-406: a step of the alarm that threw tries again at its time.
-    const stepRetry = Number(this.meta("alarm_retry_at") ?? 0);
-    if (stepRetry > now) next = Math.min(next, stepRetry);
-    if (this.env.CLOUDFLARE_API_TOKEN && rowsWithoutAud(this.access).length > 0)
+    for (const failure of this.alarmSteps().values())
+      if (failure.retryAt > now) next = Math.min(next, failure.retryAt);
+    if (this.env.CLOUDFLARE_API_TOKEN && !waits("audiences") && rowsWithoutAud(this.access).length > 0)
       next = Math.min(next, Math.max(this.audRetryAt, now));
     const ends = [
       ...[...this.state.shareSettings.values()].map((setting) => setting.endsAt),
@@ -6542,6 +6556,7 @@ export class Kitshn extends DurableObject<Env> {
     ];
     for (const end of ends) if (end !== null && end > now && end < next) next = end;
     if (
+      !waits("share ends") &&
       ends.some((end) => end !== null && end <= now) &&
       (this.expiredShares(now).length > 0 || this.expiredCards(now).length > 0)
     )
@@ -6552,10 +6567,10 @@ export class Kitshn extends DurableObject<Env> {
     if (this.pushQueue.length > 0) next = Math.min(next, now + 1000);
     // K-1910: the next machine that reaches 15 minutes offline, and the next hourly check of the limits.
     const offlineAt = this.nextOfflineAt(now);
-    if (offlineAt !== null) next = Math.min(next, offlineAt);
+    if (offlineAt !== null && !waits("offline")) next = Math.min(next, offlineAt);
     if (this.env.CLOUDFLARE_API_TOKEN) next = Math.min(next, Math.max(now, this.limitsCheckAt()));
     const bellEnd = this.nextBellEnd(now);
-    if (bellEnd !== null) next = Math.min(next, bellEnd);
+    if (bellEnd !== null && !waits("bell")) next = Math.min(next, bellEnd);
     // Never move a pending alarm later: frequent wake-ups would otherwise push it away for good.
     const current = await this.ctx.storage.getAlarm();
     if (current === null || current <= now || next < current) await this.ctx.storage.setAlarm(next);
@@ -12958,35 +12973,69 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /**
-   * K-406: a step of the alarm that throws logs, opens an `alarm` notification (K-1910) and tries again after
-   * five minutes, and the next steps still run. `onError` is what the step counts then, such as its whole budget.
+   * K-406: a step of the alarm that throws logs, opens an `alarm` notification (K-1910) and waits for its retry
+   * time, and the next steps still run. Until then the step is skipped. `onError` is what a failed step counts,
+   * such as its whole budget; `skipped` is what a skipped one counts.
    */
-  private async alarmStep<T>(step: AlarmStep, onError: T, run: () => T | Promise<T>): Promise<T> {
+  private async alarmStep<T>(
+    step: AlarmStep,
+    onError: T,
+    run: () => T | Promise<T>,
+    skipped: T = onError,
+  ): Promise<T> {
+    const failing = this.alarmSteps().get(step);
+    if (failing && failing.retryAt > Date.now()) return skipped;
     try {
       const result = await run();
-      this.alarmFailingSince.delete(step);
+      if (failing) this.setAlarmStep(step, null);
       this.setNotificationState("alarm", step, "closed");
       return result;
     } catch (error) {
       const now = Date.now();
       console.error(`kitshn alarm step "${step}" failed: ${String(error)}`);
-      const since = this.alarmFailingSince.get(step) ?? now;
-      this.alarmFailingSince.set(step, since);
-      this.setMeta("alarm_retry_at", String(now + RETRY_MS));
+      const tries = (failing?.tries ?? 0) + 1;
+      const retryAt = now + alarmStepBackoff(tries);
+      this.setAlarmStep(step, { since: failing?.since ?? now, tries, retryAt });
+      const at = new Date(retryAt).toISOString().slice(11, 16);
       this.notify({
         source: "alarm",
         key: step,
-        episode: String(since),
+        episode: String(failing?.since ?? now),
         card: null,
         recipients: { _tag: "owner" },
         level: "error",
         priority: "normal",
         title: clip(`kitshn could not run the alarm step "${step}"`, TITLE_MAX),
-        text: clip(`${String(error)} kitshn tries again in five minutes.`, TEXT_MAX),
+        text: clip(`${String(error)} kitshn tries again at ${at} UTC.`, TEXT_MAX),
         actions: [],
       });
       return onError;
     }
+  }
+
+  /** K-406: whether a step that failed waits for its retry time, so its pending work does not wake the alarm. */
+  private alarmStepWaits(step: AlarmStep, now: number) {
+    return (this.alarmSteps().get(step)?.retryAt ?? 0) > now;
+  }
+
+  /** K-406: the failing steps, kept in `meta` so a wake keeps their backoff and their episode (K-1910). */
+  private alarmStepsCache: Map<AlarmStep, AlarmStepFailure> | null = null;
+  private alarmSteps(): ReadonlyMap<AlarmStep, AlarmStepFailure> {
+    this.alarmStepsCache ??= new Map(
+      Object.entries(JSON.parse(this.meta("alarm_steps") ?? "{}") as Record<string, AlarmStepFailure>).filter(
+        (entry): entry is [AlarmStep, AlarmStepFailure] =>
+          (ALARM_STEPS as ReadonlyArray<string>).includes(entry[0]),
+      ),
+    );
+    return this.alarmStepsCache;
+  }
+
+  private setAlarmStep(step: AlarmStep, failure: AlarmStepFailure | null) {
+    const steps = new Map(this.alarmSteps());
+    if (failure) steps.set(step, failure);
+    else steps.delete(step);
+    this.alarmStepsCache = steps;
+    this.setMeta("alarm_steps", JSON.stringify(Object.fromEntries(steps)));
   }
 
   /** The open `alarm` notifications, so the maps hear of a step that failed or works again. */
@@ -12996,9 +13045,6 @@ export class Kitshn extends DurableObject<Env> {
       .map((notification) => `${notification.key}: ${notification.text}`)
       .join("\n");
   }
-
-  /** Known limit: in memory, so a wake makes a new episode of a step that still fails; revisit if that reopens dismissed ones too often. */
-  private alarmFailingSince = new Map<AlarmStep, number>();
 
   /** K-1904: the sources that kitshn derives from its own state. */
   /** K-1910: limits at 80% or more of the last hourly read, and machines that stay offline 15 minutes. */
@@ -13599,22 +13645,33 @@ export class Kitshn extends DurableObject<Env> {
     await this.finishPendingRestore().catch((error: unknown) =>
       console.error(`kitshn could not finish a restore to a time: ${String(error)}`),
     );
-    this.checkLiveness(now);
+    await this.alarmStep("liveness", undefined, () => this.checkLiveness(now));
     // The alarm runs every 2 minutes while a daemon is connected, so it tells the maps only about real changes.
-    let changed = this.expireJobs(now) > 0;
-    if (this.settleRollbacks() > 0) changed = true;
-    this.expireProposals(now);
+    let changed = (await this.alarmStep("jobs", 0, () => this.expireJobs(now))) > 0;
+    if ((await this.alarmStep("rollbacks", 0, () => this.settleRollbacks())) > 0) changed = true;
+    await this.alarmStep("proposals", undefined, () => this.expireProposals(now));
     const before = JSON.stringify(accessStates(this.desired(now), this.access));
     await this.alarmStep("share ends", undefined, () => this.endShares(now));
     if (await this.alarmStep("doors", false, () => this.closeLostDoors(now))) changed = true;
     await this.alarmStep("open games", undefined, () => this.syncOpenGames(now));
-    const daily = this.dailyAt() <= now;
-    if (daily) this.daily(now);
+    // A daily run that threw or waits for its retry is no daily run, so the compare below waits with it.
+    const daily =
+      this.dailyAt() <= now &&
+      (await this.alarmStep("daily", false, () => {
+        this.daily(now);
+        return true;
+      }));
     // K-1126: the uptime fetches count against the 40 calls of this run (K-406). The daily run spends 40 already,
     // so it fetches nothing and keeps 10 subrequests spare.
-    const uptime = await this.checkUptime(now, daily ? 0 : UPTIME_FETCHES_PER_RUN);
+    const uptimeBudget = daily ? 0 : UPTIME_FETCHES_PER_RUN;
+    const uptime = await this.alarmStep(
+      "uptime",
+      { fetches: uptimeBudget, changed: false },
+      () => this.checkUptime(now, uptimeBudget),
+      { fetches: 0, changed: false },
+    );
     if (uptime.changed) changed = true;
-    if (this.bellEnded(now)) changed = true;
+    if (await this.alarmStep("bell", false, () => this.bellEnded(now))) changed = true;
     // K-1910: the use of the account once an hour, never in the daily run; the next reconcile notifies.
     if (!daily && this.env.CLOUDFLARE_API_TOKEN && this.limitsCheckAt() <= now) {
       this.limitsAtMemory = now + HOUR_MS;
@@ -13631,7 +13688,7 @@ export class Kitshn extends DurableObject<Env> {
       changed = true;
     }
     // K-1910: a machine that reached 15 minutes offline since the last run.
-    if (this.offlineChanged(now)) changed = true;
+    if (await this.alarmStep("offline", false, () => this.offlineChanged(now))) changed = true;
     // K-1817: the nightly backups run at 03:00 UTC, a quiet hour, not with the daily run at midnight.
     if (this.backupAt() <= now) {
       this.backupAtMemory = nextBackupAt(now);
@@ -13663,14 +13720,14 @@ export class Kitshn extends DurableObject<Env> {
           spent += 12;
         }
       }
-      spent += await this.alarmStep("audiences", 1, () => this.fillAudiences(api, now));
+      spent += await this.alarmStep("audiences", 1, () => this.fillAudiences(api, now), 0);
       // Removals first: ingress and DNS go before an Access application does. Additions wait for the next
       // run, because ingress and DNS need the application that the Access sync makes (K-410).
-      spent += await this.alarmStep("foreign paths", 1, () => this.refreshForeignPaths(api, now));
+      spent += await this.alarmStep("foreign paths", 1, () => this.refreshForeignPaths(api, now), 0);
       await this.alarmStep("tunnels", undefined, () => this.syncTunnels(api, 6));
-      spent += await this.alarmStep("site checks", 6, () => this.checkSites(api, 6));
+      spent += await this.alarmStep("site checks", 6, () => this.checkSites(api, 6), 0);
       await this.alarmStep("DNS", undefined, () => this.syncDns(api, 5));
-      spent += await this.alarmStep("game DNS", 4, () => this.syncGameDns(api, 4));
+      spent += await this.alarmStep("game DNS", 4, () => this.syncGameDns(api, 4), 0);
       await this.alarmStep("routes", undefined, () => this.syncRoutes(api, 5));
       // K-1124: after the tunnel and DNS steps, so an old Compose address has lost its record. The daily run spends
       // its calls on the compare; redirectWork asks for the next run at once.
@@ -13684,7 +13741,7 @@ export class Kitshn extends DurableObject<Env> {
           spent += 5;
         }
       // K-113: take an unwanted enrollment policy off the App Launcher before the sync deletes it.
-      spent += await this.alarmStep("launcher", 3, () => this.syncLauncher(api, daily));
+      spent += await this.alarmStep("launcher", 3, () => this.syncLauncher(api, daily), 0);
       // K-406: at most 40 calls. `spent` counts the daily compare (12), the site checks (6), the redirect step (5),
       // the game records (4), the launcher step (3) and the path read of taken addresses (1); the tunnels, DNS records and offline routes above made at most 6 + 5 + 5, and the launcher
       // step after the sync needs 3. The login step and the sync share what is left. A policy that the sync
@@ -13896,21 +13953,40 @@ function rowAddresses(row: Pick<DeployRow, "address" | "addresses">): Array<stri
 const RETRY_MS = 5 * 60_000;
 
 /** K-406: the steps of the alarm that run on their own, so one that throws stops no other. */
-type AlarmStep =
-  | "share ends"
-  | "doors"
-  | "open games"
-  | "audiences"
-  | "foreign paths"
-  | "tunnels"
-  | "site checks"
-  | "DNS"
-  | "game DNS"
-  | "routes"
-  | "launcher"
-  | "Access"
-  | "launcher after Access"
-  | "grants";
+const ALARM_STEPS = [
+  "liveness",
+  "jobs",
+  "rollbacks",
+  "proposals",
+  "share ends",
+  "doors",
+  "open games",
+  "daily",
+  "uptime",
+  "bell",
+  "offline",
+  "audiences",
+  "foreign paths",
+  "tunnels",
+  "site checks",
+  "DNS",
+  "game DNS",
+  "routes",
+  "launcher",
+  "Access",
+  "launcher after Access",
+  "grants",
+] as const;
+type AlarmStep = (typeof ALARM_STEPS)[number];
+
+interface AlarmStepFailure {
+  readonly since: number;
+  readonly tries: number;
+  readonly retryAt: number;
+}
+
+/** K-406: 5 minutes after the first failure, then twice as long each time, at most an hour. */
+const alarmStepBackoff = (tries: number) => Math.min(RETRY_MS * 2 ** Math.max(0, tries - 1), HOUR_MS);
 /** K-1623: cloudflared takes a new ingress within seconds; a taken address moves its record a minute after. */
 const HANDOVER_INGRESS_MS = 60_000;
 /** K-705: the sticker of a provider card whose address something else serves. */

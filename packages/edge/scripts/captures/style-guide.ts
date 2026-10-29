@@ -36,6 +36,10 @@ export default {
     // Keyboard focus on a button of the dots canvas: the accent ring and its glow.
     await page.getByRole("button", { name: "Plain", exact: true }).focus();
     await page.keyboard.press("Tab");
+    await page.waitForTimeout(200);
+    console.log(
+      `focused box-shadow: ${await page.evaluate<string>("getComputedStyle(document.activeElement).boxShadow")}`,
+    );
     await shot("focus");
     await page.evaluate(`document.querySelector(".guide-differences").scrollIntoView()`);
     await shot("differences");

@@ -5,6 +5,7 @@ import { RESERVED_SITE_NAMES } from "../core/library.ts";
 import type { Resource } from "../core/model.ts";
 import { type ServerReport, type SiteInput, parseSiteInput } from "../core/sites.ts";
 import { Radio, Switch } from "./controls.tsx";
+import { GameForm } from "./Games.tsx";
 import { LiveFrame } from "./Peek.tsx";
 import { callApi } from "./store.ts";
 
@@ -76,7 +77,7 @@ export function AddSite(props: {
   onClose: () => void;
   onDone: (text: string) => void;
 }) {
-  const [kind, setKind] = useState<"live" | "static">("live");
+  const [kind, setKind] = useState<"live" | "static" | "game">("live");
   const online = props.machines.filter((view) => view.online);
   const [text, setText] = useState(props.initial);
   const input = parseSiteInput(text);
@@ -150,8 +151,23 @@ export function AddSite(props: {
           >
             Static, from a repo
           </button>
+          <button
+            type="button"
+            aria-pressed={kind === "game"}
+            data-tip="Game: a game server of a machine, with ports that each player opens for their own address (K-2001)."
+            onClick={() => setKind("game")}
+          >
+            Game
+          </button>
         </div>
-        {kind === "live" ? (
+        {kind === "game" ? (
+          <GameForm
+            zone={props.zone}
+            machines={props.machines}
+            onClose={props.onClose}
+            onDone={props.onDone}
+          />
+        ) : kind === "live" ? (
           <form
             onSubmit={(event) => {
               event.preventDefault();

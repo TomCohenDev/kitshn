@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type ProviderReport, readAnswer, readRequest, reportProblem } from "./index.ts";
+import { type ProviderReport, desiredProblem, readAnswer, readRequest, reportProblem } from "./index.ts";
 
 const t3 = (resources: ProviderReport["resources"], extra: Partial<ProviderReport> = {}): ProviderReport => ({
   name: "t3",
@@ -36,6 +36,98 @@ describe("provider reports (K-704, K-705)", () => {
     ["a card of a kind without levels (K-709)", t3([{ ...app, kind: "t3.settings" }])],
     ["an unknown parent", t3([{ ...app, parent: "gone" }])],
     ["two resources with one id", t3([app, app])],
+    [
+      "a card setting whose default is not one of its values (K-717)",
+      t3([], {
+        kinds: [
+          {
+            id: "t3.app",
+            name: "T3 app",
+            levels: { view: "view" },
+            settings: [
+              {
+                id: "updateChannel",
+                title: "Update channel",
+                values: ["nightly", "daily"],
+                default: "weekly",
+              },
+            ],
+          },
+        ],
+      }),
+    ],
+    [
+      "a list cell that is no column of its list (K-1625)",
+      t3([
+        {
+          ...app,
+          lists: [
+            {
+              id: "tasks",
+              title: "Tasks",
+              columns: [{ id: "name", title: "Name" }],
+              rows: [{ id: "r1", cells: { name: "x", other: "y" } }],
+            },
+          ],
+        },
+      ]),
+    ],
+    [
+      "a resource over 64 KB (K-1625)",
+      t3([
+        {
+          ...app,
+          facts: Array.from({ length: 20 }, (_, index) => ({ label: `f${index}`, value: "é".repeat(200) })),
+          stickers: [],
+          lists: [
+            {
+              id: "big",
+              title: "Big",
+              columns: [{ id: "c", title: "C" }],
+              rows: Array.from({ length: 100 }, (_, index) => ({
+                id: `r${index}`,
+                cells: { c: "x".repeat(200) },
+              })),
+            },
+            {
+              id: "big2",
+              title: "Big",
+              columns: [{ id: "c", title: "C" }],
+              rows: Array.from({ length: 100 }, (_, index) => ({
+                id: `r${index}`,
+                cells: { c: "x".repeat(200) },
+              })),
+            },
+            {
+              id: "big3",
+              title: "Big",
+              columns: [{ id: "c", title: "C" }],
+              rows: Array.from({ length: 100 }, (_, index) => ({
+                id: `r${index}`,
+                cells: { c: "x".repeat(200) },
+              })),
+            },
+          ],
+        },
+      ]),
+    ],
+    [
+      "a list row with a command that its kind does not have (K-1625)",
+      t3([
+        {
+          ...app,
+          kind: "t3.thread",
+          lists: [
+            {
+              id: "tasks",
+              title: "Tasks",
+              columns: [{ id: "name", title: "Name" }],
+              rows: [{ id: "r1", cells: {}, commands: ["restart"] }],
+            },
+          ],
+        },
+      ]),
+    ],
   ])("refuses %s", (_, report) => {
     expect(reportProblem(report, [], new Set(), new Set())).not.toBeNull();
   });
@@ -82,5 +174,12 @@ describe("provider reports (K-704, K-705)", () => {
     expect(answer).toMatchObject({
       tables: { a: [{ circle: { rules: [{ email: "a@b.c" }, { unknown: "future" }] } }] },
     });
+  });
+
+  it("takes a desired state part only for a kind with state, and at most 64 KB (K-709)", () => {
+    const kinds = [{ id: "t3.settings", name: "settings", levels: {}, state: {} }, t3([]).kinds[0]!];
+    expect(desiredProblem(kinds, "t3.settings", { theme: "dark" })).toBeNull();
+    expect(desiredProblem(kinds, "t3.app", {})).toMatch(/no desired state/);
+    expect(desiredProblem(kinds, "t3.settings", "x".repeat(70_000))).toMatch(/at most/);
   });
 });

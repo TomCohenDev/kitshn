@@ -281,7 +281,9 @@ export function desiredAccess(
       apps.set(`app:${resource.id}:${address}`, {
         name: appName(resource.name),
         type: "self_hosted",
-        domain: address,
+        // K-1623: Cloudflare accepts `<host>/*` next to another application of the host and lets it answer there,
+        // so kitshn takes a provider site's host over with an application at each moment.
+        domain: resource.provider?.site ? `${address}/*` : address,
         // K-109
         session_duration: resource.id === ADMIN_RESOURCE_ID ? "24h" : "720h",
         same_site_cookie_attribute: "lax",

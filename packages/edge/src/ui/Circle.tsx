@@ -27,6 +27,7 @@ import { MachineRights, withMode } from "./MachineRights.tsx";
 import { selfApprovers } from "../core/asks.ts";
 import type { ComponentChildren } from "preact";
 import { levelEdit } from "./actions.ts";
+import { type DeviceInvite, InviteDialog } from "./Invite.tsx";
 
 /** The sticker of each member kind: its name and a light sticker colour with black text. */
 const MEMBER_STICKERS: Record<Member["_tag"], { readonly label: string; readonly color: string }> = {
@@ -380,6 +381,7 @@ function DeviceList(props: {
   taken: ReadonlySet<string>;
   onAdd: (member: DeviceMember) => Promise<string | null>;
   onSecret: (secret: DeviceSecret) => void;
+  onInvite: (invite: DeviceInvite) => void;
 }) {
   const [devices, setDevices] = useState<ReadonlyArray<Device> | null>(null);
   const [name, setName] = useState("");
@@ -445,57 +447,85 @@ function DeviceList(props: {
             class="row"
             onSubmit={(event) => {
               event.preventDefault();
-              if (!name.trim()) return setError("Name the new device, for example Her phone.");
-              void run(async () => {
-                const result = await callApi<DeviceMember & { clientSecret: string }>(
-                  "POST",
-                  "/api/devices",
-                  {
-                    name: name.trim(),
-                  },
-                );
-                if ("error" in result) return setError(result.error);
-                setError(null);
-                setName("");
-                props.onSecret({
-                  name: result.name,
-                  clientId: result.clientId,
-                  clientSecret: result.clientSecret,
-                });
-                setDevices([
-                  ...(devices ?? []),
-                  { tokenId: result.tokenId, clientId: result.clientId, name: result.name },
-                ]);
-                const refused = await props.onAdd({
-                  _tag: "device",
-                  tokenId: result.tokenId,
-                  clientId: result.clientId,
-                  name: result.name,
-                });
-                if (refused) setError(`The token exists, but the circle did not take it: ${refused}`);
-              });
+              invite();
             }}
           >
             <input
               class="field field-block grow"
               value={name}
               aria-label="New device name"
-              data-tip="The name of a new device token. kitshn makes the token and adds the device to this circle."
+              data-tip="The name of a new device. kitshn makes its token and adds the device to this circle."
               placeholder="+ New device, for example Her phone"
               onInput={(event) => setName((event.target as HTMLInputElement).value)}
             />
             <button
+              class="btn primary"
+              disabled={busy}
+              data-tip="Invite the T3 Code app on a phone or a desktop: a QR code and a link that work once for 15 minutes."
+            >
+              Invite app
+            </button>
+            <button
+              type="button"
               class="btn"
               disabled={busy}
-              data-tip="Make a service token for the new device and show its secret once."
+              data-tip="Make a service token for a script or an agent key, and show its secret once."
+              onClick={makeToken}
             >
-              Make
+              Make token
             </button>
           </form>
         </li>
       </ul>
     </div>
   );
+
+  function makeToken() {
+    if (!name.trim()) return setError("Name the new device, for example Her phone.");
+    void run(async () => {
+      const result = await callApi<DeviceMember & { clientSecret: string }>("POST", "/api/devices", {
+        name: name.trim(),
+      });
+      if ("error" in result) return setError(result.error);
+      setError(null);
+      setName("");
+      props.onSecret({
+        name: result.name,
+        clientId: result.clientId,
+        clientSecret: result.clientSecret,
+      });
+      setDevices([
+        ...(devices ?? []),
+        { tokenId: result.tokenId, clientId: result.clientId, name: result.name },
+      ]);
+      const refused = await props.onAdd({
+        _tag: "device",
+        tokenId: result.tokenId,
+        clientId: result.clientId,
+        name: result.name,
+      });
+      if (refused) setError(`The token exists, but the circle did not take it: ${refused}`);
+    });
+  }
+
+  /** K-1601: a new device token and its invite; kitshn keeps no secret, and the app gets one at the exchange. */
+  function invite() {
+    if (!name.trim()) return setError("Name the new device, for example Her phone.");
+    void run(async () => {
+      const result = await callApi<DeviceInvite>("POST", "/api/devices/invites", { name: name.trim() });
+      if ("error" in result) return setError(result.error);
+      setError(null);
+      setName("");
+      props.onInvite(result);
+      const refused = await props.onAdd({
+        _tag: "device",
+        tokenId: result.tokenId,
+        clientId: result.clientId,
+        name: result.name,
+      });
+      if (refused) setError(`The invite works, but the circle did not take the device: ${refused}`);
+    });
+  }
 }
 
 /** One control for every member kind: the text decides the kind, the segment overrides it. */
@@ -503,6 +533,7 @@ function AddMember(props: {
   circle: Circle;
   onAdd: (member: Member) => Promise<string | null>;
   onSecret: (secret: DeviceSecret) => void;
+  onInvite: (invite: DeviceInvite) => void;
 }) {
   const [kind, setKind] = useState<TypedKind | "device">("auto");
   const [value, setValue] = useState("");
@@ -548,6 +579,7 @@ function AddMember(props: {
           }
           onAdd={props.onAdd}
           onSecret={props.onSecret}
+          onInvite={props.onInvite}
         />
       ) : (
         <form
@@ -609,6 +641,13 @@ export function CircleEditor(props: {
     return put({ members: [...latest.current.members, member] });
   };
   const [draft, setDraft] = useState<string | null>(null);
+  const [invite, setInvite] = useState<DeviceInvite | null>(null);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const inviteAgain = async (member: DeviceMember) => {
+    const result = await callApi<DeviceInvite>("POST", "/api/devices/invites", { tokenId: member.tokenId });
+    setInviteError("error" in result ? result.error : null);
+    if (!("error" in result)) setInvite(result);
+  };
   const inside = [...state.resources.values()].filter((resource) =>
     circlesHolding(state, resource.id).includes(circle),
   );
@@ -676,7 +715,16 @@ export function CircleEditor(props: {
                 : null
             }
             extra={
-              member._tag === "machine" && agentCircle ? (
+              member._tag === "device" ? (
+                <button
+                  type="button"
+                  class="btn"
+                  data-tip={`A new invite for ${member.name}: a phone or desktop app gets a new secret of its token, and the old secret ends.`}
+                  onClick={() => void inviteAgain(member)}
+                >
+                  Invite
+                </button>
+              ) : member._tag === "machine" && agentCircle ? (
                 <MachineRights
                   member={member}
                   circles={state.circles}
@@ -702,7 +750,9 @@ export function CircleEditor(props: {
           <li class="help">Nobody yet. A circle with no members matches nobody.</li>
         ) : null}
       </ul>
-      <AddMember circle={circle} onAdd={addMember} onSecret={props.onSecret} />
+      {inviteError ? <p class="error">{inviteError}</p> : null}
+      <AddMember circle={circle} onAdd={addMember} onSecret={props.onSecret} onInvite={setInvite} />
+      {invite ? <InviteDialog invite={invite} onClose={() => setInvite(null)} /> : null}
 
       <h3 class="label">Access</h3>
       <div class="field-row">

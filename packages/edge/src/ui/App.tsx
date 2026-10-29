@@ -34,7 +34,7 @@ import {
   type CardKind,
   type ProviderCard,
 } from "../core/model.ts";
-import type { ProviderSticker } from "@kitshn/local";
+import type { ProviderCommand, ProviderSticker } from "@kitshn/local";
 import { MAX_UPLOAD_BYTES, isLibraryId } from "../core/library.ts";
 import {
   type Box,
@@ -126,6 +126,7 @@ import {
 } from "./actions.ts";
 import type { Rect } from "./popover.ts";
 import { AddSite } from "./Add.tsx";
+import { GameDoors, isGameCard } from "./Games.tsx";
 import { AddRepoGroup, GitHubDefaultWay, RepoGroupPanel, matchedCards } from "./RepoGroups.tsx";
 import { Palette } from "./Palette.tsx";
 import {
@@ -139,7 +140,7 @@ import {
 } from "./Pause.tsx";
 import { playResumeSound, pressSound, showPanic, unlockAudio } from "./panic.ts";
 import { GONE_STICKER, REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
-import { AskEvents, BotRuns, approveFromHash } from "./Asks.tsx";
+import { AskEvents, LinkEvents, BotRuns, approveFromHash } from "./Asks.tsx";
 import { PassSettingsPanel } from "./Passes.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
@@ -988,6 +989,51 @@ export function App(props: { readonly panels?: boolean } = {}) {
     });
   };
 
+  /** K-717: History records it; the server checks control on the card. */
+  const setCardSetting = async (card: Resource, key: string, value: string) => {
+    const result = await callApi<{ ok: true }>("POST", `/api/cards/${encodeURIComponent(card.id)}/settings`, {
+      key,
+      value,
+    });
+    if ("error" in result) showToast({ text: result.error, error: true, undo: null });
+  };
+
+  const takeAddress = async (resource: Resource) => {
+    if (
+      !(await ask(
+        `Take over the address of ${resource.name}? Its machine needs a T3 that takes kitshn's Access audiences (fork #415). kitshn makes its Access application, then its tunnel route, and moves the DNS record once T3 has the new audience. Then take the address out of what served it.`,
+      ))
+    )
+      return;
+    const result = await callApi<object>(
+      "POST",
+      `/api/cards/${encodeURIComponent(resource.id)}/take-address`,
+    );
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: `kitshn takes over the address of ${resource.name}.`, error: false, undo: null },
+    );
+  };
+
+  const giveAddressBack = async (resource: Resource) => {
+    if (
+      !(await ask(
+        `Give the address of ${resource.name} back? Its DNS record points at what served it before, and kitshn lets go. Do this only while that still serves the address.`,
+      ))
+    )
+      return;
+    const result = await callApi<object>(
+      "POST",
+      `/api/cards/${encodeURIComponent(resource.id)}/give-address-back`,
+    );
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: `Gave the address of ${resource.name} back.`, error: false, undo: null },
+    );
+  };
+
   /** K-704: no confirm; the toast and History undo it. */
   const forgetProvider = async (machineId: string, provider: string, card: Resource | null) => {
     const result = await callApi<{ revision: number | null }>(
@@ -1034,7 +1080,12 @@ export function App(props: { readonly panels?: boolean } = {}) {
           state={state}
           onUndo={(id) => historyUndo.current(id)}
           onShow={(revision) => historyShow.current(revision)}
-          askEvents={<AskEvents events={store.snapshot.askEvents} />}
+          askEvents={
+            <>
+              <AskEvents events={store.snapshot.askEvents} />
+              <LinkEvents events={store.snapshot.linkEvents} />
+            </>
+          }
         />
       ) : null,
     [store.snapshot, state],
@@ -1443,6 +1494,22 @@ export function App(props: { readonly panels?: boolean } = {}) {
     );
   };
 
+  /** K-534: the way out of a game card, from its menu, its panel and the palette; it has no Undo, so it asks. */
+  const removeGame = async (resource: Resource) => {
+    if (
+      !(await ask(
+        `Remove the game ${resource.name}? Its doors close for everyone at once and its records go. This has no Undo.`,
+      ))
+    )
+      return;
+    const result = await callApi<object>("DELETE", `/api/games/${encodeURIComponent(resource.id)}`);
+    showToast(
+      "error" in result
+        ? { text: result.error, error: true, undo: null }
+        : { text: `Removed the game ${resource.name}.`, error: false, undo: null },
+    );
+  };
+
   /** K-523: the menu and the palette run these, the same as the toolbar and the panel. */
   const handlers: ActionHandlers = {
     select: (selected) => {
@@ -1502,7 +1569,10 @@ export function App(props: { readonly panels?: boolean } = {}) {
         'input[aria-label="Stack name"]',
       ),
     removeApp: (resource) => void removeApp(resource),
+    removeGame: (resource) => void removeGame(resource),
     forgetProvider: (machineId, provider, card) => void forgetProvider(machineId, provider, card),
+    takeAddress: (resource) => void takeAddress(resource),
+    giveAddressBack: (resource) => void giveAddressBack(resource),
     rollback: (resource, mode) => setRollback({ card: resource, mode }),
     restorePrevious: (resource) => void restorePrevious(resource),
     editAddress: (resource) =>
@@ -1551,6 +1621,7 @@ export function App(props: { readonly panels?: boolean } = {}) {
     selected: selection.cards,
     previousVersions,
     handoverCards,
+    addressHolds: store.snapshot?.addressHolds ?? {},
     openStacks,
     folderSites,
     providerCommands: store.snapshot.providerCommands,
@@ -1710,6 +1781,7 @@ export function App(props: { readonly panels?: boolean } = {}) {
               onPlace={placeInView}
               onReshare={(resource, circle, share, part) => void reshare(resource, circle, share, part)}
               onTime={handlers.setTime}
+              onRemoveGame={handlers.removeGame}
               onNewCircle={(ids) => void newCircleFor(ids)}
               onRemoveApp={(resource) => void removeApp(resource)}
               onRollback={(resource, mode) => setRollback({ card: resource, mode })}
@@ -1729,6 +1801,9 @@ export function App(props: { readonly panels?: boolean } = {}) {
               deployed={deployed}
               previewCards={previewCards}
               pullRequests={pullRequests}
+              cardSettings={store.snapshot.cardSettings}
+              providerCommands={store.snapshot.providerCommands}
+              onSetCardSetting={(card, key, value) => void setCardSetting(card, key, value)}
               deployNotes={store.snapshot.deployNotes}
               uptime={store.snapshot.uptime}
               pause={pauseView}
@@ -1738,6 +1813,7 @@ export function App(props: { readonly panels?: boolean } = {}) {
               onToast={(text, error) => showToast({ text, error, undo: null })}
               onRemoveMachine={handlers.removeMachine}
               onRunJob={runJob}
+              onRunProviderCommand={handlers.runProviderCommand}
               warnings={store.snapshot.accessWarnings}
               onOpenSafety={openSafety}
               selectionActions={selectionActions(actionContext, handlers)}
@@ -2285,6 +2361,8 @@ function Panel(props: {
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   /** K-212: a new end time, null for no end, or "now". */
   onTime: (resource: Resource, endsAt: number | null | "now") => void;
+  /** K-534: removes a game card after a confirm. */
+  onRemoveGame: (resource: Resource) => void;
   onNewCircle: (ids: ReadonlyArray<string>) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
@@ -2309,12 +2387,18 @@ function Panel(props: {
   pullRequests: Readonly<Record<string, number>>;
   deployNotes: Readonly<Record<string, DeployNote>>;
   uptime: Snapshot["uptime"];
+  /** K-717, K-1625: the card settings and the provider commands of the snapshot. */
+  cardSettings: Snapshot["cardSettings"];
+  providerCommands: Snapshot["providerCommands"];
+  onSetCardSetting: (card: Resource, key: string, value: string) => void;
   pause: PauseView | null;
   warnings: ReadonlyArray<string>;
   machines: ReadonlyMap<string, MachineView>;
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
   onRunJob: (view: MachineView, command: Command) => Promise<void>;
+  /** K-707, K-1615: a provider command; a question asks first. */
+  onRunProviderCommand: (view: MachineView, command: Command, question: string | null) => void;
   version: string;
   onToast: (text: string, error: boolean) => void;
   onOpenSafety: () => void;
@@ -2365,6 +2449,7 @@ function Panel(props: {
         onPlace={props.onPlace}
         onReshare={props.onReshare}
         onTime={props.onTime}
+        onRemoveGame={props.onRemoveGame}
         onNewCircle={props.onNewCircle}
         onRemoveApp={props.onRemoveApp}
         onRollback={props.onRollback}
@@ -2386,10 +2471,15 @@ function Panel(props: {
         deployNote={props.deployNotes[cards[0].id] ?? null}
         uptime={props.uptime[cards[0].id] ?? null}
         machine={props.machines.get(cards[0].id) ?? null}
+        providerMachine={props.machines.get(cards[0].machine ?? "") ?? null}
+        cardSettings={props.cardSettings[cards[0].id] ?? {}}
+        providerCommands={props.providerCommands}
+        onSetCardSetting={props.onSetCardSetting}
         version={props.version}
         jobs={props.jobs}
         onRemoveMachine={props.onRemoveMachine}
         onRunJob={props.onRunJob}
+        onRunProviderCommand={props.onRunProviderCommand}
         onToast={props.onToast}
       />
     );
@@ -2753,6 +2843,8 @@ function CardPanel(props: {
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   /** K-212: a new end time, null for no end, or "now". */
   onTime: (resource: Resource, endsAt: number | null | "now") => void;
+  /** K-534: removes a game card after a confirm. */
+  onRemoveGame: (resource: Resource) => void;
   onNewCircle: (ids: ReadonlyArray<string>) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
@@ -2782,9 +2874,16 @@ function CardPanel(props: {
   /** K-1125: up or down, when kitshn checks this card. */
   uptime: Snapshot["uptime"][string] | null;
   machine: MachineView | null;
+  /** K-1625: the machine of a provider card, for the commands of its list rows. */
+  providerMachine: MachineView | null;
+  cardSettings: Readonly<Record<string, string>>;
+  providerCommands: Snapshot["providerCommands"];
+  onSetCardSetting: (card: Resource, key: string, value: string) => void;
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
   onRunJob: (view: MachineView, command: Command) => Promise<void>;
+  /** K-707, K-1615: a provider command; a question asks first. */
+  onRunProviderCommand: (view: MachineView, command: Command, question: string | null) => void;
   version: string;
   onToast: (text: string, error: boolean) => void;
 }) {
@@ -2821,7 +2920,35 @@ function CardPanel(props: {
         <ItemIcon resource={resource} />
         {resource.name}
       </h2>
-      {resource.provider ? <ProviderFacts card={resource.provider} /> : null}
+      {resource.provider ? (
+        <ProviderFacts
+          resource={resource}
+          card={resource.provider}
+          values={props.cardSettings}
+          commands={
+            props.providerCommands[resource.machine ?? ""]?.find(
+              (item) => item.name === resource.provider?.name,
+            )?.commands ?? []
+          }
+          onSetting={(key, value) => props.onSetCardSetting(resource, key, value)}
+          onRow={
+            props.providerMachine
+              ? (command, row) =>
+                  props.onRunProviderCommand(
+                    props.providerMachine!,
+                    {
+                      kind: "provider",
+                      provider: resource.provider!.name,
+                      command: command.id,
+                      resource: resource.id,
+                      row,
+                    },
+                    command.confirm ? `${command.title} for this row of ${resource.name}?` : null,
+                  )
+              : null
+          }
+        />
+      ) : null}
       {address ? (
         <div class="row">
           <code>{address}</code>
@@ -3160,6 +3287,9 @@ function CardPanel(props: {
           })}
         </ul>
       )}
+      {isGameCard(resource) ? (
+        <GameDoors resource={resource} onRemove={() => props.onRemoveGame(resource)} />
+      ) : null}
       {state.places.has(resource.id) && resource.id !== ADMIN_RESOURCE_ID ? (
         <div class="field-row">
           <span
@@ -3322,10 +3452,86 @@ const STICKER_CLASSES: Record<ProviderSticker["tone"], string> = {
 };
 
 /** K-1625: the stickers and facts that a provider attaches to its card; kitshn shows them without reading them. */
-function ProviderFacts(props: { card: ProviderCard }) {
+function ProviderFacts(props: {
+  resource: Resource;
+  card: ProviderCard;
+  values: Readonly<Record<string, string>>;
+  commands: ReadonlyArray<ProviderCommand>;
+  onSetting: (key: string, value: string) => void;
+  /** Null while kitshn does not know the machine of the card. */
+  onRow: ((command: ProviderCommand, row: string) => void) | null;
+}) {
   const { card } = props;
   return (
     <>
+      {/* K-717: a setting of the card; a missing value is the default of the setting. */}
+      {card.settings.map((setting) => {
+        const current = props.values[setting.id] ?? setting.default;
+        return (
+          <div key={setting.id} class="row">
+            <span
+              class="label"
+              data-tip={`${setting.title}: ${card.name} gets this value on ${props.resource.name}.`}
+            >
+              {setting.title}
+            </span>
+            <div class="seg small">
+              {setting.values.map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={value === current}
+                  data-tip={`Set ${setting.title} to ${value}. It needs control on this card.`}
+                  onClick={() => value !== current && props.onSetting(setting.id, value)}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      {/* K-1625: a list of the card, with the commands of each row. */}
+      {card.lists.map((list) => (
+        <section key={list.id}>
+          <h3 class="label">{list.title}</h3>
+          <table class="provider-list">
+            <thead>
+              <tr>
+                {list.columns.map((column) => (
+                  <th key={column.id}>{column.title}</th>
+                ))}
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {list.rows.map((row) => (
+                <tr key={row.id}>
+                  {list.columns.map((column) => (
+                    <td key={column.id}>{row.cells[column.id] ?? ""}</td>
+                  ))}
+                  <td>
+                    {(row.commands ?? []).map((id) => {
+                      const command = props.commands.find((item) => item.id === id);
+                      return command && props.onRow ? (
+                        <button
+                          key={id}
+                          type="button"
+                          class="btn"
+                          data-tip={`${command.title} for this row; an offline machine runs it when it connects.`}
+                          onClick={() => props.onRow!(command, row.id)}
+                        >
+                          {command.title}
+                        </button>
+                      ) : null;
+                    })}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      ))}
       {card.droppedAt !== undefined ? (
         <p class="help">
           {card.name} no longer reports this card, since {new Date(card.droppedAt).toLocaleString()}. It keeps

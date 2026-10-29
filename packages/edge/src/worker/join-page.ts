@@ -11,13 +11,22 @@ export interface JoinView {
     readonly reachable: boolean;
     readonly machineOnline: boolean;
   };
+  /** K-2004: the card has an active share in Everyone, so its ports are open to every address and it has no doors. */
+  readonly openToAll: boolean;
   readonly doors: ReadonlyArray<Door>;
   readonly seen: string | null;
   readonly error: string | null;
 }
 
-/** The browser asks these for the address of each family; both answer cross-origin (checked 2026-10-29). */
-export const ADDRESS_PROBES = { v4: "https://ipv4.icanhazip.com", v6: "https://ipv6.icanhazip.com" } as const;
+/**
+ * K-2003: the browser asks each of these for its public address; all answer cross-origin (checked 2026-10-29). Two
+ * IPv4 services on different networks, because a home network can leave through another address per destination.
+ */
+export const ADDRESS_PROBES = [
+  "https://ipv4.icanhazip.com",
+  "https://api.ipify.org",
+  "https://ipv6.icanhazip.com",
+] as const;
 
 export function joinHeaders(nonce: string) {
   return {
@@ -29,7 +38,7 @@ export function joinHeaders(nonce: string) {
       "default-src 'none'",
       `script-src 'nonce-${nonce}'`,
       "style-src 'unsafe-inline'",
-      `connect-src 'self' ${ADDRESS_PROBES.v4} ${ADDRESS_PROBES.v6}`,
+      `connect-src 'self' ${ADDRESS_PROBES.join(" ")}`,
       "frame-ancestors 'none'",
       "form-action 'none'",
       "base-uri 'none'",
@@ -61,12 +70,18 @@ li { margin: 6px 0; }
 </style></head>
 <body><main>
 <h1>${escapeHtml(game.name)}</h1>
-<p class="note">Logged in as ${escapeHtml(email)}</p>
+${
+  view.openToAll
+    ? `<section><div>Open to everyone: join</div><p><code>${escapeHtml(game.address)}</code></p>
+<div class="note">Ports: ${escapeHtml(game.ports.join(", "))}${game.reachable ? "" : ". The game has no public address yet, so it is not reachable."}</div></section>
+<p class="note">Anyone who knows the address can reach the game. Keep the game's own whitelist on if you want to choose the players.</p>
+</main></body></html>`
+    : `<p class="note">Logged in as ${escapeHtml(email)}</p>
 <section id="join"><div>Join with</div><p><code id="address"></code> <button class="quiet" id="copy">Copy</button></p>
 <div class="note" id="ports"></div></section>
-<section id="open"><div><strong>Open the door for your address</strong></div><ul id="addresses"></ul>
+<section id="open"><div><strong>Open the door for your addresses</strong></div><ul id="addresses"><li>Looking for your addresses…</li></ul>
 <p class="note" id="probe-note"></p><button id="open-button" disabled>Open</button> <span class="error" id="error"></span></section>
-<section id="doors-section"><div><strong>Your open doors</strong></div><ul id="doors"></ul></section>
+<section id="doors-section"><div><strong>Your open doors</strong></div><ul id="doors"></ul><button class="quiet" id="end" hidden>End now</button></section>
 <p class="note">While a door is open, everyone who shares your internet address can reach the game. Keep the game's own whitelist on.</p>
 </main>
 <script type="application/json" id="data">${data}</script>
@@ -77,7 +92,7 @@ const item = (text, button) => { const li = document.createElement("li"); li.tex
 const family = (address) => (address && address.includes(":") ? "v6" : "v4");
 async function probe(url) {
   const stop = new AbortController();
-  setTimeout(() => stop.abort(), 4000);
+  setTimeout(() => stop.abort(), 3000);
   try { const answer = await fetch(url, { signal: stop.signal, cache: "no-store" }); return answer.ok ? (await answer.text()).trim() : null; }
   catch { return null; }
 }
@@ -93,23 +108,19 @@ $("ports").textContent = "Ports: " + data.game.ports.join(", ") + (data.game.rea
 $("copy").onclick = () => navigator.clipboard.writeText(data.game.address);
 $("open-button").textContent = "Open for " + data.game.doorHours + " h";
 if (data.error) $("error").textContent = data.error;
-for (const door of data.doors) {
-  const end = document.createElement("button");
-  end.className = "quiet"; end.textContent = "End now";
-  end.onclick = () => send({ action: "close", address: door.address });
-  $("doors").append(item(door.address + ", until " + new Date(door.endsAt).toLocaleString(), end));
-}
+for (const door of data.doors) $("doors").append(item(door.address + ", until " + new Date(door.endsAt).toLocaleString()));
 if (data.doors.length === 0) $("doors").append(item("None"));
+$("end").hidden = data.doors.length === 0;
+$("end").onclick = () => send({ action: "close" });
 (async () => {
-  const [v4, v6] = await Promise.all([probe(data.probes.v4), probe(data.probes.v6)]);
-  const found = { v4, v6 };
-  if (data.seen) found[family(data.seen)] = data.seen;
-  const addresses = [found.v4, found.v6].filter(Boolean);
-  for (const address of addresses) $("addresses").append(item(address + (address === data.seen ? " (kitshn sees this one)" : "")));
-  const missing = ["v4", "v6"].filter((name) => !found[name]).map((name) => (name === "v4" ? "IPv4" : "IPv6"));
+  const answers = await Promise.all(data.probes.map(probe));
+  const addresses = [...new Set([data.seen, ...answers].filter(Boolean))];
+  $("addresses").replaceChildren(...addresses.map((address) => item(address + (address === data.seen ? " (kitshn sees this one)" : ""))));
+  const missing = ["v4", "v6"].filter((name) => !addresses.some((address) => family(address) === name)).map((name) => (name === "v4" ? "IPv4" : "IPv6"));
   $("probe-note").textContent = missing.length === 0 ? "" : "No " + missing.join(" or ") + " address answered, so kitshn opens only the address" + (addresses.length > 1 ? "es" : "") + " above.";
   $("open-button").disabled = addresses.length === 0;
   $("open-button").onclick = () => send({ action: "open", addresses });
 })();
-</script></body></html>`;
+</script></body></html>`
+}`;
 }

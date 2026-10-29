@@ -1,9 +1,18 @@
 import type { ProviderReport } from "@kitshn/local";
 import { describe, expect, it } from "vitest";
 import type { Machine } from "./machine.ts";
-import { type Circle, type Resource, type State, levelForKind, shareKey } from "./model.ts";
-import { applyChanges, forgetProviderChanges, invert } from "./changes.ts";
-import { commandsFor, grantTables, grantsOf, providerCards } from "./providers.ts";
+import { type Circle, OWNER_CIRCLE_ID, type Resource, type State, levelForKind, shareKey } from "./model.ts";
+import { applyChanges, forgetProviderChanges, invert, ruleViolation } from "./changes.ts";
+import {
+  commandsFor,
+  grantTables,
+  grantsOf,
+  machineBusy,
+  providerCards,
+  providerPushes,
+  siteAudiences,
+  reachOf,
+} from "./providers.ts";
 
 const report: ProviderReport = {
   name: "t3",
@@ -188,5 +197,154 @@ describe("forget provider (K-704)", () => {
     const dropped = { ...card, provider: { ...card.provider!, droppedAt: 1 } };
     const waiting = { ...value, resources: new Map([...value.resources, [card.id, dropped]]) };
     expect(Object.keys(grantTables(waiting, "vps", "t3", 0))).toEqual(["app"]);
+  });
+});
+
+describe("pushes to a machine (K-709, K-717, K-1608)", () => {
+  it("gives each provider its grants and card settings, and each state kind the shared and own part", () => {
+    const kinds = [
+      {
+        id: "t3.app",
+        name: "T3 app",
+        levels: { view: "view" },
+        settings: [
+          { id: "updateChannel", title: "Update channel", values: ["nightly", "daily"], default: "nightly" },
+        ],
+      },
+      { id: "t3.settings", name: "settings", levels: {}, state: {} },
+    ];
+    const withSettings = providerCards(
+      machine,
+      [{ ...report, kinds: [...kinds, report.kinds[1]!] }],
+      "example.com",
+    );
+    // K-1623: the app card serves its site, so its Access application's audience goes to the provider.
+    const served = new Map(
+      [...withSettings].map(([id, card]): [string, Resource] => [
+        id,
+        card.kind === "t3.app"
+          ? { ...card, addresses: ["t3-vps.example.com"], provider: { ...card.provider!, site: "t3-vps" } }
+          : card,
+      ]),
+    );
+    const value: State = { ...state([]), resources: served };
+    const app = [...served.values()].find((card) => card.kind === "t3.app")!;
+    const access = (aud: string | null) => ({
+      teamDomain: "team.cloudflareaccess.com",
+      audiencesOf: (cardId: string) => (cardId === app.id && aud ? [aud] : []),
+    });
+    const desired = new Map([
+      [
+        "t3.settings",
+        new Map<string, unknown>([
+          ["", { theme: "dark" }],
+          ["other", { x: 1 }],
+        ]),
+      ],
+    ]);
+    const pushes = providerPushes(
+      value,
+      "vps",
+      [{ name: "t3", kinds }],
+      desired,
+      new Map([[app.id, { updateChannel: "daily" }]]),
+      0,
+      access("aud-app"),
+    );
+    expect(pushes.map((push) => push.key)).toEqual([
+      "grants:t3",
+      "reach:t3",
+      "settings:t3",
+      "access:t3",
+      "desired:t3:t3.settings",
+    ]);
+    expect(pushes[2]).toMatchObject({ values: { app: { updateChannel: "daily" } } });
+    expect(pushes[3]).toMatchObject({
+      access: { teamDomain: "team.cloudflareaccess.com", audiences: ["aud-app"] },
+    });
+    // Another machine's part never reaches this one.
+    expect(pushes[4]).toMatchObject({ state: { shared: { theme: "dark" }, machine: null } });
+    // A stored value that the kind no longer offers falls back to the default.
+    const stale = providerPushes(
+      value,
+      "vps",
+      [{ name: "t3", kinds }],
+      desired,
+      new Map([[app.id, { updateChannel: "weekly" }]]),
+      0,
+      access(null),
+    );
+    expect(stale[2]).toMatchObject({ values: { app: { updateChannel: "nightly" } } });
+    // No application yet: no audience, so the provider accepts only what it accepted before.
+    expect(stale[3]).toMatchObject({ access: { audiences: [] } });
+    // A give-back takes the address off the card at once, but the application answers until the sync deletes it.
+    const givenBack: State = { ...value, resources: new Map([[app.id, { ...app, addresses: [] }]]) };
+    expect(siteAudiences(givenBack, "vps", "t3", access("aud-app").audiencesOf)).toEqual(["aud-app"]);
+  });
+});
+
+describe("reach of a machine (K-1609)", () => {
+  it("lists the cards of the provider on other machines that the machine's token opens, with the level name", () => {
+    const other: Machine = { ...machine, id: "mac", name: "mac", clientId: "mac.access" };
+    const base = state([circle("links", [{ _tag: "machine", machineId: "mac" }], { level: "use" })]);
+    const value: State = { ...base, machines: new Map([...base.machines, ["mac", other]]) };
+    // The cards of vps sit in "links", which holds the machine mac.
+    expect(reachOf(value, "mac", "t3", 0)).toEqual([
+      {
+        machineId: "vps",
+        machineName: "vps",
+        kind: "t3.app",
+        id: "app",
+        address: "t3-vps.example.com",
+        level: "use",
+      },
+      { machineId: "vps", machineName: "vps", kind: "t3.thread", id: "th-1", address: null, level: "send" },
+    ]);
+    // A machine never reaches its own cards, and a pause closes every link (K-1504).
+    expect(reachOf(value, "vps", "t3", 0)).toEqual([]);
+    expect(reachOf({ ...value, paused: "keep-public" }, "mac", "t3", 0)).toEqual([]);
+  });
+});
+
+describe("a busy machine (K-1608)", () => {
+  it("is busy only while a running card of a provider reports busy, not an offline or dropped one", () => {
+    const value = state([]);
+    const app = [...value.resources.values()].find((card) => card.kind === "t3.app")!;
+    const with_ = (card: Resource) => ({
+      ...value,
+      resources: new Map([...value.resources, [app.id, card]]),
+    });
+    const busy = {
+      ...app,
+      provider: { ...app.provider!, facts: [{ label: "busy", value: "true", role: "busy" as const }] },
+    };
+    expect(machineBusy(with_(busy), "vps")).toBe(true);
+    expect(machineBusy(with_({ ...busy, status: "offline" }), "vps")).toBe(false);
+    expect(machineBusy(with_({ ...busy, provider: { ...busy.provider, droppedAt: 1 } }), "vps")).toBe(false);
+    expect(machineBusy(value, "vps")).toBe(false);
+  });
+});
+
+describe("owner control (K-719)", () => {
+  it("gives the Owner circle the top level of an owner-control card wherever it sits, and refuses an override of it", () => {
+    const owner = circle(OWNER_CIRCLE_ID, [{ _tag: "email", email: "owner@b.c" }], {
+      x: 5000,
+      y: 5000,
+      level: "view",
+    });
+    const base = state([owner]);
+    const app = [...base.resources.values()].find((card) => card.kind === "t3.app")!;
+    const guarded = { ...app, provider: { ...app.provider!, ownerControl: true as const } };
+    const value: State = { ...base, resources: new Map([...base.resources, [app.id, guarded]]) };
+    // The card sits at 0,0, outside the Owner circle, and the Owner circle's default is view.
+    expect(grantsOf(value, guarded, 0)).toEqual([
+      expect.objectContaining({ circle: expect.objectContaining({ id: OWNER_CIRCLE_ID }), level: "control" }),
+    ]);
+    expect(grantsOf(base, app, 0)).toEqual([]);
+    const lowered = {
+      ...value,
+      shareSettings: new Map([[shareKey(app.id, OWNER_CIRCLE_ID), { level: "view" as const, endsAt: null }]]),
+    };
+    expect(ruleViolation(lowered)).toMatch(/keeps control/);
   });
 });

@@ -1,6 +1,7 @@
 import type { ProviderReport, ProviderRequest } from "@kitshn/local";
 import { describe, expect, it } from "vitest";
 import { Providers, parseSaved } from "./providers.ts";
+import { pushKey } from "@kitshn/local";
 
 const kinds = [{ id: "t3.thread", name: "thread", levels: { view: "view", use: "send" } }] as const;
 const thread = (id: string) => ({ id, kind: "t3.thread", name: id, status: "running" }) as const;
@@ -17,7 +18,7 @@ const register = (
 
 function providers() {
   const saves: Array<ReadonlyArray<ProviderReport>> = [];
-  const registry = new Providers({ providers: [], grants: {} }, (saved) => saves.push(saved.providers));
+  const registry = new Providers({ providers: [], pushed: {} }, (saved) => saves.push(saved.providers));
   return { registry, saves };
 }
 
@@ -66,9 +67,21 @@ describe("the providers of a machine (K-704, K-705)", () => {
     const app = { ...thread("a"), site: { name: "t3-vps", port: 3773 } };
     registry.apply({ ...register([]), resources: [app] }, 1, new Set());
     expect(registry.sites()).toEqual([{ name: "t3-vps", target: "http://localhost:3773", dev: false }]);
-    expect(registry.setGrants("t3", { a: [] })).toBe(true);
-    expect(registry.setGrants("t3", { a: [] })).toBe(false);
-    expect(registry.grantsOf("t3")).toEqual({ a: [] });
+    expect(registry.setPushed(pushKey.grants("t3"), { a: [] })).toBe(true);
+    expect(registry.setPushed(pushKey.grants("t3"), { a: [] })).toBe(false);
+    registry.setPushed(pushKey.desired("t3", "t3.settings"), { shared: { theme: "dark" }, machine: null });
+    // K-1608: the answer to register gives the saved state, from before kitshn answers; access is null until kitshn
+    // sends it (K-1623).
+    expect(registry.savedFor("t3")).toMatchObject({ access: null });
+    const access = { teamDomain: "team.cloudflareaccess.com", audiences: ["aud-app"] };
+    registry.setPushed(pushKey.access("t3"), access);
+    expect(registry.savedFor("t3")).toEqual({
+      grants: { a: [] },
+      desired: { "t3.settings": { shared: { theme: "dark" }, machine: null } },
+      settings: {},
+      reach: [],
+      access,
+    });
   });
 
   it("forgets only a provider that no connection holds (K-704)", () => {
@@ -84,6 +97,6 @@ describe("the providers of a machine (K-704, K-705)", () => {
 
   it("starts empty from a broken file and says why (K-006)", () => {
     expect(parseSaved({ providers: [{ name: "site" }] }).problem).not.toBeNull();
-    expect(parseSaved(null)).toEqual({ saved: { providers: [], grants: {} }, problem: null });
+    expect(parseSaved(null)).toEqual({ saved: { providers: [], pushed: {} }, problem: null });
   });
 });

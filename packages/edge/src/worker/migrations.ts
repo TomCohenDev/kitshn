@@ -271,6 +271,27 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `CREATE TABLE game_records (type TEXT NOT NULL, name TEXT NOT NULL, card_id TEXT NOT NULL, content TEXT NOT NULL,
       record_id TEXT NOT NULL, error TEXT, retry_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (type, name))`,
   ],
+  // 38: provider state. The desired state of each kind (K-709), with "" as the machine of the shared part; card
+  // settings (K-717), outside the card body that each report rewrites; the last push that each machine applied
+  // (K-1608); and jobs that wait until no provider of their machine is busy (K-613).
+  [
+    "CREATE TABLE desired_state (kind TEXT NOT NULL, machine_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (kind, machine_id))",
+    "CREATE TABLE card_settings (card_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (card_id, key))",
+    "CREATE TABLE applied_state (machine_id TEXT NOT NULL, key TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (machine_id, key))",
+    "ALTER TABLE jobs ADD COLUMN when_idle INTEGER NOT NULL DEFAULT 0",
+  ],
+  // 39: the cross-machine work that source machines report (K-1610): exec runs and forwarded tool calls, never their
+  // arguments or output. Events, not revisions; 30 days, at most 2,000.
+  [
+    `CREATE TABLE link_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, source TEXT NOT NULL,
+      target TEXT NOT NULL, kind TEXT NOT NULL, thread TEXT, name TEXT NOT NULL, cwd TEXT, outcome TEXT NOT NULL,
+      exit_code INTEGER)`,
+  ],
+  // 40: device invites (K-1601). The lookup of the one-time code and the token it opens; never the code or a secret.
+  [
+    `CREATE TABLE device_invites (lookup TEXT PRIMARY KEY, token_id TEXT NOT NULL UNIQUE, client_id TEXT NOT NULL,
+      name TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

@@ -12,6 +12,8 @@ export const PING_TIMEOUT_MS = 30_000;
 export const LIVENESS_CHECK_MS = 120_000;
 /** K-602 */
 export const JOIN_CODE_MS = 10 * 60 * 1000;
+/** K-1601 */
+export const DEVICE_INVITE_MS = 15 * 60 * 1000;
 /** Job output that kitshn keeps, at most. The daemon caps it too. */
 export const OUTPUT_LIMIT = 64 * 1024;
 
@@ -71,7 +73,10 @@ export function parseCommand(value: unknown): Command | string {
       return "A provider command names its provider and its command.";
     if (resource !== null && (typeof resource !== "string" || resource.length > 64))
       return "A provider command names a card id, or none for the machine.";
-    return { kind: "provider", provider, command, resource };
+    const row = field("row");
+    if (row !== undefined && (typeof row !== "string" || row.length > 64))
+      return "A row of a provider command is an id of at most 64 characters.";
+    return { kind: "provider", provider, command, resource, ...(row === undefined ? {} : { row }) };
   }
   return `kitshn has no command "${String(value.kind)}".`;
 }

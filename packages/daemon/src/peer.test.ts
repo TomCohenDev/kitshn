@@ -38,8 +38,18 @@ describe("local users in machine.json (K-701)", () => {
     expect(requestAllowed("reconnect", 1001, own)).toBe(false);
     // K-1710: a local user asks kitshn as the machine.
     expect(requestAllowed("ask", 1001, own)).toBe(true);
+    // K-1612, K-605: a local user cancels the machine's own queued jobs and reads its samples.
+    expect(requestAllowed("job-cancel", 1001, own)).toBe(true);
+    expect(requestAllowed("samples", 1001, own)).toBe(true);
     // K-704: a provider adds cards and enforces their grants, so only the daemon user and root are providers.
-    for (const type of ["register", "upsert", "remove", "command-result", "provider-forget"] as const) {
+    for (const type of [
+      "register",
+      "upsert",
+      "remove",
+      "command-result",
+      "provider-forget",
+      "desired-set",
+    ] as const) {
       expect(requestAllowed(type, 1001, own)).toBe(false);
       expect(requestAllowed(type, own, own)).toBe(true);
       expect(requestAllowed(type, 0, own)).toBe(true);

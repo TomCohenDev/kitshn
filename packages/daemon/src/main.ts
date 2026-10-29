@@ -125,6 +125,10 @@ import { RUNNING_FORMAT, VOLUME_FORMAT, idleVolumes, volumeRemoveRefusal } from 
 import { keepBuild, keptId, keptTag, rollbackOverride, serviceImages, staleTags } from "./keep.ts";
 import { TokenCache } from "./tokens.ts";
 import { Providers, parseSaved } from "./providers.ts";
+import { desiredProblem } from "@kitshn/local";
+import { linkSocketProblem, serveLinks } from "./link.ts";
+import { lastHour, lastSamples } from "./samples.ts";
+import { pushKey } from "@kitshn/local";
 import { listenerUid, portOf } from "./listener.ts";
 import { MAX_FORWARDS, forwardTarget, passedHeaders, readBounded } from "./forward.ts";
 import {
@@ -378,6 +382,17 @@ async function providerCommand(argv: ReadonlyArray<string>) {
     (bytes) => process.stdout.write(bytes),
   ).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   if (outcome !== "closed") fail(notRunning());
+}
+
+/**
+ * K-1609, K-621: `kitshn link-check <socket>` exits 0 when this account's daemon serves the link socket, so a provider
+ * that cannot read a pipe's server account itself checks it before its first call.
+ */
+function linkCheckCommand(path: string | undefined) {
+  if (!path) fail("usage: kitshn link-check <socket or pipe>");
+  const problem = linkSocketProblem(platform, path!);
+  if (problem) fail(problem);
+  console.log(`${path} is served by this account.`);
 }
 
 /** K-702: one request to the running daemon; null when it does not run. An error answer ends the command. */
@@ -832,11 +847,16 @@ function sample() {
   };
 }
 
+/** K-605: the samples of the last hour, for `samples` on the local socket; read from the file at start. */
+const RECENT_SAMPLES = 60;
+let recentSamples: Array<ReturnType<typeof sample>> = [];
+
 /** K-606: the daemon keeps 30 days of samples on its own disk. */
 function keepSample(value: ReturnType<typeof sample>) {
   const file = join(paths.data, "samples.jsonl");
   mkdirSync(paths.data, { recursive: true });
   appendFileSync(file, `${JSON.stringify(value)}\n`);
+  recentSamples = [...recentSamples, value].slice(-RECENT_SAMPLES);
 }
 
 function pruneSamples() {
@@ -1700,7 +1720,7 @@ function report() {
       // K-624: Windows has no Docker setup in v1, so the map refuses Compose, logs and backups there with a reason.
       capabilities:
         platform === "win32"
-          ? ["update", "update-gz", "provider"]
+          ? ["update", "update-gz", "provider", "access"]
           : [
               "update",
               "update-gz",
@@ -1712,6 +1732,10 @@ function report() {
               "backup",
               "backup-restore",
               "provider",
+              // K-1608: this daemon answers `applied` for each push that it saved.
+              "applied",
+              // K-1623: this daemon saves the Access audiences of its providers and gives them on.
+              "access",
               ...(doorState.problem === null ? ["doors"] : []),
             ],
       ...(keptBytes === undefined ? {} : { keptBytes }),
@@ -2240,13 +2264,44 @@ function connect(config: JoinSecrets) {
         accepted(`with the key ${message.fingerprint}`);
       } else if (message.type === "rotateKey") {
         void rotateKey(ws);
-      } else if (message.type === "grants") {
-        // K-706: the provider gets each change at once, and the saved copy after a restart (K-1608).
-        if (registry().setGrants(message.provider, message.tables)) {
+      } else if (
+        message.type === "grants" ||
+        message.type === "desired" ||
+        message.type === "settings" ||
+        message.type === "reach" ||
+        message.type === "access"
+      ) {
+        // K-1608: the daemon saves each push, gives it to the provider, and tells kitshn that it applied it.
+        const key =
+          message.type === "grants"
+            ? pushKey.grants(message.provider)
+            : message.type === "settings"
+              ? pushKey.settings(message.provider)
+              : message.type === "reach"
+                ? pushKey.reach(message.provider)
+                : message.type === "access"
+                  ? pushKey.access(message.provider)
+                  : pushKey.desired(message.provider, message.kind);
+        const { hash: _hash, ...event } = message;
+        const value =
+          message.type === "grants"
+            ? message.tables
+            : message.type === "settings"
+              ? message.values
+              : message.type === "reach"
+                ? message.cards
+                : message.type === "access"
+                  ? message.access
+                  : message.state;
+        if (registry().setPushed(key, value)) {
           const connection = registry().connectionOf(message.provider);
           const emit = connection === null ? undefined : providerEmitters.get(connection);
-          emit?.({ type: "grants", provider: message.provider, tables: message.tables });
+          emit?.(event);
         }
+        sendOn(ws, { type: "applied", key, hash: message.hash });
+      } else if (message.type === "name") {
+        // K-704: the answer to register names the machine, also before the next connection.
+        registry().setPushed(MACHINE_NAME_KEY, message.name);
       } else if (message.type === "forgetProvider") {
         // K-704: a provider that a connection holds runs, so the forget does not apply to it.
         if (
@@ -2254,6 +2309,9 @@ function connect(config: JoinSecrets) {
           registry().forget(message.provider) === null
         )
           sendProviders();
+      } else if (message.type === "requestAnswer") {
+        answerWaiters.get(message.requestId)?.(message.error);
+        answerWaiters.delete(message.requestId);
       } else if (message.type === "dropTokens") {
         keptTokens.drop(message.repo);
       } else if (message.type === "logs") {
@@ -2317,6 +2375,11 @@ function connect(config: JoinSecrets) {
       // K-1805: kitshn forgets the tails of a closed connection.
       if (socket === ws) stopTails();
       if (socket === ws) socket = null;
+      // K-709: a request in flight gets no answer from a closed connection.
+      for (const [requestId, settle] of answerWaiters) {
+        settle(`the connection to kitshn closed (${event.code}) before its answer.`);
+        answerWaiters.delete(requestId);
+      }
       // K-1716: an ask in flight gets no result from a closed connection; its proposal stays.
       for (const [requestId, settle] of askWaiters) {
         settle({
@@ -2559,6 +2622,18 @@ async function runCommand() {
   };
   const local = await listenLocal(paths.socket, { ...socketOptions, access: "private" });
   process.on("exit", local.stop);
+  // K-1609: the link proxy of the providers, in the same private folder, so only the daemon user and root reach it.
+  // K-1609, K-621: a start without the link proxy still serves the rest; the answer to register then names none.
+  const links = await serveLinks(linkSocket, {
+    reachOf: (provider) => registry().reachOf(provider),
+    token: () => (joined ? { clientId: joined.clientId, clientSecret: joined.clientSecret } : null),
+    log,
+  }).catch((error: unknown) => {
+    log(`no link proxy: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  });
+  linkServed = links !== null;
+  if (links) process.on("exit", links.stop);
   // K-701: the users in `localUsers` connect here. An unsafe folder costs only this socket, not the daemon.
   const shared =
     platform === "win32"
@@ -2574,6 +2649,12 @@ async function runCommand() {
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => process.exit(0));
   pruneSamples();
   startDoors();
+  recentSamples = lastSamples(
+    existsSync(join(paths.data, "samples.jsonl"))
+      ? readFileSync(join(paths.data, "samples.jsonl"), "utf8")
+      : "",
+    RECENT_SAMPLES,
+  );
   await ensureTunnel(config);
   watchTunnel();
   // K-821: the machine card shows what the kept builds take on disk.
@@ -2621,6 +2702,24 @@ function readMachineFile(): unknown {
     return null;
   }
 }
+
+/** The requests to kitshn that wait for its `answer`, by request id: null, or why kitshn refused. */
+const answerWaiters = new Map<string, (error: string | null) => void>();
+/** K-704: where the daemon keeps the machine's name among its saved pushes. */
+const MACHINE_NAME_KEY = "machine:name";
+
+/** K-1609: the Unix socket of the link proxy, next to the private local socket. */
+/**
+ * K-1609: the link proxy, next to the private local socket. On Windows a named pipe has no private folder, so its name
+ * ends in a part that is new at each start: no other account can take it first, and a provider learns it only from
+ * the answer to `register` (K-621).
+ */
+const linkSocket =
+  platform === "win32"
+    ? `${paths.socket}-link-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`
+    : join(dirname(paths.socket), "link.sock");
+/** False when the link proxy did not start; the answer to `register` then names no socket. */
+let linkServed = false;
 
 /** K-704: the providers of this machine, saved in `providers.json`. */
 const providersFile = () => join(paths.data, "providers.json");
@@ -2735,6 +2834,7 @@ async function runProviderCommand(
       commandId: jobId,
       command: command.command,
       resource: command.resource,
+      ...(command.row === undefined ? {} : { row: command.row }),
     });
   });
 }
@@ -2773,6 +2873,62 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
     waiter.settle({ ok: request.ok, exitCode: request.ok ? 0 : 1, output: request.output });
     return { id, type: "command-result" };
   }
+  if (request.type === "samples") {
+    return { id, type: "samples", newest: sample(), history: lastHour(recentSamples, Date.now()) };
+  }
+  if (request.type === "job-cancel") {
+    const ws = socket;
+    if (ws === null || challenge === null)
+      throw new Error("the daemon has no signed connection to kitshn, so it cannot cancel a job now.");
+    const requestId = crypto.randomUUID();
+    const error = await new Promise<string | null>((resolve) => {
+      answerWaiters.set(requestId, resolve);
+      sendOn(ws, { type: "cancelJob", requestId, jobId: request.jobId });
+    });
+    if (error !== null) throw new Error(error);
+    return { id, type: "job-cancel" };
+  }
+  if (request.type === "audit") {
+    // K-1610: only the provider's own connection, and only over a signed connection; kitshn names the source.
+    if (registry().connectionOf(request.provider) !== caller.connection)
+      throw new Error(`register ${request.provider} on this connection first (K-704).`);
+    const ws = socket;
+    if (ws === null || challenge === null)
+      throw new Error("the daemon has no signed connection to kitshn, so kitshn cannot record the call now.");
+    sendOn(ws, { type: "audit", audit: request.audit });
+    return { id, type: "audit" };
+  }
+  if (request.type === "desired-set") {
+    // K-709: only the connection that registered the provider, and only over a signed connection to kitshn.
+    if (registry().connectionOf(request.provider) !== caller.connection)
+      throw new Error(`register ${request.provider} on this connection first (K-704).`);
+    const ws = socket;
+    if (ws === null || challenge === null)
+      throw new Error("the daemon has no signed connection to kitshn, so kitshn cannot store the state now.");
+    const kinds =
+      registry()
+        .reports()
+        .find((report) => report.name === request.provider)?.kinds ?? [];
+    const problem = desiredProblem(kinds, request.kind, request.value);
+    if (problem) throw new Error(problem);
+    // kitshn checks again when it writes; the provider gets that answer, not only the daemon's.
+    const { id: _id, type: _type, ...change } = request;
+    const requestId = crypto.randomUUID();
+    const error = await new Promise<string | null>((resolve) => {
+      // Like an ask, a request waits at most 60 seconds for kitshn.
+      const timer = setTimeout(() => {
+        answerWaiters.delete(requestId);
+        resolve("kitshn did not answer within 60 seconds; the state may or may not be stored.");
+      }, 60_000);
+      answerWaiters.set(requestId, (answer) => {
+        clearTimeout(timer);
+        resolve(answer);
+      });
+      sendOn(ws, { type: "desiredSet", requestId, ...change });
+    });
+    if (error !== null) throw new Error(error);
+    return { id, type: "desired-set" };
+  }
   if (request.type === "provider-forget") {
     const problem = registry().forget(request.provider);
     if (problem) throw new Error(problem);
@@ -2797,7 +2953,9 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
       id,
       type: "register",
       machineId: joined.machineId,
-      grants: registry().grantsOf(request.provider),
+      ...registry().savedFor(request.provider),
+      linkSocket: linkServed ? linkSocket : null,
+      machineName: registry().pushedValue(MACHINE_NAME_KEY) as string | null,
     };
   }
   if (request.type === "attester-set") return setAttester(request, caller);
@@ -2866,6 +3024,9 @@ switch (command) {
   case "provider":
     await providerCommand(args);
     break;
+  case "link-check":
+    linkCheckCommand(args[0]);
+    break;
   case "publish":
   case "address":
   case "logs":
@@ -2920,6 +3081,7 @@ kitshn attester set --prefix <p.> --url <loopback url> --token-env <NAME>
                                         register an attester of thread labels, as the daemon user or root (K-1751)
 kitshn provider                         join stdin and stdout to the local socket, for a provider (K-704)
 kitshn provider forget <name>           drop a provider that does not run, as the daemon user or root (K-704)
+kitshn link-check <socket or pipe>      exit 0 when this account's daemon serves that link proxy (K-1609)
 kitshn agent <action> [target]          ask kitshn as this machine (K-1710): --reason, --label k=v, --body json
 ${AGENT_USAGE}
 kitshn setup-git                        git asks kitshn first for github.com tokens (K-1763)

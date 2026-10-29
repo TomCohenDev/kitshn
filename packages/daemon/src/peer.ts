@@ -71,6 +71,11 @@ const REQUEST_SENDERS: Record<Request["type"], "local-users" | "daemon-user-or-r
   remove: "daemon-user-or-root",
   "command-result": "daemon-user-or-root",
   "provider-forget": "daemon-user-or-root",
+  "desired-set": "daemon-user-or-root",
+  audit: "daemon-user-or-root",
+  // K-1612, K-605: a local user cancels the machine's own queued jobs and reads its samples, as with `ask`.
+  "job-cancel": "local-users",
+  samples: "local-users",
 };
 
 export const requestAllowed = (type: Request["type"], uid: number, own: number) =>

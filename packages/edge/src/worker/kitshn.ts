@@ -48,6 +48,7 @@ import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
   OWNER_CIRCLE_ID,
+  shareKey,
   MACHINE_RIGHT_NAMES,
   type MachineRight,
   type GitHubWay,
@@ -63,6 +64,8 @@ import {
   UNDO_SOURCES,
   type UndoSource,
   circlesHolding,
+  fnv,
+  levelName,
 } from "../core/model.ts";
 import {
   type Command,
@@ -86,6 +89,7 @@ import {
   parsePublicKey,
   joinLookup,
   newChallenge,
+  newInviteCode,
   newJoinCode,
   rotateText,
   sealJoin,
@@ -143,6 +147,7 @@ import {
 import {
   DEFAULT_DOOR_MS,
   type Door,
+  DOOR_LIMITS,
   doorAddress,
   doorMachine,
   doorPlan,
@@ -155,10 +160,12 @@ import {
   relayHost,
 } from "../core/game.ts";
 import type {
+  AddressHold,
   DeployNote,
   MachineView,
   OrphanWorker,
   AskEventView,
+  LinkEventView,
   ProposalView,
   RepoView,
   RevisionView,
@@ -257,17 +264,22 @@ import {
   newLibraryId,
   randomAddressName,
   objectKey,
+  openToAll,
   slotKey,
   uploadKind,
 } from "../core/library.ts";
 import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
-import { commandsFor, grantTables, providerCards } from "../core/providers.ts";
+import { commandsFor, machineBusy, providerCards, providerPushes, reachOf } from "../core/providers.ts";
 import {
+  type LinkAudit,
+  LinkAudit as LinkAuditSchema,
   type ProviderCommand,
+  desiredProblem,
   type ProviderKind,
   type ProviderReport,
   decodeProviderReports,
+  pushKey,
   reportProblem,
 } from "@kitshn/local";
 import { seed } from "../core/seed.ts";
@@ -373,6 +385,10 @@ import {
   ingressAccess,
   fitAttachment,
   liveSiteId,
+  type AccessAppListing,
+  type ForeignPath,
+  foreignHolds,
+  foreignPaths,
   LIVE_LABEL,
   reachableAddresses,
   offlineReason,
@@ -387,6 +403,7 @@ import {
 } from "./live.ts";
 import {
   JOB_EXPIRY_MS,
+  DEVICE_INVITE_MS,
   JOIN_CODE_MS,
   type Job,
   OUTPUT_LIMIT,
@@ -443,6 +460,11 @@ const attachmentOf = (socket: WebSocket) => socket.deserializeAttachment() as At
 /** K-619, K-909: every write of a machine socket's attachment, trimmed to the attachment budget. */
 const saveMachine = (socket: WebSocket, attachment: Extract<Attachment, { kind: "machine" }>) =>
   socket.serializeAttachment(fitAttachment(attachment));
+
+const decodeLinkAudit = Schema.decodeUnknownSync(LinkAuditSchema);
+/** K-1610: how often the maps hear of new link events, and how many reports of one machine kitshn takes a minute. */
+const LINK_BROADCAST_MS = 10_000;
+const LINK_AUDITS_PER_MINUTE = 120;
 
 /** K-704: what kitshn keeps of one provider's registration; its cards are rows of `resources`. */
 interface ProviderRegistration {
@@ -773,6 +795,8 @@ export class Kitshn extends DurableObject<Env> {
   private presence = new Map<string, { online: boolean; lastSeen: number; os: MachineOs | null }>();
   /** K-2004: the last open or close of a door, by card and person. */
   private doorTurns = new Map<string, number>();
+  /** K-2004: the open-to-all game cards of the last door plans; null after a restart, so the next check sends all. */
+  private openGamesSent: string | null = null;
   /**
    * K-1113: the hash of each stored card icon, the bytes stay in SQLite until a map asks. K-1114: when each icon
    * last changed, so a daemon changes one at most once an hour. Read on first use (K-1302).
@@ -798,10 +822,22 @@ export class Kitshn extends DurableObject<Env> {
   }
   /** K-1104: live sites of the machines. */
   private liveSites = new Map<string, LiveSite>();
+  /** K-1610: when an audit last told the maps of new link events. */
+  private linkBroadcastAt = 0;
+  /** K-1610: the audit reports of each machine in the current minute. */
+  private linkRates = new Map<string, { minute: number; count: number; dropped: number }>();
   /** K-704: the kinds and commands of each machine's providers, by machine id. */
   private providerRegs = new Map<string, Array<ProviderRegistration>>();
-  /** K-706: the grant tables that each signed connection got last, by `<machine id>/<provider>`, as JSON. */
+  /** K-1608: the hash of each push of each machine with providers, by machine id and push key. */
+  private pushHashes = new Map<string, Map<string, string>>();
+  /** K-1608: the hash of what each signed connection got last, by `<machine id>/<push key>`. */
   private sentGrants = new Map<string, string>();
+  /** K-709: the parts of each desired state, by kind and by machine id ("" for the shared part). */
+  private desiredState = new Map<string, Map<string, unknown>>();
+  /** K-717: card setting values, by card id. */
+  private cardSettings = new Map<string, Record<string, string>>();
+  /** K-1608: the hash of the last push that each machine applied, by `<machine id>/<push key>`. */
+  private applied = new Map<string, string>();
   /** K-1117: the library items that an update, a restore or a delete changes now. */
   private busyItems = new Set<string>();
   /**
@@ -835,6 +871,17 @@ export class Kitshn extends DurableObject<Env> {
   private setMeta(key: string, value: string) {
     if (this.meta(key) !== value)
       this.sql("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", key, value);
+  }
+
+  /** K-1623: the record that served a taken address before, kept until the owner gives the address back. */
+  private handoverOf(siteId: string): AddressHandover | null {
+    const value = this.meta(`address-handover:${siteId}`);
+    return value === null ? null : (JSON.parse(value) as AddressHandover);
+  }
+
+  private setHandover(siteId: string, value: AddressHandover | null) {
+    if (value === null) this.sql("DELETE FROM meta WHERE key = ?", `address-handover:${siteId}`);
+    else this.setMeta(`address-handover:${siteId}`, JSON.stringify(value));
   }
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -932,6 +979,24 @@ export class Kitshn extends DurableObject<Env> {
           state: row.state,
         },
       ]),
+    );
+    this.desiredState = new Map();
+    for (const row of this.sql<{ kind: string; machine_id: string; body: string }>(
+      "SELECT kind, machine_id, body FROM desired_state",
+    ))
+      (this.desiredState.get(row.kind) ?? this.desiredState.set(row.kind, new Map()).get(row.kind)!).set(
+        row.machine_id,
+        JSON.parse(row.body) as unknown,
+      );
+    this.cardSettings = new Map();
+    for (const row of this.sql<{ card_id: string; key: string; value: string }>(
+      "SELECT card_id, key, value FROM card_settings",
+    ))
+      this.cardSettings.set(row.card_id, { ...this.cardSettings.get(row.card_id), [row.key]: row.value });
+    this.applied = new Map(
+      this.sql<{ machine_id: string; key: string; hash: string }>(
+        "SELECT machine_id, key, hash FROM applied_state",
+      ).map((row) => [`${row.machine_id}/${row.key}`, row.hash]),
     );
     this.providerRegs = new Map();
     for (const row of this.sql<{ machine_id: string; body: string }>(
@@ -1482,6 +1547,7 @@ export class Kitshn extends DurableObject<Env> {
     this.state = after;
     this.clearAccessFailures();
     this.closeLostDoors(now);
+    this.syncOpenGames(now);
     for (const change of changes) {
       if (change._tag === "shareSetting" || change._tag === "cardEnd" || change._tag === "place")
         this.stuckShares.delete(change.id);
@@ -3201,6 +3267,15 @@ export class Kitshn extends DurableObject<Env> {
       previousVersions: this.sql<{ id: string }>(
         "SELECT id FROM library WHERE previous_size IS NOT NULL",
       ).map((row) => row.id),
+      addressHolds: Object.fromEntries(
+        [...this.liveSites.values()].flatMap((site): Array<[string, AddressHold]> => {
+          if (!this.state.resources.get(site.id)?.provider) return [];
+          if (site.state === "refused") return [[site.id, "in-use"]];
+          if (site.state === "handover") return [[site.id, "taking"]];
+          const handover = site.state === "ok" ? this.handoverOf(site.id) : null;
+          return handover && !handover.released ? [[site.id, "taken"]] : [];
+        }),
+      ),
       handoverCards: this.sql<{ id: string }>(
         `SELECT id FROM library WHERE added_by IS NOT NULL AND kind = 'page'
          UNION SELECT card_id AS id FROM agent_sites
@@ -3225,6 +3300,8 @@ export class Kitshn extends DurableObject<Env> {
       }, {}),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
+      // K-717: only of cards that exist; an undoable removal keeps the rows, so Undo brings the settings back.
+      cardSettings: Object.fromEntries([...this.cardSettings].filter(([id]) => this.state.resources.has(id))),
       providerCommands: Object.fromEntries(
         [...this.providerRegs].map(([machineId, regs]) => [
           machineId,
@@ -3234,6 +3311,7 @@ export class Kitshn extends DurableObject<Env> {
       // K-1902: the live asks go only to who may answer them; History keeps every ask for the owner (K-1717).
       proposals: this.answerableProposals(caller.visitor),
       askEvents: this.recentAskEvents(),
+      linkEvents: this.recentLinkEvents(),
       githubDefaultWay: this.meta("github_default_way") === "app" ? "app" : "not-kitshn",
       // K-1767: the newest 20 runs of pull requests of the App that wait for Deploy.
       botRuns: this.sql<{ repo_id: string; repo: string; pr: number; sha: string; at: number }>(
@@ -3271,6 +3349,7 @@ export class Kitshn extends DurableObject<Env> {
       keyFailure: this.keyFailures.get(machine.id) ?? null,
       orphanVolumes: orphanVolumes(live?.volumes ?? [], this.state),
       servers: live?.servers ?? [],
+      queued: this.queuedFor(machine, live?.status ?? null),
     };
   }
 
@@ -3299,6 +3378,8 @@ export class Kitshn extends DurableObject<Env> {
     this.reconcileNotifications();
     // K-1716: a change can take a code right away.
     this.revokeTokens(null, true);
+    // K-1608: the pushes go out, and their hashes count the queue, before the maps read the counts.
+    this.pushGrants();
     const repos = this.repoViews();
     for (const socket of this.ctx.getWebSockets("map")) {
       const attachment = attachmentOf(socket);
@@ -3310,26 +3391,209 @@ export class Kitshn extends DurableObject<Env> {
       }
       send(socket, { type: "snapshot", snapshot: this.snapshot(caller, repos) });
     }
-    this.pushGrants();
   }
 
   /** K-706: sends each provider of each signed connection its grant tables when they changed since the last send. */
   private pushGrants(now = Date.now()) {
-    for (const [machineId, regs] of this.providerRegs) {
+    this.pushHashes.clear();
+    for (const machineId of this.providerRegs.keys()) {
+      const pushes = this.pushesOf(machineId, now);
+      this.pushHashes.set(machineId, new Map(pushes.map(({ key, hash }) => [key, hash])));
       const socket = this.ctx.getWebSockets(machineId).find((item) => {
         const attachment = attachmentOf(item);
         return attachment?.kind === "machine" && attachment.check === "signed";
       });
       if (!socket) continue;
-      for (const { name } of regs) {
-        const tables = grantTables(this.state, machineId, name, now);
-        const key = `${machineId}/${name}`;
-        const text = JSON.stringify(tables);
-        if (this.sentGrants.get(key) === text) continue;
-        this.sentGrants.set(key, text);
-        send(socket, { type: "grants", provider: name, tables } satisfies ServerToDaemon);
+      for (const { key, hash, push } of pushes) {
+        if (this.sentGrants.get(`${machineId}/${key}`) === hash) continue;
+        this.sentGrants.set(`${machineId}/${key}`, hash);
+        const { key: _key, ...message } = push;
+        send(socket, { ...message, hash } as ServerToDaemon);
       }
     }
+  }
+
+  /** K-1608: every push that the providers of a machine get now, each with the hash of its content. */
+  private pushesOf(machineId: string, now = Date.now()) {
+    return providerPushes(
+      this.state,
+      machineId,
+      this.providerRegs.get(machineId) ?? [],
+      this.desiredState,
+      this.cardSettings,
+      now,
+      {
+        teamDomain: this.env.ACCESS_TEAM_DOMAIN,
+        // An application lives until the sync deletes it, so its audience stays until then, also after a give-back.
+        audiencesOf: (cardId) =>
+          [...this.access.values()].flatMap((row) =>
+            row.key.startsWith(`app:${cardId}:`) && row.cfId && row.aud ? [row.aud] : [],
+          ),
+      },
+    ).map((push) => {
+      const text = JSON.stringify(push);
+      return { key: push.key, hash: `${fnv(text)}${fnv(text, 0x050c5d1f)}`, push };
+    });
+  }
+
+  /** K-709: the kinds of desired state that the providers registered, with their JSON Schema. */
+  private stateKind(kind: string) {
+    for (const regs of this.providerRegs.values())
+      for (const reg of regs) {
+        const found = reg.kinds.find((item) => item.id === kind && item.state !== undefined);
+        if (found) return found;
+      }
+    return null;
+  }
+
+  /** K-709: every part of one desired state, for the editor of the map and for agents. */
+  private readDesired(kind: string) {
+    const found = this.stateKind(kind);
+    if (!found)
+      return Response.json({ error: `No provider registered the state ${kind} (K-709).` }, { status: 404 });
+    const parts = this.desiredState.get(kind) ?? new Map<string, unknown>();
+    return Response.json({
+      kind,
+      schema: found.state?.schema ?? null,
+      shared: parts.get("") ?? null,
+      machines: Object.fromEntries([...parts].filter(([machineId]) => machineId !== "")),
+    });
+  }
+
+  /** K-709: the map sets the shared part (the admin) or the part of one machine (control on that machine). */
+  private putDesired(caller: Caller, kind: string, body: unknown) {
+    if (!this.stateKind(kind))
+      return Response.json({ error: `No provider registered the state ${kind} (K-709).` }, { status: 404 });
+    if (!isRecord(body) || !("value" in body))
+      return Response.json(
+        { error: "Send { machineId, value }; machineId null sets the shared part." },
+        { status: 400 },
+      );
+    const machineId = typeof body["machineId"] === "string" ? body["machineId"] : null;
+    if (machineId !== null && !this.state.machines.has(machineId))
+      return Response.json({ error: `No machine "${machineId}" exists.` }, { status: 404 });
+    if (machineId !== null && !this.canControl(caller.visitor, machineId))
+      return Response.json({ error: "A part of a machine needs control on that machine." }, { status: 403 });
+    const refusal = this.writeDesired(kind, machineId ?? "", body["value"], caller.actor);
+    return refusal ? Response.json({ error: refusal }, { status: 413 }) : Response.json({ ok: true });
+  }
+
+  /**
+   * K-717: one card setting of a provider card. It needs control on the card, which kitshn checks here; it changes
+   * no access, so it is no proposal (K-715). History records it without Undo.
+   */
+  private setCardSetting(caller: Caller, cardId: string, body: unknown) {
+    const card = this.state.resources.get(cardId);
+    const key = isRecord(body) && typeof body["key"] === "string" ? body["key"] : null;
+    const value = isRecord(body) && typeof body["value"] === "string" ? body["value"] : null;
+    const setting = card?.provider?.settings.find((item) => item.id === key);
+    if (!card || !setting)
+      return Response.json({ error: `${cardId} has no setting ${key}.` }, { status: 404 });
+    if (value === null || !setting.values.includes(value))
+      return Response.json(
+        { error: `${setting.title} is one of ${setting.values.join(", ")}.` },
+        { status: 400 },
+      );
+    const state =
+      this.state.paused && this.hasAdmin(caller.visitor) ? { ...this.state, paused: null } : this.state;
+    if (visitorLevel(state, card, caller.visitor, Date.now()) !== "control")
+      return Response.json(
+        { error: `${setting.title} needs control on ${card.name} (K-717).` },
+        { status: 403 },
+      );
+    this.ctx.storage.transactionSync(() => {
+      this.sql(
+        "INSERT OR REPLACE INTO card_settings (card_id, key, value) VALUES (?, ?, ?)",
+        card.id,
+        setting.id,
+        value,
+      );
+      this.insertRevision(caller.actor, `Set ${setting.title} of ${card.name} to ${value} (K-717)`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    return Response.json({ ok: true });
+  }
+
+  /** K-1608, K-1625: a provider card of the machine reports the fact `busy` as "true". */
+  private busy(machineId: string) {
+    return machineBusy(this.state, machineId);
+  }
+
+  /**
+   * K-1608: how many pushes a machine has not applied yet; a machine without providers has none. Null when it never
+   * answered `applied`: a daemon from before K-1608 does not, so its count is unknown, not a growing number.
+   */
+  private queuedFor(machine: Machine, status: MachineStatus | null): number | null {
+    // A machine without a key gets no pushes (K-1708), so nothing waits for it.
+    if (machine.key?.kind !== "public") return 0;
+    const pushes = this.hashesOf(machine.id);
+    if (pushes.size === 0) return 0;
+    // An online daemon that does not name `applied` never answers it, so its count is unknown.
+    if (status !== null && !status.capabilities?.includes("applied")) return null;
+    // A daemon from before K-1623 never applies the access push, so its count leaves that push out.
+    const access = status === null || status.capabilities?.includes("access") === true;
+    return [...pushes].filter(
+      ([key, hash]) =>
+        (access || !key.startsWith("access:")) && this.applied.get(`${machine.id}/${key}`) !== hash,
+    ).length;
+  }
+
+  /** K-1608: the hash of each push of a machine, from the last `pushGrants`, or counted now after a restart. */
+  private hashesOf(machineId: string): ReadonlyMap<string, string> {
+    const known = this.pushHashes.get(machineId);
+    if (known) return known;
+    const hashes = new Map(this.pushesOf(machineId).map(({ key, hash }) => [key, hash]));
+    this.pushHashes.set(machineId, hashes);
+    return hashes;
+  }
+
+  /**
+   * K-709: a provider of the machine sets its part of a desired state, or the shared part. kitshn stores it and pushes
+   * it to every machine of the provider; History records it without Undo.
+   */
+  private setDesiredFromMachine(
+    machine: Machine,
+    message: Extract<DaemonMessage, { type: "desiredSet" }>,
+  ): string | null {
+    const kinds =
+      this.providerRegs.get(machine.id)?.find((item) => item.name === message.provider)?.kinds ?? [];
+    return (
+      desiredProblem(kinds, message.kind, message.value) ??
+      this.writeDesired(message.kind, message.part === "shared" ? "" : machine.id, message.value, {
+        _tag: "machine",
+        machineId: machine.id,
+        name: machine.name,
+      })
+    );
+  }
+
+  /** K-709: stores one part of a desired state, or says why not. A part of null clears it. */
+  private writeDesired(kind: string, machineId: string, value: unknown, actor: Actor): string | null {
+    const text = JSON.stringify(value ?? null);
+    const kinds = [...this.providerRegs.values()].flatMap((regs) => regs.flatMap((reg) => reg.kinds));
+    const problem = desiredProblem(kinds, kind, value);
+    if (problem) return problem;
+    if (deepEqual(this.desiredState.get(kind)?.get(machineId) ?? null, value ?? null)) return null;
+    const where =
+      machineId === ""
+        ? "the shared part"
+        : `the part of ${this.state.machines.get(machineId)?.name ?? machineId}`;
+    this.ctx.storage.transactionSync(() => {
+      if (value === null || value === undefined)
+        this.sql("DELETE FROM desired_state WHERE kind = ? AND machine_id = ?", kind, machineId);
+      else
+        this.sql(
+          "INSERT OR REPLACE INTO desired_state (kind, machine_id, body) VALUES (?, ?, ?)",
+          kind,
+          machineId,
+          text,
+        );
+      this.insertRevision(actor, `Set ${where} of ${kind} (K-709)`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    return null;
   }
 
   /**
@@ -3367,6 +3631,30 @@ export class Kitshn extends DurableObject<Env> {
     });
     const named = new Set(valid.map((report) => report.name));
     const wanted = providerCards(machine, valid, this.env.KITSHN_ZONE);
+    // K-705: the daemon reports a provider's site before its cards, so the site can wait under an id of its own. It
+    // moves to the card that names it, and a card that kitshn made for it meanwhile goes.
+    const waiting = [...wanted.values()].flatMap((card) => {
+      const site = card.provider?.site
+        ? this.liveSites.get(liveSiteId(machine.id, card.provider.site))
+        : undefined;
+      return site && !this.liveSites.has(card.id) ? [{ site, card }] : [];
+    });
+    if (waiting.length > 0) {
+      this.ctx.storage.transactionSync(() => {
+        for (const { site, card } of waiting) {
+          this.sql("UPDATE live_sites SET id = ? WHERE id = ?", card.id, site.id);
+          if (!this.state.resources.has(site.id)) continue;
+          const forgotten = this.forgetCard(site.id);
+          this.insertRevision(
+            { _tag: "kitshn", reason: `providers on ${machine.name}` },
+            `${site.address} belongs to the provider card ${card.name}, so its own card went`,
+            [forgotten],
+            null,
+          );
+        }
+      });
+      this.load();
+    }
     for (const [id, card] of wanted) {
       const refusals = card.addresses.flatMap((address) => {
         const label = address.slice(0, -`.${this.env.KITSHN_ZONE}`.length);
@@ -3379,11 +3667,23 @@ export class Kitshn extends DurableObject<Env> {
                 : null));
         return refusal ? [{ address, refusal }] : [];
       });
-      if (refusals.length === 0) continue;
       for (const { refusal } of refusals)
         console.warn(`kitshn kept an address off the card ${card.name}: ${refusal}`);
-      const off = new Set(refusals.map((item) => item.address));
-      wanted.set(id, { ...card, addresses: card.addresses.filter((address) => !off.has(address)) });
+      // K-705, K-1111: the site's address goes on the card only after its check found it free, so no Access
+      // application, DNS record or ingress rule takes a host that something else still serves (K-1623).
+      const site = this.liveSites.get(id);
+      const serves = site?.state === "ok" || site?.state === "handover";
+      const held = card.addresses.filter((address) => !serves || site.address !== address);
+      if (refusals.length === 0 && held.length === 0) continue;
+      const off = new Set([...refusals.map((item) => item.address), ...held]);
+      const inUse = site?.state === "refused" && held.includes(site.address);
+      wanted.set(
+        id,
+        withAddressInUse(
+          { ...card, addresses: card.addresses.filter((address) => !off.has(address)) },
+          inUse,
+        ),
+      );
     }
     const existing = [...this.state.resources.values()].filter(
       (card) => card.machine === machine.id && card.provider !== undefined,
@@ -3423,8 +3723,22 @@ export class Kitshn extends DurableObject<Env> {
       [...regs].sort((a, b) => a.name.localeCompare(b.name)),
     );
     if (changed.length === 0 && !regsChanged) return;
+    // K-719: a card that gains owner control loses the settings of its Owner share that the guard now refuses, in the
+    // same transaction, so an older override or end date never blocks a later change, also a pause.
+    const ownerKeys = changed
+      .filter((card) => card.provider?.ownerControl === true)
+      .map((card) => shareKey(card.id, OWNER_CIRCLE_ID))
+      .filter((key) => this.state.shareSettings.has(key));
     this.ctx.storage.transactionSync(() => {
       for (const card of changed) this.putResource(card);
+      for (const key of ownerKeys) this.sql("DELETE FROM share_settings WHERE id = ?", key);
+      if (ownerKeys.length > 0)
+        this.insertRevision(
+          { _tag: "kitshn", reason: `providers on ${machine.name}` },
+          `The Owner circle keeps control of ${ownerKeys.length} provider cards of ${machine.name}, so their Owner share settings went (K-719)`,
+          [],
+          null,
+        );
       if (regsChanged) {
         this.sql("DELETE FROM providers WHERE machine_id = ?", machine.id);
         for (const reg of regs)
@@ -3453,6 +3767,8 @@ export class Kitshn extends DurableObject<Env> {
     });
     this.load();
     this.broadcast();
+    // K-1608: a report can end `busy`, so a job that waits for an idle machine goes now.
+    this.deliverJobs();
     void this.scheduleAlarm();
   }
 
@@ -3494,6 +3810,8 @@ export class Kitshn extends DurableObject<Env> {
     // The join exchange is public: the join code itself is the secret (K-602).
     if (path === "/join/exchange" && request.method === "POST") return this.exchangeJoin(request);
     if (path === "/join/rekey" && request.method === "POST") return this.rekey(request);
+    // K-1601: public too; the invite code is the secret.
+    if (path === "/join/device" && request.method === "POST") return this.exchangeInvite(request);
     if (path === "/internal/offline")
       return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
     if (path === "/internal/public-cards") return this.publicCards();
@@ -3555,6 +3873,8 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/fresh/restored" && request.method === "POST")
       return await this.restored(caller, await request.json().catch(() => null));
     if (path.startsWith("/agent/")) return this.agentRequest(path, request, caller);
+    if (path === "/device/machines" && request.method === "GET")
+      return Response.json(this.deviceMachines(caller.visitor));
     if (path.startsWith("/connect/deploys/")) return this.deploySource(path, caller);
     if (!this.authorized(caller)) {
       return Response.json(
@@ -3578,6 +3898,36 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/api/sign-out/retry" && request.method === "POST") return this.retrySignOut(caller);
     if (path === "/api/machines" && request.method === "POST")
       return this.addMachine(caller, await request.json().catch(() => null), new URL(request.url).origin);
+    if (path.startsWith("/api/desired/")) {
+      const kind = decodeURIComponent(path.slice("/api/desired/".length));
+      if (request.method === "GET") return this.readDesired(kind);
+      if (request.method === "PUT")
+        return this.putDesired(caller, kind, await request.json().catch(() => null));
+    }
+    if (path.startsWith("/api/cards/") && path.endsWith("/settings") && request.method === "POST")
+      return this.setCardSetting(
+        caller,
+        decodeURIComponent(path.slice("/api/cards/".length, -"/settings".length)),
+        await request.json().catch(() => null),
+      );
+    if (path.startsWith("/api/cards/") && path.endsWith("/take-address") && request.method === "POST") {
+      const api = this.api();
+      if (!api) return Response.json({ error: "kitshn has no Cloudflare token." }, { status: 503 });
+      return this.takeAddress(
+        caller,
+        decodeURIComponent(path.slice("/api/cards/".length, -"/take-address".length)),
+        api,
+      );
+    }
+    if (path.startsWith("/api/cards/") && path.endsWith("/give-address-back") && request.method === "POST") {
+      const api = this.api();
+      if (!api) return Response.json({ error: "kitshn has no Cloudflare token." }, { status: 503 });
+      return this.giveAddressBack(
+        caller,
+        decodeURIComponent(path.slice("/api/cards/".length, -"/give-address-back".length)),
+        api,
+      );
+    }
     if (path.startsWith("/api/machines/") && path.includes("/providers/") && path.endsWith("/forget")) {
       const [machineId = "", name = ""] = path
         .slice("/api/machines/".length, -"/forget".length)
@@ -3793,6 +4143,14 @@ export class Kitshn extends DurableObject<Env> {
         decodeURIComponent(path.slice("/api/repos/".length)),
         await request.json().catch(() => null),
       );
+    if (path.startsWith("/api/jobs/") && path.endsWith("/cancel") && request.method === "POST") {
+      const error = this.cancelJob(
+        Number(path.slice("/api/jobs/".length, -"/cancel".length)),
+        { caller },
+        caller.actor,
+      );
+      return error === null ? Response.json({ ok: true }) : Response.json({ error }, { status: 409 });
+    }
     if (path === "/api/jobs" && request.method === "POST")
       return this.addJob(caller, await request.json().catch(() => null));
     if (path === "/api/sites/live" && request.method === "POST")
@@ -3854,6 +4212,8 @@ export class Kitshn extends DurableObject<Env> {
       return this.restorePrevious(caller, path.slice("/api/library/".length, -"/previous".length), "owner");
     if (path === "/api/devices" && request.method === "POST")
       return this.addDevice(await request.json().catch(() => null));
+    if (path === "/api/devices/invites" || path.startsWith("/api/devices/invites/"))
+      return this.inviteRequest(path, request, caller);
     if (path === "/api/undo-item" && request.method === "GET") {
       // K-1507: the menu asks before it offers the per-item undo; the same rule over the whole History.
       const query = new URL(request.url).searchParams;
@@ -4075,6 +4435,8 @@ export class Kitshn extends DurableObject<Env> {
       this.keyFailures.delete(machine.id);
       if (machine.key?.kind !== "public") throw new Error(`${machine.name} signed without a key.`);
       send(socket, { type: "accepted", fingerprint: machine.key.fingerprint } satisfies ServerToDaemon);
+      // K-704: the daemon gives this name in its answer to register.
+      send(socket, { type: "name", name: machine.name } satisfies ServerToDaemon);
       // K-706: a new connection gets every grant table again, from the registrations that kitshn keeps.
       for (const key of this.sentGrants.keys())
         if (key.startsWith(`${machine.id}/`)) this.sentGrants.delete(key);
@@ -4281,6 +4643,54 @@ export class Kitshn extends DurableObject<Env> {
       this.updateLiveSites(machine, message.sites);
     } else if (message.type === "providers") {
       this.updateProviders(machine, message.providers);
+    } else if (message.type === "cancelJob" && typeof message.requestId === "string") {
+      const error = this.cancelJob(
+        message.jobId,
+        { machine },
+        { _tag: "machine", machineId: machine.id, name: machine.name },
+      );
+      send(socket, {
+        type: "requestAnswer",
+        requestId: message.requestId.slice(0, 64),
+        error,
+      } satisfies ServerToDaemon);
+    } else if (message.type === "audit") {
+      this.recordLinkEvent(machine, message.audit);
+    } else if (message.type === "desiredSet" && typeof message.kind === "string") {
+      // K-709: the provider gets kitshn's own answer, also a refusal.
+      // A failed write is an answer too, so the provider never waits for one that does not come.
+      let error: string | null;
+      try {
+        error = this.setDesiredFromMachine(machine, message);
+      } catch (thrown) {
+        console.error(`kitshn could not store the desired state of ${machine.name}: ${String(thrown)}`);
+        error = `kitshn could not store the state: ${thrown instanceof Error ? thrown.message : String(thrown)}`;
+      }
+      if (typeof message.requestId === "string")
+        send(socket, {
+          type: "requestAnswer",
+          requestId: message.requestId.slice(0, 64),
+          error,
+        } satisfies ServerToDaemon);
+    } else if (
+      message.type === "applied" &&
+      typeof message.key === "string" &&
+      typeof message.hash === "string"
+    ) {
+      // K-1608: written only when it changes, so a machine that applied everything writes nothing, and only for a key
+      // that kitshn pushes to it now, so a daemon cannot fill the table.
+      const id = `${machine.id}/${message.key}`;
+      const known = this.hashesOf(machine.id).has(message.key);
+      if (known && this.applied.get(id) !== message.hash) {
+        this.sql(
+          "INSERT OR REPLACE INTO applied_state (machine_id, key, hash) VALUES (?, ?, ?)",
+          machine.id,
+          message.key.slice(0, 200),
+          message.hash.slice(0, 64),
+        );
+        this.applied.set(id, message.hash);
+        this.sendMachine(machine);
+      }
     } else if (message.type === "icon") {
       await this.liveIcon(machine, message.site, message.icon);
     } else if (message.type === "servers") {
@@ -4674,10 +5084,14 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("DELETE FROM tunnel_objects WHERE machine_id = ?", id);
       for (const site of this.sitesOf(id)) {
         this.sql("DELETE FROM live_sites WHERE id = ?", site.id);
+        this.setHandover(site.id, null);
         forgotten.push(this.forgetCard(site.id));
       }
-      // K-615, K-704: the providers of the machine and their cards go with it.
+      // K-615, K-704: the providers of the machine and their cards go with it, and its desired state part and what it
+      // applied (K-709, K-1608).
       this.sql("DELETE FROM providers WHERE machine_id = ?", id);
+      this.sql("DELETE FROM desired_state WHERE machine_id = ?", id);
+      this.sql("DELETE FROM applied_state WHERE machine_id = ?", id);
       for (const card of this.state.resources.values())
         if (card.machine === id && card.provider && !this.sitesOf(id).some((site) => site.id === card.id))
           forgotten.push(this.forgetCard(card.id));
@@ -4733,7 +5147,192 @@ export class Kitshn extends DurableObject<Env> {
     );
     if (!fits)
       return `The provider ${parsed.provider} of ${machine.name} has no command ${parsed.command} for ${card.name}.`;
+    // K-1625: a row command names a row of a list of the card that offers this command.
+    if (
+      parsed.row !== undefined &&
+      !card.provider?.lists.some((list) =>
+        list.rows.some((row) => row.id === parsed.row && (row.commands ?? []).includes(parsed.command)),
+      )
+    )
+      return `${card.name} has no row ${parsed.row} with the command ${parsed.command}.`;
     return { ...parsed, resource: card.provider?.localId ?? null };
+  }
+
+  /** K-1623: the Access applications of the account, as Cloudflare lists them. */
+  private accessApps(api: Api) {
+    return api<ReadonlyArray<AccessAppListing>>(
+      "GET",
+      `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/apps?per_page=1000`,
+    );
+  }
+
+  /**
+   * K-1623: the owner moves the address of a provider site, which something else serves now, to kitshn. kitshn keeps
+   * the one proxied CNAME record of the address, makes its application, then its ingress, and changes the record
+   * only after that (`dnsWork`), so the address always has an application and a route. The path applications of the
+   * portal keep their own paths (`tunnelConfig`).
+   */
+  private async takeAddress(caller: Caller, id: string, api: Api) {
+    if (!this.isOwner(caller.visitor))
+      return Response.json({ error: "Only the owner takes an address over." }, { status: 403 });
+    const refused = () => {
+      const card = this.state.resources.get(id);
+      const site = this.liveSites.get(id);
+      return card?.provider && site?.state === "refused" ? { card, site } : null;
+    };
+    const before = refused();
+    if (!before)
+      return Response.json(
+        { error: "Only a provider card whose address is in use takes it over." },
+        { status: 409 },
+      );
+    // K-1623: kitshn's application answers on the host as soon as it exists, so T3 must get its audience first.
+    const socket = this.openSocket(before.site.machineId);
+    const attachment = socket ? attachmentOf(socket) : null;
+    if (attachment?.kind !== "machine" || !attachment.status?.capabilities?.includes("access"))
+      return Response.json(
+        {
+          error:
+            "The machine must be online, with a kitshn daemon that passes Access audiences on (K-1623). Update kitshn there, and T3 to a version with fork #415, then try again.",
+        },
+        { status: 409 },
+      );
+    const address = before.site.address;
+    let records: Array<{
+      id: string;
+      type: string;
+      content: string;
+      proxied: boolean;
+      comment?: string | null;
+    }>;
+    let domains: Array<unknown>;
+    let apps: ReadonlyArray<AccessAppListing>;
+    try {
+      records = await api("GET", `${this.zonePath(address)}/dns_records?name=${encodeURIComponent(address)}`);
+      domains = await api(
+        "GET",
+        `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/workers/domains?hostname=${encodeURIComponent(address)}`,
+      );
+      apps = await this.accessApps(api);
+    } catch (error) {
+      return Response.json(
+        { error: `kitshn could not read ${address} from Cloudflare: ${String(error)}` },
+        { status: 502 },
+      );
+    }
+    const [record] = records;
+    if (records.length !== 1 || record?.type !== "CNAME" || !record.proxied || domains.length > 0)
+      return Response.json(
+        {
+          error: `kitshn takes over only an address with one proxied CNAME record and no Worker; ${address} has ${records.length} records and ${domains.length} Workers.`,
+        },
+        { status: 409 },
+      );
+    // The reads waited; the card or its site may have changed meanwhile.
+    const now = refused();
+    if (!now || now.site.address !== address)
+      return Response.json(
+        { error: "The card or its address changed meanwhile. Try again." },
+        { status: 409 },
+      );
+    this.ctx.storage.transactionSync(() => {
+      this.sql("UPDATE live_sites SET state = 'handover' WHERE id = ?", id);
+      this.setHandover(id, {
+        recordId: record.id,
+        content: record.content,
+        comment: record.comment ?? null,
+        ingressAt: null,
+        switched: false,
+        paths: foreignPaths(apps, address),
+        pathsAt: Date.now(),
+        released: false,
+      });
+      this.putResource(withAddressInUse({ ...now.card, addresses: [address] }, false));
+      this.insertRevision(caller.actor, `Took over ${address} for ${now.card.name}`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    void this.scheduleAlarm();
+    return Response.json({});
+  }
+
+  /**
+   * K-1623: the owner gives a taken address back: its record serves what it served before, and kitshn lets go. Only
+   * while the portal still holds the exact host, so the host never stays without an application.
+   */
+  private async giveAddressBack(caller: Caller, id: string, api: Api) {
+    if (!this.isOwner(caller.visitor))
+      return Response.json({ error: "Only the owner gives an address back." }, { status: 403 });
+    const card = this.state.resources.get(id);
+    const site = this.liveSites.get(id);
+    const handover = this.handoverOf(id);
+    if (!card?.provider || !site || !handover || handover.released)
+      return Response.json({ error: "kitshn took over no address of this card." }, { status: 409 });
+    try {
+      if (!foreignHolds(await this.accessApps(api), site.address)) {
+        // After the record moved, the portal let go for good, so the action goes; before, the move goes on.
+        if (handover.switched) {
+          this.setHandover(id, { ...handover, released: true });
+          this.broadcast();
+        }
+        return Response.json(
+          { error: `The portal no longer holds ${site.address}, so kitshn keeps it.` },
+          { status: 409 },
+        );
+      }
+      if (handover.switched)
+        await api("PUT", `${this.zonePath(site.address)}/dns_records/${handover.recordId}`, {
+          type: "CNAME",
+          name: site.address,
+          content: handover.content,
+          proxied: true,
+          comment: handover.comment ?? "",
+        });
+    } catch (error) {
+      return Response.json(
+        { error: `kitshn could not give ${site.address} back: ${String(error)}. Try again.` },
+        { status: 502 },
+      );
+    }
+    this.ctx.storage.transactionSync(() => {
+      // The record goes back to what it served; kitshn forgets it and never deletes it.
+      this.sql("DELETE FROM dns_objects WHERE address = ?", site.address);
+      this.sql("UPDATE live_sites SET state = 'refused' WHERE id = ?", id);
+      this.setHandover(id, null);
+      this.putResource(withAddressInUse({ ...card, addresses: [] }, true));
+      this.insertRevision(caller.actor, `Gave ${site.address} back from ${card.name}`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    void this.scheduleAlarm();
+    return Response.json({});
+  }
+
+  /** K-1623: reads the portal's path applications of each taken address again, at most every `FOREIGN_PATHS_MS`. */
+  private async refreshForeignPaths(api: Api, now: number) {
+    const due = [...this.liveSites.values()].flatMap((site) => {
+      const handover = this.handoverOf(site.id);
+      return handover && handover.pathsAt + FOREIGN_PATHS_MS <= now ? [{ site, handover }] : [];
+    });
+    if (due.length === 0) return 0;
+    try {
+      const apps = await this.accessApps(api);
+      let released = false;
+      for (const { site, handover } of due) {
+        const done = handover.released || (handover.switched && !foreignHolds(apps, site.address));
+        released ||= done !== handover.released;
+        this.setHandover(site.id, {
+          ...handover,
+          paths: foreignPaths(apps, site.address),
+          pathsAt: now,
+          released: done,
+        });
+      }
+      if (released) this.broadcast();
+    } catch (error) {
+      console.warn(`kitshn could not read the Access applications of taken addresses: ${String(error)}`);
+    }
+    return 1;
   }
 
   /**
@@ -4799,6 +5398,72 @@ export class Kitshn extends DurableObject<Env> {
       machineId,
     ))
       send(socket, { type: "forgetProvider", provider: name } satisfies ServerToDaemon);
+  }
+
+  /**
+   * K-1601, K-1617: the machines that a device reaches: each provider card with an address that its token opens, with
+   * its machine. The shape of the portal's `/client/machines`, plus the card, its kind and the level.
+   */
+  private deviceMachines(visitor: Visitor) {
+    const now = Date.now();
+    return {
+      machines: [...this.state.resources.values()].flatMap((card) => {
+        const address = card.addresses[0];
+        const machine = card.machine === null ? undefined : this.state.machines.get(card.machine);
+        if (!card.provider || !address || !machine) return [];
+        const level = visitorLevel(this.state, card, visitor, now);
+        return level === null
+          ? []
+          : [
+              {
+                id: machine.id,
+                name: machine.name,
+                origin: `https://${address}`,
+                card: card.id,
+                kind: card.kind,
+                level: levelName(card, level),
+              },
+            ];
+      }),
+    };
+  }
+
+  /**
+   * K-1612, K-613: cancels a job while it waits in the queue, or says why not. A machine cancels only its own jobs: one
+   * that runs on it, or one that it queued. The map needs control on the job's machine. History records the cancel.
+   */
+  private cancelJob(
+    id: number,
+    who: { readonly machine: Machine } | { readonly caller: Caller },
+    actor: Actor,
+  ): string | null {
+    const [job] = Number.isSafeInteger(id)
+      ? this.sql<{ machine_id: string | null; state: string; actor: string }>(
+          "SELECT machine_id, state, actor FROM jobs WHERE id = ?",
+          id,
+        )
+      : [];
+    if (!job) return `No job ${id} exists.`;
+    if ("machine" in who) {
+      // A local user cancels only what its machine queued; a job that someone else queued needs control, on the map.
+      const queuedBy = JSON.parse(job.actor) as Actor;
+      if (queuedBy._tag !== "machine" || queuedBy.machineId !== who.machine.id)
+        return `Job ${id} was not queued by ${who.machine.name}; cancel it on the map, with control on its machine (K-1612).`;
+    } else if (job.machine_id !== null && !this.canControl(who.caller.visitor, job.machine_id))
+      return "Cancelling a job needs control on its machine.";
+    if (job.state !== "queued") return `Job ${id} is ${job.state}, so it cannot be cancelled.`;
+    const name = actor._tag === "person" ? actor.email : actor._tag === "kitshn" ? "kitshn" : actor.name;
+    this.ctx.storage.transactionSync(() => {
+      this.sql(
+        "UPDATE jobs SET state = 'failed', output = ? WHERE id = ? AND state = 'queued'",
+        `Cancelled by ${name}.`,
+        id,
+      );
+      this.insertRevision(actor, `Cancelled job #${id}`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    return null;
   }
 
   /** K-614: the sender of a command needs control on the machine card itself, not only on the admin. */
@@ -4911,8 +5576,8 @@ export class Kitshn extends DurableObject<Env> {
     const now = Date.now();
     const [row] = this.ctx.storage.transactionSync(() => {
       const inserted = this.sql<{ id: number }>(
-        `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
-         VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, NULL, '') RETURNING id`,
+        `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output, when_idle)
+         VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, NULL, '', ?) RETURNING id`,
         machineId,
         JSON.stringify(labels),
         JSON.stringify(command),
@@ -4920,6 +5585,8 @@ export class Kitshn extends DurableObject<Env> {
         now + JOB_EXPIRY_MS,
         JSON.stringify(caller.actor),
         JSON.stringify(caller.visitor),
+        // K-613: "when online and idle" waits until no provider of the machine reports busy (K-1608).
+        input["whenIdle"] === true ? 1 : 0,
       );
       // K-614: the history names the member that sent a shell command.
       if (command.kind === "shell") {
@@ -4949,8 +5616,9 @@ export class Kitshn extends DurableObject<Env> {
       labels: string;
       command: string;
       visitor: string;
+      when_idle: number;
     }>(
-      "SELECT id, machine_id, labels, command, visitor FROM jobs WHERE state = 'queued' AND expires_at > ? ORDER BY id",
+      "SELECT id, machine_id, labels, command, visitor, when_idle FROM jobs WHERE state = 'queued' AND expires_at > ? ORDER BY id",
       Date.now(),
     );
     for (const job of queued) {
@@ -4981,6 +5649,7 @@ export class Kitshn extends DurableObject<Env> {
             : null
           : pickMachine(this.state.machines.values(), allowed, JSON.parse(job.labels) as Array<string>);
       if (!machine) continue;
+      if (job.when_idle === 1 && this.busy(machine.id)) continue;
       const socket = this.openSocket(machine.id);
       if (!socket) continue;
       let command = JSON.parse(job.command) as Command;
@@ -5131,11 +5800,11 @@ export class Kitshn extends DurableObject<Env> {
     for (const machine of this.state.machines.values()) {
       const row = rows.get(machine.id);
       if (row?.error && row.retry_at > now) continue;
-      const config = tunnelConfig(this.protectedSites(machine.id), accessOf);
+      const config = tunnelConfig(this.ingressSites(machine.id), accessOf);
       const body = JSON.stringify(config);
       if (row?.applied === body && row.error === null) continue;
       if (calls++ >= budget) return;
-      for (const site of this.protectedSites(machine.id)) {
+      for (const site of this.ingressSites(machine.id)) {
         const access = accessOf(site);
         if (access.kind === "pending")
           console.warn(
@@ -5154,6 +5823,10 @@ export class Kitshn extends DurableObject<Env> {
           body,
           body,
         );
+        for (const site of this.ingressSites(machine.id)) {
+          const handover = site.state === "handover" ? this.handoverOf(site.id) : null;
+          if (handover?.ingressAt === null) this.setHandover(site.id, { ...handover, ingressAt: now });
+        }
       } catch (error) {
         this.sql(
           "INSERT OR REPLACE INTO tunnel_objects (machine_id, body, applied, error, retry_at) VALUES (?, ?, ?, ?, ?)",
@@ -5197,7 +5870,7 @@ export class Kitshn extends DurableObject<Env> {
     const stale = [...this.state.machines.values()].some((machine) => {
       const row = tunnels.get(machine.id);
       if (row?.error && row.retry_at > now) return false;
-      return row?.applied !== JSON.stringify(tunnelConfig(this.protectedSites(machine.id), accessOf));
+      return row?.applied !== JSON.stringify(tunnelConfig(this.ingressSites(machine.id), accessOf));
     });
     const checking = [...this.liveSites.values()].some(
       (site) => site.state === "checking" && (this.checkRetryAt.get(site.id) ?? 0) <= Date.now(),
@@ -5214,6 +5887,9 @@ export class Kitshn extends DurableObject<Env> {
   private forgetCard(id: string): Forget {
     for (const table of ["resources", "places", "card_ends"])
       this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
+    // K-717: the settings of a card go with it, and so does a taken address of it (K-1623).
+    this.sql("DELETE FROM card_settings WHERE card_id = ?", id);
+    this.setHandover(id, null);
     // K-1124: a forgotten card does not come back, so its old addresses go free.
     this.sql("DELETE FROM old_addresses WHERE card_id = ?", id);
     this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);
@@ -5263,6 +5939,37 @@ export class Kitshn extends DurableObject<Env> {
     });
   }
 
+  /**
+   * K-1623: the machine applied the access push that holds the audience of kitshn's application on the site, so its
+   * provider accepts kitshn's tokens before the record sends visitors through kitshn.
+   */
+  private audienceApplied(site: LiveSite) {
+    const aud = this.access.get(`app:${site.id}:${site.address}`)?.aud;
+    const provider = this.state.resources.get(site.id)?.provider?.name;
+    if (!aud || !provider) return false;
+    const key = pushKey.access(provider);
+    const push = this.pushesOf(site.machineId).find((item) => item.key === key);
+    return (
+      push?.push.type === "access" &&
+      push.push.access.audiences.includes(aud) &&
+      this.applied.get(`${site.machineId}/${key}`) === push.hash
+    );
+  }
+
+  /** K-1623: the ingress of a machine: its protected sites, and an address that it takes over once its application exists. */
+  private ingressSites(machineId: string) {
+    const taking = [...this.liveSites.values()].filter(
+      (site) =>
+        site.machineId === machineId &&
+        site.state === "handover" &&
+        Boolean(this.access.get(`app:${site.id}:${site.address}`)?.cfId),
+    );
+    return [...this.protectedSites(machineId), ...taking].map((site) => {
+      const paths = this.handoverOf(site.id)?.paths ?? [];
+      return paths.length > 0 ? { ...site, paths } : site;
+    });
+  }
+
   private protectedSites(machineId?: string) {
     return protectedLiveSites(
       [...this.liveSites.values(), ...this.relaySites()].filter(
@@ -5287,12 +5994,14 @@ export class Kitshn extends DurableObject<Env> {
       for (const report of sites) {
         const address = `${report.name}.${this.env.KITSHN_ZONE}`;
         // K-812: the socket of a Compose app on this machine is the address of its card.
-        // K-705: so is the site of a provider card on this machine.
+        // K-705: the site of a provider card on this machine is that card, by its name: the card gets the address
+        // only after the check below.
         const app = [...this.state.resources.values()].find(
           (resource) =>
-            (resource.kind === "site.compose" || resource.provider !== undefined) &&
             resource.machine === machine.id &&
-            resource.addresses.includes(address),
+            (resource.provider
+              ? resource.provider.site === report.name && resource.provider.droppedAt === undefined
+              : resource.kind === "site.compose" && resource.addresses.includes(address)),
         );
         // K-909: a removed Compose app keeps its row until its compose-down ends, so it never turns into a
         // live site card meanwhile.
@@ -5341,6 +6050,7 @@ export class Kitshn extends DurableObject<Env> {
         if (keep.has(site.id)) continue;
         changed = true;
         this.sql("DELETE FROM live_sites WHERE id = ?", site.id);
+        this.setHandover(site.id, null);
         // K-705: a provider card stays when its site goes; the provider removes the card itself.
         if (this.state.resources.get(site.id)?.provider) continue;
         // A removed app has its History entry already (K-909).
@@ -5402,6 +6112,9 @@ export class Kitshn extends DurableObject<Env> {
       if (used) {
         this.sql("UPDATE live_sites SET state = 'refused' WHERE id = ?", site.id);
         console.warn(`kitshn refused ${site.address}: something else already uses the address.`);
+        // K-705: a provider card shows at once that something else serves its address.
+        const card = this.state.resources.get(site.id);
+        if (card?.provider) this.putResource(withAddressInUse(card, true));
         continue;
       }
       const machine = this.state.machines.get(site.machineId);
@@ -5420,9 +6133,9 @@ export class Kitshn extends DurableObject<Env> {
         };
         this.putResource(
           card
-            ? // K-705: a provider reports the status of its own cards.
+            ? // K-705: a provider reports the status of its own cards, and its site's address comes on now.
               card.provider
-              ? card
+              ? withAddressInUse({ ...card, addresses: [site.address] }, false)
               : { ...card, status: site.up ? "running" : "stopped" }
             : {
                 id: site.id,
@@ -5484,6 +6197,19 @@ export class Kitshn extends DurableObject<Env> {
       (machineId) => this.state.machines.get(machineId)?.tunnelId,
       now,
     );
+    // K-1623: a taken address moves its kept record to this tunnel only after an earlier run gave the tunnel its
+    // ingress, so cloudflared has the rule before the first visit comes.
+    for (const site of this.liveSites.values()) {
+      const handover = site.state === "handover" ? this.handoverOf(site.id) : null;
+      const tunnel = this.state.machines.get(site.machineId)?.tunnelId;
+      if (
+        handover?.ingressAt != null &&
+        now - handover.ingressAt >= HANDOVER_INGRESS_MS &&
+        tunnel !== undefined &&
+        this.audienceApplied(site)
+      )
+        wanted.set(site.address, { content: `${tunnel}.cfargotunnel.com`, cardId: site.id });
+    }
     const routed = reachableAddresses({
       ingress: this.tunnelRows().map((row) => row.applied),
       records: [],
@@ -5561,16 +6287,40 @@ export class Kitshn extends DurableObject<Env> {
             proxied: true,
             comment: "kitshn live site (K-1104)",
           };
-          const record = row?.record_id
-            ? await api<{ id: string }>("PUT", `${zone}/${row.record_id}`, body)
+          const handover = work.cardId === null ? null : this.handoverOf(work.cardId);
+          const site = work.cardId === null ? undefined : this.liveSites.get(work.cardId);
+          // K-1623: a taken address changes the record that served it, never makes a second one.
+          const recordId = row?.record_id || (site?.state === "handover" ? handover?.recordId : undefined);
+          const record = recordId
+            ? await api<{ id: string }>("PUT", `${zone}/${recordId}`, body)
             : await api<{ id: string }>("POST", zone, body);
-          this.sql(
-            "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error, retry_at, card_id) VALUES (?, ?, ?, NULL, 0, ?)",
-            work.address,
-            record.id,
-            work.content,
-            work.cardId,
-          );
+          // A give-back can run during the PUT: the record goes back to what it served, and kitshn keeps nothing.
+          const taking = site?.state === "handover" && handover !== null;
+          const current = taking ? this.handoverOf(site.id) : null;
+          if (taking && (current === null || this.liveSites.get(site.id)?.state !== "handover")) {
+            await api("PUT", `${zone}/${record.id}`, {
+              type: "CNAME",
+              name: work.address,
+              content: handover.content,
+              proxied: true,
+              comment: handover.comment ?? "",
+            });
+            continue;
+          }
+          this.ctx.storage.transactionSync(() => {
+            this.sql(
+              "INSERT OR REPLACE INTO dns_objects (address, record_id, content, error, retry_at, card_id) VALUES (?, ?, ?, NULL, 0, ?)",
+              work.address,
+              record.id,
+              work.content,
+              work.cardId,
+            );
+            if (taking && current) {
+              this.sql("UPDATE live_sites SET state = 'ok' WHERE id = ?", site.id);
+              this.setHandover(site.id, { ...current, switched: true });
+              this.load();
+            }
+          });
         } else {
           if (row?.record_id) {
             await api("DELETE", `${zone}/${row.record_id}`).catch((error: unknown) =>
@@ -5719,6 +6469,12 @@ export class Kitshn extends DurableObject<Env> {
       "SELECT MIN(expires_at) AS expires_at FROM proposals WHERE state = 'pending'",
     );
     if (proposal?.expires_at) next = Math.min(next, Math.max(proposal.expires_at, now));
+    // K-1623: a taken address moves its record as soon as its ingress waited long enough.
+    for (const site of this.liveSites.values()) {
+      const ingressAt = site.state === "handover" ? this.handoverOf(site.id)?.ingressAt : null;
+      if (typeof ingressAt === "number")
+        next = Math.min(next, Math.max(ingressAt + HANDOVER_INGRESS_MS, now));
+    }
     const desired = this.desired(now);
     if (
       this.env.CLOUDFLARE_API_TOKEN &&
@@ -5889,6 +6645,12 @@ export class Kitshn extends DurableObject<Env> {
         "DELETE FROM jobs WHERE state NOT IN ('queued', 'sent') AND id <= (SELECT id FROM jobs ORDER BY id DESC LIMIT 1 OFFSET 1000)",
       );
       this.sql("DELETE FROM join_codes WHERE expires_at < ?", now);
+      this.sql("DELETE FROM device_invites WHERE expires_at < ?", now);
+      // K-1610: link events stay 30 days, at most 2,000.
+      this.sql(
+        "DELETE FROM link_events WHERE at < ? OR id <= (SELECT id FROM link_events ORDER BY id DESC LIMIT 1 OFFSET 2000)",
+        now - 30 * DAY,
+      );
       // K-1717: ask events stay 30 days, at most 5,000; a decided proposal stays as long.
       this.sql(
         "DELETE FROM ask_events WHERE at < ? OR id <= (SELECT id FROM ask_events ORDER BY id DESC LIMIT 1 OFFSET ?)",
@@ -6108,7 +6870,7 @@ export class Kitshn extends DurableObject<Env> {
       const token = await api<{ id: string; client_id: string; client_secret: string }>(
         "POST",
         `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/service_tokens`,
-        { name: `kitshn device ${name}`, duration: "8760h" },
+        { name: `${DEVICE_TOKEN_PREFIX}${name}`, duration: "8760h" },
       );
       return Response.json({
         tokenId: token.id,
@@ -6119,6 +6881,176 @@ export class Kitshn extends DurableObject<Env> {
     } catch (error) {
       return Response.json({ error: String(error) }, { status: 502 });
     }
+  }
+
+  /**
+   * K-1601: invites of phone and desktop apps, for the Owner circle only. An invite makes no secret that kitshn keeps:
+   * a new device token drops its secret, and the exchange rotates it. A cancel never touches a token.
+   */
+  private async inviteRequest(path: string, request: Request, caller: Caller): Promise<Response> {
+    if (!this.isOwner(caller.visitor))
+      return Response.json(
+        { error: "Only the owner makes or cancels a device invite (K-1601)." },
+        { status: 403 },
+      );
+    if (path === "/api/devices/invites" && request.method === "POST")
+      return this.addInvite(caller, await request.json().catch(() => null));
+    if (path.startsWith("/api/devices/invites/") && request.method === "DELETE") {
+      const tokenId = decodeURIComponent(path.slice("/api/devices/invites/".length));
+      const [row] = this.sql<{ name: string }>("SELECT name FROM device_invites WHERE token_id = ?", tokenId);
+      if (!row) return Response.json({ error: "No invite of this device waits." }, { status: 404 });
+      this.ctx.storage.transactionSync(() => {
+        this.sql("DELETE FROM device_invites WHERE token_id = ?", tokenId);
+        this.insertRevision(caller.actor, `Cancelled the invite of ${row.name}`, [], null);
+      });
+      this.load();
+      this.broadcast();
+      return Response.json({ ok: true });
+    }
+    return new Response("Not found.", { status: 404 });
+  }
+
+  /** K-1601: a new device token and its invite (`name`), or a new invite of a kitshn device token (`tokenId`). */
+  private async addInvite(caller: Caller, body: unknown) {
+    const api = this.api();
+    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    const fields = isRecord(body) ? body : {};
+    const account = `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/service_tokens`;
+    let token: { id: string; client_id: string; name: string };
+    let name: string;
+    try {
+      if (typeof fields.tokenId === "string" && fields.tokenId !== "") {
+        token = await api<{ id: string; client_id: string; name: string }>(
+          "GET",
+          `${account}/${encodeURIComponent(fields.tokenId)}`,
+        );
+        // A machine token or a token of someone else never moves to an app.
+        if (!token.name.startsWith(DEVICE_TOKEN_PREFIX))
+          return Response.json({ error: "This token is no kitshn device token." }, { status: 400 });
+        name = token.name.slice(DEVICE_TOKEN_PREFIX.length);
+      } else {
+        name = typeof fields.name === "string" ? fields.name.trim() : "";
+        if (!name || name.length > 60)
+          return Response.json({ error: "Give the device a name of 1 to 60 characters." }, { status: 400 });
+        // The secret of the new token is dropped here; the exchange rotates it.
+        token = await api<{ id: string; client_id: string; name: string }>("POST", account, {
+          name: `${DEVICE_TOKEN_PREFIX}${name}`,
+          duration: "8760h",
+        });
+      }
+    } catch (error) {
+      return Response.json({ error: String(error) }, { status: 502 });
+    }
+    const code = newInviteCode();
+    const expiresAt = Date.now() + DEVICE_INVITE_MS;
+    const lookup = await joinLookup(code);
+    this.ctx.storage.transactionSync(() => {
+      // One invite per token: a new one ends the one that waits.
+      this.sql("DELETE FROM device_invites WHERE token_id = ?", token.id);
+      this.sql(
+        "INSERT INTO device_invites (lookup, token_id, client_id, name, expires_at) VALUES (?, ?, ?, ?, ?)",
+        lookup,
+        token.id,
+        token.client_id,
+        name,
+        expiresAt,
+      );
+      this.insertRevision(caller.actor, `Invited an app as ${name}`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    return Response.json({
+      tokenId: token.id,
+      clientId: token.client_id,
+      name,
+      link: `https://${this.env.KITSHN_HOST}/join/device#code=${code}`,
+      expiresAt,
+    });
+  }
+
+  /**
+   * K-1601: trades an invite code, once and within 15 minutes, for a new secret of its device token. The secret is
+   * only in this answer. The row goes before the rotate, so two exchanges of one code never both get a secret.
+   */
+  private async exchangeInvite(request: Request) {
+    const body = (await request.json().catch(() => null)) as { code?: unknown; device?: unknown } | null;
+    const code = typeof body?.code === "string" ? body.code.trim() : "";
+    if (!code) return Response.json({ error: "Send the invite code." }, { status: 400 });
+    const device = typeof body?.device === "string" ? body.device.trim().slice(0, 200) : "";
+    const lookup = await joinLookup(code);
+    const [row] = this.sql<InviteRow>("SELECT * FROM device_invites WHERE lookup = ?", lookup);
+    if (!row)
+      return Response.json(
+        {
+          error:
+            "This invite code is used, cancelled or unknown. A code works once, also when its answer got lost. Ask the owner for a new invite.",
+        },
+        { status: 404 },
+      );
+    if (row.expires_at < Date.now()) {
+      this.sql("DELETE FROM device_invites WHERE lookup = ?", lookup);
+      return Response.json({ error: "This invite expired. Ask for a new one." }, { status: 410 });
+    }
+    if (this.state.paused)
+      return Response.json(
+        { error: "kitshn is paused. Try the invite again after Resume." },
+        { status: 423 },
+      );
+    const api = this.api();
+    if (!api) return Response.json({ error: "kitshn has no Cloudflare API token here." }, { status: 503 });
+    this.sql("DELETE FROM device_invites WHERE lookup = ?", lookup);
+    let secret: string;
+    try {
+      // No grace period: the secret of an older invite of this device ends now.
+      secret = (
+        await api<{ client_secret: string }>(
+          "POST",
+          `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/service_tokens/${encodeURIComponent(row.token_id)}/rotate`,
+          {},
+        )
+      ).client_secret;
+    } catch (error) {
+      // The code stays good, unless a newer invite of the device took its place meanwhile.
+      this.sql(
+        "INSERT OR IGNORE INTO device_invites (lookup, token_id, client_id, name, expires_at) VALUES (?, ?, ?, ?, ?)",
+        row.lookup,
+        row.token_id,
+        row.client_id,
+        row.name,
+        row.expires_at,
+      );
+      return Response.json({ error: `Cloudflare made no new secret: ${String(error)}` }, { status: 502 });
+    }
+    // The secret is out, so a failed refresh must not lose it; the token then keeps its old expiry.
+    let refreshed = true;
+    try {
+      // A new invite of an old token gives the app a full year, not what is left of the token's first year.
+      await api(
+        "POST",
+        `/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/service_tokens/${encodeURIComponent(row.token_id)}/refresh`,
+      );
+    } catch (error) {
+      refreshed = false;
+      console.error(`K-1601: the refresh of the device token ${row.token_id} failed: ${String(error)}`);
+    }
+    const actor: Actor = { _tag: "device", clientId: row.client_id, name: row.name };
+    // `device` comes from the anonymous caller, so History marks it as the app's own words.
+    this.insertRevision(
+      actor,
+      `${row.name} joined with an invite${device ? ` (the app says: ${device})` : ""}${refreshed ? "" : "; the token expiry did not refresh"}`,
+      [],
+      null,
+    );
+    this.load();
+    this.broadcast();
+    const visitor: Visitor = { email: null, clientId: row.client_id, ip: null };
+    return Response.json({
+      clientId: row.client_id,
+      name: row.name,
+      serviceToken: { clientId: row.client_id, clientSecret: secret },
+      machines: this.deviceMachines(visitor).machines,
+      machinesUrl: `https://${this.env.KITSHN_HOST}/device/machines`,
+    });
   }
 
   /**
@@ -8034,6 +8966,8 @@ export class Kitshn extends DurableObject<Env> {
         rights,
         // K-619: a machine sees its own listening ports, the list of the site wizard.
         ...(machine ? { proposals: answerable, servers: this.machineView(machine).servers } : {}),
+        // K-1610: the newest 50 calls from or to this machine.
+        ...(machine ? { linkEvents: this.recentLinkEvents(machine.id) } : {}),
         // K-819: with "may add apps", the waiting repos that the key may allow.
         repos: rights.includes("addsApps")
           ? this.sql<RepoRow>(
@@ -9387,6 +10321,93 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("INSERT INTO ask_labels (event_id, key, value) VALUES (?, ?, ?)", last.id, key, value);
     this.sql("DELETE FROM ask_events WHERE id <= ?", last.id - ASK_EVENT_COUNT);
     this.sql("DELETE FROM ask_labels WHERE event_id <= ?", last.id - ASK_EVENT_COUNT);
+  }
+
+  /**
+   * K-1610: one call that a source machine reports. The source is always the machine of the connection, so a machine
+   * cannot report for another one. A report that does not decode is dropped and logged. Known limit: only the source
+   * reports (see `LinkAudit`).
+   */
+  private recordLinkEvent(machine: Machine, value: unknown) {
+    let audit: LinkAudit;
+    try {
+      audit = decodeLinkAudit(value);
+    } catch (error) {
+      console.warn(`kitshn dropped an audit report of ${machine.name}: ${String(error)}`);
+      return;
+    }
+    // A machine reports only calls on machines that it reaches now, so it cannot put calls on another machine's record.
+    const reached = (this.providerRegs.get(machine.id) ?? []).some((reg) =>
+      reachOf(this.state, machine.id, reg.name, Date.now()).some((card) => card.machineId === audit.target),
+    );
+    if (!reached) {
+      console.warn(
+        `kitshn dropped an audit report of ${machine.name}: it reaches no machine ${audit.target}.`,
+      );
+      return;
+    }
+    // At most LINK_AUDITS_PER_MINUTE reports of one machine a minute; the rest are counted and dropped.
+    const minute = Math.floor(Date.now() / 60_000);
+    const rate = this.linkRates.get(machine.id);
+    const counted = rate?.minute === minute ? rate : { minute, count: 0, dropped: 0 };
+    this.linkRates.set(machine.id, counted);
+    if (counted.count >= LINK_AUDITS_PER_MINUTE) {
+      counted.dropped += 1;
+      if (counted.dropped === 1)
+        console.warn(`kitshn drops audit reports of ${machine.name} for the rest of this minute.`);
+      return;
+    }
+    counted.count += 1;
+    this.sql(
+      `INSERT INTO link_events (at, source, target, kind, thread, name, cwd, outcome, exit_code)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      // The time of the report, not the claim of the machine, orders History.
+      Date.now(),
+      machine.id,
+      audit.target,
+      audit.kind,
+      audit.thread,
+      audit.name,
+      audit.cwd,
+      audit.outcome,
+      audit.exitCode,
+    );
+    this.sql(
+      "DELETE FROM link_events WHERE id <= (SELECT id FROM link_events ORDER BY id DESC LIMIT 1 OFFSET 2000)",
+    );
+    // A burst of calls must not rebuild every map's snapshot per call: an audit broadcasts at most every 10 seconds.
+    // Known limit: the last events of a burst show with the next change of the map; revisit if History must be live.
+    if (Date.now() - this.linkBroadcastAt >= LINK_BROADCAST_MS) {
+      this.linkBroadcastAt = Date.now();
+      this.broadcast();
+    }
+  }
+
+  /** K-1610: the newest 50 link events, of one machine or of all, with machine names. */
+  private recentLinkEvents(machineId: string | null = null): Array<LinkEventView> {
+    const name = (id: string) => this.state.machines.get(id)?.name ?? id;
+    return this.sql<{
+      id: number;
+      at: number;
+      source: string;
+      target: string;
+      kind: "exec" | "tool";
+      thread: string | null;
+      name: string;
+      cwd: string | null;
+      outcome: LinkEventView["outcome"];
+      exit_code: number | null;
+    }>(
+      machineId === null
+        ? "SELECT * FROM link_events ORDER BY id DESC LIMIT 50"
+        : "SELECT * FROM link_events WHERE source = ? OR target = ? ORDER BY id DESC LIMIT 50",
+      ...(machineId === null ? [] : [machineId, machineId]),
+    ).map(({ exit_code, ...row }) => ({
+      ...row,
+      source: name(row.source),
+      target: name(row.target),
+      exitCode: exit_code,
+    }));
   }
 
   /** K-1717: the newest 50 ask events, for History; a snapshot reads at most 50 rows for them. */
@@ -11104,14 +12125,12 @@ export class Kitshn extends DurableObject<Env> {
        WHERE machine_id = ? AND state = 'queued' AND json_extract(command, '$.kind') = 'doors'`,
       machineId,
     );
-    const plan = doorPlan(
+    this.queueKitshnJob(
       machineId,
-      this.gameRows().map(gameOf),
-      this.openDoors(now),
-      now,
-      this.env.KITSHN_ZONE,
+      { kind: "doors", plan: this.doorPlanOf(machineId, now) },
+      actor,
+      now + HOUR_MS,
     );
-    this.queueKitshnJob(machineId, { kind: "doors", plan }, actor, now + HOUR_MS);
     this.deliverJobs();
   }
 
@@ -11246,6 +12265,54 @@ export class Kitshn extends DurableObject<Env> {
     for (const machine of machines) this.queueDoors(machine, actor, now);
   }
 
+  private doorPlanOf(machineId: string, now: number) {
+    return doorPlan(
+      machineId,
+      this.gameRows().map(gameOf),
+      this.openDoors(now),
+      now,
+      this.env.KITSHN_ZONE,
+      this.openGames(now),
+    );
+  }
+
+  /** K-2004: the game cards with an active share in Everyone, whose ports are open to every address. */
+  private openGames(now: number) {
+    return new Set(
+      this.gameRows()
+        .map((row) => row.card_id)
+        .filter((card) => {
+          const resource = this.state.resources.get(card);
+          return resource !== undefined && openToAll(this.state, resource, now);
+        }),
+    );
+  }
+
+  /** K-2005: a share in Everyone that starts or ends sends new plans, so the ports open or close for all. */
+  private syncOpenGames(now: number) {
+    const open = [...this.openGames(now)].sort().join(" ");
+    if (open === this.openGamesSent) return;
+    const restarted = this.openGamesSent === null;
+    this.openGamesSent = open;
+    const actor: Actor = { _tag: "kitshn", reason: "Everyone share of a game (K-2004)" };
+    for (const machine of new Set(this.gameRows().map(gameOf).map(doorMachine))) {
+      // After a restart the last change is not known, so a machine gets a plan only when its gated ports differ from
+      // its last plan that did not fail.
+      if (restarted && JSON.stringify(this.doorPlanOf(machine, now).ports) === this.lastDoorPorts(machine))
+        continue;
+      this.queueDoors(machine, actor, now);
+    }
+  }
+
+  private lastDoorPorts(machineId: string) {
+    const [last] = this.sql<{ ports: string | null }>(
+      `SELECT json_extract(command, '$.plan.ports') AS ports FROM jobs
+       WHERE machine_id = ? AND state != 'failed' AND json_extract(command, '$.kind') = 'doors' ORDER BY id DESC LIMIT 1`,
+      machineId,
+    );
+    return last?.ports ?? null;
+  }
+
   /** K-2005: a door whose person lost the card's share closes at once; a door of a removed card goes too. */
   private closeLostDoors(now: number) {
     // The check uses the address that opened the door, so a circle with an address condition keeps it open.
@@ -11272,11 +12339,31 @@ export class Kitshn extends DurableObject<Env> {
     const resource = row ? this.state.resources.get(row.card_id) : undefined;
     if (!row || !resource) return Response.json({ decision: "missing", stale });
     // A door belongs to a person, so the join page needs a login, also on a card in Everyone.
+    const game = gameOf(row);
+    const machine = doorMachine(game);
+    const status = this.state.machines.get(machine);
+    const gameView = {
+      name: game.name,
+      address: joinAddress(game, resource.addresses[0] ?? ""),
+      ports: game.ports.map(portKey),
+      doorHours: game.doorMs / HOUR_MS,
+      reachable: row.v4 !== null || row.v6 !== null,
+      machineOnline: status ? this.machineView(status).online : false,
+    };
+    // K-2004: a game in Everyone has no doors, so its page needs no login.
+    if (openToAll(this.state, resource, now))
+      return Response.json({
+        decision: "allow",
+        stale,
+        error: input.action === "view" ? null : "This game is open to everyone, so it needs no door.",
+        game: gameView,
+        openToAll: true,
+        doors: [],
+        seen: visitor.ip,
+      });
     const decision = visitor.email === null ? "login" : contentAccess(this.state, resource, visitor, now);
     if (decision !== "allow" || visitor.email === null) return Response.json({ decision, stale });
     const person = visitor.email;
-    const game = gameOf(row);
-    const machine = doorMachine(game);
     const actor: Actor = { _tag: "person", email: person };
     let error: string | null = null;
     // K-2004: one open or close per person and card in 10 s, so a loop cannot fill History or the machine's jobs.
@@ -11291,13 +12378,17 @@ export class Kitshn extends DurableObject<Env> {
         for (const [key, at] of this.doorTurns) if (at <= now - 10_000) this.doorTurns.delete(key);
     };
     if (input.action === "open" && !waiting) {
-      // K-2004: the address that kitshn sees is the door; the browser may add only the other family to it.
+      // K-2004: the address that kitshn sees is always a door; the browser adds the other addresses that it found,
+      // within the limits of openDoors. Each browser address passes the share check, so an address condition of a
+      // circle still holds; a refused one is left out.
       const seen = doorAddress(visitor.ip ?? "");
-      const other = (input.addresses ?? [])
-        .map((address) => doorAddress(String(address)))
-        .find((door) => !("error" in door) && !("error" in seen) && door.family !== seen.family);
-      const addresses =
-        "error" in seen ? [] : [seen.address, ...(other && !("error" in other) ? [other.address] : [])];
+      const found = (input.addresses ?? [])
+        .slice(0, DOOR_LIMITS[4] + DOOR_LIMITS[6])
+        .map(String)
+        .filter((ip) => contentAccess(this.state, resource, { ...visitor, ip }, now) === "allow")
+        .map((address) => doorAddress(address))
+        .flatMap((door) => ("error" in door ? [] : [door.address]));
+      const addresses = "error" in seen ? [] : [...new Set([seen.address, ...found])];
       error =
         ("error" in seen ? `kitshn sees your address as ${visitor.ip ?? "none"}: ${seen.error}` : null) ??
         // An offline machine gets the plan when it connects; an online one must hold doors now.
@@ -11327,7 +12418,7 @@ export class Kitshn extends DurableObject<Env> {
             );
           this.insertRevision(
             actor,
-            `${person} opened ${game.name} for ${addresses.join(" and ")} until ${ends} UTC`,
+            `${person} opened ${game.name} for ${open.map((door) => door.address).join(", ")} until ${ends} UTC`,
             [],
             null,
           );
@@ -11339,29 +12430,21 @@ export class Kitshn extends DurableObject<Env> {
       }
     }
     if (input.action === "close" && !waiting) {
-      const door = this.openDoors(now, game.card).find(
-        (item) => item.person === person && item.address === input.address,
-      );
-      if (door) {
-        this.closeDoors(actor, [door], "End now", now);
+      // K-2004: End now closes every door of this person on the card.
+      const doors = this.openDoors(now, game.card).filter((item) => item.person === person);
+      if (doors.length > 0) {
+        this.closeDoors(actor, doors, "End now", now);
         tookTurn();
         this.load();
         this.broadcast();
-      } else error = "You have no open door for this address.";
+      } else error = "You have no open door on this game.";
     }
-    const status = this.state.machines.get(machine);
     return Response.json({
       decision,
       stale,
       error,
-      game: {
-        name: game.name,
-        address: joinAddress(game, resource.addresses[0] ?? ""),
-        ports: game.ports.map(portKey),
-        doorHours: game.doorMs / HOUR_MS,
-        reachable: row.v4 !== null || row.v6 !== null,
-        machineOnline: status ? this.machineView(status).online : false,
-      },
+      game: gameView,
+      openToAll: false,
       doors: this.openDoors(now, game.card).filter((door) => door.person === person),
       seen: visitor.ip,
     });
@@ -11443,6 +12526,8 @@ export class Kitshn extends DurableObject<Env> {
     const want = new Map(
       gameRecords(this.gameRows(), this.env.KITSHN_ZONE).map((r) => [`${r.type} ${r.name}`, r]),
     );
+    // Every game record is on the kitshn zone. zonePath takes one label only, so an SRV name like _x._tcp.<name> fails it.
+    const zone = `${this.zonePath(this.env.KITSHN_ZONE)}/dns_records`;
     const rows = this.sql<GameRecordRow>("SELECT * FROM game_records");
     const failed = (
       row: { type: string; name: string; card_id: string; content: string; record_id: string },
@@ -11464,9 +12549,8 @@ export class Kitshn extends DurableObject<Env> {
       try {
         if (row.record_id) {
           calls++;
-          await api("DELETE", `${this.zonePath(row.name)}/dns_records/${row.record_id}`).catch(
-            (error: unknown) =>
-              error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error),
+          await api("DELETE", `${zone}/${row.record_id}`).catch((error: unknown) =>
+            error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error),
           );
         }
         this.sql("DELETE FROM game_records WHERE type = ? AND name = ?", row.type, row.name);
@@ -11480,7 +12564,6 @@ export class Kitshn extends DurableObject<Env> {
       if (row && row.content === record.content && row.error === null) continue;
       if (row?.error && row.retry_at > now) continue;
       if (calls + 2 > budget) return calls;
-      const zone = `${this.zonePath(record.name)}/dns_records`;
       try {
         let recordId = row?.record_id ?? "";
         if (!recordId) {
@@ -12454,6 +13537,7 @@ export class Kitshn extends DurableObject<Env> {
     const before = JSON.stringify(accessStates(this.desired(now), this.access));
     this.endShares(now);
     if (this.closeLostDoors(now)) changed = true;
+    this.syncOpenGames(now);
     const daily = this.dailyAt() <= now;
     if (daily) this.daily(now);
     // K-1126: the uptime fetches count against the 40 calls of this run (K-406). The daily run spends 40 already,
@@ -12512,6 +13596,7 @@ export class Kitshn extends DurableObject<Env> {
       spent += await this.fillAudiences(api, now);
       // Removals first: ingress and DNS go before an Access application does. Additions wait for the next
       // run, because ingress and DNS need the application that the Access sync makes (K-410).
+      spent += await this.refreshForeignPaths(api, now);
       await this.syncTunnels(api, 6);
       spent += await this.checkSites(api, 6);
       await this.syncDns(api, 5);
@@ -12531,12 +13616,14 @@ export class Kitshn extends DurableObject<Env> {
       // K-113: take an unwanted enrollment policy off the App Launcher before the sync deletes it.
       spent += await this.syncLauncher(api, daily);
       // K-406: at most 40 calls. `spent` counts the daily compare (12), the site checks (6), the redirect step (5),
-      // the game records (4) and the launcher step (3); the tunnels, DNS records and offline routes above made at most 6 + 5 + 5, and the launcher
+      // the game records (4), the launcher step (3) and the path read of taken addresses (1); the tunnels, DNS records and offline routes above made at most 6 + 5 + 5, and the launcher
       // step after the sync needs 3. The login step and the sync share what is left. A policy that the sync
       // makes goes on the login applications in the next alarm, which runs at once (loginWork).
       await this.syncAccessLocked(api, CALLS_PER_RUN - spent - 16 - 3);
       // A policy that the sync just made goes on the App Launcher in the same run.
       await this.syncLauncher(api, false);
+      // K-1623: an application that the sync made or made again changes the audiences of its provider.
+      this.pushGrants();
 
       changed ||= daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
     }
@@ -12736,11 +13823,59 @@ function rowAddresses(row: Pick<DeployRow, "address" | "addresses">): Array<stri
 
 /** A failed tunnel, DNS or route write tries again after this time. */
 const RETRY_MS = 5 * 60_000;
+/** K-1623: cloudflared takes a new ingress within seconds; a taken address moves its record a minute after. */
+const HANDOVER_INGRESS_MS = 60_000;
+/** K-705: the sticker of a provider card whose address something else serves. */
+const ADDRESS_IN_USE = "address in use";
+
+/** K-1623: the record of a taken address as it was, for "Give the address back". */
+interface AddressHandover {
+  readonly recordId: string;
+  readonly content: string;
+  readonly comment: string | null;
+  /** When the tunnel first got the address's ingress; the record moves `HANDOVER_INGRESS_MS` after. */
+  readonly ingressAt: number | null;
+  /** The record serves kitshn's tunnel now. */
+  readonly switched: boolean;
+  /** The path applications of the portal on the address, as kitshn last read them, and when. */
+  readonly paths: ReadonlyArray<ForeignPath>;
+  readonly pathsAt: number;
+  /** The record moved and the portal no longer holds the exact host, so the address stays with kitshn for good. */
+  readonly released: boolean;
+}
+
+/** K-1623: how often kitshn reads the path applications of a taken address again. */
+const FOREIGN_PATHS_MS = 10 * 60_000;
+
+/** K-705: a provider card with or without the sticker of an address that something else serves. */
+function withAddressInUse(card: Resource, inUse: boolean): Resource {
+  const provider = card.provider!;
+  const stickers = provider.stickers.filter((sticker) => sticker.text !== ADDRESS_IN_USE);
+  return {
+    ...card,
+    provider: {
+      ...provider,
+      stickers: inUse ? [{ text: ADDRESS_IN_USE, tone: "warn" as const }, ...stickers].slice(0, 8) : stickers,
+    },
+  };
+}
 
 const DAY_MS = 24 * 3_600_000;
 
 /** K-819: GitHub calls of one repo check; a Free plan request may make 50 subrequests. */
 const GITHUB_CALLS_PER_CHECK = 40;
+
+/** K-106: the Cloudflare name of each device token that kitshn makes. */
+const DEVICE_TOKEN_PREFIX = "kitshn device ";
+
+/** K-1601: a waiting device invite. */
+type InviteRow = {
+  lookup: string;
+  token_id: string;
+  client_id: string;
+  name: string;
+  expires_at: number;
+};
 
 /** A machine as the actor of what its daemon does, such as a key rotation (K-1705). */
 const deviceActor = (machine: Machine): Actor => ({
@@ -12766,8 +13901,14 @@ const missingFeature = (
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
-const send = (socket: WebSocket, message: ServerMessage | ServerToDaemon) =>
+/**
+ * A socket that is closing still shows in `getWebSockets` until its close is handled, and a send to it throws. It
+ * gets nothing: its close handler does the clean-up (K-1805).
+ */
+const send = (socket: WebSocket, message: ServerMessage | ServerToDaemon) => {
+  if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) return;
   socket.send(JSON.stringify(message));
+};
 
 /** K-2003: a request of the join page. */
 interface GameRequest {
@@ -12776,8 +13917,6 @@ interface GameRequest {
   readonly action: "view" | "open" | "close";
   /** `open`: the addresses that the browser found (K-2004). */
   readonly addresses?: ReadonlyArray<unknown>;
-  /** `close`: the door address. */
-  readonly address?: string;
 }
 
 interface ContentRequest {

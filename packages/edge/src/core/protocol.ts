@@ -18,6 +18,9 @@ import type { RepoGate } from "./repos.ts";
 import type { Proposal } from "./asks.ts";
 import type { ProviderCommand } from "@kitshn/local";
 
+/** K-1623: a provider card's address that something else serves, that kitshn takes over now, or took over. */
+export type AddressHold = "in-use" | "taking" | "taken";
+
 /** K-1717: one ask of an agent on a machine, as History shows it: an event, with no Undo. */
 export interface AskEventView {
   readonly id: number;
@@ -32,6 +35,20 @@ export interface AskEventView {
   readonly detail: string;
   /** K-1752: the label keys that an attester set; the rest are claims. */
   readonly verified: ReadonlyArray<string>;
+}
+
+/** K-1610: one call of a source machine on a target machine, as History shows it: an event, with no Undo. */
+export interface LinkEventView {
+  readonly id: number;
+  readonly at: number;
+  readonly source: string;
+  readonly target: string;
+  readonly kind: "exec" | "tool";
+  readonly thread: string | null;
+  readonly name: string;
+  readonly cwd: string | null;
+  readonly outcome: "succeeded" | "refused" | "failed";
+  readonly exitCode: number | null;
 }
 
 /** K-1722: an open proposal, with the name of the machine that asked, for the Asks list. */
@@ -124,6 +141,8 @@ export interface Snapshot {
   readonly previousVersions: ReadonlyArray<string>;
   /** K-1127: the pages and folder sites that an agent key published, which it can hand over to a repo. */
   readonly handoverCards: ReadonlyArray<string>;
+  /** K-1623: provider cards whose address something else serves, that kitshn takes over now, or took over. */
+  readonly addressHolds: Readonly<Record<string, AddressHold>>;
   /** K-1123, K-1129: the folder sites that no repo took over; a folder from the owner gives them a new version. */
   readonly folderSites: ReadonlyArray<string>;
   /** K-1128: the redirect addresses of each site card, by card id. */
@@ -131,6 +150,8 @@ export interface Snapshot {
   /** K-1504: who paused and when, while paused. */
   readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;
+  /** K-717: the stored card setting values, by card id; a missing value is the default of its setting. */
+  readonly cardSettings: Readonly<Record<string, Readonly<Record<string, string>>>>;
   /** K-707: the commands of the providers of each machine, by machine id. */
   readonly providerCommands: Readonly<
     Record<
@@ -152,6 +173,8 @@ export interface Snapshot {
   readonly githubDefaultWay: GitHubWay;
   /** K-1717: the newest 50 ask events. */
   readonly askEvents: ReadonlyArray<AskEventView>;
+  /** K-1610: the newest 50 exec runs and forwarded tool calls between machines. */
+  readonly linkEvents: ReadonlyArray<LinkEventView>;
   /** The newest jobs, with their output cut to 4,000 characters. */
   readonly jobs: ReadonlyArray<JobView>;
   /** K-515: the jobs that wait for each machine, from the job table, not from the newest jobs above. */
@@ -215,6 +238,8 @@ export interface MachineView {
   readonly orphanVolumes: ReadonlyArray<ProjectVolume>;
   /** K-619: the listening ports of the machine while it is online, for the site wizard. */
   readonly servers: ReadonlyArray<ServerReport>;
+  /** K-1608: the pushes of state that the machine has not applied yet; null when its daemon does not report it. */
+  readonly queued: number | null;
 }
 
 export interface JobView {

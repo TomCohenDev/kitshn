@@ -1,7 +1,15 @@
 import type { LogAnswer, LogLine, LogSearch } from "./logs.ts";
 import type { BackupReport } from "./backups.ts";
 import type { MachineRight } from "./model.ts";
-import type { GrantTables, ProviderReport } from "@kitshn/local";
+import type {
+  CardSettingValues,
+  DesiredParts,
+  GrantTables,
+  LinkAudit,
+  ProviderReport,
+  ProviderAccess,
+  ReachedCard,
+} from "@kitshn/local";
 import type { ServerReport } from "./sites.ts";
 import type { DoorPlan } from "./game.ts";
 /** A joined machine (K-602). Its resource card has the same id and the kind `machine`. */
@@ -163,6 +171,8 @@ export type Command =
       readonly provider: string;
       readonly command: string;
       readonly resource: string | null;
+      /** K-1625: the row of a list that the command is for. */
+      readonly row?: string;
     }
   /** K-1820: back up as the run `before` first, then write the run `run` back. Only kitshn makes this job. */
   /** K-2005: the game ports of this machine and their open doors; the whole list each time. Only kitshn makes it. */
@@ -262,7 +272,23 @@ export type DaemonMessage =
   /** K-1710: an ask of a local agent; kitshn answers with `askAnswer` and the same `requestId`. */
   | { readonly type: "ask"; readonly requestId: string; readonly ask: AskWire }
   /** K-704: every provider of the machine with its kinds, commands and resources, on connect and on each change. */
-  | { readonly type: "providers"; readonly providers: ReadonlyArray<ProviderReport> };
+  | { readonly type: "providers"; readonly providers: ReadonlyArray<ProviderReport> }
+  /** K-709: a provider set a part of a desired state; kitshn stores it and pushes it to every machine. */
+  | {
+      readonly type: "desiredSet";
+      /** kitshn answers with `requestAnswer` and this id. */
+      readonly requestId: string;
+      readonly provider: string;
+      readonly kind: string;
+      readonly part: "shared" | "machine";
+      readonly value: unknown;
+    }
+  /** K-1612: a local user cancels a queued job of this machine; kitshn answers with `requestAnswer`. */
+  | { readonly type: "cancelJob"; readonly requestId: string; readonly jobId: number }
+  /** K-1610: a provider of the machine reports one exec run or forwarded tool call on another machine. */
+  | { readonly type: "audit"; readonly audit: LinkAudit }
+  /** K-1608: the daemon saved the push with this key and hash and gave it to its provider. */
+  | { readonly type: "applied"; readonly key: string; readonly hash: string };
 
 /** Messages from kitshn to a daemon. */
 export type ServerToDaemon =
@@ -276,10 +302,48 @@ export type ServerToDaemon =
   | { readonly type: "accepted"; readonly fingerprint: string }
   /** K-1705: "Rotate key" in the machine panel. */
   | { readonly type: "rotateKey" }
+  /** K-704: the name of the machine on the map, on each signed connection and after a rename. */
+  | { readonly type: "name"; readonly name: string }
   /** K-704: the owner forgot this provider on the map; the daemon drops it unless a connection holds it. */
   | { readonly type: "forgetProvider"; readonly provider: string }
   /** K-706: the grant table of each resource of one provider, on connect and on each change. */
-  | { readonly type: "grants"; readonly provider: string; readonly tables: GrantTables }
+  | {
+      readonly type: "grants";
+      readonly provider: string;
+      readonly tables: GrantTables;
+      readonly hash: string;
+    }
+  /** The answer to a request of the daemon that names a `requestId`: null, or why kitshn refused. */
+  | { readonly type: "requestAnswer"; readonly requestId: string; readonly error: string | null }
+  /** K-709: the shared part and this machine's part of one desired state. */
+  | {
+      readonly type: "desired";
+      readonly provider: string;
+      readonly kind: string;
+      readonly state: DesiredParts;
+      readonly hash: string;
+    }
+  /** K-1609: the cards of one provider on other machines that this machine reaches. */
+  | {
+      readonly type: "reach";
+      readonly provider: string;
+      readonly cards: ReadonlyArray<ReachedCard>;
+      readonly hash: string;
+    }
+  /** K-1623: the Access audiences of one provider's site hosts on this machine. */
+  | {
+      readonly type: "access";
+      readonly provider: string;
+      readonly access: ProviderAccess;
+      readonly hash: string;
+    }
+  /** K-717: the card settings of one provider's cards on this machine. */
+  | {
+      readonly type: "settings";
+      readonly provider: string;
+      readonly values: CardSettingValues;
+      readonly hash: string;
+    }
   /** K-1762: the daemon drops its kept GitHub tokens of one repo, or all with null, because kitshn revoked them. */
   | { readonly type: "dropTokens"; readonly repo: string | null }
   | {
@@ -497,6 +561,11 @@ export function newJoinCode(): string {
   const alphabet = "23456789abcdefghjkmnpqrstuvwxyz";
   const random = crypto.getRandomValues(new Uint8Array(20));
   return [...random].map((value) => alphabet[value % alphabet.length]).join("");
+}
+
+/** K-1601: a device invite code: 16 random bytes in hex, 128 bits. */
+export function newInviteCode(): string {
+  return [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /** K-818: checks an allow list from the map: at most 50 entries of a repo `owner/name` and a setting name. */

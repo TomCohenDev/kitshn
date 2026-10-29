@@ -108,6 +108,7 @@ function context(version = "0123456789ab"): ActionContext {
     keyFailure: null,
     orphanVolumes: [],
     servers: [],
+    queued: 0,
   };
   return {
     state,
@@ -119,6 +120,7 @@ function context(version = "0123456789ab"): ActionContext {
     selected: new Set(),
     previousVersions: new Set(),
     handoverCards: new Set(),
+    addressHolds: {},
     openStacks: new Set(),
     folderSites: new Set(),
     providerCommands: {},
@@ -597,5 +599,23 @@ describe("per-item undo (K-1507)", () => {
     expect(settleUndoCheck(null, "card:riffle", { allowed: true })).toBeNull();
     const settled = settleUndoCheck(check, "circle:her", { allowed: true });
     expect(slowUndoCheck(settled, "circle:her")).toBe(settled);
+  });
+});
+
+describe("game cards (K-534)", () => {
+  it("offer Remove game as a dangerous action, the way out of the Game step", () => {
+    const { handlers, calls } = recorder();
+    const base = context();
+    const game = card("mc", "game", ["mc.example.com"]);
+    const ctx = {
+      ...base,
+      state: { ...base.state, resources: new Map(base.state.resources).set("mc", game) },
+    };
+    const groups = actionsFor(ctx, handlers, { _tag: "card", id: "mc" });
+    const remove = find(groups, "remove-game");
+    expect(remove.danger).toBe(true);
+    run(remove);
+    expect(calls).toEqual([["removeGame", game]]);
+    expect(ids(actionsFor(base, handlers, { _tag: "card", id: "riffle" }))).not.toContain("remove-game");
   });
 });

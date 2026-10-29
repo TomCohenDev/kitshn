@@ -2,6 +2,11 @@
 // its answer the same id. An event carries no id (K-703): the result of an ask that waited (K-1722).
 import { Schema } from "effect";
 import {
+  CardSettingValues,
+  LinkAudit,
+  ProviderAccess,
+  ReachedCard,
+  DesiredParts,
   GrantTables,
   PROVIDER_LIMITS,
   ProviderCommand,
@@ -146,6 +151,24 @@ export const Request = Schema.Union([
   }),
   /** K-704: `kitshn provider forget <name>`: the daemon drops a provider that does not run, so it no longer reports it. */
   Schema.Struct({ id: Id, type: Schema.Literal("provider-forget"), provider: ProviderName }),
+  /**
+   * K-709: a provider sets the part of a desired state of this machine, or the shared part. kitshn stores it and pushes
+   * it to every machine of the provider. Only the connection that registered the provider sends it.
+   */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("desired-set"),
+    provider: ProviderName,
+    kind: Schema.String.check(Schema.isMaxLength(64)),
+    part: Schema.Literals(["shared", "machine"]),
+    value: Schema.Unknown,
+  }),
+  /** K-1612: cancels a job of this machine while it waits in the queue: one that runs here, or one that it queued. */
+  Schema.Struct({ id: Id, type: Schema.Literal("job-cancel"), jobId: Schema.Int }),
+  /** K-605, K-606: the resource sample now and the samples of the last hour, read on this machine only. */
+  Schema.Struct({ id: Id, type: Schema.Literal("samples") }),
+  /** K-1610: the provider reports one exec run or forwarded tool call on another machine. */
+  Schema.Struct({ id: Id, type: Schema.Literal("audit"), provider: ProviderName, audit: LinkAudit }),
   /** K-707: the result of a `command` event. */
   Schema.Struct({
     id: Id,
@@ -159,6 +182,15 @@ export const Request = Schema.Union([
 ]);
 export type Request = typeof Request.Type;
 export type ProviderRequest = Extract<Request, { type: "register" | "upsert" | "remove" | "command-result" }>;
+
+/** K-605: one resource sample; each share is between 0 and 1. */
+export const Sample = Schema.Struct({
+  at: Schema.Number,
+  cpu: Schema.Number,
+  memory: Schema.Number,
+  disk: Schema.Number,
+});
+export type Sample = typeof Sample.Type;
 
 export const Status = Schema.Struct({
   version: Schema.String,
@@ -239,7 +271,39 @@ export const Answer = Schema.Union([
     type: Schema.Literal("register"),
     machineId: Schema.String,
     grants: GrantTables,
+    /** K-709, K-1608: the saved desired state of each kind of the provider, from before kitshn answers. */
+    desired: Schema.Record(Schema.String, DesiredParts),
+    /** K-717: the saved value of each card setting, by resource id and setting id. */
+    settings: CardSettingValues,
+    /** K-1609: the saved reach of this machine. */
+    reach: Schema.Array(ReachedCard),
+    /** K-1623: the saved Access audiences of the provider's site hosts; null before kitshn sent them. */
+    access: Schema.NullOr(ProviderAccess),
+    /**
+     * K-1609: the Unix socket or Windows pipe of the link proxy: `http://link/<provider>/<machine id>/<path>` reaches
+     * that provider's card on that machine. Null when the daemon could not serve it.
+     */
+    linkSocket: Schema.NullOr(Schema.String),
+    /** The name of this machine on the map; null before its first connection to kitshn. */
+    machineName: Schema.NullOr(Schema.String),
   }),
+  Schema.Struct({ id: Id, type: Schema.Literal("desired-set") }),
+  Schema.Struct({ id: Id, type: Schema.Literal("audit") }),
+  Schema.Struct({ id: Id, type: Schema.Literal("job-cancel") }),
+  Schema.Struct({ id: Id, type: Schema.Literal("samples"), newest: Sample, history: Schema.Array(Sample) }),
+  /** K-1623: an event: the Access audiences of the provider's site hosts, on each change. */
+  Schema.Struct({ type: Schema.Literal("access"), provider: Schema.String, access: ProviderAccess }),
+  /** K-1609: an event: the cards of this provider on other machines that this machine reaches, on each change. */
+  Schema.Struct({ type: Schema.Literal("reach"), provider: Schema.String, cards: Schema.Array(ReachedCard) }),
+  /** K-709: an event: the desired state of one kind, on each change. */
+  Schema.Struct({
+    type: Schema.Literal("desired"),
+    provider: Schema.String,
+    kind: Schema.String,
+    state: DesiredParts,
+  }),
+  /** K-717: an event: the card settings of the provider's cards, on each change. */
+  Schema.Struct({ type: Schema.Literal("settings"), provider: Schema.String, values: CardSettingValues }),
   Schema.Struct({ id: Id, type: Schema.Literal("upsert") }),
   Schema.Struct({ id: Id, type: Schema.Literal("remove") }),
   Schema.Struct({ id: Id, type: Schema.Literal("command-result") }),
@@ -256,6 +320,8 @@ export const Answer = Schema.Union([
     commandId: Schema.Int,
     command: Schema.String,
     resource: Schema.NullOr(Schema.String),
+    /** K-1625: the row of a list that the command is for. */
+    row: Schema.optionalKey(Schema.String),
   }),
   /** The id is null when the line has no valid id. */
   Schema.Struct({ id: Schema.NullOr(Id), type: Schema.Literal("error"), error: Schema.String }),

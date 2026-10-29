@@ -188,6 +188,27 @@ describe("Compose logs (K-1804, K-1805)", () => {
   });
 });
 
+it("stops the tail of a closing map while the daemon's socket closes too (K-1805)", async () => {
+  await composeCard("m-closing", "app-closing");
+  const machine = await daemon("m-closing", ["logs"]);
+  const map = await socket(["map"], {
+    kind: "map",
+    caller: {
+      visitor: { email: "owner@example.com", clientId: null, ip: null },
+      actor: { _tag: "person", email: "owner@example.com" },
+    },
+    tails: [{ kind: "compose", id: "t3", machineId: "m-closing" }],
+  });
+  // The daemon's socket is closing, and kitshn has not seen its close yet, when the map goes.
+  await runInDurableObject(stub(), async (instance) => {
+    machine.server.close(1001, "gone");
+    map.server.close(1001, "gone");
+    await instance.webSocketClose(map.server);
+  });
+  await settle();
+  await runInDurableObject(stub(), (instance) => instance.webSocketClose(machine.server));
+});
+
 describe("logs for agent keys (K-1810)", () => {
   const circle = (id: string, clientId: string, x: number, level: "view" | "control"): Circle => ({
     id,

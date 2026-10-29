@@ -1,5 +1,17 @@
 // Section 7: the cards of a machine's providers (K-704, K-705) and the grant tables that kitshn pushes to them (K-706).
-import type { Grant, GrantRule, GrantTables, ProviderCommand, ProviderReport } from "@kitshn/local";
+import {
+  type DesiredParts,
+  type Grant,
+  type GrantRule,
+  type GrantTables,
+  type ProviderCommand,
+  type ProviderKind,
+  type ProviderReport,
+  type ProviderAccess,
+  type ReachedCard,
+  pushKey,
+} from "@kitshn/local";
+import { visitorLevel } from "./visitor.ts";
 import type { Machine } from "./machine.ts";
 import {
   type Member,
@@ -43,6 +55,9 @@ export function providerCards(
           levels: kind.levels,
           facts: item.facts ?? [],
           stickers: item.stickers ?? [],
+          lists: item.lists ?? [],
+          settings: kind.settings ?? [],
+          ...(kind.ownerControl === true ? { ownerControl: true as const } : {}),
           site: item.site?.name ?? null,
         },
       });
@@ -128,4 +143,164 @@ export function commandsFor(
       )
       .map((command) => ({ provider: report.name, command })),
   );
+}
+
+/** K-1608: one push of kitshn to a machine, by the key that the daemon reports back when it applied it. */
+export type ProviderPush =
+  | { readonly key: string; readonly type: "grants"; readonly provider: string; readonly tables: GrantTables }
+  | {
+      readonly key: string;
+      readonly type: "desired";
+      readonly provider: string;
+      readonly kind: string;
+      readonly state: DesiredParts;
+    }
+  | {
+      readonly key: string;
+      readonly type: "reach";
+      readonly provider: string;
+      readonly cards: ReadonlyArray<ReachedCard>;
+    }
+  | {
+      readonly key: string;
+      readonly type: "access";
+      readonly provider: string;
+      readonly access: ProviderAccess;
+    }
+  | {
+      readonly key: string;
+      readonly type: "settings";
+      readonly provider: string;
+      readonly values: Record<string, Record<string, string>>;
+    };
+
+/**
+ * K-706, K-709, K-717: everything that the providers of one machine get: the grant tables and card settings of each
+ * provider, and the shared part and this machine's part of each desired state. `desired` holds the parts of each kind
+ * by machine id, with "" for the shared part; `settings` the stored values by card id.
+ */
+export function providerPushes(
+  state: State,
+  machineId: string,
+  regs: ReadonlyArray<{ readonly name: string; readonly kinds: ReadonlyArray<ProviderKind> }>,
+  desired: ReadonlyMap<string, ReadonlyMap<string, unknown>>,
+  settings: ReadonlyMap<string, Readonly<Record<string, string>>>,
+  now: number,
+  access: {
+    readonly teamDomain: string;
+    readonly audiencesOf: (cardId: string) => ReadonlyArray<string>;
+  },
+): Array<ProviderPush> {
+  return regs.flatMap(({ name, kinds }) => {
+    const values: Record<string, Record<string, string>> = {};
+    for (const card of state.resources.values())
+      if (card.machine === machineId && card.provider?.name === name && card.provider.settings.length > 0)
+        values[card.provider.localId] = Object.fromEntries(
+          card.provider.settings.map((setting) => [
+            setting.id,
+            settingValue(setting, settings.get(card.id)?.[setting.id]),
+          ]),
+        );
+    return [
+      {
+        key: pushKey.grants(name),
+        type: "grants",
+        provider: name,
+        tables: grantTables(state, machineId, name, now),
+      },
+      {
+        key: pushKey.reach(name),
+        type: "reach",
+        provider: name,
+        cards: reachOf(state, machineId, name, now),
+      },
+      { key: pushKey.settings(name), type: "settings", provider: name, values },
+      {
+        key: pushKey.access(name),
+        type: "access",
+        provider: name,
+        access: {
+          teamDomain: access.teamDomain,
+          audiences: siteAudiences(state, machineId, name, access.audiencesOf),
+        },
+      },
+      ...kinds
+        .filter((kind) => kind.state !== undefined)
+        .map((kind): ProviderPush => ({
+          key: pushKey.desired(name, kind.id),
+          type: "desired",
+          provider: name,
+          kind: kind.id,
+          state: {
+            shared: desired.get(kind.id)?.get("") ?? null,
+            machine: desired.get(kind.id)?.get(machineId) ?? null,
+          },
+        })),
+    ];
+  });
+}
+
+/**
+ * K-1623: the AUD tags of kitshn's Access applications of one provider's site cards on a machine, so the provider
+ * accepts tokens of those applications. `audiencesOf` gives the applications that exist, also one whose address the
+ * card just gave back, because it answers until the sync deletes it. A card without an application adds none.
+ */
+export function siteAudiences(
+  state: State,
+  machineId: string,
+  provider: string,
+  audiencesOf: (cardId: string) => ReadonlyArray<string>,
+): Array<string> {
+  const audiences = new Set<string>();
+  for (const card of state.resources.values())
+    if (card.machine === machineId && card.provider?.name === provider && card.provider.site)
+      for (const aud of audiencesOf(card.id)) audiences.add(aud);
+  return [...audiences].sort();
+}
+
+/** K-717: a stored value that the kind still offers, else its default. */
+const settingValue = (
+  setting: { readonly values: ReadonlyArray<string>; readonly default: string },
+  stored?: string,
+) => (stored !== undefined && setting.values.includes(stored) ? stored : setting.default);
+
+/**
+ * K-1608, K-1625: a provider card of the machine reports the fact `busy` = "true" and runs: a card that is offline or
+ * that its provider dropped keeps its last facts (K-705), so it never holds a job.
+ */
+export function machineBusy(state: State, machineId: string): boolean {
+  return [...state.resources.values()].some(
+    (card) =>
+      card.machine === machineId &&
+      card.status !== "offline" &&
+      card.provider?.droppedAt === undefined &&
+      card.provider?.facts.some((fact) => fact.role === "busy" && fact.value === "true") === true,
+  );
+}
+
+/**
+ * K-1609: the cards of one provider on other machines that a machine opens, as Access decides it for the machine's
+ * token: its client id, no person and no address. A pause and an end date count as in Access (K-1504, K-209).
+ */
+export function reachOf(state: State, machineId: string, provider: string, now: number): Array<ReachedCard> {
+  const machine = state.machines.get(machineId);
+  if (!machine) return [];
+  const visitor = { email: null, clientId: machine.clientId, ip: null };
+  return [...state.resources.values()].flatMap((card) => {
+    if (card.machine === null || card.machine === machineId || card.provider?.name !== provider) return [];
+    if (card.provider.droppedAt !== undefined) return [];
+    const level = visitorLevel(state, card, visitor, now);
+    return level === null
+      ? []
+      : [
+          {
+            machineId: card.machine,
+            machineName: state.machines.get(card.machine)?.name ?? card.machine,
+            kind: card.kind,
+            id: card.provider.localId,
+            address: card.addresses[0] ?? null,
+            level: levelName(card, level),
+          },
+        ];
+  });
 }

@@ -24,12 +24,16 @@ export default {
       route.fulfill({ contentType: "text/html", body: site(new URL(route.request().url()).host) }),
     );
     const card = page.locator('[data-card="tick3d"]').first();
-    if (view.touch) await card.tap();
-    else {
+    // On a phone the first tap on a dot zooms to it (K-513); the second selects the card.
+    if (view.touch) {
+      await card.tap();
+      await page.waitForTimeout(300);
+      await card.tap();
+    } else {
       await zoomTo(card);
       await card.click();
     }
-    const arrow = page.getByRole("button", { name: "▾ Preview" });
+    const arrow = page.getByRole("button", { name: /▾ Preview|show the preview/i });
     await arrow.waitFor();
     await shot("closed");
     await arrow.click();
@@ -50,7 +54,7 @@ export default {
     await page.locator('[data-card="riffle"]').first().click();
     await page.waitForTimeout(200);
     await page.locator('[data-card="riffle"]').first().click();
-    await page.getByRole("button", { name: "▾ Preview" }).click();
+    await page.getByRole("button", { name: /▾ Preview|show the preview/i }).click();
     await page.locator(".preview-frame .help").waitFor();
     await shot("private");
   },

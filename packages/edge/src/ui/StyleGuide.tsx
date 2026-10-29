@@ -1,12 +1,24 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { demo, DEMO_MACHINES } from "../core/demo.ts";
-import type { MachineKey } from "../core/machine.ts";
 import type { Circle, Point, Resource, State } from "../core/model.ts";
 import type { Notification } from "../core/notifications.ts";
-import type { AccessState, MachineView, ProposalView } from "../core/protocol.ts";
-import { seed } from "../core/seed.ts";
+import type { AccessState, ProposalView } from "../core/protocol.ts";
 import { AccessRow, TrayCard } from "./App.tsx";
+import {
+  Entry,
+  GuideHead,
+  KEY,
+  MiniMap,
+  NOW,
+  Stage,
+  at,
+  fixtureCard,
+  fixtureState,
+  machineView,
+  noop,
+  resource,
+  rootTokens,
+} from "./guide-kit.tsx";
 import { AskRow } from "./Asks.tsx";
 import {
   Check,
@@ -22,7 +34,7 @@ import {
 } from "./controls.tsx";
 import { IconTile } from "./ItemIcon.tsx";
 import { KINDS, LEVEL_COLORS, LEVEL_TILTS } from "./kinds.ts";
-import { HEAD_LAYER, stackOffsets } from "./layout.ts";
+import { stackOffsets } from "./layout.ts";
 import { KeySticker, PresenceSticker } from "./Machines.tsx";
 import { CardView, CircleView, StackCard } from "./Map.tsx";
 import { NotificationRow } from "./Notifications.tsx";
@@ -34,143 +46,6 @@ import type { Rect } from "./popover.ts";
  * its shared class, with fixtures and never the live state. Owner only, as the map: the same Access application
  * guards the host.
  */
-
-const NOW = Date.now();
-const noop = () => undefined;
-const at = (x: number, y: number): Point => ({ x, y });
-
-/** The fixtures: the seed of a fresh kitshn and the local demo, as the Worker's demo mode makes them. */
-function fixtureState(): State {
-  const initial = seed(["owner@example.com"], "kit.example.com");
-  const extra = demo();
-  return {
-    circles: new Map([...initial.circles, ...extra.circles].map((circle) => [circle.id, circle])),
-    resources: new Map([...initial.resources, ...extra.resources].map((resource) => [resource.id, resource])),
-    places: new Map([...initial.places, ...extra.places]),
-    shareSettings: new Map(),
-    stacks: new Map(),
-    paused: null,
-    machines: new Map(DEMO_MACHINES.map(({ machine }) => [machine.id, machine])),
-  };
-}
-
-const resource = (id: string, kind: Resource["kind"], name: string, address: string | null): Resource => ({
-  id,
-  kind,
-  name,
-  addresses: address ? [address] : [],
-  status: "running",
-  group: null,
-  machine: null,
-});
-
-const machineView = (online: boolean, key: MachineKey | null): MachineView => {
-  const first = DEMO_MACHINES[0];
-  if (!first) throw new Error("The demo has no machine.");
-  return {
-    machine: key ? { ...first.machine, key } : first.machine,
-    online,
-    lastSeen: online ? NOW : NOW - 3_600_000,
-    status: null,
-    sample: null,
-    os: first.os,
-    keyFailure: null,
-    orphanVolumes: [],
-  };
-};
-const KEY: MachineKey = { kind: "public", publicKey: "demo", fingerprint: "SHA256:demo", since: NOW };
-
-/** The tokens of the page's own stylesheet: the light `:root` block and its dark override. */
-function rootTokens() {
-  const light = new Map<string, string>();
-  const dark = new Map<string, string>();
-  const collect = (style: CSSStyleDeclaration, into: Map<string, string>) => {
-    for (let index = 0; index < style.length; index++) {
-      const name = style.item(index);
-      into.set(name, style.getPropertyValue(name).trim());
-    }
-  };
-  for (const sheet of document.styleSheets) {
-    let rules: CSSRuleList;
-    try {
-      rules = sheet.cssRules;
-    } catch {
-      continue; // The font stylesheet of another origin.
-    }
-    for (const rule of rules) {
-      if (rule instanceof CSSStyleRule && rule.selectorText === ":root") collect(rule.style, light);
-      if (rule instanceof CSSMediaRule && rule.conditionText.includes("prefers-color-scheme: dark"))
-        for (const inner of rule.cssRules)
-          if (inner instanceof CSSStyleRule && inner.selectorText === ":root") collect(inner.style, dark);
-    }
-  }
-  return { light, dark };
-}
-
-type Scheme = "system" | "light" | "dark";
-
-/** Sets the tokens of one scheme on the page itself, so both show without a change of the system setting. */
-function applyScheme(scheme: Scheme) {
-  const { light, dark } = rootTokens();
-  const root = document.documentElement.style;
-  // Only the names that the dark block changes differ between the two schemes.
-  for (const name of dark.keys()) {
-    const value = scheme === "dark" ? dark.get(name) : scheme === "light" ? light.get(name) : undefined;
-    if (value === undefined) root.removeProperty(name);
-    else root.setProperty(name, value);
-  }
-}
-
-function useScheme(): [Scheme, (scheme: Scheme) => void] {
-  const [scheme, setScheme] = useState<Scheme>("system");
-  return [
-    scheme,
-    (next) => {
-      applyScheme(next);
-      setScheme(next);
-    },
-  ];
-}
-
-/** One entry: what it is, what it is for, and where it lives. */
-function Entry(props: { heading: string; what: string; source: string; children: ComponentChildren }) {
-  return (
-    <section class="guide-entry">
-      <header>
-        <h3>{props.heading}</h3>
-        <p>{props.what}</p>
-        <code>{props.source}</code>
-      </header>
-      <div class="guide-sample">{props.children}</div>
-    </section>
-  );
-}
-
-/** A small map: a `.world` at a fixed view, so map components draw where they do on the map. */
-function MiniMap(props: { width: number; height: number; center: Point; children: ComponentChildren }) {
-  return (
-    <div class="guide-map" style={{ width: `${props.width}px`, height: `${props.height}px` }}>
-      <div
-        class="world"
-        style={{
-          transform: `translate(${props.width / 2 - props.center.x}px, ${props.height / 2 - props.center.y}px)`,
-          "--head-layer": HEAD_LAYER,
-        }}
-      >
-        {props.children}
-      </div>
-    </div>
-  );
-}
-
-/** A box that keeps fixed surfaces (dialogs, panels, toasts, the banner) inside it: a transform makes it their frame. */
-function Stage(props: { height: number; children: ComponentChildren }) {
-  return (
-    <div class="guide-stage" style={{ height: `${props.height}px` }}>
-      {props.children}
-    </div>
-  );
-}
 
 /** The computed font size of a sample, so the type scale says what it draws. */
 function Measured(props: { children: ComponentChildren }) {
@@ -584,31 +459,8 @@ function MapParts(props: { state: State }) {
   const site =
     state.resources.get("tick3d") ?? resource("tick3d", "site.static", "tick3d", "tick3d.example.com");
   const framed = resource("framed", "site.static", "example", "example.com");
-  const card = (item: Resource, point: Point, extra: Partial<Parameters<typeof CardView>[0]> = {}) => (
-    <CardView
-      key={`${item.id}-${point.x}`}
-      resource={item}
-      layer={null}
-      state={state}
-      at={point}
-      selected={false}
-      dragging={false}
-      target={false}
-      flash={false}
-      count={null}
-      open={false}
-      access={null}
-      downSince={null}
-      machine={null}
-      pullRequest={null}
-      preview={false}
-      peek={false}
-      zone="example.invalid"
-      onMenu={noop}
-      onClose={noop}
-      {...extra}
-    />
-  );
+  const card = (item: Resource, point: Point, extra: Partial<Parameters<typeof CardView>[0]> = {}) =>
+    fixtureCard(state, item, point, extra);
   const ring: Circle = {
     id: "guide-ring",
     name: "Friends",
@@ -641,6 +493,14 @@ function MapParts(props: { state: State }) {
           {card(site, at(120, 0), { selected: true })}
         </MiniMap>
         <p class="help">Plain, and selected.</p>
+        <MiniMap width={520} height={400} center={at(0, 150)}>
+          {card(framed, at(-120, 0), { selected: true, peek: true })}
+          {card(framed, at(120, 0), { selected: true, peek: true, previewOpen: true })}
+        </MiniMap>
+        <p class="help">
+          A selected card that has a preview: the ▾ at the end of its kind sticker, closed and open
+          (example.com).
+        </p>
       </Entry>
       <Entry
         heading="Card with a preview frame"
@@ -999,32 +859,13 @@ const DIFFERENCES: ReadonlyArray<{ readonly what: string; readonly decision: "ke
 ];
 
 export function StyleGuide() {
-  const [scheme, setScheme] = useScheme();
   const [state] = useState(fixtureState);
   return (
     <main class="guide">
-      <header class="guide-head">
-        <div>
-          <h1>neo-brutalism</h1>
-          <p class="muted">
-            The primitives of the kitshn map, drawn by their real components with fixtures. Nothing here reads
-            or changes the live state.
-          </p>
-        </div>
-        <div class="seg" role="group" aria-label="Colour scheme">
-          {(["system", "light", "dark"] as const).map((each) => (
-            <button
-              key={each}
-              type="button"
-              aria-pressed={scheme === each}
-              data-tip={each === "system" ? "Follow the system setting." : `Show the ${each} scheme.`}
-              onClick={() => setScheme(each)}
-            >
-              {each}
-            </button>
-          ))}
-        </div>
-      </header>
+      <GuideHead page="neo-brutalism">
+        The primitives of the kitshn map, drawn by their real components with fixtures. Nothing here reads or
+        changes the live state.
+      </GuideHead>
       <h2 class="label">Tokens</h2>
       <Tokens />
       <h2 class="label">Controls</h2>

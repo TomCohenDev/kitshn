@@ -22,7 +22,7 @@ export function frameSandbox(address: string, adminHost: string, zone: string): 
   return "allow-scripts allow-same-origin allow-forms";
 }
 
-/** K-520: whether a card offers the preview arrow. A file only when a browser shows its type instead of a download. */
+/** K-520: whether a card offers a preview on its kind sticker. A file only when a browser shows its type instead of a download. */
 export function peekable(resource: Resource): boolean {
   if (!resource.addresses[0]) return false;
   if (FRAMED_KINDS.has(resource.kind)) return true;

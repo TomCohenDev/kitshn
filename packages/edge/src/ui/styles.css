@@ -502,6 +502,12 @@ input[type="search"]::-webkit-search-cancel-button {
 .repo-list .item-icon {
   margin-right: 0;
 }
+/* K-524: on a card the icon stands alone, without the tile's border and background, at the same size. */
+.card > .name > .item-icon,
+.card > .name > .item-icon.image {
+  border-color: transparent;
+  background: none;
+}
 .card .name {
   font-weight: 800;
   letter-spacing: -0.01em;
@@ -2099,13 +2105,44 @@ a > code {
   }
 }
 
-/* K-520: the preview arrow under a selected card, and its large view over the map. */
+/* K-520: the preview that a selected card opens from its kind sticker, and its large view over the map. */
 .peek {
   margin-top: 6px;
 }
-.peek-toggle {
-  font-size: 0.75rem;
-  padding: 1px 6px;
+/* K-520: the ▾ at the end of a kind sticker that opens the preview: small to see, big to hit. Its target (::before)
+   grows up, down and to the right only, so it never takes a press on the sticker's text; the sticker keeps that room
+   free on its right, so no neighbour sits under the target. 1.75rem is the skill's minimum; a finger gets 2.5rem. */
+.sticker-peek {
+  position: relative;
+  margin: 0 0 0 4px;
+  padding: 0 2px;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-left: var(--bw) solid currentColor;
+  cursor: pointer;
+}
+.sticker-peek::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: var(--hit);
+  height: var(--hit);
+  transform: translateY(-50%);
+}
+.sticker:has(> .sticker-peek) {
+  --hit: 1.75rem;
+  margin-right: calc(var(--hit) - 1.2em);
+}
+@media (pointer: coarse) {
+  .sticker:has(> .sticker-peek) {
+    --hit: 2.5rem;
+  }
+}
+.sticker-peek:focus-visible {
+  outline-offset: 1px;
 }
 .peek-large {
   display: flex;
@@ -2320,6 +2357,11 @@ a > code {
   flex-wrap: wrap;
   gap: 12px;
 }
+/* A grid fills its entry, unlike a single sample. */
+.guide-swatches,
+.guide-values {
+  justify-self: stretch;
+}
 .guide-swatches {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
@@ -2397,4 +2439,23 @@ a > code {
 }
 .guide-differences li + li {
   margin-top: 4px;
+}
+
+/* The concepts page (/concepts): a numbered marker on the overview map, its legend, and each concept's K numbers. */
+.concept-marker {
+  position: absolute;
+  z-index: 8;
+  font-size: 0.9rem;
+}
+.concept-legend {
+  margin: 0;
+  padding-left: 1.4rem;
+}
+.concept-legend li + li {
+  margin-top: 4px;
+}
+.concept header .row {
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
 }

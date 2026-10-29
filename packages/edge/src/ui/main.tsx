@@ -5,9 +5,11 @@ import "./styles.css";
 
 const root = document.getElementById("app");
 if (!root) throw new Error("The page has no #app element.");
-// The style guide shows fixtures only, so it never opens the live connection; it loads as its own chunk.
+// The two guide pages show fixtures only, so they never open the live connection; each loads as its own chunk.
 if (location.pathname === "/neo-brutalism") {
   void import("./StyleGuide.tsx").then(({ StyleGuide }) => render(<StyleGuide />, root));
+} else if (location.pathname === "/concepts") {
+  void import("./Concepts.tsx").then(({ Concepts }) => render(<Concepts />, root));
 } else {
   connect();
   render(<App />, root);

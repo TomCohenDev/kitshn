@@ -39,6 +39,18 @@ export interface AppBody {
   readonly path_cookie_attribute?: true;
   /** Keys of `DesiredAccess.policies`, in precedence order. */
   readonly policyKeys: ReadonlyArray<string>;
+  /** K-1130: the kitshn login page of the application; absent while the bootstrap made no pages. */
+  readonly custom_pages?: ReadonlyArray<string>;
+}
+
+/** K-1130: the ids of the kitshn Access login pages that the bootstrap made. */
+export interface LoginPages {
+  /** "Let me in, I'm the chef": a card that only the Owner circle's people open. */
+  readonly chef: string;
+  /** "This place is closed.": a card in no circle, which nobody opens. */
+  readonly closed: string;
+  /** The kitshn sign-in with the card name: every other application. */
+  readonly login: string;
 }
 
 export interface DesiredAccess {
@@ -46,6 +58,8 @@ export interface DesiredAccess {
   readonly apps: ReadonlyMap<string, AppBody>;
   /** K-1004: keys of `policies` for the login applications of pages and files, in precedence order. */
   readonly logins: { readonly login: ReadonlyArray<string>; readonly passkey: ReadonlyArray<string> };
+  /** K-1130: the login page of the login applications of pages and files, or null without kitshn pages. */
+  readonly loginPage: string | null;
 }
 
 /** K-1723: the keys of the two approve applications. */
@@ -209,13 +223,24 @@ export function desiredAccess(
   now: number,
   removed: ReadonlyArray<RemovedSite> = [],
   old: ReadonlyArray<OldAddress> = [],
+  pages: LoginPages | null = null,
 ): DesiredAccess {
+  const page = (id: string | undefined) => (id === undefined ? {} : { custom_pages: [id] });
   const policies = new Map<string, PolicyBody>();
   const apps = new Map<string, AppBody>();
   for (const resource of state.resources.values()) {
     if (WORKER_CHECKED.has(resource.kind) || resource.addresses.length === 0) continue;
     const policyKeys: Array<string> = [];
-    for (const share of activeShares(state, resource, now)) {
+    const shares = activeShares(state, resource, now);
+    // K-1130: no Cloudflare login of a card is the bare one: closed in no circle, the chef page when only the Owner
+    // circle's people open it, else the kitshn sign-in.
+    const people = shares.filter((share) =>
+      circlePolicies(share.circle, state.machines).has(`policy:${share.circle.id}:people`),
+    );
+    const chef = people.length > 0 && people.every((share) => share.circle.id === OWNER_CIRCLE_ID);
+    // A card whose circles hold no people (machines only) is closed to every person.
+    const loginPage = page(people.length === 0 ? pages?.closed : chef ? pages?.chef : pages?.login);
+    for (const share of shares) {
       for (const [key, body] of circlePolicies(share.circle, state.machines)) {
         // K-1504: during a pause only people pass; the devices and networks policy of Owner drops out.
         if (state.paused && !key.endsWith(":people")) continue;
@@ -238,6 +263,7 @@ export function desiredAccess(
         session_duration: resource.id === ADMIN_RESOURCE_ID ? "24h" : "720h",
         same_site_cookie_attribute: "lax",
         policyKeys,
+        ...loginPage,
       });
     }
   }
@@ -255,6 +281,8 @@ export function desiredAccess(
       session_duration: "720h",
       same_site_cookie_attribute: "lax",
       policyKeys: removedKeys,
+      // Only the Owner circle's people open a removed app while it still answers.
+      ...page(pages?.chef),
     });
   }
   // K-1004: only the people of circles that can open a page or a file may log in, so a stranger cannot
@@ -347,7 +375,8 @@ export function desiredAccess(
       same_site_cookie_attribute: "lax",
       path_cookie_attribute: true,
       policyKeys: approvers[kind],
+      ...page(pages?.login),
     });
   }
-  return { policies, apps, logins: { login, passkey } };
+  return { policies, apps, logins: { login, passkey }, loginPage: pages?.login ?? null };
 }

@@ -471,6 +471,73 @@ describe("Access compile (K-401 to K-403)", () => {
     expect(
       desiredAccess(state, 0, [], old).apps.get("app:riffle:old-riffle.example.com")?.policyKeys,
     ).toEqual(["policy:owner:people"]);
+    expect(access.apps.get("app:riffle:riffle.example.com")).not.toHaveProperty("custom_pages");
+  });
+});
+
+describe("kitshn login pages (K-1130)", () => {
+  it("never leaves an application on the bare Cloudflare login, in each case where the owner met it", () => {
+    const pages = { chef: "chef", closed: "closed", login: "login" };
+    const state = start();
+    const spot = state.places.get("riffle")!;
+    const tray = applyChanges(
+      state,
+      resolveEdits(state, [{ _tag: "place", id: "riffle", after: { x: 3000, y: 3000 } }]),
+    );
+    const shared = applyChanges(
+      state,
+      resolveEdits(state, [
+        { _tag: "circle", id: "her", after: { ...circle(state, "her"), x: spot.x, y: spot.y, r: 400 } },
+      ]),
+    );
+    const devices: Circle = {
+      ...circle(state, "her"),
+      x: 3000,
+      y: 3000,
+      r: 400,
+      members: [{ _tag: "device", tokenId: "t1", clientId: "c1.access", name: "a machine" }],
+    };
+    const machinesOnly = applyChanges(
+      tray,
+      resolveEdits(tray, [{ _tag: "circle", id: "her", after: devices }]),
+    );
+    const old = [{ cardId: "riffle", address: "old-riffle.example.com" }];
+    const removed = [{ id: "app-gone-1-prod", name: "gone", address: "gone.example.com" }];
+    const page = (from: State, key: string) =>
+      desiredAccess(from, 0, removed, old, pages).apps.get(key)?.custom_pages;
+    // [case, state, application, page]
+    const rows: Array<[string, State, string, string]> = [
+      ["a card in the tray, which nobody opens", tray, "app:riffle:riffle.example.com", "closed"],
+      ["its old address", tray, "app:riffle:old-riffle.example.com", "closed"],
+      ["a card in the Owner circle only", state, "app:riffle:riffle.example.com", "chef"],
+      ["the admin", state, "app:kitshn-admin:kit.example.com", "chef"],
+      ["an old address of an Owner-only card", state, "app:riffle:old-riffle.example.com", "chef"],
+      ["a removed app that still answers", state, "app:app-gone-1-prod:gone.example.com", "chef"],
+      ["a card that another people circle opens", shared, "app:riffle:riffle.example.com", "login"],
+      ["a card in a circle of machines only", machinesOnly, "app:riffle:riffle.example.com", "closed"],
+      [
+        "the pause, which closes the card's share",
+        { ...state, paused: "keep-public" },
+        "app:riffle:riffle.example.com",
+        "closed",
+      ],
+      [
+        "the admin in the pause",
+        { ...state, paused: "keep-public" },
+        "app:kitshn-admin:kit.example.com",
+        "chef",
+      ],
+    ];
+    for (const [name, from, key, wanted] of rows) expect(page(from, key), name).toEqual([wanted]);
+    expect(desiredAccess(state, 0, [], [], pages).loginPage).toBe("login");
+    // Without the pages the bootstrap made, nothing changes.
+    expect(desiredAccess(tray, 0).apps.get("app:riffle:riffle.example.com")).not.toHaveProperty(
+      "custom_pages",
+    );
+    // A card in no circle still lets nobody in (K-208).
+    expect(
+      desiredAccess(tray, 0, [], [], pages).apps.get("app:riffle:riffle.example.com")?.policyKeys,
+    ).toEqual([]);
   });
 });
 

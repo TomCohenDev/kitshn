@@ -1,3 +1,4 @@
+import type { LoginPages } from "../core/access.ts";
 import type { Kitshn } from "./kitshn.ts";
 
 export interface Env {
@@ -7,6 +8,8 @@ export interface Env {
   readonly KITSHN_HOST: string;
   /** K-1209: the old admin host, set by the bootstrap only during the host move. */
   readonly KITSHN_OLD_HOST?: string;
+  /** K-1130: the ids of the kitshn Access login pages as JSON `{chef, closed, login}`, when the bootstrap made them. */
+  readonly KITSHN_LOGIN_PAGES?: string;
   /** The Zero Trust team domain, for example `team.cloudflareaccess.com`. */
   readonly ACCESS_TEAM_DOMAIN: string;
   /** The audience tag of the admin Access application (the map and `/api`). */
@@ -68,4 +71,30 @@ export function adminHosts(
   return old !== "" && old !== env.KITSHN_HOST && old.endsWith(`.${env.KITSHN_ZONE}`)
     ? [env.KITSHN_HOST, old]
     : [env.KITSHN_HOST];
+}
+
+/**
+ * K-1130: the kitshn login pages, or null while the bootstrap made none. A binding that is not the bootstrap's JSON
+ * is logged and counts as none, so Access keeps working with the Cloudflare login.
+ */
+export function loginPages(env: Pick<Env, "KITSHN_LOGIN_PAGES">): LoginPages | null {
+  const text = env.KITSHN_LOGIN_PAGES?.trim();
+  if (!text) return null;
+  try {
+    const value = JSON.parse(text) as Record<string, unknown>;
+    const { chef, closed, login } = value;
+    if (
+      typeof chef === "string" &&
+      chef &&
+      typeof closed === "string" &&
+      closed &&
+      typeof login === "string" &&
+      login
+    )
+      return { chef, closed, login };
+  } catch {
+    // Logged below.
+  }
+  console.error(`KITSHN_LOGIN_PAGES is not {chef, closed, login} (K-1130): ${text.slice(0, 200)}`);
+  return null;
 }

@@ -968,7 +968,7 @@ describe("page and file logins (K-1004)", () => {
       if (method === "PUT") puts.push({ path, body });
       return cf.api(method as "GET", path, body);
     };
-    return { ...cf, api, puts };
+    return { ...cf, api, puts, apps };
   }
 
   it("replaces the any-login policies with the circles' people, keeps machines, and deletes the old ones", async () => {
@@ -1013,6 +1013,22 @@ describe("page and file logins (K-1004)", () => {
       attached: result.attached,
       calls: 0,
     });
+    // K-1130: with the kitshn pages, each login application gets the kitshn sign-in page, also with its policies right.
+    for (const put of cf.puts) {
+      const app = cf.apps.find((item) => put.path.endsWith(`/${item.id}`));
+      if (app) app.policies = (put.body as { policies: typeof app.policies }).policies;
+    }
+    cf.puts.length = 0;
+    const pages = { chef: "chef-page", closed: "closed-page", login: "login-page" };
+    const withPages = desiredAccess(start(), 0, [], [], pages);
+    const paged = await syncLogins(withPages, cf.store, cf.api, "a", "example.com", result.attached, false);
+    expect(cf.puts.map((put) => (put.body as { custom_pages?: unknown }).custom_pages)).toEqual([
+      ["login-page"],
+      ["login-page"],
+      ["login-page"],
+      ["login-page"],
+    ]);
+    expect(paged.attached).not.toBe(result.attached);
   });
 
   it("writes the other applications when one fails, keeps the old policy it still uses, and throws", async () => {
@@ -1114,7 +1130,7 @@ describe("page and file logins (K-1004)", () => {
     const row = cf.rows.get("policy:owner:login-passkey")!;
     const { mfa_config: _, ...old } = JSON.parse(row.body) as Record<string, unknown>;
     cf.rows.set(row.key, { ...row, body: JSON.stringify(old) });
-    expect(JSON.parse(loginWant(desired, cf.rows))).toEqual({
+    expect(JSON.parse(loginWant(desired, cf.rows))).toMatchObject({
       login: [cf.rows.get("policy:owner:login")!.cfId],
       passkey: [],
     });

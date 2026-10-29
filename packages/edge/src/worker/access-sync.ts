@@ -838,7 +838,11 @@ export function loginWant(desired: DesiredAccess, rows: ReadonlyMap<string, Acce
       const policy = desired.policies.get(key);
       return row?.cfId && policy && row.body === policyBody(policy) ? [row.cfId] : [];
     });
-  return JSON.stringify({ login: ids(desired.logins.login), passkey: ids(desired.logins.passkey) });
+  return JSON.stringify({
+    login: ids(desired.logins.login),
+    passkey: ids(desired.logins.passkey),
+    page: desired.loginPage,
+  });
 }
 
 /** K-1004: the policy ids in a `loginWant`, which the login applications hold once it is applied. */
@@ -935,11 +939,14 @@ export async function syncLogins(
         continue;
       }
       const live = [...(app.policies ?? [])].sort((a, b) => (a.precedence ?? 0) - (b.precedence ?? 0));
+      // K-1130: the kitshn sign-in page, so a page or file login is never the bare Cloudflare one.
+      const pages = desired.loginPage === null ? undefined : [desired.loginPage];
       if (
         deepEqual(
           wanted,
           live.map((policy) => policy.id),
-        )
+        ) &&
+        (pages === undefined || deepEqual(app["custom_pages"] ?? [], pages))
       )
         continue;
       calls++;
@@ -952,6 +959,7 @@ export async function syncLogins(
         await api("PUT", `${base}/apps/${app.id}`, {
           ...body,
           policies: wanted.map((id, index) => ({ id, precedence: index + 1 })),
+          ...(pages === undefined ? {} : { custom_pages: pages }),
         });
         uses.set(app.id, wanted);
       } catch (error) {

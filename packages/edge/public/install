@@ -174,21 +174,38 @@ policy() {
   fi
   printf '%s' "$id"
 }
-# app DOMAIN NAME SESSION POLICY_ID: prints the audience tag of the application on DOMAIN. It never
-# changes an application that it did not make (K-408).
+# with_page APP_JSON PAGE: the application with the kitshn login page PAGE (K-1130), as the body of a PUT.
+with_page() {
+  printf '%s' "$1" | jq -c --arg page "$2" 'del(.id, .uid, .aud, .created_at, .updated_at, .scim_config)
+    | .policies = [(.policies // [])[] | {id} + (if .precedence == null then {} else {precedence} end)]
+    | .custom_pages = [$page]'
+}
+# set_page APP_JSON PAGE: gives a kitshn application the login page PAGE when it has another one.
+set_page() {
+  [ -n "$2" ] || return 0
+  printf '%s' "$1" | jq -e --arg page "$2" '(.custom_pages // []) == [$page]' >/dev/null && return 0
+  api PUT "/accounts/$ACCOUNT/access/apps/$(printf '%s' "$1" | jq -r .id)" "$(with_page "$1" "$2")" >/dev/null
+  changed "gave \"$(printf '%s' "$1" | jq -r .name)\" the kitshn login page (K-1130)" >&2
+}
+# app DOMAIN NAME SESSION POLICY_ID [PAGE]: prints the audience tag of the application on DOMAIN. It never
+# changes an application that it did not make (K-408), and gives the ones it made the login page PAGE (K-1130).
 app() {
   found=$(printf '%s' "$APPS" | jq -c --arg domain "$1" 'map(select(.domain == $domain)) | .[0] // empty')
   if [ -n "$found" ]; then
     name=$(printf '%s' "$found" | jq -r .name)
     case "$name" in
-    kitshn*) kept "application \"$name\" on $1" >&2 ;;
+    kitshn*)
+      kept "application \"$name\" on $1" >&2
+      set_page "$found" "${5:-}"
+      ;;
     *) die "the Access application \"$name\" already covers $1. kitshn does not change it. Remove it or pick another KITSHN_HOST." ;;
     esac
     printf '%s' "$found" | jq -r .aud
     return
   fi
   body=$(jq -nc --arg domain "$1" --arg name "$2" --arg session "$3" --arg policy "$4" \
-    '{name:$name,type:"self_hosted",domain:$domain,session_duration:$session,same_site_cookie_attribute:"lax"} + (if $policy == "" then {} else {policies:[{id:$policy,precedence:1}]} end)')
+    --arg page "${5:-}" \
+    '{name:$name,type:"self_hosted",domain:$domain,session_duration:$session,same_site_cookie_attribute:"lax"} + (if $policy == "" then {} else {policies:[{id:$policy,precedence:1}]} end) + (if $page == "" then {} else {custom_pages:[$page]} end)')
   created=$(api POST "/accounts/$ACCOUNT/access/apps" "$body")
   changed "created the application \"$2\" on $1" >&2
   printf '%s' "$created" | jq -r .aud
@@ -203,6 +220,117 @@ if ! printf '%s' "$APPS" | jq -e --arg d "$KITSHN_HOST" 'any(.[]; .domain == $d)
 fi
 public_policy=$(policy "kitshn public paths" '{"name":"kitshn public paths","decision":"bypass","include":[{"everyone":{}}],"require":[],"exclude":[]}')
 machines_policy=$(policy "kitshn machines" '{"name":"kitshn machines","decision":"non_identity","include":[{"any_valid_service_token":{}}],"require":[],"exclude":[]}')
+# K-1130: the kitshn Access login pages, so no kitshn application shows the bare Cloudflare login: "chef" for a card that
+# only the Owner circle opens, "closed" for a card in no circle, and "login" for every other one. Optional: without
+# "Access: Custom Pages Edit", or on a plan that refuses login pages, the applications keep the Cloudflare login.
+# A login page must show the Cloudflare sign-in box and allows no script, so "closed" keeps it under a note.
+login_page_html() {
+  cat <<'HTML'
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ app_domain }}</title>
+<style>
+:root { color-scheme: light; --canvas: #E4E7FF; --dots: #00000026; --surface: #FFFFFF; --ink: #000000; --muted: #3D3D5C;
+  --border: #000000; --shadow-ink: #000000; --select: #FFE14D; --pink: #FF9EB0; --green: #7CFF8A;
+  --sans: "Bricolage Grotesque", system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, monospace; }
+@media (prefers-color-scheme: dark) {
+  :root { color-scheme: dark; --canvas: #15122B; --dots: #F3F0FF22; --surface: #262147; --ink: #F3F0FF;
+    --muted: #BDB6E6; --border: #F3F0FF; --shadow-ink: #B9A8FF; --select: #6C5CE7; }
+}
+* { box-sizing: border-box; }
+html { font-size: 18px; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; font: 1rem/1.5 var(--sans);
+  color: var(--ink); background-color: var(--canvas); background-size: 16px 16px;
+  background-image: radial-gradient(var(--dots) 1.2px, transparent 1.2px); }
+main { width: min(30rem, 100%); padding: 24px; background: var(--surface); border: 2px solid var(--border);
+  border-radius: 0.25rem; box-shadow: 4px 4px 0 0 var(--shadow-ink); }
+.sticker { display: inline-block; margin-right: 6px; padding: 0 6px; font-size: 0.65rem; font-weight: 800;
+  letter-spacing: 0.04em; text-transform: uppercase; color: #000000; background: var(--pink);
+  border: 2px solid var(--shadow-ink); border-radius: 4px; box-shadow: 2px 2px 0 0 var(--shadow-ink); transform: rotate(-3deg); }
+.sticker.ok { background: var(--green); }
+code { font-family: var(--mono); font-size: 0.85em; padding: 0 2px;
+  background: linear-gradient(transparent 35%, var(--select) 35%, var(--select) 88%, transparent 88%); }
+h1 { margin: 16px 0 4px; font-size: 1.6rem; font-weight: 800; letter-spacing: -0.01em; }
+p { margin: 0 0 16px; color: var(--muted); }
+.note { margin: 0 0 8px; font-size: 0.7rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; }
+</style>
+</head>
+<body>
+<main>
+HTML
+  case "$1" in
+  chef) cat <<'HTML'
+<span class="sticker">closed</span><code>{{ app_domain }}</code>
+<h1>Let me in, I'm the chef</h1>
+<p>This place is closed. Only the chef gets in.</p>
+HTML
+    ;;
+  closed) cat <<'HTML'
+<span class="sticker">closed</span><code>{{ app_domain }}</code>
+<h1>This place is closed.</h1>
+<p class="note">Sign in (only for people with access)</p>
+HTML
+    ;;
+  login) cat <<'HTML'
+<span class="sticker ok">kitshn</span><code>{{ app_domain }}</code>
+<h1>{{ app_name | remove_first: "kitshn " }}</h1>
+<p>Sign in to open it.</p>
+HTML
+    ;;
+  esac
+  cat <<'HTML'
+<cf-access-authbox></cf-access-authbox>
+</main>
+</body>
+</html>
+HTML
+}
+LOGIN_PAGES=""
+if ! try GET "/accounts/$ACCOUNT/access/custom_pages"; then
+  say "  warning: the token has no \"Access: Custom Pages Edit\", so kitshn applications show the Cloudflare login (K-1130)."
+  say "           To add it, edit the token at https://dash.cloudflare.com/profile/api-tokens:"
+  say "           add \"Account\", \"Access: Custom Pages\", \"Edit\", then Update token."
+else
+  cp "$WORK/out" "$WORK/pages.json"
+  ids="{}"
+  for kind in chef closed login; do
+    name="kitshn $kind"
+    html=$(login_page_html "$kind")
+    id=$(jq -r --arg name "$name" '[.result[] | select(.name == $name and .type == "login")] | .[0] | (.uid // .id) // empty' "$WORK/pages.json")
+    jq -nc --arg name "$name" --arg html "$html" '{name:$name,type:"login",custom_html:$html}' >"$WORK/body"
+    call=""
+    if [ -z "$id" ]; then
+      call="POST /accounts/$ACCOUNT/access/custom_pages"
+    elif try GET "/accounts/$ACCOUNT/access/custom_pages/$id" && [ "$(jq -r '.result.custom_html' "$WORK/out")" = "$html" ]; then
+      kept "login page \"$name\""
+    else
+      call="PUT /accounts/$ACCOUNT/access/custom_pages/$id"
+    fi
+    if [ -n "$call" ]; then
+      curl -sS -X "${call%% *}" "$API${call#* }" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+        -H "Content-Type: application/json" --data-binary "@$WORK/body" >"$WORK/out" 2>/dev/null || true
+      if [ "$(jq -r '.success // false' "$WORK/out" 2>/dev/null)" = true ]; then
+        id=$(jq -r '.result | (.uid // .id)' "$WORK/out")
+        changed "wrote the login page \"$name\" (K-1130)"
+      else
+        say "  warning: Cloudflare refused the login page \"$name\": $(jq -r '[.errors[]? | "\(.code): \(.message)"] | join("; ")' "$WORK/out" 2>/dev/null || head -c 200 "$WORK/out")"
+        id=""
+      fi
+    fi
+    ids=$(printf '%s' "$ids" | jq -c --arg kind "$kind" --arg id "$id" '. + {($kind): $id}')
+  done
+  # All three or none, so no application points at a page that is missing.
+  if printf '%s' "$ids" | jq -e '.chef != "" and .closed != "" and .login != ""' >/dev/null; then
+    LOGIN_PAGES=$ids
+  else
+    say "           kitshn applications keep the Cloudflare login (K-1130)."
+  fi
+fi
+# page KIND: the id of the kitshn login page KIND, or nothing without the pages.
+page() { [ -n "$LOGIN_PAGES" ] && printf '%s' "$LOGIN_PAGES" | jq -r --arg kind "$1" '.[$kind]'; return 0; }
 # K-1209: during the host move the Worker also takes the old host and the audience tags of its applications. A run
 # without KITSHN_OLD_HOST keeps the value of the running Worker, and KITSHN_OLD_HOST=none ends the move.
 if [ -z "${KITSHN_OLD_HOST:-}" ] && try GET "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/settings"; then
@@ -233,9 +361,9 @@ app "$KITSHN_HOST/notify" "kitshn notify (public)" 24h "$public_policy" >/dev/nu
 app "$KITSHN_HOST/public/cards.json" "kitshn public cards (public)" 24h "$public_policy" >/dev/null
 # K-1119: deploy badges for READMEs. The path covers every badge below it.
 app "$KITSHN_HOST/public/badges" "kitshn badges (public)" 24h "$public_policy" >/dev/null
-CONNECT_AUD=$(with_old "$(app "$KITSHN_HOST/connect" "kitshn connect" 24h "$machines_policy")" /connect)
+CONNECT_AUD=$(with_old "$(app "$KITSHN_HOST/connect" "kitshn connect" 24h "$machines_policy" "$(page login)")" /connect)
 # K-718: agent keys reach /agent with their service token; the Worker decides what each key may do.
-AGENT_AUD=$(with_old "$(app "$KITSHN_HOST/agent" "kitshn agent keys" 24h "$machines_policy")" /agent)
+AGENT_AUD=$(with_old "$(app "$KITSHN_HOST/agent" "kitshn agent keys" 24h "$machines_policy" "$(page login)")" /agent)
 # K-1504: "Resume" needs a fresh passkey: a 10-minute application and MFA session for the owner emails.
 fresh_rules=$(printf '%s' "$KITSHN_OWNER_EMAILS" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0) | {email: {email: .}})')
 fresh_policy=$(policy "kitshn fresh passkey" "$(jq -nc --argjson include "$fresh_rules" \
@@ -246,9 +374,11 @@ fresh_name=$(printf '%s' "$APPS" | jq -r --arg d "$KITSHN_HOST/api/fresh" 'map(s
 case "$fresh_name" in "" | kitshn*) ;; *) die "the Access application \"$fresh_name\" already covers $KITSHN_HOST/api/fresh. kitshn does not change it." ;; esac
 if [ -n "$FRESH_AUD" ]; then
   kept "application \"kitshn fresh passkey\" on $KITSHN_HOST/api/fresh"
+  set_page "$(printf '%s' "$APPS" | jq -c --arg d "$KITSHN_HOST/api/fresh" 'map(select(.domain == $d)) | .[0]')" "$(page chef)"
 else
   FRESH_AUD=$(api POST "/accounts/$ACCOUNT/access/apps" "$(jq -nc --arg domain "$KITSHN_HOST/api/fresh" --arg policy "$fresh_policy" \
-    '{name:"kitshn fresh passkey",type:"self_hosted",domain:$domain,session_duration:"10m",same_site_cookie_attribute:"lax",path_cookie_attribute:true,policies:[{id:$policy,precedence:1}]}')" | jq -r .aud)
+    --arg page "$(page chef)" \
+    '{name:"kitshn fresh passkey",type:"self_hosted",domain:$domain,session_duration:"10m",same_site_cookie_attribute:"lax",path_cookie_attribute:true,policies:[{id:$policy,precedence:1}]} + (if $page == "" then {} else {custom_pages:[$page]} end)')" | jq -r .aud)
   changed "created the application \"kitshn fresh passkey\" on $KITSHN_HOST/api/fresh"
 fi
 FRESH_AUD=$(with_old "$FRESH_AUD" /api/fresh)
@@ -368,7 +498,7 @@ if [ "$(printf '%s' "$scripts" | jq -r --arg s "$SCRIPT" 'map(select(.id == $s))
 fi
 # run_worker_first: the offline routes of live sites (K-1108) need the Worker before the map's assets.
 metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --argjson migrations "$migrations" \
-  --arg host "$KITSHN_HOST" --arg old_host "$KITSHN_OLD_HOST" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" --arg agent_aud "$AGENT_AUD" --arg fresh_aud "$FRESH_AUD" \
+  --arg host "$KITSHN_HOST" --arg old_host "$KITSHN_OLD_HOST" --arg login_pages "$LOGIN_PAGES" --arg team "$TEAM" --arg admin_aud "$ADMIN_AUD" --arg connect_aud "$CONNECT_AUD" --arg agent_aud "$AGENT_AUD" --arg fresh_aud "$FRESH_AUD" \
   --arg owners "$KITSHN_OWNER_EMAILS" --arg devices "${KITSHN_OWNER_DEVICES:-}" --arg account "$ACCOUNT" \
   --arg zone "$ZONE" --arg zone_name "$ZONE_NAME" --arg zones "$ZONES_JSON" --arg deployers "$DEPLOY_OWNER_IDS" \
   --arg version "$(cat "$WORK/bundle/version")" --arg r2 "$R2" --arg pages_login "$PAGES_LOGIN_AUD" \
@@ -401,6 +531,7 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
       {type: "plain_text", name: "FILES_LOGIN_AUD", text: $files_login},
       {type: "plain_text", name: "FILES_PASSKEY_AUD", text: $files_passkey}
     ] + (if $old_host == "" then [] else [{type: "plain_text", name: "KITSHN_OLD_HOST", text: $old_host}] end)
+      + (if $login_pages == "" then [] else [{type: "plain_text", name: "KITSHN_LOGIN_PAGES", text: $login_pages}] end)
       + (if $r2 == "" then [] else [{type: "r2_bucket", name: "BUCKET", bucket_name: $r2}] end)
       + (if $import_at == "" then [] else [{type: "plain_text", name: "KITSHN_IMPORT_AT", text: $import_at}] end),
     keep_bindings: ["secret_text"]

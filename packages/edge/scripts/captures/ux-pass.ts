@@ -28,7 +28,7 @@ export default {
       await zoomAt(page, '[data-card="tick3d"]', -300);
       await tick3d.click();
     }
-    await page.getByRole("button", { name: /▾ Preview|show the preview/ }).click();
+    await page.getByRole("button", { name: /▾ Preview|show the preview/i }).click();
     await page.locator(".preview-frame iframe").waitFor();
     await page.waitForTimeout(400);
     await shot("preview");

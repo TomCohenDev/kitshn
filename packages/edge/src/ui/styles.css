@@ -2109,17 +2109,19 @@ a > code {
 .peek {
   margin-top: 6px;
 }
-/* K-520: a kind sticker that also opens the preview: the sticker's look, a button's press. */
-.sticker.kind-toggle {
-  font-family: inherit;
+/* K-520: the ▾ at the end of a kind sticker that opens the preview: the sticker's text, a button's target. */
+.sticker-peek {
+  margin: 0 0 0 4px;
+  padding: 0 2px;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-left: var(--bw) solid currentColor;
   cursor: pointer;
-  transition:
-    transform 80ms,
-    box-shadow 80ms;
 }
-.sticker.kind-toggle:active {
-  transform: rotate(var(--tilt, -3deg)) translate(2px, 2px);
-  box-shadow: none;
+.sticker-peek:focus-visible {
+  outline-offset: 1px;
 }
 .peek-large {
   display: flex;

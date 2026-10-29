@@ -166,35 +166,36 @@ export function usePeek(offered: boolean) {
 export type Peek = ReturnType<typeof usePeek>;
 
 /**
- * K-524, K-520: the kind sticker of a card. When the card offers a preview, the sticker is also its toggle: a ▾ at
- * its end opens and closes the frame, by click or keyboard. Otherwise it is the plain sticker.
+ * K-524, K-520: the kind sticker of a card. When the card offers a preview, a small ▾ at the sticker's end is a button
+ * that opens and closes the frame, by click or keyboard. The rest of the sticker stays part of the card, so a press
+ * there still selects or drags it.
  */
 export function KindSticker(props: { resource: Resource; peek: Peek | null }) {
   const kind = KINDS[props.resource.kind];
-  const style = { "--tilt": kind.tilt, background: kind.color, color: kind.ink };
   const peek = props.peek;
-  if (!peek?.offered)
-    return (
-      <span class="sticker" data-tip={kind.help} style={style}>
-        {props.resource.kind}
-      </span>
-    );
   return (
-    <button
-      type="button"
-      ref={peek.toggle}
-      class="sticker kind-toggle"
-      aria-expanded={peek.open}
-      aria-label={`${props.resource.kind}: ${peek.open ? "hide" : "show"} the preview`}
-      data-tip={`${peek.open ? "Hide the preview." : "Show the preview."} ${kind.help}`}
-      style={style}
-      // The map starts a drag on a press; this press only opens or closes the preview.
-      onPointerDown={(event) => event.stopPropagation()}
-      onClick={peek.flip}
+    <span
+      class="sticker"
+      data-tip={kind.help}
+      style={{ "--tilt": kind.tilt, background: kind.color, color: kind.ink }}
     >
       {props.resource.kind}
-      <span aria-hidden="true">{peek.open ? " ▴" : " ▾"}</span>
-    </button>
+      {peek?.offered ? (
+        <button
+          type="button"
+          ref={peek.toggle}
+          class="sticker-peek"
+          aria-expanded={peek.open}
+          aria-label={peek.open ? "Hide the preview" : "Show the preview"}
+          data-tip={peek.open ? "Hide the preview." : "Show the preview."}
+          // The map starts a drag on a press; this press only opens or closes the preview.
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={peek.flip}
+        >
+          {peek.open ? "▴" : "▾"}
+        </button>
+      ) : null}
+    </span>
   );
 }
 

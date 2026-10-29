@@ -34,7 +34,7 @@ import {
   type CardKind,
   type ProviderCard,
 } from "../core/model.ts";
-import type { ProviderSticker } from "@kitshn/local";
+import type { ProviderCommand, ProviderSticker } from "@kitshn/local";
 import { MAX_UPLOAD_BYTES, isLibraryId } from "../core/library.ts";
 import {
   type Box,
@@ -978,6 +978,15 @@ export function App() {
     });
   };
 
+  /** K-717: History records it; the server checks control on the card. */
+  const setCardSetting = async (card: Resource, key: string, value: string) => {
+    const result = await callApi<{ ok: true }>("POST", `/api/cards/${encodeURIComponent(card.id)}/settings`, {
+      key,
+      value,
+    });
+    if ("error" in result) showToast({ text: result.error, error: true, undo: null });
+  };
+
   /** K-704: no confirm; the toast and History undo it. */
   const forgetProvider = async (machineId: string, provider: string, card: Resource | null) => {
     const result = await callApi<{ revision: number | null }>(
@@ -1737,6 +1746,9 @@ export function App() {
               deployed={deployed}
               previewCards={previewCards}
               pullRequests={pullRequests}
+              cardSettings={store.snapshot.cardSettings}
+              providerCommands={store.snapshot.providerCommands}
+              onSetCardSetting={(card, key, value) => void setCardSetting(card, key, value)}
               deployNotes={store.snapshot.deployNotes}
               uptime={store.snapshot.uptime}
               pause={pauseView}
@@ -2296,6 +2308,10 @@ function Panel(props: {
   pullRequests: Readonly<Record<string, number>>;
   deployNotes: Readonly<Record<string, DeployNote>>;
   uptime: Snapshot["uptime"];
+  /** K-717, K-1625: the card settings and the provider commands of the snapshot. */
+  cardSettings: Snapshot["cardSettings"];
+  providerCommands: Snapshot["providerCommands"];
+  onSetCardSetting: (card: Resource, key: string, value: string) => void;
   pause: PauseView | null;
   warnings: ReadonlyArray<string>;
   machines: ReadonlyMap<string, MachineView>;
@@ -2374,6 +2390,10 @@ function Panel(props: {
         deployNote={props.deployNotes[cards[0].id] ?? null}
         uptime={props.uptime[cards[0].id] ?? null}
         machine={props.machines.get(cards[0].id) ?? null}
+        providerMachine={props.machines.get(cards[0].machine ?? "") ?? null}
+        cardSettings={props.cardSettings[cards[0].id] ?? {}}
+        providerCommands={props.providerCommands}
+        onSetCardSetting={props.onSetCardSetting}
         version={props.version}
         jobs={props.jobs}
         onRemoveMachine={props.onRemoveMachine}
@@ -2772,6 +2792,11 @@ function CardPanel(props: {
   /** K-1125: up or down, when kitshn checks this card. */
   uptime: Snapshot["uptime"][string] | null;
   machine: MachineView | null;
+  /** K-1625: the machine of a provider card, for the commands of its list rows. */
+  providerMachine: MachineView | null;
+  cardSettings: Readonly<Record<string, string>>;
+  providerCommands: Snapshot["providerCommands"];
+  onSetCardSetting: (card: Resource, key: string, value: string) => void;
   jobs: ReadonlyArray<JobView>;
   onRemoveMachine: (view: MachineView) => void;
   onRunJob: (view: MachineView, command: Command) => Promise<void>;
@@ -2811,7 +2836,31 @@ function CardPanel(props: {
         <ItemIcon resource={resource} />
         {resource.name}
       </h2>
-      {resource.provider ? <ProviderFacts card={resource.provider} /> : null}
+      {resource.provider ? (
+        <ProviderFacts
+          resource={resource}
+          card={resource.provider}
+          values={props.cardSettings}
+          commands={
+            props.providerCommands[resource.machine ?? ""]?.find(
+              (item) => item.name === resource.provider?.name,
+            )?.commands ?? []
+          }
+          onSetting={(key, value) => props.onSetCardSetting(resource, key, value)}
+          onRow={
+            props.providerMachine
+              ? (command, row) =>
+                  void props.onRunJob(props.providerMachine!, {
+                    kind: "provider",
+                    provider: resource.provider!.name,
+                    command,
+                    resource: resource.id,
+                    row,
+                  })
+              : null
+          }
+        />
+      ) : null}
       {address ? (
         <div class="row">
           <code>{address}</code>
@@ -3315,10 +3364,86 @@ const STICKER_CLASSES: Record<ProviderSticker["tone"], string> = {
 };
 
 /** K-1625: the stickers and facts that a provider attaches to its card; kitshn shows them without reading them. */
-function ProviderFacts(props: { card: ProviderCard }) {
+function ProviderFacts(props: {
+  resource: Resource;
+  card: ProviderCard;
+  values: Readonly<Record<string, string>>;
+  commands: ReadonlyArray<ProviderCommand>;
+  onSetting: (key: string, value: string) => void;
+  /** Null while kitshn does not know the machine of the card. */
+  onRow: ((command: string, row: string) => void) | null;
+}) {
   const { card } = props;
   return (
     <>
+      {/* K-717: a setting of the card; a missing value is the default of the setting. */}
+      {card.settings.map((setting) => {
+        const current = props.values[setting.id] ?? setting.default;
+        return (
+          <div key={setting.id} class="row">
+            <span
+              class="label"
+              data-tip={`${setting.title}: ${card.name} gets this value on ${props.resource.name}.`}
+            >
+              {setting.title}
+            </span>
+            <div class="seg small">
+              {setting.values.map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={value === current}
+                  data-tip={`Set ${setting.title} to ${value}. It needs control on this card.`}
+                  onClick={() => value !== current && props.onSetting(setting.id, value)}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      {/* K-1625: a list of the card, with the commands of each row. */}
+      {card.lists.map((list) => (
+        <section key={list.id}>
+          <h3 class="label">{list.title}</h3>
+          <table class="provider-list">
+            <thead>
+              <tr>
+                {list.columns.map((column) => (
+                  <th key={column.id}>{column.title}</th>
+                ))}
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {list.rows.map((row) => (
+                <tr key={row.id}>
+                  {list.columns.map((column) => (
+                    <td key={column.id}>{row.cells[column.id] ?? ""}</td>
+                  ))}
+                  <td>
+                    {(row.commands ?? []).map((id) => {
+                      const command = props.commands.find((item) => item.id === id);
+                      return command && props.onRow ? (
+                        <button
+                          key={id}
+                          type="button"
+                          class="btn"
+                          data-tip={`${command.title} for this row; an offline machine runs it when it connects.`}
+                          onClick={() => props.onRow!(id, row.id)}
+                        >
+                          {command.title}
+                        </button>
+                      ) : null;
+                    })}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      ))}
       {card.droppedAt !== undefined ? (
         <p class="help">
           {card.name} no longer reports this card, since {new Date(card.droppedAt).toLocaleString()}. It keeps

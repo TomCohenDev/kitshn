@@ -12,6 +12,8 @@ describe("Durable Object migrations", () => {
     expect(migrate((query) => db.exec(query), 0)).toBe(MIGRATIONS.length);
     expect(columns(db, "tunnel_objects")).toEqual(["machine_id", "body", "error", "applied", "retry_at"]);
     expect(columns(db, "providers")).toEqual(["machine_id", "name", "body"]);
+    expect(columns(db, "desired_state")).toEqual(["kind", "machine_id", "body"]);
+    expect(columns(db, "jobs")).toContain("when_idle");
     expect(db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({
       value: String(MIGRATIONS.length),
     });

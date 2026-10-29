@@ -71,6 +71,7 @@ const REQUEST_SENDERS: Record<Request["type"], "local-users" | "daemon-user-or-r
   remove: "daemon-user-or-root",
   "command-result": "daemon-user-or-root",
   "provider-forget": "daemon-user-or-root",
+  "desired-set": "daemon-user-or-root",
 };
 
 export const requestAllowed = (type: Request["type"], uid: number, own: number) =>

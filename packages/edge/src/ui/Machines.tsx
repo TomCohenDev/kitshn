@@ -173,6 +173,19 @@ export function KeySticker(props: { view: MachineView }) {
   return null;
 }
 
+/** K-1608: the pushes of state that an offline machine gets when it connects. */
+export function QueuedSticker(props: { view: MachineView }) {
+  if (props.view.queued === 0) return null;
+  return (
+    <span
+      class="sticker wait"
+      data-tip={`Queued: ${props.view.queued} changes of grants, settings or shared state wait for this machine. It applies the current state when it connects.`}
+    >
+      queued {props.view.queued}
+    </span>
+  );
+}
+
 /** K-1702: the start of a fingerprint is enough to compare it by eye. */
 const shortFingerprint = (fingerprint: string) => `${fingerprint.slice(0, "SHA256:".length + 12)}…`;
 
@@ -204,7 +217,10 @@ function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error
             {shortFingerprint(machine.key.fingerprint)} · {ago(machine.key.since)} old
           </span>
         ) : (
-          <KeySticker view={props.view} />
+          <>
+            <KeySticker view={props.view} />
+            <QueuedSticker view={props.view} />
+          </>
         )}
         <button
           class="btn"

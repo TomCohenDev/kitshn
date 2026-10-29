@@ -63,6 +63,7 @@ import {
   UNDO_SOURCES,
   type UndoSource,
   circlesHolding,
+  fnv,
 } from "../core/model.ts";
 import {
   type Command,
@@ -262,8 +263,9 @@ import {
 } from "../core/library.ts";
 import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
-import { commandsFor, grantTables, providerCards } from "../core/providers.ts";
+import { commandsFor, providerCards, providerPushes } from "../core/providers.ts";
 import {
+  PROVIDER_LIMITS,
   type ProviderCommand,
   type ProviderKind,
   type ProviderReport,
@@ -800,8 +802,14 @@ export class Kitshn extends DurableObject<Env> {
   private liveSites = new Map<string, LiveSite>();
   /** K-704: the kinds and commands of each machine's providers, by machine id. */
   private providerRegs = new Map<string, Array<ProviderRegistration>>();
-  /** K-706: the grant tables that each signed connection got last, by `<machine id>/<provider>`, as JSON. */
+  /** K-1608: the hash of what each signed connection got last, by `<machine id>/<push key>`. */
   private sentGrants = new Map<string, string>();
+  /** K-709: the parts of each desired state, by kind and by machine id ("" for the shared part). */
+  private desiredState = new Map<string, Map<string, unknown>>();
+  /** K-717: card setting values, by card id. */
+  private cardSettings = new Map<string, Record<string, string>>();
+  /** K-1608: the hash of the last push that each machine applied, by `<machine id>/<push key>`. */
+  private applied = new Map<string, string>();
   /** K-1117: the library items that an update, a restore or a delete changes now. */
   private busyItems = new Set<string>();
   /**
@@ -932,6 +940,24 @@ export class Kitshn extends DurableObject<Env> {
           state: row.state,
         },
       ]),
+    );
+    this.desiredState = new Map();
+    for (const row of this.sql<{ kind: string; machine_id: string; body: string }>(
+      "SELECT kind, machine_id, body FROM desired_state",
+    ))
+      (this.desiredState.get(row.kind) ?? this.desiredState.set(row.kind, new Map()).get(row.kind)!).set(
+        row.machine_id,
+        JSON.parse(row.body) as unknown,
+      );
+    this.cardSettings = new Map();
+    for (const row of this.sql<{ card_id: string; key: string; value: string }>(
+      "SELECT card_id, key, value FROM card_settings",
+    ))
+      this.cardSettings.set(row.card_id, { ...this.cardSettings.get(row.card_id), [row.key]: row.value });
+    this.applied = new Map(
+      this.sql<{ machine_id: string; key: string; hash: string }>(
+        "SELECT machine_id, key, hash FROM applied_state",
+      ).map((row) => [`${row.machine_id}/${row.key}`, row.hash]),
     );
     this.providerRegs = new Map();
     for (const row of this.sql<{ machine_id: string; body: string }>(
@@ -3225,6 +3251,7 @@ export class Kitshn extends DurableObject<Env> {
       }, {}),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
+      cardSettings: Object.fromEntries(this.cardSettings),
       providerCommands: Object.fromEntries(
         [...this.providerRegs].map(([machineId, regs]) => [
           machineId,
@@ -3271,6 +3298,7 @@ export class Kitshn extends DurableObject<Env> {
       keyFailure: this.keyFailures.get(machine.id) ?? null,
       orphanVolumes: orphanVolumes(live?.volumes ?? [], this.state),
       servers: live?.servers ?? [],
+      queued: this.queuedFor(machine.id),
     };
   }
 
@@ -3315,21 +3343,177 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-706: sends each provider of each signed connection its grant tables when they changed since the last send. */
   private pushGrants(now = Date.now()) {
-    for (const [machineId, regs] of this.providerRegs) {
+    for (const machineId of this.providerRegs.keys()) {
       const socket = this.ctx.getWebSockets(machineId).find((item) => {
         const attachment = attachmentOf(item);
         return attachment?.kind === "machine" && attachment.check === "signed";
       });
       if (!socket) continue;
-      for (const { name } of regs) {
-        const tables = grantTables(this.state, machineId, name, now);
-        const key = `${machineId}/${name}`;
-        const text = JSON.stringify(tables);
-        if (this.sentGrants.get(key) === text) continue;
-        this.sentGrants.set(key, text);
-        send(socket, { type: "grants", provider: name, tables } satisfies ServerToDaemon);
+      for (const { key, hash, push } of this.pushesOf(machineId, now)) {
+        if (this.sentGrants.get(`${machineId}/${key}`) === hash) continue;
+        this.sentGrants.set(`${machineId}/${key}`, hash);
+        const { key: _key, ...message } = push;
+        send(socket, { ...message, hash } as ServerToDaemon);
       }
     }
+  }
+
+  /** K-1608: every push that the providers of a machine get now, each with the hash of its content. */
+  private pushesOf(machineId: string, now = Date.now()) {
+    return providerPushes(
+      this.state,
+      machineId,
+      this.providerRegs.get(machineId) ?? [],
+      this.desiredState,
+      this.cardSettings,
+      now,
+    ).map((push) => {
+      const text = JSON.stringify(push);
+      return { key: push.key, hash: `${fnv(text)}${fnv(text, 0x050c5d1f)}`, push };
+    });
+  }
+
+  /** K-709: the kinds of desired state that the providers registered, with their JSON Schema. */
+  private stateKind(kind: string) {
+    for (const regs of this.providerRegs.values())
+      for (const reg of regs) {
+        const found = reg.kinds.find((item) => item.id === kind && item.state !== undefined);
+        if (found) return found;
+      }
+    return null;
+  }
+
+  /** K-709: every part of one desired state, for the editor of the map and for agents. */
+  private readDesired(kind: string) {
+    const found = this.stateKind(kind);
+    if (!found)
+      return Response.json({ error: `No provider registered the state ${kind} (K-709).` }, { status: 404 });
+    const parts = this.desiredState.get(kind) ?? new Map<string, unknown>();
+    return Response.json({
+      kind,
+      schema: found.state?.schema ?? null,
+      shared: parts.get("") ?? null,
+      machines: Object.fromEntries([...parts].filter(([machineId]) => machineId !== "")),
+    });
+  }
+
+  /** K-709: the map sets the shared part (the admin) or the part of one machine (control on that machine). */
+  private putDesired(caller: Caller, kind: string, body: unknown) {
+    if (!this.stateKind(kind))
+      return Response.json({ error: `No provider registered the state ${kind} (K-709).` }, { status: 404 });
+    if (!isRecord(body) || !("value" in body))
+      return Response.json(
+        { error: "Send { machineId, value }; machineId null sets the shared part." },
+        { status: 400 },
+      );
+    const machineId = typeof body["machineId"] === "string" ? body["machineId"] : null;
+    if (machineId !== null && !this.state.machines.has(machineId))
+      return Response.json({ error: `No machine "${machineId}" exists.` }, { status: 404 });
+    if (machineId !== null && !this.canControl(caller.visitor, machineId))
+      return Response.json({ error: "A part of a machine needs control on that machine." }, { status: 403 });
+    const refusal = this.writeDesired(kind, machineId ?? "", body["value"], caller.actor);
+    return refusal ? Response.json({ error: refusal }, { status: 413 }) : Response.json({ ok: true });
+  }
+
+  /**
+   * K-717: one card setting of a provider card. It needs control on the card, which kitshn checks here; it changes
+   * no access, so it is no proposal (K-715). History records it without Undo.
+   */
+  private setCardSetting(caller: Caller, cardId: string, body: unknown) {
+    const card = this.state.resources.get(cardId);
+    const key = isRecord(body) && typeof body["key"] === "string" ? body["key"] : null;
+    const value = isRecord(body) && typeof body["value"] === "string" ? body["value"] : null;
+    const setting = card?.provider?.settings.find((item) => item.id === key);
+    if (!card || !setting)
+      return Response.json({ error: `${cardId} has no setting ${key}.` }, { status: 404 });
+    if (value === null || !setting.values.includes(value))
+      return Response.json(
+        { error: `${setting.title} is one of ${setting.values.join(", ")}.` },
+        { status: 400 },
+      );
+    const state =
+      this.state.paused && this.hasAdmin(caller.visitor) ? { ...this.state, paused: null } : this.state;
+    if (visitorLevel(state, card, caller.visitor, Date.now()) !== "control")
+      return Response.json(
+        { error: `${setting.title} needs control on ${card.name} (K-717).` },
+        { status: 403 },
+      );
+    this.ctx.storage.transactionSync(() => {
+      this.sql(
+        "INSERT OR REPLACE INTO card_settings (card_id, key, value) VALUES (?, ?, ?)",
+        card.id,
+        setting.id,
+        value,
+      );
+      this.insertRevision(caller.actor, `Set ${setting.title} of ${card.name} to ${value} (K-717)`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    return Response.json({ ok: true });
+  }
+
+  /** K-1608, K-1625: a provider card of the machine reports the fact `busy` as "true". */
+  private busy(machineId: string) {
+    return [...this.state.resources.values()].some(
+      (card) =>
+        card.machine === machineId &&
+        card.provider?.facts.some((fact) => fact.role === "busy" && fact.value === "true") === true,
+    );
+  }
+
+  /** K-1608: how many pushes a machine has not applied yet; a machine without providers has none. */
+  private queuedFor(machineId: string) {
+    return this.pushesOf(machineId).filter(
+      ({ key, hash }) => this.applied.get(`${machineId}/${key}`) !== hash,
+    ).length;
+  }
+
+  /**
+   * K-709: a provider of the machine sets its part of a desired state, or the shared part. kitshn stores it and pushes
+   * it to every machine of the provider; History records it without Undo.
+   */
+  private setDesiredFromMachine(machine: Machine, message: Extract<DaemonMessage, { type: "desiredSet" }>) {
+    const reg = this.providerRegs.get(machine.id)?.find((item) => item.name === message.provider);
+    const kind = reg?.kinds.find((item) => item.id === message.kind && item.state !== undefined);
+    if (!kind) {
+      console.warn(
+        `kitshn refused desired state of ${machine.name}: ${message.provider} has no state kind ${message.kind}.`,
+      );
+      return;
+    }
+    const refusal = this.writeDesired(kind.id, message.part === "shared" ? "" : machine.id, message.value, {
+      _tag: "machine",
+      machineId: machine.id,
+      name: machine.name,
+    });
+    if (refusal) console.warn(`kitshn refused desired state of ${machine.name}: ${refusal}`);
+  }
+
+  /** K-709: stores one part of a desired state, or says why not. A part of null clears it. */
+  private writeDesired(kind: string, machineId: string, value: unknown, actor: Actor): string | null {
+    const text = JSON.stringify(value ?? null);
+    if (new TextEncoder().encode(text).length > PROVIDER_LIMITS.stateBytes)
+      return `a desired state holds at most ${PROVIDER_LIMITS.stateBytes} bytes (K-709).`;
+    if (deepEqual(this.desiredState.get(kind)?.get(machineId) ?? null, value ?? null)) return null;
+    const where =
+      machineId === ""
+        ? "the shared part"
+        : `the part of ${this.state.machines.get(machineId)?.name ?? machineId}`;
+    this.ctx.storage.transactionSync(() => {
+      if (value === null || value === undefined)
+        this.sql("DELETE FROM desired_state WHERE kind = ? AND machine_id = ?", kind, machineId);
+      else
+        this.sql(
+          "INSERT OR REPLACE INTO desired_state (kind, machine_id, body) VALUES (?, ?, ?)",
+          kind,
+          machineId,
+          text,
+        );
+      this.insertRevision(actor, `Set ${where} of ${kind} (K-709)`, [], null);
+    });
+    this.load();
+    this.broadcast();
+    return null;
   }
 
   /**
@@ -3578,6 +3762,18 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/api/sign-out/retry" && request.method === "POST") return this.retrySignOut(caller);
     if (path === "/api/machines" && request.method === "POST")
       return this.addMachine(caller, await request.json().catch(() => null), new URL(request.url).origin);
+    if (path.startsWith("/api/desired/")) {
+      const kind = decodeURIComponent(path.slice("/api/desired/".length));
+      if (request.method === "GET") return this.readDesired(kind);
+      if (request.method === "PUT")
+        return this.putDesired(caller, kind, await request.json().catch(() => null));
+    }
+    if (path.startsWith("/api/cards/") && path.endsWith("/settings") && request.method === "POST")
+      return this.setCardSetting(
+        caller,
+        decodeURIComponent(path.slice("/api/cards/".length, -"/settings".length)),
+        await request.json().catch(() => null),
+      );
     if (path.startsWith("/api/machines/") && path.includes("/providers/") && path.endsWith("/forget")) {
       const [machineId = "", name = ""] = path
         .slice("/api/machines/".length, -"/forget".length)
@@ -4281,6 +4477,25 @@ export class Kitshn extends DurableObject<Env> {
       this.updateLiveSites(machine, message.sites);
     } else if (message.type === "providers") {
       this.updateProviders(machine, message.providers);
+    } else if (message.type === "desiredSet" && typeof message.kind === "string") {
+      this.setDesiredFromMachine(machine, message);
+    } else if (
+      message.type === "applied" &&
+      typeof message.key === "string" &&
+      typeof message.hash === "string"
+    ) {
+      // K-1608: written only when it changes, so a machine that applied everything writes nothing.
+      const id = `${machine.id}/${message.key}`;
+      if (this.applied.get(id) !== message.hash) {
+        this.sql(
+          "INSERT OR REPLACE INTO applied_state (machine_id, key, hash) VALUES (?, ?, ?)",
+          machine.id,
+          message.key.slice(0, 200),
+          message.hash.slice(0, 64),
+        );
+        this.applied.set(id, message.hash);
+        this.sendMachine(machine);
+      }
     } else if (message.type === "icon") {
       await this.liveIcon(machine, message.site, message.icon);
     } else if (message.type === "servers") {
@@ -4733,6 +4948,14 @@ export class Kitshn extends DurableObject<Env> {
     );
     if (!fits)
       return `The provider ${parsed.provider} of ${machine.name} has no command ${parsed.command} for ${card.name}.`;
+    // K-1625: a row command names a row of a list of the card that offers this command.
+    if (
+      parsed.row !== undefined &&
+      !card.provider?.lists.some((list) =>
+        list.rows.some((row) => row.id === parsed.row && (row.commands ?? []).includes(parsed.command)),
+      )
+    )
+      return `${card.name} has no row ${parsed.row} with the command ${parsed.command}.`;
     return { ...parsed, resource: card.provider?.localId ?? null };
   }
 
@@ -4911,8 +5134,8 @@ export class Kitshn extends DurableObject<Env> {
     const now = Date.now();
     const [row] = this.ctx.storage.transactionSync(() => {
       const inserted = this.sql<{ id: number }>(
-        `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
-         VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, NULL, '') RETURNING id`,
+        `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output, when_idle)
+         VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, NULL, '', ?) RETURNING id`,
         machineId,
         JSON.stringify(labels),
         JSON.stringify(command),
@@ -4920,6 +5143,8 @@ export class Kitshn extends DurableObject<Env> {
         now + JOB_EXPIRY_MS,
         JSON.stringify(caller.actor),
         JSON.stringify(caller.visitor),
+        // K-613: "when online and idle" waits until no provider of the machine reports busy (K-1608).
+        input["whenIdle"] === true ? 1 : 0,
       );
       // K-614: the history names the member that sent a shell command.
       if (command.kind === "shell") {
@@ -4949,8 +5174,9 @@ export class Kitshn extends DurableObject<Env> {
       labels: string;
       command: string;
       visitor: string;
+      when_idle: number;
     }>(
-      "SELECT id, machine_id, labels, command, visitor FROM jobs WHERE state = 'queued' AND expires_at > ? ORDER BY id",
+      "SELECT id, machine_id, labels, command, visitor, when_idle FROM jobs WHERE state = 'queued' AND expires_at > ? ORDER BY id",
       Date.now(),
     );
     for (const job of queued) {
@@ -4981,6 +5207,7 @@ export class Kitshn extends DurableObject<Env> {
             : null
           : pickMachine(this.state.machines.values(), allowed, JSON.parse(job.labels) as Array<string>);
       if (!machine) continue;
+      if (job.when_idle === 1 && this.busy(machine.id)) continue;
       const socket = this.openSocket(machine.id);
       if (!socket) continue;
       let command = JSON.parse(job.command) as Command;

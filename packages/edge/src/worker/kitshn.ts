@@ -11966,6 +11966,8 @@ export class Kitshn extends DurableObject<Env> {
     const want = new Map(
       gameRecords(this.gameRows(), this.env.KITSHN_ZONE).map((r) => [`${r.type} ${r.name}`, r]),
     );
+    // Every game record is on the kitshn zone. zonePath takes one label only, so an SRV name like _x._tcp.<name> fails it.
+    const zone = `${this.zonePath(this.env.KITSHN_ZONE)}/dns_records`;
     const rows = this.sql<GameRecordRow>("SELECT * FROM game_records");
     const failed = (
       row: { type: string; name: string; card_id: string; content: string; record_id: string },
@@ -11987,9 +11989,8 @@ export class Kitshn extends DurableObject<Env> {
       try {
         if (row.record_id) {
           calls++;
-          await api("DELETE", `${this.zonePath(row.name)}/dns_records/${row.record_id}`).catch(
-            (error: unknown) =>
-              error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error),
+          await api("DELETE", `${zone}/${row.record_id}`).catch((error: unknown) =>
+            error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error),
           );
         }
         this.sql("DELETE FROM game_records WHERE type = ? AND name = ?", row.type, row.name);
@@ -12003,7 +12004,6 @@ export class Kitshn extends DurableObject<Env> {
       if (row && row.content === record.content && row.error === null) continue;
       if (row?.error && row.retry_at > now) continue;
       if (calls + 2 > budget) return calls;
-      const zone = `${this.zonePath(record.name)}/dns_records`;
       try {
         let recordId = row?.record_id ?? "";
         if (!recordId) {

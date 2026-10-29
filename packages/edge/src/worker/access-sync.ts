@@ -26,6 +26,8 @@ export interface AccessRow {
   readonly retryAt?: number;
   /** K-408: in memory only, the failed tries in a row, for the backoff. */
   readonly attempts?: number;
+  /** K-409: in memory only, the applications whose sessions the write of `tried` already ended. */
+  readonly ended?: ReadonlyArray<string>;
 }
 
 export interface AccessStore {
@@ -376,26 +378,8 @@ export async function verifyAccess(
       }
     }
   }
-  // K-408: a circle policy that no row holds and no application uses is left over from a crash between its create and
-  // its row. It grants nothing, so the compare deletes it, at most ORPHAN_DELETES a day; more wait for the next day.
-  const used = new Set(apps.flatMap((app) => app.policies?.map((policy) => policy.id) ?? []));
-  const orphans = policies.filter(
-    (policy) => policy.name.startsWith(CIRCLE_POLICY_PREFIX) && !ours.has(policy.id) && !used.has(policy.id),
-  );
-  for (const policy of orphans.slice(0, ORPHAN_DELETES)) {
-    try {
-      await api("DELETE", `${base}/policies/${policy.id}`);
-    } catch (error) {
-      if (!isNotFound(error))
-        warnings.push(`kitshn could not delete the unused Access policy "${policy.name}": ${message(error)}`);
-    }
-  }
   return warnings;
 }
-
-/** K-406: the deletes of unused circle policies that the daily compare may make; it counts them before it starts. */
-export const ORPHAN_DELETES = 2;
-const CIRCLE_POLICY_PREFIX = `${ACCESS_NAME_PREFIX}circle `;
 
 /** K-110: an application whose sessions a sign-out did not end yet, and why. */
 export interface LeftApp {
@@ -644,11 +628,7 @@ export async function syncAccess(
     let cfId = row?.cfId ?? "";
     try {
       if (!cfId) {
-        // A policy that kitshn never tried is new, so its name lookup is skipped. The lookup stays after a try (a
-        // create that may have landed, K-408) and for an empty store (a new kitshn adopts what an old one made).
-        // A crash between a create and its row leaves an unused policy, which the daily compare deletes.
-        const lookup = kind === "apps" || row !== undefined || store.rows.size === 0;
-        if (kind === "policies" && lookup && !existingPolicies) {
+        if (kind === "policies" && !existingPolicies) {
           if (!spend()) return false;
           existingPolicies = await api<ReadonlyArray<Named>>("GET", `${base}/policies?per_page=1000`);
         }
@@ -656,9 +636,7 @@ export async function syncAccess(
           if (!spend()) return false;
           existingApps = await api<ReadonlyArray<Named>>("GET", `${base}/apps?per_page=1000`);
         }
-        const found = lookup
-          ? find((kind === "policies" ? existingPolicies : existingApps) ?? [])
-          : undefined;
+        const found = find((kind === "policies" ? existingPolicies : existingApps) ?? []);
         // Never adopt an object that another row holds: one Cloudflare object belongs to one row (K-408).
         const taken = new Set([...store.rows.values()].map((item) => item.cfId));
         cfId = found && found.name.startsWith(ACCESS_NAME_PREFIX) && !taken.has(found.id) ? found.id : "";
@@ -698,40 +676,48 @@ export async function syncAccess(
           : narrowsPolicy(before, body)
             ? appsUsing(store.rows, result.id)
             : [];
-      if (ending.length > 0) {
-        // K-406: every revoke counts before it starts; they run together, while the run goes on (K-409).
-        if (calls + ending.length > budget) {
-          calls = budget;
-          store.put({ key, cfId: result.id, aud, body: before, tried: "", error: null });
-          return false;
-        }
-        calls += ending.length;
+      // Sessions that an earlier run of this same write already ended (`tried` is this body).
+      const ended = row?.tried === body ? (row.ended ?? []) : [];
+      const left = ending.filter((appId) => !ended.includes(appId));
+      if (left.length > 0) {
+        // K-406: each revoke counts before it starts. They run together, while the run goes on (K-409); what does not
+        // fit in this run's budget waits for the next run.
+        const now = left.slice(0, Math.max(0, budget - calls));
+        calls += now.length;
         const id = result.id;
+        // Later writes of this run see the new id; the old body stays until every session ended.
+        store.put({ key, cfId: id, aud, body: before, tried: body, error: null, ended });
         revoking.push(
-          Promise.allSettled(ending.map((appId) => api("POST", `${base}/apps/${appId}/revoke_tokens`))).then(
+          Promise.allSettled(now.map((appId) => api("POST", `${base}/apps/${appId}/revoke_tokens`))).then(
             (results) => {
               // An application that is gone has no sessions left.
+              const done = [
+                ...ended,
+                ...now.filter((_, index) => {
+                  const result = results[index];
+                  return result?.status === "fulfilled" || isNotFound(result?.reason);
+                }),
+              ];
               const failed = results.find(
                 (item): item is PromiseRejectedResult =>
                   item.status === "rejected" && !isNotFound(item.reason),
               );
+              const waiting = { key, cfId: id, aud, body: before, tried: body, ended: done };
               store.put(
                 failed
                   ? {
-                      key,
-                      cfId: id,
-                      aud,
-                      body: before,
-                      tried: body,
+                      ...waiting,
                       error: `sessions not ended: ${message(failed.reason)}`,
                       ...backoff(row, Date.now()),
                     }
-                  : { key, cfId: id, aud, body, tried: body, error: null },
+                  : done.length < ended.length + left.length
+                    ? { ...waiting, error: null }
+                    : { key, cfId: id, aud, body, tried: body, error: null },
               );
             },
           ),
         );
-        return true;
+        return now.length === left.length;
       }
       store.put({ key, cfId: result.id, aud, body, tried: body, error: null });
     } catch (error) {

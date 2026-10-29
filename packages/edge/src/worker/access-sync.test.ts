@@ -585,6 +585,49 @@ describe("Access sync (K-406, K-408)", () => {
     expect(most).toBe(2);
   });
 
+  it("ends the sessions of more applications than one run reaches over several runs, each once (K-406, K-409)", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    const owner = state.circles.get("owner")!;
+    const cards: Array<Resource> = ["two", "three"].map((id) => ({
+      id,
+      kind: "site.static",
+      name: id,
+      addresses: [`${id}.example.com`],
+      status: "running",
+      group: null,
+      machine: null,
+    }));
+    const all: State = {
+      ...state,
+      resources: new Map([...state.resources, ...cards.map((card) => [card.id, card] as const)]),
+      places: new Map([
+        ...state.places,
+        ...cards.map((card) => [card.id, state.places.get("kitshn-admin")!] as const),
+      ]),
+    };
+    const domain = { _tag: "domain" as const, domain: "x.com" };
+    const withX = applyChanges(
+      all,
+      resolveEdits(all, [
+        { _tag: "circle", id: "owner", after: { ...owner, members: [...owner.members, domain] } },
+      ]),
+    );
+    await syncAccess(desiredAccess(withX, 0), cf.store, cf.api, "a");
+    cf.calls.length = 0;
+    // Each run has room for the policy write and one revoke; the circle's other policies take later runs.
+    const desired = desiredAccess(all, 0);
+    let runs = 0;
+    while (!(await syncAccess(desired, cf.store, cf.api, "a", 2)) && runs < 10) runs++;
+    expect(runs).toBeLessThan(10);
+    const revokes = cf.calls.filter((call) => call.endsWith("/revoke_tokens"));
+    expect(new Set(revokes).size).toBe(3);
+    expect(revokes).toHaveLength(3);
+    expect(cf.rows.get("policy:owner:people")).toMatchObject({
+      body: cf.rows.get("policy:owner:people")!.tried,
+    });
+  });
+
   it("writes the application before it ends sessions and deletes the policy that it dropped (K-409, K-410)", async () => {
     const cf = fakeCloudflare();
     const state = start();
@@ -612,40 +655,6 @@ describe("Access sync (K-406, K-408)", () => {
     expect(cf.calls.indexOf(`DELETE /policies/${policy}`)).toBeGreaterThan(write);
     expect(cf.rows.has("policy:b:people")).toBe(false);
     expect(cf.rows.get("app:kitshn-admin:kit.example.com")).toMatchObject({ error: null });
-  });
-
-  it.each([
-    ["no row", false],
-    ["a row of an unclear create", true],
-  ])("looks a new policy up by name only after an earlier try: %s", async (_, earlier) => {
-    const cf = fakeCloudflare();
-    const state = start();
-    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
-    if (earlier)
-      cf.rows.set("policy:b:people", {
-        key: "policy:b:people",
-        cfId: "",
-        aud: "",
-        body: "",
-        tried: "",
-        error: "504",
-      });
-    const owner = state.circles.get("owner")!;
-    const inB = applyChanges(
-      state,
-      resolveEdits(state, [
-        {
-          _tag: "circle",
-          id: "b",
-          after: { ...owner, id: "b", name: "B", needsPasskey: false, x: 5000, y: 5000, r: 100 },
-        },
-        { _tag: "place", id: "kitshn-admin", after: { x: 5000, y: 5000 } },
-      ]),
-    );
-    cf.calls.length = 0;
-    await syncAccess(desiredAccess(inB, 0), cf.store, cf.api, "a");
-    expect(cf.calls.includes("GET /policies?per_page=1000")).toBe(earlier);
-    expect(cf.calls).toContain("POST /policies");
   });
 
   it.each([
@@ -759,46 +768,6 @@ describe("Access sync (K-406, K-408)", () => {
 });
 
 describe("daily compare and sessions (K-408, K-409, K-110)", () => {
-  it("deletes an unused circle policy that no row holds, and nothing else (K-408)", async () => {
-    const cf = fakeCloudflare();
-    const live: Api = async <T>(method: Parameters<Api>[0], path: string, body?: unknown) => {
-      if (path.includes("/policies?"))
-        return [
-          {
-            id: "p-gone",
-            name: "kitshn circle Gone",
-            decision: "allow",
-            include: [],
-            require: [],
-            exclude: [],
-          },
-          {
-            id: "p-used",
-            name: "kitshn circle Used",
-            decision: "allow",
-            include: [],
-            require: [],
-            exclude: [],
-          },
-          {
-            id: "p-machines",
-            name: "kitshn machines",
-            decision: "non_identity",
-            include: [],
-            require: [],
-            exclude: [],
-          },
-        ] as T;
-      if (path.includes("/apps?"))
-        return [
-          { id: "app-x", name: "kitshn x", domain: "x.example.com", policies: [{ id: "p-used" }] },
-        ] as T;
-      return cf.api<T>(method, path, body);
-    };
-    await verifyAccess(desiredAccess(start(), 0), cf.store, live, "a");
-    expect(cf.calls.filter((call) => !call.startsWith("GET"))).toEqual(["DELETE /policies/p-gone"]);
-  });
-
   it("rewrites an object that someone changed, and warns about a foreign application", async () => {
     const cf = fakeCloudflare();
     const desired = desiredAccess(start(), 0);

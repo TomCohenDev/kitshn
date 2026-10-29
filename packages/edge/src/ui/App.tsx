@@ -127,7 +127,7 @@ import {
 } from "./Pause.tsx";
 import { playResumeSound, pressSound, showPanic, unlockAudio } from "./panic.ts";
 import { GONE_STICKER, REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx";
-import { AskEvents, BotRuns, approveFromHash } from "./Asks.tsx";
+import { AskEvents, LinkEvents, BotRuns, approveFromHash } from "./Asks.tsx";
 import { PassSettingsPanel } from "./Passes.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
@@ -1016,7 +1016,12 @@ export function App() {
           state={state}
           onUndo={(id) => historyUndo.current(id)}
           onShow={(revision) => historyShow.current(revision)}
-          askEvents={<AskEvents events={store.snapshot.askEvents} />}
+          askEvents={
+            <>
+              <AskEvents events={store.snapshot.askEvents} />
+              <LinkEvents events={store.snapshot.linkEvents} />
+            </>
+          }
         />
       ) : null,
     [store.snapshot, state],

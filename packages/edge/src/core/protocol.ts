@@ -33,6 +33,20 @@ export interface AskEventView {
   readonly verified: ReadonlyArray<string>;
 }
 
+/** K-1610: one call of a source machine on a target machine, as History shows it: an event, with no Undo. */
+export interface LinkEventView {
+  readonly id: number;
+  readonly at: number;
+  readonly source: string;
+  readonly target: string;
+  readonly kind: "exec" | "tool";
+  readonly thread: string | null;
+  readonly name: string;
+  readonly cwd: string | null;
+  readonly outcome: "succeeded" | "refused" | "failed";
+  readonly exitCode: number | null;
+}
+
 /** K-1722: an open proposal, with the name of the machine that asked, for the Asks list. */
 export type ProposalView = Proposal & {
   readonly machineName: string;
@@ -151,6 +165,8 @@ export interface Snapshot {
   readonly githubDefaultWay: GitHubWay;
   /** K-1717: the newest 50 ask events. */
   readonly askEvents: ReadonlyArray<AskEventView>;
+  /** K-1610: the newest 50 exec runs and forwarded tool calls between machines. */
+  readonly linkEvents: ReadonlyArray<LinkEventView>;
   /** The newest jobs, with their output cut to 4,000 characters. */
   readonly jobs: ReadonlyArray<JobView>;
   /** K-1819: the newest backup run of each Compose card that has one. */

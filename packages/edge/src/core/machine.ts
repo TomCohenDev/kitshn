@@ -1,7 +1,14 @@
 import type { LogAnswer, LogLine, LogSearch } from "./logs.ts";
 import type { BackupReport } from "./backups.ts";
 import type { MachineRight } from "./model.ts";
-import type { CardSettingValues, DesiredParts, GrantTables, ProviderReport } from "@kitshn/local";
+import type {
+  CardSettingValues,
+  DesiredParts,
+  GrantTables,
+  LinkAudit,
+  ProviderReport,
+  ReachedCard,
+} from "@kitshn/local";
 /** A joined machine (K-602). Its resource card has the same id and the kind `machine`. */
 export interface Machine {
   readonly id: string;
@@ -259,6 +266,8 @@ export type DaemonMessage =
       readonly part: "shared" | "machine";
       readonly value: unknown;
     }
+  /** K-1610: a provider of the machine reports one exec run or forwarded tool call on another machine. */
+  | { readonly type: "audit"; readonly audit: LinkAudit }
   /** K-1608: the daemon saved the push with this key and hash and gave it to its provider. */
   | { readonly type: "applied"; readonly key: string; readonly hash: string };
 
@@ -289,6 +298,13 @@ export type ServerToDaemon =
       readonly provider: string;
       readonly kind: string;
       readonly state: DesiredParts;
+      readonly hash: string;
+    }
+  /** K-1609: the cards of one provider on other machines that this machine reaches. */
+  | {
+      readonly type: "reach";
+      readonly provider: string;
+      readonly cards: ReadonlyArray<ReachedCard>;
       readonly hash: string;
     }
   /** K-717: the card settings of one provider's cards on this machine. */

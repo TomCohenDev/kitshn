@@ -75,6 +75,7 @@ describe("the providers of a machine (K-704, K-705)", () => {
       grants: { a: [] },
       desired: { "t3.settings": { shared: { theme: "dark" }, machine: null } },
       settings: {},
+      reach: [],
     });
   });
 

@@ -346,4 +346,35 @@ export const pushKey = {
   grants: (provider: string) => `grants:${provider}`,
   settings: (provider: string) => `settings:${provider}`,
   desired: (provider: string, kind: string) => `desired:${provider}:${kind}`,
+  reach: (provider: string) => `reach:${provider}`,
 } as const;
+
+/**
+ * K-1609: one card of the same provider on another machine that this machine opens, with the provider's name of the
+ * level that this machine has there. The link proxy of the daemon reaches its address with the machine token.
+ */
+export const ReachedCard = Schema.Struct({
+  machineId: Schema.String,
+  machineName: Schema.String,
+  kind: Schema.String,
+  id: Schema.String,
+  address: Schema.NullOr(Schema.String),
+  level: Schema.String,
+});
+export type ReachedCard = typeof ReachedCard.Type;
+
+/** K-1610: what a source machine reports of one call on another machine; never its arguments or its output. */
+export const AUDIT_OUTCOMES = ["succeeded", "refused", "failed"] as const;
+export const LinkAudit = Schema.Struct({
+  kind: Schema.Literals(["exec", "tool"]),
+  /** The machine id of the target. */
+  target: Schema.String.check(Schema.isMaxLength(64)),
+  thread: Schema.NullOr(Schema.String.check(Schema.isMaxLength(200))),
+  /** The command of an exec run, or the name of the tool. */
+  name: Schema.String.check(Schema.isMaxLength(500)),
+  cwd: Schema.NullOr(Schema.String.check(Schema.isMaxLength(500))),
+  outcome: Schema.Literals(AUDIT_OUTCOMES),
+  exitCode: Schema.NullOr(Schema.Int),
+  at: Schema.Number,
+});
+export type LinkAudit = typeof LinkAudit.Type;

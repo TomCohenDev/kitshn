@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { Machine } from "./machine.ts";
 import { type Circle, type Resource, type State, levelForKind, shareKey } from "./model.ts";
 import { applyChanges, forgetProviderChanges, invert } from "./changes.ts";
-import { commandsFor, grantTables, grantsOf, providerCards, providerPushes } from "./providers.ts";
+import { commandsFor, grantTables, grantsOf, providerCards, providerPushes, reachOf } from "./providers.ts";
 
 const report: ProviderReport = {
   name: "t3",
@@ -227,10 +227,15 @@ describe("pushes to a machine (K-709, K-717, K-1608)", () => {
       new Map([[app.id, { updateChannel: "daily" }]]),
       0,
     );
-    expect(pushes.map((push) => push.key)).toEqual(["grants:t3", "settings:t3", "desired:t3:t3.settings"]);
-    expect(pushes[1]).toMatchObject({ values: { app: { updateChannel: "daily" } } });
+    expect(pushes.map((push) => push.key)).toEqual([
+      "grants:t3",
+      "reach:t3",
+      "settings:t3",
+      "desired:t3:t3.settings",
+    ]);
+    expect(pushes[2]).toMatchObject({ values: { app: { updateChannel: "daily" } } });
     // Another machine's part never reaches this one.
-    expect(pushes[2]).toMatchObject({ state: { shared: { theme: "dark" }, machine: null } });
+    expect(pushes[3]).toMatchObject({ state: { shared: { theme: "dark" }, machine: null } });
     // A stored value that the kind no longer offers falls back to the default.
     const stale = providerPushes(
       value,
@@ -240,6 +245,29 @@ describe("pushes to a machine (K-709, K-717, K-1608)", () => {
       new Map([[app.id, { updateChannel: "weekly" }]]),
       0,
     );
-    expect(stale[1]).toMatchObject({ values: { app: { updateChannel: "nightly" } } });
+    expect(stale[2]).toMatchObject({ values: { app: { updateChannel: "nightly" } } });
+  });
+});
+
+describe("reach of a machine (K-1609)", () => {
+  it("lists the cards of the provider on other machines that the machine's token opens, with the level name", () => {
+    const other: Machine = { ...machine, id: "mac", name: "mac", clientId: "mac.access" };
+    const base = state([circle("links", [{ _tag: "machine", machineId: "mac" }], { level: "use" })]);
+    const value: State = { ...base, machines: new Map([...base.machines, ["mac", other]]) };
+    // The cards of vps sit in "links", which holds the machine mac.
+    expect(reachOf(value, "mac", "t3", 0)).toEqual([
+      {
+        machineId: "vps",
+        machineName: "vps",
+        kind: "t3.app",
+        id: "app",
+        address: "t3-vps.example.com",
+        level: "use",
+      },
+      { machineId: "vps", machineName: "vps", kind: "t3.thread", id: "th-1", address: null, level: "send" },
+    ]);
+    // A machine never reaches its own cards, and a pause closes every link (K-1504).
+    expect(reachOf(value, "vps", "t3", 0)).toEqual([]);
+    expect(reachOf({ ...value, paused: "keep-public" }, "mac", "t3", 0)).toEqual([]);
   });
 });

@@ -7,8 +7,10 @@ import {
   type ProviderCommand,
   type ProviderKind,
   type ProviderReport,
+  type ReachedCard,
   pushKey,
 } from "@kitshn/local";
+import { visitorLevel } from "./visitor.ts";
 import type { Machine } from "./machine.ts";
 import {
   type Member,
@@ -153,6 +155,12 @@ export type ProviderPush =
     }
   | {
       readonly key: string;
+      readonly type: "reach";
+      readonly provider: string;
+      readonly cards: ReadonlyArray<ReachedCard>;
+    }
+  | {
+      readonly key: string;
       readonly type: "settings";
       readonly provider: string;
       readonly values: Record<string, Record<string, string>>;
@@ -188,6 +196,12 @@ export function providerPushes(
         provider: name,
         tables: grantTables(state, machineId, name, now),
       },
+      {
+        key: pushKey.reach(name),
+        type: "reach",
+        provider: name,
+        cards: reachOf(state, machineId, name, now),
+      },
       { key: pushKey.settings(name), type: "settings", provider: name, values },
       ...kinds
         .filter((kind) => kind.state !== undefined)
@@ -210,3 +224,30 @@ const settingValue = (
   setting: { readonly values: ReadonlyArray<string>; readonly default: string },
   stored?: string,
 ) => (stored !== undefined && setting.values.includes(stored) ? stored : setting.default);
+
+/**
+ * K-1609: the cards of one provider on other machines that a machine opens, as Access decides it for the machine's
+ * token: its client id, no person and no address. A pause and an end date count as in Access (K-1504, K-209).
+ */
+export function reachOf(state: State, machineId: string, provider: string, now: number): Array<ReachedCard> {
+  const machine = state.machines.get(machineId);
+  if (!machine) return [];
+  const visitor = { email: null, clientId: machine.clientId, ip: null };
+  return [...state.resources.values()].flatMap((card) => {
+    if (card.machine === null || card.machine === machineId || card.provider?.name !== provider) return [];
+    if (card.provider.droppedAt !== undefined) return [];
+    const level = visitorLevel(state, card, visitor, now);
+    return level === null
+      ? []
+      : [
+          {
+            machineId: card.machine,
+            machineName: state.machines.get(card.machine)?.name ?? card.machine,
+            kind: card.kind,
+            id: card.provider.localId,
+            address: card.addresses[0] ?? null,
+            level: levelName(card, level),
+          },
+        ];
+  });
+}

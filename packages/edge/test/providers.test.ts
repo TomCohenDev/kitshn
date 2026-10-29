@@ -214,6 +214,36 @@ it("stores desired state from a provider, and runs a provider command that an ag
   await sql("DELETE FROM circles WHERE id = 'agents'");
 });
 
+it("records the calls that a machine reports on other machines, as its own and only on a signed connection (K-1610)", async () => {
+  const { stub } = await setup();
+  const audit = {
+    kind: "exec",
+    target: "mac",
+    thread: "thread-1",
+    name: "git status",
+    cwd: "/home/kcw",
+    outcome: "succeeded",
+    exitCode: 0,
+    at: 0,
+  };
+  const raw = (check: "signed" | "token", message: object) =>
+    runInDurableObject(stub, (instance) =>
+      instance.webSocketMessage(daemonSocket(check), JSON.stringify(message)),
+    );
+  await runInDurableObject(stub, (_, state) => void state.storage.sql.exec("DELETE FROM link_events"));
+  await raw("token", { type: "audit", audit });
+  await raw("signed", { type: "audit", audit: { ...audit, outcome: "maybe" } });
+  await raw("signed", { type: "audit", audit });
+  const rows = await runInDurableObject(stub, (_, state) =>
+    state.storage.sql
+      .exec("SELECT source, target, kind, name, outcome, exit_code FROM link_events")
+      .toArray(),
+  );
+  expect(rows).toEqual([
+    { source: "vps", target: "mac", kind: "exec", name: "git status", outcome: "succeeded", exit_code: 0 },
+  ]);
+});
+
 it("keeps an address that another card holds, or a name of kitshn, off a provider card (K-705)", async () => {
   const { message, card, sql } = await setup();
   const other: Resource = {

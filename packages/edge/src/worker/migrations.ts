@@ -282,6 +282,13 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "CREATE TABLE applied_state (machine_id TEXT NOT NULL, key TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (machine_id, key))",
     "ALTER TABLE jobs ADD COLUMN when_idle INTEGER NOT NULL DEFAULT 0",
   ],
+  // 39: the cross-machine work that source machines report (K-1610): exec runs and forwarded tool calls, never their
+  // arguments or output. Events, not revisions; 30 days, at most 2,000.
+  [
+    `CREATE TABLE link_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, source TEXT NOT NULL,
+      target TEXT NOT NULL, kind TEXT NOT NULL, thread TEXT, name TEXT NOT NULL, cwd TEXT, outcome TEXT NOT NULL,
+      exit_code INTEGER)`,
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

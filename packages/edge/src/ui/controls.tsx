@@ -422,6 +422,29 @@ export function MoreButton(props: { readonly name: string; readonly onOpen: (anc
   );
 }
 
+/** The Enlarge icon (arrows out), or with `shrink` the To the map icon (arrows in). Its button names it. */
+export function ResizeIcon(props: { shrink?: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="1em"
+      height="1em"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2.6"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      {props.shrink ? (
+        <path d="M4 14h6v6M20 10h-6V4M14 10l7-7M10 14l-7 7" />
+      ) : (
+        <path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7" />
+      )}
+    </svg>
+  );
+}
+
 /**
  * A panel that floats over the map, with its heading, "Enlarge" to the full view, and Close. `large` is the
  * full view of the same content; its button "To the map" goes back to the panel.
@@ -446,14 +469,15 @@ export function OverlayPanel(props: {
         <button
           type="button"
           class="btn"
+          aria-label={props.large ? "To the map" : "Enlarge"}
           data-tip={
             props.large
-              ? `Show ${props.heading} as a panel over the map again.`
-              : `Open the full view of ${props.heading}.`
+              ? `To the map: show ${props.heading} as a panel over the map again.`
+              : `Enlarge: open the full view of ${props.heading}.`
           }
           onClick={props.onResize}
         >
-          {props.large ? "To the map" : "Enlarge"}
+          <ResizeIcon shrink={props.large} />
         </button>
         <button
           type="button"

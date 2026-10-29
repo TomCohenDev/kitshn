@@ -1,6 +1,7 @@
 import { createPortal } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { type Resource, type State, activeShares, isPublicCircle } from "../core/model.ts";
+import { ResizeIcon } from "./controls.tsx";
 import { frameSandbox } from "./frames.ts";
 import { KINDS } from "./kinds.ts";
 
@@ -122,10 +123,11 @@ export function CardPreview(props: {
           <button
             type="button"
             class="btn"
-            data-tip="Show the preview large, over the map."
+            aria-label="Enlarge"
+            data-tip="Enlarge: show the preview large, over the map."
             onClick={props.onEnlarge}
           >
-            Enlarge
+            <ResizeIcon />
           </button>
         ) : null}
         <a class="btn" href={url} target="_blank" rel="noreferrer" data-tip="Open the address in a new tab.">

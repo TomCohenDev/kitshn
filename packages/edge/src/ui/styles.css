@@ -528,6 +528,40 @@ input[type="search"]::-webkit-search-cancel-button {
 .card.sel .sub {
   color: inherit;
 }
+/* K-515: the live row of a machine card. The bars change with each sample, once a minute, with no transition. */
+.card .live .meters {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.card .meter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+.card .meter-label {
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.card .meter-bar {
+  width: 48px;
+  height: 8px;
+  border: var(--bw) solid var(--border);
+  border-radius: 2px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.card .meter-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--green);
+}
+.card .meter-bar > span.hot {
+  background: var(--error);
+}
 .card .foot {
   display: flex;
   gap: 4px;

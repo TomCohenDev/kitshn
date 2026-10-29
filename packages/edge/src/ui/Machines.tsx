@@ -2,7 +2,7 @@ import { useState } from "preact/hooks";
 import type { Command } from "../core/machine.ts";
 import type { JobView, MachineView } from "../core/protocol.ts";
 import { MACHINE_TIPS, isRelease } from "./actions.ts";
-import { callApi } from "./store.ts";
+import { callApi, useStore } from "./store.ts";
 
 /** "5 min", "3 h", "2 d": how long ago a time was (K-515). */
 export function ago(time: number | null, now = Date.now()): string {
@@ -33,6 +33,105 @@ export function PresenceSticker(props: { view: MachineView }) {
     <span class="sticker presence" data-tip="Offline: the time since kitshn last heard from the daemon.">
       offline · {ago(props.view.lastSeen)}
     </span>
+  );
+}
+
+/**
+ * K-515: the live row of a machine card: the daemon version and system, and CPU and memory bars from the newest
+ * sample (K-605). Offline, it says when kitshn last heard from the daemon and shows no bars, because an old load lies.
+ */
+export function MachineLive(props: { view: MachineView }) {
+  const { online, status, sample, lastSeen } = props.view;
+  const daemon = status ? `daemon ${status.version} · ${status.os} ${status.arch}` : "no status yet";
+  if (!online)
+    return (
+      <div class="sub live">
+        seen {ago(lastSeen)} ago · {daemon}
+      </div>
+    );
+  return (
+    <div class="live">
+      <div class="sub">{daemon}</div>
+      {sample ? (
+        <div class="meters">
+          <Meter label="CPU" value={sample.cpu} />
+          <Meter label="Mem" value={sample.memory} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function Meter(props: { label: string; value: number }) {
+  const share = Math.min(1, Math.max(0, props.value));
+  return (
+    <span
+      class="meter"
+      role="img"
+      aria-label={`${props.label} ${percent(share)}`}
+      data-tip={`${props.label} ${percent(share)} at the last sample, once a minute (K-605).`}
+    >
+      <span class="meter-label">{props.label}</span>
+      <span class="meter-bar">
+        <span class={share >= 0.9 ? "hot" : ""} style={{ width: `${Math.round(share * 100)}%` }} />
+      </span>
+      <span class="meter-value">{percent(share)}</span>
+    </span>
+  );
+}
+
+/**
+ * K-515, K-1616, K-1902: the stickers of a machine card: its daemon against the release of the Worker, its queued
+ * jobs, and the asks that wait for the viewer. Each links where it acts.
+ */
+export function MachineStickers(props: { view: MachineView }) {
+  const { snapshot } = useStore();
+  if (!snapshot) return null;
+  const { machine, online, status } = props.view;
+  // Known limit: the snapshot holds the newest jobs only, so a long queue counts short. Revisit when queues grow past it.
+  const queued = snapshot.jobs.filter((job) => job.machineId === machine.id && job.state === "queued").length;
+  const asks = snapshot.myAsks[machine.id] ?? 0;
+  return (
+    <>
+      {online && status && isRelease(snapshot.version) ? (
+        status.version === snapshot.version ? (
+          <span
+            class="sticker ok"
+            data-tip={`Newest: the daemon runs edge-${snapshot.version}, the release of the Worker (K-617).`}
+          >
+            newest
+          </span>
+        ) : (
+          <span
+            class="sticker wait"
+            data-tip={`Behind: the daemon runs ${status.version}, the Worker runs edge-${snapshot.version}. Update daemon in its menu brings it up (K-612).`}
+          >
+            behind
+          </span>
+        )
+      ) : null}
+      {queued > 0 ? (
+        <a
+          class="sticker info"
+          href="#machines"
+          // The card starts a drag on a press; a link on it opens instead.
+          onPointerDown={(event) => event.stopPropagation()}
+          data-tip={`${queued} ${queued === 1 ? "job waits" : "jobs wait"} for this machine. The Machines view lists them.`}
+        >
+          {queued} queued
+        </a>
+      ) : null}
+      {asks > 0 ? (
+        <a
+          class="sticker wait"
+          href={`#notifications/${encodeURIComponent(machine.id)}`}
+          onPointerDown={(event) => event.stopPropagation()}
+          data-tip={`An agent on ${machine.name} waits for your answer. The Inbox shows ${asks === 1 ? "its ask" : `its ${asks} asks`}.`}
+        >
+          {asks} needs you
+        </a>
+      ) : null}
+    </>
   );
 }
 

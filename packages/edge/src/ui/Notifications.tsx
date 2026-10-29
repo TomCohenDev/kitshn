@@ -24,8 +24,14 @@ export function NotificationsView(props: {
   bell: number;
   /** K-1607, K-1722: the asks that wait for an approver circle; the snapshot keeps them, so the Inbox is live. */
   proposals: ReadonlyArray<ProposalView>;
+  /** K-515: the machine whose "needs you" sticker opened the Inbox, or "" for every ask. */
+  machine: string;
   onToast: (text: string, error: boolean) => void;
 }) {
+  const asks = props.machine
+    ? props.proposals.filter((proposal) => proposal.machineId === props.machine)
+    : props.proposals;
+  const machineName = props.state.machines.get(props.machine)?.name ?? props.machine;
   const [list, setList] = useState<{
     notifications: ReadonlyArray<Notification>;
     mutes: ReadonlyArray<Mute>;
@@ -87,9 +93,14 @@ export function NotificationsView(props: {
         </Menu>
       ) : null}
       <h3>Inbox</h3>
-      {props.proposals.length === 0 ? <p class="muted">No ask waits for an answer.</p> : null}
+      {props.machine ? (
+        <p class="muted">
+          The asks of {machineName}. <a href="#notifications">Show every ask</a>
+        </p>
+      ) : null}
+      {asks.length === 0 ? <p class="muted">No ask waits for an answer.</p> : null}
       <AskList
-        proposals={props.proposals}
+        proposals={asks}
         circleName={(id) => props.state.circles.get(id)?.name ?? id}
         needsPasskey={(id) => props.state.circles.get(id)?.needsPasskey === true}
         onToast={props.onToast}

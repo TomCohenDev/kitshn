@@ -12,6 +12,60 @@ const opensForAnyone = (state: State, resource: Resource) =>
 const LOGIN_HELP = "Shows only after you log in. Open it in a new tab to log in.";
 
 /**
+ * A frame that has not loaded after this long shows "Preview not available". A browser fires no error for a frame,
+ * and fires `load` for the error page of a refused one, so this catches only a page that hangs.
+ */
+const FRAME_GIVE_UP_MS = 20_000;
+
+/**
+ * K-520: a preview frame that shows a still "Loading preview" in its place until the page fires `load`, and
+ * "Preview not available" with Open when it never does. The frame keeps loading behind it, and shows when it loads.
+ * It loads at once, because it mounts only while shown, so the timer starts with the load. Callers key it by its
+ * address, so a new address starts again from "Loading preview".
+ */
+function LiveFrame(props: { url: string; label: string; sandbox: string; interact: boolean }) {
+  const [phase, setPhase] = useState<"loading" | "loaded" | "failed">("loading");
+  useEffect(() => {
+    const timer = setTimeout(() => setPhase((now) => (now === "loading" ? "failed" : now)), FRAME_GIVE_UP_MS);
+    return () => clearTimeout(timer);
+  }, []);
+  return (
+    <>
+      <iframe
+        src={props.url}
+        aria-label={props.label}
+        sandbox={props.sandbox}
+        style={{
+          pointerEvents: props.interact ? "auto" : "none",
+          visibility: phase === "loaded" ? "visible" : "hidden",
+        }}
+        onLoad={() => setPhase("loaded")}
+      />
+      {phase === "loaded" ? null : (
+        <div class="frame-state" role="status">
+          {phase === "loading" ? (
+            <span>Loading preview…</span>
+          ) : (
+            <>
+              <span>Preview not available</span>
+              <a
+                class="btn"
+                href={props.url}
+                target="_blank"
+                rel="noreferrer"
+                data-tip="Open the address in a new tab."
+              >
+                Open
+              </a>
+            </>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
  * A live view of a site or page. A site behind Access shows only when this browser already has its Access
  * cookie: the Access login refuses to load in a frame, so "Open in new tab" logs in there.
  */
@@ -29,12 +83,12 @@ export function CardPreview(props: {
   return (
     <div class="preview-frame" onPointerDown={(event) => event.stopPropagation()}>
       <div class="thumb">
-        <iframe
-          src={url}
-          aria-label={`Preview of ${address}`}
-          loading="lazy"
+        <LiveFrame
+          key={url}
+          url={url}
+          label={`Preview of ${address}`}
           sandbox={sandbox}
-          style={{ pointerEvents: interact ? "auto" : "none" }}
+          interact={interact}
         />
       </div>
       <div class="row">
@@ -149,7 +203,9 @@ function LargePreview(props: { resource: Resource; state: State; zone: string; o
             ×
           </button>
         </header>
-        <iframe src={url} aria-label={`Preview of ${address}`} sandbox={sandbox} />
+        <div class="frame">
+          <LiveFrame key={url} url={url} label={`Preview of ${address}`} sandbox={sandbox} interact />
+        </div>
         {opensForAnyone(props.state, props.resource) ? null : <div class="help">{LOGIN_HELP}</div>}
       </section>
     </div>,

@@ -55,6 +55,11 @@
 * {
   box-sizing: border-box;
 }
+/* A sideways trackpad pan of the map must never become the browser's back or forward swipe (macOS). */
+html,
+body {
+  overscroll-behavior-x: none;
+}
 html {
   font-size: 18px;
 }
@@ -311,6 +316,7 @@ input[type="search"]::-webkit-search-cancel-button {
 
 /* Map */
 .viewport {
+  overscroll-behavior: none;
   position: absolute;
   inset: 0;
   /* Circles past the screen edge never widen the page; a phone would otherwise lay it out wider. */
@@ -344,7 +350,8 @@ input[type="search"]::-webkit-search-cancel-button {
 /* A head draws above the cards, so a card never hides the circle's name and level (layout.ts headAngle). */
 .circle .head {
   position: absolute;
-  z-index: 2;
+  /* HEAD_LAYER (layout.ts), above every card layer (K-506). */
+  z-index: var(--head-layer);
   left: 50%;
   top: -20px;
   transform: translateX(-50%);
@@ -420,8 +427,17 @@ input[type="search"]::-webkit-search-cancel-button {
   background: var(--select);
   color: var(--select-fg);
 }
+/* A card's layer comes from `cardLayer` (layout.ts) as `--layer`. Keyboard focus, also inside its frame, raises
+   it to FOCUS_LAYER (layout.ts) until focus leaves, unless its own layer is higher. */
+.world > .card,
+.world > .mini {
+  z-index: var(--layer, auto);
+}
+.world > .card:focus-within,
+.world > .mini:focus {
+  z-index: max(var(--layer, 0), 5);
+}
 .card.dragging {
-  z-index: 3;
   cursor: grabbing;
 }
 /* K-1508: a History row highlights its cards and circles once; the outline fades and never repeats. */
@@ -682,12 +698,9 @@ button.count {
   left: calc((100vw - var(--panel-width) - 24px) / 2);
   max-width: min(640px, calc(100vw - var(--panel-width) - 44px));
 }
-/* A phone's card sheet fills the bottom, so a toast there would sit on the button that made it: it goes on top. */
+/* `toastPlace` (layout.ts) sets the toast's top or bottom, clear of the card that the change names. */
 @media (max-width: 720px) {
-  .toast,
   .toast.beside-panel {
-    top: calc(var(--bar-bottom, 102px) + 10px);
-    bottom: auto;
     left: 50%;
     max-width: calc(100vw - 20px);
   }
@@ -700,11 +713,13 @@ button.count {
   background: var(--error-surface);
   color: var(--error-fg);
 }
+/* Plain text over the map: a press goes through it to a card or circle under it. */
 .hint {
   position: fixed;
   bottom: 10px;
   left: 10px;
   z-index: 8;
+  pointer-events: none;
   font-size: 0.7rem;
   color: var(--muted);
   background: var(--surface);
@@ -2062,10 +2077,6 @@ a > code {
 .peek {
   margin-top: 6px;
 }
-/* An open preview reaches below its card, so the card sits above its neighbours (a drag stays on top). */
-.card:has(.peek) {
-  z-index: 2;
-}
 .peek-toggle {
   font-size: 0.75rem;
   padding: 1px 6px;
@@ -2084,11 +2095,34 @@ a > code {
   flex: 1;
   font-size: 1.15rem;
 }
-.peek-large iframe {
+.peek-large .frame {
+  position: relative;
   flex: 1;
-  width: 100%;
   background: #fff;
   border: var(--bw) solid var(--border);
+}
+.peek-large .frame iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+/* K-520: in place of a frame that is loading or never loaded; still, so it never repaints. */
+.frame-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px;
+  text-align: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--raised);
 }
 
 /* Usage (K-1303) */

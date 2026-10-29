@@ -20,14 +20,23 @@ import { AGENT_TIP, LEVEL_TIPS, MATCH_TIPS, MEMBER_HELP, PASSKEY_TIP, RightStick
 import { MachineRightStickers } from "./MachineRights.tsx";
 import { KINDS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
 import { KeySticker, PresenceSticker } from "./Machines.tsx";
-import type { MenuTarget } from "./actions.ts";
+import { type MenuTarget, USER_STACK } from "./actions.ts";
 import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import { FRAMED_KINDS, peekable } from "./frames.ts";
 import { CardPreview, PeekArrow } from "./Peek.tsx";
 import type { Rect } from "./popover.ts";
 import { HOLD_MS, type Press, fingerDown, startPress, stepPress } from "./press.ts";
-import { type Fingers, type View, ZOOM, headAngle, pinchView, shownCardBoxes } from "./layout.ts";
+import {
+  type Fingers,
+  HEAD_LAYER,
+  type View,
+  ZOOM,
+  cardLayer,
+  headAngle,
+  pinchView,
+  shownCardBoxes,
+} from "./layout.ts";
 
 export type { View };
 
@@ -78,9 +87,6 @@ export function stacksOf(state: State): Map<string, Array<string>> {
   for (const [key, ids] of stacks) if (ids.length < 2) stacks.delete(key);
   return stacks;
 }
-
-/** The key prefix of a stack that the owner made, as opposed to a stack by group (K-508). */
-export const USER_STACK = "stack:";
 
 /** K-407 */
 export const ACCESS_TIPS = {
@@ -622,7 +628,13 @@ export function MapView(props: Props) {
         props.onDropFiles(files, at);
       }}
     >
-      <div class="world" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})` }}>
+      <div
+        class="world"
+        style={{
+          transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})`,
+          "--head-layer": HEAD_LAYER,
+        }}
+      >
         {[...shown.circles.values()].map((circle) => (
           <CircleView
             key={circle.id}
@@ -657,13 +669,25 @@ export function MapView(props: Props) {
           const flash = (stack && !open ? stack[1] : [resource.id]).some((id) =>
             props.flash.has(`card:${id}`),
           );
+          // A closed stack draws through its face card, so a selection of any of its cards raises it.
+          const shownIds = stack && !open ? stack[1] : [resource.id];
+          const layer = cardLayer({
+            dragging: draggedIds.has(resource.id),
+            selected: shownIds.some((id) => props.selection.cards.has(id)),
+            framed: previewIds.has(resource.id),
+          });
           if (zoomedOut) {
             return (
               <div
                 key={resource.id}
                 data-card={resource.id}
                 class={`mini${selected ? " sel" : ""}${stackTarget === resource.id ? " stack-target" : ""}${flash ? " flash" : ""}`}
-                style={{ left: px(at.x), top: px(at.y), background: KINDS[resource.kind].color }}
+                style={{
+                  left: px(at.x),
+                  top: px(at.y),
+                  background: KINDS[resource.kind].color,
+                  ...(layer === null ? {} : { "--layer": layer }),
+                }}
                 tabIndex={0}
                 role="img"
                 aria-label={resource.name}
@@ -685,6 +709,7 @@ export function MapView(props: Props) {
                 dragging={draggedIds.has(resource.id)}
                 target={stackTarget === resource.id}
                 flash={flash}
+                layer={layer}
                 onMenu={(anchor) =>
                   props.onMenu({ target: { _tag: "stack", id: stack[0].slice(USER_STACK.length) }, anchor })
                 }
@@ -701,6 +726,7 @@ export function MapView(props: Props) {
               dragging={draggedIds.has(resource.id)}
               target={stackTarget === resource.id}
               flash={flash}
+              layer={layer}
               count={stack && index === 0 ? stack[1].length : null}
               open={open}
               access={props.access[resource.id] ?? null}
@@ -889,6 +915,8 @@ function CircleView(props: {
 
 function CardView(props: {
   resource: Resource;
+  /** `cardLayer`: its z-index on the map, or null for document order. */
+  layer: number | null;
   state: State;
   at: Point;
   selected: boolean;
@@ -916,7 +944,11 @@ function CardView(props: {
     <div
       class={`card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}${props.flash ? " flash" : ""}`}
       data-card={resource.id}
-      style={{ left: px(props.at.x), top: px(props.at.y) }}
+      style={{
+        left: px(props.at.x),
+        top: px(props.at.y),
+        ...(props.layer === null ? {} : { "--layer": props.layer }),
+      }}
     >
       {props.count !== null && props.open ? (
         <button
@@ -1027,6 +1059,7 @@ function CardView(props: {
 /** K-521: a closed stack of the owner, as one card that lists its cards. A click opens it. */
 function StackCard(props: {
   id: string;
+  layer: number | null;
   name: string;
   members: ReadonlyArray<Resource>;
   state: State;
@@ -1042,7 +1075,11 @@ function StackCard(props: {
     <div
       class={`card stack-card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}${props.flash ? " flash" : ""}`}
       data-card={props.id}
-      style={{ left: px(props.at.x), top: px(props.at.y) }}
+      style={{
+        left: px(props.at.x),
+        top: px(props.at.y),
+        ...(props.layer === null ? {} : { "--layer": props.layer }),
+      }}
     >
       <span
         class="sticker count"

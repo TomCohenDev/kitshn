@@ -255,3 +255,41 @@ export function pinchView(start: View, from: Fingers, to: Fingers): View {
   const world = { x: (was.x - start.x) / start.s, y: (was.y - start.y) / start.s };
   return { s, x: now.x - world.x * s, y: now.y - world.y * s };
 }
+
+/**
+ * The stacking layer of a card on the map: a dragged card first, then selected cards, then cards that show a live
+ * frame, which reaches over the cards below. Null leaves the card in document order. A card with keyboard focus
+ * (also inside its frame) takes `FOCUS_LAYER` in CSS (`:focus-within`), unless its own layer is higher.
+ */
+export function cardLayer(card: {
+  readonly dragging: boolean;
+  readonly selected: boolean;
+  readonly framed: boolean;
+}): number | null {
+  if (card.dragging) return 6;
+  if (card.selected) return 4;
+  if (card.framed) return 3;
+  return null;
+}
+
+/** The layer of a card with keyboard focus; styles.css repeats it in its `:focus-within` rule. */
+export const FOCUS_LAYER = 5;
+
+/** K-506: circle heads draw above every card layer, so a card or its frame never hides a head. */
+export const HEAD_LAYER = 7;
+
+/**
+ * K-503: where the toast goes so that it keeps clear of the changed card at screen height `target`: at the top of
+ * the open `area` (under the toolbar) when the card is in its lower half, else at its bottom (above the hint line,
+ * or above a phone's card sheet). `screen` is the window height, for the bottom offset.
+ */
+export function toastPlace(
+  target: number,
+  area: { readonly top: number; readonly bottom: number },
+  screen: number,
+): { readonly top: number } | { readonly bottom: number } {
+  const gap = 10;
+  return target > (area.top + area.bottom) / 2
+    ? { top: area.top + gap }
+    : { bottom: screen - area.bottom + gap };
+}

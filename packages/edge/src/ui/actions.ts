@@ -83,6 +83,8 @@ export interface ActionContext {
   readonly previousVersions: ReadonlySet<string>;
   /** K-1127: the cards that an agent key can hand over to a repo. */
   readonly handoverCards: ReadonlySet<string>;
+  /** K-508, K-521: the stacks that show as a column on the map now, by their key (`USER_STACK` and the id). */
+  readonly openStacks: ReadonlySet<string>;
 }
 
 export interface ActionHandlers {
@@ -99,6 +101,8 @@ export interface ActionHandlers {
   readonly stackOnto: (ids: Array<string>, target: string) => void;
   readonly pullOut: (stackId: string, id: string) => void;
   readonly unstack: (stackId: string) => void;
+  /** K-521: opens a closed stack as a column on the map, or closes an open one. */
+  readonly toggleStack: (key: string) => void;
   readonly renameStack: (stackId: string) => void;
   readonly removeApp: (resource: Resource) => void;
   /** K-821: opens the rollback of one card, or of the run that made its current deploy. */
@@ -727,9 +731,14 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
   ].filter((group) => group.length > 0);
 }
 
+/** The key prefix of a stack that the owner made, as opposed to a stack by group (K-508). */
+export const USER_STACK = "stack:";
+
 /** K-521, K-522: a closed stack of the owner. Shares go through its first card, which takes the stack along. */
 export function stackActions(ctx: ActionContext, h: ActionHandlers, stack: Stack): ActionGroups {
   const { state } = ctx;
+  const key = `${USER_STACK}${stack.id}`;
+  const open = ctx.openStacks.has(key);
   const first = state.resources.get(firstOf(stack));
   const members = stack.members.flatMap((id) => state.resources.get(id) ?? []);
   return [
@@ -745,6 +754,14 @@ export function stackActions(ctx: ActionContext, h: ActionHandlers, stack: Stack
         label: "Rename",
         tip: `Rename ${stackTitle(state, stack)} in its panel.`,
         run: () => h.renameStack(stack.id),
+      },
+      {
+        id: "open-stack",
+        label: open ? "Close the column" : "Open as a column",
+        tip: open
+          ? `Show ${stackTitle(state, stack)} as one card again.`
+          : `Show the cards of ${stackTitle(state, stack)} as a column on the map, as a click does.`,
+        run: () => h.toggleStack(key),
       },
     ],
     first ? shareActions(state, h, first) : [],

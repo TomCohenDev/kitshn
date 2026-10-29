@@ -188,6 +188,7 @@ export function AddMachine(props: { onClose: () => void }) {
           >
             <p class="muted">The new machine card starts in the tray, so it is private until you place it.</p>
             <input
+              class="field"
               aria-label="Machine name"
               data-tip="The name of the machine card."
               placeholder="Name, for example Oracle VPS"
@@ -195,6 +196,7 @@ export function AddMachine(props: { onClose: () => void }) {
               onInput={(event) => setName((event.target as HTMLInputElement).value)}
             />
             <input
+              class="field"
               aria-label="Labels"
               data-tip="Labels, split by commas. A job runs on the first online machine that has all labels that it needs."
               placeholder="Labels, for example docker, server, arm"
@@ -315,6 +317,7 @@ export function MachinePanel(props: {
       >
         <span class="label">Labels</span>
         <input
+          class="field"
           name="labels"
           aria-label="Labels"
           data-tip="Labels, split by commas. A job runs on the first online machine that has all labels that it needs."
@@ -398,7 +401,7 @@ export function MachinePanel(props: {
         }}
       >
         <input
-          class="mono"
+          class="field mono"
           aria-label="Shell command"
           data-tip="A shell command that the daemon runs as a job. It needs control on the machine card."
           placeholder="Shell command, needs control"

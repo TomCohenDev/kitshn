@@ -104,6 +104,7 @@ export function AskEvents(props: { readonly events: ReadonlyArray<AskEventView> 
         Asks of agents
       </h3>
       <input
+        class="field"
         aria-label="Search asks by label"
         placeholder="t3.thread.id=…"
         value={label}
@@ -183,6 +184,7 @@ export function BotRuns(props: {
             <code>{run.sha.slice(0, 7)}</code>
             <button
               type="button"
+              class="btn"
               data-tip="Deploy: kitshn runs the pull request's workflow again for this commit, and its preview deploys."
               onClick={() => void deploy(run)}
             >
@@ -229,6 +231,7 @@ export function AskRow(props: {
       </span>
       <button
         type="button"
+        class="btn primary"
         disabled={props.busy}
         data-tip="Approve: the login of the approver circle (a fresh passkey when it needs one), then you read the ask once more, then kitshn runs it."
         onClick={props.onApprove}
@@ -237,6 +240,7 @@ export function AskRow(props: {
       </button>
       <button
         type="button"
+        class="btn"
         disabled={props.busy}
         data-tip="Deny: the agent hears that you denied it."
         onClick={props.onDeny}

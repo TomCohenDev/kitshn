@@ -168,6 +168,7 @@ export function PushSection(props: { onToast: (text: string, error: boolean) => 
       {subscription ? (
         <>
           <input
+            class="field"
             type="text"
             aria-label="Name of this device"
             data-tip="The name of this device in the list below."
@@ -196,7 +197,7 @@ export function PushSection(props: { onToast: (text: string, error: boolean) => 
             </span>
             <input
               type="text"
-              class="time"
+              class="field time"
               aria-label="Quiet from"
               placeholder="22:00"
               value={quietFrom}
@@ -205,7 +206,7 @@ export function PushSection(props: { onToast: (text: string, error: boolean) => 
             <span>to</span>
             <input
               type="text"
-              class="time"
+              class="field time"
               aria-label="Quiet until"
               placeholder="07:00"
               value={quietTo}

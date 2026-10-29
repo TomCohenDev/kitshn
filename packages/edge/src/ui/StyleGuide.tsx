@@ -412,23 +412,33 @@ function Controls() {
       </Entry>
       <Entry
         heading="Text field"
-        what="Text input. kitshn has no select list: a choice of many is a menu or a segmented control."
-        source="input · styles.css"
+        what="Text input, and a field whose value kitshn refuses. kitshn has no select list (K-517): a choice of many is a menu or a segmented control."
+        source=".field, .field[aria-invalid] · styles.css"
       >
         <div class="row">
           <input
+            class="field"
             type="text"
             placeholder="name@example.com"
             aria-label="A text field"
             data-tip="A text field."
           />
           <input
+            class="field"
             type="search"
             placeholder="Filter"
             aria-label="A search field"
             data-tip="A search field; Escape clears it."
           />
-          <input type="text" value="Disabled" disabled aria-label="A disabled field" />
+          <input
+            class="field"
+            type="text"
+            value="not-an-email"
+            aria-invalid="true"
+            aria-label="A field with a refused value"
+            data-tip="A field whose value kitshn refuses: the error colours."
+          />
+          <input class="field" type="text" value="Disabled" disabled aria-label="A disabled field" />
         </div>
       </Entry>
       <Entry
@@ -942,18 +952,33 @@ function Lists(props: { state: State }) {
   );
 }
 
-/** Where kitshn and the neo-brutalism skill differ (checked 2026-10-29); each needs a fix in one of the two. */
-const DIFFERENCES = [
-  "Tokens: the skill has --code-bg, --warning-fg, --warning-surface, --info-fg and --info-surface; kitshn has none of them.",
-  "Stickers: the skill sets 0.65rem; kitshn sets 0.72rem.",
-  "Buttons: the skill uses 1rem text, 4px 10px padding and the 4px card shadow on hover; kitshn uses 0.9rem, 3px 10px and a 3px shadow.",
-  "Send button: the skill defines .btn.send (the one gradient); kitshn has no send button.",
-  "Focus ring: the skill adds a 6px pink glow (box-shadow 0 0 0 6px #FF527766) to the accent outline; kitshn has the outline only.",
-  "Scrim: the skill uses #0006 and centres a fixed dialog of 32rem; kitshn uses #00000055, puts the dialog 12vh from the top, and makes it 560px wide.",
-  "Text field and select: the skill styles .field and .select; kitshn styles every input by element, uses .field for a layout row, has no select list, and no aria-invalid look.",
-  "Tabs: the skill marks the chosen tab with aria-pressed or aria-selected; kitshn uses aria-pressed only.",
-  "Inbox ask row: Approve and Deny are plain buttons without .btn, so they keep the browser's own look, which the skill forbids.",
-  "Components that kitshn has and the skill does not define: toast, card, circle with head, stack, tray, badge, Access row, big red button, pause banner, notification row.",
+/**
+ * Where kitshn and the neo-brutalism skill still differ, after the decisions of 2026-10-29. Kept on purpose: kitshn
+ * stays as it is. The skill follows kitshn: the skill changes to match.
+ */
+const DIFFERENCES: ReadonlyArray<{ readonly what: string; readonly decision: "kept" | "skill" }> = [
+  {
+    what: "Tokens: the skill has --code-bg, --warning-fg, --warning-surface, --info-fg and --info-surface; kitshn adds them only when a state needs them.",
+    decision: "kept",
+  },
+  { what: "Send button: the skill defines .btn.send; kitshn has no send button.", decision: "kept" },
+  {
+    what: "Select: the skill styles .select; kitshn has no select list at all (its native-UI test forbids the select element, K-517), so it has no .select rule.",
+    decision: "kept",
+  },
+  { what: "Stickers: kitshn sets 0.72rem; the skill sets 0.65rem.", decision: "skill" },
+  {
+    what: "Buttons: kitshn uses 0.9rem text, 3px 10px padding and a 3px shadow on hover; the skill uses 1rem, 4px 10px and the 4px card shadow.",
+    decision: "skill",
+  },
+  {
+    what: "Tabs: kitshn marks the chosen tab with aria-pressed; the skill names aria-pressed or aria-selected, and either is fine.",
+    decision: "skill",
+  },
+  {
+    what: "Components that kitshn has and the skill does not define (toast, card, circle with head, stack, tray, badge, Access row, big red button, pause banner, notification row): the skill gets a section that points to them and to this page.",
+    decision: "skill",
+  },
 ];
 
 export function StyleGuide() {
@@ -1000,11 +1025,23 @@ export function StyleGuide() {
       <section class="guide-entry guide-differences">
         <header>
           <h3>Differences with the neo-brutalism skill</h3>
-          <p>Each one needs a fix in the skill or in kitshn.</p>
+          <p>What is left after the decisions of 2026-10-29. The skill update is not done yet.</p>
         </header>
         <ol>
           {DIFFERENCES.map((difference) => (
-            <li key={difference}>{difference}</li>
+            <li key={difference.what}>
+              <span
+                class={`sticker${difference.decision === "kept" ? " ok" : " wait"}`}
+                data-tip={
+                  difference.decision === "kept"
+                    ? "Kept on purpose: kitshn stays as it is."
+                    : "The skill follows kitshn: the skill changes to match."
+                }
+              >
+                {difference.decision === "kept" ? "kept" : "skill follows"}
+              </span>{" "}
+              {difference.what}
+            </li>
           ))}
         </ol>
       </section>

@@ -93,9 +93,11 @@ code {
   padding: 0 2px;
   overflow-wrap: anywhere;
 }
+/* The glow makes focus easy to find on the dots canvas. */
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+  box-shadow: 0 0 0 6px #ff527766;
 }
 /* A tap shows the control's own pressed or selected state, not the browser's blue box. */
 :root {
@@ -215,15 +217,25 @@ code {
   padding: 1px 10px;
 }
 
-input {
+/* A text field. Checkbox, radio and switch have their own classes (controls.tsx). */
+.field {
   font: inherit;
   font-size: 1rem;
-  padding: 4px 8px;
+  min-width: 0;
+  min-height: 2rem;
+  padding: 4px 10px;
   color: var(--ink);
   background: var(--surface);
   border: var(--bw) solid var(--border);
   border-radius: var(--radius);
-  min-width: 0;
+}
+.field::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+.field[aria-invalid="true"] {
+  border-color: var(--error);
+  background: var(--error-surface);
 }
 
 /* The browser's own clear button of a search field is native UI; Escape clears the field. */
@@ -729,18 +741,28 @@ button.count {
 }
 
 /* Dialogs: palette and confirmation */
+/* A flat dimming layer. It scrolls a dialog taller than the screen, and `margin: auto` centres one that fits. */
 .scrim {
   position: fixed;
   inset: 0;
   z-index: 40;
   display: flex;
-  align-items: flex-start;
-  justify-content: center;
+  padding: 1rem;
+  overflow: auto;
+  background: #0006;
+}
+.scrim > * {
+  margin: auto;
+}
+/* The command palette stays at one height while its list grows and shrinks. */
+.scrim.palette-scrim {
   padding-top: 12vh;
-  background: #00000055;
+}
+.scrim.palette-scrim > * {
+  margin: 0 auto auto;
 }
 .dialog {
-  width: min(560px, calc(100vw - 20px));
+  width: min(32rem, calc(100vw - 2rem));
   padding: 16px;
   background: var(--surface);
   border: var(--bw) solid var(--border);
@@ -1408,12 +1430,8 @@ pre.output {
 }
 
 /* Forms (tick3d): ink borders, help lines in muted text, errors in the error colours. */
-input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 0;
-  box-shadow: 3px 3px 0 0 var(--shadow-ink);
-}
-.field {
+/* A field on its own line under its label. */
+.field-block {
   display: block;
   margin-top: 6px;
 }
@@ -1608,10 +1626,12 @@ input:focus-visible {
   border: 0;
   border-radius: 4px;
 }
+/* A menu item shows focus by its fill, so it needs no ring or glow. */
 .menu-item:is(:hover, :focus-visible, [data-highlighted]) {
   background: var(--select);
   color: var(--select-fg);
   outline: none;
+  box-shadow: none;
 }
 .menu-item:is(:disabled, [aria-disabled="true"]) {
   opacity: 0.55;
@@ -2080,9 +2100,6 @@ a > code {
 .peek-toggle {
   font-size: 0.75rem;
   padding: 1px 6px;
-}
-.peek-scrim {
-  padding-top: 4vh;
 }
 .peek-large {
   display: flex;

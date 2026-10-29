@@ -59,9 +59,13 @@ export function Palette(props: {
     entry.run();
   };
   return (
-    <div class="scrim" onClick={(event) => event.target === event.currentTarget && props.onClose()}>
+    <div
+      class="scrim palette-scrim"
+      onClick={(event) => event.target === event.currentTarget && props.onClose()}
+    >
       <div class="dialog" role="dialog" aria-label="Command palette">
         <input
+          class="field"
           ref={input}
           aria-label="Find"
           role="combobox"

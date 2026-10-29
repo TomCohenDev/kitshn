@@ -1953,6 +1953,7 @@ export function App() {
               New · private ({tray.length}) {trayOpen ? "▴" : "▾"}
             </button>
             <input
+              class="field"
               type="search"
               placeholder="Filter"
               aria-label="Filter the tray"
@@ -2428,7 +2429,7 @@ function StackPanel(props: {
     <section class="editor">
       <div class="label">Stack</div>
       <input
-        class="title"
+        class="field title"
         aria-label="Stack name"
         placeholder="No name"
         data-tip="The name of the stack. Enter saves it; an empty name shows only its cards."
@@ -2517,6 +2518,7 @@ function AddressName(props: { address: string; onSave: (name: string) => Promise
     <div class="row">
       <span class="label">Name</span>
       <input
+        class="field"
         ref={field}
         aria-label="Address name"
         data-tip="The name in the address: a to z, 0 to 9 and hyphens. Enter saves it; the old address keeps working."
@@ -2571,6 +2573,7 @@ function Redirects(props: {
       ))}
       <div class="row">
         <input
+          class="field"
           ref={field}
           aria-label="Redirect address"
           data-tip="A hostname under one of kitshn's zones, such as old-name.example.com. At most 5 per card."

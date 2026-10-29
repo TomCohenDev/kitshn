@@ -33,6 +33,10 @@ export default {
     await page.waitForTimeout(250);
     await shot("menu");
     await page.keyboard.press("Escape");
+    // Keyboard focus on a button of the dots canvas: the accent ring and its glow.
+    await page.getByRole("button", { name: "Plain", exact: true }).focus();
+    await page.keyboard.press("Tab");
+    await shot("focus");
     await page.evaluate(`document.querySelector(".guide-differences").scrollIntoView()`);
     await shot("differences");
     // One picture per entry, so each primitive shows whole.

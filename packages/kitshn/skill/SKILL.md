@@ -91,7 +91,7 @@ Call `kitshn` on the machine where you run. kitshn knows the machine and your th
 - `kitshn servers` lists the servers that listen on this machine, with their page title (K-619). `kitshn expose <port> --name <name> --time 1h` shares one for an hour: the port may also be `localhost:5173` or `http://127.0.0.1:5173/` (K-1131), and its card waits in the tray until the owner places it. Add `--new` so kitshn never points a name that it shares already at another server.
 - `kitshn time <card> 1h` shares a card only for a while: at the end it leaves every circle and goes to the tray (K-212). Use it for a preview of a local server. `4h`, `1d` and `30m` work too; `stop` keeps the card, `now` ends it at once. `kitshn agent state` shows each `endsAt`.
 - `kitshn address <card> <name>`, `kitshn redirect <card> <address> [--remove]`, `kitshn logs <card> [text] [--since 1h] [--deploys]` and `kitshn repo <card> --repo <owner/name>` do what their names say (K-1120, K-1128, K-1809, K-1127).
-- `git push` to github.com works after `kitshn setup-git` once on the machine (K-1763).
+- `git push` to github.com works after `kitshn setup-git` on the machine (K-1763). Run it again after a kitshn update that says so; without its push mark, kitshn grants only read.
 
 When a call needs the owner, kitshn asks the owner and prints `waiting:`; the call ends when the owner answers. `--reason <text>` tells the owner why. When kitshn says no, its one line names the right and what to ask the owner.
 

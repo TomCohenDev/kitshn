@@ -1,5 +1,6 @@
 // K-620: the swap of the daemon binary at an update. On Windows a running .exe cannot be replaced, only renamed, and a
 // virus scan can hold the new file open for a moment.
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 export interface SwapFiles {
@@ -31,8 +32,10 @@ export const nextBinaryName = (binary: string, windows: boolean) =>
 
 /** K-629: the time that a new daemon has to reach kitshn before the previous one comes back. */
 export const UPDATE_DEADLINE_MS = 5 * 60_000;
+/** K-629: starts of the new daemon without an accepted connection, after which the next start rolls back. */
+export const UPDATE_MAX_STARTS = 3;
 
-/** K-629: `<data>/update.json`, written before the swap and read by the next start. */
+/** K-629: `<data>/update.json`, written before the swap and read by each start until kitshn accepts the new daemon. */
 export interface UpdateMarker {
   readonly jobId: number;
   readonly from: string;
@@ -40,6 +43,8 @@ export interface UpdateMarker {
   /** The previous binary: `kitshn.old` beside the binary, or `kitshn.old-<time>.exe` on Windows (K-620). */
   readonly previous: string;
   readonly deadline: number;
+  /** Starts of the new daemon so far. */
+  readonly starts: number;
   readonly state: "pending" | "rolled-back";
   readonly reason?: string;
 }
@@ -62,21 +67,64 @@ export function parseMarker(value: unknown): UpdateMarker | null {
     to: marker["to"],
     previous: marker["previous"],
     deadline: marker["deadline"],
+    starts: typeof marker["starts"] === "number" ? marker["starts"] : 0,
     state: marker["state"],
     ...(typeof marker["reason"] === "string" ? { reason: marker["reason"] } : {}),
   };
 }
 
-/** K-629: what a start does with the marker of an update. */
-export type StartStep =
+export const markerPath = (data: string) => join(data, "update.json");
+
+/** A marker that does not parse is dropped with a log line, so it never stops the daemon from starting. */
+export function readMarker(data: string, log: (text: string) => void): UpdateMarker | null {
+  const file = markerPath(data);
+  if (!existsSync(file)) return null;
+  try {
+    const marker = parseMarker(JSON.parse(readFileSync(file, "utf8")));
+    if (marker) return marker;
+  } catch {
+    // Logged below.
+  }
+  log(`${file} does not parse; kitshn drops it`);
+  rmSync(file, { force: true });
+  return null;
+}
+
+export function writeMarker(data: string, marker: UpdateMarker) {
+  mkdirSync(data, { recursive: true });
+  writeFileSync(markerPath(data), JSON.stringify(marker));
+}
+
+/**
+ * K-629: the first step of every start, before the rest of the daemon loads. A new daemon past its deadline or after
+ * UPDATE_MAX_STARTS starts without an accepted connection rolls back at once; any other start of it counts.
+ */
+export type GateStep =
+  | { readonly kind: "none" }
+  | { readonly kind: "count"; readonly marker: UpdateMarker }
+  | { readonly kind: "roll-back"; readonly reason: string };
+
+export function gateStep(marker: UpdateMarker | null, version: string, now: number): GateStep {
+  if (marker === null || marker.state !== "pending" || version !== marker.to) return { kind: "none" };
+  if (marker.starts >= UPDATE_MAX_STARTS)
+    return {
+      kind: "roll-back",
+      reason: `The new daemon started ${marker.starts} times without reaching kitshn.`,
+    };
+  if (now >= marker.deadline)
+    return { kind: "roll-back", reason: "The new daemon did not reach kitshn within 5 minutes." };
+  return { kind: "count", marker: { ...marker, starts: marker.starts + 1 } };
+}
+
+/** K-629: what the running daemon does with the marker after the gate let it start. */
+export type RunStep =
   | { readonly kind: "none" }
   /** The new daemon runs: it reports the update once kitshn accepts it, or rolls back at the deadline. */
   | { readonly kind: "wait"; readonly jobId: number; readonly deadline: number }
-  | { readonly kind: "roll-back"; readonly reason: string }
   /** The previous daemon runs again, so it reports why the update failed. */
   | { readonly kind: "report"; readonly jobId: number; readonly reason: string };
 
-export function startStep(marker: UpdateMarker | null, version: string, now: number): StartStep {
+export function runStep(marker: UpdateMarker | null, version: string): RunStep {
   if (marker === null) return { kind: "none" };
   if (marker.state === "rolled-back")
     return { kind: "report", jobId: marker.jobId, reason: marker.reason ?? "The previous daemon came back." };
@@ -86,9 +134,6 @@ export function startStep(marker: UpdateMarker | null, version: string, now: num
       jobId: marker.jobId,
       reason: `The daemon started on ${version}, not on edge-${marker.to}.`,
     };
-  // A daemon that crashes before kitshn accepts it starts again; the first start after the deadline rolls back.
-  if (now >= marker.deadline)
-    return { kind: "roll-back", reason: "The new daemon did not reach kitshn within 5 minutes." };
   return { kind: "wait", jobId: marker.jobId, deadline: marker.deadline };
 }
 
@@ -106,6 +151,62 @@ export async function restorePrevious(
 ): Promise<void> {
   if (windows) await swapBinary(files, binary, previous, oldBinaryName(binary, now), 5, sleep);
   else files.rename(previous, binary);
+}
+
+/** K-629: the file work of an update, so a test runs it on a fake folder. */
+export interface InstallFiles extends SwapFiles {
+  readonly copy: (from: string, to: string) => void;
+  readonly remove: (path: string) => void;
+  /** Runs `<binary> version`; the release that it prints, or why it did not run. */
+  readonly version: (
+    binary: string,
+  ) => { readonly ok: true; readonly version: string } | { readonly ok: false; readonly error: string };
+  readonly writeMarker: (marker: UpdateMarker) => void;
+  readonly removeMarker: () => void;
+}
+
+/**
+ * K-629: puts the downloaded binary `next` in place of `binary` after it passed the start check, keeps the previous
+ * one, and writes the marker first. Returns why it did not, with `binary` as it was.
+ */
+export async function installUpdate(
+  files: InstallFiles,
+  input: {
+    readonly binary: string;
+    readonly next: string;
+    readonly windows: boolean;
+    readonly jobId: number;
+    readonly from: string;
+    readonly to: string;
+    readonly now: number;
+  },
+): Promise<string | null> {
+  const check = files.version(input.next);
+  if (!check.ok || check.version !== input.to) {
+    files.remove(input.next);
+    return `The new daemon failed its start check (${check.ok ? `it names ${check.version}` : check.error}).`;
+  }
+  const previous = input.windows ? oldBinaryName(input.binary, input.now) : `${input.binary}.old`;
+  files.writeMarker({
+    jobId: input.jobId,
+    from: input.from,
+    to: input.to,
+    previous,
+    deadline: input.now + UPDATE_DEADLINE_MS,
+    starts: 0,
+    state: "pending",
+  });
+  try {
+    if (input.windows) await swapBinary(files, input.binary, input.next, previous);
+    else {
+      files.copy(input.binary, previous);
+      files.rename(input.next, input.binary);
+    }
+  } catch (error) {
+    files.removeMarker();
+    return `The update failed: ${String(error)}`;
+  }
+  return null;
 }
 
 /**

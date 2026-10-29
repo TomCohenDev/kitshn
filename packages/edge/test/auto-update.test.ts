@@ -29,6 +29,7 @@ async function setup() {
   await runInDurableObject(stub, (_, state) => {
     state.storage.sql.exec("DELETE FROM providers");
     state.storage.sql.exec("DELETE FROM jobs WHERE machine_id = 'auto'");
+    state.storage.sql.exec("DELETE FROM meta WHERE key = 'daemon_rollout'");
     state.storage.sql.exec(
       "INSERT OR REPLACE INTO machines (id, body) VALUES (?, ?)",
       machine.id,
@@ -79,14 +80,25 @@ const busyReport = (busy: boolean): ProviderReport => ({
   ],
 });
 
-it("queues one update for a BEHIND daemon that connects, and it waits while a provider is busy (K-627)", async () => {
+/**
+ * Runs `scenario` on a Worker of a release, with a signed daemon socket of "auto" that is online, then closes the
+ * socket, because an open one keeps the Durable Object busy and the next test evicts it.
+ */
+async function withDaemon(
+  scenario: (tools: {
+    readonly daemon: (message: object) => Promise<void>;
+    readonly jobs: () => Array<{ state: string; command: string; when_idle: number; output: string }>;
+    readonly kitshn: { commit(actor: object, changes: Array<object>, undo: null): number | null };
+  }) => Promise<void>,
+) {
   const stub = await setup();
   await runInDurableObject(stub, async (instance, state) => {
-    // The Worker of a release, so there is a release to update to (K-617).
     const kitshn = instance as unknown as {
       env: { KITSHN_VERSION: string };
       setPresence(machineId: string, online: boolean): void;
+      commit(actor: object, changes: Array<object>, undo: null): number | null;
     };
+    // The Worker of a release, so there is a release to update to (K-617).
     kitshn.env = { ...kitshn.env, KITSHN_VERSION: NEW };
     const pair = new WebSocketPair();
     state.acceptWebSocket(pair[1], [machine.id, "machines"]);
@@ -104,38 +116,64 @@ it("queues one update for a BEHIND daemon that connects, and it waits while a pr
     });
     // As the accepted challenge does (K-1704).
     kitshn.setPresence(machine.id, true);
-    const daemon = (message: object) => instance.webSocketMessage(pair[1], JSON.stringify(message));
-    const status = {
-      type: "status",
-      status: {
-        version: OLD,
-        os: "Linux 6",
-        arch: "x64",
-        hostname: "auto",
-        tunnel: "running",
-        capabilities: ["update", "update-gz"],
-      },
-    };
-    const jobs = () =>
-      state.storage.sql
-        .exec<{ state: string; command: string; when_idle: number }>(
-          "SELECT state, command, when_idle FROM jobs WHERE machine_id = ?",
-          machine.id,
-        )
-        .toArray();
     try {
-      await daemon({ type: "providers", providers: [busyReport(true)] });
-      await daemon(status);
-      await daemon(status);
-      expect(jobs()).toEqual([
-        { state: "queued", command: JSON.stringify({ kind: "update", version: NEW }), when_idle: 1 },
-      ]);
-      await daemon({ type: "providers", providers: [busyReport(false)] });
-      expect(jobs().map((job) => job.state)).toEqual(["sent"]);
+      await scenario({
+        daemon: (message) => instance.webSocketMessage(pair[1], JSON.stringify(message)),
+        jobs: () =>
+          state.storage.sql
+            .exec<{ state: string; command: string; when_idle: number; output: string }>(
+              "SELECT state, command, when_idle, output FROM jobs WHERE machine_id = ?",
+              machine.id,
+            )
+            .toArray(),
+        kitshn,
+      });
     } finally {
-      // An open socket keeps the Durable Object busy, and the next test evicts it.
       pair[1].close(1000, "test over");
     }
+  });
+}
+
+const behindStatus = {
+  type: "status",
+  status: {
+    version: OLD,
+    os: "Linux 6",
+    arch: "x64",
+    hostname: "auto",
+    tunnel: "running",
+    capabilities: ["update", "update-gz"],
+  },
+};
+
+it("queues one update for a BEHIND daemon that connects, and it waits while a provider is busy (K-627)", async () => {
+  await withDaemon(async ({ daemon, jobs }) => {
+    await daemon({ type: "providers", providers: [busyReport(true)] });
+    await daemon(behindStatus);
+    await daemon(behindStatus);
+    expect(jobs().map(({ output: _output, ...job }) => job)).toEqual([
+      { state: "queued", command: JSON.stringify({ kind: "update", version: NEW }), when_idle: 1 },
+    ]);
+    await daemon({ type: "providers", providers: [busyReport(false)] });
+    expect(jobs().map((job) => job.state)).toEqual(["sent"]);
+  });
+});
+
+it("drops a waiting automatic update when the owner turns the setting off (K-626)", async () => {
+  await withDaemon(async ({ daemon, jobs, kitshn }) => {
+    await daemon({ type: "providers", providers: [busyReport(true)] });
+    await daemon(behindStatus);
+    kitshn.commit(
+      { _tag: "person", email: "owner@example.com" },
+      [{ _tag: "autoUpdate", id: machine.id, before: true, after: false }],
+      null,
+    );
+    expect(jobs().map((job) => [job.state, job.output])).toEqual([
+      [
+        "failed",
+        "Update daemon automatically is off on this machine, so kitshn dropped this update (K-626).",
+      ],
+    ]);
   });
 });
 

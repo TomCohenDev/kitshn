@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { type UpdateMarker, oldBinaries, restorePrevious, startStep, swapBinary } from "./update.ts";
+import {
+  type InstallFiles,
+  type UpdateMarker,
+  gateStep,
+  installUpdate,
+  oldBinaries,
+  restorePrevious,
+  runStep,
+  swapBinary,
+} from "./update.ts";
 
 /** Files by name; `busy` names files whose rename fails that many times. */
 function folder(names: ReadonlyArray<string>, busy: Record<string, number> = {}) {
@@ -62,32 +71,92 @@ describe("the way back of an update (K-629)", () => {
     to: "aaaaaaaaaaaa",
     previous: "/p/kitshn.old",
     deadline: 1000,
+    starts: 0,
     state: "pending",
   };
 
-  it("waits for kitshn before the deadline, and rolls back at the first start after it", () => {
-    expect(startStep(marker, marker.to, 999)).toEqual({ kind: "wait", jobId: 7, deadline: 1000 });
-    expect(startStep(marker, marker.to, 1000)).toEqual({
+  it("counts each start of the new daemon before the deadline", () => {
+    expect(gateStep(marker, marker.to, 999)).toEqual({ kind: "count", marker: { ...marker, starts: 1 } });
+    expect(runStep({ ...marker, starts: 1 }, marker.to)).toEqual({ kind: "wait", jobId: 7, deadline: 1000 });
+  });
+
+  it("rolls back at the first start after the deadline", () => {
+    expect(gateStep(marker, marker.to, 1000)).toEqual({
       kind: "roll-back",
       reason: "The new daemon did not reach kitshn within 5 minutes.",
     });
   });
 
-  it("puts the previous binary back on Linux and macOS, and the previous daemon reports why", async () => {
-    const files = folder(["/p/kitshn", "/p/kitshn.old"]);
-    await restorePrevious(files, "/p/kitshn", marker.previous, false, 2000, none);
-    expect([...files.files]).toEqual(["/p/kitshn"]);
+  it("rolls back at once after 3 starts without an accepted connection, before the deadline", () => {
+    expect(gateStep({ ...marker, starts: 3 }, marker.to, 1)).toEqual({
+      kind: "roll-back",
+      reason: "The new daemon started 3 times without reaching kitshn.",
+    });
+  });
+
+  it("lets the previous daemon start, which reports why", () => {
     const back = { ...marker, state: "rolled-back" as const, reason: "The new daemon crashed." };
-    expect(startStep(back, marker.from, 2000)).toEqual({
+    expect(gateStep(back, marker.from, 2000)).toEqual({ kind: "none" });
+    expect(runStep(back, marker.from)).toEqual({
       kind: "report",
       jobId: 7,
       reason: "The new daemon crashed.",
     });
   });
 
+  it("puts the previous binary back on Linux and macOS", async () => {
+    const files = folder(["/p/kitshn", "/p/kitshn.old"]);
+    await restorePrevious(files, "/p/kitshn", marker.previous, false, 2000, none);
+    expect([...files.files]).toEqual(["/p/kitshn"]);
+  });
+
   it("swaps the previous .exe back on Windows, keeping the failed one aside (K-620)", async () => {
     const files = folder(["k.exe", "k.old-1.exe"]);
     await restorePrevious(files, "k.exe", "k.old-1.exe", true, 2, none);
     expect([...files.files].sort()).toEqual(["k.exe", "k.old-2.exe"]);
+  });
+});
+
+describe("the install of an update (K-629)", () => {
+  /** The fake folder, with a start check that prints `printed` or fails, and the marker writes. */
+  function install(printed: string | null) {
+    const files = folder(["/p/kitshn", "/p/kitshn.new"]);
+    const markers: Array<UpdateMarker | null> = [];
+    const ops: InstallFiles = {
+      ...files,
+      copy: (_, to) => void files.files.add(to),
+      remove: (path) => void files.files.delete(path),
+      version: () =>
+        printed === null ? { ok: false, error: "exit 1, segfault" } : { ok: true, version: printed },
+      writeMarker: (value) => void markers.push(value),
+      removeMarker: () => void markers.push(null),
+    };
+    const run = () =>
+      installUpdate(ops, {
+        binary: "/p/kitshn",
+        next: "/p/kitshn.new",
+        windows: false,
+        jobId: 7,
+        from: "bbbbbbbbbbbb",
+        to: "aaaaaaaaaaaa",
+        now: 0,
+      });
+    return { files, markers, run };
+  }
+
+  it("leaves the binary as it was when the new one fails its start check", async () => {
+    for (const printed of [null, "cccccccccccc"]) {
+      const { files, markers, run } = install(printed);
+      expect(await run()).toMatch(/failed its start check/);
+      expect([...files.files]).toEqual(["/p/kitshn"]);
+      expect(markers).toEqual([]);
+    }
+  });
+
+  it("keeps the previous binary as kitshn.old and writes the marker before the swap", async () => {
+    const { files, markers, run } = install("aaaaaaaaaaaa");
+    expect(await run()).toBeNull();
+    expect([...files.files].sort()).toEqual(["/p/kitshn", "/p/kitshn.old"]);
+    expect(markers).toMatchObject([{ jobId: 7, previous: "/p/kitshn.old", starts: 0, state: "pending" }]);
   });
 });

@@ -1,74 +1,116 @@
 import { describe, expect, it } from "vitest";
-import { type AutoUpdateMachine, daemonUpdate, nextAutoUpdate } from "./autoUpdate.ts";
+import {
+  type AutoUpdateMachine,
+  type LiveStatus,
+  NO_ROLLOUT,
+  type Rollout,
+  advanceRollout,
+  daemonUpdate,
+  nextAutoUpdate,
+  startStep,
+  stepSent,
+} from "./autoUpdate.ts";
 
 const NEW = "aaaaaaaaaaaa";
+const NEWER = "cccccccccccc";
 const OLD = "bbbbbbbbbbbb";
+const online = (version: string, connectedAt = 0): LiveStatus => ({
+  version,
+  capabilities: ["update"],
+  connectedAt,
+});
 const behind = (id: string, order: number, more: Partial<AutoUpdateMachine> = {}): AutoUpdateMachine => ({
   id,
   order,
   autoUpdate: true,
   hasKey: true,
-  status: { version: OLD, capabilities: ["update"] },
-  update: null,
+  status: online(OLD),
   ...more,
 });
+/** A rollout of NEW whose step on "a" went out at time 10. */
+const sent: Rollout = stepSent(startStep(NO_ROLLOUT, NEW, "a", 1), NEW, 10);
 
 describe("next automatic update (K-627)", () => {
   it("picks the first BEHIND machine in the owner's order, and only one", () => {
-    expect(nextAutoUpdate(NEW, false, [behind("b", 2), behind("a", 1)])).toBe("a");
+    expect(nextAutoUpdate(NEW, false, NO_ROLLOUT, [behind("b", 2), behind("a", 1)])).toBe("a");
   });
   it("skips a machine whose setting is off (K-626)", () => {
-    expect(nextAutoUpdate(NEW, false, [behind("a", 1, { autoUpdate: false })])).toBeNull();
+    expect(nextAutoUpdate(NEW, false, NO_ROLLOUT, [behind("a", 1, { autoUpdate: false })])).toBeNull();
   });
   it("waits while kitshn is paused (K-1618)", () => {
-    expect(nextAutoUpdate(NEW, true, [behind("a", 1)])).toBeNull();
+    expect(nextAutoUpdate(NEW, true, NO_ROLLOUT, [behind("a", 1)])).toBeNull();
   });
-  it("lets the second machine wait until the first runs the release", () => {
-    const first = (update: AutoUpdateMachine["update"]) => behind("a", 1, { update });
-    expect(nextAutoUpdate(NEW, false, [first({ state: "updating" }), behind("b", 2)])).toBeNull();
-    expect(nextAutoUpdate(NEW, false, [first({ state: "updated" }), behind("b", 2)])).toBe("b");
+  it("lets the second machine wait while a step runs, also one of an older release after a deploy", () => {
+    expect(nextAutoUpdate(NEW, false, sent, [behind("b", 2)])).toBeNull();
+    expect(nextAutoUpdate(NEWER, false, sent, [behind("b", 2)])).toBeNull();
   });
-  it("stops the others after the release failed on one machine", () => {
-    const failed = behind("a", 1, { update: { state: "failed", reason: "start check" } });
-    expect(nextAutoUpdate(NEW, false, [failed, behind("b", 2)])).toBeNull();
+  it("stops the others after the release failed on one machine, but not the next release", () => {
+    const failed: Rollout = {
+      ...NO_ROLLOUT,
+      version: NEW,
+      failed: { machineId: "a", reason: "start check" },
+    };
+    expect(nextAutoUpdate(NEW, false, failed, [behind("b", 2)])).toBeNull();
+    expect(nextAutoUpdate(NEWER, false, failed, [behind("b", 2)])).toBe("b");
   });
   it("skips offline, unkeyed, source and NEWEST daemons, and a local Worker build", () => {
     expect(
-      nextAutoUpdate(NEW, false, [
+      nextAutoUpdate(NEW, false, NO_ROLLOUT, [
         behind("off", 1, { status: null }),
         behind("nokey", 1, { hasKey: false }),
-        behind("dev", 1, { status: { version: "dev", capabilities: ["update"] } }),
-        behind("new", 1, { status: { version: NEW, capabilities: ["update"] } }),
-        behind("old", 1, { status: { version: OLD } }),
+        behind("dev", 1, { status: online("dev") }),
+        behind("new", 1, { status: online(NEW) }),
+        behind("old", 1, { status: { version: OLD, connectedAt: 0 } }),
       ]),
     ).toBeNull();
-    expect(nextAutoUpdate("local", false, [behind("a", 1)])).toBeNull();
+    expect(nextAutoUpdate("local", false, NO_ROLLOUT, [behind("a", 1)])).toBeNull();
   });
 });
 
-describe("update state of a daemon (K-627)", () => {
-  const online = (version: string) => ({ version, capabilities: ["update"] });
-  it("is updating until the daemon reports again after its restart", () => {
-    expect(daemonUpdate(NEW, { state: "queued", output: "" }, online(OLD))).toEqual({ state: "updating" });
-    expect(daemonUpdate(NEW, { state: "closed", output: "" }, null)).toEqual({ state: "updating" });
+describe("a step of the rollout (K-627)", () => {
+  type State = "queued" | "sent" | "done" | "failed" | "closed" | "gone";
+  const job = (state: State, output = "") => ({ state, output });
+  it("holds the rest while the machine stays offline, also after a done job", () => {
+    expect(advanceRollout(sent, job("done"), () => null)).toEqual(sent);
+    expect(advanceRollout(sent, job("closed"), () => null)).toEqual(sent);
   });
-  it("stays updated when an updated machine goes offline later", () => {
-    expect(daemonUpdate(NEW, { state: "done", output: "" }, null)).toEqual({ state: "updated" });
+  it("ends when the machine is online on the release, and the card says updated", () => {
+    const next = advanceRollout(sent, job("done"), () => online(NEW, 20));
+    expect(next).toEqual({ ...sent, step: null, updated: ["a"] });
+    expect(daemonUpdate(next, "a", NEW)).toEqual({ state: "updated" });
   });
-  it("is updated when the daemon runs the release, also after a closed connection", () => {
-    expect(daemonUpdate(NEW, { state: "closed", output: "" }, online(NEW))).toEqual({ state: "updated" });
+  it("waits while the connection that ran the job still reports the old release", () => {
+    expect(advanceRollout(sent, job("done"), () => online(OLD, 5))).toEqual(sent);
   });
-  it("failed when the daemon came back on another release, or with the last line of a failed job", () => {
-    expect(daemonUpdate(NEW, { state: "done", output: "" }, online(OLD))).toEqual({
-      state: "failed",
+  it("fails when a later connection comes back on another release, or with the last line of a failed job", () => {
+    expect(advanceRollout(sent, job("done"), () => online(OLD, 20)).failed).toEqual({
+      machineId: "a",
       reason: `The daemon came back on edge-${OLD}.`,
     });
-    expect(
-      daemonUpdate(
-        NEW,
-        { state: "failed", output: "downloading\nThe new daemon failed its start check.\n" },
-        null,
-      ),
-    ).toEqual({ state: "failed", reason: "The new daemon failed its start check." });
+    const failed = advanceRollout(
+      sent,
+      job("failed", "download\nThe new daemon failed its start check.\n"),
+      () => null,
+    );
+    expect(daemonUpdate(failed, "a", NEW)).toEqual({
+      state: "failed",
+      reason: "The new daemon failed its start check.",
+    });
+  });
+  it("drops an expired step without a failure, and ends a failure when a retry runs the release", () => {
+    expect(advanceRollout(sent, job("gone"), () => null)).toEqual({ ...sent, step: null });
+    const failed: Rollout = { ...NO_ROLLOUT, version: NEW, failed: { machineId: "a", reason: "x" } };
+    expect(advanceRollout(failed, null, () => online(NEW))).toEqual({
+      ...failed,
+      failed: null,
+      updated: ["a"],
+    });
+  });
+  it("follows the release that delivery names after a deploy", () => {
+    const queued = startStep(NO_ROLLOUT, NEW, "a", 1);
+    expect(stepSent(queued, NEWER, 10)).toMatchObject({
+      version: NEWER,
+      step: { machineId: "a", sentAt: 10 },
+    });
   });
 });

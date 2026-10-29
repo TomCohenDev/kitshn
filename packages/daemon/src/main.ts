@@ -46,7 +46,15 @@ import {
   dropAttested,
   withAttester,
 } from "./attest.ts";
-import { credentialReply, readCredentialInput, repoOfCredential, repoOfRemote } from "./gitCredential.ts";
+import {
+  PUSH_MARK_KEY,
+  answersMarkedPush,
+  credentialReply,
+  permissionOfCredential,
+  readCredentialInput,
+  repoOfCredential,
+  repoOfRemote,
+} from "./gitCredential.ts";
 import { composeLogs, followLogs, rangeArgs, searchLogs, withLogLimits } from "./logs.ts";
 import {
   type Caller,
@@ -99,6 +107,7 @@ import { basename, dirname, join } from "node:path";
 import { oldBinaries, oldBinaryName, swapBinary } from "./update.ts";
 import { ownSid } from "./winpipe.ts";
 import {
+  type PathFacts,
   type Platform,
   RELEASES,
   WINDOWS_CLOUDFLARED,
@@ -109,6 +118,7 @@ import {
   expectedHash,
   isDigits,
   localSocket,
+  otherUsersSockets,
   versionJson,
   pathsFor,
   releaseAsset,
@@ -309,34 +319,29 @@ async function statusCommand() {
   );
 }
 
+const pathFacts = (path: string): PathFacts | null => {
+  try {
+    const stat = lstatSync(path);
+    return { uid: stat.uid, mode: stat.mode, directory: stat.isDirectory(), socket: stat.isSocket() };
+  } catch {
+    return null;
+  }
+};
+const tmpEntries = (() => {
+  try {
+    return readdirSync("/tmp");
+  } catch {
+    return [];
+  }
+})();
+const userNameOf = (uid: number): string | null => {
+  const name = spawnSync("id", ["-nu", String(uid)], { encoding: "utf8" });
+  return name.status === 0 ? name.stdout.trim() : null;
+};
 /** K-701: where the commands find the daemon: their own socket, or the one trusted shared socket in /tmp. */
 // K-621: Windows has one pipe per user and no shared socket.
 const foundSocket =
-  platform === "win32"
-    ? paths.socket
-    : localSocket(
-        process.env,
-        paths,
-        (path) => {
-          try {
-            const stat = lstatSync(path);
-            return { uid: stat.uid, mode: stat.mode, directory: stat.isDirectory(), socket: stat.isSocket() };
-          } catch {
-            return null;
-          }
-        },
-        (() => {
-          try {
-            return readdirSync("/tmp");
-          } catch {
-            return [];
-          }
-        })(),
-        (uid) => {
-          const name = spawnSync("id", ["-nu", String(uid)], { encoding: "utf8" });
-          return name.status === 0 ? name.stdout.trim() : null;
-        },
-      );
+  platform === "win32" ? paths.socket : localSocket(process.env, paths, pathFacts, tmpEntries, userNameOf);
 const socketPath = typeof foundSocket === "string" ? foundSocket : paths.socket;
 const daemonUid = expectedDaemonUid(process.env, socketPath, ownUid());
 /** K-701: why no daemon answers. A shared folder that another user made first keeps the daemon out of it. */
@@ -351,7 +356,12 @@ function notRunning(): string {
     if (problem)
       return `${folder} belongs to another user or is not safe (${problem}), so the daemon cannot listen there. Ask root to remove it, then restart the daemon.`;
   }
-  return `the daemon is not running (no daemon listens on ${socketPath}). Start it with: kitshn service install`;
+  const others = otherUsersSockets(pathFacts, tmpEntries, userNameOf);
+  const shared =
+    others.length > 0
+      ? ` kitshn uses a shared socket only of the user kitshn, so it does not use ${others.join(", ")}.`
+      : "";
+  return `no daemon of yours runs (no daemon listens on ${socketPath}). Start it with: kitshn service install.${shared}`;
 }
 
 /**
@@ -459,7 +469,7 @@ function daemonTransport(): AgentTransport {
 }
 
 /** K-1763, K-1764: one `github-token` ask for a repo; the answer, or null when the daemon does not run. */
-async function askToken(repo: string): Promise<Answer | null> {
+async function askToken(repo: string, permission: "read" | "write" | "auto"): Promise<Answer | null> {
   if (typeof daemonUid === "string") return null;
   const outcome = await askLocal(
     socketPath,
@@ -468,7 +478,7 @@ async function askToken(repo: string): Promise<Answer | null> {
       type: "ask",
       action: "github-token",
       target: repo,
-      body: { permission: "auto" },
+      body: { permission },
       attestations: await attestationsFromEnv(),
     },
     90_000,
@@ -484,7 +494,8 @@ async function askToken(repo: string): Promise<Answer | null> {
  */
 async function gitCredentialCommand(operation: string | undefined) {
   if (operation !== "get" && operation !== "erase") return;
-  const repo = repoOfCredential(readCredentialInput(await Bun.stdin.text()));
+  const fields = readCredentialInput(await Bun.stdin.text());
+  const repo = repoOfCredential(fields);
   if (repo === null) return;
   // Git erases a credential that GitHub refused, so the daemon drops the kept token of that repo.
   if (operation === "erase") {
@@ -495,7 +506,11 @@ async function gitCredentialCommand(operation: string | undefined) {
       }).catch(() => null);
     return;
   }
-  const reply = credentialReply(await askToken(repo));
+  // No legacy fallback: a config from before the push mark asks for read on a push, and says how to fix it.
+  if (spawnSync("git", ["config", "--get", PUSH_MARK_KEY], { encoding: "utf8" }).status !== 0)
+    console.error("kitshn: run `kitshn setup-git` again; pushes need its new mark (K-1763).");
+  const permission = permissionOfCredential(fields);
+  const reply = credentialReply(await askToken(repo, permission), permission === "write");
   if (reply.stderr) console.error(reply.stderr);
   process.stdout.write(reply.stdout);
 }
@@ -525,9 +540,15 @@ function setupGitCommand() {
   git("--add", scope, ours);
   for (const helper of previous) git("--add", scope, helper);
   git("credential.https://github.com.useHttpPath", "true");
+  // Known limit: a remote with its own pushurl or a user name in its URL is not marked, so its push asks for read.
+  git(PUSH_MARK_KEY, "https://github.com/");
   console.log(
     `git asks kitshn first for github.com, then: ${previous.length > 0 ? previous.join(", ") : "nothing else"}.`,
   );
+  for (const helper of previous.filter((helper) => !answersMarkedPush(helper)))
+    console.warn(
+      `kitshn: ${helper} looks up the user name, so it does not answer a push that kitshn marks; such a push works only through kitshn or gh (K-1763).`,
+    );
 }
 
 /** K-1764: `kitshn gh <args>` runs gh with a token for the repo of --repo or of the remote origin. */
@@ -537,7 +558,7 @@ async function ghCommand(argv: ReadonlyArray<string>) {
   const repo = at >= 0 ? (argv[at + 1] ?? null) : repoOfRemote(remote);
   const env = { ...process.env };
   if (repo !== null) {
-    const answer = await askToken(repo);
+    const answer = await askToken(repo, "auto");
     if (
       answer?.type === "ask" &&
       answer.outcome === "done" &&

@@ -18,6 +18,7 @@ import {
   type ServerToDaemon,
   type AskOutcome,
 } from "@kitshn/edge/machine";
+import type { DoorPlan } from "@kitshn/edge/game";
 import type { BackupReport } from "@kitshn/edge/backups";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -126,6 +127,15 @@ import { TokenCache } from "./tokens.ts";
 import { Providers, parseSaved } from "./providers.ts";
 import { listenerUid, portOf } from "./listener.ts";
 import { MAX_FORWARDS, forwardTarget, passedHeaders, readBounded } from "./forward.ts";
+import {
+  Relays,
+  applyDoors,
+  doorsCommand,
+  doorsProblem,
+  keptPlan,
+  listening,
+  publicAddresses,
+} from "./doors.ts";
 import { AGENT_USAGE, type AgentTransport, runAgentCommand, timeBody } from "kitshn/agent";
 import { CliError } from "kitshn/cli-error";
 import { checkSkill, installGlobalSkill, installRepoSkill, refreshGlobalSkill } from "./skill.ts";
@@ -1657,6 +1667,14 @@ function runJob(
       return { ...outcome, exitCode: outcome.ok ? 0 : 1 };
     });
   }
+  if (command.kind === "doors") {
+    if (doorState.problem !== null)
+      return Promise.resolve({ ok: false, exitCode: 1, output: `no doors here: ${doorState.problem}` });
+    const outcome = applyDoors(command.plan, doorsFile(), Date.now());
+    if (outcome.ok) syncRelays(command.plan);
+    checkListening();
+    return Promise.resolve({ ...outcome, exitCode: outcome.ok ? 0 : 1 });
+  }
   if (command.kind === "restart") {
     restartSoon();
     return Promise.resolve({ ok: true, exitCode: 0, output: "restarting" });
@@ -1694,6 +1712,7 @@ function report() {
               "backup",
               "backup-restore",
               "provider",
+              ...(doorState.problem === null ? ["doors"] : []),
             ],
       ...(keptBytes === undefined ? {} : { keptBytes }),
       version: VERSION,
@@ -1703,9 +1722,78 @@ function report() {
       tunnel: tunnelState,
       // K-1751: the map shows the attesters of each machine.
       attesters: attestersOf(readMachineFile()).attesters.map(({ prefix, address }) => ({ prefix, address })),
+      publicAddresses: publicAddresses(),
+      ...(doorState.problem === null ? {} : { doorsProblem: doorState.problem }),
+      listening: [...doorState.listening],
     },
   };
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+}
+
+/** K-2002, K-2006: whether this machine can gate game ports, and which game ports listen. */
+const doorState: { problem: string | null; listening: ReadonlySet<string> } = {
+  problem: "not checked yet",
+  listening: new Set(),
+};
+const doorsFile = () => join(paths.data, "doors.json");
+const relays = new Relays(log);
+process.on("exit", () => relays.stopAll());
+
+/** K-2008: the relays of a plan, after its doors are in the table. */
+function syncRelays(plan: DoorPlan) {
+  void ensureCloudflared()
+    .then(({ file }) => relays.sync(plan.relays, file, readConfig()))
+    .catch((error: unknown) => log(`the relays could not start: ${String(error)}`));
+}
+
+/** K-2006: the game ports of the kept plan that something listens on; a change goes out in the status. */
+function checkListening() {
+  const plan = keptPlan(doorsFile());
+  const wanted = new Set((plan?.ports ?? []).map(({ port, proto }) => `${port}/${proto}`));
+  const found =
+    wanted.size === 0
+      ? new Set<string>()
+      : new Set(
+          [...listening(spawnSync("ss", ["-H", "-ltnu"], { encoding: "utf8" }).stdout ?? "")].filter((key) =>
+            wanted.has(key),
+          ),
+        );
+  if ([...found].sort().join() === [...doorState.listening].sort().join()) return;
+  doorState.listening = found;
+  report();
+}
+
+/** K-2005: after a restart or a reboot the table is empty or old; the kept plan goes in again before kitshn sends one. */
+function startDoors() {
+  doorState.problem = doorsProblem(platform);
+  checkListening();
+  setInterval(checkListening, 30_000);
+  if (platform !== "linux") return;
+  if (doorState.problem === null) applyKeptPlan();
+  // K-2005: each minute, a start problem is checked again (the network was not up yet, or sudo failed once), and
+  // the kept plan goes in again, because a \`flush ruleset\` (nftables.service, a reload) can delete the table at
+  // any time and the daemon user cannot list it. The apply is idempotent.
+  setInterval(() => {
+    if (doorState.problem === null) return applyKeptPlan(true);
+    doorState.problem = doorsProblem(platform);
+    if (doorState.problem !== null) return;
+    applyKeptPlan();
+    report();
+  }, 60_000);
+}
+
+/** K-2005: the plan that this daemon wrote last goes into the table again before kitshn sends a new one. */
+function applyKeptPlan(quiet = false) {
+  const plan = keptPlan(doorsFile());
+  if (plan === null) {
+    if (!quiet && existsSync(doorsFile()))
+      log("the kept door plan is not readable; waiting for kitshn's plan");
+    return;
+  }
+  const outcome = applyDoors(plan, doorsFile(), Date.now());
+  if (!outcome.ok) log(`the kept door plan failed: ${outcome.output}`);
+  else if (!quiet) log(`kept ${outcome.output}`);
+  if (outcome.ok) syncRelays(plan);
 }
 
 /** K-605: the tunnel state comes from its service manager; a change goes out in the status. */
@@ -2485,6 +2573,7 @@ async function runCommand() {
   // The service manager stops the daemon with SIGTERM; an exit runs the clean-up of the socket and the jobs.
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => process.exit(0));
   pruneSamples();
+  startDoors();
   await ensureTunnel(config);
   watchTunnel();
   // K-821: the machine card shows what the kept builds take on disk.
@@ -2783,6 +2872,7 @@ switch (command) {
   case "repo":
   case "redirect":
   case "time":
+  case "game":
     await runAgentCommand(command, args, daemonTransport);
     break;
   case "local-users":
@@ -2790,6 +2880,9 @@ switch (command) {
     break;
   case "version":
     console.log(args.includes("--json") ? versionJson(VERSION) : VERSION);
+    break;
+  case "doors":
+    doorsCommand(args[0], flag("--user"));
     break;
   case "skill":
     skillCommand(args[0], args.includes("--repo"));
@@ -2833,6 +2926,8 @@ kitshn setup-git                        git asks kitshn first for github.com tok
 kitshn gh <args>                        gh with a kitshn token for this repo (K-1764)
 kitshn expose <port|socket> --name <n>  share a local server at <n>.<zone> (K-1104); --dev sets Host localhost;
                                         also localhost:5173 or http://127.0.0.1:5173/ (K-1131); --time 1h ends it (K-212)
+kitshn doors install --user <u>         as root: the helper that gates game ports, for the daemon user (K-2005)
+kitshn doors uninstall                  as root: remove it and its firewall table
 kitshn unexpose <name>                  stop sharing it
 kitshn servers [--json]                 the servers that listen on this machine, with their page title (K-619)
 kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>

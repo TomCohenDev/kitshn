@@ -24,6 +24,8 @@ import type { Usage } from "../core/usage.ts";
 import { NOTIFY_BODY_MAX } from "../core/notify.ts";
 import { escapeHtml, originDown, seenText } from "./live.ts";
 import { adminHosts, type Env } from "./env.ts";
+import { type JoinView, joinHeaders, joinPage } from "./join-page.ts";
+import { gameNameError } from "../core/game.ts";
 import { readUsage } from "./usage.ts";
 import { zoneFor, zonesOf, zonesOrMain } from "./zones.ts";
 
@@ -139,6 +141,7 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
     );
     return new Response(null, { status: 302, headers });
   }
+  if (kind === "page" && url.pathname.startsWith("/join/")) return join(request, env, logins, url);
   if (request.method !== "GET" && request.method !== "HEAD") return text("Use GET.", 405);
   const [, segment = "", ...rest] = url.pathname.split("/");
   if (!isLibraryId(segment) && addressNameError(segment) !== null)
@@ -206,6 +209,70 @@ async function content(request: Request, env: Env, kind: "page" | "file"): Promi
   if (kind === "file")
     headers.set("content-disposition", `inline; filename*=UTF-8''${encodeURIComponent(item.fileName ?? "")}`);
   return new Response(object?.body ?? null, { headers });
+}
+
+/** What the Durable Object decides for one request of a join page (K-2003). */
+type GameAnswer = { readonly stale: boolean } & (
+  | ({ readonly decision: "allow" } & JoinView)
+  | { readonly decision: "login" | "passkey" | "deny" | "missing" }
+);
+
+/** K-2003: the join page of a game card. GET shows it; a POST from the page opens or closes a door. */
+async function join(request: Request, env: Env, logins: ContentLogins, url: URL): Promise<Response> {
+  const name = url.pathname.slice("/join/".length);
+  if (gameNameError(name) !== null) return text("kitshn has no game here.", 404);
+  const post = request.method === "POST";
+  if (!post && request.method !== "GET") return text("Use GET or POST.", 405);
+  let body: Record<string, unknown> = { action: "view" };
+  if (post) {
+    // The login cookies are SameSite=Lax; this check also keeps out a script of another site.
+    if (request.headers.get("origin") !== url.origin)
+      return Response.json({ error: "A door changes only from its join page." }, { status: 403 });
+    const sent: unknown = await request.json().catch(() => null);
+    if (
+      typeof sent !== "object" ||
+      sent === null ||
+      !["open", "close"].includes(String((sent as { action?: unknown }).action))
+    )
+      return Response.json({ error: "Send open or close." }, { status: 400 });
+    body = sent as Record<string, unknown>;
+  }
+  const { visitor, problem } = await contentVisitorOf(request, env, logins);
+  const answer = (await (
+    await env.KITSHN.getByName("kitshn").fetch("https://kitshn.internal/internal/game", {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        visitor,
+        action: body["action"],
+        addresses: Array.isArray(body["addresses"]) ? body["addresses"] : [],
+        address: typeof body["address"] === "string" ? body["address"] : undefined,
+      }),
+    })
+  ).json()) as GameAnswer;
+  if (answer.decision === "missing") return text("kitshn has no game here.", 404);
+  if (post)
+    return answer.decision === "allow"
+      ? Response.json({ error: answer.error })
+      : Response.json(
+          { error: "You have no access to this game now. Open the page again." },
+          { status: 401 },
+        );
+  const cameBack = cookieValues(request.headers.get("cookie"), RETURN_MARK)[0] ?? null;
+  const step = loginStep(answer.decision, cameBack);
+  const back = `?next=${encodeURIComponent(url.pathname)}`;
+  if (step === "login") return redirect(`${url.origin}/login${back}`, answer.stale);
+  if (step === "passkey") return redirect(`${url.origin}/login/passkey${back}`, answer.stale);
+  if (step === "explain")
+    return text(
+      `Access let you in, but kitshn could not use the login${problem ? `: ${problem}` : "."}` +
+        ` Log out at https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/logout, then open ${url.origin}${url.pathname} again.`,
+      401,
+    );
+  if (answer.decision !== "allow")
+    return text(`${visitor.email ?? "You"} has no access to this game. Ask its owner to share it.`, 403);
+  const nonce = crypto.randomUUID().replaceAll("-", "");
+  return new Response(joinPage(answer, visitor.email ?? "", nonce), { headers: joinHeaders(nonce) });
 }
 
 interface OfflineInfo {

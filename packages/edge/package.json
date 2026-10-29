@@ -33,6 +33,7 @@
     "./machine": "./src/core/machine.ts",
     "./logs": "./src/core/logs.ts",
     "./backups": "./src/core/backups.ts",
-    "./sites": "./src/core/sites.ts"
+    "./sites": "./src/core/sites.ts",
+    "./game": "./src/core/game.ts"
   }
 }

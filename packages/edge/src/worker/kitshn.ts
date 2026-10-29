@@ -130,6 +130,30 @@ import {
   writeImport,
 } from "./state-import.ts";
 import { MIGRATIONS } from "./migrations.ts";
+import {
+  type DoorRow,
+  type GameRecordRow,
+  type GameRow,
+  doorOf,
+  gameOf,
+  gameRecords,
+  gameStatus,
+  recordBody,
+} from "./games.ts";
+import {
+  DEFAULT_DOOR_MS,
+  type Door,
+  doorAddress,
+  doorMachine,
+  doorPlan,
+  gameError,
+  joinAddress,
+  openDoors,
+  parsePort,
+  portKey,
+  busyPort,
+  relayHost,
+} from "../core/game.ts";
 import type {
   DeployNote,
   MachineView,
@@ -747,6 +771,8 @@ export class Kitshn extends DurableObject<Env> {
   private checkingRepos = false;
   /** K-606: presence is stored on change; status and the latest sample live on the socket. */
   private presence = new Map<string, { online: boolean; lastSeen: number; os: MachineOs | null }>();
+  /** K-2004: the last open or close of a door, by card and person. */
+  private doorTurns = new Map<string, number>();
   /**
    * K-1113: the hash of each stored card icon, the bytes stay in SQLite until a map asks. K-1114: when each icon
    * last changed, so a daemon changes one at most once an hour. Read on first use (K-1302).
@@ -1455,6 +1481,7 @@ export class Kitshn extends DurableObject<Env> {
     });
     this.state = after;
     this.clearAccessFailures();
+    this.closeLostDoors(now);
     for (const change of changes) {
       if (change._tag === "shareSetting" || change._tag === "cardEnd" || change._tag === "place")
         this.stuckShares.delete(change.id);
@@ -3476,6 +3503,7 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/internal/backup-access")
       return this.backupAccess((await request.json()) as { card: string; clientId: string });
     if (path === "/internal/content") return this.contentDecision((await request.json()) as ContentRequest);
+    if (path === "/internal/game") return this.gameDecision((await request.json()) as GameRequest);
     if (path === "/internal/well-known/openid-configuration" || path === "/internal/well-known/jwks.json")
       return this.wellKnown(path.slice("/internal/well-known/".length).replace(".json", ""));
     if (path.startsWith("/deploy/")) {
@@ -3773,6 +3801,17 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/api/devices" && request.method === "GET") return this.listDevices();
     if (path === "/api/usage" && request.method === "GET") return await this.readUsage();
     if (path === "/api/library" && request.method === "GET") return Response.json(this.libraryItems());
+    // Section 20: game cards and their doors (K-2001, K-2006).
+    if (path === "/api/games" && request.method === "GET")
+      return Response.json(this.gameRows().map((row) => this.gameView(row, Date.now())));
+    if (path === "/api/games" && request.method === "POST")
+      return this.createGame(caller.actor, await request.json().catch(() => null));
+    if (path.startsWith("/api/games/") && request.method === "DELETE") {
+      const [card = "", doors, address] = path.slice("/api/games/".length).split("/");
+      if (doors === undefined) return this.deleteGame(caller.actor, card);
+      if (doors === "doors" && address)
+        return this.closeDoorBy(caller.actor, card, decodeURIComponent(address));
+    }
     if (path.startsWith("/api/uptime/") && request.method === "GET")
       return Response.json(this.uptimeChanges(decodeURIComponent(path.slice("/api/uptime/".length))));
     if (path.startsWith("/api/notifications")) return this.notificationRequest(path, request, caller);
@@ -4214,8 +4253,14 @@ export class Kitshn extends DurableObject<Env> {
                 .map((item) => ({ prefix: item.prefix.slice(0, 32), address: item.address.slice(0, 200) })),
             }
           : {}),
+        ...gameStatus(message.status),
       };
       saveMachine(socket, { ...attachment, status });
+      this.updateGameAddresses(machine.id, status.publicAddresses);
+      // K-2005: a daemon that connects gets its door plan, also an empty one: the last card may have gone while it was
+      // offline for longer than a plan job waits, and only an empty plan removes its table and its boot ports.
+      if (attachment.status === null && status.capabilities?.includes("doors"))
+        this.queueDoors(machine.id, { _tag: "kitshn", reason: "door plan on connect (K-2005)" }, Date.now());
       this.setMachineOs(machine.id, machineOs(status.os));
       // An update job waits for the status; it can go now.
       if (this.deliverJobs() > 0) this.broadcast();
@@ -4619,6 +4664,7 @@ export class Kitshn extends DurableObject<Env> {
         { status: 502 },
       );
     }
+    const relaysLeft = new Set<string>();
     this.ctx.storage.transactionSync(() => {
       for (const table of ["machines", "presence"]) this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
       const forgotten = [this.forgetCard(id)];
@@ -4635,12 +4681,23 @@ export class Kitshn extends DurableObject<Env> {
       for (const card of this.state.resources.values())
         if (card.machine === id && card.provider && !this.sitesOf(id).some((site) => site.id === card.id))
           forgotten.push(this.forgetCard(card.id));
+      // K-2001: the game cards of the machine, or that it relays, go too, with their doors; the alarm removes their
+      // records, so no name keeps pointing at an address that the provider may give to someone else.
+      for (const row of this.gameRows("machine_id = ? OR relay_id = ?", id, id)) {
+        this.sql("DELETE FROM games WHERE card_id = ?", row.card_id);
+        this.sql("DELETE FROM doors WHERE card_id = ?", row.card_id);
+        forgotten.push(this.forgetCard(row.card_id));
+        const other = doorMachine(gameOf(row));
+        if (other !== id) relaysLeft.add(other);
+      }
       const key = machine.key?.kind === "public" ? ` and its key ${machine.key.fingerprint}` : "";
       this.insertRevision(caller.actor, `Removed machine ${machine.name}${key}`, forgotten, null);
     });
     this.presence.delete(id);
     this.keyFailures.delete(id);
     this.load();
+    // A relay machine that stays drops the ports of the removed machine's games.
+    for (const relay of relaysLeft) this.queueDoors(relay, caller.actor, Date.now());
     this.broadcast();
     void this.scheduleAlarm();
     return Response.json({ removed: id });
@@ -5145,7 +5202,9 @@ export class Kitshn extends DurableObject<Env> {
     const checking = [...this.liveSites.values()].some(
       (site) => site.state === "checking" && (this.checkRetryAt.get(site.id) ?? 0) <= Date.now(),
     );
-    return stale || checking || this.dnsWork().length > 0 || this.routeWork().length > 0;
+    return (
+      stale || checking || this.dnsWork().length > 0 || this.routeWork().length > 0 || this.gameDnsWork(now)
+    );
   }
 
   /**
@@ -5179,9 +5238,36 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** Live sites whose address is checked and whose Access application exists in Cloudflare. */
+  /**
+   * K-2008: the relay host of each game behind NAT, as a live site of the game's machine. So it gets its tunnel
+   * ingress, its proxied record and its Access check from the site path; `tcp://` makes cloudflared carry raw TCP.
+   */
+  private relaySites(): Array<LiveSite> {
+    return this.gameRows("relay_id IS NOT NULL").flatMap((row) => {
+      const address = this.state.resources.get(row.card_id)?.addresses[1];
+      const port = gameOf(row).ports[0];
+      if (!address || !port) return [];
+      return [
+        {
+          id: row.card_id,
+          machineId: row.machine_id,
+          name: `${row.name}-relay`,
+          address,
+          target: `tcp://localhost:${port.port}`,
+          dev: false,
+          up: true,
+          lastUp: 0,
+          state: "ok" as const,
+        },
+      ];
+    });
+  }
+
   private protectedSites(machineId?: string) {
     return protectedLiveSites(
-      [...this.liveSites.values()].filter((site) => machineId === undefined || site.machineId === machineId),
+      [...this.liveSites.values(), ...this.relaySites()].filter(
+        (site) => machineId === undefined || site.machineId === machineId,
+      ),
       (id) => this.state.resources.get(id),
       // The application exists in Cloudflare; a later failed update of it does not take the site down.
       (site) => Boolean(this.access.get(`app:${site.id}:${site.address}`)?.cfId),
@@ -8028,6 +8114,66 @@ export class Kitshn extends DurableObject<Env> {
     }
     // K-1116: an agent key publishes a page or a file, the same upload as a drop on the map.
     if (path === "/agent/library" && request.method === "POST") return this.agentPublish(agent, request, now);
+    // K-2006: an agent adds a game on a machine that it controls and closes its doors; it never opens one.
+    if (path === "/agent/games" && request.method === "POST") {
+      const body: unknown = await request.json().catch(() => null);
+      const machineId = isRecord(body) && typeof body["machine"] === "string" ? body["machine"] : "";
+      const relay = isRecord(body) && typeof body["relay"] === "string" ? body["relay"] : "";
+      if (!agentHas(this.state, caller.visitor, "addsApps", now, approved))
+        return Response.json(
+          {
+            error: 'The right "adds apps" is off for this agent. Ask the owner to turn it on.',
+            need: "addsApps",
+          },
+          { status: 403 },
+        );
+      if (!managed.has(machineId) || (relay !== "" && !managed.has(relay)))
+        return Response.json(
+          { error: "An agent adds a game only on machines that it controls (K-2006)." },
+          { status: 403 },
+        );
+      return this.createGame(agent.actor, body);
+    }
+    // K-2006: an agent removes a game card on a machine that it controls, with "adds apps", as it adds one.
+    if (
+      path.startsWith("/agent/cards/") &&
+      request.method === "DELETE" &&
+      !path.slice("/agent/cards/".length).includes("/")
+    ) {
+      const card = path.slice("/agent/cards/".length);
+      const [row] = this.gameRows("card_id = ?", card);
+      if (!row)
+        return Response.json(
+          { error: `An agent removes only game cards; ${card} is none.` },
+          { status: 404 },
+        );
+      if (!agentHas(this.state, caller.visitor, "addsApps", now, approved))
+        return Response.json(
+          {
+            error: 'The right "adds apps" is off for this agent. Ask the owner to turn it on.',
+            need: "addsApps",
+          },
+          { status: 403 },
+        );
+      if (!managed.has(row.machine_id) || (row.relay_id !== null && !managed.has(row.relay_id)))
+        return Response.json(
+          { error: "An agent removes a game only on machines that it controls (K-2006)." },
+          { status: 403 },
+        );
+      return this.deleteGame(agent.actor, card);
+    }
+    if (path.startsWith("/agent/cards/") && path.includes("/doors")) {
+      const [card = "", address] = path.slice("/agent/cards/".length).split("/doors");
+      const [row] = this.gameRows("card_id = ?", card);
+      if (!row || !managed.has(doorMachine(gameOf(row))))
+        return Response.json(
+          { error: "An agent sees the doors only of games on machines that it controls (K-2006)." },
+          { status: 403 },
+        );
+      if (request.method === "GET" && !address) return Response.json(this.gameView(row, now));
+      if (request.method === "DELETE" && address?.startsWith("/"))
+        return this.closeDoorBy(agent.actor, card, decodeURIComponent(address.slice(1)));
+    }
     // K-1127: a key hands a page or a folder site over to a new repo of its user.
     if (path.startsWith("/agent/cards/") && path.endsWith("/handover") && request.method === "POST") {
       const input: unknown = await request.json().catch(() => null);
@@ -9393,11 +9539,7 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-1004: the Worker asks here before it serves a page or a file. */
   private contentDecision({ segment, kind, visitor: sent }: ContentRequest) {
-    const signedOutAt = Number(this.meta("signed_out_at") ?? 0);
-    const visitor: ContentVisitor =
-      (sent.email !== null || sent.clientId !== null) && (sent.issuedAt ?? 0) * 1000 < signedOutAt
-        ? { email: null, clientId: null, ip: sent.ip, passkey: false, issuedAt: null }
-        : sent;
+    const visitor = this.freshVisitor(sent);
     // The old cookie still opens the login path, so the Worker drops it, or the login sends the visitor
     // straight back with it.
     const stale = visitor !== sent;
@@ -10922,6 +11064,465 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ deleted: id });
   }
 
+  /** K-110: a login from before "Sign out everywhere" counts as no login. */
+  private freshVisitor(sent: ContentVisitor): ContentVisitor {
+    const signedOutAt = Number(this.meta("signed_out_at") ?? 0);
+    return (sent.email !== null || sent.clientId !== null) && (sent.issuedAt ?? 0) * 1000 < signedOutAt
+      ? { email: null, clientId: null, ip: sent.ip, passkey: false, issuedAt: null }
+      : sent;
+  }
+
+  private gameRows(where = "1 = 1", ...values: Array<SqlStorageValue>) {
+    return this.sql<GameRow>(`SELECT * FROM games WHERE ${where}`, ...values);
+  }
+
+  private openDoors(now: number, card?: string) {
+    return (
+      card === undefined
+        ? this.sql<DoorRow>("SELECT * FROM doors WHERE ends_at > ?", now)
+        : this.sql<DoorRow>("SELECT * FROM doors WHERE ends_at > ? AND card_id = ?", now, card)
+    ).map(doorOf);
+  }
+
+  /** K-2002: why a machine cannot hold doors now, or null. */
+  private doorsProblem(machineId: string): string | null {
+    const machine = this.state.machines.get(machineId);
+    if (!machine) return `No machine "${machineId}" exists.`;
+    const status = this.machineView(machine).status;
+    if (!status) return `${machine.name} is offline; kitshn needs its report first.`;
+    if (status.capabilities?.includes("doors")) return null;
+    return `${machine.name} cannot hold doors: ${status.doorsProblem ?? "its daemon is too old; update it"}.`;
+  }
+
+  /**
+   * K-2005: the full door plan of one machine as a job. The plan replaces the whole table, so a newer job makes the
+   * queued ones useless; they fail with a note.
+   */
+  private queueDoors(machineId: string, actor: Actor, now: number) {
+    this.sql(
+      `UPDATE jobs SET state = 'failed', output = 'A newer door plan replaced this job.'
+       WHERE machine_id = ? AND state = 'queued' AND json_extract(command, '$.kind') = 'doors'`,
+      machineId,
+    );
+    const plan = doorPlan(
+      machineId,
+      this.gameRows().map(gameOf),
+      this.openDoors(now),
+      now,
+      this.env.KITSHN_ZONE,
+    );
+    this.queueKitshnJob(machineId, { kind: "doors", plan }, actor, now + HOUR_MS);
+    this.deliverJobs();
+  }
+
+  /** K-2001: a new game card in the tray. The owner or an agent puts it into circles later. */
+  private createGame(actor: Actor, body: unknown) {
+    const refuse = (error: string, status = 400) => Response.json({ error }, { status });
+    if (!isRecord(body)) return refuse("Send a JSON object.");
+    const name = typeof body["name"] === "string" ? body["name"].trim().toLowerCase() : "";
+    const machineId = typeof body["machine"] === "string" ? body["machine"] : "";
+    const texts = Array.isArray(body["ports"]) ? body["ports"] : [];
+    const ports = texts.map((text) => (typeof text === "string" ? parsePort(text) : null));
+    if (ports.some((port) => port === null)) return refuse("A port is like 25565/tcp or 19132/udp.");
+    const hours = body["doorHours"] ?? DEFAULT_DOOR_MS / HOUR_MS;
+    const srv = typeof body["srv"] === "string" && body["srv"] !== "" ? body["srv"] : null;
+    const relay = typeof body["relay"] === "string" && body["relay"] !== "" ? body["relay"] : null;
+    const game = {
+      name,
+      ports: ports.filter((port) => port !== null),
+      doorMs: typeof hours === "number" ? hours * HOUR_MS : Number.NaN,
+      srv,
+      relay,
+    };
+    const error = gameError(game);
+    if (error) return refuse(error);
+    if (!this.state.machines.has(machineId)) return refuse(`No machine "${machineId}" exists.`, 404);
+    if (relay === machineId) return refuse("A machine does not relay its own game.");
+    const problem = this.doorsProblem(relay ?? machineId);
+    if (problem) return refuse(problem, 409);
+    // K-2001: a door must not close a port that a kitshn site of the door machine serves.
+    const site = [...this.liveSites.values()].find(
+      (item) =>
+        item.machineId === (relay ?? machineId) &&
+        game.ports.some((port) => port.proto === "tcp" && item.target === `http://localhost:${port.port}`),
+    );
+    if (site)
+      return refuse(
+        `${site.address} serves from ${site.target} on this machine, so a game card cannot close it.`,
+        409,
+      );
+    // K-2001, K-619: a port that another service of the door machine listens on.
+    const busy = busyPort(game.ports, this.machineView(this.state.machines.get(relay ?? machineId)!).servers);
+    if (busy)
+      return refuse(
+        `${busy.port}/tcp on this machine is ${busy.title ? `"${busy.title}"` : (busy.process ?? "another service")}, which is no game, so a game card cannot close it.`,
+        409,
+      );
+    const host = `${name}.${this.env.KITSHN_ZONE}`;
+    const addresses = relay ? [host, relayHost(name, this.env.KITSHN_ZONE)] : [host];
+    const taken = (address: string) =>
+      RESERVED_SITE_NAMES.has(address.split(".")[0] ?? "") ||
+      this.gameRows("name = ?", name).length > 0 ||
+      [...this.state.resources.values()].some((resource) => resource.addresses.includes(address)) ||
+      [...this.liveSites.values()].some((site) => site.address === address) ||
+      this.sql("SELECT address FROM dns_objects WHERE address = ?", address).length > 0;
+    const clash = addresses.find(taken);
+    if (clash) return refuse(`${clash} is taken; pick another name.`, 409);
+    const status = this.machineView(this.state.machines.get(relay ?? machineId)!).status;
+    const id = newLibraryId();
+    const resource: Resource = {
+      id,
+      kind: "game",
+      name,
+      addresses,
+      status: "unknown",
+      group: null,
+      machine: machineId,
+      ...(relay ? { relay } : {}),
+    };
+    const revision = this.ctx.storage.transactionSync(() => {
+      this.sql(
+        "INSERT INTO games (card_id, machine_id, name, ports, door_ms, srv, relay_id, v4, v6) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        id,
+        machineId,
+        name,
+        JSON.stringify(game.ports),
+        game.doorMs,
+        srv,
+        relay,
+        status?.publicAddresses?.v4 ?? null,
+        status?.publicAddresses?.v6 ?? null,
+      );
+      return this.addCard(actor, resource, null, `the game server ${name}`);
+    });
+    this.queueDoors(relay ?? machineId, actor, Date.now());
+    this.load();
+    this.broadcast();
+    void this.scheduleAlarm();
+    return Response.json(
+      { id, address: host, join: `https://pages.${this.env.KITSHN_ZONE}/join/${name}`, revision },
+      { status: 201 },
+    );
+  }
+
+  /** K-2001: removes a game card, its doors and, through the alarm, its records. */
+  private deleteGame(actor: Actor, id: string) {
+    const [row] = this.gameRows("card_id = ?", id);
+    if (!row) return Response.json({ error: `No game card "${id}" exists.` }, { status: 404 });
+    this.ctx.storage.transactionSync(() => {
+      this.sql("DELETE FROM games WHERE card_id = ?", id);
+      this.sql("DELETE FROM doors WHERE card_id = ?", id);
+      this.insertRevision(actor, `Removed the game server ${row.name}`, [this.forgetCard(id)], null);
+    });
+    this.queueDoors(doorMachine(gameOf(row)), actor, Date.now());
+    this.load();
+    this.broadcast();
+    void this.scheduleAlarm();
+    return Response.json({ deleted: id });
+  }
+
+  /** K-2004: closes doors in one transaction, each with a History line, then sends the new plans. */
+  private closeDoors(actor: Actor, doors: ReadonlyArray<Door>, why: string, now: number) {
+    if (doors.length === 0) return;
+    const machines = new Set<string>();
+    this.ctx.storage.transactionSync(() => {
+      for (const door of doors) {
+        this.sql(
+          "DELETE FROM doors WHERE card_id = ? AND person = ? AND address = ?",
+          door.card,
+          door.person,
+          door.address,
+        );
+        const [row] = this.gameRows("card_id = ?", door.card);
+        if (row) machines.add(doorMachine(gameOf(row)));
+        this.insertRevision(
+          actor,
+          `Closed the door of ${door.person} on ${row?.name ?? door.card} for ${door.address} (${why})`,
+          [],
+          null,
+        );
+      }
+    });
+    for (const machine of machines) this.queueDoors(machine, actor, now);
+  }
+
+  /** K-2005: a door whose person lost the card's share closes at once; a door of a removed card goes too. */
+  private closeLostDoors(now: number) {
+    // The check uses the address that opened the door, so a circle with an address condition keeps it open.
+    const lost = this.sql<DoorRow>("SELECT * FROM doors WHERE ends_at > ?", now)
+      .filter((row) => {
+        const resource = this.state.resources.get(row.card_id);
+        if (!resource) return true;
+        const visitor = { email: row.person, clientId: null, ip: row.seen_ip, passkey: true, issuedAt: null };
+        return contentAccess(this.state, resource, visitor, now) !== "allow";
+      })
+      .map(doorOf);
+    if (lost.length === 0) return false;
+    this.closeDoors({ _tag: "kitshn", reason: "share lost (K-2005)" }, lost, "the share ended", now);
+    this.load();
+    return true;
+  }
+
+  /** K-2003: the join page asks here; `open` and `close` change the doors of the visitor alone. */
+  private gameDecision(input: GameRequest) {
+    const now = Date.now();
+    const visitor = this.freshVisitor(input.visitor);
+    const stale = visitor !== input.visitor;
+    const [row] = this.gameRows("name = ?", input.name);
+    const resource = row ? this.state.resources.get(row.card_id) : undefined;
+    if (!row || !resource) return Response.json({ decision: "missing", stale });
+    // A door belongs to a person, so the join page needs a login, also on a card in Everyone.
+    const decision = visitor.email === null ? "login" : contentAccess(this.state, resource, visitor, now);
+    if (decision !== "allow" || visitor.email === null) return Response.json({ decision, stale });
+    const person = visitor.email;
+    const game = gameOf(row);
+    const machine = doorMachine(game);
+    const actor: Actor = { _tag: "person", email: person };
+    let error: string | null = null;
+    // K-2004: one open or close per person and card in 10 s, so a loop cannot fill History or the machine's jobs.
+    // In memory, as the limits of K-1908: a restart of the Durable Object only resets the wait.
+    const turn = `${game.card} ${person}`;
+    const waiting =
+      (input.action === "open" || input.action === "close") && (this.doorTurns.get(turn) ?? 0) > now - 10_000;
+    if (waiting) error = "You changed a door a few seconds ago. Wait a moment.";
+    const tookTurn = () => {
+      this.doorTurns.set(turn, now);
+      if (this.doorTurns.size > 1000)
+        for (const [key, at] of this.doorTurns) if (at <= now - 10_000) this.doorTurns.delete(key);
+    };
+    if (input.action === "open" && !waiting) {
+      // K-2004: the address that kitshn sees is the door; the browser may add only the other family to it.
+      const seen = doorAddress(visitor.ip ?? "");
+      const other = (input.addresses ?? [])
+        .map((address) => doorAddress(String(address)))
+        .find((door) => !("error" in door) && !("error" in seen) && door.family !== seen.family);
+      const addresses =
+        "error" in seen ? [] : [seen.address, ...(other && !("error" in other) ? [other.address] : [])];
+      error =
+        ("error" in seen ? `kitshn sees your address as ${visitor.ip ?? "none"}: ${seen.error}` : null) ??
+        // An offline machine gets the plan when it connects; an online one must hold doors now.
+        (this.state.machines.has(machine) && !this.machineView(this.state.machines.get(machine)!).online
+          ? null
+          : this.doorsProblem(machine));
+      if (error === null) {
+        const { open, close } = openDoors(this.openDoors(now, game.card), game, person, addresses, now);
+        const ends = new Date(now + game.doorMs).toISOString().slice(0, 16).replace("T", " ");
+        this.ctx.storage.transactionSync(() => {
+          for (const address of close)
+            this.sql(
+              "DELETE FROM doors WHERE card_id = ? AND person = ? AND address = ?",
+              game.card,
+              person,
+              address,
+            );
+          for (const door of open)
+            this.sql(
+              "INSERT OR REPLACE INTO doors (card_id, person, address, opened_at, ends_at, seen_ip) VALUES (?, ?, ?, ?, ?, ?)",
+              door.card,
+              door.person,
+              door.address,
+              door.openedAt,
+              door.endsAt,
+              visitor.ip,
+            );
+          this.insertRevision(
+            actor,
+            `${person} opened ${game.name} for ${addresses.join(" and ")} until ${ends} UTC`,
+            [],
+            null,
+          );
+        });
+        this.queueDoors(machine, actor, now);
+        tookTurn();
+        this.load();
+        this.broadcast();
+      }
+    }
+    if (input.action === "close" && !waiting) {
+      const door = this.openDoors(now, game.card).find(
+        (item) => item.person === person && item.address === input.address,
+      );
+      if (door) {
+        this.closeDoors(actor, [door], "End now", now);
+        tookTurn();
+        this.load();
+        this.broadcast();
+      } else error = "You have no open door for this address.";
+    }
+    const status = this.state.machines.get(machine);
+    return Response.json({
+      decision,
+      stale,
+      error,
+      game: {
+        name: game.name,
+        address: joinAddress(game, resource.addresses[0] ?? ""),
+        ports: game.ports.map(portKey),
+        doorHours: game.doorMs / HOUR_MS,
+        reachable: row.v4 !== null || row.v6 !== null,
+        machineOnline: status ? this.machineView(status).online : false,
+      },
+      doors: this.openDoors(now, game.card).filter((door) => door.person === person),
+      seen: visitor.ip,
+    });
+  }
+
+  /** K-2006: a game card as the owner and agents see it: its doors, records and what listens. */
+  private gameView(row: GameRow, now: number) {
+    const game = gameOf(row);
+    const machine = this.state.machines.get(doorMachine(game));
+    const listening = new Set(machine ? (this.machineView(machine).status?.listening ?? []) : []);
+    return {
+      ...game,
+      join: `https://pages.${this.env.KITSHN_ZONE}/join/${game.name}`,
+      address: joinAddress(game, `${game.name}.${this.env.KITSHN_ZONE}`),
+      listening: game.ports.map(portKey).filter((port) => listening.has(port)),
+      problem: this.doorsProblem(doorMachine(game)),
+      doors: this.openDoors(now, game.card),
+      records: this.sql<GameRecordRow>("SELECT * FROM game_records WHERE card_id = ?", game.card).map(
+        (record) => ({
+          type: record.type,
+          name: record.name,
+          content: record.content,
+          error: record.error,
+        }),
+      ),
+    };
+  }
+
+  /** K-2006: the owner and agents close any door of a card. */
+  private closeDoorBy(actor: Actor, card: string, address: string) {
+    const now = Date.now();
+    const doors = this.openDoors(now, card).filter((door) => door.address === address);
+    if (doors.length === 0)
+      return Response.json({ error: `No door for ${address} is open on this card.` }, { status: 404 });
+    this.closeDoors(actor, doors, "closed by hand", now);
+    this.load();
+    this.broadcast();
+    return Response.json({ closed: doors.length });
+  }
+
+  /** K-2002: a new public address of a machine moves the records of its games. */
+  private updateGameAddresses(machineId: string, found: MachineStatus["publicAddresses"]) {
+    if (!found) return;
+    const moved = this.sql(
+      `UPDATE games SET v4 = ?, v6 = ? WHERE COALESCE(relay_id, machine_id) = ?
+       AND (v4 IS NOT ? OR v6 IS NOT ?) RETURNING card_id`,
+      found.v4,
+      found.v6,
+      machineId,
+      found.v4,
+      found.v6,
+    );
+    if (moved.length > 0) void this.scheduleAlarm();
+  }
+
+  /** K-2007: true when a game record waits for the alarm. */
+  private gameDnsWork(now: number) {
+    const want = new Map(
+      gameRecords(this.gameRows(), this.env.KITSHN_ZONE).map((r) => [`${r.type} ${r.name}`, r]),
+    );
+    const rows = this.sql<GameRecordRow>("SELECT * FROM game_records");
+    const keys = new Set(rows.map((row) => `${row.type} ${row.name}`));
+    return (
+      rows.some(
+        (row) =>
+          (row.error === null || row.retry_at <= now) &&
+          (want.get(`${row.type} ${row.name}`)?.content !== row.content || row.error !== null),
+      ) || [...want.keys()].some((key) => !keys.has(key))
+    );
+  }
+
+  /**
+   * K-2007: makes, moves and removes the A, AAAA and SRV records of game cards; returns the Cloudflare calls. A new
+   * record first checks that no record of that type and name exists, so kitshn never adds to one it did not make.
+   */
+  private async syncGameDns(api: Api, budget: number) {
+    const now = Date.now();
+    let calls = 0;
+    const want = new Map(
+      gameRecords(this.gameRows(), this.env.KITSHN_ZONE).map((r) => [`${r.type} ${r.name}`, r]),
+    );
+    const rows = this.sql<GameRecordRow>("SELECT * FROM game_records");
+    const failed = (
+      row: { type: string; name: string; card_id: string; content: string; record_id: string },
+      error: unknown,
+    ) =>
+      this.sql(
+        "INSERT OR REPLACE INTO game_records (type, name, card_id, content, record_id, error, retry_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        row.type,
+        row.name,
+        row.card_id,
+        row.content,
+        row.record_id,
+        String(error),
+        now + RETRY_MS,
+      );
+    for (const row of rows) {
+      if (want.has(`${row.type} ${row.name}`) || (row.error !== null && row.retry_at > now)) continue;
+      if (calls >= budget) return calls;
+      try {
+        if (row.record_id) {
+          calls++;
+          await api("DELETE", `${this.zonePath(row.name)}/dns_records/${row.record_id}`).catch(
+            (error: unknown) =>
+              error instanceof CloudflareError && error.status === 404 ? undefined : Promise.reject(error),
+          );
+        }
+        this.sql("DELETE FROM game_records WHERE type = ? AND name = ?", row.type, row.name);
+      } catch (error) {
+        failed(row, error);
+      }
+    }
+    const have = new Map(rows.map((row) => [`${row.type} ${row.name}`, row]));
+    for (const [key, record] of want) {
+      const row = have.get(key);
+      if (row && row.content === record.content && row.error === null) continue;
+      if (row?.error && row.retry_at > now) continue;
+      if (calls + 2 > budget) return calls;
+      const zone = `${this.zonePath(record.name)}/dns_records`;
+      try {
+        let recordId = row?.record_id ?? "";
+        if (!recordId) {
+          calls++;
+          const found = await api<Array<unknown>>(
+            "GET",
+            `${zone}?type=${record.type}&name=${encodeURIComponent(record.name)}`,
+          );
+          if (found.length > 0)
+            throw new Error(
+              `A ${record.type} record for ${record.name} exists that kitshn did not make. Remove it, or give the game another name.`,
+            );
+        }
+        calls++;
+        const made = recordId
+          ? await api<{ id: string }>("PUT", `${zone}/${recordId}`, recordBody(record))
+          : await api<{ id: string }>("POST", zone, recordBody(record));
+        recordId = made.id;
+        this.sql(
+          "INSERT OR REPLACE INTO game_records (type, name, card_id, content, record_id, error, retry_at) VALUES (?, ?, ?, ?, ?, NULL, 0)",
+          record.type,
+          record.name,
+          record.card,
+          record.content,
+          recordId,
+        );
+      } catch (error) {
+        failed(
+          {
+            type: record.type,
+            name: record.name,
+            card_id: record.card,
+            content: row?.content ?? "",
+            record_id: row?.record_id ?? "",
+          },
+          error,
+        );
+      }
+    }
+    return calls;
+  }
+
   /** K-113: returns the Cloudflare calls it made. */
   private async syncLauncher(api: Api, force: boolean) {
     if (!force && this.meta("launcher_failed") === `failed:${this.launcherWant()}`) return 0;
@@ -11852,6 +12453,7 @@ export class Kitshn extends DurableObject<Env> {
     this.expireProposals(now);
     const before = JSON.stringify(accessStates(this.desired(now), this.access));
     this.endShares(now);
+    if (this.closeLostDoors(now)) changed = true;
     const daily = this.dailyAt() <= now;
     if (daily) this.daily(now);
     // K-1126: the uptime fetches count against the 40 calls of this run (K-406). The daily run spends 40 already,
@@ -11913,6 +12515,7 @@ export class Kitshn extends DurableObject<Env> {
       await this.syncTunnels(api, 6);
       spent += await this.checkSites(api, 6);
       await this.syncDns(api, 5);
+      spent += await this.syncGameDns(api, 4);
       await this.syncRoutes(api, 5);
       // K-1124: after the tunnel and DNS steps, so an old Compose address has lost its record. The daily run spends
       // its calls on the compare; redirectWork asks for the next run at once.
@@ -11927,8 +12530,8 @@ export class Kitshn extends DurableObject<Env> {
         }
       // K-113: take an unwanted enrollment policy off the App Launcher before the sync deletes it.
       spent += await this.syncLauncher(api, daily);
-      // K-406: at most 40 calls. `spent` counts the daily compare (12), the site checks (6), the redirect step (5)
-      // and the launcher step (3); the tunnels, DNS records and offline routes above made at most 6 + 5 + 5, and the launcher
+      // K-406: at most 40 calls. `spent` counts the daily compare (12), the site checks (6), the redirect step (5),
+      // the game records (4) and the launcher step (3); the tunnels, DNS records and offline routes above made at most 6 + 5 + 5, and the launcher
       // step after the sync needs 3. The login step and the sync share what is left. A policy that the sync
       // makes goes on the login applications in the next alarm, which runs at once (loginWork).
       await this.syncAccessLocked(api, CALLS_PER_RUN - spent - 16 - 3);
@@ -12165,6 +12768,17 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const send = (socket: WebSocket, message: ServerMessage | ServerToDaemon) =>
   socket.send(JSON.stringify(message));
+
+/** K-2003: a request of the join page. */
+interface GameRequest {
+  readonly name: string;
+  readonly visitor: ContentVisitor;
+  readonly action: "view" | "open" | "close";
+  /** `open`: the addresses that the browser found (K-2004). */
+  readonly addresses?: ReadonlyArray<unknown>;
+  /** `close`: the door address. */
+  readonly address?: string;
+}
 
 interface ContentRequest {
   /** The first path segment: a name of K-1120 or an id. */
@@ -12407,6 +13021,9 @@ export function forwardRight(path: string, method: string): MachineRight | null 
   if (card !== null && card.includes("/redirects") && (method === "POST" || method === "DELETE"))
     return "addsPages";
   if (card !== null && card.endsWith("/handover") && method === "POST") return "addsApps";
+  if (path === "/agent/games" && method === "POST") return "addsApps";
+  if (card !== null && !card.includes("/") && method === "DELETE") return "addsApps";
+  if (card !== null && card.includes("/doors") && (method === "GET" || method === "DELETE")) return null;
   if (path === "/agent/logs" && method === "POST") return null;
   return undefined;
 }

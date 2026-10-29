@@ -199,7 +199,8 @@ export function circlePolicies(
 }
 
 /** Resource kinds that the Worker serves and checks itself (K-404) get no Access application. */
-const WORKER_CHECKED = new Set(["page", "file"]);
+// K-2003: a game card has no Access application; the Worker checks its join page like a page.
+const WORKER_CHECKED = new Set(["page", "file", "game"]);
 
 /** K-909: the address of a removed app that its machine still serves; `id` was its card id. */
 export interface RemovedSite {
@@ -229,6 +230,28 @@ export function desiredAccess(
   const policies = new Map<string, PolicyBody>();
   const apps = new Map<string, AppBody>();
   for (const resource of state.resources.values()) {
+    // K-2008: the relay host of a game behind NAT lets in only the service token of its relay machine; a pause
+    // closes it, as it closes every device.
+    const relay = resource.kind === "game" && resource.relay ? state.machines.get(resource.relay) : undefined;
+    const relayAddress = resource.addresses[1];
+    if (relay && relayAddress && !state.paused) {
+      const key = `policy:relay:${relay.id}`;
+      policies.set(key, {
+        name: `kitshn relay ${relay.name}`,
+        decision: "non_identity",
+        include: [{ service_token: { token_id: relay.serviceTokenId } }],
+        require: [],
+        exclude: [],
+      });
+      apps.set(`app:${resource.id}:${relayAddress}`, {
+        name: appName(`${resource.name} relay`),
+        type: "self_hosted",
+        domain: relayAddress,
+        session_duration: "24h",
+        same_site_cookie_attribute: "lax",
+        policyKeys: [key],
+      });
+    }
     if (WORKER_CHECKED.has(resource.kind) || resource.addresses.length === 0) continue;
     const policyKeys: Array<string> = [];
     const shares = activeShares(state, resource, now);

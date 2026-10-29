@@ -91,6 +91,13 @@ export const KINDS: Record<ResourceKind, KindInfo> = {
     color: "var(--pink)",
     tilt: "2.5deg",
   },
+  game: {
+    label: "Game servers",
+    help: "A game server on a machine. A person in its circles opens the ports for their address on its join page.",
+    icon: "🎮",
+    color: "var(--green)",
+    tilt: "2deg",
+  },
   "repo.group": {
     label: "Repo groups",
     help: "The repos of an owner, or of a name pattern with one *. A right on it covers each repo that it matches.",

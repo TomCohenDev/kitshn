@@ -3,6 +3,7 @@ import type { BackupReport } from "./backups.ts";
 import type { MachineRight } from "./model.ts";
 import type { GrantTables, ProviderReport } from "@kitshn/local";
 import type { ServerReport } from "./sites.ts";
+import type { DoorPlan } from "./game.ts";
 /** A joined machine (K-602). Its resource card has the same id and the kind `machine`. */
 export interface Machine {
   readonly id: string;
@@ -61,6 +62,12 @@ export interface MachineStatus {
   readonly keptBytes?: number;
   /** K-1751: the attesters of `machine.json`; their prefixes are the labels that rights may check (K-1754). */
   readonly attesters?: ReadonlyArray<{ readonly prefix: string; readonly address: string }>;
+  /** K-2002: the public addresses on the machine's interfaces, for the records of its game cards. */
+  readonly publicAddresses?: { readonly v4: string | null; readonly v6: string | null };
+  /** K-2002: why the machine cannot gate game ports; absent when it reports the capability `doors`. */
+  readonly doorsProblem?: string;
+  /** K-2006: the game ports (`25565/tcp`) of the last door plan that something listens on. */
+  readonly listening?: ReadonlyArray<string>;
 }
 
 /** K-605, K-606: the latest resource sample. The Durable Object keeps it in memory only. */
@@ -158,6 +165,8 @@ export type Command =
       readonly resource: string | null;
     }
   /** K-1820: back up as the run `before` first, then write the run `run` back. Only kitshn makes this job. */
+  /** K-2005: the game ports of this machine and their open doors; the whole list each time. Only kitshn makes it. */
+  | { readonly kind: "doors"; readonly plan: DoorPlan }
   | {
       readonly kind: "backup-restore";
       readonly card: string;

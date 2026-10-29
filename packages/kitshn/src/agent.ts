@@ -54,7 +54,7 @@ export function keyTransport(server: string): AgentTransport {
   };
 }
 
-export const AGENT_COMMANDS = ["publish", "address", "logs", "repo", "redirect", "time"] as const;
+export const AGENT_COMMANDS = ["publish", "address", "logs", "repo", "redirect", "time", "game"] as const;
 export type AgentCommand = (typeof AGENT_COMMANDS)[number];
 export const isAgentCommand = (value: unknown): value is AgentCommand =>
   typeof value === "string" && (AGENT_COMMANDS as ReadonlyArray<string>).includes(value);
@@ -72,7 +72,12 @@ kitshn redirect <card> <address> [--remove] [--json]
                                              a hostname that only sends visitors on to a site card (K-1128)
 kitshn time <card> <30m|1h|4h|1d|stop|now> [--json]
                                              a card leaves every circle for the tray after this time (K-212);
-                                             stop keeps it until someone moves it, now ends it at once`;
+                                             stop keeps it until someone moves it, now ends it at once
+kitshn game add --machine <machine> --name <name> --port 25565/tcp [--port <port/proto>] [--door 12h] [--srv minecraft] [--relay <machine>] [--json]
+                                             a game card: its ports open per person from its join page (K-2001)
+kitshn game doors <card> [--json]            the open doors, records and listening ports of a game card (K-2006)
+kitshn game close <card> <address> [--json]  close one door of a game card (K-2006)
+kitshn game remove <card> [--json]           remove a game card, its doors and its records (K-2006)`;
 
 /** K-1809: with `--json`, stdout holds only the result object; progress and notes go to stderr. */
 let json = false;
@@ -366,6 +371,50 @@ async function redirect(t: AgentTransport, card: string, address: string, remove
   );
 }
 
+/** K-2001, K-2006: `kitshn game add|doors|close`. An agent never opens a door; a person does on the join page. */
+async function game(t: AgentTransport, args: ReadonlyArray<string>) {
+  const valued = new Set(["--machine", "--name", "--port", "--door", "--srv", "--relay", "--server"]);
+  const values = (name: string) =>
+    args.flatMap((arg, index) => (arg === name ? [args[index + 1] ?? ""] : []));
+  const [action, card, address] = args.filter(
+    (arg, index) => !arg.startsWith("--") && !valued.has(args[index - 1] ?? ""),
+  );
+  let response: Response;
+  if (action === "add") {
+    const door = values("--door")[0] ?? "12h";
+    const hours = door.endsWith("d") ? Number(door.slice(0, -1)) * 24 : Number(door.replace(/h$/, ""));
+    if (!Number.isFinite(hours)) fail(`--door is a time like 12h or 2d, not ${door}.`);
+    response = await t.call("/agent/games", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        machine: values("--machine")[0] ?? "",
+        name: values("--name")[0] ?? "",
+        ports: values("--port"),
+        doorHours: hours,
+        srv: values("--srv")[0] ?? "",
+        relay: values("--relay")[0] ?? "",
+      }),
+    });
+  } else if (action === "doors" && card) {
+    response = await t.call(`/agent/cards/${encodeURIComponent(card)}/doors`, { method: "GET" });
+  } else if (action === "remove" && card) {
+    response = await t.call(`/agent/cards/${encodeURIComponent(card)}`, { method: "DELETE" });
+  } else if (action === "close" && card && address) {
+    response = await t.call(`/agent/cards/${encodeURIComponent(card)}/doors/${encodeURIComponent(address)}`, {
+      method: "DELETE",
+    });
+  } else return fail("use kitshn game add|doors <card>|close <card> <address>|remove <card>.");
+  const data = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!response.ok || !data) fail(String(data?.["error"] ?? `kitshn answered ${response.status}.`));
+  if (json) return void process.stdout.write(`${JSON.stringify(data)}\n`);
+  if (action === "add")
+    console.log(`kitshn: added ${String(data?.["address"])}; players open it at ${String(data?.["join"])}.`);
+  else if (action === "close") console.log(`kitshn: closed ${address} on ${card}.`);
+  else if (action === "remove") console.log(`kitshn: removed the game card ${card}.`);
+  else console.log(JSON.stringify(data, null, 2));
+}
+
 /**
  * Runs one agent command and exits on an error: 1 for a refused step, 2 for bad arguments (K-1809). With `--json`,
  * the reason is the one object on stdout.
@@ -430,6 +479,8 @@ export async function runAgentCommand(
       );
       if (!card || !word) usage("name the card and the time: kitshn time <card> <30m|1h|4h|1d|stop|now>.");
       await cardTime(t, card ?? "", word ?? "");
+    } else if (command === "game") {
+      await game(t, args);
     } else if (command === "address") {
       const [card, name] = args.filter(
         (arg, index) => !arg.startsWith("--") && args[index - 1] !== "--server",

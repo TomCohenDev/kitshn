@@ -41,6 +41,13 @@ jobs:
       - name: Peer user id self-test, compiled for linux-x64 (K-701)
         working-directory: packages/daemon
         run: bun build src/peer.selftest.ts --compile --outfile="$RUNNER_TEMP/selftest" && "$RUNNER_TEMP/selftest"
+      # K-2005: the door helper with real traffic in network namespaces, the Docker DNAT path and a reboot included.
+      - name: Door helper traffic test (K-2005)
+        working-directory: packages/daemon
+        run: |
+          command -v nft >/dev/null || sudo apt-get install -y -q nftables
+          bun -e 'import { HELPER } from "./src/doors.ts"; await Bun.write(`${process.env.RUNNER_TEMP}/doors`, HELPER)'
+          sudo sh test/doors-netns.sh "$RUNNER_TEMP/doors"
       - run: pnpm --filter @kitshn/edge run build
       - name: The kitshn types build, and the .d.ts has no imports (K-801)
         working-directory: packages/kitshn

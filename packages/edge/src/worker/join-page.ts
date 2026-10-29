@@ -1,0 +1,115 @@
+// K-2003: the join page of a game card, `pages.<zone>/join/<name>`. The Worker serves it after the share check.
+import type { Door } from "../core/game.ts";
+import { escapeHtml } from "./live.ts";
+
+export interface JoinView {
+  readonly game: {
+    readonly name: string;
+    readonly address: string;
+    readonly ports: ReadonlyArray<string>;
+    readonly doorHours: number;
+    readonly reachable: boolean;
+    readonly machineOnline: boolean;
+  };
+  readonly doors: ReadonlyArray<Door>;
+  readonly seen: string | null;
+  readonly error: string | null;
+}
+
+/** The browser asks these for the address of each family; both answer cross-origin (checked 2026-10-29). */
+export const ADDRESS_PROBES = { v4: "https://ipv4.icanhazip.com", v6: "https://ipv6.icanhazip.com" } as const;
+
+export function joinHeaders(nonce: string) {
+  return {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "private, no-store",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "content-security-policy": [
+      "default-src 'none'",
+      `script-src 'nonce-${nonce}'`,
+      "style-src 'unsafe-inline'",
+      `connect-src 'self' ${ADDRESS_PROBES.v4} ${ADDRESS_PROBES.v6}`,
+      "frame-ancestors 'none'",
+      "form-action 'none'",
+      "base-uri 'none'",
+    ].join("; "),
+  };
+}
+
+export function joinPage(view: JoinView, email: string, nonce: string): string {
+  const { game } = view;
+  // `<` cannot end the script element from inside the JSON.
+  const data = JSON.stringify({ ...view, probes: ADDRESS_PROBES }).replaceAll("<", "\\u003c");
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Join ${escapeHtml(game.name)}</title>
+<style>
+:root { color-scheme: light dark; --ink: #111; --paper: #fffdf6; --accent: #7c3aed; }
+@media (prefers-color-scheme: dark) { :root { --ink: #f5f3ea; --paper: #17161c; } }
+body { font: 16px/1.5 system-ui, sans-serif; background: var(--paper); color: var(--ink); margin: 0; padding: 24px; }
+main { max-width: 560px; margin: 0 auto; }
+h1 { font-size: 28px; margin: 0 0 4px; }
+section { border: 2px solid var(--ink); box-shadow: 4px 4px 0 var(--ink); padding: 16px; margin: 16px 0; }
+button { font: inherit; font-weight: 700; border: 2px solid var(--ink); background: #facc15; color: #111; padding: 8px 14px; cursor: pointer; box-shadow: 3px 3px 0 var(--ink); }
+button.quiet { background: transparent; color: var(--ink); box-shadow: none; padding: 4px 10px; }
+button:disabled { opacity: .5; cursor: default; }
+code { font-size: 18px; font-weight: 700; }
+.note { opacity: .75; font-size: 14px; }
+.error { color: #dc2626; font-weight: 700; }
+li { margin: 6px 0; }
+</style></head>
+<body><main>
+<h1>${escapeHtml(game.name)}</h1>
+<p class="note">Logged in as ${escapeHtml(email)}</p>
+<section id="join"><div>Join with</div><p><code id="address"></code> <button class="quiet" id="copy">Copy</button></p>
+<div class="note" id="ports"></div></section>
+<section id="open"><div><strong>Open the door for your address</strong></div><ul id="addresses"></ul>
+<p class="note" id="probe-note"></p><button id="open-button" disabled>Open</button> <span class="error" id="error"></span></section>
+<section id="doors-section"><div><strong>Your open doors</strong></div><ul id="doors"></ul></section>
+<p class="note">While a door is open, everyone who shares your internet address can reach the game. Keep the game's own whitelist on.</p>
+</main>
+<script type="application/json" id="data">${data}</script>
+<script nonce="${nonce}">
+const data = JSON.parse(document.getElementById("data").textContent);
+const $ = (id) => document.getElementById(id);
+const item = (text, button) => { const li = document.createElement("li"); li.textContent = text; if (button) { li.append(" "); li.append(button); } return li; };
+const family = (address) => (address && address.includes(":") ? "v6" : "v4");
+async function probe(url) {
+  const stop = new AbortController();
+  setTimeout(() => stop.abort(), 4000);
+  try { const answer = await fetch(url, { signal: stop.signal, cache: "no-store" }); return answer.ok ? (await answer.text()).trim() : null; }
+  catch { return null; }
+}
+async function send(body) {
+  $("error").textContent = "";
+  const answer = await fetch(location.pathname, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const result = await answer.json().catch(() => ({ error: "kitshn sent no answer." }));
+  if (!answer.ok || result.error) { $("error").textContent = result.error || "kitshn refused."; return; }
+  location.reload();
+}
+$("address").textContent = data.game.address;
+$("ports").textContent = "Ports: " + data.game.ports.join(", ") + (data.game.reachable ? "" : ". The game has no public address yet, so it is not reachable.");
+$("copy").onclick = () => navigator.clipboard.writeText(data.game.address);
+$("open-button").textContent = "Open for " + data.game.doorHours + " h";
+if (data.error) $("error").textContent = data.error;
+for (const door of data.doors) {
+  const end = document.createElement("button");
+  end.className = "quiet"; end.textContent = "End now";
+  end.onclick = () => send({ action: "close", address: door.address });
+  $("doors").append(item(door.address + ", until " + new Date(door.endsAt).toLocaleString(), end));
+}
+if (data.doors.length === 0) $("doors").append(item("None"));
+(async () => {
+  const [v4, v6] = await Promise.all([probe(data.probes.v4), probe(data.probes.v6)]);
+  const found = { v4, v6 };
+  if (data.seen) found[family(data.seen)] = data.seen;
+  const addresses = [found.v4, found.v6].filter(Boolean);
+  for (const address of addresses) $("addresses").append(item(address + (address === data.seen ? " (kitshn sees this one)" : "")));
+  const missing = ["v4", "v6"].filter((name) => !found[name]).map((name) => (name === "v4" ? "IPv4" : "IPv6"));
+  $("probe-note").textContent = missing.length === 0 ? "" : "No " + missing.join(" or ") + " address answered, so kitshn opens only the address" + (addresses.length > 1 ? "es" : "") + " above.";
+  $("open-button").disabled = addresses.length === 0;
+  $("open-button").onclick = () => send({ action: "open", addresses });
+})();
+</script></body></html>`;
+}

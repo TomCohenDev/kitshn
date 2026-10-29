@@ -3425,6 +3425,13 @@ export class Kitshn extends DurableObject<Env> {
       {
         teamDomain: this.env.ACCESS_TEAM_DOMAIN,
         // An application lives until the sync deletes it, so its audience stays until then, also after a give-back.
+        servedHost: (cardId) => {
+          const site = this.liveSites.get(cardId);
+          const handover = this.handoverOf(cardId);
+          return site?.state === "ok" && (handover === null || (handover.switched && !handover.returning))
+            ? site.address
+            : null;
+        },
         audiencesOf: (cardId) =>
           [...this.access.values()].flatMap((row) =>
             row.key.startsWith(`app:${cardId}:`) && row.cfId && row.aud ? [row.aud] : [],
@@ -5246,6 +5253,7 @@ export class Kitshn extends DurableObject<Env> {
         paths: foreignPaths(apps, address),
         pathsAt: Date.now(),
         released: false,
+        returning: false,
       });
       this.putResource(withAddressInUse({ ...now.card, addresses: [address] }, false));
       this.insertRevision(caller.actor, `Took over ${address} for ${now.card.name}`, [], null);
@@ -5280,7 +5288,17 @@ export class Kitshn extends DurableObject<Env> {
           { status: 409 },
         );
       }
-      if (handover.switched)
+    } catch (error) {
+      return Response.json(
+        { error: `kitshn could not give ${site.address} back: ${String(error)}. Try again.` },
+        { status: 502 },
+      );
+    }
+    if (handover.switched) {
+      // The provider learns first that kitshn no longer serves the host, so it can start its own route again.
+      this.setHandover(id, { ...handover, returning: true });
+      this.pushGrants();
+      try {
         await api("PUT", `${this.zonePath(site.address)}/dns_records/${handover.recordId}`, {
           type: "CNAME",
           name: site.address,
@@ -5288,11 +5306,15 @@ export class Kitshn extends DurableObject<Env> {
           proxied: true,
           comment: handover.comment ?? "",
         });
-    } catch (error) {
-      return Response.json(
-        { error: `kitshn could not give ${site.address} back: ${String(error)}. Try again.` },
-        { status: 502 },
-      );
+      } catch (error) {
+        const current = this.handoverOf(id);
+        if (current) this.setHandover(id, { ...current, returning: false });
+        this.pushGrants();
+        return Response.json(
+          { error: `kitshn could not give ${site.address} back: ${String(error)}. Try again.` },
+          { status: 502 },
+        );
+      }
     }
     this.ctx.storage.transactionSync(() => {
       // The record goes back to what it served; kitshn forgets it and never deletes it.
@@ -13840,6 +13862,8 @@ interface AddressHandover {
   /** The path applications of the portal on the address, as kitshn last read them, and when. */
   readonly paths: ReadonlyArray<ForeignPath>;
   readonly pathsAt: number;
+  /** A give-back runs: the host left `served` before the record moves back (K-1623). */
+  readonly returning: boolean;
   /** The record moved and the portal no longer holds the exact host, so the address stays with kitshn for good. */
   readonly released: boolean;
 }

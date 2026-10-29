@@ -1116,6 +1116,12 @@ describe("folder sites (K-1123)", () => {
     // A failed move puts the redirect addresses of the card back as they were (K-1128).
     const kept = await admin(`/api/cards/${card.id}/redirects`, "POST", { address: "kept.example.com" });
     expect(kept.status, JSON.stringify(kept.body)).toBe(200);
+    // A removal in progress stays removed. The redirect Worker upload fails, so no alarm takes its domain off yet.
+    expect(
+      (await admin(`/api/cards/${card.id}/redirects`, "POST", { address: "gone.example.com" })).status,
+    ).toBe(200);
+    cloudflare.state.failUploads = 1000;
+    expect((await admin(`/api/cards/${card.id}/redirects/gone.example.com`, "DELETE")).status).toBe(200);
     cloudflare.state.failDomains = 1000;
     let failed = { status: 503, body: {} as Record<string, unknown> };
     for (let attempt = 0; attempt < 10 && failed.status === 503; attempt++)
@@ -1123,6 +1129,13 @@ describe("folder sites (K-1123)", () => {
     expect(failed.status).not.toBe(200);
     cloudflare.state.failDomains = 0;
     expect((await admin("/api/state", "GET")).body["redirects"]).toEqual({ [card.id]: ["kept.example.com"] });
+    const going = await runInDurableObject(durable, (_instance, storage) =>
+      storage.storage.sql
+        .exec("SELECT going FROM old_addresses WHERE address = 'gone.example.com'")
+        .toArray(),
+    );
+    expect(going).toEqual([{ going: 1 }]);
+    cloudflare.state.failUploads = 0;
 
     // Removed, the site lets its old address go; another site takes it, and the Undo of the removal then refuses.
     const removed = await admin(`/api/apps/${card.id}`, "DELETE");

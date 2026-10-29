@@ -9084,8 +9084,8 @@ export class Kitshn extends DurableObject<Env> {
     if (refused) return refused;
     // The card takes the address before Cloudflare does, so that the Access sync makes its application first
     // (K-402). Only success writes the revision; anything else puts the card and its old addresses back.
-    const oldRows = this.sql<{ address: string; attached: number }>(
-      "SELECT address, attached FROM old_addresses WHERE card_id = ? ORDER BY rowid",
+    const oldRows = this.sql<{ address: string; attached: number; pinned: number; going: number }>(
+      "SELECT address, attached, pinned, going FROM old_addresses WHERE card_id = ? ORDER BY rowid",
       resource.id,
     );
     const moveTo = (address: string) => {
@@ -9103,10 +9103,12 @@ export class Kitshn extends DurableObject<Env> {
         this.sql("DELETE FROM old_addresses WHERE card_id = ?", resource.id);
         for (const row of oldRows)
           this.sql(
-            "INSERT OR REPLACE INTO old_addresses (address, card_id, attached) VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO old_addresses (address, card_id, attached, pinned, going) VALUES (?, ?, ?, ?, ?)",
             row.address,
             resource.id,
             row.attached,
+            row.pinned,
+            row.going,
           );
       });
       this.load();
@@ -9500,11 +9502,13 @@ export class Kitshn extends DurableObject<Env> {
     const error = redirectAddressError(name, this.env);
     if (error) return fail(400, error);
     if (resource.addresses.includes(name)) return fail(409, `${name} serves ${resource.name} already.`);
-    const [own] = this.sql<{ card_id: string; pinned: number }>(
-      "SELECT card_id, pinned FROM old_addresses WHERE address = ? AND going = 0",
+    const [own] = this.sql<{ card_id: string; pinned: number; going: number }>(
+      "SELECT card_id, pinned, going FROM old_addresses WHERE address = ?",
       name,
     );
-    if (own?.card_id === resource.id && own.pinned === 1)
+    // Also a row that oldAddresses() skips, such as a removed card's or a going one, holds the hostname.
+    if (own && own.card_id !== resource.id) return fail(409, `${name} is taken (K-817).`);
+    if (own?.pinned === 1 && own.going === 0)
       return fail(409, `${name} sends visitors on to ${resource.name} already.`);
     const [count] = this.sql<{ n: number }>(
       "SELECT COUNT(*) AS n FROM old_addresses WHERE card_id = ? AND pinned = 1",

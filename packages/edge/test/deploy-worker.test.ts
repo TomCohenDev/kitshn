@@ -1113,6 +1113,17 @@ describe("folder sites (K-1123)", () => {
     await alarm();
     expect(cloudflare.served("second.example.com")).toEqual(["kitshn-redirects"]);
 
+    // A failed move puts the redirect addresses of the card back as they were (K-1128).
+    const kept = await admin(`/api/cards/${card.id}/redirects`, "POST", { address: "kept.example.com" });
+    expect(kept.status, JSON.stringify(kept.body)).toBe(200);
+    cloudflare.state.failDomains = 1000;
+    let failed = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && failed.status === 503; attempt++)
+      failed = await agentStep("move-key.access", "/agent/cards/moving/address", { address: "third" });
+    expect(failed.status).not.toBe(200);
+    cloudflare.state.failDomains = 0;
+    expect((await admin("/api/state", "GET")).body["redirects"]).toEqual({ [card.id]: ["kept.example.com"] });
+
     // Removed, the site lets its old address go; another site takes it, and the Undo of the removal then refuses.
     const removed = await admin(`/api/apps/${card.id}`, "DELETE");
     expect(removed.status, JSON.stringify(removed.body)).toBe(200);
@@ -1480,6 +1491,13 @@ describe("redirect addresses (K-1128)", () => {
     const add = (address: string) => admin(`/api/cards/${app.card}/redirects`, "POST", { address });
 
     expect((await add("kit.example.com")).status).toBe(400);
+    // A row of another card holds its hostname, also one that oldAddresses() skips.
+    await runInDurableObject(durable, (_instance, storage) =>
+      storage.storage.sql.exec(
+        "INSERT INTO old_addresses (address, card_id, attached, going) VALUES ('held.example.com', 'gone', 1, 1)",
+      ),
+    );
+    expect((await add("held.example.com")).status).toBe(409);
     const added = await add("alias.example.com");
     expect(added.body, JSON.stringify(added.body)).toMatchObject({
       address: "alias.example.com",

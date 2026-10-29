@@ -108,6 +108,7 @@ describe("app removal (K-909)", () => {
       resources: new Map([...s.resources, { ...compose, status: "stopped" as const }].map((r) => [r.id, r])),
       places: new Map(),
       shareSettings: new Map(),
+      ends: new Map(),
       stacks: new Map(),
       paused: null,
       machines: new Map(),

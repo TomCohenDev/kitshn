@@ -85,6 +85,7 @@ export const ShareSetting = Schema.Struct({ level: Schema.NullOr(Level), endsAt:
 export const Edit_ = Schema.Union([
   Schema.TaggedStruct("circle", { id: Schema.String, after: Schema.NullOr(Circle) }),
   Schema.TaggedStruct("place", { id: Schema.String, after: Schema.NullOr(Point) }),
+  Schema.TaggedStruct("cardEnd", { id: Schema.String, after: Schema.NullOr(Time) }),
   Schema.TaggedStruct("shareSetting", {
     resourceId: Schema.String,
     circleId: Schema.String,

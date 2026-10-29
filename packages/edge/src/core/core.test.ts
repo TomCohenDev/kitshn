@@ -76,6 +76,7 @@ function start(): State {
     resources: new Map([...s.resources, site].map((resource) => [resource.id, resource])),
     places: new Map([...s.places, ["riffle", { x: 0, y: -200 }]]),
     shareSettings: new Map(),
+    ends: new Map(),
     stacks: new Map(),
     paused: null,
     machines: new Map(),
@@ -193,6 +194,45 @@ describe("admin guard (K-105)", () => {
 });
 
 describe("changes and undo (K-1501, K-1502)", () => {
+  it("keeps a passed end time unless the same Undo puts the card back on the map (K-209, K-212)", () => {
+    const share = shareKey("riffle", "her");
+    // At 10:00 the owner sets an end at 11:00 and extends it to 12:00 at 10:30; the Undo comes at 11:15.
+    const extended = { ...start(), ends: new Map([["riffle", 12]]) };
+    const extension: Array<Change> = [{ _tag: "cardEnd", id: "riffle", before: 11, after: 12 }];
+    expect(prepareUndo(extended, extension, 11.25)).toEqual([
+      { _tag: "cardEnd", id: "riffle", before: 12, after: 11 },
+    ]);
+    const sharedLonger = { ...start(), shareSettings: new Map([[share, { level: null, endsAt: 12 }]]) };
+    const shareExtension: Array<Change> = [
+      {
+        _tag: "shareSetting",
+        id: share,
+        before: { level: null, endsAt: 11 },
+        after: { level: null, endsAt: 12 },
+      },
+    ];
+    expect(prepareUndo(sharedLonger, shareExtension, 11.25)).toEqual([
+      {
+        _tag: "shareSetting",
+        id: share,
+        before: { level: null, endsAt: 12 },
+        after: { level: null, endsAt: 11 },
+      },
+    ]);
+    // The Undo of the expiry gives the place back, so the passed end goes and the shares stay.
+    const ended = { ...start(), places: new Map([...start().places].filter(([id]) => id !== "riffle")) };
+    const expiry: Array<Change> = [
+      { _tag: "place", id: "riffle", before: { x: 0, y: -200 }, after: null },
+      { _tag: "cardEnd", id: "riffle", before: 11, after: null },
+    ];
+    expect(prepareUndo(ended, expiry, 11.25)).toContainEqual({
+      _tag: "cardEnd",
+      id: "riffle",
+      before: null,
+      after: null,
+    });
+  });
+
   it("drops edits that change nothing", () => {
     const state = start();
     expect(resolveEdits(state, [{ _tag: "place", id: "riffle", after: { x: 0, y: -200 } }])).toEqual([]);
@@ -646,6 +686,10 @@ describe("pause (K-1504)", () => {
     expect(access.apps.get("app:kitshn-admin:kit.example.com")?.policyKeys).toEqual(["policy:owner:people"]);
     const owner = { email: OWNER, clientId: null, ip: null };
     expect(visitorLevel(after, after.resources.get("riffle")!, owner, 0)).toBeNull();
+    // K-212: a card end stops its shares at that time, before the alarm moves the card.
+    const timed = { ...state, ends: new Map([["riffle", 10]]) };
+    expect(visitorLevel(timed, timed.resources.get("riffle")!, owner, 9)).not.toBeNull();
+    expect(visitorLevel(timed, timed.resources.get("riffle")!, owner, 10)).toBeNull();
     expect(visitorLevel(after, after.resources.get(ADMIN_RESOURCE_ID)!, owner, 0)).toBe("control");
   });
 
@@ -922,6 +966,18 @@ describe("emergency pause (K-1504)", () => {
     expect(() => refuseRaiseWhilePaused(ending, { ...ending, shareSettings: new Map() })).toThrow(
       /end later/,
     );
+    // K-212: a card end that goes or moves later raises access; an earlier one lowers it.
+    const timed = { ...paused, ends: new Map([["riffle", 5]]) };
+    expect(() => refuseRaiseWhilePaused(timed, { ...timed, ends: new Map() })).toThrow(/end later/);
+    expect(() => refuseRaiseWhilePaused(timed, { ...timed, ends: new Map([["riffle", 2]]) })).not.toThrow();
+    // The expiry and End now take the end away with the card, to the tray, so they work during a pause.
+    const placed = { ...timed, places: new Map(timed.places).set("riffle", { x: 0, y: -200 }) };
+    const tray = {
+      ...placed,
+      ends: new Map(),
+      places: new Map([...placed.places].filter(([id]) => id !== "riffle")),
+    };
+    expect(() => refuseRaiseWhilePaused(placed, tray)).not.toThrow();
     // K-718: an agent right that turns on raises access; one that turns off lowers it.
     const device = { _tag: "device" as const, tokenId: "t", clientId: "c", name: "Bot" };
     const withDevice = (member: typeof device & { publishes?: true }) => ({
@@ -1175,17 +1231,19 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
       [A, [herAs({ level: "view" })]],
       [B, [place("riffle", 400, 0)]],
     ]);
-    expect(undoAnswer(state, revisions, A, { item: { kind: "card", id: "box" } })).toEqual({ allowed: true });
-    expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: "her" } })).toEqual({
+    expect(undoAnswer(state, revisions, A, { item: { kind: "card", id: "box" } }, 0)).toEqual({
+      allowed: true,
+    });
+    expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: "her" } }, 0)).toEqual({
       allowed: false,
       reason:
         '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
     });
-    expect(undoAnswer(state, revisions, B, { item: { kind: "card", id: "box" } })).toEqual({
+    expect(undoAnswer(state, revisions, B, { item: { kind: "card", id: "box" } }, 0)).toEqual({
       allowed: false,
       reason: "You have no change to this item left to undo.",
     });
-    expect(undoAnswer(state, revisions, A, { revision: 2 })).toEqual({
+    expect(undoAnswer(state, revisions, A, { revision: 2 }, 0)).toEqual({
       allowed: false,
       reason:
         '#3 "step 3" changed the same cards or circles later, so this undo no longer fits. Change it by hand.',
@@ -1199,8 +1257,8 @@ describe("undo that follows intent (K-1505 to K-1507)", () => {
     ]);
     const reason =
       "This undo would make riffle public in Everyone. An undo never does that without asking; share it by hand.";
-    expect(() => prepareUndo(state, revisions[0]!.changes)).toThrow(reason);
-    expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: EVERYONE_CIRCLE_ID } })).toEqual({
+    expect(() => prepareUndo(state, revisions[0]!.changes, 0)).toThrow(reason);
+    expect(undoAnswer(state, revisions, A, { item: { kind: "circle", id: EVERYONE_CIRCLE_ID } }, 0)).toEqual({
       allowed: false,
       reason,
     });

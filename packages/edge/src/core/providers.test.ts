@@ -54,6 +54,7 @@ function state(circles: ReadonlyArray<Circle>, extra: Partial<State> = {}): Stat
     resources: cards,
     places: new Map([...cards.keys()].map((id) => [id, { x: 0, y: 0 }])),
     shareSettings: new Map(),
+    ends: new Map(),
     stacks: new Map(),
     paused: null,
     machines: new Map([[machine.id, machine]]),

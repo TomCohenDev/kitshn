@@ -41,6 +41,7 @@ describe("repo groups (K-1733, K-1760)", () => {
       resources: new Map([[group.id, group]]),
       places: new Map(),
       shareSettings: new Map(),
+      ends: new Map(),
       stacks: new Map(),
       paused: null,
       machines: new Map(),

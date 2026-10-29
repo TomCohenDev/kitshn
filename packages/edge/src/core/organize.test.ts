@@ -77,6 +77,7 @@ function world(): State {
     resources: new Map(resources.map((resource) => [resource.id, resource])),
     places: new Map(Object.entries(places)),
     shareSettings: new Map(),
+    ends: new Map(),
     stacks: new Map([["s", { id: "s", name: "Notes", members: ["s1", "s2"] }]]),
     paused: null,
     machines: new Map(),

@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { type AssetSession, uploadAssets } from "./assets.ts";
 import { CliError, fail } from "./cli-error.ts";
-import { type DeployRun, type LogAnswer, logArgs, logLineText, logRange } from "./logs.ts";
+import { type DeployRun, type LogAnswer, logArgs, logLineText, logRange, sinceMs } from "./logs.ts";
 import { contentType } from "./media.ts";
 import { cardOutput, errorOutput } from "./output.ts";
 import { type HandoverAnswer, repoFiles } from "./repo-files.ts";
@@ -54,7 +54,7 @@ export function keyTransport(server: string): AgentTransport {
   };
 }
 
-export const AGENT_COMMANDS = ["publish", "address", "logs", "repo", "redirect"] as const;
+export const AGENT_COMMANDS = ["publish", "address", "logs", "repo", "redirect", "time"] as const;
 export type AgentCommand = (typeof AGENT_COMMANDS)[number];
 export const isAgentCommand = (value: unknown): value is AgentCommand =>
   typeof value === "string" && (AGENT_COMMANDS as ReadonlyArray<string>).includes(value);
@@ -69,7 +69,10 @@ kitshn logs <card> [text] [--since 1h | --from <time> [--to <time>]] [--deploys]
 kitshn repo <card> [<folder|file>] --repo <owner/name>
                                              make a new repo of a page or a folder site with gh (K-1127)
 kitshn redirect <card> <address> [--remove] [--json]
-                                             a hostname that only sends visitors on to a site card (K-1128)`;
+                                             a hostname that only sends visitors on to a site card (K-1128)
+kitshn time <card> <30m|1h|4h|1d|stop|now> [--json]
+                                             a card leaves every circle for the tray after this time (K-212);
+                                             stop keeps it until someone moves it, now ends it at once`;
 
 /** K-1809: with `--json`, stdout holds only the result object; progress and notes go to stderr. */
 let json = false;
@@ -314,6 +317,32 @@ async function makeRepo(t: AgentTransport, card: string, path: string, repo: str
 }
 
 /** K-1128: adds a hostname that only sends visitors on to a site card, or with `remove` takes it away again. */
+/** K-212: `30m`, `1h`, `4h` or `1d` from now, `stop` for no end, or `now`; undefined for any other word. */
+export function timeBody(word: string, now: number): { endsAt: number | null } | { now: true } | undefined {
+  if (word === "now") return { now: true };
+  if (word === "stop") return { endsAt: null };
+  const after = sinceMs(word);
+  return after === null ? undefined : { endsAt: now + after };
+}
+
+async function cardTime(t: AgentTransport, card: string, word: string) {
+  const body =
+    timeBody(word, Date.now()) ?? fail(`kitshn time takes 30m, 1h, 4h, 1d, stop or now, not "${word}".`);
+  const data = await agentCall<{ revision: number | null; endsAt: number | null }>(
+    t,
+    `/agent/cards/${encodeURIComponent(card)}/time`,
+    body,
+  );
+  if (json) return void process.stdout.write(`${JSON.stringify({ card, ...data })}\n`);
+  console.log(
+    data.endsAt === null
+      ? word === "now"
+        ? `kitshn: ${card} is in the tray now, out of every circle.`
+        : `kitshn: ${card} stays until someone moves it.`
+      : `kitshn: ${card} moves to the tray at ${new Date(data.endsAt).toISOString()}.`,
+  );
+}
+
 async function redirect(t: AgentTransport, card: string, address: string, remove: boolean) {
   const path = `/agent/cards/${encodeURIComponent(card)}/redirects`;
   const response = await t.call(remove ? `${path}/${encodeURIComponent(address)}` : path, {
@@ -395,6 +424,12 @@ export async function runAgentCommand(
       if (!card || !address)
         fail("name the site card and the hostname: kitshn redirect <card> <address> [--remove].");
       await redirect(t, card ?? "", address ?? "", args.includes("--remove"));
+    } else if (command === "time") {
+      const [card, word] = args.filter(
+        (arg, index) => !arg.startsWith("--") && args[index - 1] !== "--server",
+      );
+      if (!card || !word) usage("name the card and the time: kitshn time <card> <30m|1h|4h|1d|stop|now>.");
+      await cardTime(t, card ?? "", word ?? "");
     } else if (command === "address") {
       const [card, name] = args.filter(
         (arg, index) => !arg.startsWith("--") && args[index - 1] !== "--server",

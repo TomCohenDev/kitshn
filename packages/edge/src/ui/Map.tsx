@@ -20,7 +20,7 @@ import { AGENT_TIP, LEVEL_TIPS, MATCH_TIPS, MEMBER_HELP, PASSKEY_TIP, RightStick
 import { MachineRightStickers } from "./MachineRights.tsx";
 import { type KindInfo, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS, kindInfo } from "./kinds.ts";
 import { KeySticker, PresenceSticker } from "./Machines.tsx";
-import type { MenuTarget } from "./actions.ts";
+import { type MenuTarget, untilText } from "./actions.ts";
 import type { DrawnWire } from "../core/organize.ts";
 import { USER_STACK, headAngle, stacksOf } from "../core/place.ts";
 import { MoreButton } from "./controls.tsx";
@@ -1043,6 +1043,7 @@ export function CardView(props: {
   onClose: () => void;
 }) {
   const { resource, state } = props;
+  const endsAt = state.ends.get(resource.id);
   // K-520: the selected card offers its preview on its kind sticker, unless a live preview already shows.
   const peek = usePeek(
     props.selected && props.peek && peekable(resource) && !(props.preview && resource.addresses[0]),
@@ -1111,6 +1112,14 @@ export function CardView(props: {
         {resource.name}
       </div>
       <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
+      {endsAt !== undefined ? (
+        <div
+          class="sub ends"
+          data-tip={`K-212: at this time ${resource.name} moves to the tray, out of every circle. Its menu extends it, makes it permanent or ends it now.`}
+        >
+          ⏱ {untilText(endsAt)}
+        </div>
+      ) : null}
       <div class="foot">
         <KindSticker resource={resource} peek={peek} />
         {props.pullRequest !== null ? (

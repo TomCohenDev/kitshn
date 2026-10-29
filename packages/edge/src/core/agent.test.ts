@@ -72,6 +72,7 @@ function start(): State {
     resources: new Map([...s.resources, site, { ...site, id: "nas", name: "nas" }].map((r) => [r.id, r])),
     places: new Map([...s.places, ["site", { x: 0, y: 1000 }], ["nas", { x: 2400, y: 1000 }]]),
     shareSettings: new Map(),
+    ends: new Map(),
     stacks: new Map(),
     paused: null,
     machines: new Map(),
@@ -181,6 +182,7 @@ describe("agent keys (K-718)", () => {
       resources: new Map(base.resources).set("other", other),
       places: new Map(base.places).set("other", { x: 0, y: 1000 }),
       shareSettings: new Map([["other/agents", { level: "view", endsAt: null }]]),
+      ends: new Map(),
       stacks: new Map([["s1", { id: "s1", name: "pair", members: ["site", "other"] }]]),
     };
     expect(check(state, [{ _tag: "place", id: "site", after: { x: 600, y: 1000 } }])).toMatch(/other/);

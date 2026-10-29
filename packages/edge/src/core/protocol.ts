@@ -91,6 +91,8 @@ export interface Snapshot {
   readonly resources: ReadonlyArray<Resource>;
   readonly places: Readonly<Record<string, Point>>;
   readonly shareSettings: Readonly<Record<string, ShareSetting>>;
+  /** K-212: the end time of each timed card. */
+  readonly ends: Readonly<Record<string, number>>;
   readonly stacks: ReadonlyArray<Stack>;
   readonly revisions: ReadonlyArray<RevisionView>;
   readonly access: Readonly<Record<string, AccessState>>;

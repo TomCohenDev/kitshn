@@ -258,6 +258,9 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     // "Forget provider": until the daemon drops it, kitshn ignores its offline reports and tells the daemon again.
     "CREATE TABLE forgotten_providers (machine_id TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (machine_id, name))",
   ],
+  // 36: the end time of each timed card (K-212), in milliseconds, and who set it as a JSON actor: the end runs as
+  // that actor, so its Undo works (K-1506). Null when an undo brought the time back.
+  ["CREATE TABLE card_ends (id TEXT PRIMARY KEY, ends_at INTEGER NOT NULL, set_by TEXT)"],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

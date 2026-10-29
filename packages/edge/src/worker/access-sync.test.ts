@@ -1399,13 +1399,18 @@ describe("the approve applications (K-1723)", () => {
     expect(desired.apps.has("app:approve:login")).toBe(false);
     // No machine: no approve application.
     expect(desiredAccess(state, 0).apps.has("app:approve:passkey")).toBe(false);
-    // K-1776: a machine with no explicit ask still asks the Owner for each unset right.
-    const automatic = {
-      ...agents,
-      members: [{ ...agents.members[0]!, rights: { deploys: { mode: "automatic" as const } } }],
+    // K-1776: a joined machine in the tray, in no circle, asks the Owner for each unset right.
+    const tray = {
+      id: "vps",
+      name: "vps",
+      labels: [],
+      order: 0,
+      serviceTokenId: "t",
+      clientId: "c",
+      tunnelId: "u",
     };
-    const defaults = desiredAccess({ ...state, circles: new Map(state.circles).set("agents", automatic) }, 0);
-    expect(defaults.apps.get("app:approve:passkey")).toMatchObject({
+    const joined = desiredAccess({ ...state, machines: new Map([["vps", tray]]) }, 0);
+    expect(joined.apps.get("app:approve:passkey")).toMatchObject({
       policyKeys: ["policy:approve-passkey:owner"],
     });
   });

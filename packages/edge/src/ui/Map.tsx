@@ -25,7 +25,7 @@ import { parseSiteInput } from "../core/sites.ts";
 import { openToAll } from "../core/library.ts";
 import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
-import { CircleChips, ReachLayer, ShareChips } from "./Reach.tsx";
+import { CircleChips, ReachLayer, ShareChips, useShareClock } from "./Reach.tsx";
 import { reachOf } from "../core/reach.ts";
 import { FRAMED_KINDS, peekable } from "./frames.ts";
 import { CardPreview, type FramePhase, KindSticker, PeekFrame, usePeek } from "./Peek.tsx";
@@ -249,6 +249,7 @@ export function MapView(props: Props) {
   const previewed = useRef<ReadonlySet<string>>(new Set());
 
   const shown = draft?.state ?? state;
+  const now = useShareClock(state);
   // A head slides along its circle off the cards (layout.ts). It follows the stored map, not a drag in flight,
   // so a head never jumps while a card passes it.
   const headAngles = useMemo(() => {
@@ -641,7 +642,7 @@ export function MapView(props: Props) {
   const draggedIds = drag?.type === "cards" && drag.moved ? new Set(drag.origins.keys()) : new Set<string>();
   // K-537: the lens follows the stored map, so a drag only moves its lines.
   const lens = props.selection.cards.size === 1 && !zoomedOut ? [...props.selection.cards][0] : undefined;
-  const lensLines = useMemo(() => (lens ? reachOf(state, lens, Date.now()) : []), [state, lens]);
+  const lensLines = useMemo(() => (lens ? reachOf(state, lens, now) : []), [state, lens, now]);
   const lit = lens
     ? new Set([
         lens,
@@ -868,6 +869,7 @@ export function MapView(props: Props) {
               preview={previewIds.has(resource.id)}
               peek={props.peek && props.selection.cards.size === 1}
               zone={props.zone}
+              now={now}
               onMenu={(anchor) => props.onMenu({ target: { _tag: "card", id: resource.id }, anchor })}
               onClose={() => stack && props.onToggleStack(stack[0])}
             />
@@ -1074,6 +1076,8 @@ export function CardView(props: {
   /** K-520: the selected card offers its preview on its kind sticker; a phone has it in the card sheet instead. */
   peek: boolean;
   zone: string;
+  /** The time that the share chips are drawn for (`useShareClock`). */
+  now: number;
   onMenu: (anchor: Rect) => void;
   onClose: () => void;
 }) {
@@ -1178,7 +1182,7 @@ export function CardView(props: {
         {props.machine ? <QueuedSticker view={props.machine} /> : null}
         <MoreButton name={resource.name} onOpen={props.onMenu} />
       </div>
-      <ShareChips state={state} resource={resource} />
+      <ShareChips state={state} resource={resource} now={props.now} />
       {props.preview && resource.addresses[0] ? (
         <CardPreview
           resource={resource}

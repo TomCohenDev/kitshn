@@ -1,25 +1,49 @@
+import { useEffect, useMemo, useState } from "preact/hooks";
 import {
   type Circle,
   type Level,
   type Point,
   type Resource,
   type State,
+  activeShares,
   levelRank,
   shareKey,
-  sharesOf,
 } from "../core/model.ts";
 import { type Box, cardBox } from "../core/place.ts";
-import { type Capability, type ReachLine, capabilitiesOf } from "../core/reach.ts";
+import { type Capability, type ReachLine, capabilitiesOf, nextEnd, reachOf } from "../core/reach.ts";
 import { LEVEL_TIPS } from "./Circle.tsx";
 import { LEVEL_COLORS, LEVEL_LINES } from "./kinds.ts";
 
 /** K-507: a card shows this many share chips, then "+N". */
 const SHOWN_CHIPS = 2;
 
-/** K-507: one chip per circle that shares the card, highest level first, at most two and "+N". */
-export function ShareChips(props: { readonly state: State; readonly resource: Resource }) {
+/**
+ * The time that shares are drawn for. It moves on at each next end of a share, so a line or a chip goes at its end,
+ * not only when the expiry revision lands. One timer, and no repaint between ends.
+ */
+export function useShareClock(state: State): number {
+  const [now, setNow] = useState(Date.now);
+  const end = nextEnd(state, now);
+  // A timer to the next share end, outside React.
+  useEffect(() => {
+    if (end === null) return;
+    // setTimeout holds at most 2^31 - 1 ms; a later end sets a new timer when this one fires.
+    const timer = setTimeout(() => setNow(Date.now()), Math.min(end - Date.now(), 2 ** 31 - 1));
+    return () => clearTimeout(timer);
+  }, [end]);
+  return now;
+}
+
+/** K-507: one chip per circle that shares the card now, highest level first, at most two and "+N". */
+export function ShareChips(props: {
+  readonly state: State;
+  readonly resource: Resource;
+  readonly now: number;
+}) {
   const { state, resource } = props;
-  const shares = sharesOf(state, resource).sort((a, b) => levelRank(b.level) - levelRank(a.level));
+  const shares = activeShares(state, resource, props.now).sort(
+    (a, b) => levelRank(b.level) - levelRank(a.level),
+  );
   if (shares.length === 0) return null;
   const rest = shares.slice(SHOWN_CHIPS);
   return (
@@ -230,15 +254,13 @@ const endName = (state: State, line: ReachLine, end: "from" | "to") =>
       : (state.resources.get(line.from.id)?.name ?? line.from.id);
 
 /** K-537: the lens as a list in the card panel, for a phone and the keyboard. */
-export function ReachList(props: {
-  readonly state: State;
-  readonly selected: string;
-  readonly lines: ReadonlyArray<ReachLine>;
-}) {
+export function ReachList(props: { readonly state: State; readonly selected: string }) {
   const { state } = props;
-  if (props.lines.length === 0) return null;
-  const incoming = props.lines.filter((line) => line.to === props.selected);
-  const outgoing = props.lines.filter((line) => line.to !== props.selected);
+  const now = useShareClock(state);
+  const lines = useMemo(() => reachOf(state, props.selected, now), [state, props.selected, now]);
+  if (lines.length === 0) return null;
+  const incoming = lines.filter((line) => line.to === props.selected);
+  const outgoing = lines.filter((line) => line.to !== props.selected);
   const row = (line: ReachLine, end: "from" | "to") => {
     const target = state.resources.get(line.to);
     const capabilities = line.level && target ? capabilitiesOf(target, line.level) : [];

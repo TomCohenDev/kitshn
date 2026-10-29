@@ -90,6 +90,32 @@ describe("reach of the relationship lens (K-537)", () => {
     expect(summary({ ...state, paused: "keep-public" }, "vps")).toEqual(["vps>riffle - runs"]);
   });
 
+  it("draws no head line for a circle that Access gives no policy, and counts every member of an all-match circle", () => {
+    const state = start();
+    // The reviewer's case: all must match a machine and a person, which no single visitor does.
+    const strict = circle("strict", 1000, "view", [
+      { _tag: "machine", machineId: "vps" },
+      { _tag: "email", email: "her@example.com" },
+    ]);
+    const her = { ...state.circles.get("her")!, x: 5000 };
+    const mixed = {
+      ...state,
+      circles: new Map([...state.circles, ["her", her], ["strict", { ...strict, match: "all" as const }]]),
+    };
+    expect(summary(mixed, "riffle")).toEqual(["vps>riffle - runs"]);
+    const network = circle("network", 1000, "view", [
+      { _tag: "domain", domain: "example.com" },
+      { _tag: "ip", range: "10.0.0.0/8" },
+    ]);
+    const both = {
+      ...state,
+      circles: new Map([...state.circles, ["her", her], ["network", { ...network, match: "all" as const }]]),
+    };
+    expect(reachOf(both, "riffle", 0)).toContainEqual(
+      expect.objectContaining({ from: { _tag: "circle", id: "network" }, members: 2 }),
+    );
+  });
+
   it("draws no machine line for a level that only a public circle gives", () => {
     const state = start();
     const everyone = circle("everyone", 1000, "view", [{ _tag: "everyone" }]);

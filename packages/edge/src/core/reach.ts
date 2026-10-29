@@ -1,3 +1,4 @@
+import { circlePolicies } from "./access.ts";
 import { type Level, type Resource, type State, activeShares, isPublicCircle } from "./model.ts";
 import { type Visitor, circleMatches, visitorLevel } from "./visitor.ts";
 
@@ -57,9 +58,16 @@ export function reachOf(state: State, cardId: string, now: number): Array<ReachL
     reached({ _tag: "card", id: machine.id }, card, machineVisitor(machine.clientId));
   const placed = new Set(placedMachines.map((machine) => machine.id));
   for (const share of activeShares(state, card, now)) {
-    const others = share.circle.members.filter(
-      (member) => member._tag !== "machine" || (member.machineId !== cardId && !placed.has(member.machineId)),
-    );
+    // K-402: a circle that Access makes no policy for, such as "all must match" a machine and a person, lets no one in.
+    if (circlePolicies(share.circle, state.machines).size === 0) continue;
+    // K-203: "all must match" members get in only together, so the line stands for all of them.
+    const others =
+      share.circle.match === "all"
+        ? share.circle.members
+        : share.circle.members.filter(
+            (member) =>
+              member._tag !== "machine" || (member.machineId !== cardId && !placed.has(member.machineId)),
+          );
     if (others.length === 0) continue;
     add({
       from: { _tag: "circle", id: share.circle.id },
@@ -104,4 +112,17 @@ export function capabilitiesOf(
   // K-614: a shell command needs `control` on the machine.
   if (resource.kind === "machine") return level === "control" ? ["exec"] : [];
   return resource.addresses.length > 0 ? ["open"] : [];
+}
+
+/**
+ * The next time after `now` that a share ends: a circle end (K-201), a share end (K-209) or a card end (K-212). The
+ * map draws shares again then, because the expiry revision can come later than the end.
+ */
+export function nextEnd(state: State, now: number): number | null {
+  const ends = [
+    ...[...state.circles.values()].map((circle) => circle.endsAt),
+    ...[...state.shareSettings.values()].map((setting) => setting.endsAt),
+    ...state.ends.values(),
+  ].filter((end): end is number => end !== null && end > now);
+  return ends.length > 0 ? Math.min(...ends) : null;
 }

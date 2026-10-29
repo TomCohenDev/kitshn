@@ -665,11 +665,11 @@ input[type="search"]::-webkit-search-cancel-button {
   color: var(--ink);
   background: var(--surface);
   border: var(--bw) solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius);
   box-shadow: 2px 2px 0 0 var(--shadow-ink);
 }
 .lens-pill .lv {
-  border-radius: 999px;
+  border-radius: 4px;
 }
 .lens-pill .who {
   color: var(--muted);

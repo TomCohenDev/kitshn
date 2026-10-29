@@ -262,6 +262,8 @@ export type ServerToDaemon =
   | { readonly type: "accepted"; readonly fingerprint: string }
   /** K-1705: "Rotate key" in the machine panel. */
   | { readonly type: "rotateKey" }
+  /** K-704: the owner forgot this provider on the map; the daemon drops it unless a connection holds it. */
+  | { readonly type: "forgetProvider"; readonly provider: string }
   /** K-706: the grant table of each resource of one provider, on connect and on each change. */
   | { readonly type: "grants"; readonly provider: string; readonly tables: GrantTables }
   /** K-1762: the daemon drops its kept GitHub tokens of one repo, or all with null, because kitshn revoked them. */

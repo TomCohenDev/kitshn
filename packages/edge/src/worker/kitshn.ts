@@ -3217,6 +3217,16 @@ export class Kitshn extends DurableObject<Env> {
       console.warn(`kitshn refused the providers of ${machine.name}: ${String(error)}`);
       return;
     }
+    // K-704: a forgotten provider that the daemon still reports offline stays forgotten; one that runs is back.
+    const forgotten = new Set(
+      this.sql<{ name: string }>("SELECT name FROM forgotten_providers WHERE machine_id = ?", machine.id).map(
+        (row) => row.name,
+      ),
+    );
+    for (const name of forgotten)
+      if (!reports.some((report) => report.name === name && !report.online))
+        this.sql("DELETE FROM forgotten_providers WHERE machine_id = ? AND name = ?", machine.id, name);
+    reports = reports.filter((report) => !(forgotten.has(report.name) && !report.online));
     const valid = reports.filter((report) => {
       const problem = reportProblem(
         report,
@@ -3909,6 +3919,7 @@ export class Kitshn extends DurableObject<Env> {
       for (const key of this.sentGrants.keys())
         if (key.startsWith(`${machine.id}/`)) this.sentGrants.delete(key);
       this.pushGrants();
+      this.sendForgotten(machine.id);
     }
     if (this.presence.get(machine.id)?.online) this.sendMachine(machine);
     else this.setPresence(machine.id, true);
@@ -4567,7 +4578,16 @@ export class Kitshn extends DurableObject<Env> {
         null,
       );
       // Undo brings the cards back offline; the provider's next report brings its commands back.
-      if (card === null) this.sql("DELETE FROM providers WHERE machine_id = ? AND name = ?", machineId, name);
+      if (card === null) {
+        this.sql("DELETE FROM providers WHERE machine_id = ? AND name = ?", machineId, name);
+        // The daemon keeps the provider in providers.json; it hears of the forget now, or on its next connection.
+        this.sql(
+          "INSERT OR REPLACE INTO forgotten_providers (machine_id, name) VALUES (?, ?)",
+          machineId,
+          name,
+        );
+        this.sendForgotten(machineId);
+      }
       this.load();
       this.broadcast();
       void this.scheduleAlarm();
@@ -4576,6 +4596,20 @@ export class Kitshn extends DurableObject<Env> {
       if (error instanceof RuleError) return Response.json({ error: error.message }, { status: 409 });
       throw error;
     }
+  }
+
+  /** K-704: tells a signed connection of the machine about each provider that the owner forgot. */
+  private sendForgotten(machineId: string) {
+    const socket = this.ctx.getWebSockets(machineId).find((item) => {
+      const attachment = attachmentOf(item);
+      return attachment?.kind === "machine" && attachment.check === "signed";
+    });
+    if (!socket) return;
+    for (const { name } of this.sql<{ name: string }>(
+      "SELECT name FROM forgotten_providers WHERE machine_id = ?",
+      machineId,
+    ))
+      send(socket, { type: "forgetProvider", provider: name } satisfies ServerToDaemon);
   }
 
   /** K-614: the sender of a command needs control on the machine card itself, not only on the admin. */

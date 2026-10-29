@@ -2057,6 +2057,13 @@ function connect(config: JoinSecrets) {
           const emit = connection === null ? undefined : providerEmitters.get(connection);
           emit?.({ type: "grants", provider: message.provider, tables: message.tables });
         }
+      } else if (message.type === "forgetProvider") {
+        // K-704: a provider that a connection holds runs, so the forget does not apply to it.
+        if (
+          registry().connectionOf(message.provider) === null &&
+          registry().forget(message.provider) === null
+        )
+          sendProviders();
       } else if (message.type === "dropTokens") {
         keptTokens.drop(message.repo);
       } else if (message.type === "logs") {

@@ -176,10 +176,9 @@ it("keeps an address that another card holds, or a name of kitshn, off a provide
   expect(await card()).toBeUndefined();
 });
 
-// One test for the HTTP routes: a second HTTP test in this file waits for the Durable Object until its timeout.
-it("queues only a command that the card's provider has, and forgets only a provider that does not run (K-704, K-707)", async () => {
+it("queues only a command that the card's provider has (K-707)", async () => {
   stubAccessCerts();
-  const { message, card, lastSummary } = await setup();
+  const { message } = await setup();
   await message("signed", [report([app])]);
   const token = await accessToken("admin-aud", { email: "owner@example.com" });
   const job = (command: object) =>
@@ -210,8 +209,13 @@ it("queues only a command that the card's provider has, and forgets only a provi
   expect((await job({ kind: "provider", provider: "t3", command: "restart", resource: appId })).status).toBe(
     409,
   );
+});
 
-  // K-704: Forget provider, with one revision.
+it("forgets only a provider that does not run, and an offline report does not bring it back (K-704, K-705)", async () => {
+  stubAccessCerts();
+  const { message, card, lastSummary } = await setup();
+  await message("signed", [report([app])]);
+  const token = await accessToken("admin-aud", { email: "owner@example.com" });
   const forget = (card: string | null = null) =>
     send("/api/machines/vps/providers/t3/forget", {
       method: "POST",
@@ -231,4 +235,10 @@ it("queues only a command that the card's provider has, and forgets only a provi
   expect((await forget()).status).toBe(200);
   expect(await card()).toBeUndefined();
   expect(await lastSummary()).toBe("Forgot 1 card of the provider t3 (K-704)");
+  // The daemon reports the provider from providers.json until it hears of the forget; that report brings nothing back.
+  await message("signed", [report([app], false)]);
+  expect(await card()).toBeUndefined();
+  // A provider that registers again runs, so its cards come back as new cards.
+  await message("signed", [report([app])]);
+  expect(await card()).toBeDefined();
 });

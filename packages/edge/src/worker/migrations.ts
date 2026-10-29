@@ -255,6 +255,8 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
   // cards are rows of `resources`.
   [
     "CREATE TABLE providers (machine_id TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (machine_id, name))",
+    // "Forget provider": until the daemon drops it, kitshn ignores its offline reports and tells the daemon again.
+    "CREATE TABLE forgotten_providers (machine_id TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (machine_id, name))",
   ],
 ];
 

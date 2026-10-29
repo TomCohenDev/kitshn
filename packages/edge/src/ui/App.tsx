@@ -347,6 +347,7 @@ export function App() {
   const previewCards = useMemo(() => new Set(store.snapshot?.previewCards ?? []), [store.snapshot]);
   const pullRequests = store.snapshot?.pullRequests ?? {};
   const previousVersions = useMemo(() => new Set(store.snapshot?.previousVersions ?? []), [store.snapshot]);
+  const handoverCards = useMemo(() => new Set(store.snapshot?.handoverCards ?? []), [store.snapshot]);
 
   /**
    * K-523, K-1507: the item whose per-item undo the open menu shows, or for the palette the selected card or
@@ -1266,6 +1267,18 @@ export function App() {
     },
     openAddress: (address) => void open(`https://${address}`, "_blank", "noreferrer"),
     copyAddress: (address) => void navigator.clipboard.writeText(`https://${address}`),
+    copyRepoCommand: (resource) =>
+      void navigator.clipboard
+        .writeText(
+          `kitshn repo ${resource.id}${resource.kind === "page" ? "" : " <folder>"} --repo <owner>/<name>`,
+        )
+        .then(() =>
+          showToast({
+            text: `Copied the kitshn repo command of ${resource.name}. An agent key runs it where gh is logged in.`,
+            error: false,
+            undo: null,
+          }),
+        ),
     reshare: (resource, circle, share, part) => void reshare(resource, circle, share, part),
     setLevel: (resource, circle, level) =>
       void applyEdits([levelEdit(state, resource, circle, level)]).then(
@@ -1323,6 +1336,7 @@ export function App() {
     undoCheck,
     selected: selection.cards,
     previousVersions,
+    handoverCards,
   };
 
   const waitingRepos = store.snapshot?.repos.filter(awaitsAllow).length ?? 0;
@@ -1425,7 +1439,7 @@ export function App() {
           ) : shownPanel === "machines" ? (
             <MachinesView machines={store.snapshot.machines} onAdd={() => setAddingMachine(true)} />
           ) : shownPanel === "usage" ? (
-            <UsageView machines={store.snapshot.machines} />
+            <UsageView machines={store.snapshot.machines} r2Bucket={store.snapshot.r2Bucket} />
           ) : shownPanel === "notifications" ? (
             <NotificationsView
               state={state}
@@ -1467,6 +1481,7 @@ export function App() {
               onLogs={setLogs}
               backups={store.snapshot.backups}
               r2Bucket={store.snapshot.r2Bucket}
+              backupsOff={store.snapshot.backupsOff}
               onBackUpNow={(resource) => void backUpNow(resource)}
               onBackups={setBackupsCard}
               orphanWorkers={store.snapshot.orphanWorkers}
@@ -2001,6 +2016,8 @@ function Panel(props: {
   onLogs: (resource: Resource) => void;
   backups: Readonly<Record<string, BackupRun>>;
   r2Bucket: BucketSize | null;
+  /** K-1815: no backup key, so backups are off. */
+  backupsOff: boolean;
   onBackUpNow: (resource: Resource) => void;
   onBackups: (resource: Resource) => void;
   orphanWorkers: ReadonlyArray<OrphanWorker>;
@@ -2074,6 +2091,7 @@ function Panel(props: {
         onLogs={props.onLogs}
         backup={props.backups[cards[0].id] ?? null}
         r2Bucket={props.r2Bucket}
+        backupsOff={props.backupsOff}
         onBackUpNow={props.onBackUpNow}
         onBackups={props.onBackups}
         orphanWorkers={cards[0].id === ADMIN_RESOURCE_ID ? props.orphanWorkers : []}
@@ -2403,6 +2421,8 @@ function CardPanel(props: {
   /** K-1819: the newest backup run of this card, or null. */
   backup: BackupRun | null;
   r2Bucket: BucketSize | null;
+  /** K-1815: no backup key, so backups are off. */
+  backupsOff: boolean;
   onBackUpNow: (resource: Resource) => void;
   onBackups: (resource: Resource) => void;
   /** K-909: on the admin card, what removed Worker apps left in Cloudflare. */
@@ -2481,7 +2501,9 @@ function CardPanel(props: {
         <PeekArrow resource={resource} state={state} zone={props.zone} />
       ) : null}
       {address &&
-      (resource.kind === "page" || resource.kind === "file" || resource.id.startsWith(FOLDER_SITE_PREFIX)) ? (
+      (resource.kind === "page" ||
+        resource.kind === "file" ||
+        (resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo)) ? (
         <AddressName address={address} onSave={(name) => props.onSetAddress(resource, name)} />
       ) : null}
       {resource.kind === "repo.group" ? (
@@ -2598,6 +2620,9 @@ function CardPanel(props: {
           <div class="label" data-tip="Backups: daily copies of the volumes and the data folder (K-1811).">
             Backups
           </div>
+          {props.backupsOff ? (
+            <p class="error">Backups are off: run the bootstrap with KITSHN_BACKUP_KEY_NOW=1 (K-1815).</p>
+          ) : null}
           {props.r2Bucket && props.r2Bucket.bytes >= BACKUP_LIMIT_BYTES ? (
             <p class="error">
               Backups wait: the R2 bucket holds {gigabytes(props.r2Bucket.bytes)} of the 10 GB of the free
@@ -2609,7 +2634,7 @@ function CardPanel(props: {
               <>
                 <span>{backupLabel(props.backup)}</span> <BackupState run={props.backup} />
               </>
-            ) : (
+            ) : props.backupsOff ? null : (
               <span class="muted">No backup yet; the first runs tonight.</span>
             )}
           </div>
@@ -2641,7 +2666,7 @@ function CardPanel(props: {
             Roll back…
           </button>
           {/* K-1123: a folder site comes from no workflow run. */}
-          {resource.id.startsWith(FOLDER_SITE_PREFIX) ? null : (
+          {resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo ? null : (
             <button
               class="btn"
               data-tip={`Roll back every card of the workflow run that made this deploy. ${ROLLBACK_DATA}`}

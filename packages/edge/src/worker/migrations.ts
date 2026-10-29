@@ -184,7 +184,16 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     // K-1819: when the daily run first saw that a card with backups was gone; its repository goes 7 days later.
     "CREATE TABLE backup_gone (card TEXT PRIMARY KEY, since INTEGER NOT NULL)",
   ],
-  // 28: section 17. A proposal is an ask that waits for its approver circle (K-1722); `body` and `labels` are JSON,
+  // 28: make it a repo (K-1127). A handover lets the first push deploy of one repo take over a page or a folder site
+  // card for an hour; `repo_cards` then keeps that card for every later deploy of the repo, its app and environment.
+  [
+    `CREATE TABLE handovers (repo_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, repo TEXT NOT NULL,
+     card_id TEXT NOT NULL UNIQUE, client_id TEXT NOT NULL, client_name TEXT NOT NULL, address TEXT NOT NULL,
+     expires_at INTEGER NOT NULL)`,
+    `CREATE TABLE repo_cards (repo_id TEXT NOT NULL, app_key TEXT NOT NULL, environment TEXT NOT NULL,
+     card_id TEXT NOT NULL UNIQUE, PRIMARY KEY (repo_id, app_key, environment))`,
+  ],
+  // 29: section 17. A proposal is an ask that waits for its approver circle (K-1722); `body` and `labels` are JSON,
   // and one conditional update moves `state` from pending (K-1723). Ask events are the History of asks (K-1717): not
   // revisions, with their own cap.
   [

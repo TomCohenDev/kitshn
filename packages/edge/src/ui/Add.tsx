@@ -1,3 +1,4 @@
+import { deployWorkflow } from "kitshn/templates";
 import { useState } from "preact/hooks";
 import type { MachineView } from "../core/protocol.ts";
 import { RESERVED_SITE_NAMES } from "../core/library.ts";
@@ -33,22 +34,6 @@ export default defineApp({
     { on: "pull_request", name: "pr-{pr}", ephemeral: true },
   ],
 });`;
-
-const workflow = (server: string) => `name: kitshn
-on:
-  push:
-    branches: [main]
-  pull_request:
-    types: [opened, synchronize, reopened, closed]
-  workflow_dispatch:
-permissions:
-  contents: read
-  id-token: write
-jobs:
-  kitshn:
-    uses: Yarden-zamir/kitshn/.github/workflows/kitshn2-deploy.yml@main
-    with:
-      server: ${server}`;
 
 function Snippet(props: { file: string; text: string }) {
   return (
@@ -235,7 +220,7 @@ export function AddSite(props: {
               in the tray, private, until you place it in a circle.
             </p>
             <Snippet file="kitshn.config.ts" text={RECIPE} />
-            <Snippet file=".github/workflows/kitshn.yml" text={workflow(location.origin)} />
+            <Snippet file=".github/workflows/kitshn.yml" text={deployWorkflow(location.origin)} />
             <div class="row">
               <button type="button" class="btn" data-tip="Close this dialog." onClick={props.onClose}>
                 Done

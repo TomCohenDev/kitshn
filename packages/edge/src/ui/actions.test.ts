@@ -116,6 +116,7 @@ function context(version = "0123456789ab"): ActionContext {
     undoCheck: null,
     selected: new Set(),
     previousVersions: new Set(),
+    handoverCards: new Set(),
   };
 }
 

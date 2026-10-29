@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 // The kitshn CLI for app repos: `kitshn check` (K-802) and `kitshn deploy` (K-803, K-805, K-811).
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   cpSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join, relative, resolve, sep } from "node:path";
@@ -20,6 +22,8 @@ import { headersWarnings, redirectsWarnings } from "./headers.ts";
 import { pickSiteIcon } from "./icon.ts";
 import { contentType } from "./media.ts";
 import { cardOutput, errorOutput } from "./output.ts";
+import { type DeployRun, type LogAnswer, logArgs, logLineText, logRange } from "./logs.ts";
+import { type HandoverAnswer, repoFiles } from "./repo-files.ts";
 import { type Artifact, artifactsByApp } from "./artifacts.ts";
 import { RecipeError, readApps } from "./parse.ts";
 import {
@@ -594,8 +598,8 @@ async function publish(server: string, file: string, options: PublishOptions) {
   if (json)
     return void process.stdout.write(
       cardOutput({
-        address: data?.address ?? "",
-        card: data?.id ?? "",
+        address: data?.address,
+        card: data?.id,
         kind: fileName.toLowerCase().endsWith(".html") ? "page" : "file",
         updated: data?.updated === true,
         revision: data?.revision ?? null,
@@ -665,7 +669,139 @@ async function setAddress(server: string, card: string, name: string) {
   console.log(`kitshn: ${card} is now at https://${data.address}`);
 }
 
+/** K-1809: an agent key searches the logs of a card that it controls (K-1810); no Live, which needs the map. */
+async function logs(
+  server: string,
+  card: string,
+  text: string,
+  range: { from: number; to: number },
+  options: { deploys: boolean; json: boolean },
+) {
+  const answer = await agentCall<{ answer?: LogAnswer; runs?: ReadonlyArray<DeployRun> }>(
+    server,
+    "/agent/logs",
+    {
+      card,
+      tab: options.deploys ? "deploys" : "app",
+      text,
+      from: range.from,
+      to: range.to,
+    },
+  );
+  // An error answer fails (exit 1), also with --json, where the catch prints it as {"error"} (K-1809).
+  const found = answer.answer;
+  if (found?.state === "error") fail(found.error);
+  if (found?.state === "needs-permission")
+    fail('search in Worker logs needs the token permission "Workers Observability: Edit" (K-1806).');
+  // With --json, stdout holds only the answer; console.log goes to stderr in that mode.
+  if (options.json) return void process.stdout.write(`${JSON.stringify(found ?? answer.runs)}\n`);
+  if (options.deploys) {
+    for (const run of answer.runs ?? []) {
+      console.log(
+        `${new Date(run.at).toISOString()} ${run.sha.slice(0, 7)} ${run.state}${run.reason ? ` ${run.reason}` : ""}${run.runUrl ? ` ${run.runUrl}` : ""}`,
+      );
+      for (const line of run.lines ?? []) console.log(`  ${line}`);
+    }
+    return;
+  }
+  if (!found) fail("kitshn sent no answer.");
+  if (found?.state !== "lines") return;
+  for (const line of found.lines) console.log(logLineText(line));
+  if (found.cut)
+    console.error(
+      "kitshn: the search stopped at 15 s, so the newest lines may be missing; narrow the range.",
+    );
+  else if (found.matched > found.lines.length)
+    console.error(`kitshn: the newest ${found.lines.length} of ${found.matched} lines that match.`);
+}
+
+/**
+ * K-1127: makes a new GitHub repo of a page or a folder site with the user's own `gh` login, and hands the card over
+ * to it by the repo's ids: the repo's first push deploys the same card. The files come from `path`; for a page
+ * without one, from kitshn.
+ */
+async function makeRepo(server: string, card: string, path: string, repo: string) {
+  const credentials = agentHeaders(server);
+  const gh = (...ghArgs: Array<string>) => execFileSync("gh", ghArgs, { encoding: "utf8" }).trim();
+  // A new repo only: the handover is for the repo that this command makes.
+  const known = spawnSync("gh", ["repo", "view", repo, "--json", "name"], { stdio: "ignore" });
+  if (known.error) fail("install the GitHub CLI and log in with gh auth login.");
+  if (known.status === 0) fail(`${repo} exists already; name a new repo.`);
+  if (path && !existsSync(path)) fail(`${path} does not exist.`);
+  gh("repo", "create", repo, "--private");
+  const [repoId = "", ownerId = ""] = gh("api", `repos/${repo}`, "--jq", ".id, .owner.id").split("\n");
+  let handover: HandoverAnswer;
+  try {
+    handover = await agentCall<HandoverAnswer>(server, `/agent/cards/${encodeURIComponent(card)}/handover`, {
+      repo,
+      repoId,
+      ownerId,
+    });
+  } catch (error) {
+    console.error(
+      `kitshn: ${repo} is made but empty; delete it with gh repo delete ${repo} if you do not need it.`,
+    );
+    throw error;
+  }
+  const dir = mkdtempSync(join(tmpdir(), "kitshn-repo-"));
+  try {
+    const site = join(dir, "site");
+    mkdirSync(site);
+    if (path && statSync(path).isDirectory())
+      cpSync(path, site, {
+        recursive: true,
+        filter: (from) =>
+          !relative(path, from)
+            .split(sep)
+            .some((part) => part.startsWith(".")),
+      });
+    else if (path && handover.kind === "page") cpSync(path, join(site, "index.html"));
+    else if (path) fail(`${path} is a file; a folder site becomes a repo from its folder.`);
+    else if (handover.kind === "page") {
+      const page = await fetch(
+        new URL(`/agent/library/${encodeURIComponent(handover.card)}/content`, server),
+        {
+          headers: credentials,
+        },
+      );
+      if (!page.ok) fail(`kitshn did not send the page: ${page.status}.`);
+      writeFileSync(join(site, "index.html"), Buffer.from(await page.arrayBuffer()));
+    } else fail("name the folder of the site: kitshn cannot read the files of a folder site back.");
+    for (const [file, text] of Object.entries(repoFiles(handover, repo, server))) {
+      mkdirSync(join(dir, file, ".."), { recursive: true });
+      writeFileSync(join(dir, file), text);
+    }
+    const git = (...gitArgs: Array<string>) => execFileSync("git", gitArgs, { cwd: dir, stdio: "inherit" });
+    git("init", "--quiet", "--initial-branch", "main");
+    git("add", "--all");
+    git("commit", "--quiet", "--message", `kitshn: ${repo} from its kitshn card`);
+    // The user's gh login pushes, so the first deploy comes from the user's push.
+    git(
+      "-c",
+      "credential.helper=",
+      "-c",
+      "credential.helper=!gh auth git-credential",
+      "push",
+      "--quiet",
+      `https://github.com/${repo}.git`,
+      "main",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  console.log(
+    `kitshn: made ${repo}; its first push deploys the card at https://${handover.addresses[0] ?? ""} (K-1127).`,
+  );
+}
+
 const [command, ...args] = process.argv.slice(2);
+
+/** K-1809: bad arguments exit with 2, and with --json the reason is the one object on stdout. */
+function usage(reason: string): never {
+  if (args.includes("--json")) process.stdout.write(errorOutput(reason));
+  console.error(`kitshn: ${reason}`);
+  process.exit(2);
+}
 /** K-1116: with `--json`, stdout holds only the result object; progress and notes go to stderr. */
 const json = args.includes("--json");
 if (json) console.log = console.error.bind(console);
@@ -691,10 +827,40 @@ try {
       zone: flag("--zone", ""),
       open: args.includes("--public"),
     });
+  } else if (command === "logs") {
+    const { card, text } = logArgs(args);
+    if (!card)
+      usage(
+        "name the card: kitshn logs <card> [text] [--since 1h | --from <time> [--to <time>]] [--deploys] [--json] [-- <text>].",
+      );
+    const range = logRange(
+      { since: flag("--since", ""), from: flag("--from", ""), to: flag("--to", "") },
+      Date.now(),
+    );
+    if (typeof range === "string") usage(range);
+    await logs(
+      flag("--server", process.env["KITSHN_SERVER"] ?? ""),
+      card ?? "",
+      text,
+      range as { from: number; to: number },
+      {
+        deploys: args.includes("--deploys"),
+        json: args.includes("--json"),
+      },
+    );
   } else if (command === "address") {
     const [card, name] = args.filter((arg, index) => !arg.startsWith("--") && args[index - 1] !== "--server");
     if (!card || !name) fail("name the card and its new address name: kitshn address <card> <name>.");
     await setAddress(flag("--server", process.env["KITSHN_SERVER"] ?? ""), card ?? "", name ?? "");
+  } else if (command === "repo") {
+    const valued = new Set(["--repo", "--server"]);
+    const [card, path] = args.filter(
+      (arg, index) => !arg.startsWith("--") && !valued.has(args[index - 1] ?? ""),
+    );
+    const repo = flag("--repo", "");
+    if (!card || !repo)
+      fail("name the card and the new repo: kitshn repo <card> [<folder|file>] --repo <owner/name>.");
+    await makeRepo(flag("--server", process.env["KITSHN_SERVER"] ?? ""), card ?? "", path ?? "", repo);
   }
 } catch (error) {
   if (json) {
@@ -705,11 +871,15 @@ try {
   console.error(`kitshn: ${error.message}`);
   process.exit(1);
 }
-if (command !== "check" && command !== "deploy" && command !== "publish" && command !== "address") {
+if (!["check", "deploy", "publish", "address", "logs", "repo"].includes(command ?? "")) {
   console.log(`kitshn check [--dir <app>]                  check kitshn.config.ts and print it as JSON (K-802)
 kitshn deploy --server <address> [--dir <app>]   deploy from GitHub Actions (K-803)
 kitshn publish <file|folder> [--name <name>] [--address <name>] [--zone <zone>] [--circle <circle>] [--public] [--json]
                                              publish a page, a file (K-1116) or a folder site (K-1123) with an agent key
 kitshn address <card> <name> [--json]        give a page, a file (K-1120) or a folder site (K-1124) a new address name
-                                             --json prints one JSON object on stdout: the card, or {"error"}`);
+                                             --json prints one JSON object on stdout: the card, or {"error"}
+kitshn logs <card> [text] [--since 1h | --from <time> [--to <time>]] [--deploys] [--json] [-- <text>]
+                                             search the logs of a card that your agent key controls (K-1809)
+kitshn repo <card> [<folder|file>] --repo <owner/name>
+                                             make a new repo of a page or a folder site with gh (K-1127)`);
 }

@@ -27,6 +27,18 @@ describe("the takeover decision (K-1404)", () => {
     expect(takeoverPlan({ ...base, hasData: true, exists: () => true }).kind).toBe("skip");
     expect(takeoverPlan({ ...base, taken: true, exists: () => true }).kind).toBe("skip");
   });
+  it("starts a pull request preview fresh, also when its KitSHn 1 folder still exists", () => {
+    expect(takeoverPlan({ ...base, environment: "pr-174", exists: () => true })).toEqual({
+      kind: "skip",
+      note: "A preview takes no KitSHn 1 data; /p/o/app/pr-174 stays for its deletion, and the app starts empty (K-1404).",
+    });
+    expect(takeoverPlan({ ...base, environment: "pr-174", exists: () => false })).toEqual({
+      kind: "skip",
+      note: null,
+    });
+    // Only a pull request environment: a name that starts with "pr" otherwise still takes its data.
+    expect(takeoverPlan({ ...base, environment: "prod-eu", exists: () => true }).kind).toBe("take");
+  });
   it("says so when there is no KitSHn 1 data to take", () => {
     expect(takeoverPlan({ ...base, exists: (path) => path === "/p/o/app" })).toEqual({
       kind: "skip",

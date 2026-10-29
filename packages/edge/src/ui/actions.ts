@@ -81,12 +81,16 @@ export interface ActionContext {
   readonly selected: ReadonlySet<string>;
   /** K-1117: the pages and files that have a previous version. */
   readonly previousVersions: ReadonlySet<string>;
+  /** K-1127: the cards that an agent key can hand over to a repo. */
+  readonly handoverCards: ReadonlySet<string>;
 }
 
 export interface ActionHandlers {
   readonly select: (selection: Selection) => void;
   readonly openAddress: (address: string) => void;
   readonly copyAddress: (address: string) => void;
+  /** K-1127: copies the `kitshn repo` command of a page or a folder site, which an agent runs where `gh` works. */
+  readonly copyRepoCommand: (resource: Resource) => void;
   /** `part` says whether a stacked card leaves alone (and leaves its stack) or takes its stack along. */
   readonly reshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
   readonly setLevel: (resource: Resource, circle: Circle, level: Level | null) => void;
@@ -539,6 +543,16 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
             },
           ]
         : []),
+      ...(ctx.handoverCards.has(resource.id)
+        ? [
+            {
+              id: "make-repo",
+              label: "Make it a repo…",
+              tip: `Copy the command for the agent key that published ${resource.name}: it makes a new GitHub repo with gh, and the repo's first push then deploys this card. The key needs "may add apps".`,
+              run: () => h.copyRepoCommand(resource),
+            },
+          ]
+        : []),
       ...(resource.kind === "page" || resource.kind === "file"
         ? [
             {
@@ -664,8 +678,8 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
               tip: `Roll back: serve an earlier deploy of this card again. ${ROLLBACK_DATA}`,
               run: () => h.rollback(resource, "card"),
             },
-            // K-1123: a folder site comes from no workflow run.
-            ...(resource.id.startsWith(FOLDER_SITE_PREFIX)
+            // K-1123: a folder site comes from no workflow run; one that a repo took over does (K-1127).
+            ...(resource.id.startsWith(FOLDER_SITE_PREFIX) && ctx.handoverCards.has(resource.id)
               ? []
               : [
                   {

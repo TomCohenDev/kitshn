@@ -105,6 +105,8 @@ export interface Snapshot {
   readonly icons: Readonly<Record<string, string>>;
   /** K-1117: the pages and files that have a previous version to restore. */
   readonly previousVersions: ReadonlyArray<string>;
+  /** K-1127: the pages and folder sites that an agent key published, which it can hand over to a repo. */
+  readonly handoverCards: ReadonlyArray<string>;
   /** K-1504: who paused and when, while paused. */
   readonly pausedBy: { readonly actor: Actor; readonly at: number } | null;
   readonly machines: ReadonlyArray<MachineView>;
@@ -128,6 +130,8 @@ export interface Snapshot {
   readonly backups: Readonly<Record<string, BackupRun>>;
   /** K-1818: the size of the `kitshn` bucket at the last daily run; null before the first. */
   readonly r2Bucket: BucketSize | null;
+  /** K-1815: the Worker has no KITSHN_BACKUP_KEY, so no backup runs until the owner makes one. */
+  readonly backupsOff: boolean;
   /** K-1822: the bookmark that undoes the last "Restore kitshn to a time"; null when none ran. */
   readonly restoreUndo: string | null;
   /** K-617: the release of this kitshn; "Update daemon" installs the daemon of this release. */

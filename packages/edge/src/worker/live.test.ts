@@ -4,6 +4,7 @@ import type { AccessRow } from "./access-sync.ts";
 import {
   type IngressAccess,
   type LiveSite,
+  wantedRecords,
   escapeHtml,
   ingressAccess,
   liveSiteId,
@@ -272,5 +273,29 @@ describe("records that block an address (K-817, K-1111)", () => {
     expect(addressRecords(apex)).toBe(1);
     expect(addressRecords(apex.filter((record) => record.type !== "A"))).toBe(0);
     expect(addressRecords([{ type: "CNAME" }, { type: "AAAA" }])).toBe(2);
+  });
+});
+
+describe("DNS records of a Compose deploy before its site is live (K-817, K-901)", () => {
+  const tunnelOf = (machineId: string) => (machineId === "m" ? "t" : undefined);
+  const run = (expiresAt: number, machineId: string | null = "m") => ({
+    card: "app-a",
+    addresses: ["a.example.com", "b.example.com"],
+    machineId,
+    expiresAt,
+  });
+  const record = { content: "t.cfargotunnel.com", cardId: "app-a" };
+
+  it("wants the records of a planned, running or done deploy until it expires, then only a live site's", () => {
+    expect([...wantedRecords([run(100)], [], tunnelOf, 50)]).toEqual([
+      ["a.example.com", record],
+      ["b.example.com", record],
+    ]);
+    // An expired deploy, or one on a machine that kitshn does not know, wants nothing.
+    expect(wantedRecords([run(100)], [], tunnelOf, 100).size).toBe(0);
+    expect(wantedRecords([run(100, "gone")], [], tunnelOf, 50).size).toBe(0);
+    // After it expires, the live site of the card holds the main address.
+    const site = { id: "app-a", machineId: "m", address: "a.example.com" };
+    expect([...wantedRecords([run(100)], [site], tunnelOf, 200)]).toEqual([["a.example.com", record]]);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type Analytics, analyticsRows, countRows, usageLevel } from "./usage.ts";
+import { type Analytics, analyticsRows, bucketRow, countRows, usageLevel, withBucket } from "./usage.ts";
 
 const used = (rows: ReadonlyArray<{ label: string; used: number | null }>, label: string) =>
   rows.find((row) => row.label === label)?.used;
@@ -68,6 +68,14 @@ describe("free plan usage (K-1303)", () => {
     expect(rows.find((row) => row.label === "DNS records of new.example")?.limit).toBe(200);
     expect(rows.find((row) => row.label === "DNS records of old.example")?.limit).toBe(1000);
     expect(used(rows, "Access seats")).toBeNull();
+  });
+
+  it("puts the kitshn bucket right after the account's R2 storage, and warns where backups wait (K-1818)", () => {
+    const rows = withBucket(analyticsRows({ r2Storage: [] }, {}), { bytes: 8_000_000_000, at: 0 });
+    const labels = rows.map((row) => row.label);
+    expect(labels[labels.indexOf("R2 storage") + 1]).toBe("R2 bucket kitshn");
+    expect(usageLevel(bucketRow({ bytes: 8_000_000_000, at: 0 }))).toBe("warn");
+    expect(withBucket(rows, null)).toBe(rows);
   });
 
   it("warns at 80%, is full at the limit, and unknown without a value", () => {

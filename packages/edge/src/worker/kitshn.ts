@@ -160,6 +160,7 @@ import type {
   MachineView,
   OrphanWorker,
   AskEventView,
+  LinkEventView,
   ProposalView,
   RepoView,
   RevisionView,
@@ -263,8 +264,10 @@ import {
 } from "../core/library.ts";
 import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
-import { commandsFor, machineBusy, providerCards, providerPushes } from "../core/providers.ts";
+import { commandsFor, machineBusy, providerCards, providerPushes, reachOf } from "../core/providers.ts";
 import {
+  type LinkAudit,
+  LinkAudit as LinkAuditSchema,
   type ProviderCommand,
   desiredProblem,
   type ProviderKind,
@@ -445,6 +448,11 @@ const attachmentOf = (socket: WebSocket) => socket.deserializeAttachment() as At
 /** K-619, K-909: every write of a machine socket's attachment, trimmed to the attachment budget. */
 const saveMachine = (socket: WebSocket, attachment: Extract<Attachment, { kind: "machine" }>) =>
   socket.serializeAttachment(fitAttachment(attachment));
+
+const decodeLinkAudit = Schema.decodeUnknownSync(LinkAuditSchema);
+/** K-1610: how often the maps hear of new link events, and how many reports of one machine kitshn takes a minute. */
+const LINK_BROADCAST_MS = 10_000;
+const LINK_AUDITS_PER_MINUTE = 120;
 
 /** K-704: what kitshn keeps of one provider's registration; its cards are rows of `resources`. */
 interface ProviderRegistration {
@@ -800,6 +808,10 @@ export class Kitshn extends DurableObject<Env> {
   }
   /** K-1104: live sites of the machines. */
   private liveSites = new Map<string, LiveSite>();
+  /** K-1610: when an audit last told the maps of new link events. */
+  private linkBroadcastAt = 0;
+  /** K-1610: the audit reports of each machine in the current minute. */
+  private linkRates = new Map<string, { minute: number; count: number; dropped: number }>();
   /** K-704: the kinds and commands of each machine's providers, by machine id. */
   private providerRegs = new Map<string, Array<ProviderRegistration>>();
   /** K-1608: the hash of what each signed connection got last, by `<machine id>/<push key>`. */
@@ -3261,6 +3273,7 @@ export class Kitshn extends DurableObject<Env> {
       // K-1902: the live asks go only to who may answer them; History keeps every ask for the owner (K-1717).
       proposals: this.answerableProposals(caller.visitor),
       askEvents: this.recentAskEvents(),
+      linkEvents: this.recentLinkEvents(),
       githubDefaultWay: this.meta("github_default_way") === "app" ? "app" : "not-kitshn",
       // K-1767: the newest 20 runs of pull requests of the App that wait for Deploy.
       botRuns: this.sql<{ repo_id: string; repo: string; pr: number; sha: string; at: number }>(
@@ -4479,6 +4492,8 @@ export class Kitshn extends DurableObject<Env> {
       this.updateLiveSites(machine, message.sites);
     } else if (message.type === "providers") {
       this.updateProviders(machine, message.providers);
+    } else if (message.type === "audit") {
+      this.recordLinkEvent(machine, message.audit);
     } else if (message.type === "desiredSet" && typeof message.kind === "string") {
       // K-709: the provider gets kitshn's own answer, also a refusal.
       const error = this.setDesiredFromMachine(machine, message);
@@ -6130,6 +6145,11 @@ export class Kitshn extends DurableObject<Env> {
         "DELETE FROM jobs WHERE state NOT IN ('queued', 'sent') AND id <= (SELECT id FROM jobs ORDER BY id DESC LIMIT 1 OFFSET 1000)",
       );
       this.sql("DELETE FROM join_codes WHERE expires_at < ?", now);
+      // K-1610: link events stay 30 days, at most 2,000.
+      this.sql(
+        "DELETE FROM link_events WHERE at < ? OR id <= (SELECT id FROM link_events ORDER BY id DESC LIMIT 1 OFFSET 2000)",
+        now - 30 * DAY,
+      );
       // K-1717: ask events stay 30 days, at most 5,000; a decided proposal stays as long.
       this.sql(
         "DELETE FROM ask_events WHERE at < ? OR id <= (SELECT id FROM ask_events ORDER BY id DESC LIMIT 1 OFFSET ?)",
@@ -8275,6 +8295,8 @@ export class Kitshn extends DurableObject<Env> {
         rights,
         // K-619: a machine sees its own listening ports, the list of the site wizard.
         ...(machine ? { proposals: answerable, servers: this.machineView(machine).servers } : {}),
+        // K-1610: the newest 50 calls from or to this machine.
+        ...(machine ? { linkEvents: this.recentLinkEvents(machine.id) } : {}),
         // K-819: with "may add apps", the waiting repos that the key may allow.
         repos: rights.includes("addsApps")
           ? this.sql<RepoRow>(
@@ -9628,6 +9650,93 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("INSERT INTO ask_labels (event_id, key, value) VALUES (?, ?, ?)", last.id, key, value);
     this.sql("DELETE FROM ask_events WHERE id <= ?", last.id - ASK_EVENT_COUNT);
     this.sql("DELETE FROM ask_labels WHERE event_id <= ?", last.id - ASK_EVENT_COUNT);
+  }
+
+  /**
+   * K-1610: one call that a source machine reports. The source is always the machine of the connection, so a machine
+   * cannot report for another one. A report that does not decode is dropped and logged. Known limit: only the source
+   * reports (see `LinkAudit`).
+   */
+  private recordLinkEvent(machine: Machine, value: unknown) {
+    let audit: LinkAudit;
+    try {
+      audit = decodeLinkAudit(value);
+    } catch (error) {
+      console.warn(`kitshn dropped an audit report of ${machine.name}: ${String(error)}`);
+      return;
+    }
+    // A machine reports only calls on machines that it reaches now, so it cannot put calls on another machine's record.
+    const reached = (this.providerRegs.get(machine.id) ?? []).some((reg) =>
+      reachOf(this.state, machine.id, reg.name, Date.now()).some((card) => card.machineId === audit.target),
+    );
+    if (!reached) {
+      console.warn(
+        `kitshn dropped an audit report of ${machine.name}: it reaches no machine ${audit.target}.`,
+      );
+      return;
+    }
+    // At most LINK_AUDITS_PER_MINUTE reports of one machine a minute; the rest are counted and dropped.
+    const minute = Math.floor(Date.now() / 60_000);
+    const rate = this.linkRates.get(machine.id);
+    const counted = rate?.minute === minute ? rate : { minute, count: 0, dropped: 0 };
+    this.linkRates.set(machine.id, counted);
+    if (counted.count >= LINK_AUDITS_PER_MINUTE) {
+      counted.dropped += 1;
+      if (counted.dropped === 1)
+        console.warn(`kitshn drops audit reports of ${machine.name} for the rest of this minute.`);
+      return;
+    }
+    counted.count += 1;
+    this.sql(
+      `INSERT INTO link_events (at, source, target, kind, thread, name, cwd, outcome, exit_code)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      // The time of the report, not the claim of the machine, orders History.
+      Date.now(),
+      machine.id,
+      audit.target,
+      audit.kind,
+      audit.thread,
+      audit.name,
+      audit.cwd,
+      audit.outcome,
+      audit.exitCode,
+    );
+    this.sql(
+      "DELETE FROM link_events WHERE id <= (SELECT id FROM link_events ORDER BY id DESC LIMIT 1 OFFSET 2000)",
+    );
+    // A burst of calls must not rebuild every map's snapshot per call: an audit broadcasts at most every 10 seconds.
+    // Known limit: the last events of a burst show with the next change of the map; revisit if History must be live.
+    if (Date.now() - this.linkBroadcastAt >= LINK_BROADCAST_MS) {
+      this.linkBroadcastAt = Date.now();
+      this.broadcast();
+    }
+  }
+
+  /** K-1610: the newest 50 link events, of one machine or of all, with machine names. */
+  private recentLinkEvents(machineId: string | null = null): Array<LinkEventView> {
+    const name = (id: string) => this.state.machines.get(id)?.name ?? id;
+    return this.sql<{
+      id: number;
+      at: number;
+      source: string;
+      target: string;
+      kind: "exec" | "tool";
+      thread: string | null;
+      name: string;
+      cwd: string | null;
+      outcome: LinkEventView["outcome"];
+      exit_code: number | null;
+    }>(
+      machineId === null
+        ? "SELECT * FROM link_events ORDER BY id DESC LIMIT 50"
+        : "SELECT * FROM link_events WHERE source = ? OR target = ? ORDER BY id DESC LIMIT 50",
+      ...(machineId === null ? [] : [machineId, machineId]),
+    ).map(({ exit_code, ...row }) => ({
+      ...row,
+      source: name(row.source),
+      target: name(row.target),
+      exitCode: exit_code,
+    }));
   }
 
   /** K-1717: the newest 50 ask events, for History; a snapshot reads at most 50 rows for them. */

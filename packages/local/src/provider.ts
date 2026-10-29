@@ -356,6 +356,7 @@ export const pushKey = {
   grants: (provider: string) => `grants:${provider}`,
   settings: (provider: string) => `settings:${provider}`,
   desired: (provider: string, kind: string) => `desired:${provider}:${kind}`,
+  reach: (provider: string) => `reach:${provider}`,
 } as const;
 
 /** The UTF-8 length of a value's JSON; this package runs without DOM types, so it counts by hand. */
@@ -384,3 +385,43 @@ export function desiredProblem(
     return `a desired state part holds at most ${PROVIDER_LIMITS.stateBytes} bytes (K-709).`;
   return null;
 }
+
+/**
+ * K-1609: one card of the same provider on another machine that this machine opens, with the provider's name of the
+ * level that this machine has there. The link proxy of the daemon reaches its address with the machine token.
+ */
+export const ReachedCard = Schema.Struct({
+  machineId: Schema.String,
+  machineName: Schema.String,
+  kind: Schema.String,
+  id: Schema.String,
+  address: Schema.NullOr(Schema.String),
+  level: Schema.String,
+});
+export type ReachedCard = typeof ReachedCard.Type;
+
+/**
+ * K-1610: what the source machine reports of one call on another machine; never its arguments or its output. Known
+ * limit: only the source reports, so a source that misbehaves can skip its own reports. Revisit with reports of the
+ * target when the audit must hold against a dishonest source.
+ */
+export const AUDIT_OUTCOMES = ["succeeded", "refused", "failed"] as const;
+export const LinkAudit = Schema.Struct({
+  kind: Schema.Literals(["exec", "tool"]),
+  /** The machine id of the target. */
+  target: Schema.String.check(Schema.isMaxLength(64)),
+  thread: Schema.NullOr(Schema.String.check(Schema.isMaxLength(200))),
+  /** The command name of a `machine_exec` run, or the name of the tool: one word, never the arguments. */
+  name: Schema.String.check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(100),
+    Schema.makeFilter(
+      (name: string) => ![...name].some((char) => char.trim() === "") || "one word, with no arguments",
+    ),
+  ),
+  cwd: Schema.NullOr(Schema.String.check(Schema.isMaxLength(500))),
+  outcome: Schema.Literals(AUDIT_OUTCOMES),
+  exitCode: Schema.NullOr(Schema.Int),
+  at: Schema.Number,
+});
+export type LinkAudit = typeof LinkAudit.Type;

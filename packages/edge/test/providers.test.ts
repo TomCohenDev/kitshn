@@ -253,8 +253,8 @@ it("counts the pushes that a machine has not applied, takes applied only for its
       .map((row) => row.key),
   );
   expect(keys).toEqual(["grants:t3"]);
-  // Two pushes wait: the grant tables, with a stale hash, and the card settings, with none.
-  expect(await queued()).toBe(2);
+  // Three pushes wait: the grant tables, with a stale hash, and the reach and the card settings, with none.
+  expect(await queued()).toBe(3);
   // A report that can end busy sends the jobs that wait for an idle machine.
   const delivered = await runInDurableObject(stub, async (instance) => {
     const spy = vi.spyOn(instance as unknown as Internals, "deliverJobs");
@@ -268,6 +268,81 @@ it("counts the pushes that a machine has not applied, takes applied only for its
     return spy.mock.calls.length;
   });
   expect(delivered).toBeGreaterThan(0);
+});
+
+it("records only the calls that a machine reports on machines that it reaches, as its own and only on a signed connection (K-1610)", async () => {
+  const { stub, message, sql } = await setup();
+  await message("signed", [report([app])]);
+  // vps reaches the T3 card of mac: the card sits in a circle that holds the machine vps.
+  const mac: Machine = { ...machine, id: "mac", name: "mac", clientId: "mac.access" };
+  const macCard: Resource = {
+    id: "p-mac-app",
+    kind: "t3.app",
+    name: "T3 on mac",
+    addresses: [],
+    status: "running",
+    group: null,
+    machine: "mac",
+    provider: {
+      name: "t3",
+      localId: "app",
+      kindName: "T3 app",
+      levels: { view: "view", use: "use", control: "control" },
+      facts: [],
+      stickers: [],
+      lists: [],
+      settings: [],
+      site: null,
+    },
+  };
+  const links: Circle = {
+    id: "links",
+    name: "Links",
+    color: "#7CFF8A",
+    level: "use",
+    members: [{ _tag: "machine", machineId: "vps" }],
+    match: "any",
+    needsPasskey: false,
+    endsAt: null,
+    x: 7000,
+    y: 7000,
+    r: 200,
+  };
+  await sql("INSERT OR REPLACE INTO machines (id, body) VALUES ('mac', ?)", JSON.stringify(mac));
+  await sql("INSERT OR REPLACE INTO resources (id, body) VALUES (?, ?)", macCard.id, JSON.stringify(macCard));
+  await sql("INSERT OR REPLACE INTO circles (id, body) VALUES ('links', ?)", JSON.stringify(links));
+  await sql("INSERT OR REPLACE INTO places (id, x, y) VALUES (?, 7000, 7000)", macCard.id);
+  await sql("DELETE FROM link_events");
+  const audit = {
+    kind: "exec",
+    target: "mac",
+    thread: "thread-1",
+    name: "git",
+    cwd: "/home/kcw",
+    outcome: "succeeded",
+    exitCode: 0,
+    at: 0,
+  };
+  const raw = (check: "signed" | "token", body: object) =>
+    runInDurableObject(stub, (instance) =>
+      instance.webSocketMessage(daemonSocket(check), JSON.stringify(body)),
+    );
+  await raw("token", { type: "audit", audit });
+  await raw("signed", { type: "audit", audit: { ...audit, outcome: "maybe" } });
+  // A machine that vps does not reach, and a command line instead of a command name.
+  await raw("signed", { type: "audit", audit: { ...audit, target: "other" } });
+  await raw("signed", { type: "audit", audit: { ...audit, name: "curl -H secret" } });
+  await raw("signed", { type: "audit", audit });
+  const rows = await runInDurableObject(stub, (_, state) =>
+    state.storage.sql
+      .exec("SELECT source, target, kind, name, outcome, exit_code FROM link_events")
+      .toArray(),
+  );
+  expect(rows).toEqual([
+    { source: "vps", target: "mac", kind: "exec", name: "git", outcome: "succeeded", exit_code: 0 },
+  ]);
+  await sql("DELETE FROM circles WHERE id = 'links'");
+  await sql("DELETE FROM resources WHERE id = 'p-mac-app'");
 });
 
 it("keeps an address that another card holds, or a name of kitshn, off a provider card (K-705)", async () => {

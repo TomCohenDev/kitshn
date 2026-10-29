@@ -126,6 +126,7 @@ import { keepBuild, keptId, keptTag, rollbackOverride, serviceImages, staleTags 
 import { TokenCache } from "./tokens.ts";
 import { Providers, parseSaved } from "./providers.ts";
 import { desiredProblem } from "@kitshn/local";
+import { serveLinks } from "./link.ts";
 import { pushKey } from "@kitshn/local";
 import { listenerUid, portOf } from "./listener.ts";
 import { MAX_FORWARDS, forwardTarget, passedHeaders, readBounded } from "./forward.ts";
@@ -2242,21 +2243,30 @@ function connect(config: JoinSecrets) {
         accepted(`with the key ${message.fingerprint}`);
       } else if (message.type === "rotateKey") {
         void rotateKey(ws);
-      } else if (message.type === "grants" || message.type === "desired" || message.type === "settings") {
+      } else if (
+        message.type === "grants" ||
+        message.type === "desired" ||
+        message.type === "settings" ||
+        message.type === "reach"
+      ) {
         // K-1608: the daemon saves each push, gives it to the provider, and tells kitshn that it applied it.
         const key =
           message.type === "grants"
             ? pushKey.grants(message.provider)
             : message.type === "settings"
               ? pushKey.settings(message.provider)
-              : pushKey.desired(message.provider, message.kind);
+              : message.type === "reach"
+                ? pushKey.reach(message.provider)
+                : pushKey.desired(message.provider, message.kind);
         const { hash: _hash, ...event } = message;
         const value =
           message.type === "grants"
             ? message.tables
             : message.type === "settings"
               ? message.values
-              : message.state;
+              : message.type === "reach"
+                ? message.cards
+                : message.state;
         if (registry().setPushed(key, value)) {
           const connection = registry().connectionOf(message.provider);
           const emit = connection === null ? undefined : providerEmitters.get(connection);
@@ -2583,6 +2593,19 @@ async function runCommand() {
   };
   const local = await listenLocal(paths.socket, { ...socketOptions, access: "private" });
   process.on("exit", local.stop);
+  // K-1609: the link proxy of the providers, in the same private folder, so only the daemon user and root reach it.
+  const links =
+    linkSocket === null
+      ? null
+      : serveLinks(linkSocket, {
+          reach: () =>
+            registry()
+              .reports()
+              .flatMap((report) => registry().reachOf(report.name)),
+          token: () => (joined ? { clientId: joined.clientId, clientSecret: joined.clientSecret } : null),
+          log,
+        });
+  if (links) process.on("exit", links.stop);
   // K-701: the users in `localUsers` connect here. An unsafe folder costs only this socket, not the daemon.
   const shared =
     platform === "win32"
@@ -2648,6 +2671,10 @@ function readMachineFile(): unknown {
 
 /** The requests to kitshn that wait for its `answer`, by request id: null, or why kitshn refused. */
 const answerWaiters = new Map<string, (error: string | null) => void>();
+/** K-1609: the Unix socket of the link proxy, next to the private local socket. */
+// Known limit: Windows has no link proxy, because its local socket is a named pipe with no private folder (K-621).
+// Revisit with a pipe of its own, under the pipe rules of K-621.
+const linkSocket = platform === "win32" ? null : join(dirname(paths.socket), "link.sock");
 
 /** K-704: the providers of this machine, saved in `providers.json`. */
 const providersFile = () => join(paths.data, "providers.json");
@@ -2801,6 +2828,16 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
     waiter.settle({ ok: request.ok, exitCode: request.ok ? 0 : 1, output: request.output });
     return { id, type: "command-result" };
   }
+  if (request.type === "audit") {
+    // K-1610: only the provider's own connection, and only over a signed connection; kitshn names the source.
+    if (registry().connectionOf(request.provider) !== caller.connection)
+      throw new Error(`register ${request.provider} on this connection first (K-704).`);
+    const ws = socket;
+    if (ws === null || challenge === null)
+      throw new Error("the daemon has no signed connection to kitshn, so kitshn cannot record the call now.");
+    sendOn(ws, { type: "audit", audit: request.audit });
+    return { id, type: "audit" };
+  }
   if (request.type === "desired-set") {
     // K-709: only the connection that registered the provider, and only over a signed connection to kitshn.
     if (registry().connectionOf(request.provider) !== caller.connection)
@@ -2849,6 +2886,7 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
       type: "register",
       machineId: joined.machineId,
       ...registry().savedFor(request.provider),
+      linkSocket,
     };
   }
   if (request.type === "attester-set") return setAttester(request, caller);

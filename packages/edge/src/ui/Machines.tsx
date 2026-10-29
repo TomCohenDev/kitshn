@@ -174,20 +174,22 @@ export function KeySticker(props: { view: MachineView }) {
 }
 
 /**
- * K-1608: the pushes of state that an offline machine gets when it connects. An online machine applies them at once,
- * so it shows none; a daemon that does not report what it applied shows "queued ?".
+ * K-1608: an offline machine shows the pushes that wait for it. An online daemon that does not report what it applied,
+ * one from before K-1608, shows "queued ?". An online daemon that reports it applies each push at once.
  */
 export function QueuedSticker(props: { view: MachineView }) {
   const { online, queued } = props.view;
-  if (online || queued === 0) return null;
-  return queued === null ? (
-    <span
-      class="sticker wait"
-      data-tip="Queued: this daemon does not report what it applied, so kitshn cannot count the changes that wait. Update the daemon."
-    >
-      queued ?
-    </span>
-  ) : (
+  if (online && queued === null)
+    return (
+      <span
+        class="sticker wait"
+        data-tip="Queued: this daemon is older than the queue and does not report what it applied, so kitshn cannot count what waits. Update the daemon."
+      >
+        queued ?
+      </span>
+    );
+  if (online || queued === null || queued === 0) return null;
+  return (
     <span
       class="sticker wait"
       data-tip={`Queued: ${queued} changes of grants, settings or shared state wait for this machine. It applies the current state when it connects.`}
@@ -228,10 +230,7 @@ function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error
             {shortFingerprint(machine.key.fingerprint)} · {ago(machine.key.since)} old
           </span>
         ) : (
-          <>
-            <KeySticker view={props.view} />
-            <QueuedSticker view={props.view} />
-          </>
+          <KeySticker view={props.view} />
         )}
         <button
           class="btn"
@@ -427,6 +426,7 @@ export function MachinePanel(props: {
     <>
       <div class="row">
         <PresenceSticker view={view} />
+        <QueuedSticker view={view} />
         {view.status ? (
           <span class="muted">
             {view.status.hostname} · {view.status.os} · {view.status.arch} · kitshn {view.status.version} ·

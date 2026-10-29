@@ -1721,6 +1721,8 @@ function report() {
               "backup",
               "backup-restore",
               "provider",
+              // K-1608: this daemon answers `applied` for each push that it saved.
+              "applied",
               ...(doorState.problem === null ? ["doors"] : []),
             ],
       ...(keptBytes === undefined ? {} : { keptBytes }),
@@ -2888,7 +2890,15 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
     const { id: _id, type: _type, ...change } = request;
     const requestId = crypto.randomUUID();
     const error = await new Promise<string | null>((resolve) => {
-      answerWaiters.set(requestId, resolve);
+      // Like an ask, a request waits at most 60 seconds for kitshn.
+      const timer = setTimeout(() => {
+        answerWaiters.delete(requestId);
+        resolve("kitshn did not answer within 60 seconds; the state may or may not be stored.");
+      }, 60_000);
+      answerWaiters.set(requestId, (answer) => {
+        clearTimeout(timer);
+        resolve(answer);
+      });
       sendOn(ws, { type: "desiredSet", requestId, ...change });
     });
     if (error !== null) throw new Error(error);

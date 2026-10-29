@@ -816,6 +816,8 @@ export class Kitshn extends DurableObject<Env> {
   private linkRates = new Map<string, { minute: number; count: number; dropped: number }>();
   /** K-704: the kinds and commands of each machine's providers, by machine id. */
   private providerRegs = new Map<string, Array<ProviderRegistration>>();
+  /** K-1608: the hash of each push of each machine with providers, by machine id and push key. */
+  private pushHashes = new Map<string, Map<string, string>>();
   /** K-1608: the hash of what each signed connection got last, by `<machine id>/<push key>`. */
   private sentGrants = new Map<string, string>();
   /** K-709: the parts of each desired state, by kind and by machine id ("" for the shared part). */
@@ -3265,7 +3267,8 @@ export class Kitshn extends DurableObject<Env> {
       }, {}),
       pausedBy: this.state.paused ? parsePausedBy(this.meta("paused_by"), this.meta("paused_at")) : null,
       machines: [...this.state.machines.values()].map((machine) => this.machineView(machine)),
-      cardSettings: Object.fromEntries(this.cardSettings),
+      // K-717: only of cards that exist; an undoable removal keeps the rows, so Undo brings the settings back.
+      cardSettings: Object.fromEntries([...this.cardSettings].filter(([id]) => this.state.resources.has(id))),
       providerCommands: Object.fromEntries(
         [...this.providerRegs].map(([machineId, regs]) => [
           machineId,
@@ -3313,7 +3316,7 @@ export class Kitshn extends DurableObject<Env> {
       keyFailure: this.keyFailures.get(machine.id) ?? null,
       orphanVolumes: orphanVolumes(live?.volumes ?? [], this.state),
       servers: live?.servers ?? [],
-      queued: this.queuedFor(machine.id),
+      queued: this.queuedFor(machine, live?.status ?? null),
     };
   }
 
@@ -3342,6 +3345,8 @@ export class Kitshn extends DurableObject<Env> {
     this.reconcileNotifications();
     // K-1716: a change can take a code right away.
     this.revokeTokens(null, true);
+    // K-1608: the pushes go out, and their hashes count the queue, before the maps read the counts.
+    this.pushGrants();
     const repos = this.repoViews();
     for (const socket of this.ctx.getWebSockets("map")) {
       const attachment = attachmentOf(socket);
@@ -3353,18 +3358,20 @@ export class Kitshn extends DurableObject<Env> {
       }
       send(socket, { type: "snapshot", snapshot: this.snapshot(caller, repos) });
     }
-    this.pushGrants();
   }
 
   /** K-706: sends each provider of each signed connection its grant tables when they changed since the last send. */
   private pushGrants(now = Date.now()) {
+    this.pushHashes.clear();
     for (const machineId of this.providerRegs.keys()) {
+      const pushes = this.pushesOf(machineId, now);
+      this.pushHashes.set(machineId, new Map(pushes.map(({ key, hash }) => [key, hash])));
       const socket = this.ctx.getWebSockets(machineId).find((item) => {
         const attachment = attachmentOf(item);
         return attachment?.kind === "machine" && attachment.check === "signed";
       });
       if (!socket) continue;
-      for (const { key, hash, push } of this.pushesOf(machineId, now)) {
+      for (const { key, hash, push } of pushes) {
         if (this.sentGrants.get(`${machineId}/${key}`) === hash) continue;
         this.sentGrants.set(`${machineId}/${key}`, hash);
         const { key: _key, ...message } = push;
@@ -3476,11 +3483,23 @@ export class Kitshn extends DurableObject<Env> {
    * K-1608: how many pushes a machine has not applied yet; a machine without providers has none. Null when it never
    * answered `applied`: a daemon from before K-1608 does not, so its count is unknown, not a growing number.
    */
-  private queuedFor(machineId: string): number | null {
-    const pushes = this.pushesOf(machineId);
-    if (pushes.length === 0) return 0;
-    if (!pushes.some(({ key }) => this.applied.has(`${machineId}/${key}`))) return null;
-    return pushes.filter(({ key, hash }) => this.applied.get(`${machineId}/${key}`) !== hash).length;
+  private queuedFor(machine: Machine, status: MachineStatus | null): number | null {
+    // A machine without a key gets no pushes (K-1708), so nothing waits for it.
+    if (machine.key?.kind !== "public") return 0;
+    const pushes = this.hashesOf(machine.id);
+    if (pushes.size === 0) return 0;
+    // An online daemon that does not name `applied` never answers it, so its count is unknown.
+    if (status !== null && !status.capabilities?.includes("applied")) return null;
+    return [...pushes].filter(([key, hash]) => this.applied.get(`${machine.id}/${key}`) !== hash).length;
+  }
+
+  /** K-1608: the hash of each push of a machine, from the last `pushGrants`, or counted now after a restart. */
+  private hashesOf(machineId: string): ReadonlyMap<string, string> {
+    const known = this.pushHashes.get(machineId);
+    if (known) return known;
+    const hashes = new Map(this.pushesOf(machineId).map(({ key, hash }) => [key, hash]));
+    this.pushHashes.set(machineId, hashes);
+    return hashes;
   }
 
   /**
@@ -4535,7 +4554,14 @@ export class Kitshn extends DurableObject<Env> {
       this.recordLinkEvent(machine, message.audit);
     } else if (message.type === "desiredSet" && typeof message.kind === "string") {
       // K-709: the provider gets kitshn's own answer, also a refusal.
-      const error = this.setDesiredFromMachine(machine, message);
+      // A failed write is an answer too, so the provider never waits for one that does not come.
+      let error: string | null;
+      try {
+        error = this.setDesiredFromMachine(machine, message);
+      } catch (thrown) {
+        console.error(`kitshn could not store the desired state of ${machine.name}: ${String(thrown)}`);
+        error = `kitshn could not store the state: ${thrown instanceof Error ? thrown.message : String(thrown)}`;
+      }
       if (typeof message.requestId === "string")
         send(socket, {
           type: "requestAnswer",
@@ -4550,7 +4576,7 @@ export class Kitshn extends DurableObject<Env> {
       // K-1608: written only when it changes, so a machine that applied everything writes nothing, and only for a key
       // that kitshn pushes to it now, so a daemon cannot fill the table.
       const id = `${machine.id}/${message.key}`;
-      const known = this.pushesOf(machine.id).some((push) => push.key === message.key);
+      const known = this.hashesOf(machine.id).has(message.key);
       if (known && this.applied.get(id) !== message.hash) {
         this.sql(
           "INSERT OR REPLACE INTO applied_state (machine_id, key, hash) VALUES (?, ?, ?)",
@@ -5575,6 +5601,8 @@ export class Kitshn extends DurableObject<Env> {
   private forgetCard(id: string): Forget {
     for (const table of ["resources", "places", "card_ends"])
       this.sql(`DELETE FROM ${table} WHERE id = ?`, id);
+    // K-717: the settings of a card go with it.
+    this.sql("DELETE FROM card_settings WHERE card_id = ?", id);
     // K-1124: a forgotten card does not come back, so its old addresses go free.
     this.sql("DELETE FROM old_addresses WHERE card_id = ?", id);
     this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);

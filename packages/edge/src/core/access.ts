@@ -238,7 +238,8 @@ export function desiredAccess(
       circlePolicies(share.circle, state.machines).has(`policy:${share.circle.id}:people`),
     );
     const chef = people.length > 0 && people.every((share) => share.circle.id === OWNER_CIRCLE_ID);
-    const closed = page(shares.length === 0 ? pages?.closed : chef ? pages?.chef : pages?.login);
+    // A card whose circles hold no people (machines only) is closed to every person.
+    const loginPage = page(people.length === 0 ? pages?.closed : chef ? pages?.chef : pages?.login);
     for (const share of shares) {
       for (const [key, body] of circlePolicies(share.circle, state.machines)) {
         // K-1504: during a pause only people pass; the devices and networks policy of Owner drops out.
@@ -262,7 +263,7 @@ export function desiredAccess(
         session_duration: resource.id === ADMIN_RESOURCE_ID ? "24h" : "720h",
         same_site_cookie_attribute: "lax",
         policyKeys,
-        ...closed,
+        ...loginPage,
       });
     }
   }

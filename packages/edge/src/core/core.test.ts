@@ -490,6 +490,17 @@ describe("kitshn login pages (K-1130)", () => {
         { _tag: "circle", id: "her", after: { ...circle(state, "her"), x: spot.x, y: spot.y, r: 400 } },
       ]),
     );
+    const devices: Circle = {
+      ...circle(state, "her"),
+      x: 3000,
+      y: 3000,
+      r: 400,
+      members: [{ _tag: "device", tokenId: "t1", clientId: "c1.access", name: "a machine" }],
+    };
+    const machinesOnly = applyChanges(
+      tray,
+      resolveEdits(tray, [{ _tag: "circle", id: "her", after: devices }]),
+    );
     const old = [{ cardId: "riffle", address: "old-riffle.example.com" }];
     const removed = [{ id: "app-gone-1-prod", name: "gone", address: "gone.example.com" }];
     const page = (from: State, key: string) =>
@@ -503,6 +514,7 @@ describe("kitshn login pages (K-1130)", () => {
       ["an old address of an Owner-only card", state, "app:riffle:old-riffle.example.com", "chef"],
       ["a removed app that still answers", state, "app:app-gone-1-prod:gone.example.com", "chef"],
       ["a card that another people circle opens", shared, "app:riffle:riffle.example.com", "login"],
+      ["a card in a circle of machines only", machinesOnly, "app:riffle:riffle.example.com", "closed"],
       [
         "the pause, which closes the card's share",
         { ...state, paused: "keep-public" },

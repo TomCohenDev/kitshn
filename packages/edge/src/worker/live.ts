@@ -1,3 +1,4 @@
+import { ACCESS_NAME_PREFIX } from "../core/access.ts";
 import { RESERVED_SITE_NAMES } from "../core/library.ts";
 import type { LiveSiteReport } from "../core/machine.ts";
 import { type Resource, fnv } from "../core/model.ts";
@@ -17,6 +18,8 @@ export interface LiveSite {
   /** When the site or its machine was last seen up. */
   readonly lastUp: number;
   /** "checking" until kitshn knows that nothing else uses the address; "refused" when something does. */
+  /** K-1623: the path applications of another owner on the address, whose paths keep their own Access check. */
+  readonly paths?: ReadonlyArray<ForeignPath>;
   /** `handover`: the owner takes over an address that something else serves (K-1623); it ends as `ok`. */
   readonly state: "checking" | "ok" | "refused" | "handover";
 }
@@ -137,6 +140,55 @@ export function nextCardAddresses(
   return [...addresses, ...existing.filter((address) => !addresses.includes(address))];
 }
 
+/** K-1623: a path application of another owner on a kitshn address; `aud` null for one that bypasses Access. */
+export interface ForeignPath {
+  readonly path: string;
+  readonly aud: string | null;
+}
+
+/** One Access application as Cloudflare lists it, with the fields that K-1623 reads. */
+export interface AccessAppListing {
+  readonly name: string;
+  readonly domain: string;
+  readonly aud: string;
+  readonly self_hosted_domains?: ReadonlyArray<string>;
+  readonly policies?: ReadonlyArray<{ readonly decision: string }>;
+}
+
+const appHosts = (app: AccessAppListing) => [...new Set([app.domain, ...(app.self_hosted_domains ?? [])])];
+
+/**
+ * K-1623: the paths on `host` of applications that kitshn did not make. A path of an application with a Bypass
+ * policy comes with no Access token, so it gets no check; any other path comes with its own application's token.
+ */
+export function foreignPaths(apps: ReadonlyArray<AccessAppListing>, host: string): Array<ForeignPath> {
+  return apps
+    .filter((app) => !app.name.startsWith(ACCESS_NAME_PREFIX))
+    .flatMap((app) => {
+      const bypass = (app.policies ?? []).some((policy) => policy.decision === "bypass");
+      return appHosts(app)
+        .filter((domain) => domain.startsWith(`${host}/`))
+        .map((domain) => ({ path: domain.slice(host.length), aud: bypass ? null : app.aud }));
+    })
+    .sort((a, b) => b.path.length - a.path.length || a.path.localeCompare(b.path));
+}
+
+/** K-1623: whether an application that kitshn did not make holds exactly `host`, with no path. */
+export const foreignHolds = (apps: ReadonlyArray<AccessAppListing>, host: string) =>
+  apps.some((app) => !app.name.startsWith(ACCESS_NAME_PREFIX) && appHosts(app).includes(host));
+
+/**
+ * K-1623: the cloudflared path rule of an Access application path. `*` matches anything, and a path without one also
+ * covers the paths below it, as Access does (tested on Cloudflare, 2026-10-29). cloudflared takes a regular expression.
+ */
+export function ingressPath(path: string): string {
+  const pattern = path
+    .split("*")
+    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
+  return path.endsWith("*") ? `^${pattern}` : `^${pattern}(/|$)`;
+}
+
 /** K-603, K-607, K-1105: the ingress of a machine's tunnel from its live sites. */
 export function tunnelConfig(sites: ReadonlyArray<LiveSite>, accessOf: (site: LiveSite) => IngressAccess) {
   return {
@@ -144,19 +196,27 @@ export function tunnelConfig(sites: ReadonlyArray<LiveSite>, accessOf: (site: Li
       ingress: [
         ...[...sites]
           .sort((a, b) => a.address.localeCompare(b.address))
-          .map((site) => {
+          .flatMap((site) => {
             const access = accessOf(site);
-            const originRequest = {
-              ...(site.dev ? { httpHostHeader: "localhost" } : {}),
-              ...(access.kind === "check"
-                ? { access: { required: true, teamName: access.teamName, audTag: [access.aud] } }
-                : {}),
-            };
-            return {
+            const check = (aud: string) =>
+              access.kind === "check"
+                ? { access: { required: true, teamName: access.teamName, audTag: [aud] } }
+                : {};
+            const rule = (extra: object, originRequest: object) => ({
               hostname: site.address,
+              ...extra,
               service: site.target,
               ...(Object.keys(originRequest).length > 0 ? { originRequest } : {}),
-            };
+            });
+            const dev = site.dev ? { httpHostHeader: "localhost" } : {};
+            // K-1623: cloudflared takes the first rule that matches, so the paths of other applications come first,
+            // each with its own check; the host keeps kitshn's.
+            return [
+              ...(site.paths ?? []).map((item) =>
+                rule({ path: ingressPath(item.path) }, { ...dev, ...(item.aud ? check(item.aud) : {}) }),
+              ),
+              rule({}, { ...dev, ...(access.kind === "check" ? check(access.aud) : {}) }),
+            ];
           }),
         { service: "http_status:404" },
       ],

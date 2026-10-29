@@ -115,14 +115,14 @@ async function setup() {
           .exec<{ summary: string }>("SELECT summary FROM revisions ORDER BY id DESC LIMIT 1")
           .one().summary,
     );
-  /** The daemon reports the provider site `name`, as it does before it reports the provider's cards. */
-  const sites = (name: string) =>
+  /** The daemon reports the provider site `name`, or none, as it does before it reports the provider's cards. */
+  const sites = (name?: string) =>
     runInDurableObject(stub, (instance) =>
       instance.webSocketMessage(
         daemonSocket("signed"),
         JSON.stringify({
           type: "sites",
-          sites: [{ name, target: "http://localhost:3773", dev: false, up: true }],
+          sites: name ? [{ name, target: "http://localhost:3773", dev: false, up: true }] : [],
         }),
       ),
     );
@@ -758,12 +758,28 @@ it("lets a machine cancel only the queued jobs that it queued itself (K-1612)", 
 });
 
 it("takes over a provider site's address with its application first, then ingress, then the kept record, and gives it back (K-1623)", async () => {
-  const { stub, message, card, sql, site } = await setup();
+  const { stub, message, card, sql, site, sites } = await setup();
   await sql("INSERT OR REPLACE INTO places (id, x, y) SELECT ?, x, y FROM places WHERE id = 'vps'", appId);
   await message("signed", [report([{ ...app, site: { name: "t3-vps", port: 3773 } }])]);
   await site("t3-vps", true);
   const calls: Array<string> = [];
+  let portalHolds = true;
+  let tunnelIngress: Array<Record<string, unknown>> = [];
+  const portal = (hosts: Array<string>, decision: string, aud: string) => ({
+    name: "portal",
+    domain: hosts[0],
+    aud,
+    self_hosted_domains: hosts,
+    policies: [{ decision }],
+  });
   const api = async (method: string, path: string, body?: unknown) => {
+    if (path.includes("/access/apps"))
+      return [
+        ...(portalHolds ? [portal(["t3-vps.example.com"], "allow", "aud-portal")] : []),
+        portal(["t3-vps.example.com/assets/*"], "bypass", "aud-build"),
+      ];
+    if (path.includes("cfd_tunnel") && isRecordLike(body))
+      tunnelIngress = (body["config"] as { ingress: Array<Record<string, unknown>> }).ingress;
     const content = isRecordLike(body) && typeof body["content"] === "string" ? ` ${body["content"]}` : "";
     const ingress =
       path.includes("cfd_tunnel") && JSON.stringify(body).includes("t3-vps.example.com")
@@ -831,6 +847,12 @@ it("takes over a provider site's address with its application first, then ingres
   );
   await run((instance) => instance.syncTunnels(api, 6));
   expect(calls.at(-1)?.endsWith("/cfd_tunnel/tunnel-vps/configurations with the host")).toBe(true);
+  // The portal's Bypass path comes first, with no check; the host keeps kitshn's.
+  expect(tunnelIngress.slice(0, 2)).toMatchObject([
+    { hostname: "t3-vps.example.com", path: "^/assets/.*" },
+    { hostname: "t3-vps.example.com", originRequest: { access: { audTag: ["aud"] } } },
+  ]);
+  expect(tunnelIngress[0]).not.toHaveProperty("originRequest");
   expect(await run((instance) => instance.handoverOf(appId)?.ingressAt)).not.toBeNull();
   // The zone's records path, as kitshn asked for the record of the address.
   const records = calls
@@ -857,6 +879,19 @@ it("takes over a provider site's address with its application first, then ingres
   expect(calls).toEqual([`PUT ${records}/portal-record portal.cfargotunnel.com`]);
   expect(await state()).toEqual({ site: "refused", records: [] });
   expect(await card()).toMatchObject({ addresses: [], provider: { stickers: [{ text: "address in use" }] } });
+  // After the portal let go of the host, the address stays with kitshn: no give-back, and the action goes.
+  expect(
+    await statusOf(run((instance) => instance.takeAddress(person("owner@example.com"), appId, api))),
+  ).toBe(200);
+  await run((instance) => instance.setHandover(appId, { ...instance.handoverOf(appId), switched: true }));
+  portalHolds = false;
+  expect(
+    await statusOf(run((instance) => instance.giveAddressBack(person("owner@example.com"), appId, api))),
+  ).toBe(409);
+  expect(await run((instance) => instance.handoverOf(appId))).toMatchObject({ released: true });
+  // When the daemon stops reporting the site, its handover goes with it.
+  await sites();
+  expect(await run((instance) => instance.handoverOf(appId))).toBeNull();
   await sql("DELETE FROM access_objects WHERE key LIKE 'app:p-%'");
   await sql("DELETE FROM places WHERE id LIKE 'p-%'");
 });

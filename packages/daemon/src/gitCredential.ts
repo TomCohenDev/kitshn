@@ -33,6 +33,19 @@ export function repoOfRemote(url: string): string | null {
   return null;
 }
 
+/** K-1763: `kitshn setup-git` marks each push to github.com with this user name, because git never tells a helper push from fetch. */
+export const PUSH_USER = "kitshn-push";
+
+/** K-1763: the git config key of the push mark that `kitshn setup-git` writes. */
+export const PUSH_MARK_KEY = `url.https://${PUSH_USER}@github.com/.pushInsteadOf`;
+
+/** K-1763: gh answers a marked push with the empty user name of kitshn; helpers that look up a user name do not. */
+export const answersMarkedPush = (helper: string) => helper.includes("gh auth git-credential");
+
+/** K-1763: a marked push asks for write; every other request asks for read. */
+export const permissionOfCredential = (fields: Readonly<Record<string, string>>): "read" | "write" =>
+  fields["username"] === PUSH_USER ? "write" : "read";
+
 /** K-1763: the answer of the helper for a token, with its expiry, so a helper that stores it drops it in time. */
 export const credentialAnswer = (token: string, expiresAt: string) =>
   `username=x-access-token\npassword=${token}\npassword_expiry_utc=${Math.floor(Date.parse(expiresAt) / 1000)}\n`;
@@ -41,14 +54,18 @@ export const credentialAnswer = (token: string, expiresAt: string) =>
  * K-1763, K-1752: what `kitshn git-credential get` prints for kitshn's answer. A token answers git. A refusal or a
  * waiting ask of a kitshn owner, also a thread that the attester could not check, prints `quit=1`, so git never falls
  * back to the machine's own login. A daemon that cannot help (no daemon, no connection, another owner) prints nothing,
- * so git tries its next helper.
+ * so git tries its next helper. On a marked push it clears the user name first, because gh refuses a request for
+ * another user.
  */
-export function credentialReply(answer: Answer | null): {
+export function credentialReply(
+  answer: Answer | null,
+  push = false,
+): {
   readonly stdout: string;
   readonly stderr: string | null;
 } {
   if (answer === null || answer.type !== "ask" || answer.outcome === "not-kitshn")
-    return { stdout: "", stderr: null };
+    return { stdout: push ? "username=\n" : "", stderr: null };
   if (answer.outcome === "done" && typeof answer.result === "object" && answer.result !== null) {
     const { token, expiresAt } = answer.result as { token?: unknown; expiresAt?: unknown };
     if (typeof token === "string" && typeof expiresAt === "string")

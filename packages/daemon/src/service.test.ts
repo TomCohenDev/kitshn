@@ -4,6 +4,7 @@ import {
   expectedDaemonUid,
   expectedHash,
   localSocket,
+  otherUsersSockets,
   pathsFor,
   releaseAsset,
   serviceCommands,
@@ -155,6 +156,10 @@ describe("daemon service (K-601)", () => {
       "/tmp/kitshn-1001/kitshn.sock": { ...sock, uid: 1001 },
     };
     expect(localSocket({}, root, at(mallory), ["kitshn-1001"], named)).toBe(root.socket);
+    // So "not running" names it, instead of only the caller's own socket.
+    expect(otherUsersSockets(at({ ...daemon, ...mallory }), [...tmp, "kitshn-1001"], named)).toEqual([
+      "/tmp/kitshn-1001/kitshn.sock (user mallory)",
+    ]);
     // Another user's fake socket next to the daemon's neither counts nor blocks the daemon's.
     expect(localSocket({}, root, at({ ...daemon, ...mallory }), [...tmp, "kitshn-1001"], named)).toBe(
       "/tmp/kitshn-1000/kitshn.sock",

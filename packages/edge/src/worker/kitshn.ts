@@ -2673,6 +2673,7 @@ export class Kitshn extends DurableObject<Env> {
       jobs: this.recentJobs(10, 2000),
       backups: Object.fromEntries(this.latestBackups()),
       r2Bucket: this.bucket(),
+      backupsOff: !this.env.KITSHN_BACKUP_KEY,
       restoreUndo: this.meta("restore_undo"),
       version: this.env.KITSHN_VERSION,
       accessTeam: this.env.ACCESS_TEAM_DOMAIN,

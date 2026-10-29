@@ -1649,6 +1649,11 @@ export class Kitshn extends DurableObject<Env> {
     const store = this.accessStore();
     for (const { retryAt: _, attempts: __, ...row } of this.access.values())
       if (row.error !== null) store.put({ ...row, tried: "", error: null });
+    // K-406, K-409: a waiting Access step runs in the next alarm; its tries and episode stay.
+    for (const step of ["Access", "launcher", "launcher after Access"] as const) {
+      const failure = this.alarmSteps().get(step);
+      if (failure && failure.retryAt !== 0) this.setAlarmStep(step, { ...failure, retryAt: 0 });
+    }
   }
 
   /** K-1502, K-1506: Undo reverses the caller's own newest revision, and runs the same rules as an edit. */

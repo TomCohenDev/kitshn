@@ -139,14 +139,29 @@ it("runs the later alarm steps when one throws, skips it with backoff, and tells
     // The daily run and the backups are far away, so only the steps set the next alarm.
     for (const key of ["daily_at", "backup_at"])
       kitshn.sql("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", key, String(t0 + 86_400_000));
+    // K-406, K-409: a timed card ends while the Access step waits (below), and that change runs Access at once.
+    const timer: Resource = {
+      id: "timer",
+      // A Compose card that no machine serves, so uptime fetches nothing.
+      kind: "site.compose",
+      name: "timer",
+      addresses: ["timer.example.com"],
+      status: "running",
+      group: null,
+      machine: null,
+    };
+    kitshn.sql("INSERT INTO resources (id, body) VALUES ('timer', ?)", JSON.stringify(timer));
+    kitshn.sql("INSERT INTO places (id, x, y) VALUES ('timer', 0, 0)");
+    kitshn.sql("INSERT INTO card_ends (id, ends_at) VALUES ('timer', ?)", t0 + 16.5 * 60_000);
+    kitshn.load();
     let ran: Array<string> = [];
-    let gameDnsFails = true;
+    const fails = new Set(["syncGameDns"]);
     kitshn["api"] = () => async () => [];
     // Game records wait, as on 2026-10-29: this work woke the alarm at once while the step threw.
     kitshn["gameDnsWork"] = () => true;
     const step = (name: string, calls: number) => async () => {
       ran.push(name);
-      if (name === "syncGameDns" && gameDnsFails) throw new Error("zonePath takes one label.");
+      if (fails.has(name)) throw new Error("zonePath takes one label.");
       return calls;
     };
     for (const name of ["fillAudiences", "refreshForeignPaths", "syncTunnels", "checkSites", "syncDns"])
@@ -158,6 +173,7 @@ it("runs the later alarm steps when one throws, skips it with backoff, and tells
     let accessBudget = 0;
     kitshn["syncAccessLocked"] = async (_api: unknown, budget: number) => {
       ran.push("syncAccessLocked");
+      if (fails.has("syncAccessLocked")) throw new Error("Cloudflare answered 503.");
       accessBudget = budget;
     };
     const read = () => kitshn.sql("SELECT key, state FROM notifications WHERE source = 'alarm' ORDER BY id");
@@ -170,9 +186,14 @@ it("runs the later alarm steps when one throws, skips it with backoff, and tells
     const failed = { ...(await run(t0)), rows: read() };
     const skipped = await run(t0 + 1_000);
     const again = await run(t0 + 5 * 60_000);
-    gameDnsFails = false;
+    fails.clear();
     const works = await run(t0 + 15 * 60_000);
-    return { failed, skipped, again, works, rows: read() };
+    const rows = read();
+    fails.add("syncAccessLocked");
+    await run(t0 + 16 * 60_000);
+    fails.clear();
+    const ended = await run(t0 + 17 * 60_000);
+    return { failed, skipped, again, works, rows, ended, endedRows: read() };
   });
   const later = ["syncRoutes", "syncRedirects", "syncLauncher", "syncAccessLocked", "syncLauncher"];
   const before = ["fillAudiences", "refreshForeignPaths", "syncTunnels", "checkSites", "syncDns"];
@@ -191,4 +212,10 @@ it("runs the later alarm steps when one throws, skips it with backoff, and tells
   expect(result.again.alarm).toBe(t0 + 15 * 60_000);
   expect(result.works.ran).toContain("syncGameDns");
   expect(result.rows).toEqual([{ key: "game DNS", state: "closed" }]);
+  // The end of the card is a map change, so the waiting Access step runs in the same alarm and closes.
+  expect(result.ended.ran).toContain("syncAccessLocked");
+  expect(result.endedRows).toEqual([
+    { key: "game DNS", state: "closed" },
+    { key: "Access", state: "closed" },
+  ]);
 });

@@ -52,5 +52,10 @@ describe("Web Push (K-1907)", () => {
       title: "riffle is down",
       body: "uptime · riffle",
     });
+    // K-1908: an app writes its own title, so its push names only the card.
+    expect(pushMessage({ ...notification, source: "app", title: "Secret plan" }, "riffle")).toMatchObject({
+      title: "riffle has news",
+      body: "app · riffle",
+    });
   });
 });

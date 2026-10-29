@@ -379,6 +379,11 @@ describe("Worker deploys (K-806, K-909)", () => {
     cloudflare.state.failUploads = 1;
     expect((await deploy(app)).status).toBe(502);
     expect(cloudflare.scripts.has(app.script)).toBe(false);
+    // K-1908: a failed deploy keeps no notify token.
+    const tokens = await runInDurableObject(env.KITSHN.getByName("kitshn"), (_instance, state) =>
+      state.storage.sql.exec("SELECT hash FROM notify_tokens WHERE card_id = ?", app.card).toArray(),
+    );
+    expect(tokens).toEqual([]);
     const removed = await admin(`/api/apps/${app.card}`, "DELETE");
     expect(removed.status, JSON.stringify(removed.body)).toBe(200);
     expect(await storageRows(app.card)).toEqual([]);

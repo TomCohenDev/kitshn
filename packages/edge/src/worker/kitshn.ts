@@ -155,7 +155,9 @@ import { type Usage, type UsageRow, usageLevel } from "../core/usage.ts";
 import {
   HOUR_MS,
   MACHINE_OFFLINE_MS,
-  NOTIFY_PER_HOUR,
+  NOTIFY_ALL_HOUR,
+  NOTIFY_BODY_MAX,
+  NOTIFY_PER_CARD_HOUR,
   NOTIFY_TOKENS_KEPT,
   appEvent,
   takeSlot,
@@ -518,6 +520,15 @@ interface NotificationRow extends Record<string, SqlStorageValue> {
   closed_at: number | null;
   snoozed_until: number | null;
   episode: string;
+}
+
+/** JSON text as a value, or null when it is no JSON. */
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
 }
 
 /** A stored value outside its set is a bug, so it fails loudly (K-006). */
@@ -3906,6 +3917,13 @@ export class Kitshn extends DurableObject<Env> {
           )
         : [];
       const command = job ? (JSON.parse(job.command) as Command) : null;
+      // K-1908: a Compose job that came up keeps its notify token; a failed one drops it.
+      if (
+        command?.kind === "compose" ||
+        command?.kind === "compose-redeploy" ||
+        command?.kind === "compose-rollback"
+      )
+        this.settleNotifyToken(`job:${message.id}`, result.ok === true);
       // K-909: undo never brings a deleted volume back, so History records the delete as an action once it ran.
       if (job && command?.kind === "compose-volume-remove" && result.ok === true) {
         this.insertRevision(
@@ -4420,7 +4438,7 @@ export class Kitshn extends DurableObject<Env> {
         command.kind === "compose" ||
         command.kind === "compose-redeploy" ||
         command.kind === "compose-rollback"
-          ? { url: this.notifyUrl(), token: this.mintNotifyToken(command.project) }
+          ? { url: this.notifyUrl(), token: this.mintNotifyToken(command.project, `job:${job.id}`) }
           : undefined;
       send(socket, { type: "job", id: job.id, command, ...(notify ? { notify } : {}) });
       this.sql("UPDATE jobs SET state = 'sent', machine_id = ? WHERE id = ?", machine.id, job.id);
@@ -5204,6 +5222,8 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("DELETE FROM notification_mutes WHERE until IS NOT NULL AND until < ?", now);
       // K-1908: a removed app card loses its notify tokens here, so a quick Undo keeps them.
       this.sql("DELETE FROM notify_tokens WHERE card_id NOT IN (SELECT id FROM resources)");
+      // A token whose deploy or job never reported back goes after a day.
+      this.sql("DELETE FROM notify_tokens WHERE pending IS NOT NULL AND created_at < ?", now - DAY);
       this.muteCache = null;
       // K-1113: a removed card keeps its icon until this run, so a quick Undo keeps it; a deploy sends it again.
       for (const { id } of this.sql<{ id: string }>(
@@ -6596,44 +6616,50 @@ export class Kitshn extends DurableObject<Env> {
       return fail(
         `kitshn deletes the storage of ${row.resource_id} now. Deploy again after it finishes (K-909).`,
       );
-    const response = await this.publish(
-      api,
-      row,
-      deployer,
-      "site.worker",
-      icon,
-      async () => {
-        const metadata = workerMetadata(app, {
-          kv,
-          // K-1908: the app gets a new notify token with each deploy.
-          secrets: {
-            ...secrets.secrets,
-            KITSHN_NOTIFY_URL: this.notifyUrl(),
-            KITSHN_NOTIFY_TOKEN: this.mintNotifyToken(row.resource_id),
-          },
-          assets:
-            app.assets === undefined
-              ? null
-              : {
-                  jwt: jwt as string,
-                  headers: headers as string | null,
-                  redirects: redirects as string | null,
-                },
-        });
-        if ("error" in metadata) throw new RuleError(metadata.error);
-        return { metadata: metadata.metadata, module };
-      },
-      // K-806: the schedules belong to the script, so they change after the upload, but before the addresses and
-      // before the card says that the deploy is live. A preview runs no crons, so it never runs them twice.
-      async () => {
-        if (!ephemeral)
-          await api(
-            "PUT",
-            `${account}/workers/scripts/${row.script}/schedules`,
-            crons.map((cron) => ({ cron })),
-          );
-      },
-    );
+    // K-1908: only a deploy that went live keeps its notify token; a failure or a throw drops it.
+    let response: Response | undefined;
+    try {
+      response = await this.publish(
+        api,
+        row,
+        deployer,
+        "site.worker",
+        icon,
+        async () => {
+          const metadata = workerMetadata(app, {
+            kv,
+            // K-1908: the app gets a new notify token with each deploy.
+            secrets: {
+              ...secrets.secrets,
+              KITSHN_NOTIFY_URL: this.notifyUrl(),
+              KITSHN_NOTIFY_TOKEN: this.mintNotifyToken(row.resource_id, `deploy:${row.id}`),
+            },
+            assets:
+              app.assets === undefined
+                ? null
+                : {
+                    jwt: jwt as string,
+                    headers: headers as string | null,
+                    redirects: redirects as string | null,
+                  },
+          });
+          if ("error" in metadata) throw new RuleError(metadata.error);
+          return { metadata: metadata.metadata, module };
+        },
+        // K-806: the schedules belong to the script, so they change after the upload, but before the addresses and
+        // before the card says that the deploy is live. A preview runs no crons, so it never runs them twice.
+        async () => {
+          if (!ephemeral)
+            await api(
+              "PUT",
+              `${account}/workers/scripts/${row.script}/schedules`,
+              crons.map((cron) => ({ cron })),
+            );
+        },
+      );
+    } finally {
+      this.settleNotifyToken(`deploy:${row.id}`, response?.ok === true);
+    }
     if (!response.ok) return response;
     // A deploy brings a removed Worker app back, so its kept script is no longer orphaned (K-909).
     this.sql("DELETE FROM worker_storage WHERE card_id = ? AND kind = 'script'", row.resource_id);
@@ -10322,6 +10348,7 @@ export class Kitshn extends DurableObject<Env> {
         source: "machine",
         key: id,
         episode: String(since),
+        // The machine card on purpose: mute and "Show machine" work by card, and a machine is a card on the map.
         card: id,
         recipients: { _tag: "owner" },
         level: "error",
@@ -10344,25 +10371,42 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /**
-   * K-1908: a new notify token for a card. kitshn keeps only its SHA-256, the newest NOTIFY_TOKENS_KEPT per card, so
-   * a rollback brings back a build whose token still works.
+   * K-1908: a new notify token for a card, pending on the deploy or job `pending`. kitshn keeps only its SHA-256. The
+   * app may use it at once, because it starts before its deploy reports back.
    */
-  private mintNotifyToken(card: string): string {
+  private mintNotifyToken(card: string, pending: string): string {
     const token = randomBytes(32).toString("base64url");
     this.sql(
-      "INSERT INTO notify_tokens (hash, card_id, created_at) VALUES (?, ?, ?)",
+      "INSERT INTO notify_tokens (hash, card_id, created_at, pending) VALUES (?, ?, ?, ?)",
       createHash("sha256").update(token).digest("hex"),
       card,
       Date.now(),
-    );
-    this.sql(
-      `DELETE FROM notify_tokens WHERE card_id = ? AND hash NOT IN
-       (SELECT hash FROM notify_tokens WHERE card_id = ? ORDER BY created_at DESC LIMIT ?)`,
-      card,
-      card,
-      NOTIFY_TOKENS_KEPT,
+      pending,
     );
     return token;
+  }
+
+  /**
+   * K-1908: the token of a deploy or job that went live turns live, and the newest NOTIFY_TOKENS_KEPT live ones per
+   * card stay, so a rollback brings back a build whose token still works. A failure drops its token, so failed deploys
+   * never push the live build's token out.
+   */
+  private settleNotifyToken(pending: string, ok: boolean) {
+    if (!ok) {
+      this.sql("DELETE FROM notify_tokens WHERE pending = ?", pending);
+      return;
+    }
+    for (const { card_id } of this.sql<{ card_id: string }>(
+      "UPDATE notify_tokens SET pending = NULL WHERE pending = ? RETURNING card_id",
+      pending,
+    ))
+      this.sql(
+        `DELETE FROM notify_tokens WHERE card_id = ? AND pending IS NULL AND hash NOT IN
+         (SELECT hash FROM notify_tokens WHERE card_id = ? AND pending IS NULL ORDER BY created_at DESC LIMIT ?)`,
+        card_id,
+        card_id,
+        NOTIFY_TOKENS_KEPT,
+      );
   }
 
   /** K-1908: the hourly windows of app notifications, per card and for all cards together. Memory only. */
@@ -10383,27 +10427,36 @@ export class Kitshn extends DurableObject<Env> {
     const card = row ? this.state.resources.get(row.card_id) : undefined;
     if (!card)
       return Response.json({ error: "kitshn knows no app with this notify token." }, { status: 401 });
-    const event = appEvent(await request.json().catch(() => null));
+    const body = await request.text();
+    if (new TextEncoder().encode(body).length > NOTIFY_BODY_MAX)
+      return Response.json({ error: `A notification is at most ${NOTIFY_BODY_MAX} bytes.` }, { status: 413 });
+    const event = appEvent(parseJson(body));
     if (typeof event === "string") return Response.json({ error: event }, { status: 400 });
     const now = Date.now();
     const key = `${card.id}:${event.key}`;
-    if (event.resolved) {
-      this.setNotificationState("app", key, "closed", now);
-      this.broadcast();
-      return Response.json({ ok: true });
-    }
     const window = this.appWindows.get(card.id) ?? [];
     this.appWindows.set(card.id, window);
-    // Both windows must have room; a refused call takes a slot of neither.
-    const wait =
-      takeSlot([...window], now, NOTIFY_PER_HOUR) ?? takeSlot([...this.appWindowAll], now, NOTIFY_PER_HOUR);
-    if (wait !== null)
-      return Response.json(
-        { error: `kitshn takes ${NOTIFY_PER_HOUR} app notifications an hour; try again in ${wait} seconds.` },
+    const refuse = (wait: number, limit: number, whose: string) =>
+      Response.json(
+        { error: `kitshn takes ${limit} app notifications an hour ${whose}; try again in ${wait} seconds.` },
         { status: 429, headers: { "retry-after": String(wait) } },
       );
-    takeSlot(window, now, NOTIFY_PER_HOUR);
-    takeSlot(this.appWindowAll, now, NOTIFY_PER_HOUR);
+    // A resolve counts against the card's window too, so a token cannot flood the maps with broadcasts.
+    if (event.resolved) {
+      const wait = takeSlot(window, now, NOTIFY_PER_CARD_HOUR);
+      if (wait !== null) return refuse(wait, NOTIFY_PER_CARD_HOUR, "for one card");
+      const open = this.openNotifications.has(`app\u0000${key}`);
+      this.setNotificationState("app", key, "closed", now);
+      if (open) this.broadcast();
+      return Response.json({ ok: true });
+    }
+    // Both windows must have room; a refused call takes a slot of neither.
+    const cardWait = takeSlot([...window], now, NOTIFY_PER_CARD_HOUR);
+    if (cardWait !== null) return refuse(cardWait, NOTIFY_PER_CARD_HOUR, "for one card");
+    const allWait = takeSlot([...this.appWindowAll], now, NOTIFY_ALL_HOUR);
+    if (allWait !== null) return refuse(allWait, NOTIFY_ALL_HOUR, "for all apps together");
+    takeSlot(window, now, NOTIFY_PER_CARD_HOUR);
+    takeSlot(this.appWindowAll, now, NOTIFY_ALL_HOUR);
     this.notify(
       {
         source: "app",
@@ -10425,8 +10478,11 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-1910: the last use of the account that the hourly check read, kept in memory for the reconcile. */
   private limitsUsage: Usage | null = null;
+  /** The next hourly limits check, read once per wake, as the backup time (K-1302). */
+  private limitsAtMemory: number | null = null;
   private limitsCheckAt() {
-    return Number(this.meta("limits_check_at") ?? 0);
+    this.limitsAtMemory ??= Number(this.meta("limits_check_at") ?? 0);
+    return this.limitsAtMemory;
   }
 
   /** K-1910: when the next machine reaches 15 minutes offline, or null. */
@@ -10867,7 +10923,8 @@ export class Kitshn extends DurableObject<Env> {
     if (this.bellEnded(now)) changed = true;
     // K-1910: the use of the account once an hour, never in the daily run; the next reconcile notifies.
     if (!daily && this.env.CLOUDFLARE_API_TOKEN && this.limitsCheckAt() <= now) {
-      this.setMeta("limits_check_at", String(now + HOUR_MS));
+      this.limitsAtMemory = now + HOUR_MS;
+      this.setMeta("limits_check_at", String(this.limitsAtMemory));
       this.limitsUsage = await readUsage(
         this.env.CLOUDFLARE_API_TOKEN,
         this.env.CLOUDFLARE_ACCOUNT_ID,

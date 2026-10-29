@@ -1,8 +1,11 @@
 /** K-1908: app events, the notifications that an app sends with its notify token. */
 import { type NotificationLevel, TEXT_MAX, TITLE_MAX } from "./notifications.ts";
 
-/** K-1908: notifications per card per hour, and for all cards together. */
-export const NOTIFY_PER_HOUR = 30;
+/** K-1908: notifications per card per hour, and for all cards together, so one app cannot starve the others. */
+export const NOTIFY_PER_CARD_HOUR = 10;
+export const NOTIFY_ALL_HOUR = 30;
+/** K-1908: a `/notify` body is at most this many bytes. */
+export const NOTIFY_BODY_MAX = 4 * 1024;
 export const HOUR_MS = 60 * 60_000;
 /** K-1910: a machine that is offline this long opens a notification. */
 export const MACHINE_OFFLINE_MS = 15 * 60_000;

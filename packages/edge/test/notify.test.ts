@@ -11,7 +11,7 @@ interface Kitshn {
     ...bindings: Array<string | number | null>
   ): Array<Record<string, string | number | null>>;
   load(): void;
-  mintNotifyToken(card: string): string;
+  mintNotifyToken(card: string, pending: string): string;
   broadcast(): void;
   limitsUsage: Usage | null;
   presence: Map<string, { online: boolean; lastSeen: number; os: null }>;
@@ -34,29 +34,36 @@ const post = (token: string, body: object) =>
     body: JSON.stringify(body),
   });
 
-it("takes 30 app notifications an hour per card and for all cards together, then 429 with Retry-After (K-1908)", async () => {
+it("takes 10 calls an hour per card and 30 for all cards together, then 429 with Retry-After (K-1908)", async () => {
+  const ids = ["one", "two", "three", "four"];
   const tokens = await runInDurableObject(env.KITSHN.getByName("kitshn"), (instance) => {
     const kitshn = instance as unknown as Kitshn;
-    for (const id of ["one", "two"])
+    for (const id of ids)
       kitshn.sql("INSERT INTO resources (id, body) VALUES (?, ?)", id, JSON.stringify(card(id)));
     kitshn.load();
-    return { one: kitshn.mintNotifyToken("one"), two: kitshn.mintNotifyToken("two") };
+    return Object.fromEntries(ids.map((id) => [id, kitshn.mintNotifyToken(id, `test:${id}`)]));
   });
-  for (let i = 0; i < 20; i++) expect((await post(tokens.one, { title: `one ${i}` })).status).toBe(200);
-  for (let i = 0; i < 10; i++) expect((await post(tokens.two, { title: `two ${i}` })).status).toBe(200);
-  // Card two has room of its own, but all cards together have sent 30.
-  const refused = await post(tokens.two, { title: "two 10" });
-  expect(refused.status).toBe(429);
-  expect(Number(refused.headers.get("retry-after"))).toBeGreaterThan(0);
-  // `resolved` closes the open notification of its key, and counts against no window.
-  expect((await post(tokens.one, { title: "one 0", resolved: true })).status).toBe(200);
+  const token = (id: string) => tokens[id] ?? "";
+  for (let i = 0; i < 9; i++) expect((await post(token("one"), { title: `one ${i}` })).status).toBe(200);
+  // A resolve counts against the card's window too: the 10th call of card one.
+  expect((await post(token("one"), { title: "one 0", resolved: true })).status).toBe(200);
+  const perCard = await post(token("one"), { title: "one 9" });
+  expect(perCard.status).toBe(429);
+  expect(Number(perCard.headers.get("retry-after"))).toBeGreaterThan(0);
+  for (const id of ["two", "three"])
+    for (let i = 0; i < 10; i++) expect((await post(token(id), { title: `${id} ${i}` })).status).toBe(200);
+  // Card four has room of its own, but all cards together have 29 notifications and one resolve did not count.
+  expect((await post(token("four"), { title: "four 0" })).status).toBe(200);
+  expect((await post(token("four"), { title: "four 1" })).status).toBe(429);
   const states = await runInDurableObject(env.KITSHN.getByName("kitshn"), (instance) =>
     (instance as unknown as Kitshn).sql(
       "SELECT state FROM notifications WHERE source = 'app' AND key = 'one:one 0'",
     ),
   );
   expect(states).toEqual([{ state: "closed" }]);
-  expect((await post(tokens.one, { title: "x".repeat(101) })).status).toBe(400);
+  // The body is checked before the windows.
+  expect((await post(token("two"), { title: "x".repeat(101) })).status).toBe(400);
+  expect((await post(token("four"), { title: "t", text: "x".repeat(5000) })).status).toBe(413);
 });
 
 it("opens a limits notification at 80% and a machine notification after 15 minutes offline, and closes them (K-1910)", async () => {

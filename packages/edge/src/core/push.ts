@@ -64,7 +64,8 @@ export function deviceWants(
 /** K-1907: what the push service carries, encrypted: never an address, a reason text or a secret. */
 export function pushMessage(notification: Notification, cardName: string | null) {
   return {
-    title: notification.title,
+    // K-1908: an app writes its own title, so its push shows only that the card has news; the map shows the rest.
+    title: notification.source === "app" ? `${cardName ?? "An app"} has news` : notification.title,
     body: cardName === null ? notification.source : `${notification.source} · ${cardName}`,
     id: notification.id,
     tag: `${notification.source}:${notification.key}`,

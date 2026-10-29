@@ -240,9 +240,10 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     "ALTER TABLE old_addresses ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE old_addresses ADD COLUMN going INTEGER NOT NULL DEFAULT 0",
   ],
-  // 32: notify tokens of app cards (K-1908): only the SHA-256 of each token, the newest 6 per card.
+  // 32: notify tokens of app cards (K-1908): only the SHA-256 of each token, the newest 6 live ones per card.
+  // `pending` names the deploy or job that the token waits on; it turns live (null) only when that one succeeds.
   [
-    "CREATE TABLE notify_tokens (hash TEXT PRIMARY KEY, card_id TEXT NOT NULL, created_at INTEGER NOT NULL)",
+    "CREATE TABLE notify_tokens (hash TEXT PRIMARY KEY, card_id TEXT NOT NULL, created_at INTEGER NOT NULL, pending TEXT)",
     "CREATE INDEX notify_tokens_card ON notify_tokens (card_id, created_at)",
   ],
 ];

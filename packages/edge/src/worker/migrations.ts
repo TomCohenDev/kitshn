@@ -205,16 +205,19 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */
 export const REPO_GATE_MIGRATION = 6;
 
-/** Runs the migrations after `from`. Returns the new version. The caller provides the transaction. */
-export function migrate(exec: (query: string) => void, from: number): number {
+/**
+ * Runs the migrations after `from`, up to `to` (K-1833 stops at the schema of an export). Returns the new version.
+ * The caller provides the transaction.
+ */
+export function migrate(exec: (query: string) => void, from: number, to = MIGRATIONS.length): number {
   if (from > MIGRATIONS.length) {
     throw new Error(
       `The database has schema version ${from}, newer than this kitshn (${MIGRATIONS.length}).`,
     );
   }
-  for (let version = from + 1; version <= MIGRATIONS.length; version++) {
+  for (let version = from + 1; version <= to; version++) {
     for (const query of MIGRATIONS[version - 1] ?? []) exec(query);
     exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '${version}')`);
   }
-  return MIGRATIONS.length;
+  return to;
 }

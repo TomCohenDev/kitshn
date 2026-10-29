@@ -157,10 +157,11 @@ describe("state export (K-1831)", () => {
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, 'secret')",
             `${row.metaPrefix}_test`,
           );
-      const exported = stateExport(durable.storage.sql, 21, 5);
+      const exported = stateExport(durable.storage.sql, "acct", 21, 5);
       expect(exported).toMatchObject({
         format: "kitshn-state",
         version: 1,
+        account: "acct",
         schemaVersion: 21,
         exportedAt: 5,
       });

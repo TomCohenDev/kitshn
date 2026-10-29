@@ -1366,6 +1366,14 @@ export function App() {
               >
                 Restore kitshn to a time…
               </button>
+              <a
+                class="btn"
+                href="/api/state/export"
+                download
+                data-tip="Save the state of kitshn as one file, with no secret. The bootstrap rebuilds an install from it (K-1832, K-1833)."
+              >
+                Download state export
+              </a>
             </>
           ) : shownPanel === "history" ? (
             historyView

@@ -95,6 +95,7 @@ import {
   gigabytes,
 } from "../core/backups.ts";
 import { bucketSize, stateExport, writeExport } from "./backups.ts";
+import { IMPORT_OBJECT, notEmptyReason, readExport, writeImport } from "./state-import.ts";
 import { MIGRATIONS } from "./migrations.ts";
 import type {
   DeployNote,
@@ -670,6 +671,8 @@ export class Kitshn extends DurableObject<Env> {
       this.reconcilePresence();
       // K-821: a restart cut off any run rollback that did not wait for a job.
       this.settleRollbacks();
+      // K-1833: a bootstrap with KITSHN_IMPORT asks for one import; a start reads one meta row for it.
+      await this.importIfDue();
       await this.scheduleAlarm();
     });
   }
@@ -1808,6 +1811,80 @@ export class Kitshn extends DurableObject<Env> {
     return this.backupAtMemory;
   }
 
+  /** K-1833: imports the file of the bootstrap once per new `KITSHN_IMPORT_AT`, and keeps the outcome in meta. */
+  private async importIfDue() {
+    const at = this.env.KITSHN_IMPORT_AT;
+    if (!at || this.meta("import_at") === at) return;
+    const outcome = await this.runImport().catch((error: unknown): ImportStatus => ({
+      state: "refused",
+      reason: `The import failed: ${String(error)}`,
+    }));
+    this.setMeta("import_at", at);
+    this.setMeta("import_status", JSON.stringify(outcome));
+  }
+
+  private async runImport(): Promise<ImportStatus> {
+    const refuse = (reason: string): ImportStatus => ({ state: "refused", reason });
+    const bucket = this.env.BUCKET;
+    if (!bucket) return refuse("R2 is off on this account, so kitshn finds no import file.");
+    const file = await bucket.get(IMPORT_OBJECT);
+    if (!file) return refuse(`R2 holds no ${IMPORT_OBJECT}; run the bootstrap with KITSHN_IMPORT again.`);
+    const text = await new Response(file.body.pipeThrough(new DecompressionStream("gzip"))).text();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return refuse("The import file is no JSON.");
+    }
+    const state = readExport(parsed, this.env.CLOUDFLARE_ACCOUNT_ID);
+    if (typeof state === "string") return refuse(state);
+    const notEmpty = notEmptyReason(this.ctx.storage.sql, [ADMIN_RESOURCE_ID]);
+    if (notEmpty) return refuse(notEmpty);
+    // A table or a column that the schema of the export lacks rolls the whole transaction back.
+    try {
+      this.ctx.storage.transactionSync(() =>
+        writeImport(this.ctx.storage.sql, state, (from) => {
+          if (from < REPO_GATE_MIGRATION) this.backfillRepoIds();
+        }),
+      );
+    } catch (error) {
+      this.load();
+      return refuse(error instanceof Error ? error.message : String(error));
+    }
+    const actor: Actor = { _tag: "kitshn", reason: "the import of the bootstrap (K-1833)" };
+    this.load();
+    this.insertRevision(
+      actor,
+      `Imported the state of ${new Date(state.exportedAt).toISOString()} (K-1833)`,
+      [],
+      null,
+    );
+    this.load();
+    await bucket.delete(IMPORT_OBJECT);
+    // K-1834: the export holds no pass key, so the import ends with a new one.
+    await this.rotatePassKey(actor);
+    return { state: "done", reason: null };
+  }
+
+  /** K-1833: what the public import status tells the bootstrap: the state and the reason, nothing more. */
+  private importStatus(): ImportStatus | { state: "none" | "pending" } {
+    if (!this.env.KITSHN_IMPORT_AT) return { state: "none" };
+    if (this.meta("import_at") !== this.env.KITSHN_IMPORT_AT) return { state: "pending" };
+    return JSON.parse(this.meta("import_status") ?? '{"state":"pending"}') as ImportStatus;
+  }
+
+  /** K-1832: the state export of K-1831 for the admin, as a file. */
+  private exportResponse() {
+    const now = Date.now();
+    const state = stateExport(this.ctx.storage.sql, this.env.CLOUDFLARE_ACCOUNT_ID, MIGRATIONS.length, now);
+    return new Response(JSON.stringify(state), {
+      headers: {
+        "content-type": "application/json",
+        "content-disposition": `attachment; filename="kitshn-state-${new Date(now).toISOString().slice(0, 10)}.json"`,
+      },
+    });
+  }
+
   /** K-1817: one backup job and its row. Returns the run. */
   private queueBackup(card: string, actor: Actor, prune: boolean, now: number) {
     const resource = this.state.resources.get(card);
@@ -1962,7 +2039,10 @@ export class Kitshn extends DurableObject<Env> {
         console.error(`kitshn daily backups: ${what} failed: ${String(error)}`),
       );
     await step("the state export (K-1821)", async () => {
-      await writeExport(bucket, stateExport(this.ctx.storage.sql, MIGRATIONS.length, now));
+      await writeExport(
+        bucket,
+        stateExport(this.ctx.storage.sql, this.env.CLOUDFLARE_ACCOUNT_ID, MIGRATIONS.length, now),
+      );
     });
     await step("the bucket size (K-1818)", async () => {
       this.setMeta("r2_bucket", JSON.stringify(await bucketSize(bucket, now)));
@@ -2883,6 +2963,7 @@ export class Kitshn extends DurableObject<Env> {
       return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
     if (path === "/internal/public-cards") return this.publicCards();
     if (path === "/internal/badge") return this.badge(new URL(request.url).searchParams);
+    if (path === "/internal/import-status") return Response.json(this.importStatus());
     if (path === "/internal/backup-access")
       return this.backupAccess((await request.json()) as { card: string; clientId: string });
     if (path === "/internal/content") return this.contentDecision((await request.json()) as ContentRequest);
@@ -2955,6 +3036,7 @@ export class Kitshn extends DurableObject<Env> {
         decodeURIComponent(path.slice("/api/apps/".length, -"/logs".length)),
         await request.json().catch(() => null),
       );
+    if (path === "/api/state/export" && request.method === "GET") return this.exportResponse();
     if (path.startsWith("/api/apps/") && path.includes("/backups")) {
       const [card = "", , run = "", action = ""] = path
         .slice("/api/apps/".length)
@@ -8891,6 +8973,10 @@ const repoGateOf = (row: RepoRow): RepoGate => ({
 });
 
 /** K-1819 */
+/** K-1833: the outcome of an import, which the bootstrap reads. */
+type ImportStatus =
+  { readonly state: "done"; readonly reason: null } | { readonly state: "refused"; readonly reason: string };
+
 /** K-1822: what finishes a restore to a time after the restart. */
 interface RestoreFinish {
   readonly undo: string;

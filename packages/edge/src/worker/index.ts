@@ -380,6 +380,21 @@ export default {
       headers.set("x-kitshn-caller", JSON.stringify(caller));
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
     }
+    // K-1601: devices read their machines. Access lets any service token in; the Durable Object decides what each opens.
+    if (url.pathname.startsWith("/device/")) {
+      if (!env.ACCESS_DEVICE_AUD)
+        return Response.json(
+          { error: "Run the bootstrap again to turn on the device list." },
+          { status: 503 },
+        );
+      const caller = await callerOf(request, env, env.ACCESS_DEVICE_AUD);
+      if (typeof caller === "string") return Response.json({ error: caller }, { status: 401 });
+      if (caller.visitor.clientId === null)
+        return Response.json({ error: "The device path takes a service token only." }, { status: 403 });
+      const headers = new Headers(request.headers);
+      headers.set("x-kitshn-caller", JSON.stringify(caller));
+      return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
+    }
     if (url.pathname.startsWith("/api/")) {
       // A browser sends Origin on a WebSocket and a cross-site POST. Only the map's own page may call.
       const origin = request.headers.get("origin");

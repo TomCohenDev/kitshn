@@ -714,6 +714,13 @@ export function ruleViolation(state: State): string | null {
     const points = new Set(stack.members.map((id) => JSON.stringify(state.places.get(id) ?? null)));
     if (points.size > 1) return `The cards of the stack "${stackTitle(state, stack)}" must share one place.`;
   }
+  // K-719: the Owner circle's share of an owner-control card has no override and no end date.
+  for (const [key, setting] of state.shareSettings) {
+    if (!key.endsWith(`/${OWNER_CIRCLE_ID}`) || (setting.level === null && setting.endsAt === null)) continue;
+    const card = state.resources.get(key.slice(0, -`/${OWNER_CIRCLE_ID}`.length));
+    if (card?.provider?.ownerControl)
+      return `The Owner circle keeps control of ${card.name}: its share has no other level and no end date (K-719).`;
+  }
   const admin = state.resources.get(ADMIN_RESOURCE_ID);
   if (!admin) return "The kitshn admin card is missing.";
   const all = circlesHolding(state, admin.id);

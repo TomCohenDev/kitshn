@@ -43,6 +43,8 @@ export interface ProviderCard {
   readonly lists: ReadonlyArray<ProviderList>;
   /** K-717: the settings of its kind; their values live outside the card (`cardSettings` of the snapshot). */
   readonly settings: ReadonlyArray<ProviderCardSetting>;
+  /** K-719: the Owner circle always holds this card at the top level of its kind. */
+  readonly ownerControl?: true;
   /** K-705: the live site name of the card on its machine, or null. */
   readonly site: string | null;
   /** K-705: when its provider's report dropped it; kitshn forgets it a day later unless it comes back. */
@@ -329,10 +331,15 @@ export interface Share {
 
 /** Every share of a resource with a level above none. */
 export function sharesOf(state: State, resource: Resource): Array<Share> {
-  return circlesHolding(state, resource.id).flatMap((circle) => {
+  const held = circlesHolding(state, resource.id).flatMap((circle) => {
     const level = shareLevel(state, resource, circle);
     return level ? [{ circle, level }] : [];
   });
+  // K-719: the Owner circle holds such a card at its top level wherever the card sits, so the owner is never locked out.
+  const owner = state.circles.get(OWNER_CIRCLE_ID);
+  const top = levelsOf(resource).at(-1);
+  if (!resource.provider?.ownerControl || !owner || !top) return held;
+  return [...held.filter((share) => share.circle.id !== OWNER_CIRCLE_ID), { circle: owner, level: top }];
 }
 
 /**

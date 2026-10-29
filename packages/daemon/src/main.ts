@@ -118,6 +118,7 @@ import { keepBuild, keptId, keptTag, rollbackOverride, serviceImages, staleTags 
 import { TokenCache } from "./tokens.ts";
 import { Providers, parseSaved } from "./providers.ts";
 import { serveLinks } from "./link.ts";
+import { lastSamples } from "./samples.ts";
 import { pushKey } from "@kitshn/local";
 import { listenerUid, portOf } from "./listener.ts";
 import { MAX_FORWARDS, forwardTarget, passedHeaders, readBounded } from "./forward.ts";
@@ -777,11 +778,16 @@ function sample() {
   };
 }
 
+/** K-605: the samples of the last hour, for `samples` on the local socket; read from the file at start. */
+const RECENT_SAMPLES = 60;
+let recentSamples: Array<ReturnType<typeof sample>> = [];
+
 /** K-606: the daemon keeps 30 days of samples on its own disk. */
 function keepSample(value: ReturnType<typeof sample>) {
   const file = join(paths.data, "samples.jsonl");
   mkdirSync(paths.data, { recursive: true });
   appendFileSync(file, `${JSON.stringify(value)}\n`);
+  recentSamples = [...recentSamples, value].slice(-RECENT_SAMPLES);
 }
 
 function pruneSamples() {
@@ -2082,6 +2088,12 @@ function connect(config: JoinSecrets) {
           emit?.(event);
         }
         sendOn(ws, { type: "applied", key, hash: message.hash });
+      } else if (message.type === "name") {
+        // K-704: the answer to register names the machine, also before the next connection.
+        registry().setPushed(MACHINE_NAME_KEY, message.name);
+      } else if (message.type === "cancelAnswer") {
+        cancelWaiters.get(message.requestId)?.(message.error);
+        cancelWaiters.delete(message.requestId);
       } else if (message.type === "forgetProvider") {
         // K-704: a provider that a connection holds runs, so the forget does not apply to it.
         if (
@@ -2152,6 +2164,11 @@ function connect(config: JoinSecrets) {
       // K-1805: kitshn forgets the tails of a closed connection.
       if (socket === ws) stopTails();
       if (socket === ws) socket = null;
+      // K-1612: a cancel in flight gets no answer from a closed connection.
+      for (const [requestId, settle] of cancelWaiters) {
+        settle(`the connection to kitshn closed (${event.code}) before its answer.`);
+        cancelWaiters.delete(requestId);
+      }
       // K-1716: an ask in flight gets no result from a closed connection; its proposal stays.
       for (const [requestId, settle] of askWaiters) {
         settle({
@@ -2369,6 +2386,12 @@ async function runCommand() {
   // The service manager stops the daemon with SIGTERM; an exit runs the clean-up of the socket and the jobs.
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => process.exit(0));
   pruneSamples();
+  recentSamples = lastSamples(
+    existsSync(join(paths.data, "samples.jsonl"))
+      ? readFileSync(join(paths.data, "samples.jsonl"), "utf8")
+      : "",
+    RECENT_SAMPLES,
+  );
   await ensureTunnel(config);
   watchTunnel();
   // K-821: the machine card shows what the kept builds take on disk.
@@ -2395,6 +2418,11 @@ function readMachineFile(): unknown {
     return null;
   }
 }
+
+/** K-704: where the daemon keeps the machine's name among its saved pushes. */
+const MACHINE_NAME_KEY = "machine:name";
+/** K-1612: the cancels that wait for kitshn's answer, by request id. */
+const cancelWaiters = new Map<string, (error: string | null) => void>();
 
 /** K-1609: the Unix socket of the link proxy, next to the private local socket. */
 const linkSocket = join(dirname(paths.socket), "link.sock");
@@ -2551,6 +2579,19 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
     waiter.settle({ ok: request.ok, exitCode: request.ok ? 0 : 1, output: request.output });
     return { id, type: "command-result" };
   }
+  if (request.type === "samples") return { id, type: "samples", newest: sample(), history: recentSamples };
+  if (request.type === "job-cancel") {
+    const ws = socket;
+    if (ws === null || challenge === null)
+      throw new Error("the daemon has no signed connection to kitshn, so it cannot cancel a job now.");
+    const requestId = crypto.randomUUID();
+    const error = await new Promise<string | null>((resolve) => {
+      cancelWaiters.set(requestId, resolve);
+      sendOn(ws, { type: "cancelJob", requestId, jobId: request.jobId });
+    });
+    if (error !== null) throw new Error(error);
+    return { id, type: "job-cancel" };
+  }
   if (request.type === "audit") {
     // K-1610: only the provider's own connection, and only over a signed connection; kitshn names the source.
     if (registry().connectionOf(request.provider) !== caller.connection)
@@ -2598,6 +2639,7 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
       machineId: joined.machineId,
       ...registry().savedFor(request.provider),
       linkSocket,
+      machineName: registry().pushedValue(MACHINE_NAME_KEY) as string | null,
     };
   }
   if (request.type === "attester-set") return setAttester(request, caller);

@@ -28,6 +28,7 @@ export default defineConfig({
                 ACCESS_TEAM_DOMAIN: "team.example.com",
                 ACCESS_ADMIN_AUD: "admin-aud",
                 ACCESS_AGENT_AUD: "agent-aud",
+                ACCESS_DEVICE_AUD: "device-aud",
                 ACCESS_CONNECT_AUD: "connect-aud",
                 KITSHN_BACKUP_KEY: "test-backup-key",
                 DEV_IDENTITY: "",

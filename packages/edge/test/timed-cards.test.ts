@@ -76,6 +76,10 @@ it("ends a timed card as one revision to the tray, as its setter, and the Undo g
   const set = await post(`/api/cards/${id}/time`, await owner(), { endsAt: Date.now() + 3_600_000 });
   expect(set.status, await set.clone().text()).toBe(200);
   expect((await seen()).ends[id]).toBeGreaterThan(Date.now());
+  // An extension and its Undo: the restored end time keeps its setter, so the owner can undo the end later too.
+  const extended = await post(`/api/cards/${id}/time`, await owner(), { endsAt: Date.now() + 7_200_000 });
+  const { revision } = (await extended.json()) as { revision: number };
+  expect((await post("/api/undo", await owner(), { revision })).status).toBe(200);
 
   await timePasses(id);
   await runDurableObjectAlarm(env.KITSHN.getByName("kitshn"));
@@ -116,6 +120,21 @@ it("lets an agent set, extend and end the time of a card that it manages, and of
   expect((await time("other.access", { endsAt: hour })).status).toBe(403);
   expect((await time("timer.access", { endsAt: 1 })).status).toBe(400);
   expect((await time("timer.access", { now: true })).status).toBe(200);
+  const after = await seen();
+  expect([after.places[id], after.ends[id]]).toEqual([undefined, undefined]);
+});
+
+it("ends a timed card during a lockdown too, because the end only lowers access (K-212, K-1504)", async () => {
+  stubAccessCerts();
+  const id = await page("paused.access", 10000);
+  expect(
+    (await post(`/api/cards/${id}/time`, await owner(), { endsAt: Date.now() + 3_600_000 })).status,
+  ).toBe(200);
+  expect(
+    (await post("/api/apply", await owner(), { edits: [{ _tag: "pause", after: "lockdown" }] })).status,
+  ).toBe(200);
+  await timePasses(id);
+  await runDurableObjectAlarm(env.KITSHN.getByName("kitshn"));
   const after = await seen();
   expect([after.places[id], after.ends[id]]).toEqual([undefined, undefined]);
 });

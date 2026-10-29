@@ -967,8 +967,9 @@ export function refuseRaiseWhilePaused(before: State, after: State): void {
   for (const key of new Set([...before.shareSettings.keys(), ...after.shareSettings.keys()]))
     if (ends(after.shareSettings.get(key)?.endsAt) > ends(before.shareSettings.get(key)?.endsAt))
       throw new RuleError("While paused, access only goes down: a share would end later.");
+  // K-212: an end that goes with its card off the map (the expiry, End now) lowers access.
   for (const id of new Set([...before.ends.keys(), ...after.ends.keys()]))
-    if (ends(after.ends.get(id)) > ends(before.ends.get(id)))
+    if (ends(after.ends.get(id)) > ends(before.ends.get(id)) && after.places.has(id))
       throw new RuleError("While paused, access only goes down: a card would end later.");
   for (const circle of after.circles.values()) {
     const old = before.circles.get(circle.id);

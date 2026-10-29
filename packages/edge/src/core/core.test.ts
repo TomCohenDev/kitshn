@@ -931,6 +931,14 @@ describe("emergency pause (K-1504)", () => {
     const timed = { ...paused, ends: new Map([["riffle", 5]]) };
     expect(() => refuseRaiseWhilePaused(timed, { ...timed, ends: new Map() })).toThrow(/end later/);
     expect(() => refuseRaiseWhilePaused(timed, { ...timed, ends: new Map([["riffle", 2]]) })).not.toThrow();
+    // The expiry and End now take the end away with the card, to the tray, so they work during a pause.
+    const placed = { ...timed, places: new Map(timed.places).set("riffle", { x: 0, y: -200 }) };
+    const tray = {
+      ...placed,
+      ends: new Map(),
+      places: new Map([...placed.places].filter(([id]) => id !== "riffle")),
+    };
+    expect(() => refuseRaiseWhilePaused(placed, tray)).not.toThrow();
     // K-718: an agent right that turns on raises access; one that turns off lowers it.
     const device = { _tag: "device" as const, tokenId: "t", clientId: "c", name: "Bot" };
     const withDevice = (member: typeof device & { publishes?: true }) => ({

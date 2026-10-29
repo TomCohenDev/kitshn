@@ -1395,6 +1395,11 @@ export class Kitshn extends DurableObject<Env> {
     const undoes = undo?.item === null ? undo.revision : null;
     const id = this.ctx.storage.transactionSync(() => {
       this.persist(changes);
+      // K-212: the actor of the revision that sets an end time, also by an Undo, is its setter; the end then runs
+      // as that actor, so the actor can undo it (K-1506).
+      for (const change of changes)
+        if (change._tag === "cardEnd" && change.after !== null)
+          this.sql("UPDATE card_ends SET set_by = ? WHERE id = ?", JSON.stringify(actor), change.id);
       // A switch to a lockdown keeps who paused first and when.
       if (changes.some((change) => change._tag === "pause" && change.after && !change.before)) {
         this.setMeta("paused_by", JSON.stringify(actor));
@@ -10513,8 +10518,6 @@ export class Kitshn extends DurableObject<Env> {
           resolveEdits(this.state, [{ _tag: "cardEnd", id, after: wanted }]),
           null,
         );
-        if (wanted !== null)
-          this.sql("UPDATE card_ends SET set_by = ? WHERE id = ?", JSON.stringify(caller.actor), id);
         return Response.json({ revision, endsAt: wanted });
       }
       if (!this.state.ends.has(id))

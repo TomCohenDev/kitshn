@@ -70,6 +70,7 @@ export function MachineRights(props: {
             ))}
             {mode ? (
               <input
+                class="field"
                 aria-label={`Conditions of ${MACHINE_RIGHT_NAMES[right]}`}
                 placeholder="t3.project.name=kitshn,riffle; t3.subagent=false"
                 value={formatConditions(mode.conditions)}

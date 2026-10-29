@@ -48,6 +48,7 @@ import {
 } from "./Backups.tsx";
 import { type BackupRun, BACKUP_LIMIT_BYTES, type BucketSize, gigabytes } from "../core/backups.ts";
 import type {
+  AccessState,
   DeployNote,
   JobView,
   MachineView,
@@ -75,6 +76,7 @@ import {
   MoreButton,
   OverlayPanel,
   ResizeEdge,
+  ToastView,
   TooltipLayer,
   useScreenWidth,
   useStoredWidth,
@@ -1952,6 +1954,7 @@ export function App() {
               New · private ({tray.length}) {trayOpen ? "▴" : "▾"}
             </button>
             <input
+              class="field"
               type="search"
               placeholder="Filter"
               aria-label="Filter the tray"
@@ -1964,11 +1967,10 @@ export function App() {
           <div class="tray-list">
             {shownTray.length === 0 ? <p class="help">No card matches.</p> : null}
             {shownTray.map((resource) => (
-              <div
+              <TrayCard
                 key={resource.id}
-                class={`card${selection.cards.has(resource.id) ? " sel" : ""}`}
-                data-tip={`${KINDS[resource.kind].help} Drag it onto the map; it lands in exactly the circles there.`}
-                draggable
+                resource={resource}
+                selected={selection.cards.has(resource.id)}
                 onDragStart={(event) => {
                   // A selected card carries the whole selection of tray cards with it.
                   const ids = selection.cards.has(resource.id)
@@ -1977,33 +1979,14 @@ export function App() {
                   event.dataTransfer?.setData(TRAY_CARDS_TYPE, JSON.stringify(ids));
                   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
                 }}
-                onContextMenu={(event) => {
-                  // K-523: a tray card has the same menu as on the map, with Place on the map.
-                  event.preventDefault();
-                  setMenu({
-                    target: { _tag: "card", id: resource.id },
-                    anchor: { left: event.clientX, top: event.clientY, width: 0, height: 0 },
-                  });
-                }}
+                onMenu={(anchor) => setMenu({ target: { _tag: "card", id: resource.id }, anchor })}
                 onClick={(event) => {
                   const cards = new Set(event.shiftKey ? selection.cards : []);
                   if (event.shiftKey && cards.has(resource.id)) cards.delete(resource.id);
                   else cards.add(resource.id);
                   select({ cards, circle: null });
                 }}
-              >
-                <div class="name">
-                  <ItemIcon resource={resource} />
-                  {resource.name}
-                </div>
-                <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
-                <div class="foot">
-                  <MoreButton
-                    name={resource.name}
-                    onOpen={(anchor) => setMenu({ target: { _tag: "card", id: resource.id }, anchor })}
-                  />
-                </div>
-              </div>
+              />
             ))}
           </div>
         </aside>
@@ -2089,54 +2072,38 @@ export function App() {
         </div>
       ) : null}
       {toast ? (
-        <div
-          class={`toast${toast.error ? " error" : ""}${floating ? " beside-panel" : ""}`}
-          style={
-            "top" in toast.place
-              ? { top: `${toast.place.top}px`, bottom: "auto" }
-              : { bottom: `${toast.place.bottom}px` }
+        <ToastView
+          text={toast.text}
+          error={toast.error}
+          besidePanel={floating}
+          place={toast.place}
+          onUndo={
+            toast.undo === null
+              ? null
+              : () => {
+                  if (Date.now() - toastShownAt.current < TOAST_GUARD_MS) return;
+                  const revisions = [...(toast.undo === null ? [] : [toast.undo]), ...(toast.alsoUndo ?? [])];
+                  setToast(null);
+                  void (async () => {
+                    for (const revision of revisions) await undo(revision);
+                  })();
+                }
           }
-          role="status"
-        >
-          <span>{toast.text}</span>
-          {toast.undo !== null ? (
-            <button
-              class="btn primary"
-              data-tip="Undo: take this change back."
-              onClick={() => {
-                if (Date.now() - toastShownAt.current < TOAST_GUARD_MS) return;
-                const revisions = [...(toast.undo === null ? [] : [toast.undo]), ...(toast.alsoUndo ?? [])];
-                setToast(null);
-                void (async () => {
-                  for (const revision of revisions) await undo(revision);
-                })();
-              }}
-            >
-              Undo
-            </button>
-          ) : null}
-          {toast.action ? (
-            <button
-              class="btn resume"
-              data-tip={toast.action.tip}
-              onClick={() => {
-                if (Date.now() - toastShownAt.current < TOAST_GUARD_MS) return;
-                setToast(null);
-                toast.action?.run();
-              }}
-            >
-              {toast.action.label}
-            </button>
-          ) : null}
-          <button
-            class="btn"
-            onClick={() => setToast(null)}
-            aria-label="Close"
-            data-tip="Close this message."
-          >
-            ×
-          </button>
-        </div>
+          action={
+            toast.action
+              ? {
+                  label: toast.action.label,
+                  tip: toast.action.tip,
+                  run: () => {
+                    if (Date.now() - toastShownAt.current < TOAST_GUARD_MS) return;
+                    setToast(null);
+                    toast.action?.run();
+                  },
+                }
+              : null
+          }
+          onClose={() => setToast(null)}
+        />
       ) : null}
       {route.tab === "map" ? (
         // Beside a floating panel the hint stops at the panel and wraps, so it stays readable.
@@ -2166,7 +2133,7 @@ function Panel(props: {
   /** K-1767: App pull request runs that wait for Deploy. */
   botRuns: Snapshot["botRuns"];
   selection: Selection;
-  access: Readonly<Record<string, import("../core/protocol.ts").AccessState>>;
+  access: Readonly<Record<string, AccessState>>;
   me: Actor;
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onDeleteCircle: (circle: Circle) => void;
@@ -2463,7 +2430,7 @@ function StackPanel(props: {
     <section class="editor">
       <div class="label">Stack</div>
       <input
-        class="title"
+        class="field title"
         aria-label="Stack name"
         placeholder="No name"
         data-tip="The name of the stack. Enter saves it; an empty name shows only its cards."
@@ -2552,6 +2519,7 @@ function AddressName(props: { address: string; onSave: (name: string) => Promise
     <div class="row">
       <span class="label">Name</span>
       <input
+        class="field"
         ref={field}
         aria-label="Address name"
         data-tip="The name in the address: a to z, 0 to 9 and hyphens. Enter saves it; the old address keeps working."
@@ -2606,6 +2574,7 @@ function Redirects(props: {
       ))}
       <div class="row">
         <input
+          class="field"
           ref={field}
           aria-label="Redirect address"
           data-tip="A hostname under one of kitshn's zones, such as old-name.example.com. At most 5 per card."
@@ -2631,7 +2600,7 @@ function CardPanel(props: {
   peek: boolean;
   /** K-819: the repo gate of the repo that deploys this card, when it has one. */
   repo: RepoView | null;
-  access: import("../core/protocol.ts").AccessState | null;
+  access: AccessState | null;
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onPlace: (resource: Resource) => void;
   onReshare: (resource: Resource, circle: Circle, share: boolean, part: StackPart) => void;
@@ -2798,37 +2767,7 @@ function CardPanel(props: {
           )}
         </div>
       ) : null}
-      {props.access ? (
-        <div class="row">
-          <span class="label" data-tip="Access: whether Cloudflare has the latest shares of this card.">
-            Access
-          </span>
-          {props.access.state === "applied" ? (
-            <span class="stamp" data-tip={ACCESS_TIPS.applied}>
-              ✓ applied
-            </span>
-          ) : (
-            <span
-              class={`sticker ${props.access.state === "failed" ? "" : "wait"}`}
-              data-tip={
-                props.access.state === "applying"
-                  ? ACCESS_TIPS.applying
-                  : props.access.state === "retrying"
-                    ? ACCESS_TIPS.retrying
-                    : "Failed: Cloudflare refused the change."
-              }
-            >
-              {props.access.state}
-            </span>
-          )}
-          {props.access.state === "failed" ? <span class="muted">{props.access.error}</span> : null}
-          {props.access.state === "retrying" ? (
-            <span class="muted">
-              {props.access.error} Next try at {new Date(props.access.at).toLocaleTimeString()}.
-            </span>
-          ) : null}
-        </div>
-      ) : null}
+      {props.access ? <AccessRow access={props.access} /> : null}
       {props.uptime ? <UptimeRow resource={resource} uptime={props.uptime} /> : null}
       {props.deployNote ? (
         <div class="row">
@@ -3125,4 +3064,73 @@ function ContextMenu(props: {
           : "the map";
   const label = target._tag === "add" ? "Add" : `Actions for ${name ?? "the map"}`;
   return <ActionMenu label={label} anchor={props.menu.anchor} groups={groups} onClose={props.onClose} />;
+}
+
+/** K-509: a card in the tray, private until it lands on the map. A drag places it; its menu is the map's (K-523). */
+export function TrayCard(props: {
+  readonly resource: Resource;
+  readonly selected: boolean;
+  readonly onDragStart: (event: DragEvent) => void;
+  readonly onMenu: (anchor: Rect) => void;
+  readonly onClick: (event: MouseEvent) => void;
+}) {
+  const { resource } = props;
+  return (
+    <div
+      class={`card${props.selected ? " sel" : ""}`}
+      data-tip={`${KINDS[resource.kind].help} Drag it onto the map; it lands in exactly the circles there.`}
+      draggable
+      onDragStart={props.onDragStart}
+      onContextMenu={(event) => {
+        // K-523: a tray card has the same menu as on the map, with Place on the map.
+        event.preventDefault();
+        props.onMenu({ left: event.clientX, top: event.clientY, width: 0, height: 0 });
+      }}
+      onClick={props.onClick}
+    >
+      <div class="name">
+        <ItemIcon resource={resource} />
+        {resource.name}
+      </div>
+      <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
+      <div class="foot">
+        <MoreButton name={resource.name} onOpen={props.onMenu} />
+      </div>
+    </div>
+  );
+}
+
+/** K-407: the Access row of a card panel: applied as a stamp; applying, retrying and failed as stickers with why. */
+export function AccessRow(props: { readonly access: AccessState }) {
+  return (
+    <div class="row">
+      <span class="label" data-tip="Access: whether Cloudflare has the latest shares of this card.">
+        Access
+      </span>
+      {props.access.state === "applied" ? (
+        <span class="stamp" data-tip={ACCESS_TIPS.applied}>
+          ✓ applied
+        </span>
+      ) : (
+        <span
+          class={`sticker ${props.access.state === "failed" ? "" : "wait"}`}
+          data-tip={
+            props.access.state === "applying"
+              ? ACCESS_TIPS.applying
+              : props.access.state === "retrying"
+                ? ACCESS_TIPS.retrying
+                : "Failed: Cloudflare refused the change."
+          }
+        >
+          {props.access.state}
+        </span>
+      )}
+      {props.access.state === "failed" ? <span class="muted">{props.access.error}</span> : null}
+      {props.access.state === "retrying" ? (
+        <span class="muted">
+          {props.access.error} Next try at {new Date(props.access.at).toLocaleTimeString()}.
+        </span>
+      ) : null}
+    </div>
+  );
 }

@@ -1397,7 +1397,16 @@ describe("the approve applications (K-1723)", () => {
       mfa_config: { session_duration: "10m" },
     });
     expect(desired.apps.has("app:approve:login")).toBe(false);
-    // No ask right: no approve application.
+    // No machine: no approve application.
     expect(desiredAccess(state, 0).apps.has("app:approve:passkey")).toBe(false);
+    // K-1776: a machine with no explicit ask still asks the Owner for each unset right.
+    const automatic = {
+      ...agents,
+      members: [{ ...agents.members[0]!, rights: { deploys: { mode: "automatic" as const } } }],
+    };
+    const defaults = desiredAccess({ ...state, circles: new Map(state.circles).set("agents", automatic) }, 0);
+    expect(defaults.apps.get("app:approve:passkey")).toMatchObject({
+      policyKeys: ["policy:approve-passkey:owner"],
+    });
   });
 });

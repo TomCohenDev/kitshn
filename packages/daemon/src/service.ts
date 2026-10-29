@@ -1,7 +1,20 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 
-export type Platform = "linux" | "darwin";
+export type Platform = "linux" | "darwin" | "win32";
+
+/**
+ * K-621: Windows has no user ids. Its pipe admits only the daemon user, SYSTEM and administrators, so every caller
+ * there counts as the daemon user, under this id.
+ */
+export const WINDOWS_UID = -1;
+export const ownUid = () => process.getuid?.() ?? WINDOWS_UID;
+
+/** K-622: the daemon's own cloudflared on Windows, by a name that no other cloudflared on the PC has. */
+export const WINDOWS_CLOUDFLARED = "kitshn-cloudflared.exe";
+
+/** K-622: the Task Scheduler folder of the two tasks; the system service "Cloudflared" is not a task, so no clash. */
+export const WINDOWS_TASKS = { daemon: "\\kitshn\\daemon", tunnel: "\\kitshn\\tunnel" } as const;
 
 export interface Paths {
   /** Holds the machine token and the tunnel token, mode 0600 (K-602). */
@@ -22,8 +35,21 @@ export function pathsFor(
   platform: Platform,
   env: Record<string, string | undefined>,
   home = homedir(),
-  uid = process.getuid!(),
+  uid = ownUid(),
 ): Paths {
+  if (platform === "win32") {
+    // K-623: the user's own local app data; the join gives only the user and SYSTEM access to it.
+    const folder = win32.join(env["LOCALAPPDATA"] || win32.join(home, "AppData", "Local"), "kitshn");
+    return {
+      socket: windowsPipe(env),
+      // K-624: no shared pipe for other local users in v1.
+      sharedSocket: "",
+      config: win32.join(folder, "machine.json"),
+      data: folder,
+      service: win32.join(folder, "task-daemon.xml"),
+      tunnelService: win32.join(folder, "task-tunnel.xml"),
+    };
+  }
   if (platform === "darwin") {
     const support = join(home, "Library", "Application Support", "kitshn");
     return {
@@ -47,6 +73,74 @@ export function pathsFor(
     service: join(config, "systemd", "user", "kitshn.service"),
     tunnelService: join(config, "systemd", "user", "kitshn-tunnel.service"),
   };
+}
+
+/** K-621: the named pipe of the daemon of this Windows user. */
+export const windowsPipe = (env: Record<string, string | undefined>) =>
+  `\\\\.\\pipe\\kitshn-${(env["USERNAME"] || "user").toLowerCase().replaceAll("\\", "-")}`;
+
+/**
+ * K-622: a PowerShell command that stops the processes of `image` whose full path is one of `paths` (and whose
+ * command line ends with ` <lastArgument>`), never by name alone.
+ */
+function stopByPath(
+  image: string,
+  paths: ReadonlyArray<string>,
+  lastArgument?: string,
+): ReadonlyArray<string> {
+  const quote = (text: string) => `'${text.replaceAll("'", "''")}'`;
+  const argument = lastArgument ? ` -and $_.CommandLine -match ${quote(`\\s${lastArgument}$`)}` : "";
+  return [
+    "powershell.exe",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    `Get-CimInstance Win32_Process -Filter ${quote(`Name="${image}"`)} | Where-Object { @(${paths.map(quote).join(", ")}) -contains $_.ExecutablePath${argument} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`,
+  ];
+}
+
+/** K-622: the Windows account of the tasks, as Task Scheduler names it. */
+const windowsUser = (env: Record<string, string | undefined>) =>
+  env["USERDOMAIN"] ? `${env["USERDOMAIN"]}\\${env["USERNAME"] ?? ""}` : (env["USERNAME"] ?? "");
+
+/**
+ * K-622: a Task Scheduler task of the user that starts at logon, with no time limit. `conhost --headless` runs the
+ * console program with no window. Task Scheduler does not
+ * start an action again after it exits, so a trigger every 5 minutes starts it again; a running one ignores it.
+ */
+function windowsTask(
+  env: Record<string, string | undefined>,
+  description: string,
+  command: string,
+  args: string,
+) {
+  const user = xml(windowsUser(env));
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>${xml(description)}</Description></RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>${user}</UserId>
+      <Repetition><Interval>PT5M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author"><UserId>${user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Hidden>true</Hidden>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec><Command>conhost.exe</Command><Arguments>${xml(`--headless "${command}" ${args}`)}</Arguments></Exec>
+  </Actions>
+</Task>
+`;
 }
 
 /** K-701: the private socket folder sits in a folder that only its user can pass, so the shared one is in /tmp. */
@@ -144,7 +238,12 @@ const xml = (text: string) =>
  * does the same with KeepAlive. A user service needs no root; on Linux it runs without a login only with
  * `loginctl enable-linger`.
  */
-export function serviceFile(platform: Platform, binary: string): string {
+export function serviceFile(
+  platform: Platform,
+  binary: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  if (platform === "win32") return windowsTask(env, "kitshn daemon", binary, "run");
   if (platform === "darwin") {
     return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -177,7 +276,21 @@ WantedBy=default.target
  * K-603: the tunnel is its own user service, so a restart or an update of the daemon never stops it. The token
  * stays in a file of the user (`--token-file`), not on the command line.
  */
-export function tunnelServiceFile(platform: Platform, cloudflared: string, tokenFile: string): string {
+export function tunnelServiceFile(
+  platform: Platform,
+  cloudflared: string,
+  tokenFile: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  // K-622: a free metrics port of its own, and its own empty config next to the token, so the tunnel never shares
+  // a port or a `.cloudflared` config with another cloudflared on the PC.
+  if (platform === "win32")
+    return windowsTask(
+      env,
+      "kitshn tunnel (cloudflared)",
+      cloudflared,
+      `--no-autoupdate --config "${win32.join(win32.dirname(tokenFile), "cloudflared.yml")}" --metrics 127.0.0.1:0 tunnel run --token-file "${tokenFile}"`,
+    );
   if (platform === "darwin") {
     const args = [cloudflared, "--no-autoupdate", "tunnel", "run", "--token-file", tokenFile];
     return `<?xml version="1.0" encoding="UTF-8"?>
@@ -217,7 +330,41 @@ export interface Step {
  * K-603: start (idempotent), restart with a changed service file, stop and read the tunnel service. On macOS a
  * changed plist needs `bootout` and `bootstrap`; `kickstart` would run the old definition.
  */
-export function tunnelCommands(platform: Platform, file: string, uid: number) {
+export function tunnelCommands(
+  platform: Platform,
+  file: string,
+  uid: number,
+  env: Record<string, string | undefined> = process.env,
+) {
+  if (platform === "win32") {
+    const name = WINDOWS_TASKS.tunnel;
+    const create = { argv: ["schtasks", "/Create", "/TN", name, "/XML", file, "/F"], mayFail: false };
+    const run = { argv: ["schtasks", "/Run", "/TN", name], mayFail: false };
+    // `/End` ends the task and its conhost but not the program inside, so the process goes too: by its full path,
+    // so the tunnel of another user and a system cloudflared stay.
+    const end = { argv: ["schtasks", "/End", "/TN", name], mayFail: true };
+    const kill = {
+      argv: stopByPath(WINDOWS_CLOUDFLARED, [win32.join(win32.dirname(file), WINDOWS_CLOUDFLARED)]),
+      mayFail: true,
+    };
+    return {
+      start: [create, { ...run, mayFail: true }],
+      restart: [end, kill, create, run],
+      stop: [end, kill, { argv: ["schtasks", "/Delete", "/TN", name, "/F"], mayFail: true }],
+      // The task state of schtasks is in the language of Windows, so the check looks for the process instead.
+      // Only this user's processes count; another user's kitshn tunnel is not this one.
+      state: [
+        "tasklist",
+        "/FI",
+        `IMAGENAME eq ${WINDOWS_CLOUDFLARED}`,
+        "/FI",
+        `USERNAME eq ${windowsUser(env)}`,
+        "/FO",
+        "CSV",
+        "/NH",
+      ],
+    } satisfies Record<string, ReadonlyArray<Step> | ReadonlyArray<string>>;
+  }
   if (platform === "darwin") {
     const bootstrap = { argv: ["launchctl", "bootstrap", `gui/${uid}`, file], mayFail: false };
     const bootout = { argv: ["launchctl", "bootout", `gui/${uid}`, file], mayFail: true };
@@ -248,13 +395,30 @@ export function tunnelCommands(platform: Platform, file: string, uid: number) {
 /** K-605: the tunnel state for the status report, from the output of the state command. */
 export function tunnelStateOf(platform: Platform, output: string): "starting" | "running" | "stopped" {
   if (platform === "darwin") return output.includes("state = running") ? "running" : "stopped";
+  if (platform === "win32") return output.includes(`"${WINDOWS_CLOUDFLARED}"`) ? "running" : "stopped";
   const state = output.trim();
   if (state === "active") return "running";
   return state === "activating" || state === "reloading" ? "starting" : "stopped";
 }
 
 /** The commands that start and stop the service of the platform. */
-export function serviceCommands(platform: Platform, file: string, uid: number) {
+export function serviceCommands(platform: Platform, file: string, uid: number, binary = process.execPath) {
+  if (platform === "win32") {
+    const name = WINDOWS_TASKS.daemon;
+    return {
+      start: [
+        ["schtasks", "/Create", "/TN", name, "/XML", file, "/F"],
+        ["schtasks", "/Run", "/TN", name],
+      ],
+      // `/End` leaves the program inside conhost running. The daemon is this binary with `run`; a kitshn command,
+      // such as this `service install`, has other arguments and keeps running.
+      stop: [
+        ["schtasks", "/End", "/TN", name],
+        stopByPath(win32.basename(binary), [binary], "run"),
+        ["schtasks", "/Delete", "/TN", name, "/F"],
+      ],
+    };
+  }
   if (platform === "darwin") {
     return {
       start: [["launchctl", "bootstrap", `gui/${uid}`, file]],
@@ -278,6 +442,7 @@ export function cloudflaredUrl(platform: Platform, arch: string): { url: string;
   const cpu = arch === "arm64" ? "arm64" : arch === "x64" ? "amd64" : null;
   if (!cpu) throw new Error(`kitshn has no cloudflared for the CPU ${arch}.`);
   const base = "https://github.com/cloudflare/cloudflared/releases/latest/download";
+  if (platform === "win32") return { url: `${base}/cloudflared-windows-${cpu}.exe`, archive: false };
   return platform === "darwin"
     ? { url: `${base}/cloudflared-darwin-${cpu}.tgz`, archive: true }
     : { url: `${base}/cloudflared-linux-${cpu}`, archive: false };
@@ -290,6 +455,11 @@ export const RELEASES = "https://github.com/Yarden-zamir/kitshn/releases/downloa
 export function releaseAsset(platform: Platform, arch: string): string {
   const cpu = arch === "arm64" ? "arm64" : arch === "x64" ? "x64" : null;
   if (!cpu) throw new Error(`kitshn has no daemon for the CPU ${arch}.`);
+  // K-620: only x64 on Windows; revisit when a Windows arm64 machine joins.
+  if (platform === "win32") {
+    if (cpu !== "x64") throw new Error(`kitshn has no Windows daemon for the CPU ${arch}.`);
+    return "kitshn-windows-x64.exe";
+  }
   return `kitshn-${platform}-${cpu}`;
 }
 

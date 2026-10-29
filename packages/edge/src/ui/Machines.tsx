@@ -137,7 +137,9 @@ function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error
 export function AddMachine(props: { onClose: () => void }) {
   const [name, setName] = useState("");
   const [labels, setLabels] = useState("");
-  const [result, setResult] = useState<{ command: string; expiresAt: number } | null>(null);
+  const [result, setResult] = useState<{ command: string; windowsCommand: string; expiresAt: number } | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
   return (
     <div class="scrim" onClick={(event) => event.target === event.currentTarget && props.onClose()}>
@@ -150,13 +152,22 @@ export function AddMachine(props: { onClose: () => void }) {
               {new Date(result.expiresAt).toLocaleTimeString()}.
             </p>
             <pre class="command">{result.command}</pre>
+            <p>On Windows, in PowerShell:</p>
+            <pre class="command">{result.windowsCommand}</pre>
             <div class="row">
               <button
                 class="btn primary"
-                data-tip="Copy the join command to the clipboard."
+                data-tip="Copy the join command for Linux and macOS to the clipboard."
                 onClick={() => void navigator.clipboard.writeText(result.command)}
               >
                 Copy
+              </button>
+              <button
+                class="btn"
+                data-tip="Copy the join command for Windows PowerShell to the clipboard."
+                onClick={() => void navigator.clipboard.writeText(result.windowsCommand)}
+              >
+                Copy for Windows
               </button>
               <button
                 class="btn"
@@ -171,7 +182,7 @@ export function AddMachine(props: { onClose: () => void }) {
           <form
             onSubmit={async (event) => {
               event.preventDefault();
-              const response = await callApi<{ command: string; expiresAt: number }>(
+              const response = await callApi<{ command: string; windowsCommand: string; expiresAt: number }>(
                 "POST",
                 "/api/machines",
                 {

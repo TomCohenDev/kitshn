@@ -8,6 +8,7 @@ import {
   releaseAsset,
   serviceCommands,
   serviceFile,
+  tunnelCommands,
   tunnelServiceFile,
   tunnelStateOf,
   versionJson,
@@ -27,6 +28,15 @@ describe("daemon service (K-601)", () => {
     expect(pathsFor("darwin", {}, "/Users/u").socket).toBe(
       "/Users/u/Library/Application Support/kitshn/kitshn.sock",
     );
+    // K-621, K-623: a pipe per user, and the user's local app data.
+    const windows = pathsFor(
+      "win32",
+      { LOCALAPPDATA: "C:\\Users\\Ya\\AppData\\Local", USERNAME: "Ya" },
+      "C:\\Users\\Ya",
+    );
+    expect(windows.config).toBe("C:\\Users\\Ya\\AppData\\Local\\kitshn\\machine.json");
+    expect(windows.socket).toBe("\\\\.\\pipe\\kitshn-ya");
+    expect(windows.sharedSocket).toBe("");
   });
 
   it("restarts the daemon after every exit", () => {
@@ -35,6 +45,23 @@ describe("daemon service (K-601)", () => {
     );
     expect(serviceFile("linux", "/b")).toContain("Restart=always");
     expect(serviceFile("darwin", "/a&b")).toContain("<string>/a&amp;b</string>");
+    // K-622: a task of the user at logon, started again every 5 minutes, with no window.
+    const task = serviceFile("win32", "C:\\k\\kitshn.exe", { USERDOMAIN: "PC", USERNAME: "ya" });
+    expect(task).toContain("<UserId>PC\\ya</UserId>");
+    expect(task).toContain("<Interval>PT5M</Interval>");
+    expect(task).toContain("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>");
+    expect(task).toContain(
+      "<Command>conhost.exe</Command><Arguments>--headless &quot;C:\\k\\kitshn.exe&quot; run</Arguments>",
+    );
+    expect(serviceCommands("win32", "C:\\t.xml", -1).start[0]).toEqual([
+      "schtasks",
+      "/Create",
+      "/TN",
+      "\\kitshn\\daemon",
+      "/XML",
+      "C:\\t.xml",
+      "/F",
+    ]);
     expect(serviceCommands("linux", "/f", 1000).start.at(-1)).toEqual([
       "systemctl",
       "--user",
@@ -54,6 +81,14 @@ describe("daemon service (K-601)", () => {
     expect(tunnelServiceFile("darwin", "/d/cloudflared", "/d/t")).toContain(
       "<string>--token-file</string><string>/d/t</string>",
     );
+    // K-622: its own task, config and a free metrics port, so it never clashes with another cloudflared.
+    const task = tunnelServiceFile("win32", "C:\\k\\cloudflared.exe", "C:\\k\\tunnel-token", {
+      USERNAME: "ya",
+    });
+    expect(task).toContain("--config &quot;C:\\k\\cloudflared.yml&quot;");
+    expect(task).toContain("--metrics 127.0.0.1:0");
+    expect(task).toContain("--token-file &quot;C:\\k\\tunnel-token&quot;");
+    expect(tunnelCommands("win32", "C:\\t.xml", -1).start[0]?.argv).toContain("\\kitshn\\tunnel");
   });
 
   it("reads the tunnel state from its service manager (K-605)", () => {
@@ -62,17 +97,26 @@ describe("daemon service (K-601)", () => {
     expect(tunnelStateOf("linux", "failed\n")).toBe("stopped");
     expect(tunnelStateOf("darwin", "com.kitshn.tunnel = {\n\tstate = running\n")).toBe("running");
     expect(tunnelStateOf("darwin", "")).toBe("stopped");
+    expect(tunnelStateOf("win32", '"kitshn-cloudflared.exe","4242","Console","1","30,000 K"\r\n')).toBe(
+      "running",
+    );
+    expect(tunnelStateOf("win32", "INFO: No tasks are running which match the specified criteria.\r\n")).toBe(
+      "stopped",
+    );
   });
 
   it("downloads the cloudflared of the platform", () => {
     expect(cloudflaredUrl("linux", "arm64").url).toMatch(/cloudflared-linux-arm64$/);
     expect(cloudflaredUrl("darwin", "x64")).toMatchObject({ archive: true });
     expect(() => cloudflaredUrl("linux", "ia32")).toThrow();
+    expect(cloudflaredUrl("win32", "x64").url).toMatch(/cloudflared-windows-amd64\.exe$/);
   });
 
   it("finds the daemon of a release and its hash in SHA256SUMS (K-617)", () => {
     expect(releaseAsset("linux", "arm64")).toBe("kitshn-linux-arm64");
     expect(() => releaseAsset("linux", "ia32")).toThrow();
+    expect(releaseAsset("win32", "x64")).toBe("kitshn-windows-x64.exe");
+    expect(() => releaseAsset("win32", "arm64")).toThrow();
     const sums = `${"a".repeat(64)}  kitshn-linux-arm64\n${"b".repeat(64)} *kitshn.mjs\n`;
     expect(expectedHash(sums, "kitshn-linux-arm64")).toBe("a".repeat(64));
     expect(expectedHash(sums, "kitshn.mjs")).toBe("b".repeat(64));

@@ -16,7 +16,7 @@
 ### Project Shape
 - Python 3.14 `uv` project; use `uv run ...` for project commands and do not use raw `python`/`pip`.
 - CLI entrypoint is `kitshn = kitshn.cli:main`; command definitions live in `src/kitshn/cli.py`.
-- There is no Makefile, pre-commit config, or Python test/lint GitHub workflow. `.github/workflows/deploy.yml` is the reusable deploy workflow that recipe repos call. `.github/workflows/release.yml` tags, releases, and syncs the Homebrew tap on every push to `main` with a new `pyproject.toml` version; see `specs/release.md`. The maintainer VPS host setup (`host.yml`) lives in `Yarden-zamir/kitshn-1`; see `specs/caddy.md`.
+- There is no Makefile, pre-commit config, or Python test/lint GitHub workflow. `.github/workflows/kitshn2-deploy.yml` is the reusable deploy workflow that app repos call. `.github/workflows/release.yml` tags, releases, and syncs the Homebrew tap on every push to `main` with a new `pyproject.toml` version; see `specs/release.md`. The maintainer VPS host setup (`host.yml`) lives in `Yarden-zamir/kitshn-1`; see `specs/caddy.md`.
 
 ### Commands
 - Install/sync deps: `uv sync`.

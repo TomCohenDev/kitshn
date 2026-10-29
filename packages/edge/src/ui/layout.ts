@@ -242,3 +242,33 @@ export function stackOffsets(
   }
   return offsets;
 }
+
+/** K-532: a card that the map draws now, around its place, and the height of the frame that it shows now, if any. */
+export interface DrawnCard {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
+  /** The height of its preview frame with the margin, or 0 without one. */
+  readonly frame: number;
+  /** Whether Previews can give it a frame (K-520). */
+  readonly framable: boolean;
+}
+
+/**
+ * K-532: the box of a card, or of an open stack with its cards in column order, as if every framable card showed a
+ * frame of `frameRoom`, spaced as `stackOffsets` spaces a column. So the box does not depend on which cards show a
+ * frame now.
+ */
+export function steadyBox(cards: ReadonlyArray<DrawnCard>, frameRoom: number, row: number, gap: number): Box {
+  const first = cards[0];
+  if (!first) throw new Error("steadyBox needs a card.");
+  const heights = cards.map((card) => card.height - card.frame + (card.framable ? frameRoom : 0));
+  const offsets = cards.length > 1 ? stackOffsets(heights, row, gap) : [0];
+  return union(
+    cards.map((card, index) => {
+      const top = first.top + (offsets[index] ?? 0);
+      return { left: card.left, right: card.left + card.width, top, bottom: top + (heights[index] ?? 0) };
+    }),
+  );
+}

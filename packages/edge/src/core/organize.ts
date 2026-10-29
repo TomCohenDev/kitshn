@@ -61,6 +61,8 @@ export const organizeSummary = (moved: number) =>
 
 /** The space between two cards, and between a card and a head or a chip row. */
 const GAP = 16;
+/** The extra columns that a grid may have, so its cards can pass a card that stays. */
+const SPARE_COLUMNS = 4;
 /** A row where no card fits moves this far down. */
 const ROW_STEP = 24;
 /** `.circle .members` sits this far below the top of its circle. */
@@ -288,11 +290,13 @@ export function organize(
       const top = Math.max(...own.map((circle) => circle.y - circle.r));
       const bottom = Math.min(...own.map((circle) => circle.y + circle.r));
       // The square grid first, then wider and narrower ones, never wider than the circle; each starts centred on
-      // the middle, then at the top of the area.
+      // the middle, then at the top of the area. Up to SPARE_COLUMNS more columns than cards leave slots free, so
+      // cards can go around a card that stays.
+      const most = members.length + SPARE_COLUMNS;
       const widths = [square];
-      for (let step = 1; widths.length < members.length; step++)
+      for (let step = 1; widths.length < most; step++)
         for (const columns of [square + step, square - step])
-          if (columns >= 1 && columns <= members.length) widths.push(columns);
+          if (columns >= 1 && columns <= most) widths.push(columns);
       for (const columns of widths.filter((columns) => (columns - 1) * widest <= 2 * smallest)) {
         const rows = Math.ceil(members.length / columns);
         const left = Math.round(middle.x - (columns * widest - GAP) / 2);

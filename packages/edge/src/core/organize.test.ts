@@ -179,6 +179,32 @@ describe("organize (K-532)", () => {
     expect(at("loose").y).toBe(at("loose-2").y);
   });
 
+  it("goes around a card that stays, beside it, instead of refusing", () => {
+    const state: State = {
+      ...world(),
+      circles: new Map([["Big", circle("Big", 6000, 2000, 500, [])]]),
+      resources: new Map([
+        ["fixed", card("fixed", "page")],
+        ["free", card("free", "page")],
+      ]),
+      places: new Map([
+        ["fixed", { x: 6000, y: 1600 }],
+        ["free", { x: 6100, y: 2300 }],
+      ]),
+      stacks: new Map(),
+    };
+    // A tall open column down the middle of the circle stays where it is.
+    const sizes: DrawnSizes = {
+      ...NO_SIZES,
+      units: new Map([["fixed", { left: -95, top: -36, right: 95, bottom: 964 }]]),
+    };
+    const result = organize(state, sizes, (id) => id === "free");
+    if ("refused" in result) throw new Error(result.refused);
+    const after = applyChanges(state, resolveEdits(state, result.edits));
+    const [fixed, free] = drawn(after, sizes);
+    expect(fixed && free && boxesOverlap(fixed.box, free.box)).toBe(false);
+  });
+
   it("moves only the cards that the caller may move, around the others", () => {
     const state = world();
     const result = organize(state, NO_SIZES, (id) => id === "zeta" || id === "alpha");

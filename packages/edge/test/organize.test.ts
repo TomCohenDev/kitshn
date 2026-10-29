@@ -35,7 +35,7 @@ describe("agent organize (K-532)", () => {
     });
     expect(applied.status).toBe(200);
     const ids: Array<string> = [];
-    for (const name of ["b.html", "a.html", "c.html"]) {
+    for (const name of ["b.html", "a.html", "c.html", "d.html"]) {
       const published = await post("/agent/library", await agent("tidy.access"), "<p>page</p>", {
         "x-kitshn-name": name,
         "x-kitshn-circle": "tidy",
@@ -44,7 +44,13 @@ describe("agent organize (K-532)", () => {
       expect(published.status, await published.clone().text()).toBe(201);
       ids.push(((await published.json()) as { id: string }).id);
     }
-    // A people circle also holds one card, so no agent may move it; it stays and the other cards still organize.
+    // A people circle also holds one card, and Everyone holds another one that the agent published, while it has no
+    // "publishes" right now. No agent may move them; they stay and the other cards still organize.
+    const state = (await (
+      await send("/api/state", { headers: { "cf-access-jwt-assertion": await owner() } })
+    ).json()) as { circles: ReadonlyArray<Circle> };
+    const everyone = state.circles.find((circle) => circle.id === "everyone");
+    if (!everyone) throw new Error("no Everyone circle");
     const friends: Circle = {
       ...agentCircle("friends", "", 6150),
       level: "view",
@@ -58,6 +64,8 @@ describe("agent organize (K-532)", () => {
         edits: [
           { _tag: "circle", id: "friends", after: friends },
           { _tag: "place", id: ids[2], after: { x: 6150, y: 2000 } },
+          { _tag: "circle", id: "everyone", after: { ...everyone, x: 6250, y: 2150, r: 100 } },
+          { _tag: "place", id: ids[3], after: { x: 6250, y: 2150 } },
         ],
       }),
       { "content-type": "application/json" },
@@ -90,6 +98,7 @@ describe("agent organize (K-532)", () => {
       expect(place && Math.hypot(place.x - 6000, place.y - 2000)).toBeLessThan(300);
     }
     expect(after.places[ids[2] ?? ""]).toEqual({ x: 6150, y: 2000 });
+    expect(after.places[ids[3] ?? ""]).toEqual({ x: 6250, y: 2150 });
     expect(await organize()).toBeNull();
 
     const [first] = ids;

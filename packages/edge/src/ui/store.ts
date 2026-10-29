@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import type { Edit } from "../core/changes.ts";
-import type { ResourceKind, State, UndoSource } from "../core/model.ts";
+import type { CardKind, State, UndoSource } from "../core/model.ts";
 import type { DrawnWire } from "../core/organize.ts";
 import type { LogLine, TailAnswer } from "../core/logs.ts";
 import type { ServerMessage, Snapshot } from "../core/protocol.ts";
@@ -245,7 +245,7 @@ export function release(requestId: string) {
 export const undoRevision = (revision: number, source: UndoSource) =>
   request({ type: "undo", revision, source });
 /** K-532: Organize, with the sizes that the map draws now. */
-export const organizeMap = (sizes: DrawnWire, hiddenKinds: ReadonlyArray<ResourceKind>) =>
+export const organizeMap = (sizes: DrawnWire, hiddenKinds: ReadonlyArray<CardKind>) =>
   request({ type: "organize", ...sizes, hiddenKinds });
 
 export function toState(snapshot: Snapshot): State {

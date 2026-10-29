@@ -7806,7 +7806,9 @@ export class Kitshn extends DurableObject<Env> {
         const place = this.state.places.get(id);
         if (!managed.has(id) || !place) return false;
         const probe: Change = { _tag: "place", id, before: place, after: place };
-        return agentRefusal(this.state, this.state, caller.visitor, [probe], now, added, null) === null;
+        // A separate after state, so a published card in Everyone needs "publishes" now, as the real move does.
+        const after = applyChanges(this.state, [probe]);
+        return agentRefusal(this.state, after, caller.visitor, [probe], now, added, null) === null;
       };
       const plan = organize(this.state, this.drawn ?? NO_SIZES, mayMove);
       if ("refused" in plan) return Response.json({ error: plan.refused }, { status: 409 });

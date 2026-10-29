@@ -22,7 +22,7 @@ import { type KindInfo, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS, kindInfo } from
 import { KeySticker, PresenceSticker } from "./Machines.tsx";
 import type { MenuTarget } from "./actions.ts";
 import type { DrawnWire } from "../core/organize.ts";
-import { type Box, USER_STACK, headAngle, stacksOf, union } from "../core/place.ts";
+import { USER_STACK, headAngle, stacksOf } from "../core/place.ts";
 import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import { FRAMED_KINDS, peekable } from "./frames.ts";
@@ -38,6 +38,8 @@ import {
   pinchView,
   shownCardBoxes,
   stackOffsets,
+  type DrawnCard,
+  steadyBox,
 } from "./layout.ts";
 
 export type { View };
@@ -74,39 +76,49 @@ type Drag =
 export function measureMap(state: State, previews: boolean): DrawnWire {
   const world = document.querySelector<HTMLElement>(".viewport > .world");
   if (!world) throw new Error("measureMap: the map is not on screen.");
-  const firstOf = new Map<string, string>();
-  for (const ids of stacksOf(state).values()) for (const id of ids) firstOf.set(id, ids[0] as string);
-  const boxes = new Map<string, Box>();
+  const columnOf = new Map<string, ReadonlyArray<string>>();
+  for (const ids of stacksOf(state).values()) for (const id of ids) columnOf.set(id, ids);
   const cards = [...world.querySelectorAll<HTMLElement>(":scope > .card[data-card]")];
-  // K-520: with Previews on, a frame goes to the cards near the centre of the view. Every card that can get one
-  // keeps the room of one, so the grid does not depend on the view.
-  const frames = cards.flatMap((card) => {
+  const frameOf = (card: HTMLElement) => {
     const frame = card.querySelector<HTMLElement>(".preview-frame");
-    return frame ? [frame.offsetHeight + FRAME_MARGIN] : [];
-  });
-  const frameRoom = previews ? Math.max(FRAME_ROOM, ...frames) : 0;
+    return frame ? frame.offsetHeight + FRAME_MARGIN : 0;
+  };
+  // K-520: with Previews on, a frame goes to the cards near the centre of the view. Every card that can get one
+  // counts with the tallest frame room, also in an open stack, so the grid does not depend on the view.
+  const frameRoom = previews ? Math.max(FRAME_ROOM, ...cards.map(frameOf)) : 0;
+  const drawn = new Map<string, Array<{ readonly id: string; readonly card: DrawnCard }>>();
   for (const element of cards) {
     const id = element.dataset["card"] ?? "";
-    const first = firstOf.get(id) ?? id;
+    const column = columnOf.get(id) ?? [id];
+    const first = column[0] ?? id;
     const place = state.places.get(first);
     if (!place) continue;
-    const box = {
+    const card: DrawnCard = {
       left: element.offsetLeft - place.x,
       top: element.offsetTop - place.y,
-      right: element.offsetLeft + element.offsetWidth - place.x,
-      bottom:
-        element.offsetTop +
-        element.offsetHeight -
-        place.y +
-        (FRAMED_KINDS.has(state.resources.get(id)?.kind ?? "file") &&
-        !element.classList.contains("stack-card") &&
-        !element.querySelector(".preview-frame")
-          ? frameRoom
-          : 0),
+      width: element.offsetWidth,
+      height: element.offsetHeight,
+      frame: frameOf(element),
+      framable:
+        previews &&
+        FRAMED_KINDS.has(state.resources.get(id)?.kind ?? "file") &&
+        !element.classList.contains("stack-card"),
     };
-    const before = boxes.get(first);
-    boxes.set(first, before ? union([before, box]) : box);
+    drawn.set(first, [...(drawn.get(first) ?? []), { id, card }]);
   }
+  const boxes = [...drawn].map(([first, entries]) => {
+    const column = columnOf.get(first) ?? [first];
+    const ordered = [...entries].sort((a, b) => column.indexOf(a.id) - column.indexOf(b.id));
+    return [
+      first,
+      steadyBox(
+        ordered.map((entry) => entry.card),
+        frameRoom,
+        STACK_ROW,
+        STACK_GAP,
+      ),
+    ] as const;
+  });
   const sizeOf = (element: HTMLElement | null) =>
     element ? { width: element.offsetWidth, height: element.offsetHeight } : null;
   return {

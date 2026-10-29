@@ -88,6 +88,17 @@ export const Request = Schema.Union([
       Schema.Record(Schema.String, Schema.String.check(Schema.isMaxLength(4096))),
     ),
   }),
+  /**
+   * K-1751: the T3 server (or another local service) registers its attester on start, with its real loopback
+   * address. Only the daemon user and root send it; an entry of the same prefix is replaced.
+   */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("attester-set"),
+    prefix: Schema.String.check(Schema.isMaxLength(32)),
+    url: Schema.String.check(Schema.isMaxLength(512)),
+    tokenEnv: Schema.String.check(Schema.isMaxLength(128)),
+  }),
   /** K-1762: `git credential erase` drops the kept tokens of one repo. */
   Schema.Struct({
     id: Id,
@@ -118,6 +129,14 @@ export const Answer = Schema.Union([
   Schema.Struct({ id: Id, type: Schema.Literal("rotate-key"), fingerprint: Schema.String }),
   Schema.Struct({ id: Id, type: Schema.Literal("reconnect") }),
   Schema.Struct({ id: Id, type: Schema.Literal("forget-token") }),
+  /** K-1751: the attesters of `machine.json` after the change. */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("attester-set"),
+    attesters: Schema.Array(
+      Schema.Struct({ prefix: Schema.String, address: Schema.String, tokenEnv: Schema.String }),
+    ),
+  }),
   /** K-1714: kitshn's answer to a forwarded call; `body` is base64. */
   Schema.Struct({
     id: Id,

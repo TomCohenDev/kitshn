@@ -33,7 +33,14 @@ import {
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { backup, finishRestores, restore, unpauseMarked } from "./backup.ts";
 import { keyPlan } from "./keys.ts";
-import { attest, attesterPrefixes, attestersOf, dropAttested } from "./attest.ts";
+import {
+  attest,
+  attestationRefusal,
+  attesterPrefixes,
+  attestersOf,
+  dropAttested,
+  withAttester,
+} from "./attest.ts";
 import { credentialAnswer, readCredentialInput, repoOfCredential, repoOfRemote } from "./gitCredential.ts";
 import { composeLogs, followLogs, rangeArgs, searchLogs, withLogLimits } from "./logs.ts";
 import { type LocalOutcome, askLocal, listenLocal, sharedFolderProblem } from "./local.ts";
@@ -402,6 +409,12 @@ async function gitCredentialCommand(operation: string | undefined) {
     return;
   }
   const answer = await askToken(repo);
+  // K-1752: a failed thread check stops git too, so it never falls back to the machine's own login.
+  if (answer?.type === "error") {
+    console.error(`kitshn: ${answer.error}`);
+    process.stdout.write("quit=1\n");
+    return;
+  }
   if (answer === null || answer.type !== "ask" || answer.outcome === "not-kitshn") return;
   if (answer.outcome === "done" && typeof answer.result === "object" && answer.result !== null) {
     const { token, expiresAt } = answer.result as { token?: unknown; expiresAt?: unknown };
@@ -547,6 +560,34 @@ async function agentCommand(argv: ReadonlyArray<string>) {
         ? answer.result
         : null;
   console.log(JSON.stringify(result ?? null, null, 2));
+}
+
+/**
+ * K-1751: `kitshn attester set --prefix <p.> --url <loopback url> --token-env <NAME>` registers an attester through the
+ * daemon, as the daemon user or root. The T3 server runs it on start with its own port.
+ */
+async function attesterCommand(argv: ReadonlyArray<string>) {
+  const [action, ...rest] = argv;
+  const value = (name: string) => {
+    const index = rest.indexOf(name);
+    return index >= 0 ? (rest[index + 1] ?? "") : "";
+  };
+  const prefix = value("--prefix");
+  const url = value("--url");
+  const tokenEnv = value("--token-env");
+  if (action !== "set" || !prefix || !url || !tokenEnv)
+    fail("usage: kitshn attester set --prefix <prefix.> --url <loopback url> --token-env <variable>");
+  if (typeof daemonUid === "string") fail(daemonUid);
+  const outcome = await askLocal(
+    socketPath,
+    { id: "1", type: "attester-set", prefix, url, tokenEnv },
+    10_000,
+    { platform, daemonUid: daemonUid as number },
+  ).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+  if (outcome.kind === "not-running") fail(notRunning());
+  const answer = outcome.answer;
+  if (answer.type === "error") fail(answer.error);
+  console.log(JSON.stringify(answer.type === "attester-set" ? answer.attesters : null));
 }
 
 /**
@@ -1666,13 +1707,36 @@ async function askAgain(
   );
 }
 
+/** K-1751: writes one attester into `machine.json`, replacing an older entry of the same prefix. */
+function setAttester(request: Extract<Request, { type: "attester-set" }>): Answer {
+  const machine = readMachineFile();
+  // A file that the daemon cannot read is never rewritten, so its tokens stay.
+  if (typeof machine !== "object" || machine === null || Array.isArray(machine))
+    throw new Error(`the daemon cannot read ${paths.config}, so it changes no attester.`);
+  const next = withAttester(machine as Record<string, unknown>, {
+    prefix: request.prefix,
+    address: request.url,
+    tokenEnv: request.tokenEnv,
+  });
+  if (typeof next === "string") throw new Error(`kitshn refuses this attester: ${next} (K-1751).`);
+  const temporary = `${paths.config}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temporary, paths.config);
+  log(`attester ${request.prefix} set to ${request.url}`);
+  return { id: request.id, type: "attester-set", attesters: attestersOf(next).attesters };
+}
+
 /** K-1752, K-1753: the labels that the attesters of this machine vouch for, each asked with its own token only. */
 async function attestedFor(attestations: Readonly<Record<string, string>> | undefined) {
   const attested: Record<string, string> = {};
   for (const attester of attestersOf(readMachineFile()).attesters) {
     const token = attestations?.[attester.tokenEnv];
     if (!token) continue;
-    Object.assign(attested, (await attest(attester, token)) ?? {});
+    const result = await attest(attester, token);
+    // K-1752: a call with a token never falls back to the bare machine.
+    const refusal = attestationRefusal(attester, result);
+    if (refusal) throw new Error(refusal);
+    if (result.outcome === "labels") Object.assign(attested, result.labels);
   }
   return attested;
 }
@@ -2213,6 +2277,7 @@ async function answerLocal(
     };
   }
   if (request.type === "forward") return forwardCall(request);
+  if (request.type === "attester-set") return setAttester(request);
   if (request.type === "forget-token") {
     keptTokens.drop(request.repo);
     return { id, type: "forget-token" };
@@ -2272,6 +2337,9 @@ switch (command) {
   case "agent":
     await agentCommand(args);
     break;
+  case "attester":
+    await attesterCommand(args);
+    break;
   case "publish":
   case "address":
   case "logs":
@@ -2305,6 +2373,8 @@ kitshn rotate-key                       replace the machine key over the live co
 kitshn rekey <code>                     make a new machine key with the key code of its panel (K-1706, K-1708)
 kitshn status                           the machine, its key, its connection to kitshn and its tunnel
 kitshn local-users list|add|remove <u>  who else may use the local socket, as the daemon user (K-701)
+kitshn attester set --prefix <p.> --url <loopback url> --token-env <NAME>
+                                        register an attester of thread labels, as the daemon user or root (K-1751)
 kitshn agent <action> [target]          ask kitshn as this machine (K-1710): --reason, --label k=v, --body json
 ${AGENT_USAGE}
 kitshn setup-git                        git asks kitshn first for github.com tokens (K-1763)

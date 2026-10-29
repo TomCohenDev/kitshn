@@ -63,6 +63,8 @@ const REQUEST_SENDERS: Record<Request["type"], "local-users" | "daemon-user-or-r
   ask: "local-users",
   "forget-token": "local-users",
   forward: "local-users",
+  // K-1751: an attester vouches for threads, so only the daemon user and root register one.
+  "attester-set": "daemon-user-or-root",
 };
 
 export const requestAllowed = (type: Request["type"], uid: number, own: number) =>

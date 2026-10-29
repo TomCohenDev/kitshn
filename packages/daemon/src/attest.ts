@@ -14,7 +14,7 @@ const LOOPBACK = new Set(["127.0.0.1", "[::1]", "::1", "localhost"]);
 
 /**
  * K-1751: the attesters of `machine.json`, and why each other entry is refused: an address off loopback, a prefix
- * without a dot, or a missing variable name. The daemon never takes an attester from a caller.
+ * without a dot, or a missing variable name. Only the daemon user and root write an attester (`attester-set`).
  */
 export function attestersOf(machine: unknown): {
   readonly attesters: Array<Attester>;
@@ -98,8 +98,14 @@ export function attestedLabels(prefix: string, answer: unknown): Record<string, 
   return labels;
 }
 
-/** K-1752: asks one attester with the caller's token, at most 2 seconds; null for an inactive answer or a fault. */
-export async function attest(attester: Attester, token: string): Promise<Record<string, string> | null> {
+/** K-1752: what one attester said about the caller's token. */
+export type Attestation =
+  | { readonly outcome: "labels"; readonly labels: Record<string, string> }
+  | { readonly outcome: "inactive" }
+  | { readonly outcome: "failed" };
+
+/** K-1752: asks one attester with the caller's token, at most 2 seconds. */
+export async function attest(attester: Attester, token: string): Promise<Attestation> {
   try {
     const response = await fetch(attester.address, {
       headers: { authorization: token },
@@ -107,9 +113,51 @@ export async function attest(attester: Attester, token: string): Promise<Record<
       redirect: "error",
       signal: AbortSignal.timeout(2000),
     });
-    if (!response.ok) return null;
-    return attestedLabels(attester.prefix, await response.json());
+    if (!response.ok) return { outcome: "failed" };
+    const answer: unknown = await response.json();
+    if (
+      typeof answer === "object" &&
+      answer !== null &&
+      (answer as Record<string, unknown>)["active"] === false
+    )
+      return { outcome: "inactive" };
+    const labels = attestedLabels(attester.prefix, answer);
+    return labels === null ? { outcome: "failed" } : { outcome: "labels", labels };
   } catch {
-    return null;
+    return { outcome: "failed" };
   }
+}
+
+/**
+ * K-1752: the refusal of a call whose token an attester could not vouch for; a call never falls back to the bare
+ * machine once it carries a token.
+ */
+export function attestationRefusal(attester: Attester, result: Attestation): string | null {
+  const name = attester.prefix === "t3." ? "T3" : attester.prefix.slice(0, -1);
+  if (result.outcome === "failed") return `could not check the ${name} thread; try again.`;
+  if (result.outcome === "inactive")
+    return `the ${name} thread of this call is not active (archived or deleted).`;
+  return null;
+}
+
+/**
+ * K-1751: `machine.json` with this attester, which replaces an older entry of the same prefix; or why it is refused,
+ * by the rules of `attestersOf`.
+ */
+export function withAttester(
+  machine: Record<string, unknown>,
+  entry: Attester,
+): Record<string, unknown> | string {
+  const { refused } = attestersOf({ attesters: [entry] });
+  if (refused[0]) return refused[0];
+  const old = Array.isArray(machine["attesters"]) ? (machine["attesters"] as Array<unknown>) : [];
+  const others = old.filter(
+    (item) =>
+      !(
+        typeof item === "object" &&
+        item !== null &&
+        (item as Record<string, unknown>)["prefix"] === entry.prefix
+      ),
+  );
+  return { ...machine, attesters: [...others, { ...entry }] };
 }

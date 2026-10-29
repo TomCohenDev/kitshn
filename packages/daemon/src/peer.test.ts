@@ -31,6 +31,10 @@ describe("local users in machine.json (K-701)", () => {
     }
     expect(requestAllowed("status", 1001, own)).toBe(true);
     expect(requestAllowed("rotate-key", 1001, own)).toBe(false);
+    // K-1751: an attester vouches for threads, so a user in localUsers cannot register one.
+    expect(requestAllowed("attester-set", 1001, own)).toBe(false);
+    expect(requestAllowed("attester-set", own, own)).toBe(true);
+    expect(requestAllowed("attester-set", 0, own)).toBe(true);
     expect(requestAllowed("reconnect", 1001, own)).toBe(false);
     // K-1710: a local user asks kitshn as the machine.
     expect(requestAllowed("ask", 1001, own)).toBe(true);

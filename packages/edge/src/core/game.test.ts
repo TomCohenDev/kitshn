@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type Game, HOUR_MS, doorAddress, doorPlan, gameError, openDoors } from "./game.ts";
+import { type Game, HOUR_MS, busyPort, doorAddress, doorPlan, gameError, openDoors } from "./game.ts";
 
 const game: Game = {
   card: "c1",
@@ -51,6 +51,15 @@ describe("gameError (K-2001, K-2008)", () => {
     if (error === null) expect(result).toBeNull();
     else expect(result).toMatch(error);
   });
+});
+
+it.each([
+  [{ port: 25565, process: "java", status: null }, null],
+  [{ port: 25565, process: "node", status: 200 }, 25565],
+  [{ port: 25565, process: "sshd", status: null }, 25565],
+  [{ port: 8080, process: "node", status: 200 }, null],
+])("a running server %o makes the game port 25565/tcp busy: %s (K-2001)", (server, busy) => {
+  expect(busyPort([{ port: 25565, proto: "tcp" }], [{ title: null, ...server }])?.port ?? null).toBe(busy);
 });
 
 it("a new address replaces only the older door of its family (K-2004)", () => {

@@ -151,6 +151,7 @@ import {
   openDoors,
   parsePort,
   portKey,
+  busyPort,
   relayHost,
 } from "../core/game.ts";
 import type {
@@ -11148,6 +11149,13 @@ export class Kitshn extends DurableObject<Env> {
     if (site)
       return refuse(
         `${site.address} serves from ${site.target} on this machine, so a game card cannot close it.`,
+        409,
+      );
+    // K-2001, K-619: a port that another service of the door machine listens on.
+    const busy = busyPort(game.ports, this.machineView(this.state.machines.get(relay ?? machineId)!).servers);
+    if (busy)
+      return refuse(
+        `${busy.port}/tcp on this machine is ${busy.title ? `"${busy.title}"` : (busy.process ?? "another service")}, which is no game, so a game card cannot close it.`,
         409,
       );
     const host = `${name}.${this.env.KITSHN_ZONE}`;

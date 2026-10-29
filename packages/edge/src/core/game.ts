@@ -43,10 +43,7 @@ export const DEFAULT_DOOR_MS = 12 * HOUR_MS;
 export const MAX_DOOR_MS = 7 * 24 * HOUR_MS;
 export const MAX_GAME_PORTS = 4;
 
-/**
- * K-2001: ports that machines use for kitshn and its neighbours, which a door must never close. Known limit: other
- * services of the machine are not known here; revisit with the running servers report of K-619 (#175).
- */
+/** K-2001: ports that machines use for kitshn and its neighbours, which a door must never close. */
 export const RESERVED_GAME_PORTS: ReadonlyArray<GamePort & { readonly by: string }> = [
   { port: 41641, proto: "udp", by: "Tailscale" },
   { port: 3773, proto: "tcp", by: "T3 Code" },
@@ -104,6 +101,26 @@ export function gameError(input: {
 /** K-2003: what a player types into the game: the host alone with an SRV record, else the host and the first port. */
 export const joinAddress = (game: Pick<Game, "srv" | "ports">, host: string) =>
   game.srv !== null ? host : `${host}:${game.ports[0]?.port ?? ""}`;
+
+/** K-2001: processes that are never a game, so a game card never closes a port that they listen on. */
+const NOT_GAMES: ReadonlySet<string> = new Set(["sshd", "cloudflared", "kitshn", "tailscaled"]);
+
+/**
+ * K-2001: the running server (K-619) that a game card would close, or null. The game itself may listen already, so
+ * only another service counts: one that answers HTTP (a game server does not) or a process that is never a game.
+ * Known limit: the report lists TCP only, so a UDP port of another service is not seen.
+ */
+export function busyPort<
+  Server extends { readonly port: number; readonly process: string | null; readonly status: number | null },
+>(ports: ReadonlyArray<GamePort>, servers: ReadonlyArray<Server>): Server | null {
+  return (
+    servers.find(
+      (server) =>
+        ports.some((port) => port.proto === "tcp" && port.port === server.port) &&
+        (server.status !== null || NOT_GAMES.has(server.process ?? "")),
+    ) ?? null
+  );
+}
 
 export const portKey = ({ port, proto }: GamePort) => `${port}/${proto}`;
 

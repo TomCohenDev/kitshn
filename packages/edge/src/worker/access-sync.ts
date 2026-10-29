@@ -78,7 +78,28 @@ export const unclearAnswer = (error: unknown) =>
  * (after an unclear answer), so least access wins.
  */
 const lowers = (row: AccessRow, body: string) =>
-  row.body === "" ? row.cfId !== "" : removesPolicy(row.body, body);
+  row.body === ""
+    ? row.cfId !== ""
+    : row.key.startsWith("policy:")
+      ? narrowsPolicy(row.body, body)
+      : removesPolicy(row.body, body);
+
+/**
+ * K-407: a policy body takes access away when it drops a rule of `include`, or changes any other field of the wanted
+ * body (a new `require`, a passkey check). The stored body can be what Cloudflare served, so extra fields count for nothing.
+ */
+const narrowsPolicy = (before: string, after: string) => {
+  const { include: was = [], ...wasRest } = JSON.parse(before) as Record<string, unknown> & {
+    include?: ReadonlyArray<unknown>;
+  };
+  const { include: now = [], ...nowRest } = JSON.parse(after) as Record<string, unknown> & {
+    include?: ReadonlyArray<unknown>;
+  };
+  return (
+    was.some((rule) => !now.some((kept) => deepEqual(rule, kept))) ||
+    Object.entries(nowRest).some(([key, value]) => !deepEqual(wasRest[key], value))
+  );
+};
 
 /**
  * True when the write of this body waits. A refusal (`tried` is this body) waits for the daily retry (K-408), and one

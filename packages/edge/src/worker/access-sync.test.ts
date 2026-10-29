@@ -465,6 +465,59 @@ describe("Access sync (K-406, K-408)", () => {
     }
   });
 
+  it("retries a refused policy write that takes a person out after 5 minutes, and lets a refused widening wait (K-407)", async () => {
+    vi.useFakeTimers({ now: 1_000_000, toFake: ["Date"] });
+    try {
+      const cf = fakeCloudflare();
+      const state = start();
+      const owner = state.circles.get("owner")!;
+      const withDomain = (domains: ReadonlyArray<string>) =>
+        applyChanges(
+          state,
+          resolveEdits(state, [
+            {
+              _tag: "circle",
+              id: "owner",
+              after: {
+                ...owner,
+                members: [
+                  ...owner.members,
+                  ...domains.map((domain) => ({ _tag: "domain" as const, domain })),
+                ],
+              },
+            },
+          ]),
+        );
+      await syncAccess(desiredAccess(withDomain(["x.com"]), 0), cf.store, cf.api, "a");
+      const refusing: Api = async (method, path, body) => {
+        if (method === "PUT" && path.includes("/policies/"))
+          throw new CloudflareError(400, `PUT ${path} failed (400): refused`);
+        return cf.api(method, path, body);
+      };
+      // x.com leaves the circle: the refused policy write lowers access, so it shows in red and retries.
+      const narrow = desiredAccess(state, 0);
+      await syncAccess(narrow, cf.store, refusing, "a");
+      expect(accessStates(narrow, cf.rows)["kitshn-admin"]).toMatchObject({
+        state: "failed",
+        error: expect.stringMatching(/^Access not lowered yet: /),
+      });
+      vi.setSystemTime(1_000_000 + RETRY_AFTER_MS);
+      expect(hasAccessWork(narrow, cf.rows)).toBe(true);
+      // y.com joins instead: a refused widening waits for the daily retry.
+      const wide = desiredAccess(withDomain(["x.com", "y.com"]), 0);
+      for (const row of cf.rows.values()) cf.rows.set(row.key, { ...row, tried: row.body, error: null });
+      await syncAccess(wide, cf.store, refusing, "a");
+      expect(accessStates(wide, cf.rows)["kitshn-admin"]).toEqual({
+        state: "failed",
+        error: expect.stringMatching(/^PUT /),
+      });
+      vi.setSystemTime(1_000_000 + 2 * 60 * 60_000);
+      expect(hasAccessWork(wide, cf.rows)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("removes a share from the application even when the policy of a new share fails", async () => {
     const cf = fakeCloudflare();
     const state = start();

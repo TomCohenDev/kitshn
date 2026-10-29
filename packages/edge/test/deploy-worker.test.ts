@@ -1139,6 +1139,10 @@ describe("folder sites (K-1123)", () => {
     // A failed move puts the redirect addresses of the card back as they were (K-1128).
     const kept = await admin(`/api/cards/${card.id}/redirects`, "POST", { address: "kept.example.com" });
     expect(kept.status, JSON.stringify(kept.body)).toBe(200);
+    // One alarm has 5 calls for redirects: a new map costs 3, and each new address 2. So each address gets its own
+    // alarm here, also when no auto alarm ran in between.
+    await alarm();
+    expect(cloudflare.served("kept.example.com")).toEqual(["kitshn-redirects"]);
     // A removal in progress stays removed. The alarm first puts the address on the redirect Worker, so the removal
     // changes the map; then the upload of the new map fails, and no alarm takes the domain off yet. Without the
     // attach, a removal that leaves the old map unchanged would skip the upload and drop the row at once.

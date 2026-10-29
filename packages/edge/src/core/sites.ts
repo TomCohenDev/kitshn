@@ -22,9 +22,10 @@ export function parseSiteInput(raw: string): SiteInput {
   const text = raw.trim();
   if (text === "")
     return { kind: "invalid", reason: "Type a port, such as 5173, or an address, such as localhost:5173." };
+  // The same rule as the site report (`TARGET` in worker/live.ts): no white space, at most 200 characters after "/".
   if (text.startsWith("/"))
-    return text.includes("'") || text.includes(" ")
-      ? { kind: "invalid", reason: "A socket path cannot have a quote or a space." }
+    return text.includes("'") || [...text].some((c) => c.trim() === "") || text.length > 201
+      ? { kind: "invalid", reason: "A socket path has no quote or white space, and at most 200 characters." }
       : { kind: "socket", path: text };
   const bare = text.startsWith(":") ? text.slice(1) : text;
   if (isDigits(bare)) {
@@ -48,6 +49,7 @@ export function parseSiteInput(raw: string): SiteInput {
     notes.push(`Left out ${url.pathname}${url.search}${url.hash}: the site starts at /.`);
   if (url.protocol === "https:") notes.push("kitshn reaches the server over http on its machine.");
   const port = url.port === "" ? (url.protocol === "https:" ? 443 : 80) : Number(url.port);
+  if (!isPort(port)) return { kind: "invalid", reason: `${port} is not a port: a port is 1 to 65535.` };
   if (url.port === "") notes.push(`No port given, so kitshn takes ${port}.`);
   return { kind: "port", port, notes };
 }

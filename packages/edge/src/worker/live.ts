@@ -20,7 +20,8 @@ export interface LiveSite {
   readonly state: "checking" | "ok" | "refused";
 }
 
-const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+/** K-1104: a site name, one DNS label. */
+export const LIVE_LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 const TARGET = /^(http:\/\/localhost:(\d{1,5})|unix:\/[^\s]{1,200})$/;
 
 /** A long id keeps a hash of the machine and the name instead of being cut, so two sites never meet. */
@@ -36,7 +37,7 @@ export function parseSites(value: unknown): { sites: Array<LiveSiteReport>; refu
   if (!Array.isArray(value)) return { sites, refused: ["The site list is not a list."] };
   for (const item of value.slice(0, 50)) {
     const site = item as Partial<Record<keyof LiveSiteReport, unknown>>;
-    if (typeof site.name !== "string" || !LABEL.test(site.name))
+    if (typeof site.name !== "string" || !LIVE_LABEL.test(site.name))
       refused.push(`The name ${String(site.name)} is not valid.`);
     else if (RESERVED_SITE_NAMES.has(site.name))
       refused.push(`${site.name}: kitshn itself uses this name on the zone.`);
@@ -270,4 +271,25 @@ export function wantedRecords(
       wanted.set(site.address, { content: `${tunnel}.cfargotunnel.com`, cardId: site.id });
   }
   return wanted;
+}
+
+/**
+ * K-619, K-909: Cloudflare keeps at most 16,384 bytes on a socket attachment. A machine's attachment keeps its status,
+ * sample, volumes and servers, so the lists that only inform lose their last entries, servers first, until the JSON
+ * fits this budget. The budget leaves room for the structured clone that Cloudflare stores.
+ */
+export const ATTACHMENT_BUDGET = 14_000;
+
+export function fitAttachment<
+  T extends { readonly servers?: ReadonlyArray<unknown>; readonly volumes?: ReadonlyArray<unknown> },
+>(attachment: T): T {
+  let fitted = attachment;
+  while (JSON.stringify(fitted).length > ATTACHMENT_BUDGET) {
+    if (fitted.servers && fitted.servers.length > 0)
+      fitted = { ...fitted, servers: fitted.servers.slice(0, -1) };
+    else if (fitted.volumes && fitted.volumes.length > 0)
+      fitted = { ...fitted, volumes: fitted.volumes.slice(0, -1) };
+    else throw new Error("fitAttachment: the attachment is too big without servers and volumes.");
+  }
+  return fitted;
 }

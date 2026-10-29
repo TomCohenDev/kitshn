@@ -19,12 +19,20 @@ describe("parseSiteInput (K-1131)", () => {
     expect(parseSiteInput("https://Foo.Bar/x")).toEqual({ kind: "remote", host: "foo.bar" });
   });
 
-  it.each(["", "70000", "0", "ftp://localhost:21", "/run/my app.sock", "http://"])(
-    "refuses %j with a reason",
-    (text) => {
-      expect(parseSiteInput(text)).toEqual({ kind: "invalid", reason: expect.any(String) });
-    },
-  );
+  it.each([
+    "",
+    "70000",
+    "0",
+    "ftp://localhost:21",
+    "/run/my app.sock",
+    "/run/tab\tapp.sock",
+    `/${"a".repeat(201)}`,
+    "http://",
+    "http://localhost:0",
+    "http://[::1]:0",
+  ])("refuses %j with a reason", (text) => {
+    expect(parseSiteInput(text)).toEqual({ kind: "invalid", reason: expect.any(String) });
+  });
 });
 
 describe("serversOf (K-619)", () => {

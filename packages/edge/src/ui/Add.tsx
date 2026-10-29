@@ -56,11 +56,12 @@ const nameFrom = (text: string) =>
     .slice(0, 40);
 
 /** K-1131, K-212: the end choices of a new site; a local preview starts with 1 h. */
+const HOUR = 60 * 60 * 1000;
 const SITE_TIMES = [
-  { label: "1 h", flag: "1h" },
-  { label: "4 h", flag: "4h" },
-  { label: "1 day", flag: "1d" },
-  { label: "Until I stop it", flag: null },
+  { label: "1 h", flag: "1h", ms: HOUR },
+  { label: "4 h", flag: "4h", ms: 4 * HOUR },
+  { label: "1 day", flag: "1d", ms: 24 * HOUR },
+  { label: "Until I stop it", flag: null, ms: null },
 ] as const;
 
 /** K-805, K-1104, K-1131, K-619: a static site from a repo, or a live site from a running server of a machine. */
@@ -96,11 +97,11 @@ export function AddSite(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const remote = input.kind === "remote" ? props.cardOf(input.host) : null;
+  const taken = props.cardOf(`${shownName}.${props.zone}`);
   const share = async () => {
-    const target = input.kind === "port" ? String(input.port) : input.kind === "socket" ? input.path : null;
     const problem = !machineId
       ? "Pick a machine that is online."
-      : target === null
+      : input.kind !== "port" && input.kind !== "socket"
         ? input.kind === "invalid"
           ? input.reason
           : "kitshn shares servers of joined machines. Type a port of one, such as 5173."
@@ -108,19 +109,23 @@ export function AddSite(props: {
           ? "A name has 1 to 40 lowercase letters, digits and dashes."
           : RESERVED_SITE_NAMES.has(shownName)
             ? `${shownName}.${props.zone} belongs to kitshn itself. Pick another name.`
-            : null;
+            : taken
+              ? `${shownName}.${props.zone} is the card ${taken.name} already. Pick another name.`
+              : null;
     if (problem) return setError(problem);
     setBusy(true);
-    // An older daemon has no $KITSHN; the join script installs the binary in ~/.local/bin.
-    const script = `"\${KITSHN:-$HOME/.local/bin/kitshn}" expose '${target}' --name '${shownName}'${dev ? " --dev" : ""}${time ? ` --time ${time}` : ""}`;
-    const result = await callApi<{ id: number }>("POST", "/api/jobs", {
+    const after = SITE_TIMES.find((each) => each.flag === time)?.ms ?? null;
+    const result = await callApi<{ id: number }>("POST", "/api/sites/live", {
       machineId,
-      command: { kind: "shell", script },
+      server: text,
+      name: shownName,
+      dev,
+      endsAt: after === null ? null : Date.now() + after,
     });
     setBusy(false);
     if ("error" in result) return setError(result.error);
     props.onDone(
-      `The machine shares ${shownName}.${props.zone} when its daemon picks it up. The card waits in the tray${time ? `, and leaves every circle after ${SITE_TIMES.find((each) => each.flag === time)?.label ?? time}` : ""}.`,
+      `The machine shares ${shownName}.${props.zone} when its daemon picks it up. The card waits in the tray${after === null ? "" : `, and leaves every circle after ${SITE_TIMES.find((each) => each.flag === time)?.label ?? ""}`}.`,
     );
     props.onClose();
   };

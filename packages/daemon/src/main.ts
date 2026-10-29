@@ -2301,6 +2301,7 @@ function exposeCommand(
   name: string | undefined,
   dev: boolean,
   time: string | undefined,
+  onlyNew: boolean,
 ) {
   const usage =
     "usage: kitshn expose <port, localhost:port or /path/to.sock> --name <name> [--dev] [--time 30m|1h|4h|1d]";
@@ -2312,6 +2313,9 @@ function exposeCommand(
   if (time !== undefined && endsAt === undefined) fail(`--time takes 30m, 1h, 4h or 1d, not ${time}.`);
   const current = readSites();
   if (current === null) fail(`${sitesFile()} is broken. Fix it or delete it, then expose the sites again.`);
+  // K-1131: the site wizard only makes sites; it never points a shared name at another server.
+  if (onlyNew && current!.some((site) => site.name === name))
+    fail(`${name} is shared already on this machine. Pick another name.`);
   const sites = addSite(current!, { name, target, dev, ...(endsAt === undefined ? {} : { endsAt }) });
   if (typeof sites === "string") fail(sites);
   writeSites(sites as Array<SiteEntry>);
@@ -2783,7 +2787,7 @@ switch (command) {
     skillCommand(args[0], args.includes("--repo"));
     break;
   case "expose":
-    exposeCommand(args[0], flag("--name"), args.includes("--dev"), flag("--time"));
+    exposeCommand(args[0], flag("--name"), args.includes("--dev"), flag("--time"), args.includes("--new"));
     break;
   case "servers":
     await serversCommand(args.includes("--json"));

@@ -16,14 +16,16 @@ const OWN_PROCESSES: ReadonlySet<string> = new Set(["cloudflared", "kitshn", "ki
 
 const portAfterColon = (address: string) => Number(address.slice(address.lastIndexOf(":") + 1));
 
-/** One entry per port, the first process that names it, kitshn's own left out, by port, at most MAX_SERVERS. */
+/**
+ * One entry per port, by port, at most MAX_SERVERS. A listener without a known process has no known owner, so it goes
+ * (K-619: the scan reports only servers of the daemon's own user), and so do kitshn's own processes.
+ */
 function tidy(listeners: ReadonlyArray<Listener>): Array<Listener> {
   const byPort = new Map<number, Listener>();
   for (const listener of listeners) {
     if (!Number.isInteger(listener.port) || listener.port <= 0 || listener.port > 65535) continue;
-    if (listener.process !== null && OWN_PROCESSES.has(listener.process)) continue;
-    const known = byPort.get(listener.port);
-    if (!known || (known.process === null && listener.process !== null)) byPort.set(listener.port, listener);
+    if (listener.process === null || OWN_PROCESSES.has(listener.process)) continue;
+    if (!byPort.has(listener.port)) byPort.set(listener.port, listener);
   }
   return [...byPort.values()].sort((a, b) => a.port - b.port).slice(0, MAX_SERVERS);
 }
@@ -40,13 +42,16 @@ export function parseLsof(output: string): Array<Listener> {
   return tidy(listeners);
 }
 
-/** Linux: the output of `ss -ltnpH`; the process shows as `users:(("name",pid=1,fd=3))` when this user owns it. */
-export function parseSs(output: string): Array<Listener> {
+/**
+ * Linux: the output of `ss -ltnpeH`; the process shows as `users:(("name",pid=1,fd=3))`, and `uid:<n>` names the
+ * owner. Only listeners of `uid` count.
+ */
+export function parseSs(output: string, uid: number): Array<Listener> {
   const listeners: Array<Listener> = [];
   for (const line of output.split("\n")) {
     const fields = line.split(" ").filter((field) => field !== "");
     const local = fields[3];
-    if (fields[0] !== "LISTEN" || !local) continue;
+    if (fields[0] !== "LISTEN" || !local || !fields.includes(`uid:${uid}`)) continue;
     const users = fields.slice(5).join(" ");
     const start = users.indexOf('(("');
     const end = start < 0 ? -1 : users.indexOf('"', start + 3);
@@ -75,37 +80,78 @@ export function titleOf(html: string): string | null {
 }
 
 /** One `GET /` with a 2-second timeout, at most 64 KB read. */
+/** At most this many bytes of a page are read for its title. */
+const PAGE_BYTES = 64 * 1024;
+
+/**
+ * One `GET /` with a 2-second deadline for the whole check, at most PAGE_BYTES read. A server bound to IPv6 only gets
+ * the same GET on `[::1]` when `127.0.0.1` refuses.
+ */
 async function check(port: number): Promise<Pick<ServerReport, "status" | "title">> {
-  try {
-    const response = await fetch(`http://127.0.0.1:${port}/`, {
-      redirect: "manual",
-      signal: AbortSignal.timeout(2_000),
-      headers: { host: "localhost" },
-    });
-    const reader = response.body?.getReader();
-    let html = "";
-    const decoder = new TextDecoder();
-    while (reader && html.length < 64 * 1024) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      html += decoder.decode(value, { stream: true });
+  const signal = AbortSignal.timeout(2_000);
+  for (const host of ["127.0.0.1", "[::1]"]) {
+    let response: Response;
+    try {
+      response = await fetch(`http://${host}:${port}/`, {
+        redirect: "manual",
+        signal,
+        headers: { host: "localhost" },
+      });
+    } catch {
+      if (signal.aborted) break;
+      continue;
     }
-    await reader?.cancel().catch(() => undefined);
-    return { status: response.status, title: titleOf(html) };
-  } catch {
-    return { status: null, title: null };
+    try {
+      return { status: response.status, title: titleOf(await firstBytes(response, PAGE_BYTES)) };
+    } catch {
+      return { status: response.status, title: null };
+    }
   }
+  return { status: null, title: null };
 }
 
-/** The listening ports now. Known limit: a scan sees only the processes of this user; others show without a name. */
+/** The text of the first `limit` bytes of a body; it decodes only the bytes within the limit, then stops reading. */
+export async function firstBytes(response: Response, limit: number): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let text = "";
+  let left = limit;
+  try {
+    while (left > 0) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const part = value.byteLength > left ? value.subarray(0, left) : value;
+      left -= part.byteLength;
+      text += decoder.decode(part, { stream: left > 0 });
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return text;
+}
+
+const uid = () => {
+  const id = process.getuid?.();
+  if (id === undefined) throw new Error("kitshn needs a user id to scan servers (K-619).");
+  return id;
+};
+
+/** K-619: the listening ports of the daemon's own user now. */
 export async function listeners(platform: "darwin" | "linux"): Promise<Array<Listener>> {
   try {
     if (platform === "darwin") {
-      const { stdout } = await run("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fcn"], { timeout: 5_000 });
+      const { stdout } = await run(
+        "lsof",
+        ["-nP", "-a", "-u", String(uid()), "-iTCP", "-sTCP:LISTEN", "-Fcn"],
+        {
+          timeout: 5_000,
+        },
+      );
       return parseLsof(stdout);
     }
-    const { stdout } = await run("ss", ["-ltnpH"], { timeout: 5_000 });
-    return parseSs(stdout);
+    const { stdout } = await run("ss", ["-ltnpeH"], { timeout: 5_000 });
+    return parseSs(stdout, uid());
   } catch (error) {
     // lsof exits with 1 when nothing listens.
     const stdout = (error as { stdout?: unknown }).stdout;

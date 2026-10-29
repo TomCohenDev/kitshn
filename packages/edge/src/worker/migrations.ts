@@ -287,6 +287,11 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       target TEXT NOT NULL, kind TEXT NOT NULL, thread TEXT, name TEXT NOT NULL, cwd TEXT, outcome TEXT NOT NULL,
       exit_code INTEGER)`,
   ],
+  // 40: device invites (K-1601). The lookup of the one-time code and the token it opens; never the code or a secret.
+  [
+    `CREATE TABLE device_invites (lookup TEXT PRIMARY KEY, token_id TEXT NOT NULL UNIQUE, client_id TEXT NOT NULL,
+      name TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

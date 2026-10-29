@@ -12,6 +12,8 @@ export const PING_TIMEOUT_MS = 30_000;
 export const LIVENESS_CHECK_MS = 120_000;
 /** K-602 */
 export const JOIN_CODE_MS = 10 * 60 * 1000;
+/** K-1601 */
+export const DEVICE_INVITE_MS = 15 * 60 * 1000;
 /** Job output that kitshn keeps, at most. The daemon caps it too. */
 export const OUTPUT_LIMIT = 64 * 1024;
 

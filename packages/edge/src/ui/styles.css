@@ -1427,6 +1427,19 @@ pre.output.log-lines {
   border: 8px solid var(--panic);
   transform: none;
 }
+/* K-1601: the invite QR code, on a white tile with the ink border so it scans in dark mode too. */
+.qr-box {
+  display: flex;
+  justify-content: center;
+  margin: 8px 0;
+}
+.qr {
+  width: min(16rem, 70vw);
+  height: auto;
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
 .secret {
   display: flex;
   flex-direction: column;

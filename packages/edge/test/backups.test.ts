@@ -169,7 +169,7 @@ describe("state export (K-1831)", () => {
       expect(Object.keys(exported.tables)).toEqual(
         expect.arrayContaining(["circles", "resources", "revisions", "backups"]),
       );
-      for (const left of ["jobs", "join_codes", "rekey_codes"])
+      for (const left of ["jobs", "join_codes", "rekey_codes", "device_invites"])
         expect(exported.tables).not.toHaveProperty(left);
       expect(JSON.stringify(exported)).not.toContain("secret");
       expect(exported.tables["icons"]).toContainEqual(

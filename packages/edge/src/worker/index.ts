@@ -423,6 +423,14 @@ async function usageAnswer(
   return Response.json({ ...usage, kitshnDown: reason } satisfies Usage);
 }
 
+const HEX = "0123456789abcdef";
+
+/** K-1601: what a browser shows for an invite link; the code stays in the fragment, so it never reaches kitshn. */
+const INVITE_PAGE = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>kitshn device invite</title><body style="font-family:system-ui;max-width:32rem;margin:3rem auto;padding:0 1rem">
+<h1>Open this in the T3 Code app</h1><p>This link adds a phone or a desktop app to kitshn. Scan its QR code with the
+T3 Code app, or paste the link in the app. It works once and expires 15 minutes after the owner made it.</p>`;
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
@@ -675,6 +683,24 @@ export default {
     // K-1118, K-1119: only these public paths exist; any other one is not found, never the app shell.
     if (url.pathname.startsWith("/public/"))
       return new Response("Not found.", { status: 404, headers: { "cache-control": "no-store" } });
+    // K-1601: the link of a device invite. A browser that opens it gets told to scan it in the app.
+    if (url.pathname === "/join/device" && request.method === "GET")
+      return new Response(INVITE_PAGE, {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      });
+    // K-1601: the app trades the invite code for its device token. Public; the code is the secret.
+    if (url.pathname === "/join/device" && request.method === "POST") {
+      const body = (await request
+        .clone()
+        .json()
+        .catch(() => null)) as { code?: unknown } | null;
+      const code = body?.code;
+      if (typeof code !== "string" || code.length !== 32 || [...code].some((char) => !HEX.includes(char)))
+        return Response.json({ error: "This is not a kitshn invite code." }, { status: 400 });
+      const headers = new Headers(request.headers);
+      headers.delete("x-kitshn-caller");
+      return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
+    }
     // K-1706: "kitshn rekey" trades its one-time code in the same way.
     if ((url.pathname === "/join/exchange" || url.pathname === "/join/rekey") && request.method === "POST") {
       // A cheap shape check keeps junk away from the Durable Object; the code itself is the secret.

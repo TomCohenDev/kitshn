@@ -555,6 +555,11 @@ export function newJoinCode(): string {
   return [...random].map((value) => alphabet[value % alphabet.length]).join("");
 }
 
+/** K-1601: a device invite code: 16 random bytes in hex, 128 bits. */
+export function newInviteCode(): string {
+  return [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** K-818: checks an allow list from the map: at most 50 entries of a repo `owner/name` and a setting name. */
 export function parseAllowances(value: unknown): Array<ComposeAllowance> | string {
   if (!Array.isArray(value) || value.length > 50) return "The allow list is a list of at most 50 entries.";

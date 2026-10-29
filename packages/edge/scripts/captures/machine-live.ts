@@ -14,7 +14,7 @@ export default {
             machines: Array<Record<string, unknown> & { machine: { id: string } }>;
             jobs: Array<unknown>;
             proposals: Array<unknown>;
-            myAsks: Record<string, number>;
+            queuedJobs: Record<string, number>;
           };
         };
         const snapshot = data.snapshot;
@@ -81,7 +81,7 @@ export default {
               verified: [],
             },
           ];
-          snapshot.myAsks = { mac: 1 };
+          snapshot.queuedJobs = { vps: 7 };
         }
         socket.send(JSON.stringify(data));
       });

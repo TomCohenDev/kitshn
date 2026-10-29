@@ -3213,6 +3213,11 @@ export class Kitshn extends DurableObject<Env> {
         "SELECT repo_id, repo, pr, sha, at FROM bot_runs WHERE approved = 0 ORDER BY at DESC LIMIT 20",
       ).map((row) => ({ repoId: row.repo_id, repo: row.repo, pr: row.pr, sha: row.sha, at: row.at })),
       jobs: this.recentJobs(10, 2000),
+      queuedJobs: Object.fromEntries(
+        this.sql<{ machine_id: string; queued: number }>(
+          "SELECT machine_id, COUNT(*) AS queued FROM jobs WHERE state = 'queued' AND machine_id IS NOT NULL GROUP BY machine_id",
+        ).map((row) => [row.machine_id, row.queued]),
+      ),
       backups: Object.fromEntries(this.latestBackups()),
       r2Bucket: this.bucket(),
       backupsOff: !this.env.KITSHN_BACKUP_KEY,

@@ -528,11 +528,25 @@ input[type="search"]::-webkit-search-cancel-button {
 .card.sel .sub {
   color: inherit;
 }
-/* K-515: the live row of a machine card. The bars change with each sample, once a minute, with no transition. */
+/* K-515: the live rows of a machine card keep one height in every state, so the card never grows over a neighbour.
+   The bars change with each sample, once a minute, with no transition. */
+.card .live {
+  display: grid;
+  grid-template-rows: 1lh 14px 22px;
+  row-gap: 4px;
+  overflow: hidden;
+}
 .card .live .meters {
   display: flex;
-  gap: 8px;
-  margin-top: 4px;
+  gap: 5px;
+  align-items: center;
+}
+.card .live .live-stickers {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
 }
 .card .meter {
   display: flex;
@@ -547,7 +561,7 @@ input[type="search"]::-webkit-search-cancel-button {
   letter-spacing: 0.04em;
 }
 .card .meter-bar {
-  width: 48px;
+  width: 20px;
   height: 8px;
   border: var(--bw) solid var(--border);
   border-radius: 2px;

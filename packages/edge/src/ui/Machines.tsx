@@ -37,27 +37,27 @@ export function PresenceSticker(props: { view: MachineView }) {
 }
 
 /**
- * K-515: the live row of a machine card: the daemon version and system, and CPU and memory bars from the newest
- * sample (K-605). Offline, it says when kitshn last heard from the daemon and shows no bars, because an old load lies.
+ * K-515, K-1616: the live rows of a machine card, at a fixed height, so the card never grows over its neighbour when
+ * the machine comes online or a sticker appears: the daemon line, CPU and memory bars from the newest sample (K-605),
+ * and the stickers of its state. Offline, the bar row stays empty, because an old load is wrong.
  */
 export function MachineLive(props: { view: MachineView }) {
   const { online, status, sample, lastSeen } = props.view;
   const daemon = status ? `daemon ${status.version} · ${status.os} ${status.arch}` : "no status yet";
-  if (!online)
-    return (
-      <div class="sub live">
-        seen {ago(lastSeen)} ago · {daemon}
-      </div>
-    );
   return (
     <div class="live">
-      <div class="sub">{daemon}</div>
-      {sample ? (
-        <div class="meters">
-          <Meter label="CPU" value={sample.cpu} />
-          <Meter label="Mem" value={sample.memory} />
-        </div>
-      ) : null}
+      <div class="sub">{online ? daemon : `seen ${ago(lastSeen)} ago · ${daemon}`}</div>
+      <div class="meters">
+        {online && sample ? (
+          <>
+            <Meter label="CPU" value={sample.cpu} />
+            <Meter label="Mem" value={sample.memory} />
+          </>
+        ) : null}
+      </div>
+      <div class="live-stickers">
+        <MachineStickers view={props.view} />
+      </div>
     </div>
   );
 }
@@ -80,42 +80,57 @@ function Meter(props: { label: string; value: number }) {
   );
 }
 
+/** The card starts a drag on a press; a link on it opens instead. */
+const keepPress = (event: PointerEvent) => event.stopPropagation();
+
 /**
- * K-515, K-1616, K-1902: the stickers of a machine card: its daemon against the release of the Worker, its queued
- * jobs, and the asks that wait for the viewer. Each links where it acts.
+ * K-515, K-1616, K-1902: the daemon against the release of the Worker, the jobs that wait, and the asks that the
+ * viewer may answer. Each is a link where it acts: the version to the panel with "Update daemon" (K-612).
  */
-export function MachineStickers(props: { view: MachineView }) {
+function MachineStickers(props: { view: MachineView }) {
   const { snapshot } = useStore();
   if (!snapshot) return null;
   const { machine, online, status } = props.view;
-  // Known limit: the snapshot holds the newest jobs only, so a long queue counts short. Revisit when queues grow past it.
-  const queued = snapshot.jobs.filter((job) => job.machineId === machine.id && job.state === "queued").length;
-  const asks = snapshot.myAsks[machine.id] ?? 0;
+  const queued = snapshot.queuedJobs[machine.id] ?? 0;
+  // The snapshot holds only the asks that this viewer may answer (K-1902).
+  const asks = snapshot.proposals.filter((proposal) => proposal.machineId === machine.id).length;
+  const panel = `#map/${encodeURIComponent(machine.id)}`;
+  const version =
+    !online || !status || !isRelease(snapshot.version) ? null : !isRelease(status.version) ? (
+      <span
+        class="sticker info"
+        tabIndex={0}
+        data-tip={`From source: this daemon runs ${status.version}, not a release, so Update daemon refuses it. Pull its checkout and restart it.`}
+      >
+        source
+      </span>
+    ) : status.version === snapshot.version ? (
+      <a
+        class="sticker ok"
+        href={panel}
+        onPointerDown={keepPress}
+        data-tip={`Newest: the daemon runs edge-${snapshot.version}, the release of the Worker (K-617). Its panel has Update daemon.`}
+      >
+        newest
+      </a>
+    ) : (
+      <a
+        class="sticker wait"
+        href={panel}
+        onPointerDown={keepPress}
+        data-tip={`Behind: the daemon runs edge-${status.version}, the Worker runs edge-${snapshot.version}. Update daemon in its panel installs it (K-612).`}
+      >
+        behind
+      </a>
+    );
   return (
     <>
-      {online && status && isRelease(snapshot.version) ? (
-        status.version === snapshot.version ? (
-          <span
-            class="sticker ok"
-            data-tip={`Newest: the daemon runs edge-${snapshot.version}, the release of the Worker (K-617).`}
-          >
-            newest
-          </span>
-        ) : (
-          <span
-            class="sticker wait"
-            data-tip={`Behind: the daemon runs ${status.version}, the Worker runs edge-${snapshot.version}. Update daemon in its menu brings it up (K-612).`}
-          >
-            behind
-          </span>
-        )
-      ) : null}
+      {version}
       {queued > 0 ? (
         <a
           class="sticker info"
           href="#machines"
-          // The card starts a drag on a press; a link on it opens instead.
-          onPointerDown={(event) => event.stopPropagation()}
+          onPointerDown={keepPress}
           data-tip={`${queued} ${queued === 1 ? "job waits" : "jobs wait"} for this machine. The Machines view lists them.`}
         >
           {queued} queued
@@ -125,7 +140,7 @@ export function MachineStickers(props: { view: MachineView }) {
         <a
           class="sticker wait"
           href={`#notifications/${encodeURIComponent(machine.id)}`}
-          onPointerDown={(event) => event.stopPropagation()}
+          onPointerDown={keepPress}
           data-tip={`An agent on ${machine.name} waits for your answer. The Inbox shows ${asks === 1 ? "its ask" : `its ${asks} asks`}.`}
         >
           {asks} needs you

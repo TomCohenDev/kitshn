@@ -1663,7 +1663,7 @@ export class Kitshn extends DurableObject<Env> {
     if (!resource.machine) return `${resource.name} runs on no machine.`;
     if (!this.env.BUCKET) return "R2 is off on this account.";
     if (!this.env.KITSHN_BACKUP_KEY)
-      return "kitshn has no KITSHN_BACKUP_KEY; run the bootstrap again (K-1815).";
+      return "Backups are off: kitshn has no KITSHN_BACKUP_KEY. Run the bootstrap with KITSHN_BACKUP_KEY_NOW=1 (K-1815).";
     // K-1817: an online daemon says whether it can back up; an offline one gets the job when it connects.
     const socket = this.checkedSockets(resource.machine).at(-1);
     const attachment = socket ? attachmentOf(socket) : null;
@@ -1857,6 +1857,11 @@ export class Kitshn extends DurableObject<Env> {
       this.setMeta("r2_bucket", JSON.stringify(await bucketSize(bucket, now)));
     });
     await step("the repositories of removed cards (K-1819)", () => this.dropRemovedRepositories(bucket, now));
+    // K-1815: without the key, backups stay off; one line a day says so, not one per card.
+    if (!this.env.KITSHN_BACKUP_KEY) {
+      console.warn("kitshn daily backups: no KITSHN_BACKUP_KEY, so backups stay off (K-1815).");
+      return;
+    }
     const { deployedCards, previewCards } = this.deployedAndPreviewCards();
     const previews = new Set(previewCards);
     const actor: Actor = { _tag: "kitshn", reason: "the daily backup (K-1817)" };
@@ -2668,6 +2673,7 @@ export class Kitshn extends DurableObject<Env> {
       jobs: this.recentJobs(10, 2000),
       backups: Object.fromEntries(this.latestBackups()),
       r2Bucket: this.bucket(),
+      backupsOff: !this.env.KITSHN_BACKUP_KEY,
       restoreUndo: this.meta("restore_undo"),
       version: this.env.KITSHN_VERSION,
       accessTeam: this.env.ACCESS_TEAM_DOMAIN,

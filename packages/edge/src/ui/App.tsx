@@ -1404,6 +1404,7 @@ export function App() {
               onLogs={setLogs}
               backups={store.snapshot.backups}
               r2Bucket={store.snapshot.r2Bucket}
+              backupsOff={store.snapshot.backupsOff}
               onBackUpNow={(resource) => void backUpNow(resource)}
               onBackups={setBackupsCard}
               orphanWorkers={store.snapshot.orphanWorkers}
@@ -1926,6 +1927,8 @@ function Panel(props: {
   onLogs: (resource: Resource) => void;
   backups: Readonly<Record<string, BackupRun>>;
   r2Bucket: BucketSize | null;
+  /** K-1815: no backup key, so backups are off. */
+  backupsOff: boolean;
   onBackUpNow: (resource: Resource) => void;
   onBackups: (resource: Resource) => void;
   orphanWorkers: ReadonlyArray<OrphanWorker>;
@@ -1998,6 +2001,7 @@ function Panel(props: {
         onLogs={props.onLogs}
         backup={props.backups[cards[0].id] ?? null}
         r2Bucket={props.r2Bucket}
+        backupsOff={props.backupsOff}
         onBackUpNow={props.onBackUpNow}
         onBackups={props.onBackups}
         orphanWorkers={cards[0].id === ADMIN_RESOURCE_ID ? props.orphanWorkers : []}
@@ -2316,6 +2320,8 @@ function CardPanel(props: {
   /** K-1819: the newest backup run of this card, or null. */
   backup: BackupRun | null;
   r2Bucket: BucketSize | null;
+  /** K-1815: no backup key, so backups are off. */
+  backupsOff: boolean;
   onBackUpNow: (resource: Resource) => void;
   onBackups: (resource: Resource) => void;
   /** K-909: on the admin card, what removed Worker apps left in Cloudflare. */
@@ -2508,6 +2514,9 @@ function CardPanel(props: {
           <div class="label" data-tip="Backups: daily copies of the volumes and the data folder (K-1811).">
             Backups
           </div>
+          {props.backupsOff ? (
+            <p class="error">Backups are off: run the bootstrap with KITSHN_BACKUP_KEY_NOW=1 (K-1815).</p>
+          ) : null}
           {props.r2Bucket && props.r2Bucket.bytes >= BACKUP_LIMIT_BYTES ? (
             <p class="error">
               Backups wait: the R2 bucket holds {gigabytes(props.r2Bucket.bytes)} of the 10 GB of the free
@@ -2519,7 +2528,7 @@ function CardPanel(props: {
               <>
                 <span>{backupLabel(props.backup)}</span> <BackupState run={props.backup} />
               </>
-            ) : (
+            ) : props.backupsOff ? null : (
               <span class="muted">No backup yet; the first runs tonight.</span>
             )}
           </div>

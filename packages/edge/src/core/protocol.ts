@@ -90,6 +90,8 @@ export interface Snapshot {
   readonly backups: Readonly<Record<string, BackupRun>>;
   /** K-1818: the size of the `kitshn` bucket at the last daily run; null before the first. */
   readonly r2Bucket: BucketSize | null;
+  /** K-1815: the Worker has no KITSHN_BACKUP_KEY, so no backup runs until the owner makes one. */
+  readonly backupsOff: boolean;
   /** K-1822: the bookmark that undoes the last "Restore kitshn to a time"; null when none ran. */
   readonly restoreUndo: string | null;
   /** K-617: the release of this kitshn; "Update daemon" installs the daemon of this release. */

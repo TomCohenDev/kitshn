@@ -2594,15 +2594,18 @@ async function runCommand() {
   const local = await listenLocal(paths.socket, { ...socketOptions, access: "private" });
   process.on("exit", local.stop);
   // K-1609: the link proxy of the providers, in the same private folder, so only the daemon user and root reach it.
-  const links = serveLinks(linkSocket, {
-    reach: () =>
-      registry()
-        .reports()
-        .flatMap((report) => registry().reachOf(report.name)),
-    token: () => (joined ? { clientId: joined.clientId, clientSecret: joined.clientSecret } : null),
-    log,
-  });
-  process.on("exit", links.stop);
+  const links =
+    linkSocket === null
+      ? null
+      : serveLinks(linkSocket, {
+          reach: () =>
+            registry()
+              .reports()
+              .flatMap((report) => registry().reachOf(report.name)),
+          token: () => (joined ? { clientId: joined.clientId, clientSecret: joined.clientSecret } : null),
+          log,
+        });
+  if (links) process.on("exit", links.stop);
   // K-701: the users in `localUsers` connect here. An unsafe folder costs only this socket, not the daemon.
   const shared =
     platform === "win32"
@@ -2669,7 +2672,9 @@ function readMachineFile(): unknown {
 /** The requests to kitshn that wait for its `answer`, by request id: null, or why kitshn refused. */
 const answerWaiters = new Map<string, (error: string | null) => void>();
 /** K-1609: the Unix socket of the link proxy, next to the private local socket. */
-const linkSocket = join(dirname(paths.socket), "link.sock");
+// Known limit: Windows has no link proxy, because its local socket is a named pipe with no private folder (K-621).
+// Revisit with a pipe of its own, under the pipe rules of K-621.
+const linkSocket = platform === "win32" ? null : join(dirname(paths.socket), "link.sock");
 
 /** K-704: the providers of this machine, saved in `providers.json`. */
 const providersFile = () => join(paths.data, "providers.json");

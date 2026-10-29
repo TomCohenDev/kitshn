@@ -11,8 +11,9 @@ export interface MachineToken {
 
 /**
  * K-1609: where a request to `/<machine id>/<path>` goes: the address of a card of that machine that this machine
- * reaches. Known limit: with several such cards, the first with an address wins; revisit when a provider has two
- * addressed kinds per machine.
+ * reaches. Known limit: the reach of every provider of this machine counts, and with several such cards the first
+ * with an address wins, also a card of another provider. Revisit when a second provider, or a second addressed kind,
+ * has cards on the same machine: then the path names the card.
  */
 export function linkTarget(
   reach: ReadonlyArray<ReachedCard>,
@@ -36,11 +37,37 @@ export function linkHeaders(incoming: Headers, token: MachineToken): Record<stri
     const lower = name.toLowerCase();
     if (lower.startsWith("cf-access-") || lower.startsWith("sec-websocket-")) continue;
     if (["host", "connection", "upgrade", "content-length"].includes(lower)) continue;
+    // An Access session cookie would let B see a person or an old session instead of A's machine token.
+    if (lower === "cookie") {
+      const kept = withoutAccessCookie(value);
+      if (kept) headers[name] = kept;
+      continue;
+    }
     headers[name] = value;
   }
   headers["CF-Access-Client-Id"] = token.clientId;
   headers["CF-Access-Client-Secret"] = token.clientSecret;
   return headers;
+}
+
+/** The cookies of a `Cookie` header without `CF_Authorization`, or null when none is left. */
+export function withoutAccessCookie(cookie: string): string | null {
+  const kept = cookie
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part !== "" && !part.startsWith("CF_Authorization="));
+  return kept.length > 0 ? kept.join("; ") : null;
+}
+
+/** An answer without the `Set-Cookie` of an Access session, so the caller never keeps B's session. */
+function withoutAccessSetCookie(answer: Response): Response {
+  const cookies = answer.headers.getSetCookie();
+  if (!cookies.some((cookie) => cookie.startsWith("CF_Authorization="))) return answer;
+  const headers = new Headers(answer.headers);
+  headers.delete("set-cookie");
+  for (const cookie of cookies)
+    if (!cookie.startsWith("CF_Authorization=")) headers.append("set-cookie", cookie);
+  return new Response(answer.body, { status: answer.status, statusText: answer.statusText, headers });
 }
 
 interface Upstream {
@@ -87,7 +114,7 @@ export function serveLinks(
         headers,
         redirect: "manual",
         ...(request.body ? { body: request.body, duplex: "half" } : {}),
-      } as RequestInit);
+      } as RequestInit).then(withoutAccessSetCookie);
     },
     websocket: {
       open(client) {

@@ -35,7 +35,10 @@ describe("the link proxy (K-1609)", () => {
       fetch(request, server) {
         seen.push(request.headers);
         if (server.upgrade(request)) return undefined;
-        return new Response(`${request.method} ${new URL(request.url).pathname}`);
+        const answer = new Response(`${request.method} ${new URL(request.url).pathname}`);
+        answer.headers.append("set-cookie", "CF_Authorization=b-session; Path=/");
+        answer.headers.append("set-cookie", "theme=dark; Path=/");
+        return answer;
       },
       websocket: {
         message: (socket, message) => {
@@ -56,13 +59,20 @@ describe("the link proxy (K-1609)", () => {
       const answer = await fetch("http://link/b/api/thing", {
         unix: path,
         method: "POST",
-        headers: { "CF-Access-Client-Id": "forged", "x-keep": "1" },
+        headers: {
+          "CF-Access-Client-Id": "forged",
+          "x-keep": "1",
+          cookie: "CF_Authorization=person; lang=he",
+        },
         body: "x".repeat(200_000),
       } as RequestInit);
       expect(await answer.text()).toBe("POST /api/thing");
       expect(seen[0]?.get("cf-access-client-id")).toBe("a.access");
       expect(seen[0]?.get("cf-access-client-secret")).toBe("secret");
       expect(seen[0]?.get("x-keep")).toBe("1");
+      // An Access session never crosses the proxy, in either direction.
+      expect(seen[0]?.get("cookie")).toBe("lang=he");
+      expect(answer.headers.getSetCookie()).toEqual(["theme=dark; Path=/"]);
       const refused = await fetch("http://link/other/api", { unix: path } as RequestInit);
       expect(refused.status).toBe(403);
 

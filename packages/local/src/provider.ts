@@ -411,8 +411,14 @@ export const LinkAudit = Schema.Struct({
   /** The machine id of the target. */
   target: Schema.String.check(Schema.isMaxLength(64)),
   thread: Schema.NullOr(Schema.String.check(Schema.isMaxLength(200))),
-  /** The command name of a `machine_exec` run, or the name of the tool. */
-  name: Schema.String.check(Schema.isMaxLength(500)),
+  /** The command name of a `machine_exec` run, or the name of the tool: one word, never the arguments. */
+  name: Schema.String.check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(100),
+    Schema.makeFilter(
+      (name: string) => ![...name].some((char) => char.trim() === "") || "one word, with no arguments",
+    ),
+  ),
   cwd: Schema.NullOr(Schema.String.check(Schema.isMaxLength(500))),
   outcome: Schema.Literals(AUDIT_OUTCOMES),
   exitCode: Schema.NullOr(Schema.Int),

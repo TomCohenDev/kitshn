@@ -263,8 +263,11 @@ export const Answer = Schema.Union([
     settings: CardSettingValues,
     /** K-1609: the saved reach of this machine. */
     reach: Schema.Array(ReachedCard),
-    /** K-1609: the Unix socket of the link proxy: `http://link/<machine id>/<path>` reaches that machine's card. */
-    linkSocket: Schema.String,
+    /**
+     * K-1609: the Unix socket of the link proxy: `http://link/<machine id>/<path>` reaches that machine's card. Null on
+     * Windows, which has no link proxy yet.
+     */
+    linkSocket: Schema.NullOr(Schema.String),
   }),
   Schema.Struct({ id: Id, type: Schema.Literal("desired-set") }),
   Schema.Struct({ id: Id, type: Schema.Literal("audit") }),

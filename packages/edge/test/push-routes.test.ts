@@ -1,4 +1,4 @@
-import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Notification } from "../src/core/notifications.ts";
@@ -147,11 +147,15 @@ it("sends at most 5 pushes in one alarm run, also when its reconcile opens anoth
     .spyOn(globalThis, "fetch")
     .mockImplementation(async () => new Response(null, { status: 201 }));
   const stub = env.KITSHN.getByName("kitshn");
-  await runInDurableObject(stub, (instance) => {
+  // workerd runs the alarms that kitshn schedules on its own. One of them between this setup and the run below would
+  // send pushes too, so the test takes the pending alarm away, schedules none, and runs one alarm itself.
+  await runInDurableObject(stub, async (instance, state) => {
+    await state.storage.deleteAlarm();
     const kitshn = instance as unknown as Pushes & {
       sql(query: string, ...bindings: Array<string | number | null>): unknown;
       load(): void;
     };
+    kitshn.scheduleAlarm = async () => {};
     // A push waits already, and the alarm's broadcast (an ended mute changes the bell) opens a deploy notification.
     kitshn.sql(
       "INSERT INTO resources (id, body) VALUES ('shop', ?)",
@@ -176,9 +180,8 @@ it("sends at most 5 pushes in one alarm run, also when its reconcile opens anoth
     kitshn.load();
     kitshn.pushQueue = [{ notification: failed, device: null, tries: 0 }];
   });
-  await runDurableObjectAlarm(stub);
-  // One more call into the object, so a push that the alarm left running in the background ends before the count.
-  await runInDurableObject(stub, () => Promise.resolve());
+  sent.mockClear();
+  await runInDurableObject(stub, (instance) => instance.alarm());
   const pushes = sent.mock.calls.filter(([input]) =>
     String(input instanceof Request ? input.url : input).includes("push.example.com"),
   );

@@ -72,4 +72,6 @@ mv "$bin/kitshn.new" "$bin/kitshn"
 
 "$bin/kitshn" join "$code" --server "$server"
 "$bin/kitshn" service install
+# K-618: the skill for coding agents on this machine. A failure here stops no join.
+"$bin/kitshn" skill install || echo "kitshn: the skill was not installed; run $bin/kitshn skill install later." >&2
 echo "Done. To remove kitshn from this machine: $bin/kitshn service uninstall"

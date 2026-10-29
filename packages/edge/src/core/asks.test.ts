@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { ASK_ACTIONS as LOCAL_ACTIONS } from "../../../local/src/index.ts";
+import { ASK_ACTIONS as LOCAL_ACTIONS, WINDOW_ACTIONS as LOCAL_WINDOW } from "../../../local/src/index.ts";
 import {
   ASK_ACTIONS,
+  WINDOW_ACTIONS,
   askRequest,
   conditionProblem,
   formatConditions,
@@ -13,8 +14,9 @@ import {
 import type { Circle } from "./model.ts";
 
 describe("asks of agents on machines (K-1710, K-1711, K-1750)", () => {
-  it("knows the same actions as the daemon", () => {
+  it("knows the same actions as the daemon, and the same actions whose approval opens a window", () => {
     expect([...ASK_ACTIONS]).toEqual([...LOCAL_ACTIONS]);
+    expect([...WINDOW_ACTIONS].sort()).toEqual([...LOCAL_WINDOW].sort());
   });
 
   it("takes at most 10 labels with a prefixed key and a short text value", () => {

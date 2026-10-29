@@ -61,6 +61,7 @@ const REQUEST_SENDERS: Record<Request["type"], "local-users" | "daemon-user-or-r
   "rotate-key": "daemon-user-or-root",
   reconnect: "daemon-user-or-root",
   ask: "local-users",
+  "forget-token": "local-users",
 };
 
 export const requestAllowed = (type: Request["type"], uid: number, own: number) =>

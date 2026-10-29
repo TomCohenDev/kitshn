@@ -103,6 +103,8 @@ export async function attest(attester: Attester, token: string): Promise<Record<
   try {
     const response = await fetch(attester.address, {
       headers: { authorization: token },
+      // A redirect could carry the caller's token to another address.
+      redirect: "error",
       signal: AbortSignal.timeout(2000),
     });
     if (!response.ok) return null;

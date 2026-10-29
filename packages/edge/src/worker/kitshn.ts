@@ -609,7 +609,8 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1903: the handler of "run" actions, per source. */
   private readonly actionHandlers = new Map<
     string,
-    (notification: Notification, action: string, caller: Caller) => Promise<void> | void
+    /** The error text when the action does not run, else null. */
+    (notification: Notification, action: string, caller: Caller) => Promise<string | null> | string | null
   >();
   private get revisions(): Array<RevisionView> {
     this.revisionCache ??= this.loadRevisions();
@@ -710,8 +711,13 @@ export class Kitshn extends DurableObject<Env> {
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
     // K-1722: "Deny" of an ask runs from its notification; "Approve" is a link, because it needs the approver's proof.
     this.actionHandlers.set("kitshn.ask", async (notification, action, caller) => {
-      if (action === "deny")
-        await this.decide(notification.key, "denied", { ...caller, machineId: null, reason: null });
+      if (action !== "deny") return `The ask has no action ${action}.`;
+      const decided = await this.decide(notification.key, "denied", {
+        ...caller,
+        machineId: null,
+        reason: null,
+      });
+      return decided.ok ? null : decided.error;
     });
     void ctx.blockConcurrencyWhile(async () => {
       // Numbered migrations: each runs once per database, with its version, in one transaction.
@@ -3209,6 +3215,12 @@ export class Kitshn extends DurableObject<Env> {
       if (!isRecord(body) || typeof body["on"] !== "boolean")
         return Response.json({ error: 'Send {"on": true | false}.' }, { status: 400 });
       const on = body["on"];
+      // K-1504: while paused, access only goes down.
+      if (on && this.state.paused)
+        return Response.json(
+          { error: "kitshn is paused, so passes stay off until Resume (K-1504)." },
+          { status: 409 },
+        );
       this.ctx.storage.transactionSync(() => {
         this.setMeta("passes_on", on ? "1" : "0");
         this.insertRevision(caller.actor, on ? "Turned on passes" : "Turned off passes", [], null);
@@ -7694,6 +7706,9 @@ export class Kitshn extends DurableObject<Env> {
       );
       this.insertRevision(actor, "Rotated the pass key", [], null);
     });
+    // K-1762: a rotation answers a doubt about kitshn's secrets, so the daemons ask again for each token.
+    for (const socket of this.ctx.getWebSockets("machines"))
+      if (attachmentOf(socket)?.kind === "machine") send(socket, { type: "dropTokens", repo: null });
   }
 
   /** K-1770 to K-1773: what Settings shows of the passes: on or off, the audiences and the public keys. Never a private half. */
@@ -7945,6 +7960,8 @@ export class Kitshn extends DurableObject<Env> {
       const right = row.right_name === "writesCode" ? "writesCode" : "readsCode";
       if (onlyLost && codeRightMode(this.state, row.machine_id, right, row.repo, now) !== null) continue;
       this.sql("DELETE FROM github_tokens WHERE id = ?", row.id);
+      const socket = this.openSocket(row.machine_id);
+      if (socket) send(socket, { type: "dropTokens", repo: row.repo });
       if (!key) continue;
       this.ctx.waitUntil(
         openToken(key, row.sealed)
@@ -7984,8 +8001,8 @@ export class Kitshn extends DurableObject<Env> {
       };
     const id = crypto.randomUUID();
     this.sql(
-      `INSERT INTO proposals (id, machine_id, action, target, body, reason, labels, right_name, circle_id, shown, shown_hash, state, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      `INSERT INTO proposals (id, machine_id, action, target, body, reason, labels, right_name, circle_id, shown, shown_hash, state, created_at, expires_at, verified)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
       id,
       machine.id,
       action,
@@ -7999,6 +8016,7 @@ export class Kitshn extends DurableObject<Env> {
       await shownHash(shown),
       now,
       now + PROPOSAL_MS,
+      JSON.stringify(this.verifiedKeys(machine.id, labels)),
     );
     this.broadcast();
     void this.scheduleAlarm();
@@ -8229,7 +8247,8 @@ export class Kitshn extends DurableObject<Env> {
     outcome: AskOutcome,
   ) {
     this.sql(
-      `INSERT INTO ask_events (at, machine_id, action, target, reason, labels, outcome, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO ask_events (at, machine_id, action, target, reason, labels, outcome, detail, verified)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       at,
       machine.id,
       action,
@@ -8242,6 +8261,7 @@ export class Kitshn extends DurableObject<Env> {
         : outcome.outcome === "waiting"
           ? outcome.proposalId
           : "",
+      JSON.stringify(this.verifiedKeys(machine.id, labels)),
     );
     // K-1717: at most 5,000 events, trimmed on insert by id, so a burst of asks cannot grow the table within a day.
     const [last] = this.sql<{ id: number }>("SELECT last_insert_rowid() AS id");
@@ -8283,11 +8303,14 @@ export class Kitshn extends DurableObject<Env> {
       labels: JSON.parse(row.labels) as Record<string, string>,
       outcome: row.outcome as AskEventView["outcome"],
       detail: row.detail,
-      verified: this.verifiedKeys(row.machine_id, JSON.parse(row.labels) as Record<string, string>),
+      verified: JSON.parse(row.verified) as Array<string>,
     };
   }
 
-  /** K-1752: the labels of an attester prefix are attested, because kitshn drops a caller's own of them. */
+  /**
+   * K-1752: the labels of an attester prefix are attested, because the daemon drops a caller's own of them. Asks store
+   * the result, because the attesters that a machine reports change later.
+   */
   private verifiedKeys(machineId: string, labels: Readonly<Record<string, string>>): Array<string> {
     const prefixes = [...this.attesterPrefixesOf(machineId), "t3."];
     return Object.keys(labels).filter((key) => prefixes.some((prefix) => key.startsWith(prefix)));
@@ -8301,7 +8324,7 @@ export class Kitshn extends DurableObject<Env> {
         return {
           ...proposal,
           machineName: this.state.machines.get(proposal.machineId)?.name ?? proposal.machineId,
-          verified: this.verifiedKeys(proposal.machineId, proposal.labels),
+          verified: JSON.parse(row.verified) as Array<string>,
         };
       },
     );
@@ -9951,7 +9974,7 @@ export class Kitshn extends DurableObject<Env> {
         key: proposal.id,
         episode: proposal.id,
         card: null,
-        recipients: { _tag: "circle", circle: proposal.circleId },
+        recipients: { _tag: "approvers", circle: proposal.circleId },
         level: "warn",
         priority: "high",
         title: clip(`${proposal.machineName} asks: ${MACHINE_RIGHT_NAMES[proposal.right]}`, TITLE_MAX),
@@ -9983,10 +10006,9 @@ export class Kitshn extends DurableObject<Env> {
         circleMatches(circle, visitor, this.state.machines)
       );
     };
-    return (
-      member(OWNER_CIRCLE_ID) ||
-      (notification.recipients._tag === "circle" && member(notification.recipients.circle))
-    );
+    const recipients = notification.recipients;
+    if (recipients._tag === "approvers") return member(recipients.circle);
+    return member(OWNER_CIRCLE_ID) || (recipients._tag === "circle" && member(recipients.circle));
   }
 
   /** K-1902: a member of the Owner circle. */
@@ -10076,9 +10098,9 @@ export class Kitshn extends DurableObject<Env> {
       const handler = this.actionHandlers.get(notification.source);
       if (!known || known.kind !== "run" || !handler)
         return Response.json({ error: `The notification has no action ${action} to run.` }, { status: 400 });
-      await handler(notification, action, caller);
+      const error = await handler(notification, action, caller);
       this.broadcast();
-      return Response.json({ ok: true });
+      return error === null ? Response.json({ ok: true }) : Response.json({ error }, { status: 409 });
     }
     return Response.json({ error: "Not found." }, { status: 404 });
   }
@@ -10796,6 +10818,8 @@ interface ProposalRow extends Record<string, SqlStorageValue> {
   readonly state: string;
   readonly created_at: number;
   readonly expires_at: number;
+  /** K-1752: the label keys that an attester of the machine set, as JSON, fixed at ask time. */
+  readonly verified: string;
 }
 
 const proposalOf = (row: ProposalRow): Proposal => ({
@@ -10826,4 +10850,6 @@ interface AskEventRow extends Record<string, SqlStorageValue> {
   readonly labels: string;
   readonly outcome: string;
   readonly detail: string;
+  /** K-1752: the label keys that an attester of the machine set, as JSON, fixed at ask time. */
+  readonly verified: string;
 }

@@ -85,6 +85,7 @@ import {
 import { type SiteEntry, addSite, parseSiteFile, probe, targetOf } from "./sites.ts";
 import { RUNNING_FORMAT, VOLUME_FORMAT, idleVolumes, volumeRemoveRefusal } from "./volumes.ts";
 import { keepBuild, keptId, keptTag, rollbackOverride, serviceImages, staleTags } from "./keep.ts";
+import { TokenCache } from "./tokens.ts";
 
 declare const KITSHN_VERSION: string;
 const VERSION = typeof KITSHN_VERSION === "string" ? KITSHN_VERSION : "dev";
@@ -304,9 +305,18 @@ async function askToken(repo: string): Promise<Answer | null> {
  * a waiting ask of a kitshn owner prints `quit=1`, so git never falls back to the machine's own login.
  */
 async function gitCredentialCommand(operation: string | undefined) {
-  if (operation !== "get") return;
+  if (operation !== "get" && operation !== "erase") return;
   const repo = repoOfCredential(readCredentialInput(await Bun.stdin.text()));
   if (repo === null) return;
+  // Git erases a credential that GitHub refused, so the daemon drops the kept token of that repo.
+  if (operation === "erase") {
+    if (typeof daemonUid !== "string")
+      await askLocal(socketPath, { id: "1", type: "forget-token", repo }, 10_000, {
+        platform,
+        daemonUid: daemonUid as number,
+      }).catch(() => null);
+    return;
+  }
   const answer = await askToken(repo);
   if (answer === null || answer.type !== "ask" || answer.outcome === "not-kitshn") return;
   if (answer.outcome === "done" && typeof answer.result === "object" && answer.result !== null) {
@@ -1534,8 +1544,7 @@ async function answerChallenge(
 type RotationOutcome = { readonly fingerprint: string } | { readonly error: string };
 /** K-1705: the `rotate-key` requests of the local socket that wait for kitshn to store the new key. */
 const rotationWaiters: Array<(outcome: RotationOutcome) => void> = [];
-/** K-1762: the GitHub tokens that the daemon keeps in memory, by repo and attested thread, never on disk. */
-const keptTokens = new Map<string, { token: string; expiresAt: string; permission: "read" | "write" }>();
+const keptTokens = new TokenCache();
 /** K-1710: the asks that wait for kitshn's answer, by request id. */
 const askWaiters = new Map<string, (outcome: AskOutcome) => void>();
 /** K-1722: the local connections that wait for the answer to a proposal, by proposal id. */
@@ -1592,11 +1601,12 @@ async function askKitshn(
     ...(Object.keys(attested).length > 0 ? { attested } : {}),
   };
   // K-1762: a kept token goes only to the same repo and the same attested thread; an ask without one always asks kitshn.
-  const thread = attested["t3.thread.id"];
-  const cacheKey = request.action === "github-token" && thread ? `${request.target}\n${thread}` : null;
-  const kept = cacheKey ? keptTokens.get(cacheKey) : undefined;
-  if (kept && Date.parse(kept.expiresAt) - 5 * 60_000 > Date.now())
-    return { id, type: "ask", outcome: "done", result: kept };
+  const thread = request.action === "github-token" ? attested["t3.thread.id"] : undefined;
+  const body = request.body;
+  const wanted =
+    typeof body === "object" && body !== null ? (body as Record<string, unknown>)["permission"] : "auto";
+  const kept = thread ? keptTokens.get(request.target, thread, wanted, Date.now()) : null;
+  if (kept) return { id, type: "ask", outcome: "done", result: kept };
   const outcome = await new Promise<AskOutcome>((resolve) => {
     const timer = setTimeout(() => {
       askWaiters.delete(requestId);
@@ -1613,15 +1623,14 @@ async function askKitshn(
       ...(proposalWaiters.get(outcome.proposalId) ?? []),
       WINDOW_ACTIONS.has(request.action) ? (event) => void askAgain(request, event, emit) : emit,
     ]);
-  if (
-    cacheKey &&
-    outcome.outcome === "done" &&
-    typeof outcome.result === "object" &&
-    outcome.result !== null
-  ) {
+  if (thread && outcome.outcome === "done" && typeof outcome.result === "object" && outcome.result !== null) {
     const { token, expiresAt, permission } = outcome.result as Record<string, unknown>;
     if (typeof token === "string" && typeof expiresAt === "string")
-      keptTokens.set(cacheKey, { token, expiresAt, permission: permission === "write" ? "write" : "read" });
+      keptTokens.set(request.target, thread, {
+        token,
+        expiresAt,
+        permission: permission === "write" ? "write" : "read",
+      });
   }
   return { id, type: "ask", ...outcome };
 }
@@ -1634,6 +1643,7 @@ let rotatingTo: string | null = null;
 /** K-1705: makes a new pair and hands over to it with a signature of the old key, bound to this connection. */
 async function rotateKey(ws: WebSocket) {
   if (rotating || challenge === null || socket !== ws || !joined) return;
+  keptTokens.drop(null);
   const current = readKey(keyFile);
   if (!current) {
     log(`no key to rotate in ${keyFile}`);
@@ -1709,6 +1719,8 @@ function connect(config: JoinSecrets) {
     /** K-1704: kitshn reads this connection from now on. */
     const accepted = (how: string) => {
       log(`connected to kitshn ${how}`);
+      // K-1762: a new connection can follow a reset or a lost right that the daemon did not hear of.
+      keptTokens.drop(null);
       socket = ws;
       delay = 1000;
       stopped = false;
@@ -1742,6 +1754,8 @@ function connect(config: JoinSecrets) {
         accepted(`with the key ${message.fingerprint}`);
       } else if (message.type === "rotateKey") {
         void rotateKey(ws);
+      } else if (message.type === "dropTokens") {
+        keptTokens.drop(message.repo);
       } else if (message.type === "logs") {
         // K-1804: the data folder holds no Compose file, so Compose finds the app by its project label alone.
         void (
@@ -2031,6 +2045,10 @@ async function answerLocal(
         attesterEnv: attestersOf(readMachineFile()).attesters.map((attester) => attester.tokenEnv),
       },
     };
+  }
+  if (request.type === "forget-token") {
+    keptTokens.drop(request.repo);
+    return { id, type: "forget-token" };
   }
   if (request.type === "reconnect") {
     log("kitshn rekey saved a new key; connecting again");

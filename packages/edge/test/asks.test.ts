@@ -330,6 +330,27 @@ it("finds the ask events of one label, and keeps a caller's t3. label out (K-175
   );
   expect(found).toHaveLength(1);
   expect(found[0]?.labels).toEqual({ "my.task": "42" });
+  // K-1752: the verified mark is fixed at ask time; a later change of the attesters does not change it.
+  const sent: Array<ServerToDaemon> = [];
+  const verified = await runInDurableObject(stub, async (instance) => {
+    const kitshn = instance as unknown as Instance & {
+      attesterPrefixesOf(id: string): Array<string>;
+      askEventsWithLabel(k: string, v: string, m: string | null): Array<{ verified: Array<string> }>;
+    };
+    const reported = kitshn.attesterPrefixesOf.bind(kitshn);
+    kitshn.attesterPrefixesOf = () => ["acme."];
+    await kitshn.webSocketMessage(
+      daemonSocket(sent),
+      JSON.stringify({
+        type: "ask",
+        requestId: "r",
+        ask: { action: "allow", target: "124", attested: { "acme.task": "7" } },
+      }),
+    );
+    kitshn.attesterPrefixesOf = reported;
+    return kitshn.askEventsWithLabel("acme.task", "7", null)[0]?.verified;
+  });
+  expect(verified).toEqual(["acme.task"]);
 });
 
 it("issues a pass only while passes are on and for a listed audience, and serves its key (K-1770, K-1774)", async () => {
@@ -368,9 +389,31 @@ it("issues a pass only while passes are on and for a listed audience, and serves
     result: { pass: expect.any(String) },
   });
   expect(await wellKnown("jwks.json")).toBe(200);
+  // While paused, access only goes down: turning passes on is refused, turning them off works (K-1504).
   await runInDurableObject(stub, (_, state) =>
-    state.storage.sql.exec("DELETE FROM meta WHERE key = 'passes_on'"),
+    state.storage.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('paused', 'keep-public')"),
   );
+  await evictDurableObject(stub);
+  const setPasses = (on: boolean) =>
+    runInDurableObject(stub, async (instance) => {
+      const response = await (instance as unknown as { fetch(r: Request): Promise<Response> }).fetch(
+        new Request("https://kitshn.internal/api/passes", {
+          method: "POST",
+          headers: {
+            "x-kitshn-caller": JSON.stringify({ actor: owner.actor, visitor: owner.visitor }),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ on }),
+        }),
+      );
+      return response.status;
+    });
+  expect(await setPasses(false)).toBe(200);
+  expect(await setPasses(true)).toBe(409);
+  await runInDurableObject(stub, (_, state) => {
+    state.storage.sql.exec("DELETE FROM meta WHERE key = 'passes_on'");
+    state.storage.sql.exec("DELETE FROM meta WHERE key = 'paused'");
+  });
   await evictDurableObject(stub);
 });
 
@@ -389,11 +432,20 @@ it("opens a high-priority notification for each ask and closes it when the ask i
     );
   const [open] = await state();
   expect(open).toMatchObject({ state: "open", priority: "high" });
-  expect(JSON.parse(open?.recipients ?? "{}")).toEqual({ _tag: "circle", circle: "owner" });
+  // Only the approver circle gets it; an owner outside that circle reads asks in History.
+  expect(JSON.parse(open?.recipients ?? "{}")).toEqual({ _tag: "approvers", circle: "owner" });
   expect(JSON.parse(open?.actions ?? "[]").map((action: { id: string }) => action.id)).toEqual([
     "approve",
     "deny",
   ]);
   await runInDurableObject(stub, (instance) => (instance as unknown as Instance).decide(id, "denied", owner));
   expect((await state())[0]?.state).toBe("closed");
+  // A Deny from the notification that decide refuses answers with its error, not ok.
+  const late = await runInDurableObject(stub, async (instance) => {
+    const kitshn = instance as unknown as {
+      actionHandlers: Map<string, (n: object, action: string, caller: object) => Promise<string | null>>;
+    };
+    return kitshn.actionHandlers.get("kitshn.ask")?.({ key: id }, "deny", owner);
+  });
+  expect(late).toMatch(/already decided/);
 });

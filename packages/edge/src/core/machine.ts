@@ -247,6 +247,8 @@ export type ServerToDaemon =
   | { readonly type: "accepted"; readonly fingerprint: string }
   /** K-1705: "Rotate key" in the machine panel. */
   | { readonly type: "rotateKey" }
+  /** K-1762: the daemon drops its kept GitHub tokens of one repo, or all with null, because kitshn revoked them. */
+  | { readonly type: "dropTokens"; readonly repo: string | null }
   | { readonly type: "job"; readonly id: number; readonly command: Command }
   /** K-1804: search the logs of the Compose app `project`. */
   | { readonly type: "logs"; readonly id: string; readonly project: string; readonly search: LogSearch }

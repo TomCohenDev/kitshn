@@ -127,13 +127,18 @@ it("gives a write token for one repo of an App owner, and revokes it when the ke
   expect(stored).toHaveLength(1);
   expect(stored[0]?.sealed).not.toContain("ghs_test");
   await evictDurableObject(stub);
-  await runInDurableObject(stub, (instance) =>
-    (instance as unknown as { denyOpenProposals(id: string, why: string): void }).denyOpenProposals(
-      "vps",
-      "reset",
-    ),
-  );
+  const dropped: Array<ServerToDaemon> = [];
+  await runInDurableObject(stub, (instance) => {
+    const kitshn = instance as unknown as {
+      openSocket(id: string): WebSocket | null;
+      denyOpenProposals(id: string, why: string): void;
+    };
+    kitshn.openSocket = () => daemonSocket(dropped);
+    kitshn.denyOpenProposals("vps", "reset");
+  });
   expect(calls).toContain("DELETE /installation/token");
+  // The daemon drops its kept copy too.
+  expect(dropped).toContainEqual({ type: "dropTokens", repo: "Yarden-zamir/riffle" });
 });
 
 it("opens the one-hour window on approval with no token; the next ask of the machine gets it (K-1723)", async () => {

@@ -64,6 +64,12 @@ export const Request = Schema.Union([
   Schema.Struct({ id: Id, type: Schema.Literal("rotate-key") }),
   /** K-1706: `kitshn rekey` saved a new key; connect again with it. */
   Schema.Struct({ id: Id, type: Schema.Literal("reconnect") }),
+  /** K-1762: `git credential erase` drops the kept tokens of one repo. */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("forget-token"),
+    repo: Schema.String.check(Schema.isMaxLength(512)),
+  }),
   Ask,
 ]);
 export type Request = typeof Request.Type;
@@ -85,6 +91,7 @@ export const Answer = Schema.Union([
   Schema.Struct({ id: Id, type: Schema.Literal("status"), status: Status }),
   Schema.Struct({ id: Id, type: Schema.Literal("rotate-key"), fingerprint: Schema.String }),
   Schema.Struct({ id: Id, type: Schema.Literal("reconnect") }),
+  Schema.Struct({ id: Id, type: Schema.Literal("forget-token") }),
   /** K-1710: kitshn ran the ask; `result` is what the action gives. */
   Schema.Struct({
     id: Id,

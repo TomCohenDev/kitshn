@@ -115,16 +115,20 @@ async function setup() {
           .exec<{ summary: string }>("SELECT summary FROM revisions ORDER BY id DESC LIMIT 1")
           .one().summary,
     );
-  /** The daemon reports the provider site `name`, and the address check finds a record of something else or none. */
-  const site = async (name: string, usedElsewhere: boolean) => {
-    await runInDurableObject(stub, async (instance) => {
-      await instance.webSocketMessage(
+  /** The daemon reports the provider site `name`, as it does before it reports the provider's cards. */
+  const sites = (name: string) =>
+    runInDurableObject(stub, (instance) =>
+      instance.webSocketMessage(
         daemonSocket("signed"),
         JSON.stringify({
           type: "sites",
           sites: [{ name, target: "http://localhost:3773", dev: false, up: true }],
         }),
-      );
+      ),
+    );
+  /** The address check finds a record of something else on the address, or none. */
+  const check = (usedElsewhere: boolean) =>
+    runInDurableObject(stub, async (instance) => {
       await (
         instance as unknown as {
           checkSites(
@@ -137,8 +141,11 @@ async function setup() {
         6,
       );
     });
+  const site = async (name: string, usedElsewhere: boolean) => {
+    await sites(name);
+    await check(usedElsewhere);
   };
-  return { stub, message, card, sql, lastSummary, site };
+  return { stub, message, card, sql, lastSummary, site, sites, check };
 }
 
 it("makes cards from a signed report only, shows an offline provider, and records a removal (K-704, K-705)", async () => {
@@ -429,7 +436,7 @@ it("records only the calls that a machine reports on machines that it reaches, a
 });
 
 it("keeps an address that another card holds, or a name of kitshn, off a provider card (K-705)", async () => {
-  const { stub, message, card, sql, site } = await setup();
+  const { stub, message, card, sql, sites, check } = await setup();
   const withSite = report([{ ...app, site: { name: "t3-vps", port: 3773 } }]);
   // Whether an Access application covers the host, with or without a path.
   const covered = () =>
@@ -444,20 +451,44 @@ it("keeps an address that another card holds, or a name of kitshn, off a provide
     );
   // In the Owner circle, so a card with an address gets an Access application.
   await sql("INSERT OR REPLACE INTO places (id, x, y) SELECT ?, x, y FROM places WHERE id = 'vps'", appId);
+  const ownCard = () =>
+    runInDurableObject(
+      stub,
+      (_, state) =>
+        state.storage.sql.exec("SELECT id FROM resources WHERE id = 'live-vps-t3-vps'").toArray().length,
+    );
   // K-1623: the address waits for its check, and a host that something else serves stays off with no application.
-  await message("signed", [withSite]);
-  expect((await card())?.addresses).toEqual([]);
-  await site("t3-vps", true);
-  await message("signed", [withSite]);
-  expect(await card()).toMatchObject({ addresses: [], provider: { stickers: [{ text: "address in use" }] } });
-  expect(await covered()).toBe(false);
-  // A free host comes on the card itself, not on a card of its own.
-  await sql("DELETE FROM live_sites WHERE id LIKE 'p-%'");
-  await site("t3-vps", false);
-  expect(await card()).toMatchObject({ addresses: ["t3-vps.example.com"], provider: { stickers: [] } });
-  await message("signed", [withSite]);
-  expect((await card())?.addresses).toEqual(["t3-vps.example.com"]);
-  expect(await covered()).toBe(true);
+  // The daemon sends its sites before its providers; the check runs on the alarm, before or after them.
+  const orders = {
+    "providers, sites, check": [() => message("signed", [withSite]), () => sites("t3-vps"), "check"],
+    "sites, check, providers": [() => sites("t3-vps"), "check", () => message("signed", [withSite])],
+    "sites, providers, check": [() => sites("t3-vps"), () => message("signed", [withSite]), "check"],
+  } as const;
+  for (const [order, steps] of Object.entries(orders)) {
+    for (const usedElsewhere of [true, false]) {
+      await sql("DELETE FROM live_sites WHERE machine_id = 'vps'");
+      await sql("DELETE FROM resources WHERE id LIKE 'p-%' OR id LIKE 'live-%'");
+      for (const step of steps) await (step === "check" ? check(usedElsewhere) : step());
+      const seen = {
+        card: await card(),
+        ownCard: await ownCard(),
+        covered: await covered(),
+      };
+      expect(seen, `${order}, ${usedElsewhere ? "in use" : "free"}`).toMatchObject(
+        usedElsewhere
+          ? {
+              card: { addresses: [], provider: { stickers: [{ text: "address in use" }] } },
+              ownCard: 0,
+              covered: false,
+            }
+          : {
+              card: { addresses: ["t3-vps.example.com"], provider: { stickers: [] } },
+              ownCard: 0,
+              covered: true,
+            },
+      );
+    }
+  }
   await sql("DELETE FROM live_sites WHERE id LIKE 'p-%'");
   await sql("DELETE FROM resources WHERE id LIKE 'p-%'");
   await sql("DELETE FROM places WHERE id LIKE 'p-%'");

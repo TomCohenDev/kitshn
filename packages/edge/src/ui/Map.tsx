@@ -24,6 +24,7 @@ import { type MenuTarget, untilText } from "./actions.ts";
 import type { DrawnWire } from "../core/organize.ts";
 import { USER_STACK, headAngle, stacksOf } from "../core/place.ts";
 import { parseSiteInput } from "../core/sites.ts";
+import { openToAll } from "../core/library.ts";
 import { MoreButton } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import { FRAMED_KINDS, peekable } from "./frames.ts";
@@ -1146,6 +1147,14 @@ export function CardView(props: {
             data-tip={`A preview of pull request #${props.pullRequest}. It goes when the pull request closes; its panel links the pull request.`}
           >
             PR #{props.pullRequest}
+          </span>
+        ) : null}
+        {resource.kind === "game" && openToAll(state, resource, Date.now()) ? (
+          <span
+            class="sticker info"
+            data-tip="Open to all: a share in Everyone opens the game ports to every address, with no door and no login (K-2004)."
+          >
+            open to all
           </span>
         ) : null}
         {props.machine ? <PresenceSticker view={props.machine} time={false} /> : null}

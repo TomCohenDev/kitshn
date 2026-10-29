@@ -62,34 +62,95 @@ it.each([
   expect(busyPort([{ port: 25565, proto: "tcp" }], [{ title: null, ...server }])?.port ?? null).toBe(busy);
 });
 
-it("a new address replaces only the older door of its family (K-2004)", () => {
-  const current = [
-    { card: "c1", person: "a@x", address: "203.0.113.9", openedAt: 0, endsAt: 10_000 },
-    { card: "c1", person: "a@x", address: "2001:db8:1:2::/64", openedAt: 0, endsAt: 10_000 },
-    { card: "c1", person: "b@x", address: "198.51.100.1", openedAt: 0, endsAt: 10_000 },
-  ];
-  const { open, close } = openDoors(current, game, "a@x", ["203.0.113.10"], 1000);
-  expect(close).toEqual(["203.0.113.9"]);
-  expect(open).toEqual([
-    { card: "c1", person: "a@x", address: "203.0.113.10", openedAt: 1000, endsAt: 1000 + HOUR_MS },
-  ]);
+describe("openDoors (K-2004)", () => {
+  const door = (address: string, openedAt: number, person = "a@x") => ({
+    card: "c1",
+    person,
+    address,
+    openedAt,
+    endsAt: openedAt + 10_000,
+  });
+  const opened = (address: string) => ({
+    card: "c1",
+    person: "a@x",
+    address,
+    openedAt: 1000,
+    endsAt: 1000 + HOUR_MS,
+  });
+
+  it("adds a door per new address and keeps the doors of both families", () => {
+    const current = [door("203.0.113.9", 0), door("2001:db8:1:2::/64", 0), door("198.51.100.1", 0, "b@x")];
+    const { open, close } = openDoors(current, game, "a@x", ["203.0.113.10", "198.51.100.7"], 1000);
+    expect(close).toEqual([]);
+    expect(open).toEqual([opened("203.0.113.10"), opened("198.51.100.7")]);
+  });
+
+  it("closes the oldest door of a family past its limit", () => {
+    const current = [1, 2, 3, 4].map((n) => door(`203.0.113.${n}`, n));
+    const v6 = [door("2001:db8:1::/64", 1), door("2001:db8:2::/64", 2)];
+    const { open, close } = openDoors(
+      [...current, ...v6],
+      game,
+      "a@x",
+      ["203.0.113.5", "2001:db8:3::/64"],
+      1000,
+    );
+    expect(open).toEqual([opened("203.0.113.5"), opened("2001:db8:3::/64")]);
+    expect(close).toEqual(["203.0.113.1", "2001:db8:1::/64"]);
+  });
+
+  it("gives an open address a new end instead of a second door", () => {
+    const current = [1, 2, 3, 4].map((n) => door(`203.0.113.${n}`, n));
+    const { open, close } = openDoors(current, game, "a@x", ["203.0.113.1"], 1000);
+    expect(open).toEqual([opened("203.0.113.1")]);
+    expect(close).toEqual([]);
+  });
 });
 
-it("the plan of a machine merges doors per address, keeps the later end, and follows a relay (K-2005, K-2008)", () => {
+it("the plan of a machine holds each door of a person, merges doors per address, keeps the later end, and follows a relay (K-2005, K-2008)", () => {
   const second: Game = { ...game, card: "c2", ports: [{ port: 7777, proto: "tcp" }], relay: "relay" };
   const doors = [
     { card: "c1", person: "a@x", address: "203.0.113.9", openedAt: 0, endsAt: 5000 },
     { card: "c1", person: "b@x", address: "203.0.113.9", openedAt: 0, endsAt: 9000 },
     { card: "c1", person: "c@x", address: "198.51.100.1", openedAt: 0, endsAt: 500 },
+    { card: "c1", person: "a@x", address: "198.51.100.2", openedAt: 0, endsAt: 5000 },
     { card: "c2", person: "a@x", address: "203.0.113.9", openedAt: 0, endsAt: 9000 },
   ];
-  expect(doorPlan("vps", [game, second], doors, 1000, "example.com")).toEqual({
+  expect(doorPlan("vps", [game, second], doors, 1000, "example.com", new Set())).toEqual({
+    ports: [{ port: 25565, proto: "tcp" }],
+    relays: [],
+    doors: [
+      { address: "198.51.100.2", ports: [{ port: 25565, proto: "tcp" }], endsAt: 5000 },
+      { address: "203.0.113.9", ports: [{ port: 25565, proto: "tcp" }], endsAt: 9000 },
+    ],
+  });
+  expect(doorPlan("relay", [game, second], doors, 1000, "example.com", new Set())).toMatchObject({
+    ports: [{ port: 7777, proto: "tcp" }],
+    relays: [{ hostname: "mc-relay.example.com", port: 7777 }],
+  });
+});
+
+it("takes the ports of an open-to-all game out of the gated set, and keeps a port that a gated game names (K-2004)", () => {
+  const second: Game = {
+    ...game,
+    card: "c2",
+    ports: [
+      { port: 25565, proto: "tcp" },
+      { port: 7777, proto: "tcp" },
+    ],
+  };
+  const doors = [
+    { card: "c1", person: "a@x", address: "203.0.113.9", openedAt: 0, endsAt: 9000 },
+    { card: "c2", person: "a@x", address: "198.51.100.2", openedAt: 0, endsAt: 9000 },
+  ];
+  expect(doorPlan("vps", [game, second], doors, 1000, "example.com", new Set(["c2"]))).toEqual({
     ports: [{ port: 25565, proto: "tcp" }],
     relays: [],
     doors: [{ address: "203.0.113.9", ports: [{ port: 25565, proto: "tcp" }], endsAt: 9000 }],
   });
-  expect(doorPlan("relay", [game, second], doors, 1000, "example.com")).toMatchObject({
-    ports: [{ port: 7777, proto: "tcp" }],
-    relays: [{ hostname: "mc-relay.example.com", port: 7777 }],
+  expect(doorPlan("vps", [game], doors, 1000, "example.com", new Set(["c1"]))).toEqual({
+    ports: [],
+    relays: [],
+    doors: [],
   });
 });

@@ -246,7 +246,6 @@ async function join(request: Request, env: Env, logins: ContentLogins, url: URL)
         visitor,
         action: body["action"],
         addresses: Array.isArray(body["addresses"]) ? body["addresses"] : [],
-        address: typeof body["address"] === "string" ? body["address"] : undefined,
       }),
     })
   ).json()) as GameAnswer;

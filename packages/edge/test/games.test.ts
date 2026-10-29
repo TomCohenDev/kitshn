@@ -1,7 +1,7 @@
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { expect, it } from "vitest";
-import type { DoorPlan } from "../src/core/game.ts";
+import { type DoorPlan, HOUR_MS } from "../src/core/game.ts";
 import type { Machine } from "../src/core/machine.ts";
 import type { Circle, Resource } from "../src/core/model.ts";
 import { accessToken, send, stubAccessCerts } from "./access.ts";
@@ -89,7 +89,7 @@ const doorJobs = (stub: DurableObjectStub) =>
       .map((row) => ({ state: row.state, plan: (JSON.parse(row.command) as { plan: DoorPlan }).plan })),
   );
 
-it("opens one door per family for a person of the card, and closes it when the person leaves (K-2004, K-2005)", async () => {
+it("opens a door per address for a person of the card, and closes them when the person leaves (K-2004, K-2005)", async () => {
   stubAccessCerts();
   const stub = await setup();
   // A door belongs to a person, so no login means the login step.
@@ -115,18 +115,19 @@ it("opens one door per family for a person of the card, and closes it when the p
   });
   expect(refused.error).toMatch(/private/);
 
-  // The seen IPv4 address wins its family; the browser adds the IPv6 one, which opens its /64.
+  // The seen address and each address that the browser found open, an IPv6 one as its /64; a private one does not.
   const opened = await game(stub, {
     name: "mc",
     action: "open",
     visitor: visitor("friend@example.com", "203.0.113.9"),
-    addresses: ["203.0.113.50", "2001:db8:1:2:aaaa::1"],
+    addresses: ["203.0.113.50", "192.168.1.2", "2001:db8:1:2:aaaa::1"],
   });
   expect(opened.error).toBeNull();
-  expect(opened.doors.map((door) => door.address).sort()).toEqual(["2001:db8:1:2::/64", "203.0.113.9"]);
+  const all = ["2001:db8:1:2::/64", "203.0.113.50", "203.0.113.9"];
+  expect(opened.doors.map((door) => door.address).sort()).toEqual(all);
   const [first] = await doorJobs(stub);
   expect(first?.plan.ports).toEqual([{ port: 25565, proto: "tcp" }]);
-  expect(first?.plan.doors.map((door) => door.address).sort()).toEqual(["2001:db8:1:2::/64", "203.0.113.9"]);
+  expect(first?.plan.doors.map((door) => door.address).sort()).toEqual(all);
 
   // The owner takes the friend out of the circle: the doors close at once, with a new plan.
   const edited = await send("/api/apply", {
@@ -163,12 +164,15 @@ it("keeps a door when its circle checks the address, and refuses a second open w
     state.storage.sql.exec("UPDATE circles SET body = ? WHERE id = 'friends'", JSON.stringify(office));
   });
   await evictDurableObject(stub);
+  // A browser address outside the circle's range opens no door.
   const opened = await game(stub, {
     name: "mc",
     action: "open",
     visitor: visitor("friend@example.com", "203.0.113.9"),
+    addresses: ["203.0.113.50", "198.51.100.7"],
   });
   expect(opened.error).toBeNull();
+  expect(opened.doors.map((door) => door.address).sort()).toEqual(["203.0.113.50", "203.0.113.9"]);
   // Any commit runs the share check of the open doors; it uses the address that opened the door.
   const edited = await send("/api/apply", {
     method: "POST",
@@ -184,7 +188,7 @@ it("keeps a door when its circle checks the address, and refuses a second open w
     action: "open",
     visitor: visitor("friend@example.com", "203.0.113.9"),
   });
-  expect(again.doors.map((door) => door.address)).toEqual(["203.0.113.9"]);
+  expect(again.doors.map((door) => door.address).sort()).toEqual(["203.0.113.50", "203.0.113.9"]);
   expect(again.error).toMatch(/Wait a moment/);
 });
 
@@ -193,7 +197,7 @@ it("counts End now as a door change, so open and close in a loop wait 10 s (K-20
   const stub = await setup();
   const friend = visitor("friend@example.com", "203.0.113.9");
   expect((await game(stub, { name: "mc", action: "open", visitor: friend })).error).toBeNull();
-  const closed = await game(stub, { name: "mc", action: "close", visitor: friend, address: "203.0.113.9" });
+  const closed = await game(stub, { name: "mc", action: "close", visitor: friend });
   expect(closed.error).toMatch(/Wait a moment/);
   expect(closed.doors.map((door) => door.address)).toEqual(["203.0.113.9"]);
 });
@@ -254,4 +258,92 @@ it("makes the A and SRV records of a game in one run (K-2007)", async () => {
     name: "_minecraft._tcp.mc.example.com",
     data: { port: 25565, target: "mc.example.com" },
   });
+});
+
+it("closes every door of the person on the card with End now (K-2004)", async () => {
+  stubAccessCerts();
+  const stub = await setup();
+  // The rows go in directly, so End now is the first door change and the 10 s wait does not apply.
+  await runInDurableObject(stub, (_, state) => {
+    for (const [person, address] of [
+      ["friend@example.com", "203.0.113.9"],
+      ["friend@example.com", "198.51.100.7"],
+      ["friend@example.com", "2001:db8:1:2::/64"],
+      ["other@example.com", "203.0.113.9"],
+    ])
+      state.storage.sql.exec(
+        "INSERT INTO doors (card_id, person, address, opened_at, ends_at, seen_ip) VALUES ('game1', ?, ?, 0, ?, NULL)",
+        person,
+        address,
+        Date.now() + HOUR_MS,
+      );
+  });
+  const closed = await game(stub, {
+    name: "mc",
+    action: "close",
+    visitor: visitor("friend@example.com", "203.0.113.9"),
+  });
+  expect(closed.error).toBeNull();
+  expect(closed.doors).toEqual([]);
+  const left = await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec<{ person: string }>("SELECT person FROM doors").toArray(),
+  );
+  expect(left.map((row) => row.person)).toEqual(["other@example.com"]);
+});
+
+it("opens the ports of a game in Everyone to all and gates them again after the unshare (K-2004, K-2005)", async () => {
+  stubAccessCerts();
+  const stub = await setup();
+  const owner = {
+    "cf-access-jwt-assertion": await accessToken("admin-aud", { email: "owner@example.com" }),
+    "content-type": "application/json",
+  };
+  const state = (await (await send("/api/state", { headers: owner })).json()) as {
+    circles: Array<{ id: string; x: number; y: number }>;
+  };
+  const everyone = state.circles.find((circle) => circle.id === "everyone");
+  if (!everyone) throw new Error("The seed has no Everyone circle.");
+  const place = (after: { x: number; y: number }) =>
+    send("/api/apply", {
+      method: "POST",
+      headers: owner,
+      body: JSON.stringify({ edits: [{ _tag: "place", id: "game1", after }] }),
+    });
+
+  expect((await place({ x: everyone.x, y: everyone.y })).status).toBe(200);
+  expect((await doorJobs(stub)).at(-1)?.plan).toMatchObject({ ports: [], doors: [] });
+  // After a restart, a commit sends no plan that equals the last one.
+  await evictDurableObject(stub);
+  const before = (await doorJobs(stub)).length;
+  expect((await place({ x: everyone.x + 1, y: everyone.y })).status).toBe(200);
+  expect(await doorJobs(stub)).toHaveLength(before);
+  // The join page needs no login and offers no door.
+  const view = (await game(stub, { name: "mc", action: "view", visitor: visitor(null, "203.0.113.9") })) as {
+    decision: string;
+    openToAll?: boolean;
+  };
+  expect(view).toMatchObject({ decision: "allow", openToAll: true });
+
+  expect((await place({ x: 9000, y: 9000 })).status).toBe(200);
+  expect((await doorJobs(stub)).at(-1)?.plan.ports).toEqual([{ port: 25565, proto: "tcp" }]);
+  const opened = await game(stub, {
+    name: "mc",
+    action: "open",
+    visitor: visitor("friend@example.com", "203.0.113.9"),
+  });
+  expect(opened.error).toBeNull();
+  expect((await doorJobs(stub)).at(-1)?.plan.doors.map((door) => door.address)).toEqual(["203.0.113.9"]);
+
+  // Shared again, then a pause gates the ports, and the join page asks for a login (K-1504).
+  expect((await place({ x: everyone.x, y: everyone.y })).status).toBe(200);
+  expect((await doorJobs(stub)).at(-1)?.plan.ports).toEqual([]);
+  const paused = await send("/api/apply", {
+    method: "POST",
+    headers: owner,
+    body: JSON.stringify({ edits: [{ _tag: "pause", after: "keep-public" }] }),
+  });
+  expect(paused.status).toBe(200);
+  expect((await doorJobs(stub)).at(-1)?.plan.ports).toEqual([{ port: 25565, proto: "tcp" }]);
+  const login = await game(stub, { name: "mc", action: "view", visitor: visitor(null, "203.0.113.9") });
+  expect(login.decision).toBe("login");
 });

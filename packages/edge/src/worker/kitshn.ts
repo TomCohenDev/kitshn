@@ -1287,7 +1287,7 @@ export class Kitshn extends DurableObject<Env> {
    */
   private clearAccessFailures() {
     const store = this.accessStore();
-    for (const { retryAt: _, ...row } of this.access.values())
+    for (const { retryAt: _, attempts: __, ...row } of this.access.values())
       if (row.error !== null) store.put({ ...row, tried: "", error: null });
   }
 

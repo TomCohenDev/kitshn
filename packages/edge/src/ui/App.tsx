@@ -2485,17 +2485,24 @@ function CardPanel(props: {
             </span>
           ) : (
             <span
-              class={`sticker ${props.access.state === "applying" ? "wait" : ""}`}
+              class={`sticker ${props.access.state === "failed" ? "" : "wait"}`}
               data-tip={
                 props.access.state === "applying"
                   ? ACCESS_TIPS.applying
-                  : "Failed: Cloudflare refused the change."
+                  : props.access.state === "retrying"
+                    ? ACCESS_TIPS.retrying
+                    : "Failed: Cloudflare refused the change."
               }
             >
               {props.access.state}
             </span>
           )}
           {props.access.state === "failed" ? <span class="muted">{props.access.error}</span> : null}
+          {props.access.state === "retrying" ? (
+            <span class="muted">
+              {props.access.error} Next try at {new Date(props.access.at).toLocaleTimeString()}.
+            </span>
+          ) : null}
         </div>
       ) : null}
       {props.uptime ? <UptimeRow resource={resource} uptime={props.uptime} /> : null}

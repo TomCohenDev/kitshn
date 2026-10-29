@@ -46,12 +46,19 @@ function start(): State {
 function fakeCloudflare(existing: { policies?: Array<object>; apps?: Array<object> } = {}) {
   const calls: Array<string> = [];
   let next = 0;
-  const api: Api = async <T>(method: string, path: string) => {
+  // What Cloudflare holds: each object that a POST or PUT wrote, which a GET of that one object reads back.
+  const objects = new Map<string, object>();
+  const api: Api = async <T>(method: string, path: string, body?: unknown) => {
     calls.push(`${method} ${path.replace("/accounts/a/access", "")}`);
+    const last = path.split("/").pop() ?? "";
+    if (method === "GET" && objects.has(last)) return objects.get(last) as T;
     if (method === "GET")
       return (path.includes("/policies") ? (existing.policies ?? []) : (existing.apps ?? [])) as T;
-    const id = method === "PUT" ? (path.split("/").pop() ?? "") : `id${++next}`;
-    return (path.includes("/apps") ? { id, aud: `aud-${id}` } : { id }) as T;
+    const id = method === "PUT" ? last : `id${++next}`;
+    const result = path.includes("/apps") ? { id, aud: `aud-${id}` } : { id };
+    if (method === "PUT" || (method === "POST" && !path.endsWith("/revoke_tokens")))
+      objects.set(id, { ...(body as object), ...result });
+    return result as T;
   };
   const rows = new Map<string, AccessRow>();
   const store = {
@@ -191,7 +198,11 @@ describe("Access sync (K-406, K-408)", () => {
       };
       const desired = desiredAccess(start(), 0);
       await syncAccess(desired, cf.store, flaky, "a");
-      expect(accessStates(desired, cf.rows)["kitshn-admin"]).toEqual({ state: "applying" });
+      expect(accessStates(desired, cf.rows)["kitshn-admin"]).toEqual({
+        state: "retrying",
+        error: "POST /accounts/a/access/apps failed (504): error code: 504",
+        at: 1_000_000 + RETRY_AFTER_MS,
+      });
       expect(hasAccessWork(desired, cf.rows)).toBe(false);
       vi.setSystemTime(1_000_000 + RETRY_AFTER_MS);
       expect(hasAccessWork(desired, cf.rows)).toBe(true);
@@ -239,6 +250,76 @@ describe("Access sync (K-406, K-408)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("settles a 504 that landed with a read-back and no second write, and backs off 5, then 15 minutes (K-408)", async () => {
+    vi.useFakeTimers({ now: 1_000_000, toFake: ["Date"] });
+    try {
+      const cf = fakeCloudflare();
+      const state = start();
+      const away = applyChanges(
+        state,
+        resolveEdits(state, [{ _tag: "place", id: "kitshn-admin", after: { x: 9000, y: 9000 } }]),
+      );
+      await syncAccess(desiredAccess(away, 0), cf.store, cf.api, "a");
+      const wide = desiredAccess(state, 0);
+      let gets = 0;
+      let puts = 0;
+      // The PUT lands and answers 504; the first read-back gets no answer either.
+      const flaky: Api = async <T>(method: Parameters<Api>[0], path: string, body?: unknown) => {
+        if (method === "GET" && path.includes("/apps/") && gets++ === 0)
+          throw new CloudflareError(0, `GET ${path}: no answer from Cloudflare`);
+        const answer = await cf.api<T>(method, path, body);
+        if (method === "PUT" && path.includes("/apps/") && puts++ === 0)
+          throw new CloudflareError(504, `PUT ${path} failed (504): error code: 504`);
+        return answer;
+      };
+      await syncAccess(wide, cf.store, flaky, "a");
+      vi.setSystemTime(1_000_000 + RETRY_AFTER_MS);
+      await syncAccess(wide, cf.store, flaky, "a");
+      // The second unclear answer in a row waits 15 minutes.
+      vi.setSystemTime(1_000_000 + RETRY_AFTER_MS + 10 * 60_000);
+      expect(hasAccessWork(wide, cf.rows)).toBe(false);
+      vi.setSystemTime(1_000_000 + RETRY_AFTER_MS + 15 * 60_000);
+      expect(hasAccessWork(wide, cf.rows)).toBe(true);
+      cf.calls.length = 0;
+      await syncAccess(wide, cf.store, flaky, "a");
+      // Cloudflare serves the wanted body: one read, no second write.
+      expect(cf.calls.filter((call) => !call.startsWith("GET"))).toEqual([]);
+      expect(puts).toBe(1);
+      expect(accessStates(wide, cf.rows)["kitshn-admin"]).toEqual({ state: "applied" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("writes a removal at once after an earlier body was refused (K-407)", async () => {
+    const cf = fakeCloudflare();
+    const state = start();
+    await syncAccess(desiredAccess(state, 0), cf.store, cf.api, "a");
+    const owner = state.circles.get("owner")!;
+    // A wider body (one more circle around the admin card) is refused.
+    const wider = applyChanges(
+      state,
+      resolveEdits(state, [
+        { _tag: "circle", id: "others", after: { ...owner, id: "others", name: "Others" } },
+      ]),
+    );
+    const refusing: Api = async (method, path, body) => {
+      if (method === "PUT" && path.includes("/apps/"))
+        throw new CloudflareError(403, `PUT ${path} failed (403): refused`);
+      return cf.api(method, path, body);
+    };
+    await syncAccess(desiredAccess(wider, 0), cf.store, refusing, "a");
+    // The owner then takes the card out of every circle, which lowers access: it is written at once.
+    const away = applyChanges(
+      state,
+      resolveEdits(state, [{ _tag: "place", id: "kitshn-admin", after: { x: 9000, y: 9000 } }]),
+    );
+    cf.calls.length = 0;
+    await syncAccess(desiredAccess(away, 0), cf.store, cf.api, "a");
+    expect(cf.calls.some((call) => call.startsWith("PUT /apps/"))).toBe(true);
+    expect(accessStates(desiredAccess(away, 0), cf.rows)["kitshn-admin"]).toEqual({ state: "applied" });
   });
 
   it("counts an error that is not Cloudflare's answer as a refusal: red, and no retry in five minutes", async () => {
@@ -405,7 +486,12 @@ describe("daily compare and sessions (K-408, K-409, K-110)", () => {
     expect(warnings).toEqual([expect.stringContaining("Someone else")]);
     expect(hasAccessWork(desired, cf.rows)).toBe(true);
     cf.calls.length = 0;
-    await syncAccess(desired, cf.store, cf.api, "a");
+    // Cloudflare serves the changed policy: the read-back sees it, and kitshn writes the wanted one.
+    const changedOwner: Api = async <T>(method: Parameters<Api>[0], path: string, body?: unknown) =>
+      method === "GET" && path.endsWith("/policies/id1")
+        ? ({ id: "id1", name: "kitshn circle Owner", decision: "allow", include: [{ everyone: {} }] } as T)
+        : cf.api<T>(method, path, body);
+    await syncAccess(desired, cf.store, changedOwner, "a");
     expect(cf.calls).toEqual(["PUT /policies/id1"]);
   });
 

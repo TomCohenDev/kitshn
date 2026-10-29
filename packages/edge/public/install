@@ -560,10 +560,15 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
     keep_bindings: ["secret_text"]
   } + (if $migrations == null then {} else {migrations: $migrations} end)')
 printf '%s' "$metadata" >"$WORK/metadata.json"
-curl -sS -X PUT "$API/accounts/$ACCOUNT/workers/scripts/$SCRIPT" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+http_status=$(curl -sS -o "$WORK/out" -w '%{http_code}' -X PUT "$API/accounts/$ACCOUNT/workers/scripts/$SCRIPT" \
+  -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
   -F "metadata=@$WORK/metadata.json;type=application/json" \
-  -F "worker.js=@$WORK/bundle/worker.js;type=application/javascript+module" >"$WORK/out"
-[ "$(jq -r .success "$WORK/out")" = true ] || die "the Worker upload failed: $(jq -r '[.errors[]? | "\(.code): \(.message)"] | join("; ")' "$WORK/out")"
+  -F "worker.js=@$WORK/bundle/worker.js;type=application/javascript+module") || die "the Worker upload got no answer from Cloudflare."
+if [ "$(jq -r '.success // false' "$WORK/out" 2>/dev/null)" != true ]; then
+  # An answer that is not JSON, such as a proxy error page, has no errors list; its start says more.
+  errors=$(jq -r '[.errors[]? | "\(.code): \(.message)"] | join("; ")' "$WORK/out" 2>/dev/null || head -c 300 "$WORK/out")
+  die "the Worker upload failed ($http_status): $errors"
+fi
 changed "uploaded the Worker $SCRIPT"
 secrets=$(api GET "/accounts/$ACCOUNT/workers/scripts/$SCRIPT/secrets")
 if printf '%s' "$secrets" | jq -e 'any(.[]; .name == "CLOUDFLARE_API_TOKEN")' >/dev/null && [ "${KITSHN_SET_TOKEN:-}" != 1 ]; then

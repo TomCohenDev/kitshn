@@ -140,6 +140,7 @@ export function HistoryView(props: {
         ))}
       </div>
       <input
+        class="field"
         type="search"
         aria-label="Filter by card or circle"
         data-tip="Only the changes of a card or circle with these words in its name, or in the change."

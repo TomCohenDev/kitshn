@@ -167,7 +167,7 @@ export function EndsPicker(props: {
           }}
         >
           <input
-            class="grow"
+            class="field grow"
             inputMode="numeric"
             aria-label="Days from now"
             placeholder="Days from now, for example 3"
@@ -474,7 +474,7 @@ function DeviceList(props: {
             }}
           >
             <input
-              class="field grow"
+              class="field field-block grow"
               value={name}
               aria-label="New device name"
               data-tip="The name of a new device token. kitshn makes the token and adds the device to this circle."
@@ -556,7 +556,7 @@ function AddMember(props: {
         >
           {kind !== "everyone" ? (
             <input
-              class="field grow"
+              class="field field-block grow"
               value={value}
               aria-label="Member"
               data-tip="An email, an email domain or a network. The kind above decides how kitshn reads it."
@@ -618,7 +618,7 @@ export function CircleEditor(props: {
       <div class="band" style={{ background: circle.color }} />
       <div class="label">Circle</div>
       <input
-        class="title"
+        class="field title"
         aria-label="Circle name"
         data-tip="The name of the circle. Enter saves it; Escape cancels."
         value={draft ?? circle.name}

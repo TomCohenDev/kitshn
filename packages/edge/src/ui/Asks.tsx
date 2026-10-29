@@ -46,49 +46,18 @@ export function AskList(props: {
       </div>
       <ul class="repo-list">
         {props.proposals.map((proposal) => (
-          <li key={proposal.id}>
-            <span class="sticker wait" data-tip={`It waits for ${props.circleName(proposal.circleId)}.`}>
-              {MACHINE_RIGHT_NAMES[proposal.right]}
-            </span>
-            <span class="name">
-              {proposal.machineName}: <code>{proposal.shown}</code>
-              {proposal.reason ? <span class="muted"> · {proposal.reason}</span> : null}
-              {Object.entries(proposal.labels).map(([key, value]) => (
-                <span
-                  key={key}
-                  class="muted"
-                  data-tip={
-                    proposal.verified.includes(key)
-                      ? "Verified: an attester of the machine set this label (K-1752)."
-                      : "Claimed: the agent wrote this label; no attester checked it (K-1750)."
-                  }
-                >
-                  {" "}
-                  · {key}={value} ({proposal.verified.includes(key) ? "verified" : "claimed"})
-                </span>
-              ))}
-            </span>
-            <button
-              type="button"
-              disabled={busy.has(proposal.id)}
-              data-tip="Approve: the login of the approver circle (a fresh passkey when it needs one), then you read the ask once more, then kitshn runs it."
-              onClick={() =>
-                location.assign(
-                  `/api/approve/${props.needsPasskey(proposal.circleId) ? "passkey" : "login"}/start?approve=${encodeURIComponent(proposal.id)}&hash=${proposal.shownHash}`,
-                )
-              }
-            >
-              Approve
-            </button>
-            <button
-              type="button"
-              disabled={busy.has(proposal.id)}
-              data-tip="Deny: the agent hears that you denied it."
-              onClick={() => void deny(proposal)}
-            >
-              Deny
-            </button>
-          </li>
+          <AskRow
+            key={proposal.id}
+            proposal={proposal}
+            circleName={props.circleName}
+            busy={busy.has(proposal.id)}
+            onApprove={() =>
+              location.assign(
+                `/api/approve/${props.needsPasskey(proposal.circleId) ? "passkey" : "login"}/start?approve=${encodeURIComponent(proposal.id)}&hash=${proposal.shownHash}`,
+              )
+            }
+            onDeny={() => void deny(proposal)}
+          />
         ))}
       </ul>
     </>
@@ -135,6 +104,7 @@ export function AskEvents(props: { readonly events: ReadonlyArray<AskEventView> 
         Asks of agents
       </h3>
       <input
+        class="field"
         aria-label="Search asks by label"
         placeholder="t3.thread.id=…"
         value={label}
@@ -214,6 +184,7 @@ export function BotRuns(props: {
             <code>{run.sha.slice(0, 7)}</code>
             <button
               type="button"
+              class="btn"
               data-tip="Deploy: kitshn runs the pull request's workflow again for this commit, and its preview deploys."
               onClick={() => void deploy(run)}
             >
@@ -223,5 +194,59 @@ export function BotRuns(props: {
         ))}
       </ul>
     </>
+  );
+}
+
+/** K-1722: one ask in the Inbox: the right it asks for, the machine and command, its labels, Approve and Deny. */
+export function AskRow(props: {
+  readonly proposal: ProposalView;
+  readonly circleName: (id: string) => string;
+  /** An answer runs now, so both buttons wait. */
+  readonly busy: boolean;
+  readonly onApprove: () => void;
+  readonly onDeny: () => void;
+}) {
+  return (
+    <li>
+      <span class="sticker wait" data-tip={`It waits for ${props.circleName(props.proposal.circleId)}.`}>
+        {MACHINE_RIGHT_NAMES[props.proposal.right]}
+      </span>
+      <span class="name">
+        {props.proposal.machineName}: <code>{props.proposal.shown}</code>
+        {props.proposal.reason ? <span class="muted"> · {props.proposal.reason}</span> : null}
+        {Object.entries(props.proposal.labels).map(([key, value]) => (
+          <span
+            key={key}
+            class="muted"
+            data-tip={
+              props.proposal.verified.includes(key)
+                ? "Verified: an attester of the machine set this label (K-1752)."
+                : "Claimed: the agent wrote this label; no attester checked it (K-1750)."
+            }
+          >
+            {" "}
+            · {key}={value} ({props.proposal.verified.includes(key) ? "verified" : "claimed"})
+          </span>
+        ))}
+      </span>
+      <button
+        type="button"
+        class="btn primary"
+        disabled={props.busy}
+        data-tip="Approve: the login of the approver circle (a fresh passkey when it needs one), then you read the ask once more, then kitshn runs it."
+        onClick={props.onApprove}
+      >
+        Approve
+      </button>
+      <button
+        type="button"
+        class="btn"
+        disabled={props.busy}
+        data-tip="Deny: the agent hears that you denied it."
+        onClick={props.onDeny}
+      >
+        Deny
+      </button>
+    </li>
   );
 }

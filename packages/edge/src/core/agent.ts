@@ -116,10 +116,10 @@ export function agentHas(
   approved: MachineRight | null = null,
 ) {
   const machine = machineOf(state, visitor);
-  if (machine) {
-    const mode = machineRightMode(state, machine.id, right, now);
-    return mode !== null && (mode.mode === "automatic" || approved === right);
-  }
+  // K-1723, K-1776: an approval of exactly this call counts also for a right that no circle sets; "off" never gets
+  // this far, because the approval refuses first (proposalGone).
+  if (machine)
+    return approved === right || machineRightMode(state, machine.id, right, now)?.mode === "automatic";
   return [...circlesOf(state, visitor, now)].some((id) =>
     state.circles
       .get(id)
@@ -410,7 +410,7 @@ export const codeRightOff = (
   fullName: string,
   now: number,
 ) =>
-  codeModes(state, machineId, right, fullName, now).some((mode) => mode.mode === "off") &&
+  codeModes(state, machineId, right, fullName, now, true).some((mode) => mode.mode === "off") &&
   codeRightMode(state, machineId, right, fullName, now) === null;
 
 function codeModes(
@@ -419,12 +419,14 @@ function codeModes(
   right: "readsCode" | "writesCode",
   fullName: string,
   now: number,
+  exact = false,
 ): Array<RightMode> {
   const machine = state.machines.get(machineId);
   if (!machine) return [];
   const covering = coveringCards(state, fullName);
+  // "writes code" includes reading for an open mode; "off" counts only for its own right (K-1776).
   const rights: ReadonlyArray<MachineRight> =
-    right === "readsCode" ? ["readsCode", "writesCode"] : ["writesCode"];
+    right === "readsCode" && !exact ? ["readsCode", "writesCode"] : [right];
   const modes = [...circlesOf(state, { email: null, clientId: machine.clientId, ip: null }, now)].flatMap(
     (id) => {
       const circle = state.circles.get(id);

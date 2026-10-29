@@ -93,9 +93,11 @@ code {
   padding: 0 2px;
   overflow-wrap: anywhere;
 }
+/* The glow makes focus easy to find on the dots canvas. */
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+  box-shadow: 0 0 0 6px #ff527766;
 }
 /* A tap shows the control's own pressed or selected state, not the browser's blue box. */
 :root {
@@ -215,15 +217,25 @@ code {
   padding: 1px 10px;
 }
 
-input {
+/* A text field. Checkbox, radio and switch have their own classes (controls.tsx). */
+.field {
   font: inherit;
   font-size: 1rem;
-  padding: 4px 8px;
+  min-width: 0;
+  min-height: 2rem;
+  padding: 4px 10px;
   color: var(--ink);
   background: var(--surface);
   border: var(--bw) solid var(--border);
   border-radius: var(--radius);
-  min-width: 0;
+}
+.field::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+.field[aria-invalid="true"] {
+  border-color: var(--error);
+  background: var(--error-surface);
 }
 
 /* The browser's own clear button of a search field is native UI; Escape clears the field. */
@@ -729,18 +741,28 @@ button.count {
 }
 
 /* Dialogs: palette and confirmation */
+/* A flat dimming layer. It scrolls a dialog taller than the screen, and `margin: auto` centres one that fits. */
 .scrim {
   position: fixed;
   inset: 0;
   z-index: 40;
   display: flex;
-  align-items: flex-start;
-  justify-content: center;
+  padding: 1rem;
+  overflow: auto;
+  background: #0006;
+}
+.scrim > * {
+  margin: auto;
+}
+/* The command palette stays at one height while its list grows and shrinks. */
+.scrim.palette-scrim {
   padding-top: 12vh;
-  background: #00000055;
+}
+.scrim.palette-scrim > * {
+  margin: 0 auto auto;
 }
 .dialog {
-  width: min(560px, calc(100vw - 20px));
+  width: min(32rem, calc(100vw - 2rem));
   padding: 16px;
   background: var(--surface);
   border: var(--bw) solid var(--border);
@@ -1408,12 +1430,8 @@ pre.output {
 }
 
 /* Forms (tick3d): ink borders, help lines in muted text, errors in the error colours. */
-input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 0;
-  box-shadow: 3px 3px 0 0 var(--shadow-ink);
-}
-.field {
+/* A field on its own line under its label. */
+.field-block {
   display: block;
   margin-top: 6px;
 }
@@ -1512,6 +1530,12 @@ input:focus-visible {
 .radio:checked::after {
   opacity: 1;
 }
+/* A control with its own hard shadow keeps it on focus and shows only the ring, as cards do: no glow. */
+.check:focus-visible,
+.radio:focus-visible,
+.switch:focus-visible {
+  box-shadow: 2px 2px 0 0 var(--shadow-ink);
+}
 .check:active,
 .radio:active {
   transform: translate(2px, 2px);
@@ -1608,10 +1632,12 @@ input:focus-visible {
   border: 0;
   border-radius: 4px;
 }
+/* A menu item shows focus by its fill, so it needs no ring or glow. */
 .menu-item:is(:hover, :focus-visible, [data-highlighted]) {
   background: var(--select);
   color: var(--select-fg);
   outline: none;
+  box-shadow: none;
 }
 .menu-item:is(:disabled, [aria-disabled="true"]) {
   opacity: 0.55;
@@ -2081,9 +2107,6 @@ a > code {
   font-size: 0.75rem;
   padding: 1px 6px;
 }
-.peek-scrim {
-  padding-top: 4vh;
-}
 .peek-large {
   display: flex;
   flex-direction: column;
@@ -2229,4 +2252,149 @@ a > code {
 }
 .push input.time {
   width: 5.5rem;
+}
+
+/* The style guide (/neo-brutalism): its own layout around the real components. The map's body does not scroll. */
+.guide {
+  height: 100dvh;
+  overflow: auto;
+  padding: 24px clamp(12px, 4vw, 48px) 64px;
+}
+.guide-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.guide > h2.label {
+  margin: 28px 0 10px;
+}
+.guide-entry {
+  margin-bottom: 16px;
+  padding: 14px;
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.guide-entry > header p {
+  margin: 4px 0;
+}
+.guide-sample {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+/* A sample keeps its own width, so a sticker or a stamp is not stretched across the entry. */
+.guide-sample > * {
+  justify-self: start;
+}
+.guide-sample > .row {
+  align-items: center;
+  gap: 12px;
+}
+/* A small map and a stage hold map parts and fixed surfaces; the transform makes the stage their frame. */
+.guide-map,
+.guide-stage {
+  position: relative;
+  max-width: 100%;
+  overflow: hidden;
+  background-color: var(--canvas);
+  background-image: radial-gradient(var(--dots) 1.2px, transparent 1.2px);
+  background-size: 16px 16px;
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+}
+.guide-stage {
+  /* Its children are fixed, so it has no width of its own. */
+  justify-self: stretch;
+  transform: translateZ(0);
+}
+.guide-stage .overlay-panel {
+  --panel-width: 22rem;
+}
+.guide-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.guide-swatches {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 10px;
+}
+.guide-swatch {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  align-items: center;
+}
+.guide-swatch .chip-pair {
+  grid-row: span 2;
+  display: inline-flex;
+}
+.guide-swatch .chip-pair span {
+  width: 1.6rem;
+  height: 2.2rem;
+  border: var(--bw) solid var(--border);
+}
+.guide-swatch .chip-pair span + span {
+  border-left: 0;
+}
+.guide-swatch .muted {
+  font-size: 0.8rem;
+}
+.guide-values {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
+  gap: 6px 16px;
+  margin: 0;
+}
+.guide-values div {
+  display: flex;
+  gap: 8px;
+}
+.guide-values dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.guide-shadow {
+  padding: 8px 14px;
+  font-weight: 700;
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+}
+.guide-type {
+  display: grid;
+  gap: 8px;
+}
+.guide-measured {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.guide-measured > :first-child {
+  margin: 0;
+}
+.guide-tray {
+  position: static;
+  width: 260px;
+  max-height: none;
+}
+.guide-rows {
+  display: grid;
+  gap: 4px;
+}
+.guide-box {
+  max-width: 36rem;
+}
+.guide-differences ol {
+  margin: 8px 0 0;
+  padding-left: 1.4rem;
+}
+.guide-differences li + li {
+  margin-top: 4px;
 }

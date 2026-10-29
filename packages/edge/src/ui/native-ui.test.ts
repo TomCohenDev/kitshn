@@ -48,4 +48,27 @@ describe("no native browser UI in the map", () => {
       'controls.tsx: type="radio"',
     ]);
   });
+
+  it("gives every text-like input the .field class, so no input keeps the browser's look", () => {
+    /** The value of a quoted attribute in the source of one tag, or null. */
+    const attribute = (tag: string, name: string) => {
+      const start = tag.indexOf(`${name}="`);
+      if (start < 0) return null;
+      const from = start + name.length + 2;
+      return tag.slice(from, tag.indexOf('"', from));
+    };
+    const plain = files.flatMap((file) =>
+      file.text
+        .split("<input")
+        .slice(1)
+        .map((rest) => rest.slice(0, rest.indexOf("/>")))
+        .filter((tag) => {
+          const classes = (attribute(tag, "class") ?? "").split(" ");
+          const ownLook = ["check", "radio", "switch"].some((own) => classes.includes(own));
+          return attribute(tag, "type") !== "file" && !ownLook && !classes.includes("field");
+        })
+        .map((tag) => `${file.name}: <input${tag.split("\n")[0]}`),
+    );
+    expect(plain).toEqual([]);
+  });
 });

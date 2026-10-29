@@ -189,6 +189,16 @@ it("opens the one-hour window on approval with no token; the next ask of the mac
   expect(await askToken(stub, "Yarden-zamir/riffle")).toMatchObject({ outcome: "waiting" });
 });
 
+it("asks the Owner for a read token when only writes code is off (K-1776)", async () => {
+  fakeGitHub();
+  const stub = await setup({ writesCode: { mode: "off" } });
+  expect(await askToken(stub, "Yarden-zamir/riffle")).toMatchObject({ outcome: "waiting" });
+  const right = await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec<{ right_name: string }>("SELECT right_name FROM proposals").one(),
+  );
+  expect(right.right_name).toBe("readsCode");
+});
+
 it("answers not kitshn for another owner, and refuses an App owner's repo whose code rights are off (K-1760, K-1733)", async () => {
   fakeGitHub();
   const stub = await setup({ readsCode: { mode: "off" }, writesCode: { mode: "off" } });

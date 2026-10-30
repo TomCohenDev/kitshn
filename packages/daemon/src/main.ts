@@ -138,7 +138,7 @@ import { keepBuild, keptId, keptTag, rollbackOverride, serviceImages, staleTags 
 import { TokenCache } from "./tokens.ts";
 import { Providers, parseSaved } from "./providers.ts";
 import { desiredProblem } from "@kitshn/local";
-import { linkSocketProblem, serveLinks } from "./link.ts";
+import { linkPeerAdmitted, linkSocketProblem, serveLinks } from "./link.ts";
 import { lastHour, lastSamples } from "./samples.ts";
 import { pushKey } from "@kitshn/local";
 import { listenerUid, portOf } from "./listener.ts";
@@ -412,9 +412,11 @@ async function providerCommand(argv: ReadonlyArray<string>) {
  */
 function linkCheckCommand(path: string | undefined) {
   if (!path) fail("usage: kitshn link-check <socket or pipe>");
-  const problem = linkSocketProblem(platform, path!);
+  // K-701: the daemon user as the commands find it for the main socket, also when a local user asks.
+  if (typeof daemonUid === "string") fail(daemonUid);
+  const problem = linkSocketProblem(platform, path!, daemonUid as number);
   if (problem) fail(problem);
-  console.log(`${path} is served by this account.`);
+  console.log(`${path} is served by the kitshn daemon.`);
 }
 
 /** K-702: one request to the running daemon; null when it does not run. An error answer ends the command. */
@@ -2663,12 +2665,17 @@ async function runCommand() {
   };
   const local = await listenLocal(paths.socket, { ...socketOptions, access: "private" });
   process.on("exit", local.stop);
-  // K-1609: the link proxy of the providers, in the same private folder, so only the daemon user and root reach it.
+  // K-1609: the link proxy of the providers, in the same private folder; it admits the daemon user and local users.
   // K-1609, K-621: a start without the link proxy still serves the rest; the answer to register then names none.
-  const links = await serveLinks(linkSocket, {
-    reachOf: (provider) => registry().reachOf(provider),
+  const linkOptions = {
+    reachOf: (provider: string) => registry().reachOf(provider),
     token: () => (joined ? { clientId: joined.clientId, clientSecret: joined.clientSecret } : null),
     log,
+  };
+  const linkAdmits = (uid: number) => linkPeerAdmitted(uid, own, localUsersOf(readMachineFile()));
+  const links = await serveLinks(linkSocket, {
+    ...linkOptions,
+    ...(platform === "win32" ? {} : { peers: { platform, access: "private" as const, admits: linkAdmits } }),
   }).catch((error: unknown) => {
     log(`no link proxy: ${error instanceof Error ? error.message : String(error)}`);
     return null;
@@ -2686,6 +2693,18 @@ async function runCommand() {
           },
         );
   if (shared) process.on("exit", shared.stop);
+  // K-1609, K-701: the users of `kitshn local-users` reach the link proxy in the shared folder, next to its socket.
+  const sharedLinks = shared
+    ? await serveLinks(sharedLinkSocket, {
+        ...linkOptions,
+        peers: { platform, access: "shared", admits: linkAdmits },
+      }).catch((error: unknown) => {
+        log(`no shared link proxy: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      })
+    : null;
+  sharedLinkServed = sharedLinks !== null;
+  if (sharedLinks) process.on("exit", sharedLinks.stop);
   // The service manager stops the daemon with SIGTERM; an exit runs the clean-up of the socket and the jobs.
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => process.exit(0));
   pruneSamples();
@@ -2759,6 +2778,9 @@ const linkSocket =
   platform === "win32"
     ? `${paths.socket}-link-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`
     : join(dirname(paths.socket), "link.sock");
+/** K-701: the link socket of the users of `kitshn local-users`, next to the shared socket. */
+const sharedLinkSocket = platform === "win32" ? "" : join(dirname(paths.sharedSocket), "link.sock");
+let sharedLinkServed = false;
 /** False when the link proxy did not start; the answer to `register` then names no socket. */
 let linkServed = false;
 
@@ -3000,7 +3022,10 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
       type: "register",
       machineId: joined.machineId,
       ...registry().savedFor(request.provider),
-      linkSocket: linkServed ? linkSocket : null,
+      // K-1609, K-701: the daemon user gets the private socket, any other caller the shared one; without a shared
+      // socket the private one, which only a listed root can open, so `link-check` refuses the others with a reason.
+      linkSocket:
+        caller.uid !== ownUid() && sharedLinkServed ? sharedLinkSocket : linkServed ? linkSocket : null,
       machineName: registry().pushedValue(MACHINE_NAME_KEY) as string | null,
     };
   }

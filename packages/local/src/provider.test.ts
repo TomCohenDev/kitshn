@@ -158,6 +158,42 @@ describe("provider reports (K-704, K-705)", () => {
     expect(readRequest(line("site"))).toMatchObject({ ok: false, answer: { id: "1", type: "error" } });
   });
 
+  it("takes client apps with an open link of https or an app scheme, and a register without them (K-720)", () => {
+    const line = (clients?: unknown) =>
+      JSON.stringify({
+        id: "1",
+        type: "register",
+        provider: "t3",
+        kinds: [],
+        commands: [],
+        resources: [],
+        ...(clients === undefined ? {} : { clients }),
+      });
+    const client = (open: string) => [{ id: "t3code-fork", name: "T3 Code (fork)", open, install: [] }];
+    expect(readRequest(line())).toMatchObject({ ok: true });
+    expect(readRequest(line(client("t3code-preview://connections/new?inviteUrl={inviteUrl}")))).toMatchObject(
+      {
+        ok: true,
+        request: { clients: [{ id: "t3code-fork" }] },
+      },
+    );
+    expect(readRequest(line(client("https://example.com/add?u={inviteUrl}")))).toMatchObject({ ok: true });
+    const many = Array.from({ length: 5 }, (_, index) => ({
+      ...client("t3code://x?u={inviteUrl}")[0],
+      id: `c${index}`,
+    }));
+    expect(readRequest(line(many))).toMatchObject({ ok: false });
+    for (const open of [
+      "javascript:alert(1)//{inviteUrl}",
+      "data:text/html,{inviteUrl}",
+      "http://example.com/{inviteUrl}",
+      "t3code://connections/new",
+      "{inviteUrl}",
+      "t3code:// bad host/{inviteUrl}",
+    ])
+      expect(readRequest(line(client(open))), open).toMatchObject({ ok: false });
+  });
+
   it("keeps a grant table whole when a rule has a type that this reader does not know (K-706)", () => {
     const grant = {
       circle: {

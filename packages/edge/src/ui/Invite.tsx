@@ -1,5 +1,7 @@
 import { useState } from "preact/hooks";
 import { encode } from "uqr";
+import type { ProviderClient } from "@kitshn/local";
+import { openLink } from "../core/invite.ts";
 import { callApi } from "./store.ts";
 
 /** K-1601: a waiting invite of a phone or desktop app, as `POST /api/devices/invites` answers it. */
@@ -9,23 +11,9 @@ export interface DeviceInvite {
   readonly name: string;
   readonly link: string;
   readonly expiresAt: number;
+  /** K-720: the client apps that the providers declare; each gets its own QR code. */
+  readonly clients: ReadonlyArray<ProviderClient>;
 }
-
-/** The fork Android app in Obtainium: prereleases, the fallback to older releases and the APK filter of K-1601. */
-const OBTAINIUM_ADD_URL = `https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/${encodeURIComponent(
-  JSON.stringify({
-    id: "com.yardenzamir.t3code",
-    url: "https://github.com/Yarden-zamir/t3code",
-    author: "Yarden-zamir",
-    name: "T3 Code fork",
-    // Obtainium reads `additionalSettings` as a JSON string, not as an object.
-    additionalSettings: JSON.stringify({
-      includePrereleases: true,
-      fallbackToOlderReleases: true,
-      apkFilterRegEx: "android\\.apk$",
-    }),
-  }),
-)}`;
 
 /** The QR code of a text as one SVG path, with a quiet zone of 2 modules. It stays black on white in dark mode. */
 function QrCode(props: { text: string; label: string }) {
@@ -50,6 +38,10 @@ export function InviteDialog(props: { invite: DeviceInvite; onClose: () => void 
   const { invite } = props;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // K-720: the first declared app by default; the last tab is the plain https link, for any other app.
+  const [tab, setTab] = useState(0);
+  const client = invite.clients[tab];
+  const qrText = client ? openLink(client.open, invite.link) : invite.link;
   const until = new Date(invite.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const cancel = async () => {
     if (busy) return;
@@ -74,12 +66,33 @@ export function InviteDialog(props: { invite: DeviceInvite; onClose: () => void 
           </span>
           <b>{invite.name}</b>
         </div>
+        <div class="seg" role="tablist" aria-label="App">
+          {[...invite.clients.map((each) => each.name), "Link"].map((label, index) => (
+            <button
+              key={label}
+              type="button"
+              role="tab"
+              aria-pressed={tab === index}
+              aria-selected={tab === index}
+              data-tip={
+                index < invite.clients.length
+                  ? `A QR code that opens ${label} with this invite.`
+                  : "A QR code of the invite link. Its page offers each app, the link and the code."
+              }
+              onClick={() => setTab(index)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <p class="help">
-          Scan this in the T3 Code app on the phone, or paste the link in the desktop app. It works once,
-          until {until}.
+          {client
+            ? `Scan this with the phone camera to open ${client.name}, or open the link on the desktop.`
+            : "Scan this with the phone camera, or paste the link into the app's add server field."}{" "}
+          It works once, until {until}.
         </p>
         <div class="qr-box">
-          <QrCode text={invite.link} label={`QR code of the invite of ${invite.name}`} />
+          <QrCode text={qrText} label={`QR code of the invite of ${invite.name}`} />
         </div>
         <div class="secret">
           <code>{invite.link}</code>
@@ -93,15 +106,18 @@ export function InviteDialog(props: { invite: DeviceInvite; onClose: () => void 
           >
             Copy link
           </button>
-          <a
-            class="btn"
-            href={OBTAINIUM_ADD_URL}
-            target="_blank"
-            rel="noreferrer"
-            data-tip="Add the T3 Code Android app with Obtainium, with its prereleases."
-          >
-            Add with Obtainium
-          </a>
+          {client?.install.map((link) => (
+            <a
+              key={link.url}
+              class="btn"
+              href={link.url}
+              target="_blank"
+              rel="noreferrer"
+              data-tip={`Install ${client.name}: ${link.label}.`}
+            >
+              {link.label}
+            </a>
+          ))}
         </div>
         {error ? <p class="error">{error}</p> : null}
         <div class="row">

@@ -23,6 +23,8 @@ export const PROVIDER_LIMITS = {
   lists: 4,
   rows: 100,
   columns: 8,
+  /** K-720: the client apps of one provider. */
+  clients: 4,
   /** K-709: each part of a desired state, in bytes of its JSON. */
   stateBytes: 64 * 1024,
   /** K-1625: one resource with its facts, stickers and lists, in bytes of its JSON, so a card stays far below a row. */
@@ -172,6 +174,39 @@ export const ProviderList = Schema.Struct({
 });
 export type ProviderList = typeof ProviderList.Type;
 
+// The daemon, the Worker and Node all have the WHATWG `URL`; this package compiles without DOM or Node types.
+declare const URL: { canParse(url: string): boolean };
+
+/** K-720: schemes that a browser runs or reads itself, so an `open` link never uses them. */
+const BROWSER_SCHEMES = ["javascript", "data", "vbscript", "file", "blob", "about", "http"];
+
+/**
+ * K-720: a client app of the provider, which takes a device invite (K-1601). `open` is a link with `{inviteUrl}`: kitshn
+ * puts the encoded invite link there. It is https or the app's own scheme.
+ */
+export const ProviderClient = Schema.Struct({
+  id: SettingId,
+  name: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(60)),
+  open: Schema.String.check(
+    Schema.isMaxLength(512),
+    Schema.makeFilter((open: string) => {
+      const scheme = open.slice(0, Math.max(0, open.indexOf(":"))).toLowerCase();
+      return (
+        (open.includes("{inviteUrl}") &&
+          URL.canParse(open.replaceAll("{inviteUrl}", "x")) &&
+          scheme !== "" &&
+          only(`${LOWER}${DIGITS}+.-`)(scheme) &&
+          !BROWSER_SCHEMES.includes(scheme)) ||
+        "a link of https or the app's own scheme, with {inviteUrl}"
+      );
+    }),
+  ),
+  install: Schema.Array(
+    Schema.Struct({ label: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(40)), url: Link }),
+  ).check(Schema.isMaxLength(4)),
+});
+export type ProviderClient = typeof ProviderClient.Type;
+
 /** K-304: what a provider reports; kitshn sets "offline" itself while the provider is not connected. */
 export const PROVIDER_STATUSES = ["running", "stopped", "deploying", "failed", "unknown"] as const;
 
@@ -215,6 +250,9 @@ export const ProviderReport = Schema.Struct({
   kinds: Schema.Array(ProviderKind).check(Schema.isMaxLength(PROVIDER_LIMITS.kinds)),
   commands: Schema.Array(ProviderCommand).check(Schema.isMaxLength(PROVIDER_LIMITS.commands)),
   resources: Schema.Array(ProviderResource).check(Schema.isMaxLength(PROVIDER_LIMITS.resources)),
+  clients: Schema.optionalKey(
+    Schema.Array(ProviderClient).check(Schema.isMaxLength(PROVIDER_LIMITS.clients)),
+  ),
 });
 export type ProviderReport = typeof ProviderReport.Type;
 export const decodeProviderReports = Schema.decodeUnknownSync(

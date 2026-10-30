@@ -22,9 +22,12 @@ import {
 import { type BadgeState, badgeSvg } from "../core/badge.ts";
 import type { Usage } from "../core/usage.ts";
 import { NOTIFY_BODY_MAX } from "../core/notify.ts";
-import { escapeHtml, originDown, seenText } from "./live.ts";
+import { escapeHtml } from "../core/html.ts";
+import { originDown, seenText } from "./live.ts";
 import { adminHosts, type Env } from "./env.ts";
 import { type JoinView, joinHeaders, joinPage } from "./join-page.ts";
+import { invitePage, invitePageHeaders } from "./invite-page.ts";
+import type { ProviderClient } from "@kitshn/local";
 import { gameNameError } from "../core/game.ts";
 import { readUsage } from "./usage.ts";
 import { zoneFor, zonesOf, zonesOrMain } from "./zones.ts";
@@ -424,12 +427,6 @@ async function usageAnswer(
 
 const HEX = "0123456789abcdef";
 
-/** K-1601: what a browser shows for an invite link; the code stays in the fragment, so it never reaches kitshn. */
-const INVITE_PAGE = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>kitshn device invite</title><body style="font-family:system-ui;max-width:32rem;margin:3rem auto;padding:0 1rem">
-<h1>Open this in the T3 Code app</h1><p>This link adds a phone or a desktop app to kitshn. Scan its QR code with the
-T3 Code app, or paste the link in the app. It works once and expires 15 minutes after the owner made it.</p>`;
-
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
@@ -682,11 +679,14 @@ export default {
     // K-1118, K-1119: only these public paths exist; any other one is not found, never the app shell.
     if (url.pathname.startsWith("/public/"))
       return new Response("Not found.", { status: 404, headers: { "cache-control": "no-store" } });
-    // K-1601: the link of a device invite. A browser that opens it gets told to scan it in the app.
-    if (url.pathname === "/join/device" && request.method === "GET")
-      return new Response(INVITE_PAGE, {
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
-      });
+    // K-1601, K-720: the link of a device invite opens the client apps that the providers declare.
+    if (url.pathname === "/join/device" && request.method === "GET") {
+      const clients = (await (
+        await env.KITSHN.getByName("kitshn").fetch("https://kitshn.internal/internal/invite-clients")
+      ).json()) as Array<ProviderClient>;
+      const nonce = crypto.randomUUID().replaceAll("-", "");
+      return new Response(invitePage(clients, nonce), { headers: invitePageHeaders(nonce) });
+    }
     // K-1601: the app trades the invite code for its device token. Public; the code is the secret.
     if (url.pathname === "/join/device" && request.method === "POST") {
       const body = (await request

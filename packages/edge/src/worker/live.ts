@@ -236,9 +236,6 @@ export function offlineReason(machineName: string, machineOnline: boolean): stri
     : `The cook went home. ${machineName} is off, so this dish is off the menu for now. It comes back when ${machineName} is on.`;
 }
 
-export const escapeHtml = (text: string) =>
-  text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-
 /** "12 minutes ago" for the offline page. */
 export function seenText(time: number | null, now: number): string {
   if (time === null) return "a while ago";

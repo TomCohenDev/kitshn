@@ -208,3 +208,55 @@ it("refuses a code of the wrong shape in the Worker", async () => {
   await setup();
   expect((await exchange("not-a-code")).status).toBe(400);
 });
+
+const fork = {
+  id: "t3code-fork",
+  name: "T3 Code (fork)",
+  open: "t3code-preview://connections/new?inviteUrl={inviteUrl}",
+  install: [{ label: "Add with Obtainium", url: "https://apps.obtainium.imranr.dev/redirect?r=x" }],
+};
+const store = {
+  id: "t3code",
+  name: "T3 Code",
+  open: "t3code://connections/new?inviteUrl={inviteUrl}",
+  install: [],
+};
+
+/** K-720: the providers of two machines, as their last registrations; `clients` may be missing. */
+async function declare(sql: Awaited<ReturnType<typeof setup>>["sql"], ...bodies: Array<object>) {
+  await sql("DELETE FROM providers");
+  for (const [index, body] of bodies.entries())
+    await sql(
+      "INSERT INTO providers (machine_id, name, body) VALUES (?, 't3', ?)",
+      `m${index}`,
+      JSON.stringify({ name: "t3", kinds: [], commands: [], ...body }),
+    );
+  await runInDurableObject(env.KITSHN.getByName("kitshn"), (instance) =>
+    (instance as unknown as { load: () => void }).load(),
+  );
+}
+
+it("shows one open button per declared client app on the invite page, once per provider and id (K-720)", async () => {
+  const { sql } = await setup();
+  const page = async () => {
+    const response = await send("/join/device");
+    expect(response.headers.get("content-security-policy")).toContain("script-src 'nonce-");
+    return response.text();
+  };
+  // A registration without `clients` declares none; the page still has the link, the code and the steps.
+  await declare(sql, {});
+  const none = await page();
+  expect(none).not.toContain("Open in");
+  expect(none).toContain("Copy invite link");
+  expect(none).toContain("Another app");
+  await declare(sql, { clients: [fork] }, { clients: [fork] });
+  const one = await page();
+  expect(one.match(/Open in /g)).toHaveLength(1);
+  expect(one).toContain('data-open="t3code-preview://connections/new?inviteUrl={inviteUrl}"');
+  expect(one).toContain("Add with Obtainium");
+  await declare(sql, { clients: [fork, store] });
+  const two = await page();
+  expect(two.match(/Open in /g)).toHaveLength(2);
+  expect((await invite({ name: "Two" })).body).toMatchObject({ clients: [fork, store] });
+  await declare(sql);
+});

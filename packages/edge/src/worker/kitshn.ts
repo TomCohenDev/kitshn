@@ -961,9 +961,64 @@ export class Kitshn extends DurableObject<Env> {
     this.setProgress(cardId, { source, progress: startProgress(action, plan, now, before) });
   }
 
-  private moveAction(cardId: string, change: (progress: ActionProgress) => ActionProgress) {
+  /** With `only`, it moves the card's action only while that source drives it, so a newer action stays as it is. */
+  private moveAction(
+    cardId: string,
+    change: (progress: ActionProgress) => ActionProgress,
+    only?: StoredProgress["source"],
+  ) {
     const row = this.progressRows().get(cardId);
-    if (row) this.setProgress(cardId, { ...row, progress: change(row.progress) });
+    if (row && (only === undefined || deepEqual(row.source, only)))
+      this.setProgress(cardId, { ...row, progress: change(row.progress) });
+  }
+
+  /**
+   * K-538: one call of the CLI in a static or Worker deploy moves its card to the step with `label`. The CLI stops at
+   * an answer that is not ok, so such an answer or a throw fails the action, except a 503 that says to run it again
+   * (accessNotReady), which waits as a retry.
+   */
+  private async deployCall(row: DeployRow, label: string, call: () => Promise<Response>) {
+    const move = (change: (progress: ActionProgress) => ActionProgress) => {
+      this.moveAction(row.resource_id, change, { _tag: "deploy", deployId: row.id });
+      this.broadcast();
+    };
+    move((progress) => {
+      const index = progress.steps.findIndex((step) => step.label === label);
+      return withRetry(index < 0 ? progress : reachStep(progress, index, Date.now()), null);
+    });
+    try {
+      const response = await call();
+      if (response.ok) return response;
+      const body: unknown = await response
+        .clone()
+        .json()
+        .catch(() => null);
+      const reason =
+        isRecord(body) && typeof body["error"] === "string"
+          ? body["error"]
+          : `kitshn answered ${response.status}.`;
+      move((progress) =>
+        response.status === 503
+          ? withRetry(progress, { reason, at: Date.now() })
+          : failProgress(progress, reason, Date.now()),
+      );
+      return response;
+    } catch (error) {
+      move((progress) =>
+        failProgress(progress, error instanceof Error ? error.message : String(error), Date.now()),
+      );
+      throw error;
+    }
+  }
+
+  /** K-538: a static or Worker deploy that a card shows; a first deploy has no card yet, so it shows nothing. */
+  private startDeployAction(
+    deployId: string,
+    row: Pick<DeployRow, "app" | "worker" | "repo_id" | "resource_id">,
+  ) {
+    if (!this.state.resources.has(row.resource_id)) return;
+    this.startAction(row.resource_id, { _tag: "deploy", deployId }, "Deploy", deployPlan(row));
+    this.broadcast();
   }
 
   /**
@@ -974,16 +1029,23 @@ export class Kitshn extends DurableObject<Env> {
     let changed = false;
     for (const [cardId, row] of this.progressRows()) {
       if (row.progress.outcome.state !== "running") continue;
-      // A job and a handover resume from their stored state. A give-back runs only in its request, so a running
-      // one at wake lost its request.
+      // No client shows the action of a card that is gone, so it reads nothing until an Undo brings the card back.
+      if (!this.state.resources.has(cardId)) continue;
+      // A job, a handover, a deploy and a run rollback resume from their stored state. A give-back and a restore to
+      // a time run only in their request and its finish, so a running one at wake lost them.
+      const source = row.source;
       const progress =
-        row.source._tag === "job"
-          ? this.jobProgress(row.source.jobId, row.progress, now)
-          : row.source._tag === "takeover"
+        source._tag === "job"
+          ? this.jobProgress(source.jobId, row.progress, now)
+          : source._tag === "takeover"
             ? this.takeoverProgress(cardId, row.progress, now)
-            : wake
-              ? failProgress(row.progress, INTERRUPTED, now)
-              : row.progress;
+            : source._tag === "deploy"
+              ? this.deployProgress(source.deployId, row.progress, now)
+              : source._tag === "rollback"
+                ? this.runRollbackProgress(source.id, row.progress, now)
+                : wake
+                  ? failProgress(row.progress, INTERRUPTED, now)
+                  : row.progress;
       if (this.setProgress(cardId, { ...row, progress })) changed = true;
     }
     // The open jobs only after a new job came, so most map updates read no job rows.
@@ -1001,6 +1063,9 @@ export class Kitshn extends DurableObject<Env> {
       // A card shows the newest job: a job never takes the card back from itself or from a newer one.
       const shown = this.progressRows().get(cardId)?.source;
       if (shown?._tag === "job" && shown.jobId >= job.id) continue;
+      // A Compose rollback job on a card whose run rollback runs is a step of that action (K-821 runs one at a time).
+      const running = this.progressRows().get(cardId)?.progress.outcome.state === "running";
+      if (shown?._tag === "rollback" && running && command.kind === "compose-rollback") continue;
       this.startAction(cardId, { _tag: "job", jobId: job.id }, action.action, action.plan, now);
       this.moveAction(cardId, (progress) => this.jobProgress(job.id, progress, now));
       changed = true;
@@ -1023,7 +1088,9 @@ export class Kitshn extends DurableObject<Env> {
     if (job.state === "done") return finishProgress(progress, now);
     if (job.state === "expired" || ((closed || job.state === "queued") && job.expires_at <= now))
       return failProgress(progress, "The machine did not finish the job before it expired.", now);
-    if (job.state === "failed" && !closed) return failProgress(progress, lastLine(job.output), now);
+    // A job that failed with an answer ran on the machine, so the failure names the work, not the wait.
+    if (job.state === "failed" && !closed)
+      return failProgress(reachStep(progress, 1, now), lastLine(job.output), now);
     if (job.state === "queued") return progress;
     const command = JSON.parse(job.command) as Command;
     if (command.kind !== "update") return reachStep(progress, 1, now);
@@ -1031,6 +1098,37 @@ export class Kitshn extends DurableObject<Env> {
     const status = job.machine_id === null ? null : this.liveStatus(job.machine_id);
     const step = status?.version === command.version ? 3 : closed || status === null ? 2 : 1;
     return reachStep(progress, step, now);
+  }
+
+  /** K-538: the end of a static or Worker deploy, from its row; the calls of the CLI move its steps (deployCall). */
+  private deployProgress(deployId: string, progress: ActionProgress, now: number): ActionProgress {
+    const [row] = this.sql<{ state: string; reason: string | null; expires_at: number }>(
+      "SELECT state, reason, expires_at FROM deploys WHERE id = ?",
+      deployId,
+    );
+    if (!row) return failProgress(progress, `${INTERRUPTED} kitshn no longer has its deploy.`, now);
+    if (row.state === "done") return finishProgress(progress, now);
+    if (row.state === "failed") return failProgress(progress, row.reason ?? "The deploy failed.", now);
+    if (row.expires_at <= now)
+      return failProgress(progress, "The deploy did not finish before it expired.", now);
+    return progress;
+  }
+
+  /** K-538, K-821: the step of "Roll back this run": one step per card, from its row. */
+  private runRollbackProgress(id: string, progress: ActionProgress, now: number): ActionProgress {
+    const [row] = this.sql<{ state: string; next: number; notes: string }>(
+      "SELECT state, next, notes FROM rollbacks WHERE id = ?",
+      id,
+    );
+    if (!row) return failProgress(progress, `${INTERRUPTED} kitshn no longer has the run rollback.`, now);
+    if (row.state === "done") return finishProgress(progress, now);
+    if (row.state === "failed")
+      return failProgress(
+        progress,
+        (JSON.parse(row.notes) as Array<string>).at(-1) ?? "The run rollback stopped.",
+        now,
+      );
+    return reachStep(progress, row.next, now);
   }
 
   /** K-1623, K-538: the step of "Take the address", from the handover, the Access row and the machine's push. */
@@ -2500,21 +2598,22 @@ export class Kitshn extends DurableObject<Env> {
     });
   }
 
-  /** K-1817: one backup job and its row. Returns the run. */
+  /** K-1817: one backup job and its row. Returns the run and the job. */
   private queueBackup(card: string, actor: Actor, prune: boolean, now: number) {
     const resource = this.state.resources.get(card);
     if (!resource?.machine) throw new Error(`${card} has no machine.`);
     const run = crypto.randomUUID();
-    this.ctx.storage.transactionSync(() => {
-      const jobId = this.queueKitshnJob(
+    const jobId = this.ctx.storage.transactionSync(() => {
+      const queued = this.queueKitshnJob(
         resource.machine!,
         { kind: "backup", card, run, prune, pauseLimitMs: this.pauseLimitOf(card) },
         actor,
         now + DAY,
       );
-      this.insertBackup(run, card, resource.machine!, now, jobId);
+      this.insertBackup(run, card, resource.machine!, now, queued);
+      return queued;
     });
-    return run;
+    return { run, jobId };
   }
 
   private insertBackup(run: string, card: string, machineId: string, at: number, jobId: number) {
@@ -2544,11 +2643,23 @@ export class Kitshn extends DurableObject<Env> {
     return Response.json({ runs: runs.map(backupRun) });
   }
 
+  /** K-538: the steps of a backup or restore job that someone started; the machine reports only its end. */
+  private startBackupAction(card: string, jobId: number, action: string, work: string) {
+    const machine =
+      this.state.machines.get(this.state.resources.get(card)?.machine ?? "")?.name ?? "the machine";
+    this.startAction(card, { _tag: "job", jobId }, action, [
+      { label: `Wait until ${machine} takes the job`, expectedMs: 2_000 },
+      { label: `${work} on ${machine}`, expectedMs: 30_000 },
+    ]);
+  }
+
   /** K-1817: "Back up now". */
   private backUpNow(actor: Actor, card: string) {
     const refusal = this.backupRefusal(card);
     if (refusal) return Response.json({ error: refusal }, { status: 409 });
-    const run = this.queueBackup(card, actor, false, Date.now());
+    const { run, jobId } = this.queueBackup(card, actor, false, Date.now());
+    // K-538: only a backup that someone started shows its steps; the daily ones keep the K-1819 sticker.
+    this.startBackupAction(card, jobId, "Back up now", "Back up the volumes and the data folder");
     this.deliverJobs();
     this.broadcast();
     return Response.json({ run });
@@ -2565,15 +2676,17 @@ export class Kitshn extends DurableObject<Env> {
     const resource = this.state.resources.get(card)!;
     const before = crypto.randomUUID();
     const now = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      const jobId = this.queueKitshnJob(
+    const jobId = this.ctx.storage.transactionSync(() => {
+      const queued = this.queueKitshnJob(
         resource.machine!,
         { kind: "backup-restore", card, run, before, sources, pauseLimitMs: this.pauseLimitOf(card) },
         actor,
         now + DAY,
       );
-      this.insertBackup(before, card, resource.machine!, now, jobId);
+      this.insertBackup(before, card, resource.machine!, now, queued);
+      return queued;
     });
+    this.startBackupAction(card, jobId, "Restore", "Back up the app as it is, then write the backup back");
     this.deliverJobs();
     this.broadcast();
     return Response.json({ before });
@@ -2733,8 +2846,17 @@ export class Kitshn extends DurableObject<Env> {
         this.sql<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'jobs'")[0]?.seq ?? 0,
       actor: caller.actor,
     };
+    // K-538: the admin card shows the steps; the restore rewinds this row, so the finish brings it back from R2.
+    const before = this.progressRows().get(ADMIN_RESOURCE_ID)?.progress ?? null;
+    const progress = reachStep(
+      startProgress(RESTORE_ACTION, RESTORE_STEPS, Date.now(), before),
+      1,
+      Date.now(),
+    );
+    this.setProgress(ADMIN_RESOURCE_ID, { source: { _tag: "restore" }, progress });
+    this.broadcast();
     // Storage writes from now on are lost with the restore, so the pending finish waits in R2.
-    await this.env.BUCKET?.put(RESTORE_PENDING, JSON.stringify(finish));
+    await this.env.BUCKET?.put(RESTORE_PENDING, JSON.stringify({ ...finish, progress }));
     this.restoring = { at: Date.now() };
     // The answer goes out first; then the restart restores the storage.
     setTimeout(() => this.ctx.abort("K-1822: restore to a time"), 100);
@@ -2776,7 +2898,16 @@ export class Kitshn extends DurableObject<Env> {
   private async finishRestoreOnce(finish: RestoreFinish) {
     const pending = await this.env.BUCKET?.get(RESTORE_PENDING);
     if (this.env.BUCKET && !pending) return;
+    // K-538: kitshn wrote this object itself, before the restart.
+    const carried = pending ? ((await pending.json()) as { progress?: ActionProgress }).progress : undefined;
     await this.env.BUCKET?.delete(RESTORE_PENDING);
+    const move = (change: (progress: ActionProgress) => ActionProgress) =>
+      this.moveAction(ADMIN_RESOURCE_ID, change, { _tag: "restore" });
+    if (carried)
+      this.setProgress(ADMIN_RESOURCE_ID, {
+        source: { _tag: "restore" },
+        progress: reachStep(carried, 2, Date.now()),
+      });
     this.sql("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'jobs'", finish.jobsAfter);
     this.setMeta("restore_undo", finish.undo);
     this.insertRevision(
@@ -2785,10 +2916,19 @@ export class Kitshn extends DurableObject<Env> {
       [],
       null,
     );
+    move((progress) => reachStep(progress, 3, Date.now()));
     this.load();
     this.broadcast();
     // K-1771: the restored storage can hold a pass key that was retired after that time, so the last step rotates it.
-    await this.rotatePassKey(finish.actor);
+    try {
+      await this.rotatePassKey(finish.actor);
+    } catch (error) {
+      move((progress) => failProgress(progress, `The pass key did not rotate: ${String(error)}`, Date.now()));
+      this.broadcast();
+      throw error;
+    }
+    move((progress) => finishProgress(progress, Date.now()));
+    this.broadcast();
   }
 
   /** K-1822: a restore whose poll timed out finishes at the next alarm. */
@@ -3015,6 +3155,17 @@ export class Kitshn extends DurableObject<Env> {
       JSON.stringify(plan),
       JSON.stringify(caller.actor),
     );
+    // K-538: the card where it started shows one step per card; a Compose card's step waits for its job.
+    this.startAction(
+      card,
+      { _tag: "rollback", id },
+      "Roll back this run",
+      plan.map((step) => ({
+        label: `Roll back ${step.name}`,
+        expectedMs: this.state.resources.get(step.card)?.kind === "site.compose" ? 25_000 : 3_000,
+      })),
+    );
+    this.broadcast();
     await this.advanceRollback(id);
     this.broadcast();
     const [row] = this.sql<{ state: string; notes: string }>(
@@ -3069,6 +3220,8 @@ export class Kitshn extends DurableObject<Env> {
           result.jobId,
           id,
         );
+        // K-538: the sticker of the run moves on with each card.
+        this.broadcast();
         if (result.jobId !== null) return;
       }
     } finally {
@@ -7953,20 +8106,28 @@ export class Kitshn extends DurableObject<Env> {
       const gate = row.kind === "teardown" ? null : this.repoGate(deployer);
       if (gate) return gate;
       if (path === "/deploy/assets" && row.kind === "deploy")
-        return await this.deployAssets(api, row, input["manifest"]);
+        return await this.deployCall(row, DEPLOY_STEP.upload, () =>
+          this.deployAssets(api, row, input["manifest"]),
+        );
       if (row.app === "worker" && row.kind === "deploy") {
-        if (path === "/deploy/storage") return await this.workerStorage(api, row);
-        if (path === "/deploy/finish") return await this.finishWorker(api, row, deployer, input);
+        if (path === "/deploy/storage")
+          return await this.deployCall(row, DEPLOY_STEP.storage, () => this.workerStorage(api, row));
+        if (path === "/deploy/finish")
+          return await this.deployCall(row, DEPLOY_STEP.live, () =>
+            this.finishWorker(api, row, deployer, input),
+          );
       }
       if (path === "/deploy/finish" && row.kind === "deploy")
-        return await this.finishDeploy(
-          api,
-          row,
-          deployer,
-          input["jwt"],
-          input["icon"],
-          input["headers"],
-          input["redirects"],
+        return await this.deployCall(row, DEPLOY_STEP.live, () =>
+          this.finishDeploy(
+            api,
+            row,
+            deployer,
+            input["jwt"],
+            input["icon"],
+            input["headers"],
+            input["redirects"],
+          ),
         );
       if (row.app === "compose") {
         if (path === "/deploy/start" && row.kind === "deploy")
@@ -8442,6 +8603,13 @@ export class Kitshn extends DurableObject<Env> {
     if (handover) this.load();
     // K-817, K-901: the alarm makes the DNS records of a Compose deploy now, before its build (dnsWork).
     if (compose && result.kind === "deploy") void this.scheduleAlarm();
+    if (!compose && result.kind === "deploy")
+      this.startDeployAction(deployId, {
+        app: "worker" in recipe ? "worker" : "static",
+        worker: "worker" in recipe ? JSON.stringify(recipe.worker) : null,
+        repo_id: deployer.repoId,
+        resource_id: resourceId,
+      });
     return Response.json({ deployId, plan: result });
   }
 
@@ -11382,12 +11550,15 @@ export class Kitshn extends DurableObject<Env> {
         return fail(410, "This upload expired or ended. Upload the folder again.");
       if (step === "cancel") {
         this.endOwnerUpload(row, site, "The upload in the browser failed or stopped.");
+        this.broadcast();
         return Response.json({ ok: true });
       }
       if (step === "assets") {
         const manifest = parseManifest(body["manifest"]);
         if (typeof manifest === "string") return fail(400, manifest);
-        const answer = await this.deployAssets(api, row, body["manifest"]);
+        const answer = await this.deployCall(row, DEPLOY_STEP.upload, () =>
+          this.deployAssets(api, row, body["manifest"]),
+        );
         if (!answer.ok) return answer;
         const session = (await answer.json()) as { jwt: string; buckets: Array<Array<string>> };
         this.folderUploads.set(row.id, {
@@ -11414,14 +11585,16 @@ export class Kitshn extends DurableObject<Env> {
         this.addFolderCard(caller.actor, site, this.folderDrops.get(site.card_id) ?? null, false);
         this.folderDrops.delete(site.card_id);
       }
-      const finished = await this.finishDeploy(
-        api,
-        row,
-        folderDeployer(site.folder),
-        upload.done,
-        body["icon"],
-        body["headers"],
-        body["redirects"],
+      const finished = await this.deployCall(row, DEPLOY_STEP.live, () =>
+        this.finishDeploy(
+          api,
+          row,
+          folderDeployer(site.folder),
+          upload.done,
+          body["icon"],
+          body["headers"],
+          body["redirects"],
+        ),
       );
       if (finished.ok) this.folderUploads.delete(row.id);
       return finished;
@@ -11553,36 +11726,54 @@ export class Kitshn extends DurableObject<Env> {
         return fail(404, "kitshn knows no such folder deploy of this agent.");
       if (row.expires_at < Date.now() || row.state !== "planned")
         return fail(410, "This deploy expired or ended. Publish the folder again.");
-      if (step === "assets") return await this.deployAssets(api, row, input["manifest"]);
+      if (step === "assets")
+        return await this.deployCall(row, DEPLOY_STEP.upload, () =>
+          this.deployAssets(api, row, input["manifest"]),
+        );
       if (step !== "finish") return fail(404, `kitshn has no folder site step ${step}.`);
-      // K-909: the owner deletes the kept script of this site now.
-      if (this.deletingStorage.has(site.card_id))
-        return fail(409, `kitshn deletes the script of ${site.folder} now; publish again after it finishes.`);
-      if (this.state.resources.has(site.card_id)) {
-        const refusal = this.agentSiteMayChange(agent, site.card_id, now);
-        if (refusal) return fail(403, refusal);
-      } else {
-        // The right can go between the plan and the files.
-        if (!agentHas(this.state, agent.visitor, "addsApps", now))
-          return fail(403, 'A folder site needs the right "may add apps" (K-718, K-1123).');
-        // The rights and the circles can change between the plan and the files, so the spot counts now.
-        const spot = agentUploadPlace(this.state, agent.visitor, site.circle, site.public === 1, now);
-        if (typeof spot === "string") return fail(403, spot);
-        this.addFolderCard(agent.actor, site, spot, !spot);
-      }
-      return await this.finishDeploy(
-        api,
-        row,
-        folderDeployer(site.folder),
-        input["jwt"],
-        input["icon"],
-        input["headers"],
-        input["redirects"],
+      return await this.deployCall(row, DEPLOY_STEP.live, () =>
+        this.finishAgentSite(api, agent, row, site, input, now),
       );
     } catch (error) {
       if (error instanceof RuleError) return fail(403, error.message);
       return fail(502, `kitshn could not finish the step: ${String(error)}`);
     }
+  }
+
+  /** K-1123: the files of a folder site arrived; the card lands where K-1116 lets it, and the files go live. */
+  private async finishAgentSite(
+    api: Api,
+    agent: Caller,
+    row: DeployRow,
+    site: AgentSiteRow,
+    input: Record<string, unknown>,
+    now: number,
+  ) {
+    const fail = (status: number, error: string) => Response.json({ error }, { status });
+    // K-909: the owner deletes the kept script of this site now.
+    if (this.deletingStorage.has(site.card_id))
+      return fail(409, `kitshn deletes the script of ${site.folder} now; publish again after it finishes.`);
+    if (this.state.resources.has(site.card_id)) {
+      const refusal = this.agentSiteMayChange(agent, site.card_id, now);
+      if (refusal) return fail(403, refusal);
+    } else {
+      // The right can go between the plan and the files.
+      if (!agentHas(this.state, agent.visitor, "addsApps", now))
+        return fail(403, 'A folder site needs the right "may add apps" (K-718, K-1123).');
+      // The rights and the circles can change between the plan and the files, so the spot counts now.
+      const spot = agentUploadPlace(this.state, agent.visitor, site.circle, site.public === 1, now);
+      if (typeof spot === "string") return fail(403, spot);
+      this.addFolderCard(agent.actor, site, spot, !spot);
+    }
+    return await this.finishDeploy(
+      api,
+      row,
+      folderDeployer(site.folder),
+      input["jwt"],
+      input["icon"],
+      input["headers"],
+      input["redirects"],
+    );
   }
 
   private async agentSitePlan(
@@ -11671,6 +11862,12 @@ export class Kitshn extends DurableObject<Env> {
       now + DEPLOY_MS,
       JSON.stringify([address]),
     );
+    this.startDeployAction(deployId, {
+      app: "static",
+      worker: null,
+      repo_id: null,
+      resource_id: site.card_id,
+    });
     return deployId;
   }
 
@@ -14558,14 +14755,51 @@ const INTERRUPTED = "Interrupted: kitshn restarted during this action.";
 /** K-538: the meta key prefix of the last action of a card. */
 const PROGRESS_META = "progress:";
 
-/** K-538: an action and what drives its steps: a job, the handover of the address, or a give-back that runs at once. */
+/**
+ * K-538: an action and what drives its steps: a job, the handover of the address, a give-back that runs at once, the
+ * calls of a static or Worker deploy, a run rollback, or kitshn's own restore to a time (on the admin card).
+ */
 interface StoredProgress {
   readonly source:
     | { readonly _tag: "job"; readonly jobId: number }
     | { readonly _tag: "takeover" }
-    | { readonly _tag: "give-back" };
+    | { readonly _tag: "give-back" }
+    | { readonly _tag: "deploy"; readonly deployId: string }
+    | { readonly _tag: "rollback"; readonly id: string }
+    | { readonly _tag: "restore" };
   readonly progress: ActionProgress;
 }
+
+/** K-538: the steps of a static or Worker deploy, which the CLI runs in GitHub Actions; each of its calls moves on. */
+const DEPLOY_STEP = {
+  build: "Build in GitHub Actions",
+  storage: "Make the KV namespaces",
+  upload: "Upload the files to Cloudflare",
+  live: "Make the new version live",
+} as const;
+
+/** K-538: the plan of a static or Worker deploy; a folder site (K-1123) has no build in Actions. */
+function deployPlan(row: Pick<DeployRow, "app" | "worker" | "repo_id">): ReadonlyArray<PlannedStep> {
+  const build = row.repo_id === null ? [] : [{ label: DEPLOY_STEP.build, expectedMs: 30_000 }];
+  const upload = { label: DEPLOY_STEP.upload, expectedMs: 10_000 };
+  if (row.app !== "worker") return [...build, upload, { label: DEPLOY_STEP.live, expectedMs: 5_000 }];
+  const assets = row.worker !== null && decodeWorkerApp(JSON.parse(row.worker)).assets !== undefined;
+  return [
+    ...build,
+    { label: DEPLOY_STEP.storage, expectedMs: 2_000 },
+    ...(assets ? [upload] : []),
+    { label: DEPLOY_STEP.live, expectedMs: 8_000 },
+  ];
+}
+
+/** K-538, K-1822: the steps of "Restore kitshn to a time"; the restart cuts the storage off between steps 2 and 3. */
+const RESTORE_ACTION = "Restore kitshn to a time";
+const RESTORE_STEPS: ReadonlyArray<PlannedStep> = [
+  { label: "Find the restore point", expectedMs: 1_000 },
+  { label: "Restart kitshn on the restored storage", expectedMs: 3_000 },
+  { label: "Record the restore in History and set the job ids", expectedMs: 500 },
+  { label: "Rotate the pass key", expectedMs: 1_000 },
+];
 
 const TAKE_ADDRESS_STEPS: ReadonlyArray<PlannedStep> = [
   { label: "Make kitshn's Access application", expectedMs: 4_000 },

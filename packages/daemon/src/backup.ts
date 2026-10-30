@@ -3,6 +3,7 @@ import { BACKUP_POLICY, type BackupReport, PACK_MIB } from "@kitshn/edge/backups
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { jobSocketFolder, socketPathProblem } from "./sockets.ts";
 
 /** busybox, pinned by digest, so no app can take the name with an image of its own (K-818). */
 export const HELPER_IMAGE =
@@ -80,8 +81,10 @@ async function must(what: string, program: string, args: ReadonlyArray<string>, 
  * answers only requests below a random secret path, so nothing else on the machine can use it.
  */
 export function startProxy(machine: Machine, card: string, folder: string) {
-  mkdirSync(folder, { recursive: true, mode: 0o700 });
   const socket = join(folder, "proxy.sock");
+  const tooLong = socketPathProblem(socket, process.platform);
+  if (tooLong) throw new Error(tooLong);
+  mkdirSync(folder, { recursive: true, mode: 0o700 });
   rmSync(socket, { force: true });
   const secret = crypto.randomUUID();
   const base = new URL(`/connect/backups/${encodeURIComponent(card)}`, machine.server);
@@ -376,7 +379,7 @@ export async function backup(
   prune: boolean,
   limitMs: number,
 ): Promise<Outcome> {
-  const folder = join(machine.data, "run", run);
+  const folder = jobSocketFolder(machine.data, run);
   const proxy = startProxy(machine, card, folder);
   try {
     const restic = await openRepository(machine, card, proxy.socket, proxy.repository);
@@ -501,7 +504,7 @@ export async function restore(
   wanted: ReadonlyArray<string>,
   limitMs: number,
 ): Promise<Outcome> {
-  const folder = join(machine.data, "run", before);
+  const folder = jobSocketFolder(machine.data, before);
   const proxy = startProxy(machine, card, folder);
   let report: BackupReport | undefined;
   let stopped = false;

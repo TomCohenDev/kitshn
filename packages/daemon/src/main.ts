@@ -159,6 +159,7 @@ import {
 import { AGENT_USAGE, type AgentTransport, runAgentCommand, timeBody } from "kitshn/agent";
 import { CliError } from "kitshn/cli-error";
 import { checkSkill, installGlobalSkill, installRepoSkill, refreshGlobalSkill } from "./skill.ts";
+import { appSocketFolder, socketPathProblem } from "./sockets.ts";
 
 declare const KITSHN_VERSION: string;
 const VERSION = typeof KITSHN_VERSION === "string" ? KITSHN_VERSION : "dev";
@@ -1243,8 +1244,11 @@ async function composeUp(
   // K-818: each deploy unpacks into a new folder that no running container mounts, so the old app runs on
   // while the new one is read, checked and built. A job of the same app never runs at the same time.
   const source = join(dir, `src-${Date.now().toString(36)}`);
-  const sockets = join(dir, "sockets");
+  // K-607: a short folder of its own, so the socket path fits any card id (K-804).
+  const sockets = appSocketFolder(paths.data, command.project);
   const socketPath = join(sockets, "default.sock");
+  /** K-607: the folder of the app before 2026-10-30; its next deploy that comes up removes it. */
+  const oldSockets = join(dir, "sockets");
   /** K-818: the configs hold the values of the params, so they stay in a folder of the daemon user only. */
   const scratch = join(dir, "private");
   const checked = join(scratch, "compose.checked.json");
@@ -1259,6 +1263,9 @@ async function composeUp(
     if (!result.ok) throw new Error(`${title} failed with exit code ${result.exitCode ?? "none"}`);
   };
   try {
+    // Before the old app stops, so a data folder with a long path fails the deploy with its reason.
+    const tooLong = socketPathProblem(socketPath, platform);
+    if (tooLong) throw new Error(tooLong);
     mkdirSync(dir, { recursive: true });
     // K-718: the last build that came up stays in good/ with its params; a redeploy starts it again.
     const good = join(dir, "good");
@@ -1475,6 +1482,7 @@ async function composeUp(
       output += await removeAsRoot(old, `${command.project}-${basename(old)}`).catch(
         (cleanup: unknown) => `${String(cleanup)}\n`,
       );
+    output += removeOldSockets(oldSockets);
     output += `\nThe app answers on its socket; the tunnel sends ${command.name} there.\n`;
     return { ok: true, exitCode: 0, output, images: kept };
   } catch (error) {
@@ -1492,6 +1500,19 @@ async function composeUp(
       );
     }
     return { ok: false, exitCode: null, output };
+  }
+}
+
+/** K-607: the sockets folder of an app before the short one; a file in it that is no socket keeps it. */
+function removeOldSockets(folder: string): string {
+  if (!existsSync(folder)) return "";
+  try {
+    if (readdirSync(folder, { withFileTypes: true }).some((entry) => !entry.isSocket()))
+      return `kitshn keeps ${folder}: it holds more than sockets.\n`;
+    rmSync(folder, { recursive: true, force: true });
+    return `$ remove the old sockets folder ${folder}\n`;
+  } catch (error) {
+    return `kitshn could not remove ${folder}: ${String(error)}\n`;
   }
 }
 
@@ -1647,7 +1668,9 @@ async function composeDown(command: Extract<Command, { kind: "compose-down" }>):
   const output = `${result.output}${removed.output}`;
   if (!removed.ok) return { ok: false, exitCode: removed.exitCode, output };
   try {
-    return { ...result, output: output + (await removeAsRoot(dir, command.project)) };
+    const app = await removeAsRoot(dir, command.project);
+    const sockets = await removeAsRoot(appSocketFolder(paths.data, command.project), `${command.project}-s`);
+    return { ...result, output: output + app + sockets };
   } catch (error) {
     return {
       ok: false,

@@ -12,6 +12,7 @@ import {
   ProviderCommand,
   ProviderKind,
   ProviderName,
+  ProviderClient,
   ProviderResource,
 } from "./provider.ts";
 
@@ -132,6 +133,10 @@ export const Request = Schema.Union([
     kinds: Schema.Array(ProviderKind).check(Schema.isMaxLength(PROVIDER_LIMITS.kinds)),
     commands: Schema.Array(ProviderCommand).check(Schema.isMaxLength(PROVIDER_LIMITS.commands)),
     resources: Schema.Array(ProviderResource).check(Schema.isMaxLength(PROVIDER_LIMITS.resources)),
+    /** K-720: the provider's client apps for device invites. */
+    clients: Schema.optionalKey(
+      Schema.Array(ProviderClient).check(Schema.isMaxLength(PROVIDER_LIMITS.clients)),
+    ),
   }),
   /** K-705: adds or replaces resources of a provider that this connection registered. */
   Schema.Struct({

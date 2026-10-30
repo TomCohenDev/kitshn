@@ -158,6 +158,56 @@ describe("provider reports (K-704, K-705)", () => {
     expect(readRequest(line("site"))).toMatchObject({ ok: false, answer: { id: "1", type: "error" } });
   });
 
+  it("takes client apps with an open link of https or an app scheme, and a register without them (K-720)", () => {
+    const line = (clients?: unknown) =>
+      JSON.stringify({
+        id: "1",
+        type: "register",
+        provider: "t3",
+        kinds: [],
+        commands: [],
+        resources: [],
+        ...(clients === undefined ? {} : { clients }),
+      });
+    const client = (open: string) => [{ id: "t3code-fork", name: "T3 Code (fork)", open, install: [] }];
+    expect(readRequest(line())).toMatchObject({ ok: true });
+    expect(readRequest(line(client("t3code-preview://connections/new?inviteUrl={inviteUrl}")))).toMatchObject(
+      {
+        ok: true,
+        request: { clients: [{ id: "t3code-fork" }] },
+      },
+    );
+    expect(readRequest(line(client("T3code+x.y://new?u={inviteUrl}")))).toMatchObject({ ok: true });
+    const install = (url: string) => [
+      { id: "t3code", name: "T3 Code", open: "t3code://x?u={inviteUrl}", install: [{ label: "Get", url }] },
+    ];
+    expect(readRequest(line(install("https://play.google.com/store")))).toMatchObject({ ok: true });
+    for (const url of ["http://play.google.com/", "https://evil/?u={inviteUrl}", "market://details"])
+      expect(readRequest(line(install(url))), url).toMatchObject({ ok: false });
+    const many = Array.from({ length: 5 }, (_, index) => ({
+      ...client("t3code://x?u={inviteUrl}")[0],
+      id: `c${index}`,
+    }));
+    expect(readRequest(line(many))).toMatchObject({ ok: false });
+    for (const open of [
+      "javascript:alert(1)//{inviteUrl}",
+      "https://example.com/add?u={inviteUrl}",
+      "intent://x#Intent;S.browser_fallback_url=https%3A%2F%2Fevil%2F%3Fu%3D{inviteUrl};end",
+      "x-safari-https://evil/?u={inviteUrl}",
+      "googlechromes://evil/?u={inviteUrl}",
+      "microsoft-edge:https://evil/?u={inviteUrl}",
+      "market://details?u={inviteUrl}",
+      "wss://evil/{inviteUrl}",
+      "1app://x/{inviteUrl}",
+      "data:text/html,{inviteUrl}",
+      "http://example.com/{inviteUrl}",
+      "t3code://connections/new",
+      "{inviteUrl}",
+      "t3code:// bad host/{inviteUrl}",
+    ])
+      expect(readRequest(line(client(open))), open).toMatchObject({ ok: false });
+  });
+
   it("keeps a grant table whole when a rule has a type that this reader does not know (K-706)", () => {
     const grant = {
       circle: {

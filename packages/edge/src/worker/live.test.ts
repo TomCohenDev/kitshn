@@ -1,3 +1,4 @@
+import { escapeHtml } from "../core/html.ts";
 import { describe, expect, it } from "vitest";
 import type { PolicyBody } from "../core/access.ts";
 import type { AccessRow } from "./access-sync.ts";
@@ -12,7 +13,6 @@ import {
   type IngressAccess,
   type LiveSite,
   wantedRecords,
-  escapeHtml,
   ingressAccess,
   liveSiteId,
   offlineReason,

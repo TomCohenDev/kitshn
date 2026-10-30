@@ -1574,6 +1574,29 @@ pre.output.log-lines {
   border: 8px solid var(--panic);
   transform: none;
 }
+/* K-720: one tab per client app and one for the link; they wrap on a narrow screen, so each stays reachable. */
+.invite-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+.invite-tabs button {
+  font: inherit;
+  font-weight: 800;
+  padding: 3px 12px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  color: var(--ink);
+  background: var(--surface);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+}
+.invite-tabs button[aria-selected="true"] {
+  background: var(--select);
+  color: var(--select-fg);
+}
 /* K-1601: the invite QR code, on a white tile with the ink border so it scans in dark mode too. */
 .qr-box {
   display: flex;

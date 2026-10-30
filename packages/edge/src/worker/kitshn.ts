@@ -119,6 +119,7 @@ import {
   organize,
   organizeSummary,
 } from "../core/organize.ts";
+import { inviteClients } from "../core/invite.ts";
 import { placeInside } from "../core/place.ts";
 import { type ServerReport, parseSiteInput, serversOf } from "../core/sites.ts";
 import {
@@ -290,6 +291,7 @@ import { commandsFor, machineBusy, providerCards, providerPushes, reachOf } from
 import {
   type LinkAudit,
   LinkAudit as LinkAuditSchema,
+  type ProviderClient,
   type ProviderCommand,
   desiredProblem,
   type ProviderKind,
@@ -499,6 +501,8 @@ interface ProviderRegistration {
   readonly name: string;
   readonly kinds: ReadonlyArray<ProviderKind>;
   readonly commands: ReadonlyArray<ProviderCommand>;
+  /** K-720: the client apps that take a device invite. */
+  readonly clients?: ReadonlyArray<ProviderClient>;
 }
 
 /** K-1704 */
@@ -3944,7 +3948,15 @@ export class Kitshn extends DurableObject<Env> {
     });
     const added = changed.filter((card) => !this.state.resources.has(card.id));
     const kept = (this.providerRegs.get(machine.id) ?? []).filter((reg) => !named.has(reg.name));
-    const regs = [...kept, ...valid.map(({ name, kinds, commands }) => ({ name, kinds, commands }))];
+    const regs = [
+      ...kept,
+      ...valid.map(({ name, kinds, commands, clients }) => ({
+        name,
+        kinds,
+        commands,
+        ...(clients ? { clients } : {}),
+      })),
+    ];
     const regsChanged = !deepEqual(
       [...(this.providerRegs.get(machine.id) ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
       [...regs].sort((a, b) => a.name.localeCompare(b.name)),
@@ -4042,6 +4054,7 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/internal/offline")
       return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
     if (path === "/internal/public-cards") return this.publicCards();
+    if (path === "/internal/invite-clients") return Response.json(this.inviteClients().shared);
     if (path === "/internal/badge") return this.badge(new URL(request.url).searchParams);
     if (path === "/internal/notify" && request.method === "POST") return this.appNotify(request);
     if (path === "/internal/import-status") return Response.json(this.importStatus());
@@ -7450,13 +7463,32 @@ export class Kitshn extends DurableObject<Env> {
     });
     this.load();
     this.broadcast();
+    const { clients, agree } = this.inviteClients();
     return Response.json({
       tokenId: token.id,
       clientId: token.client_id,
       name,
       link: `https://${this.env.KITSHN_HOST}/join/device#code=${code}`,
       expiresAt,
+      clients,
+      agree,
     });
+  }
+
+  /** K-720: the client apps that the providers of all machines declare, each with its machines (`inviteClients`). */
+  private inviteClients() {
+    const order = (id: string) => this.state.machines.get(id)?.order ?? Number.MAX_SAFE_INTEGER;
+    return inviteClients(
+      [...this.providerRegs]
+        .sort(([a], [b]) => order(a) - order(b) || a.localeCompare(b))
+        .flatMap(([machineId, regs]) =>
+          regs.map((reg) => ({
+            machine: this.state.machines.get(machineId)?.name ?? machineId,
+            provider: reg.name,
+            clients: reg.clients ?? [],
+          })),
+        ),
+    );
   }
 
   /**

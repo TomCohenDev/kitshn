@@ -93,6 +93,7 @@ export class Providers {
             kinds: request.kinds,
             commands: request.commands,
             resources: request.resources,
+            ...(request.clients ? { clients: request.clients } : {}),
           }
         : { ...old!.report, resources: changedResources(old!.report.resources, request) };
     const others = [...this.entries.values()]

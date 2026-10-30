@@ -1,6 +1,6 @@
 // K-2003: the join page of a game card, `pages.<zone>/join/<name>`. The Worker serves it after the share check.
 import type { Door } from "../core/game.ts";
-import { escapeHtml } from "./live.ts";
+import { escapeHtml } from "../core/html.ts";
 
 export interface JoinView {
   readonly game: {

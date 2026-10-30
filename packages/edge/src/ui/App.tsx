@@ -3010,81 +3010,6 @@ function CardPanel(props: {
           </a>
         </div>
       ) : null}
-      {address ? (
-        <div class="row">
-          <code>{address}</code>
-          <button
-            class="btn"
-            data-tip={`Copy https://${address} to the clipboard.`}
-            onClick={() => void navigator.clipboard.writeText(`https://${address}`)}
-          >
-            Copy address
-          </button>
-          <a
-            class="btn"
-            href={`https://${address}`}
-            target="_blank"
-            rel="noreferrer"
-            data-tip="Open the address in a new tab."
-          >
-            Open
-          </a>
-        </div>
-      ) : null}
-      {props.peek && peekable(resource) ? (
-        <PeekRow key={resource.id} resource={resource} state={state} zone={props.zone} />
-      ) : null}
-      {address &&
-      (resource.kind === "page" ||
-        resource.kind === "file" ||
-        (resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo)) ? (
-        <AddressName address={address} onSave={(name) => props.onSetAddress(resource, name)} />
-      ) : null}
-      {address && props.repo ? (
-        <p class="help">Its repo sets this address: change it in kitshn.config.ts.</p>
-      ) : null}
-      {props.pullRequest !== null && props.repo ? (
-        <div class="row">
-          <a
-            class="btn"
-            href={`https://github.com/${props.repo.name}/pull/${props.pullRequest}`}
-            target="_blank"
-            rel="noreferrer"
-            data-tip={`Open pull request #${props.pullRequest} of ${props.repo.name} on GitHub. This preview goes when it closes.`}
-          >
-            Pull request #{props.pullRequest} ↗
-          </a>
-        </div>
-      ) : null}
-      {resource.provider ? (
-        <ProviderFacts
-          resource={resource}
-          card={resource.provider}
-          values={props.cardSettings}
-          commands={
-            props.providerCommands[resource.machine ?? ""]?.find(
-              (item) => item.name === resource.provider?.name,
-            )?.commands ?? []
-          }
-          onSetting={(key, value) => props.onSetCardSetting(resource, key, value)}
-          onRow={
-            props.providerMachine
-              ? (command, row) =>
-                  props.onRunProviderCommand(
-                    props.providerMachine!,
-                    {
-                      kind: "provider",
-                      provider: resource.provider!.name,
-                      command: command.id,
-                      resource: resource.id,
-                      row,
-                    },
-                    command.confirm ? `${command.title} for this row of ${resource.name}?` : null,
-                  )
-              : null
-          }
-        />
-      ) : null}
       {resource.kind === "repo.group" ? (
         <RepoGroupPanel group={resource} repos={props.repos} onToast={props.onToast} />
       ) : null}
@@ -3445,6 +3370,35 @@ function CardPanel(props: {
         >
           Restore previous version
         </button>
+      ) : null}
+      {resource.provider ? (
+        <ProviderFacts
+          resource={resource}
+          card={resource.provider}
+          values={props.cardSettings}
+          commands={
+            props.providerCommands[resource.machine ?? ""]?.find(
+              (item) => item.name === resource.provider?.name,
+            )?.commands ?? []
+          }
+          onSetting={(key, value) => props.onSetCardSetting(resource, key, value)}
+          onRow={
+            props.providerMachine
+              ? (command, row) =>
+                  props.onRunProviderCommand(
+                    props.providerMachine!,
+                    {
+                      kind: "provider",
+                      provider: resource.provider!.name,
+                      command: command.id,
+                      resource: resource.id,
+                      row,
+                    },
+                    command.confirm ? `${command.title} for this row of ${resource.name}?` : null,
+                  )
+              : null
+          }
+        />
       ) : null}
       {resource.kind.startsWith("site.") ? (
         <Redirects

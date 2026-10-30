@@ -179,6 +179,7 @@ import {
   type Door,
   DOOR_LIMITS,
   doorAddress,
+  doorFamily,
   doorMachine,
   doorPlan,
   gameError,
@@ -13582,6 +13583,7 @@ export class Kitshn extends DurableObject<Env> {
       doorHours: game.doorMs / HOUR_MS,
       reachable: row.v4 !== null || row.v6 !== null,
       machineOnline: status ? this.machineView(status).online : false,
+      needsIpv4: game.relay !== null,
     };
     // K-2004: a game in Everyone has no doors, so its page needs no login.
     if (openToAll(this.state, resource, now))
@@ -13624,6 +13626,10 @@ export class Kitshn extends DurableObject<Env> {
       const addresses = "error" in seen ? [] : [...new Set([seen.address, ...found])];
       error =
         ("error" in seen ? `kitshn sees your address as ${visitor.ip ?? "none"}: ${seen.error}` : null) ??
+        // K-2004: a relay listens on IPv4 only, so an IPv6-only open would open nothing that works.
+        (game.relay !== null && !addresses.some((address) => doorFamily(address) === 4)
+          ? "This server needs IPv4, and no IPv4 address answered."
+          : null) ??
         // An offline machine gets the plan when it connects; an online one must hold doors now.
         (this.state.machines.has(machine) && !this.machineView(this.state.machines.get(machine)!).online
           ? null

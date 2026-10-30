@@ -10,6 +10,8 @@ export interface JoinView {
     readonly doorHours: number;
     readonly reachable: boolean;
     readonly machineOnline: boolean;
+    /** K-2004: a relayed card listens on IPv4 only, so its doors need an IPv4 address. */
+    readonly needsIpv4: boolean;
   };
   /** K-2004: the card has an active share in Everyone, so its ports are open to every address and it has no doors. */
   readonly openToAll: boolean;
@@ -92,7 +94,7 @@ const item = (text, button) => { const li = document.createElement("li"); li.tex
 const family = (address) => (address && address.includes(":") ? "v6" : "v4");
 async function probe(url) {
   const stop = new AbortController();
-  setTimeout(() => stop.abort(), 3000);
+  setTimeout(() => stop.abort(), 8000);
   try { const answer = await fetch(url, { signal: stop.signal, cache: "no-store" }); return answer.ok ? (await answer.text()).trim() : null; }
   catch { return null; }
 }
@@ -112,15 +114,24 @@ for (const door of data.doors) $("doors").append(item(door.address + ", until " 
 if (data.doors.length === 0) $("doors").append(item("None"));
 $("end").hidden = data.doors.length === 0;
 $("end").onclick = () => send({ action: "close" });
-(async () => {
+// K-2004: all lookups at once, 8 s each; the open button waits for them, and "Try again" asks the missing ones again.
+async function check() {
+  $("open-button").disabled = true;
+  $("probe-note").replaceChildren("Checking your addresses…");
   const answers = await Promise.all(data.probes.map(probe));
   const addresses = [...new Set([data.seen, ...answers].filter(Boolean))];
   $("addresses").replaceChildren(...addresses.map((address) => item(address + (address === data.seen ? " (kitshn sees this one)" : ""))));
   const missing = ["v4", "v6"].filter((name) => !addresses.some((address) => family(address) === name)).map((name) => (name === "v4" ? "IPv4" : "IPv6"));
-  $("probe-note").textContent = missing.length === 0 ? "" : "No " + missing.join(" or ") + " address answered, so kitshn opens only the address" + (addresses.length > 1 ? "es" : "") + " above.";
-  $("open-button").disabled = addresses.length === 0;
+  const again = document.createElement("button");
+  again.className = "quiet"; again.textContent = "Try again"; again.onclick = () => void check();
+  const noIpv4 = data.game.needsIpv4 && missing.includes("IPv4");
+  if (noIpv4) $("probe-note").replaceChildren("This server needs IPv4, and no IPv4 address answered. ", again);
+  else if (missing.length > 0) $("probe-note").replaceChildren("No " + missing.join(" or ") + " address answered, so kitshn opens only the address" + (addresses.length > 1 ? "es" : "") + " above. ", again);
+  else $("probe-note").replaceChildren();
+  $("open-button").disabled = addresses.length === 0 || noIpv4;
   $("open-button").onclick = () => send({ action: "open", addresses });
-})();
+}
+void check();
 </script></body></html>`
 }`;
 }

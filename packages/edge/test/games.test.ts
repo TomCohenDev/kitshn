@@ -260,6 +260,22 @@ it("makes the A and SRV records of a game in one run (K-2007)", async () => {
   });
 });
 
+it("opens nothing for a relayed game when no IPv4 address answered, because the relay listens on IPv4 only (K-2004)", async () => {
+  stubAccessCerts();
+  const stub = await setup();
+  await runInDurableObject(stub, (_, state) => {
+    state.storage.sql.exec("UPDATE games SET relay_id = 'relay1' WHERE card_id = 'game1'");
+  });
+  const opened = await game(stub, {
+    name: "mc",
+    action: "open",
+    visitor: visitor("friend@example.com", "2001:db8:1:2::5"),
+    addresses: ["2001:db8:1:2::6"],
+  });
+  expect(opened.error).toMatch(/needs IPv4/);
+  expect(opened.doors).toEqual([]);
+});
+
 it("closes every door of the person on the card with End now (K-2004)", async () => {
   stubAccessCerts();
   const stub = await setup();

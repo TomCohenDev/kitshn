@@ -23,12 +23,22 @@ if ($env:KITSHN_DAEMON) {
   $packed = Join-Path $bin $file
   Write-Host "Downloading the kitshn daemon of release $version"
   Invoke-WebRequest "$base/$file" -OutFile $packed -UseBasicParsing
-  $sums = (Invoke-WebRequest "$base/SHA256SUMS" -UseBasicParsing).Content
-  $expected = ($sums -split "`n" | ForEach-Object { $parts = $_.Trim() -split '\s+\*?'; if ($parts[1] -eq $file) { $parts[0] } } | Select-Object -First 1)
+  # GitHub serves SHA256SUMS as application/octet-stream, so .Content would be bytes, not text, in PowerShell 5.1
+  # and 7. The file is read as UTF-8 text instead; Trim drops the CR of a CRLF line.
+  $sumsFile = Join-Path $bin 'SHA256SUMS'
+  Invoke-WebRequest "$base/SHA256SUMS" -OutFile $sumsFile -UseBasicParsing
+  $sums = [IO.File]::ReadAllText($sumsFile, [Text.Encoding]::UTF8)
+  Remove-Item $sumsFile -Force
+  $expected = $null
+  foreach ($line in $sums.Split("`n")) {
+    $parts = $line.Trim() -split '\s+\*?'
+    if ($parts.Count -eq 2 -and $parts[1] -eq $file) { $expected = $parts[0].ToLower(); break }
+  }
   $actual = (Get-FileHash $packed -Algorithm SHA256).Hash.ToLower()
-  if (-not $expected -or $expected -ne $actual) {
+  if ($expected -ne $actual) {
     Remove-Item $packed -Force
-    throw "kitshn: the daemon does not match the SHA256SUMS of release $version."
+    $named = if ($expected) { $expected } else { 'no line for this file' }
+    throw "kitshn: $file of release $version has the SHA-256 $actual, but its SHA256SUMS says $named."
   }
   $in = [IO.File]::OpenRead($packed)
   $out = [IO.File]::Create($next)

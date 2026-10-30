@@ -23,7 +23,12 @@ interface Entry {
   readonly report: ProviderReport;
   /** The local connection that registered it; null while it is offline. */
   readonly connection: number | null;
+  /** K-704: while it has no connection: since when, and why. */
+  readonly offline?: { readonly at: number; readonly reason: string };
 }
+
+/** K-704: why a provider that `providers.json` kept has no connection after a daemon start. */
+export const NEVER_CONNECTED = "never connected since the daemon started";
 
 /**
  * What `providers.json` holds: the providers without their connections, and the last push of kitshn for each key
@@ -76,10 +81,16 @@ export class Providers {
   constructor(
     saved: Saved,
     private readonly save: (saved: Saved) => void,
-    /** K-704: the refusals changed, so the status of the machine changed. */
+    /** K-704: a refusal or a connection changed, so the status of the machine changed. */
     private readonly refusalsChanged: () => void,
+    startedAt = Date.now(),
   ) {
-    for (const report of saved.providers) this.entries.set(report.name, { report, connection: null });
+    for (const report of saved.providers)
+      this.entries.set(report.name, {
+        report: { ...report, online: false },
+        connection: null,
+        offline: { at: startedAt, reason: NEVER_CONNECTED },
+      });
     this.pushed = { ...saved.pushed };
     this.owners = new Map(Object.entries(saved.owners ?? {}));
   }
@@ -102,7 +113,14 @@ export class Providers {
     const entry = this.entries.get(provider);
     if (!entry) return `this machine has no provider ${provider}.`;
     this.owners.set(provider, uid);
-    if (entry.connection !== null) this.entries.set(provider, { ...entry, connection: null });
+    if (entry.connection !== null) {
+      this.entries.set(provider, {
+        report: { ...entry.report, online: false },
+        connection: null,
+        offline: { at: Date.now(), reason: `it moved to the user id ${uid}` },
+      });
+      this.refusalsChanged();
+    }
     this.persist();
     return null;
   }
@@ -153,6 +171,8 @@ export class Providers {
     }
     if (request.type === "register" && this.refusals.delete(request.provider)) this.refusalsChanged();
     this.entries.set(request.provider, { report, connection });
+    // K-704: a provider that comes back changes the status of the machine.
+    if (old !== undefined && old.connection === null) this.refusalsChanged();
     const bound = request.type === "register" && owner === undefined;
     if (bound) this.owners.set(request.provider, uid);
     const changed = JSON.stringify(old?.report) !== JSON.stringify(report);
@@ -201,15 +221,31 @@ export class Providers {
   }
 
   /** K-704: the providers of a closed connection go offline; their cards stay. Returns true when one did. */
-  disconnect(connection: number): boolean {
+  disconnect(connection: number, now = Date.now()): boolean {
     let changed = false;
     for (const [name, entry] of this.entries)
       if (entry.connection === connection) {
-        this.entries.set(name, { report: { ...entry.report, online: false }, connection: null });
+        this.entries.set(name, {
+          report: { ...entry.report, online: false },
+          connection: null,
+          offline: { at: now, reason: "the connection closed" },
+        });
         changed = true;
       }
-    if (changed) this.persist();
+    if (changed) {
+      this.persist();
+      this.refusalsChanged();
+    }
     return changed;
+  }
+
+  /** K-704, K-515: the registered providers without a connection now, since when and why. */
+  offline(): Array<{ readonly provider: string; readonly reason: string; readonly at: number }> {
+    return [...this.entries].flatMap(([provider, entry]) =>
+      entry.connection === null && entry.offline
+        ? [{ provider, reason: entry.offline.reason, at: entry.offline.at }]
+        : [],
+    );
   }
 
   /** The connection of an online provider, or null. */
@@ -275,7 +311,8 @@ export class Providers {
 
   private persist() {
     this.save({
-      providers: this.reports().map((report) => ({ ...report, online: false })),
+      // The saved flag says whether a connection holds the provider now; a start reads every one as offline.
+      providers: this.reports(),
       pushed: this.pushed,
       owners: Object.fromEntries(this.owners),
     });

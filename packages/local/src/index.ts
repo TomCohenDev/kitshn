@@ -234,6 +234,11 @@ export const Status = Schema.Struct({
   attesterEnv: Schema.optionalKey(Schema.Array(Schema.String)),
   /** K-704: the providers whose last registration the daemon refused, until one is accepted. */
   refusedProviders: Schema.optionalKey(Schema.Array(ProviderRefusal)),
+  /**
+   * K-704, K-515: the registered providers without a connection now: since when (`at`) and why (`reason`), such as
+   * "the connection closed" or "never connected since the daemon started".
+   */
+  offlineProviders: Schema.optionalKey(Schema.Array(ProviderRefusal)),
 });
 export type Status = typeof Status.Type;
 

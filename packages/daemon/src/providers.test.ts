@@ -1,6 +1,6 @@
 import type { ProviderReport, ProviderRequest } from "@kitshn/local";
 import { describe, expect, it } from "vitest";
-import { Providers, parseSaved } from "./providers.ts";
+import { NEVER_CONNECTED, Providers, parseSaved } from "./providers.ts";
 import { pushKey } from "@kitshn/local";
 
 const kinds = [{ id: "t3.thread", name: "thread", levels: { view: "view", use: "send" } }] as const;
@@ -28,6 +28,34 @@ function providers() {
 }
 
 describe("the providers of a machine (K-704, K-705)", () => {
+  it("saves a connected provider as online, and tells since when and why one is offline (K-704)", () => {
+    let saved: ReadonlyArray<ProviderReport> = [];
+    const registry = new Providers(
+      { providers: [], pushed: {} },
+      (value) => (saved = value.providers),
+      () => {},
+    );
+    // Only a provider that registered before counts as offline.
+    expect(registry.offline()).toEqual([]);
+    registry.apply(register([thread("a")]), 1, new Set(), 1000, true);
+    expect([saved[0]?.online, registry.offline()]).toEqual([true, []]);
+    registry.disconnect(1, 500);
+    expect([saved[0]?.online, registry.offline()]).toEqual([
+      false,
+      [{ provider: "t3", reason: "the connection closed", at: 500 }],
+    ]);
+    // After a daemon start, a kept provider is offline until it registers, and says that it never connected.
+    const restarted = new Providers(
+      { providers: saved, pushed: {} },
+      () => {},
+      () => {},
+      700,
+    );
+    expect(restarted.offline()).toEqual([{ provider: "t3", reason: NEVER_CONNECTED, at: 700 }]);
+    restarted.apply(register([thread("a")]), 2, new Set(), 1000, true);
+    expect(restarted.offline()).toEqual([]);
+  });
+
   it("binds a provider name to the user that registered it, refuses another user, and moves it with rebind (K-704)", () => {
     let saved: unknown = null;
     const registry = new Providers(
@@ -54,7 +82,8 @@ describe("the providers of a machine (K-704, K-705)", () => {
       error: /belongs to the user id 1002/,
     });
     // The new user registers the same cards: the same ids, so kitshn keeps their circles and grants.
-    expect(registry.apply(cards, 4, new Set(), 1002, false)).toEqual({ ok: true, changed: false });
+    // Only the online flag changes; the cards are the same.
+    expect(registry.apply(cards, 4, new Set(), 1002, false)).toEqual({ ok: true, changed: true });
     expect(registry.reports()[0]?.resources.map((item) => item.id)).toEqual(["a", "b"]);
     // The bind survives a restart.
     const restarted = new Providers(
@@ -158,8 +187,9 @@ describe("the providers of a machine (K-704, K-705)", () => {
   it("takes a provider offline when its connection closes, and saves it offline", () => {
     const { registry, saves } = providers();
     registry.apply(register([thread("a")]), 7, new Set(), 1000, true);
-    expect(saves.at(-1)?.[0]?.online).toBe(false);
+    expect(saves.at(-1)?.[0]?.online).toBe(true);
     expect(registry.disconnect(7)).toBe(true);
+    expect(saves.at(-1)?.[0]?.online).toBe(false);
     expect(registry.reports()[0]).toMatchObject({ name: "t3", online: false });
     expect(registry.connectionOf("t3")).toBeNull();
     expect(registry.disconnect(7)).toBe(false);

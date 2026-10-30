@@ -330,6 +330,10 @@ async function statusCommand() {
         (refusal) =>
           `refused  ${refusal.provider} since ${new Date(refusal.at).toISOString()}: ${refusal.reason}`,
       ),
+      ...(status.offlineProviders ?? []).map(
+        (offline) =>
+          `offline  ${offline.provider} since ${new Date(offline.at).toISOString()}: ${offline.reason}`,
+      ),
     ].join("\n"),
   );
 }
@@ -1820,6 +1824,7 @@ function report() {
       ...(doorState.problem === null ? {} : { doorsProblem: doorState.problem }),
       listening: [...doorState.listening],
       refusedProviders: registry().refused(),
+      offlineProviders: registry().offline(),
     },
   };
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -3034,6 +3039,7 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
         attesterEnv: attestersOf(readMachineFile()).attesters.map((attester) => attester.tokenEnv),
         server: joined.server,
         refusedProviders: registry().refused(),
+        offlineProviders: registry().offline(),
       },
     };
   }

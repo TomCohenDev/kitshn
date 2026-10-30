@@ -985,3 +985,42 @@ const statusOf = async (answer: Promise<unknown>) => {
 
 const isRecordLike = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
+
+it("opens one notification for a refused provider from a signed status, and closes it when one passes (K-704)", async () => {
+  const { stub } = await setup();
+  const status = (check: "signed" | "token", refusedProviders: Array<object>) =>
+    runInDurableObject(stub, (instance) =>
+      instance.webSocketMessage(
+        daemonSocket(check),
+        JSON.stringify({
+          type: "status",
+          status: {
+            version: "dev",
+            os: "Linux 6",
+            arch: "x64",
+            hostname: "vps",
+            tunnel: "running",
+            refusedProviders,
+          },
+        }),
+      ),
+    );
+  const notifications = () =>
+    runInDurableObject(stub, (_, state) =>
+      state.storage.sql
+        .exec<{ key: string; state: string; text: string }>(
+          "SELECT key, state, text FROM notifications WHERE source = 'provider' ORDER BY id",
+        )
+        .toArray(),
+    );
+  const refusal = { provider: "t3", reason: "Expected a value with a length of at most 64", at: 1000 };
+  await status("token", [refusal]);
+  expect(await notifications()).toEqual([]);
+  await status("signed", [refusal]);
+  await status("signed", [refusal]);
+  expect(await notifications()).toEqual([
+    { key: "vps:t3", state: "open", text: expect.stringContaining("at most 64") },
+  ]);
+  await status("signed", []);
+  expect((await notifications()).map((row) => row.state)).toEqual(["closed"]);
+});

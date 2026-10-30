@@ -192,6 +192,14 @@ export const Sample = Schema.Struct({
 });
 export type Sample = typeof Sample.Type;
 
+/** K-704: the last refused registration of one provider; `at` is when the refusal with this reason started. */
+export const ProviderRefusal = Schema.Struct({
+  provider: Schema.String,
+  reason: Schema.String,
+  at: Schema.Number,
+});
+export type ProviderRefusal = typeof ProviderRefusal.Type;
+
 export const Status = Schema.Struct({
   version: Schema.String,
   machineId: Schema.String,
@@ -204,6 +212,8 @@ export const Status = Schema.Struct({
   server: Schema.optionalKey(Schema.String),
   /** K-1752: the variables whose values the commands send with an ask, for the attesters of this machine. */
   attesterEnv: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** K-704: the providers whose last registration the daemon refused, until one is accepted. */
+  refusedProviders: Schema.optionalKey(Schema.Array(ProviderRefusal)),
 });
 export type Status = typeof Status.Type;
 

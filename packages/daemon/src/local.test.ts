@@ -34,8 +34,10 @@ async function daemon(
   const peers: Array<number | null> = [];
   const callers: Array<Caller> = [];
   const closed = Promise.withResolvers<number>();
+  const refusals: Array<{ provider: string; reason: string }> = [];
   const server = await listenLocal(path, {
     platform,
+    refused: (provider, reason) => refusals.push({ provider, reason }),
     ...(maxLineLength === undefined ? {} : { maxLineLength }),
     closed: closed.resolve,
     decide: (peer) => {
@@ -73,7 +75,7 @@ async function daemon(
     server.stop();
     if (access === "shared") rmSync(folder, { recursive: true, force: true });
   };
-  return { path, peers, callers, closed: closed.promise, [Symbol.dispose]: stop };
+  return { path, peers, callers, refusals, closed: closed.promise, [Symbol.dispose]: stop };
 }
 
 /** Sends raw lines, as a provider with a bug would, and collects the answer lines. node:net buffers a long write. */
@@ -148,12 +150,21 @@ describe("local socket (K-701, K-702)", () => {
     expect(local.callers).toEqual([]);
   });
 
-  it("answers a clear error for a bad line, with its id when it has one", async () => {
+  it("answers a clear error for a bad line, with its id when it has one, and keeps a refused register (K-704)", async () => {
     using local = await daemon(() => ({ accept: true }));
+    const badRegister = {
+      id: "9",
+      type: "register",
+      provider: "t3",
+      kinds: [],
+      commands: [],
+      resources: [{ id: "x".repeat(65), kind: "t3.thread", name: "a", status: "running" }],
+    };
     const answers = await raw(
       local.path,
-      'not json\n{"id":"7","type":"nope"}\n{"id":"8","type":"rotate-key"}\n',
-      3,
+      'not json\n{"id":"7","type":"nope"}\n{"id":"8","type":"rotate-key"}\n' +
+        `${JSON.stringify(badRegister)}\n`,
+      4,
     );
     expect(answers).toEqual(
       expect.arrayContaining([
@@ -162,6 +173,7 @@ describe("local socket (K-701, K-702)", () => {
         { id: "8", type: "error", error: "no rotate-key here" },
       ]),
     );
+    expect(local.refusals).toEqual([{ provider: "t3", reason: expect.stringMatching(/at most 64/) }]);
   });
 
   it("refuses to start next to a daemon that listens, and ends a connection with a line that is too long", async () => {

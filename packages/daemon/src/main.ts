@@ -322,6 +322,10 @@ async function statusCommand() {
       `key      ${status.fingerprint ?? "none (kitshn rekey <code>)"}`,
       `kitshn   ${status.connection}`,
       `tunnel   ${status.tunnel}`,
+      ...(status.refusedProviders ?? []).map(
+        (refusal) =>
+          `refused  ${refusal.provider} since ${new Date(refusal.at).toISOString()}: ${refusal.reason}`,
+      ),
     ].join("\n"),
   );
 }
@@ -1773,6 +1777,7 @@ function report() {
       publicAddresses: publicAddresses(),
       ...(doorState.problem === null ? {} : { doorsProblem: doorState.problem }),
       listening: [...doorState.listening],
+      refusedProviders: registry().refused(),
     },
   };
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -2649,6 +2654,7 @@ async function runCommand() {
     handle: answerLocal,
     log,
     closed: providerClosed,
+    refused: (provider: string, reason: string) => registry().refuse(provider, reason),
   };
   const local = await listenLocal(paths.socket, { ...socketOptions, access: "private" });
   process.on("exit", local.stop);
@@ -2765,12 +2771,16 @@ function loadProviders(): Providers {
   }
   const { saved, problem } = parseSaved(value);
   if (problem) log(`${providersFile()} is broken, so the daemon starts with no providers: ${problem}`);
-  return new Providers(saved, (next) => {
-    mkdirSync(paths.data, { recursive: true });
-    const temporary = `${providersFile()}.${process.pid}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(next)}\n`, { mode: 0o600 });
-    renameSync(temporary, providersFile());
-  });
+  return new Providers(
+    saved,
+    (next) => {
+      mkdirSync(paths.data, { recursive: true });
+      const temporary = `${providersFile()}.${process.pid}.tmp`;
+      writeFileSync(temporary, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+      renameSync(temporary, providersFile());
+    },
+    report,
+  );
 }
 /** K-703: the event channel of each local connection that registered a provider. */
 const providerEmitters = new Map<number, (event: Answer) => void>();
@@ -2887,6 +2897,7 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
         tunnel: tunnelState,
         attesterEnv: attestersOf(readMachineFile()).attesters.map((attester) => attester.tokenEnv),
         server: joined.server,
+        refusedProviders: registry().refused(),
       },
     };
   }

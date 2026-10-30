@@ -83,6 +83,8 @@ export interface LocalOptions {
   readonly log: (text: string) => void;
   /** K-704: a connection closed; its providers go offline. */
   readonly closed?: (connection: number) => void;
+  /** K-704: a `register` of this provider did not decode; the daemon keeps the reason until one is accepted. */
+  readonly refused?: (provider: string, reason: string) => void;
   /**
    * K-701: "private" is a folder of 0700 and a socket of 0600. "shared" is a folder of 0711 and a socket of 0666, for
    * the users in `localUsers`; the peer check is then the only guard.
@@ -214,6 +216,18 @@ export async function listenLocal(
   };
 }
 
+/** K-704: the provider name of a `register` line that does not decode, so its refusal can show; else null. */
+function registeringProvider(text: string): string | null {
+  try {
+    const value: unknown = JSON.parse(text);
+    if (typeof value !== "object" || value === null) return null;
+    const { type, provider } = value as { type?: unknown; provider?: unknown };
+    return type === "register" && typeof provider === "string" ? provider : null;
+  } catch {
+    return null;
+  }
+}
+
 /** K-701: answers one request line of a connection of `uid`. */
 async function answerLine(
   options: LocalOptions,
@@ -222,7 +236,12 @@ async function answerLine(
   text: string,
 ) {
   const read = readRequest(text);
-  if (!read.ok) return send(read.answer);
+  if (!read.ok) {
+    const provider = registeringProvider(text);
+    if (provider !== null && requestAllowed("register", uid, ownUid()))
+      options.refused?.(provider, read.answer.error);
+    return send(read.answer);
+  }
   const { request } = read;
   if (!requestAllowed(request.type, uid, ownUid())) {
     options.log(`local socket: refused ${request.type} from user id ${uid}`);

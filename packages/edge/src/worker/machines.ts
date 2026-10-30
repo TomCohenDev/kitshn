@@ -1,5 +1,6 @@
 import type { Command, Machine, MachineKey } from "../core/machine.ts";
 import type { JobView } from "../core/protocol.ts";
+import { type ProviderRefusal, PROVIDER_LIMITS, isProviderName } from "@kitshn/local";
 
 /** K-613: a job waits at most this long for its machine by default. */
 export const JOB_EXPIRY_MS = 24 * 60 * 60 * 1000;
@@ -194,4 +195,21 @@ export function rekeyDecision(
       keepCode: false,
     };
   return { kind: "store" };
+}
+
+/** K-704: the refused registrations of a daemon status, checked; a bad item is left out. */
+export function providerRefusals(raw: unknown): ReadonlyArray<ProviderRefusal> {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(
+      (item): item is ProviderRefusal =>
+        typeof item === "object" &&
+        item !== null &&
+        typeof item.provider === "string" &&
+        isProviderName(item.provider) &&
+        typeof item.reason === "string" &&
+        Number.isSafeInteger(item.at),
+    )
+    .slice(0, PROVIDER_LIMITS.providers)
+    .map(({ provider, reason, at }) => ({ provider, reason: reason.slice(0, 500), at }));
 }

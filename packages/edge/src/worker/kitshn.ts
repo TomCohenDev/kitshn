@@ -292,6 +292,7 @@ import {
   type ProviderCommand,
   desiredProblem,
   type ProviderKind,
+  type ProviderRefusal,
   type ProviderReport,
   decodeProviderReports,
   pushKey,
@@ -431,6 +432,7 @@ import {
   type MachineCheck,
   answerCheck,
   pickMachine,
+  providerRefusals,
   rekeyDecision,
   socketStart,
 } from "./machines.ts";
@@ -4663,8 +4665,13 @@ export class Kitshn extends DurableObject<Env> {
             }
           : {}),
         ...gameStatus(message.status),
+        // K-1708: a connection on the token alone opens no notification.
+        ...(attachment.check === "signed"
+          ? { refusedProviders: providerRefusals(message.status.refusedProviders) }
+          : {}),
       };
       saveMachine(socket, { ...attachment, status });
+      if (status.refusedProviders) this.notifyRefusals(machine, status.refusedProviders);
       // K-627: a daemon that connects, or that runs another release now, can start or end an update.
       if (attachment.status === null || attachment.status.version !== status.version) this.autoUpdate();
       this.updateGameAddresses(machine.id, status.publicAddresses);
@@ -13338,6 +13345,34 @@ export class Kitshn extends DurableObject<Env> {
         this.setNotificationState("machine", notification.key, "closed");
         this.offlineNotified.delete(notification.key);
       }
+  }
+
+  /** K-704: one `provider` notification per refused provider of the machine; it closes when a registration passes. */
+  private notifyRefusals(machine: Machine, refusals: ReadonlyArray<ProviderRefusal>) {
+    const keys = new Set<string>();
+    for (const refusal of refusals) {
+      const key = `${machine.id}:${refusal.provider}`;
+      keys.add(key);
+      this.notify({
+        source: "provider",
+        key,
+        episode: String(refusal.at),
+        card: machine.id,
+        recipients: { _tag: "owner" },
+        level: "error",
+        priority: "normal",
+        title: `${machine.name} refused the provider ${refusal.provider}`,
+        text: `Its cards do not update while this lasts. ${refusal.reason}`,
+        actions: [{ id: "show", label: "Show machine", kind: "link", path: `#map/${machine.id}` }],
+      });
+    }
+    for (const notification of this.openNotifications.values())
+      if (
+        notification.source === "provider" &&
+        notification.key.startsWith(`${machine.id}:`) &&
+        !keys.has(notification.key)
+      )
+        this.setNotificationState("provider", notification.key, "closed");
   }
 
   /** K-1908: the address that an app sends its notifications to. */

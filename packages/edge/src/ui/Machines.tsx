@@ -99,6 +99,7 @@ function MachineStickers(props: { view: MachineView }) {
   // The snapshot holds only the asks that this viewer may answer (K-1902).
   const asks = snapshot.proposals.filter((proposal) => proposal.machineId === machine.id).length;
   const panel = `#map/${encodeURIComponent(machine.id)}`;
+  const refused = status?.refusedProviders ?? [];
   const update = props.view.update;
   // K-628: an update in progress or a failed one shows also while the daemon restarts or is offline.
   const version =
@@ -161,6 +162,18 @@ function MachineStickers(props: { view: MachineView }) {
           data-tip={`An agent on ${machine.name} waits for your answer. The Inbox shows ${asks === 1 ? "its ask" : `its ${asks} asks`}.`}
         >
           {asks} needs you
+        </a>
+      ) : null}
+      {online && refused.length > 0 ? (
+        <a
+          class="sticker"
+          href={panel}
+          onPointerDown={keepPress}
+          data-tip={refused
+            .map((refusal) => `Provider ${refusal.provider} refused: ${refusal.reason}`)
+            .join(" · ")}
+        >
+          {refused.length === 1 ? "provider refused" : `${refused.length} providers refused`}
         </a>
       ) : null}
       {queued > 0 ? (
@@ -480,6 +493,13 @@ export function MachinePanel(props: {
         ) : null}
       </div>
       <MachineKeyRow view={view} onToast={props.onToast} />
+      {view.online
+        ? (view.status?.refusedProviders ?? []).map((refusal) => (
+            <p key={refusal.provider} class="muted">
+              Provider {refusal.provider} refused for {ago(refusal.at)}: {refusal.reason}
+            </p>
+          ))
+        : null}
       {view.sample ? (
         <div class="row">
           <span class="label" data-tip="CPU: the share in use, from the latest sample of the minute.">

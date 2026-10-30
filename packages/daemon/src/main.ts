@@ -67,7 +67,7 @@ import {
   sharedFolderProblem,
 } from "./local.ts";
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
-import { localUsersOf, peerDecision, providerUsersOf } from "./peer.ts";
+import { localUsersEdit, localUsersOf, localUsersView, peerDecision, providerUsersOf } from "./peer.ts";
 import {
   chmodSync,
   copyFileSync,
@@ -710,50 +710,36 @@ async function attesterCommand(argv: ReadonlyArray<string>) {
 }
 
 /**
- * K-701: `kitshn local-users list|add|remove [user]` edits `localUsers` in `machine.json`. Only the daemon user
- * (and root) can read that file. The daemon reads the list at each new connection.
+ * K-701: `kitshn local-users list | add <user> [--provider] | remove <user>` asks the daemon, which edits its own
+ * `machine.json`, so the command works the same for root and the daemon user and never writes the caller's own file.
  */
-function localUsersCommand(argv: ReadonlyArray<string>) {
-  const provider = argv.includes("--provider");
-  const [action, who, ...rest] = argv.filter((arg) => arg !== "--provider");
-  if (rest.length > 0 || (provider && action !== "add"))
-    fail("usage: kitshn local-users list | add <user or uid> [--provider] | remove <user or uid>");
-  readConfig();
-  const machine = JSON.parse(readFileSync(paths.config, "utf8")) as Record<string, unknown>;
-  const users = localUsersOf(machine);
-  if (users === null) fail(`localUsers in ${paths.config} is not a list of user ids. Fix it by hand.`);
+async function localUsersCommand(argv: ReadonlyArray<string>) {
+  const usage = "usage: kitshn local-users list | add <user or uid> [--provider] | remove <user or uid>";
   if (platform === "win32")
     fail("Windows has no local users for kitshn yet; only the user who joined uses it (K-624).");
-  const own = ownUid();
-  const providers = providerUsersOf(machine);
+  const provider = argv.includes("--provider");
+  const [action, who, ...rest] = argv.filter((arg) => arg !== "--provider");
+  if (rest.length > 0 || (provider && action !== "add")) fail(usage);
+  if (action !== "list" && action !== "add" && action !== "remove") fail(usage);
+  if (action !== "list" && !who) fail(usage);
+  const answer = await ask({
+    id: "1",
+    type: "local-users",
+    action: action as "list" | "add" | "remove",
+    ...(action === "list" ? {} : { uid: uidOf(who!), provider }),
+  });
+  if (answer === null) fail(notRunning());
+  if (answer!.type !== "local-users") fail("the daemon gave no list of local users.");
+  const { daemonUid: own, users } = answer as Extract<Answer, { type: "local-users" }>;
+  const rows = users.map((user) => (user.provider ? `${user.uid} (provider)` : String(user.uid)));
   if (action === "list") {
-    const rows = users.map((uid) => (providers.includes(uid) ? `${uid} (provider)` : String(uid)));
     console.log([`${own} (the daemon user)`, ...rows].join("\n"));
     return;
   }
-  if ((action !== "add" && action !== "remove") || !who)
-    fail("usage: kitshn local-users list | add <user or uid> [--provider] | remove <user or uid>");
-  const uid = uidOf(who!);
-  if (uid === own) fail("the daemon user always can use the local socket.");
-  const next = action === "add" ? [...new Set([...users!, uid])] : users!.filter((user) => user !== uid);
-  // K-701: `add` sets the provider right as the flag says, so running it again changes the right.
-  const nextProviders =
-    action === "add" && provider
-      ? [...new Set([...providers, uid])]
-      : providers.filter((user) => user !== uid);
-  // Through a rename, so a stop never leaves half of the file that holds the machine token.
-  const temporary = `${paths.config}.${process.pid}.tmp`;
-  writeFileSync(
-    temporary,
-    `${JSON.stringify({ ...machine, localUsers: next, providerUsers: nextProviders }, null, 2)}\n`,
-    { mode: 0o600 },
-  );
-  renameSync(temporary, paths.config);
-  const named = next.map((user) => (nextProviders.includes(user) ? `${user} (provider)` : String(user)));
-  console.log(`Local users: ${named.length > 0 ? named.join(", ") : "none"}, and the daemon user ${own}.`);
+  console.log(`Local users: ${rows.length > 0 ? rows.join(", ") : "none"}, and the daemon user ${own}.`);
   if (action === "add")
     console.log(
-      `The user ${who} now reaches the daemon with kitshn, through ${paths.sharedSocket}${provider ? ", and may run a provider and its attester" : ""}.`,
+      `The user ${who} now reaches the daemon with kitshn${provider ? ", and may run its own provider and attester" : ""}.`,
     );
 }
 
@@ -2035,6 +2021,16 @@ function rebindProvider(request: Extract<Request, { type: "provider-rebind" }>):
     );
   const problem = registry().rebind(request.provider, request.uid);
   if (problem) throw new Error(problem);
+  // The old connection no longer answers for the provider, so its waiting commands end now, with the reason.
+  for (const [commandId, waiter] of commandWaiters)
+    if (waiter.provider === request.provider) {
+      commandWaiters.delete(commandId);
+      waiter.settle({
+        ok: false,
+        exitCode: null,
+        output: `The provider ${request.provider} moved to the user id ${request.uid}; start it as that user and run the command again.`,
+      });
+    }
   const next = withAttesterUid(machine as Record<string, unknown>, `${request.provider}.`, request.uid);
   if (next !== machine) {
     const temporary = `${paths.config}.${process.pid}.tmp`;
@@ -2045,6 +2041,29 @@ function rebindProvider(request: Extract<Request, { type: "provider-rebind" }>):
   sendProviders();
   report();
   return { id: request.id, type: "provider-rebind" };
+}
+
+/** K-701: lists or edits the local users of the daemon's own `machine.json`, for root or the daemon user. */
+function editLocalUsers(request: Extract<Request, { type: "local-users" }>): Answer {
+  const machine = readMachineFile();
+  if (typeof machine !== "object" || machine === null || Array.isArray(machine))
+    throw new Error(`the daemon cannot read ${paths.config}, so it changes no local user.`);
+  let current = machine as Record<string, unknown>;
+  if (request.action !== "list") {
+    if (request.uid === undefined) throw new Error(`local-users ${request.action} needs a user id.`);
+    const next = localUsersEdit(current, ownUid(), request.action, request.uid, request.provider === true);
+    if (typeof next === "string") throw new Error(next);
+    // Through a rename, so a stop never leaves half of the file that holds the machine token.
+    const temporary = `${paths.config}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    renameSync(temporary, paths.config);
+    log(`local users: ${request.action} ${request.uid}${request.provider ? " as a provider user" : ""}`);
+    current = next;
+  }
+  const users = localUsersView(current);
+  if (users === null)
+    throw new Error("localUsers in machine.json is not a list of user ids; fix it by hand.");
+  return { id: request.id, type: "local-users", daemonUid: ownUid(), users };
 }
 
 /** K-1751: writes one attester into `machine.json`, replacing an older entry of the same prefix. */
@@ -2063,6 +2082,7 @@ function setAttester(request: Extract<Request, { type: "attester-set" }>, caller
   // K-701: a provider user registers only the prefix of a provider name that belongs to it.
   const prefixProblem = attesterPrefixProblem(
     request.prefix,
+    request.tokenEnv,
     caller.uid,
     ownUid(),
     registry().ownedBy(caller.uid),
@@ -2734,7 +2754,12 @@ async function runCommand() {
     handle: answerLocal,
     log,
     closed: providerClosed,
-    refused: (provider: string, reason: string) => registry().refuse(provider, reason),
+    // K-704: a broken register marks the provider refused only when its own user sent it.
+    refused: (provider: string, reason: string, uid: number) => {
+      const owner = registry().ownerOf(provider);
+      if (owner === uid || (owner === undefined && (uid === own || uid === 0)))
+        registry().refuse(provider, reason);
+    },
   };
   const local = await listenLocal(paths.socket, { ...socketOptions, access: "private" });
   process.on("exit", local.stop);
@@ -3071,6 +3096,7 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
     return { id, type: "desired-set" };
   }
   if (request.type === "provider-rebind") return rebindProvider(request);
+  if (request.type === "local-users") return editLocalUsers(request);
   if (request.type === "provider-forget") {
     const problem = registry().forget(request.provider);
     if (problem) throw new Error(problem);
@@ -3085,6 +3111,7 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
       caller.connection,
       new Set(handMade.map((site) => site.name)),
       caller.uid,
+      caller.uid === ownUid() || caller.uid === 0,
     );
     if (!outcome.ok) throw new Error(outcome.error);
     if (outcome.changed) {
@@ -3190,7 +3217,7 @@ switch (command) {
     await runAgentCommand(command, args, daemonTransport);
     break;
   case "local-users":
-    localUsersCommand(args);
+    await localUsersCommand(args);
     break;
   case "version":
     console.log(args.includes("--json") ? versionJson(VERSION) : VERSION);

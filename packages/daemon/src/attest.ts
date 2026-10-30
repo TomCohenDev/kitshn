@@ -19,19 +19,28 @@ export const unregisteredT3 = (
     : null;
 
 /**
- * K-701, K-1751: why a user may not register an attester of `prefix`, or null. The daemon user and root register any
- * prefix; a provider user only `<name>.` of a provider name that belongs to it (`owned`).
+ * K-701, K-1751: why a user may not register an attester of `prefix` that reads `tokenEnv`, or null. The daemon user
+ * and root register any. A provider user registers only `<name>.` of a provider name that belongs to it (`owned`),
+ * with a variable that starts with `<NAME>_` (`T3_` for `t3.`): `kitshn agent` sends that variable from every caller
+ * to the attester, so a provider user never names a variable of another tool, such as `GITHUB_TOKEN`.
  */
 export function attesterPrefixProblem(
   prefix: string,
+  tokenEnv: string,
   uid: number,
   own: number,
   owned: ReadonlyArray<string>,
 ): string | null {
-  if (uid === own || uid === 0 || owned.some((name) => prefix === `${name}.`)) return null;
-  return owned.length > 0
-    ? `the user id ${uid} registers only the prefix of its own provider (${owned.map((name) => `${name}.`).join(", ")})`
-    : `the user id ${uid} registers only the prefix of its own provider; register the provider first`;
+  if (uid === own || uid === 0) return null;
+  const name = owned.find((item) => prefix === `${item}.`);
+  if (name === undefined)
+    return owned.length > 0
+      ? `the user id ${uid} registers only the prefix of its own provider (${owned.map((item) => `${item}.`).join(", ")})`
+      : `the user id ${uid} registers only the prefix of its own provider; register the provider first`;
+  const variable = `${name.toUpperCase().replaceAll("-", "_")}_`;
+  return tokenEnv.startsWith(variable)
+    ? null
+    : `the user id ${uid} names only a token variable that starts with ${variable}, not ${tokenEnv}`;
 }
 
 /**

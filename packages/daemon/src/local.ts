@@ -86,7 +86,7 @@ export interface LocalOptions {
   /** K-704: a connection closed; its providers go offline. */
   readonly closed?: (connection: number) => void;
   /** K-704: a `register` of this provider did not decode; the daemon keeps the reason until one is accepted. */
-  readonly refused?: (provider: string, reason: string) => void;
+  readonly refused?: (provider: string, reason: string, uid: number) => void;
   /**
    * K-701: "private" is a folder of 0700 and a socket of 0600. "shared" is a folder of 0711 and a socket of 0666, for
    * the users in `localUsers`; the peer check is then the only guard.
@@ -241,7 +241,7 @@ async function answerLine(
   if (!read.ok) {
     const provider = registeringProvider(text);
     if (provider !== null && requestAllowed("register", uid, ownUid(), options.providerUsers?.() ?? []))
-      options.refused?.(provider, read.answer.error);
+      options.refused?.(provider, read.answer.error, uid);
     return send(read.answer);
   }
   const { request } = read;

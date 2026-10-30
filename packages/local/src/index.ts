@@ -156,6 +156,14 @@ export const Request = Schema.Union([
   }),
   /** K-704: `kitshn provider forget <name>`: the daemon drops a provider that does not run, so it no longer reports it. */
   Schema.Struct({ id: Id, type: Schema.Literal("provider-forget"), provider: ProviderName }),
+  /** K-701: root or the daemon user lists or edits the local users of the daemon's own `machine.json`. */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("local-users"),
+    action: Schema.Literals(["list", "add", "remove"]),
+    uid: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+    provider: Schema.optionalKey(Schema.Boolean),
+  }),
   /** K-704: root or the daemon user moves a provider name, and the attester of its prefix, to another user. */
   Schema.Struct({
     id: Id,
@@ -331,6 +339,12 @@ export const Answer = Schema.Union([
   Schema.Struct({ id: Id, type: Schema.Literal("command-result") }),
   Schema.Struct({ id: Id, type: Schema.Literal("provider-forget") }),
   Schema.Struct({ id: Id, type: Schema.Literal("provider-rebind") }),
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("local-users"),
+    daemonUid: Schema.Int,
+    users: Schema.Array(Schema.Struct({ uid: Schema.Int, provider: Schema.Boolean })),
+  }),
   /** K-706: an event: the grant tables of every resource of the provider, sent on each change. */
   Schema.Struct({ type: Schema.Literal("grants"), provider: Schema.String, tables: GrantTables }),
   /**

@@ -113,14 +113,22 @@ export class Providers {
     connection: number,
     takenSites: ReadonlySet<string>,
     uid: number,
+    /** The daemon user or root, who may claim a provider saved before binds existed. */
+    privileged: boolean,
   ): ProviderOutcome {
     const old = this.entries.get(request.provider);
     const owner = this.owners.get(request.provider);
-    if (request.type === "register" && owner !== undefined && owner !== uid) {
-      const error = `${request.provider} belongs to the user id ${owner}, not to ${uid}; root or the daemon user moves it with kitshn providers rebind ${request.provider} --to-user <user> (K-704).`;
-      this.refuse(request.provider, error);
-      return { ok: false, error };
-    }
+    // Neither refusal marks the provider as refused: it belongs to another user, who still runs it (K-704).
+    if (request.type === "register" && owner !== undefined && owner !== uid)
+      return {
+        ok: false,
+        error: `${request.provider} belongs to the user id ${owner}, not to ${uid}; root or the daemon user moves it with kitshn providers rebind ${request.provider} --to-user <user> (K-704).`,
+      };
+    if (request.type === "register" && owner === undefined && old !== undefined && !privileged)
+      return {
+        ok: false,
+        error: `${request.provider} was saved before providers had users; root or the daemon user registers it or moves it with kitshn providers rebind ${request.provider} --to-user <user> (K-704).`,
+      };
     if (request.type !== "register" && old?.connection !== connection)
       return { ok: false, error: `register ${request.provider} on this connection first (K-704).` };
     const report: ProviderReport =

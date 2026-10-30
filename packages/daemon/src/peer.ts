@@ -75,6 +75,8 @@ const REQUEST_SENDERS: Record<Request["type"], "local-users" | "providers" | "da
   audit: "providers",
   "provider-forget": "daemon-user-or-root",
   "provider-rebind": "daemon-user-or-root",
+  // K-701: the daemon edits its own `machine.json`, whoever runs the command.
+  "local-users": "daemon-user-or-root",
   // K-1612, K-605: a local user cancels the machine's own queued jobs and reads its samples, as with `ask`.
   "job-cancel": "local-users",
   samples: "local-users",
@@ -140,4 +142,39 @@ export function providerUsersOf(machine: unknown): ReadonlyArray<number> {
   } catch {
     return [];
   }
+}
+
+/** K-701: the local users of `machine.json`, each with its provider right. */
+export function localUsersView(
+  machine: unknown,
+): Array<{ readonly uid: number; readonly provider: boolean }> | null {
+  const users = localUsersOf(machine);
+  if (users === null) return null;
+  const providers = providerUsersOf(machine);
+  return users.map((uid) => ({ uid, provider: providers.includes(uid) }));
+}
+
+/**
+ * K-701: `machine.json` after `kitshn local-users add|remove`, or why not. `add` sets the provider right as `provider`
+ * says, so a second `add` changes it; `remove` takes both away.
+ */
+export function localUsersEdit(
+  machine: Record<string, unknown>,
+  own: number,
+  action: "add" | "remove",
+  uid: number,
+  provider: boolean,
+): Record<string, unknown> | string {
+  const users = localUsersOf(machine);
+  if (users === null) return "localUsers in machine.json is not a list of user ids; fix it by hand";
+  if (uid === own) return "the daemon user always can use the local socket";
+  const providers = providerUsersOf(machine);
+  return {
+    ...machine,
+    localUsers: action === "add" ? [...new Set([...users, uid])] : users.filter((user) => user !== uid),
+    providerUsers:
+      action === "add" && provider
+        ? [...new Set([...providers, uid])]
+        : providers.filter((user) => user !== uid),
+  };
 }

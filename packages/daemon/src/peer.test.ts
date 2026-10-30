@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { localUsersOf, peerDecision, providerUsersOf, requestAllowed } from "./peer.ts";
+import {
+  localUsersEdit,
+  localUsersOf,
+  localUsersView,
+  peerDecision,
+  providerUsersOf,
+  requestAllowed,
+} from "./peer.ts";
 
 describe("peer user check (K-701)", () => {
   it("lets in the daemon user and the listed local users only", () => {
@@ -76,5 +83,28 @@ describe("local users in machine.json (K-701)", () => {
     // Only a user that `localUsers` still holds keeps the provider right; a file that cannot be read gives none.
     expect(providerUsersOf({ localUsers: [1001, 1002], providerUsers: [1002, 1003] })).toEqual([1002]);
     expect(providerUsersOf({ localUsers: ["t3"], providerUsers: [1002] })).toEqual([]);
+  });
+
+  it("edits the daemon's local users for root and the daemon user only, and sets the provider right by the flag (K-701)", () => {
+    const own = 1000;
+    for (const uid of [own, 0]) expect(requestAllowed("local-users", uid, own, [])).toBe(true);
+    // Neither a local user nor a provider user edits the list.
+    expect(requestAllowed("local-users", 1002, own, [1002])).toBe(false);
+    const machine = { machineId: "m1", localUsers: [1001] };
+    const added = localUsersEdit(machine, own, "add", 1002, true) as Record<string, unknown>;
+    expect(localUsersView(added)).toEqual([
+      { uid: 1001, provider: false },
+      { uid: 1002, provider: true },
+    ]);
+    // A second `add` without the flag takes the provider right away; `remove` takes both.
+    const narrowed = localUsersEdit(added, own, "add", 1002, false) as Record<string, unknown>;
+    expect(localUsersView(narrowed)).toContainEqual({ uid: 1002, provider: false });
+    const removed = localUsersEdit(added, own, "remove", 1002, false) as Record<string, unknown>;
+    expect([localUsersView(removed), removed["providerUsers"]]).toEqual([
+      [{ uid: 1001, provider: false }],
+      [],
+    ]);
+    expect(localUsersEdit(machine, own, "add", own, true)).toMatch(/daemon user always/);
+    expect(localUsersEdit({ localUsers: ["x"] }, own, "add", 1002, true)).toMatch(/not a list of user ids/);
   });
 });

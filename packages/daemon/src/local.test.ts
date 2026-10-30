@@ -4,7 +4,7 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Request } from "@kitshn/local";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   type Caller,
   type LocalOptions,
@@ -297,5 +297,44 @@ it("answers over the Windows pipe code, and a second daemon cannot take the name
     await askLocal(path, { id: "8", type: "status" } as never, 5000, { platform: "win32", daemonUid: -1 }),
   ).toEqual({
     kind: "not-running",
+  });
+});
+
+describe("connection keys (K-704)", () => {
+  it("never gives a connection of the private socket the key of one on the shared socket, so its close leaves a provider online", async () => {
+    // The daemon listens twice and gives each close to the same handler, which takes the providers of that key offline.
+    const keys = { private: [] as Array<number>, shared: [] as Array<number> };
+    const closed: Array<number> = [];
+    const listen = (path: string, list: Array<number>) =>
+      listenLocal(path, {
+        platform,
+        access: "private",
+        decide: () => ({ accept: true }),
+        log: () => {},
+        closed: (key) => closed.push(key),
+        handle: (request, caller) => {
+          list.push(caller.connection);
+          return Promise.resolve({ id: request.id, type: "error", error: "test" });
+        },
+      });
+    const privatePath = join(mkdtempSync(join(tmpdir(), "kitshn-keys-")), "kitshn", "kitshn.sock");
+    const sharedPath = join(mkdtempSync(join(tmpdir(), "kitshn-keys-")), "kitshn", "kitshn.sock");
+    const first = await listen(privatePath, keys.private);
+    const second = await listen(sharedPath, keys.shared);
+    try {
+      // A provider's bridge on the shared socket stays open; `kitshn status` on the private socket comes and goes.
+      const bridge = createConnection(sharedPath);
+      await new Promise<void>((resolve) => bridge.once("connect", resolve));
+      bridge.write(`${JSON.stringify(status)}\n`);
+      await new Promise((resolve) => bridge.once("data", resolve));
+      await raw(privatePath, `${JSON.stringify(status)}\n`, 1);
+      await vi.waitFor(() => expect(closed).toHaveLength(1));
+      expect(keys.private[0]).not.toBe(keys.shared[0]);
+      expect(closed).toEqual(keys.private);
+      bridge.destroy();
+    } finally {
+      first.stop();
+      second.stop();
+    }
   });
 });

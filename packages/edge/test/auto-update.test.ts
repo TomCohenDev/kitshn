@@ -154,37 +154,36 @@ const behindStatus = {
   },
 };
 
-it("queues one update for a BEHIND daemon that connects, and it waits while a provider is busy (K-627)", async () => {
-  await withDaemon(async ({ daemon, jobs }) => {
+it("lets a BEHIND daemon wait while a provider is busy, with no job that holds the rollout, and updates it once idle (K-627)", async () => {
+  await withDaemon(async ({ daemon, jobs, rollout }) => {
     await daemon({ type: "providers", providers: [busyReport(true)] });
     await daemon(behindStatus);
     await daemon(behindStatus);
-    expect(jobs().map(({ output: _output, ...job }) => job)).toEqual([
-      { state: "queued", command: JSON.stringify({ kind: "update", version: NEW }), when_idle: 1 },
-    ]);
+    // A busy machine gets no job yet, so it holds no step; its wait starts.
+    expect(jobs()).toEqual([]);
+    expect(rollout()).toMatchObject({ step: null, busySince: { [machine.id]: expect.any(Number) } });
+    // The report that ends `busy` brings the update at once.
     await daemon({ type: "providers", providers: [busyReport(false)] });
-    expect(jobs().map((job) => job.state)).toEqual(["sent"]);
+    expect(jobs().map(({ output: _output, ...job }) => job)).toEqual([
+      { state: "sent", command: JSON.stringify({ kind: "update", version: NEW }), when_idle: 1 },
+    ]);
+    expect(rollout()).toMatchObject({ step: { machineId: machine.id }, busySince: {} });
   });
 });
 
-it("drops a waiting automatic update when the owner turns the setting off (K-626)", async () => {
+it("ends the wait of a busy machine when the owner turns the setting off (K-626)", async () => {
   await withDaemon(async ({ daemon, jobs, kitshn, rollout }) => {
     await daemon({ type: "providers", providers: [busyReport(true)] });
     await daemon(behindStatus);
-    expect(rollout()).toMatchObject({ version: NEW, step: { machineId: machine.id } });
+    expect(rollout()).toMatchObject({ busySince: { [machine.id]: expect.any(Number) } });
     kitshn.commit(
       { _tag: "person", email: "owner@example.com" },
       [{ _tag: "autoUpdate", id: machine.id, before: true, after: false }],
       null,
     );
-    expect(jobs().map((job) => [job.state, job.output])).toEqual([
-      [
-        "failed",
-        "Update daemon automatically is off on this machine, so kitshn dropped this update (K-626).",
-      ],
-    ]);
-    // The machine no longer holds the rollout.
-    expect(rollout()).toMatchObject({ step: null, failed: null });
+    // The machine neither waits nor holds the rollout, and it gets no update.
+    expect(rollout()).toMatchObject({ step: null, failed: null, busySince: {} });
+    expect(jobs()).toEqual([]);
   });
 });
 

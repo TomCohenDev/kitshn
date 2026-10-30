@@ -12,6 +12,7 @@ export const NOTIFICATION_SOURCES = [
   "machine",
   "alarm",
   "update",
+  "provider",
 ] as const;
 
 /** K-1903: "run" calls the handler of the source at once; "link" opens a path of the map. */

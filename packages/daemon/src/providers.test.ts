@@ -18,8 +18,13 @@ const register = (
 
 function providers() {
   const saves: Array<ReadonlyArray<ProviderReport>> = [];
-  const registry = new Providers({ providers: [], pushed: {} }, (saved) => saves.push(saved.providers));
-  return { registry, saves };
+  let statusChanges = 0;
+  const registry = new Providers(
+    { providers: [], pushed: {} },
+    (saved) => saves.push(saved.providers),
+    () => statusChanges++,
+  );
+  return { registry, saves, statusChanges: () => statusChanges };
 }
 
 describe("the providers of a machine (K-704, K-705)", () => {
@@ -50,6 +55,21 @@ describe("the providers of a machine (K-704, K-705)", () => {
     } as const;
     expect(registry.apply(bad, 1, new Set())).toMatchObject({ ok: false, error: /unknown parent/ });
     expect(registry.reports()[0]?.resources.map((resource) => resource.id)).toEqual(["a"]);
+  });
+
+  it("keeps the last refused register for the machine status until one is accepted (K-704)", () => {
+    const { registry, statusChanges } = providers();
+    const bad = register([thread("a"), thread("a")]);
+    expect(registry.apply(bad, 1, new Set())).toMatchObject({ ok: false });
+    const [first] = registry.refused();
+    expect(first).toMatchObject({ provider: "t3", reason: "t3: two resources have the same id." });
+    // A retry with the same reason keeps the start of the refusal and sends no new status.
+    registry.apply(bad, 1, new Set());
+    expect(registry.refused()).toEqual([first]);
+    expect(statusChanges()).toBe(1);
+    expect(registry.apply(register([thread("a")]), 1, new Set())).toEqual({ ok: true, changed: true });
+    expect(registry.refused()).toEqual([]);
+    expect(statusChanges()).toBe(2);
   });
 
   it("takes a provider offline when its connection closes, and saves it offline", () => {

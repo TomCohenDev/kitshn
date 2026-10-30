@@ -8,6 +8,7 @@ import type {
   LinkAudit,
   ProviderReport,
   ProviderAccess,
+  ProviderRefusal,
   ReachedCard,
 } from "@kitshn/local";
 import type { ServerReport } from "./sites.ts";
@@ -78,6 +79,8 @@ export interface MachineStatus {
   readonly doorsProblem?: string;
   /** K-2006: the game ports (`25565/tcp`) of the last door plan that something listens on. */
   readonly listening?: ReadonlyArray<string>;
+  /** K-704: the providers whose last registration the daemon refused; only from a signed connection. */
+  readonly refusedProviders?: ReadonlyArray<ProviderRefusal>;
 }
 
 /** K-605, K-606: the latest resource sample. The Durable Object keeps it in memory only. */

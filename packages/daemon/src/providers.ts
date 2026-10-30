@@ -7,9 +7,12 @@ import {
   type ProviderAccess,
   type ReachedCard,
   type ProviderReport,
+  type ProviderRefusal,
   type ProviderRequest,
   type ProviderResource,
   decodeProviderReports,
+  PROVIDER_LIMITS,
+  isProviderName,
   pushKey,
   reportProblem,
 } from "@kitshn/local";
@@ -30,6 +33,9 @@ interface Saved {
   readonly providers: ReadonlyArray<ProviderReport>;
   readonly pushed: Readonly<Record<string, unknown>>;
 }
+
+/** A refusal reason fits the text of a notification (K-1901). */
+const MAX_REFUSAL_LENGTH = 500;
 
 const decodePushed = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
 
@@ -56,11 +62,15 @@ export type ProviderOutcome =
 
 export class Providers {
   private readonly entries = new Map<string, Entry>();
+  // Known limit: memory only, so a daemon restart forgets a refusal until the provider tries again.
+  private readonly refusals = new Map<string, ProviderRefusal>();
   private pushed: Record<string, unknown>;
 
   constructor(
     saved: Saved,
     private readonly save: (saved: Saved) => void,
+    /** K-704: the refusals changed, so the status of the machine changed. */
+    private readonly refusalsChanged: () => void,
   ) {
     for (const report of saved.providers) this.entries.set(report.name, { report, connection: null });
     this.pushed = { ...saved.pushed };
@@ -89,11 +99,36 @@ export class Providers {
       .map((entry) => entry.report)
       .filter((other) => other.name !== request.provider);
     const problem = reportProblem(report, others, takenSites, RESERVED_SITE_NAMES);
-    if (problem) return { ok: false, error: `${request.provider}: ${problem}` };
+    if (problem) {
+      const error = `${request.provider}: ${problem}`;
+      if (request.type === "register") this.refuse(request.provider, error);
+      return { ok: false, error };
+    }
+    if (request.type === "register" && this.refusals.delete(request.provider)) this.refusalsChanged();
     this.entries.set(request.provider, { report, connection });
     const changed = JSON.stringify(old?.report) !== JSON.stringify(report);
     if (changed) this.persist();
     return { ok: true, changed };
+  }
+
+  /**
+   * K-704: keeps the refusal of a registration until the next accepted one. A provider retries the same request, so
+   * `at` stays the start of the refusal with this reason.
+   */
+  refuse(provider: string, reason: string, now = Date.now()): void {
+    if (!isProviderName(provider)) return;
+    const clipped = reason.slice(0, MAX_REFUSAL_LENGTH);
+    if (this.refusals.get(provider)?.reason === clipped) return;
+    this.refusals.delete(provider);
+    this.refusals.set(provider, { provider, reason: clipped, at: now });
+    // A machine has at most 8 providers (K-704); the oldest refusal goes first.
+    for (const name of this.refusals.keys())
+      if (this.refusals.size > PROVIDER_LIMITS.providers) this.refusals.delete(name);
+    this.refusalsChanged();
+  }
+
+  refused(): Array<ProviderRefusal> {
+    return [...this.refusals.values()];
   }
 
   /** K-704: drops a provider that no connection holds, so the daemon no longer reports it; or says why not. */

@@ -85,7 +85,8 @@ An app that needs the user identity checks the `Cf-Access-Jwt-Assertion` header 
 
 Call `kitshn` on the machine where you run. kitshn knows the machine and your thread, and gives you the access that the owner gave them. You set nothing yourself.
 
-- `kitshn agent state`: the cards that you manage, with the newest deploy, backup and uptime of each, and your rights.
+- `kitshn agent state`: the cards that you manage, with the newest deploy, backup and uptime of each, and your rights. On a machine, `health` lists the health cells from and to this machine (K-631).
+- `kitshn health [--now] [--json]`: what this machine's daemon found at its last check of its providers and links (K-630).
 - `kitshn agent deploy <card> --body '{"mode":"redeploy"}'`: redeploy a card (`"build"` runs its workflow again). `kitshn agent backup <card>` backs it up now.
 - `kitshn agent organize` puts the cards that you manage in a tidy grid, each in its own circles, as one Undo (K-532). No share changes.
 - `kitshn agent job <machine> --body '{"command": ...}'` runs a job; `kitshn agent history t3.thread.id=<id>` lists what a thread asked.

@@ -2,6 +2,8 @@ import { useState } from "preact/hooks";
 import type { Command } from "../core/machine.ts";
 import type { JobView, MachineView } from "../core/protocol.ts";
 import { isRelease } from "../core/autoUpdate.ts";
+import { type HealthCell, healthCell, healthProblems } from "../core/health.ts";
+import { ProgressSticker } from "./Progress.tsx";
 import { MACHINE_TIPS, untilText } from "./actions.ts";
 import { Switch } from "./controls.tsx";
 import { callApi, useStore } from "./store.ts";
@@ -105,6 +107,7 @@ function MachineStickers(props: { view: MachineView }) {
   const panel = `#map/${encodeURIComponent(machine.id)}`;
   const refused = status?.refusedProviders ?? [];
   const offline = status?.offlineProviders ?? [];
+  const problems = healthProblems(snapshot.machines, machine.id, Date.now());
   const update = props.view.update;
   // K-628: an update in progress or a failed one shows also while the daemon restarts or is offline.
   const version =
@@ -205,6 +208,16 @@ function MachineStickers(props: { view: MachineView }) {
           {offline.length === 1
             ? `${offline[0]!.provider} offline since ${clock(offline[0]!.at)}`
             : `${offline.length} providers offline`}
+        </a>
+      ) : null}
+      {problems.length > 0 ? (
+        <a
+          class="sticker"
+          href="#machines"
+          onPointerDown={keepPress}
+          data-tip={`Health check (K-631): ${problems.join(" · ")}`}
+        >
+          {problems.length === 1 ? "1 check red" : `${problems.length} checks red`}
         </a>
       ) : null}
       {queued > 0 ? (
@@ -775,8 +788,114 @@ export function MachinePanel(props: {
   );
 }
 
+const CELL_MARK: Record<HealthCell["state"], string> = { ok: "✓", bad: "✗", unknown: "?", none: "" };
+
+/** K-631: the tooltip of one cell: what the row machine found about the column machine, and when. */
+function cellTip(from: MachineView, to: MachineView, cell: HealthCell): string {
+  const what =
+    from === to ? `The providers of ${from.machine.name}` : `${from.machine.name} → ${to.machine.name}`;
+  if (cell.state === "none") return `${what}: no link to check.`;
+  if (cell.state === "unknown")
+    return `${what}: unknown. ${from.online ? "No report in the last 25 minutes." : `${from.machine.name} is offline.`}${cell.at === null ? "" : ` Last check ${ago(cell.at)} ago.`}`;
+  const when = `Checked ${ago(cell.at)} ago.`;
+  return cell.state === "ok" ? `${what}: answers. ${when}` : `${what}: ${cell.errors.join("; ")}. ${when}`;
+}
+
+/**
+ * K-631: the health grid. Rows are the machines that check, columns the machines that they reach; the diagonal is the
+ * providers of the machine itself. A column has the number of its row, so long names fit.
+ */
+export function HealthGrid(props: {
+  machines: ReadonlyArray<MachineView>;
+  onToast: (text: string, error: boolean) => void;
+}) {
+  const { snapshot } = useStore();
+  const [checking, setChecking] = useState(false);
+  const now = Date.now();
+  const checkNow = async () => {
+    setChecking(true);
+    const result = await callApi<{
+      checking: ReadonlyArray<string>;
+      skipped: ReadonlyArray<{ machine: string; reason: string }>;
+    }>("POST", "/api/health/check");
+    setChecking(false);
+    if ("error" in result) return props.onToast(result.error, true);
+    const skipped = result.skipped.map((item) => `${item.machine} (${item.reason})`).join(", ");
+    props.onToast(
+      `${result.checking.length === 0 ? "No machine checks now." : `Checking ${result.checking.join(", ")}.`}${skipped ? ` Skipped: ${skipped}.` : ""}`,
+      result.checking.length === 0,
+    );
+  };
+  return (
+    <section class="health">
+      <div class="row">
+        <h3>Health</h3>
+        <button
+          type="button"
+          class="btn"
+          disabled={checking}
+          data-tip="Each online machine that you control checks its providers and links now. Each daemon also checks every 10 minutes (K-630)."
+          onClick={() => void checkNow()}
+        >
+          Check now
+        </button>
+      </div>
+      <p class="muted">
+        Rows check, columns answer; the circle is the machine's own providers. ✓ answers, ✗ fails, ? unknown,
+        empty: no link.
+      </p>
+      <div
+        class="health-grid"
+        role="table"
+        aria-label="Health: rows check, columns answer"
+        style={{ gridTemplateColumns: `minmax(0, max-content) repeat(${props.machines.length}, 1.75rem)` }}
+      >
+        <span role="columnheader" class="health-corner">
+          from \ to
+        </span>
+        {props.machines.map((view, index) => (
+          <span role="columnheader" class="health-head" data-tip={view.machine.name} key={view.machine.id}>
+            {index + 1}
+          </span>
+        ))}
+        {props.machines.map((from, row) => {
+          const progress = snapshot?.progress[from.machine.id];
+          return [
+            <span role="rowheader" class="health-name" key={`${from.machine.id}:name`}>
+              <span>
+                {row + 1} {from.machine.name}
+              </span>
+              {progress ? (
+                <ProgressSticker progress={progress} panel={`#map/${encodeURIComponent(from.machine.id)}`} />
+              ) : null}
+            </span>,
+            ...props.machines.map((to) => {
+              const cell = healthCell(from, to.machine.id, now);
+              return (
+                <span
+                  role="cell"
+                  class={`health-cell ${cell.state}${from === to ? " self" : ""}`}
+                  tabIndex={cell.state === "none" ? -1 : 0}
+                  data-tip={cellTip(from, to, cell)}
+                  key={`${from.machine.id}:${to.machine.id}`}
+                >
+                  {CELL_MARK[cell.state]}
+                </span>
+              );
+            }),
+          ];
+        })}
+      </div>
+    </section>
+  );
+}
+
 /** K-519: the Machines view, a table of status and health. */
-export function MachinesView(props: { machines: ReadonlyArray<MachineView>; onAdd: () => void }) {
+export function MachinesView(props: {
+  machines: ReadonlyArray<MachineView>;
+  onAdd: () => void;
+  onToast: (text: string, error: boolean) => void;
+}) {
   return (
     <div class="table-view">
       <p class="muted">
@@ -831,6 +950,7 @@ export function MachinesView(props: { machines: ReadonlyArray<MachineView>; onAd
           ) : null}
         </tbody>
       </table>
+      {props.machines.length > 0 ? <HealthGrid machines={props.machines} onToast={props.onToast} /> : null}
     </div>
   );
 }

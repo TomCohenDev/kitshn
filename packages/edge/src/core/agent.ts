@@ -197,6 +197,26 @@ export function agentMayRunOn(state: State, visitor: Visitor, machineId: string,
   );
 }
 
+/** K-718: these commands of a machine give no shell: the Worker names the release of `update`, the rest take no input. */
+const CLOSED_COMMANDS: ReadonlySet<Command["kind"]> = new Set(["restart", "update", "diagnostics"]);
+
+/**
+ * K-718: whether this sender may run this command on a machine without a person. For a closed command, an agent on a
+ * machine needs only the machine card. An agent key stays under the full limit (K-1732).
+ * Limit: the closed commands share the right "runs commands". Revisit when the right "maintains" lands.
+ */
+export function agentMayCommand(
+  state: State,
+  visitor: Visitor,
+  machineId: string,
+  kind: Command["kind"],
+  now: number,
+) {
+  return CLOSED_COMMANDS.has(kind) && machineOf(state, visitor) !== undefined
+    ? state.machines.has(machineId) && cardsControlledBy(state, visitor, now).has(machineId)
+    : agentMayRunOn(state, visitor, machineId, now);
+}
+
 /** K-718: the kinds that an agent key may publish. A live site serves a dev server on a machine, so never. */
 // K-1116: a page or a file that the key published itself may become public too, as an app of a repo that it allowed.
 const PUBLISHABLE: ReadonlySet<CardKind> = new Set([

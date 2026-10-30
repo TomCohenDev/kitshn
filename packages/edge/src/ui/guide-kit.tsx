@@ -60,6 +60,7 @@ export const machineView = (online: boolean, key: MachineKey | null): MachineVie
     orphanVolumes: [],
     servers: [],
     queued: 0,
+    update: null,
   };
 };
 export const KEY: MachineKey = { kind: "public", publicKey: "demo", fingerprint: "SHA256:demo", since: NOW };
@@ -195,6 +196,7 @@ export function fixtureCard(
       preview={false}
       peek={false}
       zone="example.invalid"
+      now={Date.now()}
       onMenu={noop}
       onClose={noop}
       {...extra}

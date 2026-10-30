@@ -43,7 +43,22 @@ import {
   endText,
   shareDiff,
   summarize,
+  withAutoUpdate,
 } from "../core/changes.ts";
+import {
+  type LiveStatus,
+  type Rollout,
+  type StepJob,
+  advanceRollout,
+  daemonUpdate,
+  manualStep,
+  withoutMachine,
+  isRelease,
+  nextAutoUpdate,
+  parseRollout,
+  startStep,
+  stepSent,
+} from "../core/autoUpdate.ts";
 import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
@@ -861,6 +876,8 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-1708: the last failed challenge of each machine, for the panel. Memory only (K-1302). */
   private keyFailures = new Map<string, { readonly at: number; readonly reason: string }>();
+  /** K-627: the rollout of `meta`, read once. */
+  private rolloutCache: Rollout | null = null;
 
   private meta(key: string): string | null {
     const [row] = this.sql<{ value: string }>("SELECT value FROM meta WHERE key = ?", key);
@@ -1190,6 +1207,16 @@ export class Kitshn extends DurableObject<Env> {
         if (change.after === null) this.sql("DELETE FROM card_ends WHERE id = ?", change.id);
         else
           this.sql("INSERT OR REPLACE INTO card_ends (id, ends_at) VALUES (?, ?)", change.id, change.after);
+        continue;
+      }
+      if (change._tag === "autoUpdate") {
+        const machine = this.state.machines.get(change.id);
+        if (!machine) throw new RuleError(`No machine "${change.id}" exists.`);
+        this.sql(
+          "UPDATE machines SET body = ? WHERE id = ?",
+          JSON.stringify(withAutoUpdate(machine, change.after)),
+          change.id,
+        );
         continue;
       }
       if (change._tag === "address") {
@@ -1547,6 +1574,12 @@ export class Kitshn extends DurableObject<Env> {
       );
     });
     this.state = after;
+    // K-627: Resume or the setting can let the next automatic update go.
+    // K-626: a machine whose setting goes off neither holds nor stops the rollout.
+    for (const change of changes)
+      if (change._tag === "autoUpdate" && !change.after)
+        this.saveRollout(withoutMachine(this.rollout(), change.id));
+    if (changes.some((change) => change._tag === "pause" || change._tag === "autoUpdate")) this.autoUpdate();
     this.clearAccessFailures();
     this.closeLostDoors(now);
     this.syncOpenGames(now);
@@ -1651,6 +1684,11 @@ export class Kitshn extends DurableObject<Env> {
     const store = this.accessStore();
     for (const { retryAt: _, attempts: __, ...row } of this.access.values())
       if (row.error !== null) store.put({ ...row, tried: "", error: null });
+    // K-406, K-409: a waiting Access step runs in the next alarm; its tries and episode stay.
+    for (const step of ["Access", "launcher", "launcher after Access"] as const) {
+      const failure = this.alarmSteps().get(step);
+      if (failure && failure.retryAt !== 0) this.setAlarmStep(step, { ...failure, retryAt: 0 });
+    }
   }
 
   /** K-1502, K-1506: Undo reverses the caller's own newest revision, and runs the same rules as an edit. */
@@ -3352,6 +3390,8 @@ export class Kitshn extends DurableObject<Env> {
       orphanVolumes: orphanVolumes(live?.volumes ?? [], this.state),
       servers: live?.servers ?? [],
       queued: this.queuedFor(machine, live?.status ?? null),
+      // K-628: kept between the events that change it (K-627), so a view reads no job rows.
+      update: daemonUpdate(this.rollout(), machine.id, this.env.KITSHN_VERSION),
     };
   }
 
@@ -3427,6 +3467,13 @@ export class Kitshn extends DurableObject<Env> {
       {
         teamDomain: this.env.ACCESS_TEAM_DOMAIN,
         // An application lives until the sync deletes it, so its audience stays until then, also after a give-back.
+        servedHost: (cardId) => {
+          const site = this.liveSites.get(cardId);
+          const handover = this.handoverOf(cardId);
+          return site?.state === "ok" && (handover === null || (handover.switched && !handover.returning))
+            ? site.address
+            : null;
+        },
         audiencesOf: (cardId) =>
           [...this.access.values()].flatMap((row) =>
             row.key.startsWith(`app:${cardId}:`) && row.cfId && row.aud ? [row.aud] : [],
@@ -4620,6 +4667,8 @@ export class Kitshn extends DurableObject<Env> {
         ...gameStatus(message.status),
       };
       saveMachine(socket, { ...attachment, status });
+      // K-627: a daemon that connects, or that runs another release now, can start or end an update.
+      if (attachment.status === null || attachment.status.version !== status.version) this.autoUpdate();
       this.updateGameAddresses(machine.id, status.publicAddresses);
       // K-2005: a daemon that connects gets its door plan, also an empty one: the last card may have gone while it was
       // offline for longer than a plan job waits, and only an empty plan removes its table and its boot ports.
@@ -4787,6 +4836,25 @@ export class Kitshn extends DurableObject<Env> {
           this.continueRollback(command.group, result.ok === true ? null : error);
         // K-817: a failed build gives up the DNS record that its plan made.
         if (result.ok !== true) void this.scheduleAlarm();
+      }
+      // K-628: History shows each update of a daemon, and the next automatic update can go.
+      if (job && command?.kind === "update") {
+        this.insertRevision(
+          JSON.parse(job.actor) as Actor,
+          result.ok === true
+            ? `Updated the daemon of ${machine.name} to edge-${command.version} (K-628)`
+            : `The daemon of ${machine.name} did not update to edge-${command.version}: ${
+                String(result.output ?? "")
+                  .trim()
+                  .split("\n")
+                  .at(-1)
+                  ?.slice(0, 200) ?? ""
+              } (K-628)`,
+          [],
+          null,
+        );
+        this.load();
+        this.autoUpdate();
       }
       if (job && (command?.kind === "backup" || command?.kind === "backup-restore"))
         this.backupResult(command, JSON.parse(job.actor) as Actor, result);
@@ -5248,6 +5316,7 @@ export class Kitshn extends DurableObject<Env> {
         paths: foreignPaths(apps, address),
         pathsAt: Date.now(),
         released: false,
+        returning: false,
       });
       this.putResource(withAddressInUse({ ...now.card, addresses: [address] }, false));
       this.insertRevision(caller.actor, `Took over ${address} for ${now.card.name}`, [], null);
@@ -5282,7 +5351,17 @@ export class Kitshn extends DurableObject<Env> {
           { status: 409 },
         );
       }
-      if (handover.switched)
+    } catch (error) {
+      return Response.json(
+        { error: `kitshn could not give ${site.address} back: ${String(error)}. Try again.` },
+        { status: 502 },
+      );
+    }
+    if (handover.switched) {
+      // The provider learns first that kitshn no longer serves the host, so it can start its own route again.
+      this.setHandover(id, { ...handover, returning: true });
+      this.pushGrants();
+      try {
         await api("PUT", `${this.zonePath(site.address)}/dns_records/${handover.recordId}`, {
           type: "CNAME",
           name: site.address,
@@ -5290,11 +5369,15 @@ export class Kitshn extends DurableObject<Env> {
           proxied: true,
           comment: handover.comment ?? "",
         });
-    } catch (error) {
-      return Response.json(
-        { error: `kitshn could not give ${site.address} back: ${String(error)}. Try again.` },
-        { status: 502 },
-      );
+      } catch (error) {
+        const current = this.handoverOf(id);
+        if (current) this.setHandover(id, { ...current, returning: false });
+        this.pushGrants();
+        return Response.json(
+          { error: `kitshn could not give ${site.address} back: ${String(error)}. Try again.` },
+          { status: 502 },
+        );
+      }
     }
     this.ctx.storage.transactionSync(() => {
       // The record goes back to what it served; kitshn forgets it and never deletes it.
@@ -5462,6 +5545,7 @@ export class Kitshn extends DurableObject<Env> {
         id,
       );
       this.insertRevision(actor, `Cancelled job #${id}`, [], null);
+      this.endStep(id);
     });
     this.load();
     this.broadcast();
@@ -5526,7 +5610,7 @@ export class Kitshn extends DurableObject<Env> {
     const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
     const parsed = parseCommand(input["command"]);
     if (typeof parsed === "string") return Response.json({ error: parsed }, { status: 400 });
-    if (parsed.kind === "update" && !/^[0-9a-f]{12}$/.test(this.env.KITSHN_VERSION)) {
+    if (parsed.kind === "update" && !isRelease(this.env.KITSHN_VERSION)) {
       return Response.json(
         {
           error: `This kitshn runs the build "${this.env.KITSHN_VERSION}", which has no release to update to.`,
@@ -5598,6 +5682,19 @@ export class Kitshn extends DurableObject<Env> {
       return inserted;
     });
     if (command.kind === "shell") this.load();
+    // K-627: "Update daemon" replaces a queued automatic update of the machine, and becomes the step of a machine that
+    // holds or stopped the rollout, so its success ends that.
+    if (command.kind === "update" && machineId !== null && typeof row?.id === "number") {
+      this.sql(
+        `UPDATE jobs SET state = 'failed', output = ? WHERE machine_id = ? AND state = 'queued' AND id != ?
+         AND json_extract(command, '$.kind') = 'update' AND json_extract(visitor, '$.kitshn') = 1`,
+        "The owner sent Update daemon, so kitshn dropped this automatic update.",
+        machineId,
+        row.id,
+      );
+      this.saveRollout(manualStep(this.rollout(), machineId, row.id));
+      this.autoUpdate();
+    }
     this.deliverJobs();
     this.broadcast();
     void this.scheduleAlarm();
@@ -5626,11 +5723,37 @@ export class Kitshn extends DurableObject<Env> {
     for (const job of queued) {
       const visitor = JSON.parse(job.visitor) as Visitor & { readonly kitshn?: true };
       const queuedCommand = JSON.parse(job.command) as Command;
+      // K-627: an automatic update waits while kitshn is paused, and goes when the owner turned the setting off.
+      const automatic = visitor.kitshn === true && queuedCommand.kind === "update";
+      if (
+        automatic &&
+        job.machine_id !== null &&
+        this.state.machines.get(job.machine_id)?.autoUpdate === false
+      ) {
+        this.sql(
+          "UPDATE jobs SET state = 'failed', output = ? WHERE id = ?",
+          "Update daemon automatically is off on this machine, so kitshn dropped this update (K-626).",
+          job.id,
+        );
+        this.endStep(job.id);
+        continue;
+      }
+      if (automatic && this.state.paused) continue;
+      // K-627: a daemon that runs the release already needs no automatic update; the step ends as done.
+      const running = automatic && job.machine_id !== null ? this.liveStatus(job.machine_id) : null;
+      if (running?.version === this.env.KITSHN_VERSION) {
+        this.sql(
+          "UPDATE jobs SET state = 'done', output = ? WHERE id = ?",
+          `The daemon runs edge-${running.version} already.`,
+          job.id,
+        );
+        continue;
+      }
       // K-718: a redeploy that an agent key asked for goes out only while every check of its start still holds.
       if (visitor.kitshn && visitor.clientId !== null) {
         const reason =
           queuedCommand.kind !== "compose-redeploy"
-            ? "kitshn makes no other job for an agent key."
+            ? "kitshn makes no other job for an agent."
             : !cardsControlledBy(this.state, visitor, Date.now()).has(queuedCommand.project)
               ? "The key no longer manages the card."
               : (this.redeployRefusal(job.machine_id, queuedCommand.project) ??
@@ -5669,9 +5792,11 @@ export class Kitshn extends DurableObject<Env> {
         const status = this.machineView(machine).status;
         // The daemon sends its status just after it connects; the job waits for it.
         if (!status) continue;
+        // K-627: the row names the release that it installs, so the update state of that release finds it.
+        this.sql("UPDATE jobs SET command = ? WHERE id = ?", JSON.stringify(command), job.id);
         const fail = (output: string) =>
           this.sql("UPDATE jobs SET state = 'failed', output = ? WHERE id = ?", output, job.id);
-        if (!/^[0-9a-f]{12}$/.test(command.version)) {
+        if (!isRelease(command.version)) {
           fail(`This kitshn runs the build "${command.version}", which has no release to update to.`);
           continue;
         }
@@ -5697,16 +5822,141 @@ export class Kitshn extends DurableObject<Env> {
           : undefined;
       send(socket, { type: "job", id: job.id, command, ...(notify ? { notify } : {}) });
       this.sql("UPDATE jobs SET state = 'sent', machine_id = ? WHERE id = ?", machine.id, job.id);
+      // K-627: the rollout step follows the release that went out, and only later connections show its outcome.
+      if (queuedCommand.kind === "update" && this.rollout().step?.jobId === job.id)
+        this.saveRollout(stepSent(this.rollout(), this.env.KITSHN_VERSION, Date.now()));
       sent++;
     }
     return sent;
   }
 
-  /** K-609: the owner sets the labels and the order of a machine. */
+  /** K-627: the one rollout of daemon updates, kept in `meta` so it survives a deploy and an eviction. */
+  private rollout(): Rollout {
+    return (this.rolloutCache ??= parseRollout(this.meta("daemon_rollout")));
+  }
+
+  private saveRollout(rollout: Rollout) {
+    if (deepEqual(rollout, this.rollout())) return;
+    this.setMeta("daemon_rollout", JSON.stringify(rollout));
+    this.rolloutCache = rollout;
+  }
+
+  /** K-627: the job of the rollout step, as `advanceRollout` reads it. */
+  private stepJob(jobId: number): StepJob {
+    const [row] = this.sql<{ state: string; output: string; expires_at: number }>(
+      "SELECT state, output, expires_at FROM jobs WHERE id = ?",
+      jobId,
+    );
+    if (!row || row.state === "expired" || (row.state === "queued" && row.expires_at <= Date.now()))
+      return { state: "gone", output: "" };
+    if (row.state === "failed")
+      return { state: row.output === OFFLINE_OUTPUT ? "closed" : "failed", output: row.output };
+    if (row.state === "queued" || row.state === "sent" || row.state === "done")
+      return { state: row.state, output: row.output };
+    throw new Error(`An update job has the state ${row.state}.`);
+  }
+
+  /** The status of a machine while it is online, with the start of its connection, else null. */
+  private liveStatus(machineId: string): LiveStatus {
+    const socket = this.openSocket(machineId);
+    const attachment = socket ? attachmentOf(socket) : null;
+    return attachment?.kind === "machine" && attachment.status
+      ? { ...attachment.status, connectedAt: attachment.since }
+      : null;
+  }
+
+  /** K-627: the rollout step is over without a failure: its job was cancelled or dropped. */
+  private endStep(jobId: number) {
+    const rollout = this.rollout();
+    if (rollout.step?.jobId === jobId) this.saveRollout({ ...rollout, step: null });
+  }
+
+  /**
+   * K-627: moves the rollout on and queues the next automatic update, if one may go. K-628 keeps the notification of a
+   * failed update true. Returns whether it queued or sent a job.
+   */
+  private autoUpdate(): boolean {
+    const version = this.env.KITSHN_VERSION;
+    // Delivery first: it drops an automatic update of a machine whose setting is off, which ends that step.
+    const delivered = this.deliverJobs();
+    const stored = this.rollout();
+    // A removed machine neither holds the rollout nor stops it.
+    const before: Rollout = {
+      ...stored,
+      step: stored.step && this.state.machines.has(stored.step.machineId) ? stored.step : null,
+      failed: stored.failed && this.state.machines.has(stored.failed.machineId) ? stored.failed : null,
+    };
+    let rollout = advanceRollout(before, before.step ? this.stepJob(before.step.jobId) : null, (id) =>
+      this.liveStatus(id),
+    );
+    const next = nextAutoUpdate(
+      version,
+      this.state.paused !== null,
+      rollout,
+      [...this.state.machines.values()].map((machine) => ({
+        id: machine.id,
+        order: machine.order,
+        autoUpdate: machine.autoUpdate !== false,
+        hasKey: machine.key?.kind === "public",
+        status: this.liveStatus(machine.id),
+      })),
+    );
+    if (next !== null) {
+      const jobId = this.queueKitshnJob(
+        next,
+        { kind: "update", version },
+        { _tag: "kitshn", reason: "automatic daemon update (K-627)" },
+        Date.now() + JOB_EXPIRY_MS,
+        // K-1608: the update waits while a provider of the machine reports busy.
+        true,
+      );
+      rollout = startStep(rollout, version, next, jobId);
+    }
+    this.saveRollout(rollout);
+    const failed = rollout.version === version ? rollout.failed : null;
+    const machine = failed ? this.state.machines.get(failed.machineId) : undefined;
+    if (failed && machine)
+      this.notify({
+        source: "update",
+        key: failed.machineId,
+        episode: version,
+        card: failed.machineId,
+        recipients: { _tag: "owner" },
+        level: "error",
+        priority: "normal",
+        title: clip(`The daemon of ${machine.name} did not update`, TITLE_MAX),
+        text: `${failed.reason} kitshn updates no other daemon to edge-${version} until this one runs it. Update daemon in its panel tries again.`,
+        actions: [
+          {
+            id: "show",
+            label: "Show machine",
+            kind: "link",
+            path: `#map/${encodeURIComponent(failed.machineId)}`,
+          },
+        ],
+      });
+    const resolved = [...this.openNotifications.values()].filter(
+      (notification) => notification.source === "update" && notification.key !== failed?.machineId,
+    );
+    for (const notification of resolved) this.setNotificationState("update", notification.key, "closed");
+    return delivered + this.deliverJobs() > 0 || next !== null;
+  }
+
+  /** K-609: the owner sets the labels and the order of a machine. K-626: and "Update daemon automatically". */
   private updateMachine(caller: Caller, id: string, body: unknown) {
-    const machine = this.state.machines.get(id);
-    if (!machine) return Response.json({ error: `No machine "${id}" exists.` }, { status: 404 });
     const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+    const before = this.state.machines.get(id);
+    if (!before) return Response.json({ error: `No machine "${id}" exists.` }, { status: 404 });
+    if (input["autoUpdate"] !== undefined) {
+      if (typeof input["autoUpdate"] !== "boolean")
+        return Response.json({ error: "autoUpdate is true or false." }, { status: 400 });
+      const on = before.autoUpdate !== false;
+      if (on !== input["autoUpdate"])
+        this.commit(caller.actor, [{ _tag: "autoUpdate", id, before: on, after: input["autoUpdate"] }], null);
+    }
+    const machine = this.state.machines.get(id) ?? before;
+    if (input["labels"] === undefined && input["order"] === undefined && input["allow"] === undefined)
+      return Response.json(machine);
     const labels = input["labels"] === undefined ? machine.labels : parseLabels(input["labels"]);
     if (typeof labels === "string") return Response.json({ error: labels }, { status: 400 });
     const order = input["order"] === undefined ? machine.order : Number(input["order"]);
@@ -5783,10 +6033,13 @@ export class Kitshn extends DurableObject<Env> {
 
   /** Returns how many jobs expired. */
   private expireJobs(now: number) {
-    return this.sql(
+    const expired = this.sql(
       "UPDATE jobs SET state = 'expired' WHERE state IN ('queued', 'sent') AND expires_at <= ? RETURNING id",
       now,
     ).length;
+    // K-627: an expired step ends without a failure, and the next machine can go.
+    if (expired > 0) this.autoUpdate();
+    return expired;
   }
 
   /**
@@ -5865,20 +6118,30 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** True when a site check, a tunnel, a DNS record or an offline route waits for the alarm. */
+  /** Work for the tunnel, site check and record steps; a step that waits for its retry (K-406) has none. */
   private tunnelWork() {
     const now = Date.now();
+    const ready = (step: AlarmStep) => !this.alarmStepWaits(step, now);
     const tunnels = new Map(this.tunnelRows().map((row) => [row.machine_id, row]));
     const accessOf = this.ingressAccessOf();
-    const stale = [...this.state.machines.values()].some((machine) => {
-      const row = tunnels.get(machine.id);
-      if (row?.error && row.retry_at > now) return false;
-      return row?.applied !== JSON.stringify(tunnelConfig(this.ingressSites(machine.id), accessOf));
-    });
-    const checking = [...this.liveSites.values()].some(
-      (site) => site.state === "checking" && (this.checkRetryAt.get(site.id) ?? 0) <= Date.now(),
-    );
+    const stale =
+      ready("tunnels") &&
+      [...this.state.machines.values()].some((machine) => {
+        const row = tunnels.get(machine.id);
+        if (row?.error && row.retry_at > now) return false;
+        return row?.applied !== JSON.stringify(tunnelConfig(this.ingressSites(machine.id), accessOf));
+      });
+    const checking =
+      ready("site checks") &&
+      [...this.liveSites.values()].some(
+        (site) => site.state === "checking" && (this.checkRetryAt.get(site.id) ?? 0) <= Date.now(),
+      );
     return (
-      stale || checking || this.dnsWork().length > 0 || this.routeWork().length > 0 || this.gameDnsWork(now)
+      stale ||
+      checking ||
+      (ready("DNS") && this.dnsWork().length > 0) ||
+      (ready("routes") && this.routeWork().length > 0) ||
+      (ready("game DNS") && this.gameDnsWork(now))
     );
   }
 
@@ -6453,7 +6716,9 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1302: one alarm for the next due item. Access work, share end dates, and the daily run. */
   private async scheduleAlarm() {
     const now = Date.now();
-    let next = Math.min(this.dailyAt(), this.backupAt());
+    // K-406: the pending work of a step that waits for its retry wakes nothing; its retry time below does.
+    const waits = (step: AlarmStep) => this.alarmStepWaits(step, now);
+    let next = Math.min(waits("daily") ? Infinity : this.dailyAt(), this.backupAt());
     for (const socket of this.ctx.getWebSockets("machines")) {
       const attachment = attachmentOf(socket);
       next = Math.min(next, now + LIVENESS_CHECK_MS);
@@ -6465,29 +6730,31 @@ export class Kitshn extends DurableObject<Env> {
     const [job] = this.sql<{ expires_at: number }>(
       "SELECT MIN(expires_at) AS expires_at FROM jobs WHERE state IN ('queued', 'sent')",
     );
-    if (job?.expires_at) next = Math.min(next, Math.max(job.expires_at, now));
+    if (job?.expires_at && !waits("jobs")) next = Math.min(next, Math.max(job.expires_at, now));
     // K-1724: the next proposal that expires.
     const [proposal] = this.sql<{ expires_at: number | null }>(
       "SELECT MIN(expires_at) AS expires_at FROM proposals WHERE state = 'pending'",
     );
-    if (proposal?.expires_at) next = Math.min(next, Math.max(proposal.expires_at, now));
+    if (proposal?.expires_at && !waits("proposals"))
+      next = Math.min(next, Math.max(proposal.expires_at, now));
     // K-1623: a taken address moves its record as soon as its ingress waited long enough.
     for (const site of this.liveSites.values()) {
       const ingressAt = site.state === "handover" ? this.handoverOf(site.id)?.ingressAt : null;
-      if (typeof ingressAt === "number")
+      if (typeof ingressAt === "number" && !waits("tunnels"))
         next = Math.min(next, Math.max(ingressAt + HANDOVER_INGRESS_MS, now));
     }
     const desired = this.desired(now);
     if (
       this.env.CLOUDFLARE_API_TOKEN &&
-      (hasAccessWork(
-        desired,
-        this.access,
-        this.reachableAddresses(),
-        loginHeld(this.meta("login_held") ?? ""),
-      ) ||
-        this.launcherWork() ||
-        this.loginWork() ||
+      ((!waits("Access") &&
+        (hasAccessWork(
+          desired,
+          this.access,
+          this.reachableAddresses(),
+          loginHeld(this.meta("login_held") ?? ""),
+        ) ||
+          this.loginWork())) ||
+        (!waits("launcher") && !waits("launcher after Access") && this.launcherWork()) ||
         this.redirectWork())
     )
       next = now;
@@ -6510,7 +6777,10 @@ export class Kitshn extends DurableObject<Env> {
     // K-1124: the redirect step that waits tries again at its time; a finished step stores 0.
     const redirectRetry = Number(this.meta("redirects_retry_at") ?? 0);
     if (this.env.CLOUDFLARE_API_TOKEN && redirectRetry > now) next = Math.min(next, redirectRetry);
-    if (this.env.CLOUDFLARE_API_TOKEN && rowsWithoutAud(this.access).length > 0)
+    // K-406: a step of the alarm that threw tries again at its time.
+    for (const failure of this.alarmSteps().values())
+      if (failure.retryAt > now) next = Math.min(next, failure.retryAt);
+    if (this.env.CLOUDFLARE_API_TOKEN && !waits("audiences") && rowsWithoutAud(this.access).length > 0)
       next = Math.min(next, Math.max(this.audRetryAt, now));
     const ends = [
       ...[...this.state.shareSettings.values()].map((setting) => setting.endsAt),
@@ -6519,6 +6789,7 @@ export class Kitshn extends DurableObject<Env> {
     ];
     for (const end of ends) if (end !== null && end > now && end < next) next = end;
     if (
+      !waits("share ends") &&
       ends.some((end) => end !== null && end <= now) &&
       (this.expiredShares(now).length > 0 || this.expiredCards(now).length > 0)
     )
@@ -6529,10 +6800,10 @@ export class Kitshn extends DurableObject<Env> {
     if (this.pushQueue.length > 0) next = Math.min(next, now + 1000);
     // K-1910: the next machine that reaches 15 minutes offline, and the next hourly check of the limits.
     const offlineAt = this.nextOfflineAt(now);
-    if (offlineAt !== null) next = Math.min(next, offlineAt);
+    if (offlineAt !== null && !waits("offline")) next = Math.min(next, offlineAt);
     if (this.env.CLOUDFLARE_API_TOKEN) next = Math.min(next, Math.max(now, this.limitsCheckAt()));
     const bellEnd = this.nextBellEnd(now);
-    if (bellEnd !== null) next = Math.min(next, bellEnd);
+    if (bellEnd !== null && !waits("bell")) next = Math.min(next, bellEnd);
     // Never move a pending alarm later: frequent wake-ups would otherwise push it away for good.
     const current = await this.ctx.storage.getAlarm();
     if (current === null || current <= now || next < current) await this.ctx.storage.setAlarm(next);
@@ -7244,7 +7515,7 @@ export class Kitshn extends DurableObject<Env> {
       this.insertRevision(
         caller.actor,
         takeOver && row.state === "allowed"
-          ? `Took over deploys of ${row.name} from ${row.allowed_by_name ?? "an agent key"} (K-819)`
+          ? `Took over deploys of ${row.name} from ${row.allowed_by_name ?? "an agent"} (K-819)`
           : `${state === "allowed" ? "Allowed" : "Blocked"} deploys of ${row.name} (K-819)`,
         [],
         null,
@@ -7725,7 +7996,7 @@ export class Kitshn extends DurableObject<Env> {
     // K-819: the Compose apps of a repo that an agent key allowed run only where that key may run jobs.
     const allowedBy = this.allowingAgent(deployer.repoId);
     const agentLimit = allowedBy
-      ? ` The agent key ${allowedBy.name} allowed this repo, so it deploys only to a machine whose card, and every card on it, that key manages (K-819).`
+      ? ` The agent ${allowedBy.name} allowed this repo, so it deploys only to a machine whose card, and every card on it, that agent manages (K-819).`
       : "";
     // K-610, K-611: a new Compose app goes to the first online machine with all labels; a running one stays.
     let machineId: string | null = null;
@@ -7969,7 +8240,7 @@ export class Kitshn extends DurableObject<Env> {
         null,
       );
       return allowedBy
-        ? `The card starts in ${circle.name}, a circle of the agent key ${allowedBy.name} that allowed the repo (K-819).`
+        ? `The card starts in ${circle.name}, a circle of the agent ${allowedBy.name} that allowed the repo (K-819).`
         : `The card starts in ${circle.name} (K-807).`;
     }
     this.insertRevision(actor, `Deployed ${row.repo} ${row.environment}`, [], null);
@@ -8062,7 +8333,7 @@ export class Kitshn extends DurableObject<Env> {
     if (!mayDeployOn(this.state, allowedBy?.clientId ?? null, machine.id, Date.now()))
       return Response.json(
         {
-          error: `The agent key ${allowedBy?.name} that allowed this repo no longer manages ${machine.name} (K-819).`,
+          error: `The agent ${allowedBy?.name} that allowed this repo no longer manages ${machine.name} (K-819).`,
         },
         { status: 409 },
       );
@@ -8711,7 +8982,13 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** A job that kitshn makes itself, so it needs no member with control (K-614). Returns the job id. */
-  private queueKitshnJob(machineId: string, command: Command, actor: Actor, expiresAt: number) {
+  private queueKitshnJob(
+    machineId: string,
+    command: Command,
+    actor: Actor,
+    expiresAt: number,
+    whenIdle = false,
+  ) {
     const now = Date.now();
     if (
       command.kind === "compose" ||
@@ -8720,13 +8997,14 @@ export class Kitshn extends DurableObject<Env> {
     )
       failQueuedDowns(this.query, command.project, REPLACED);
     const [row] = this.sql<{ id: number }>(
-      `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
-       VALUES (?, '[]', ?, 'queued', ?, ?, ?, '${KITSHN_JOB}', NULL, '') RETURNING id`,
+      `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output, when_idle)
+       VALUES (?, '[]', ?, 'queued', ?, ?, ?, '${KITSHN_JOB}', NULL, '', ?) RETURNING id`,
       machineId,
       JSON.stringify(command),
       now,
       expiresAt,
       JSON.stringify(actor),
+      whenIdle ? 1 : 0,
     );
     if (!row) throw new Error("The job insert returned no id.");
     return row.id;
@@ -8907,7 +9185,7 @@ export class Kitshn extends DurableObject<Env> {
     const own = circlesOf(this.state, caller.visitor, now);
     if (own.size === 0)
       return Response.json(
-        { error: "This key is in no agent circle, so it manages nothing (K-718)." },
+        { error: "This agent is in no agent circle, so it manages nothing (K-718)." },
         { status: 403 },
       );
     const managed = cardsControlledBy(this.state, caller.visitor, now);
@@ -9160,16 +9438,13 @@ export class Kitshn extends DurableObject<Env> {
       // K-718, K-909: an agent key removes nothing, also no orphaned volume.
       const command = isRecord(body) && isRecord(body["command"]) ? body["command"] : null;
       if (command?.["kind"] === "compose-volume-remove")
-        return Response.json(
-          { error: "An agent key does not delete volumes (K-718, K-909)." },
-          { status: 403 },
-        );
+        return Response.json({ error: "An agent does not delete volumes (K-718, K-909)." }, { status: 403 });
       // Only the machines whose cards it manages; a label job could land on any machine.
       if (typeof machineId !== "string" || !agentMayRunOn(this.state, caller.visitor, machineId, Date.now()))
         return Response.json(
           {
             error:
-              "An agent key runs jobs only on a machine whose card, and every card that runs on it, it manages (K-718).",
+              "An agent runs jobs only on a machine whose card, and every card that runs on it, it manages (K-718).",
           },
           { status: 403 },
         );
@@ -9183,7 +9458,7 @@ export class Kitshn extends DurableObject<Env> {
       const sender = row ? (JSON.parse(row.visitor) as Visitor).clientId : null;
       const [job] = sender !== null && sender === caller.visitor.clientId ? this.recentJobs(1, 4000, id) : [];
       // Only its own jobs: their state, exit code and output.
-      if (!job) return Response.json({ error: `This key sent no job ${id}.` }, { status: 404 });
+      if (!job) return Response.json({ error: `This agent sent no job ${id}.` }, { status: 404 });
       return Response.json(job);
     }
     if (path.startsWith("/agent/repos/") && request.method === "POST") {
@@ -9221,14 +9496,14 @@ export class Kitshn extends DurableObject<Env> {
         return Response.json({ error: 'Send {"card": <id>, "tab", "text", "from", "to"}.' }, { status: 400 });
       if (!managed.has(card))
         return Response.json(
-          { error: `This key has no control on the card "${card}" (K-1810).` },
+          { error: `This agent has no control on the card "${card}" (K-1810).` },
           { status: 403 },
         );
       // K-1810: each key searches at most 30 times a minute, so a loop cannot keep a daemon busy.
       const wait = this.logRateWait(caller.visitor.clientId ?? "", now);
       if (wait > 0)
         return Response.json(
-          { error: `This key searched logs 30 times in the last minute; try again in ${wait} s (K-1810).` },
+          { error: `This agent searched logs 30 times in the last minute; try again in ${wait} s (K-1810).` },
           { status: 429, headers: { "retry-after": String(wait) } },
         );
       // The query schema of the map ignores the extra `card` key.
@@ -9249,7 +9524,7 @@ export class Kitshn extends DurableObject<Env> {
           { status: 400 },
         );
       if (!cardsControlledBy(this.state, caller.visitor, Date.now()).has(card))
-        return Response.json({ error: `This key has no control on the card "${card}".` }, { status: 403 });
+        return Response.json({ error: `This agent has no control on the card "${card}".` }, { status: 403 });
       const row = this.lastDone(card);
       const machine = row?.machine_id ? this.state.machines.get(row.machine_id) : undefined;
       const plan = agentDeployPlan(
@@ -9487,7 +9762,12 @@ export class Kitshn extends DurableObject<Env> {
     let edits: ReadonlyArray<Edit>;
     if (action === "publish") {
       const wantsPublic = !(isRecord(body) && body["public"] === false);
-      const to = agentUploadPlace(this.state, visitor, null, wantsPublic, now, approved);
+      // A move out of Everyone stays in an agent circle that holds the card, not in the tray.
+      const holding = circlesHolding(this.state, target);
+      const home = wantsPublic
+        ? null
+        : (agentHomeCircle(this.state, machine.clientId, now, holding)?.id ?? null);
+      const to = agentUploadPlace(this.state, visitor, home, wantsPublic, now, approved);
       if (to === null || typeof to === "string")
         return to ?? "This machine has no agent circle with control (K-718).";
       edits = [{ _tag: "place", id: target, after: to }];
@@ -9832,7 +10112,7 @@ export class Kitshn extends DurableObject<Env> {
 
   /**
    * K-1762: a token for one repo. The owner's way decides first (K-1760); then "writes code" or "reads code" on a card
-   * that covers the repo, with its mode. `permission` "auto" asks for write when the machine may write (K-1763).
+   * that covers the repo, with its mode. `permission` "auto" (kitshn gh) asks for write when the machine may write (K-1764).
    */
   private async askGitHubToken(
     machine: Machine,
@@ -9851,7 +10131,7 @@ export class Kitshn extends DurableObject<Env> {
         reason: `${owner} is "not kitshn"; the machine uses its own login (K-1760).`,
       };
     const wanted = isRecord(body) ? body["permission"] : "auto";
-    // K-1763, K-1776: git cannot say push or fetch, so "auto" asks for write when the machine may write, when an Owner
+    // K-1764, K-1776: gh cannot say whether it writes, so "auto" asks for write when the machine may write, when an Owner
     // approval of write is open, and when no code right is set at all (the Owner then approves write).
     const unset =
       codeRightMode(this.state, machine.id, "readsCode", fullName, now) === null &&
@@ -10751,8 +11031,7 @@ export class Kitshn extends DurableObject<Env> {
    */
   private async agentPublish(agent: Caller, request: Request, now: number) {
     const clientId = agent.visitor.clientId;
-    if (!clientId)
-      return Response.json({ error: "Only an agent key publishes here (K-1116)." }, { status: 403 });
+    if (!clientId) return Response.json({ error: "Only an agent publishes here (K-1116)." }, { status: 403 });
     const header = (key: string) => {
       const value = request.headers.get(key);
       try {
@@ -10970,7 +11249,7 @@ export class Kitshn extends DurableObject<Env> {
     const api = this.api();
     if (!api) return fail(503, "kitshn has no Cloudflare API token here.");
     const clientId = agent.visitor.clientId;
-    if (!clientId) return fail(403, "Only an agent key publishes a folder site (K-1123).");
+    if (!clientId) return fail(403, "Only an agent publishes a folder site (K-1123).");
     try {
       if (step === "plan") return await this.agentSitePlan(api, agent, clientId, input, now);
       const [row] = this.sql<DeployRow>(
@@ -10985,7 +11264,7 @@ export class Kitshn extends DurableObject<Env> {
           )
         : [];
       if (!row || !site || row.repo_id !== null)
-        return fail(404, "kitshn knows no such folder deploy of this key.");
+        return fail(404, "kitshn knows no such folder deploy of this agent.");
       if (row.expires_at < Date.now() || row.state !== "planned")
         return fail(410, "This deploy expired or ended. Publish the folder again.");
       if (step === "assets") return await this.deployAssets(api, row, input["manifest"]);
@@ -11369,7 +11648,7 @@ export class Kitshn extends DurableObject<Env> {
     const card = this.agentCard(agent, named, now);
     const resource = card ? this.state.resources.get(card) : undefined;
     if (!card || !resource)
-      return fail(403, `This key cannot change the card "${named}" (K-1117, K-1123, K-1127).`);
+      return fail(403, `This agent cannot change the card "${named}" (K-1117, K-1123, K-1127).`);
     const folder = this.isFolderSite(card);
     if (resource.kind !== "page" && !folder)
       return fail(
@@ -11586,11 +11865,11 @@ export class Kitshn extends DurableObject<Env> {
       id,
     );
     if (!row || row.client_id !== agent.visitor.clientId)
-      return "This key changes only the folder sites that it published (K-1123).";
+      return "This agent changes only the folder sites that it published (K-1123).";
     // A plan whose files never arrived has no card yet.
     if (!this.state.resources.has(id) || row.agent_tray === 1) return null;
     if (cardsControlledBy(this.state, agent.visitor, now).has(id)) return null;
-    return "This key no longer controls the site, so it cannot change it (K-1123).";
+    return "This agent no longer controls the site, so it cannot change it (K-1123).";
   }
 
   /**
@@ -11603,7 +11882,7 @@ export class Kitshn extends DurableObject<Env> {
     if (!resource || !mine || !resource.kind.startsWith("site."))
       return Response.json(
         {
-          error: `${agent ? "This key cannot change" : "kitshn has no site card"} "${card}" (K-718, K-1128).`,
+          error: `${agent ? "This agent cannot change" : "kitshn has no site card"} "${card}" (K-718, K-1128).`,
         },
         { status: agent ? 403 : 404 },
       );
@@ -11813,7 +12092,7 @@ export class Kitshn extends DurableObject<Env> {
       const mine = this.agentCard(caller, named, Date.now());
       if (!mine)
         return Response.json(
-          { error: `This key cannot change the address of "${named}" (K-1117, K-1120).` },
+          { error: `This agent cannot change the address of "${named}" (K-1117, K-1120).` },
           { status: 403 },
         );
       card = mine;
@@ -11872,9 +12151,9 @@ export class Kitshn extends DurableObject<Env> {
       id,
     );
     if (!row || row.added_by !== agent.visitor.clientId)
-      return "This key changes only what it published (K-1117).";
+      return "This agent changes only what it published (K-1117).";
     if (row.agent_tray === 1 || cardsControlledBy(this.state, agent.visitor, now).has(id)) return null;
-    return "This key no longer controls the card, so it cannot change it (K-1117).";
+    return "This agent no longer controls the card, so it cannot change it (K-1117).";
   }
 
   /**
@@ -12933,6 +13212,80 @@ export class Kitshn extends DurableObject<Env> {
       this.queuePush({ ...before, state, closedAt: now });
   }
 
+  /**
+   * K-406: a step of the alarm that throws logs, opens an `alarm` notification (K-1910) and waits for its retry
+   * time, and the next steps still run. Until then the step is skipped. `onError` is what a failed step counts,
+   * such as its whole budget; `skipped` is what a skipped one counts.
+   */
+  private async alarmStep<T>(
+    step: AlarmStep,
+    onError: T,
+    run: () => T | Promise<T>,
+    skipped: T = onError,
+  ): Promise<T> {
+    const failing = this.alarmSteps().get(step);
+    if (failing && failing.retryAt > Date.now()) return skipped;
+    try {
+      const result = await run();
+      if (failing) this.setAlarmStep(step, null);
+      this.setNotificationState("alarm", step, "closed");
+      return result;
+    } catch (error) {
+      const now = Date.now();
+      console.error(`kitshn alarm step "${step}" failed: ${String(error)}`);
+      const tries = (failing?.tries ?? 0) + 1;
+      const retryAt = now + alarmStepBackoff(tries);
+      this.setAlarmStep(step, { since: failing?.since ?? now, tries, retryAt });
+      const at = new Date(retryAt).toISOString().slice(11, 16);
+      this.notify({
+        source: "alarm",
+        key: step,
+        episode: String(failing?.since ?? now),
+        card: null,
+        recipients: { _tag: "owner" },
+        level: "error",
+        priority: "normal",
+        title: clip(`kitshn could not run the alarm step "${step}"`, TITLE_MAX),
+        text: clip(`${String(error)} kitshn tries again at ${at} UTC.`, TEXT_MAX),
+        actions: [],
+      });
+      return onError;
+    }
+  }
+
+  /** K-406: whether a step that failed waits for its retry time, so its pending work does not wake the alarm. */
+  private alarmStepWaits(step: AlarmStep, now: number) {
+    return (this.alarmSteps().get(step)?.retryAt ?? 0) > now;
+  }
+
+  /** K-406: the failing steps, kept in `meta` so a wake keeps their backoff and their episode (K-1910). */
+  private alarmStepsCache: Map<AlarmStep, AlarmStepFailure> | null = null;
+  private alarmSteps(): ReadonlyMap<AlarmStep, AlarmStepFailure> {
+    this.alarmStepsCache ??= new Map(
+      Object.entries(JSON.parse(this.meta("alarm_steps") ?? "{}") as Record<string, AlarmStepFailure>).filter(
+        (entry): entry is [AlarmStep, AlarmStepFailure] =>
+          (ALARM_STEPS as ReadonlyArray<string>).includes(entry[0]),
+      ),
+    );
+    return this.alarmStepsCache;
+  }
+
+  private setAlarmStep(step: AlarmStep, failure: AlarmStepFailure | null) {
+    const steps = new Map(this.alarmSteps());
+    if (failure) steps.set(step, failure);
+    else steps.delete(step);
+    this.alarmStepsCache = steps;
+    this.setMeta("alarm_steps", JSON.stringify(Object.fromEntries(steps)));
+  }
+
+  /** The open `alarm` notifications, so the maps hear of a step that failed or works again. */
+  private failedAlarmSteps() {
+    return [...this.openNotifications.values()]
+      .filter((notification) => notification.source === "alarm")
+      .map((notification) => `${notification.key}: ${notification.text}`)
+      .join("\n");
+  }
+
   /** K-1904: the sources that kitshn derives from its own state. */
   /** K-1910: limits at 80% or more of the last hourly read, and machines that stay offline 15 minutes. */
   private reconcileOwnSources(now: number) {
@@ -13528,25 +13881,37 @@ export class Kitshn extends DurableObject<Env> {
 
   override async alarm() {
     const now = Date.now();
+    const failedBefore = this.failedAlarmSteps();
     await this.finishPendingRestore().catch((error: unknown) =>
       console.error(`kitshn could not finish a restore to a time: ${String(error)}`),
     );
-    this.checkLiveness(now);
+    await this.alarmStep("liveness", undefined, () => this.checkLiveness(now));
     // The alarm runs every 2 minutes while a daemon is connected, so it tells the maps only about real changes.
-    let changed = this.expireJobs(now) > 0;
-    if (this.settleRollbacks() > 0) changed = true;
-    this.expireProposals(now);
+    let changed = (await this.alarmStep("jobs", 0, () => this.expireJobs(now))) > 0;
+    if ((await this.alarmStep("rollbacks", 0, () => this.settleRollbacks())) > 0) changed = true;
+    await this.alarmStep("proposals", undefined, () => this.expireProposals(now));
     const before = JSON.stringify(accessStates(this.desired(now), this.access));
-    this.endShares(now);
-    if (this.closeLostDoors(now)) changed = true;
-    this.syncOpenGames(now);
-    const daily = this.dailyAt() <= now;
-    if (daily) this.daily(now);
+    await this.alarmStep("share ends", undefined, () => this.endShares(now));
+    if (await this.alarmStep("doors", false, () => this.closeLostDoors(now))) changed = true;
+    await this.alarmStep("open games", undefined, () => this.syncOpenGames(now));
+    // A daily run that threw or waits for its retry is no daily run, so the compare below waits with it.
+    const daily =
+      this.dailyAt() <= now &&
+      (await this.alarmStep("daily", false, () => {
+        this.daily(now);
+        return true;
+      }));
     // K-1126: the uptime fetches count against the 40 calls of this run (K-406). The daily run spends 40 already,
     // so it fetches nothing and keeps 10 subrequests spare.
-    const uptime = await this.checkUptime(now, daily ? 0 : UPTIME_FETCHES_PER_RUN);
+    const uptimeBudget = daily ? 0 : UPTIME_FETCHES_PER_RUN;
+    const uptime = await this.alarmStep(
+      "uptime",
+      { fetches: uptimeBudget, changed: false },
+      () => this.checkUptime(now, uptimeBudget),
+      { fetches: 0, changed: false },
+    );
     if (uptime.changed) changed = true;
-    if (this.bellEnded(now)) changed = true;
+    if (await this.alarmStep("bell", false, () => this.bellEnded(now))) changed = true;
     // K-1910: the use of the account once an hour, never in the daily run; the next reconcile notifies.
     if (!daily && this.env.CLOUDFLARE_API_TOKEN && this.limitsCheckAt() <= now) {
       this.limitsAtMemory = now + HOUR_MS;
@@ -13563,7 +13928,7 @@ export class Kitshn extends DurableObject<Env> {
       changed = true;
     }
     // K-1910: a machine that reached 15 minutes offline since the last run.
-    if (this.offlineChanged(now)) changed = true;
+    if (await this.alarmStep("offline", false, () => this.offlineChanged(now))) changed = true;
     // K-1817: the nightly backups run at 03:00 UTC, a quiet hour, not with the daily run at midnight.
     if (this.backupAt() <= now) {
       this.backupAtMemory = nextBackupAt(now);
@@ -13595,15 +13960,15 @@ export class Kitshn extends DurableObject<Env> {
           spent += 12;
         }
       }
-      spent += await this.fillAudiences(api, now);
+      spent += await this.alarmStep("audiences", 1, () => this.fillAudiences(api, now), 0);
       // Removals first: ingress and DNS go before an Access application does. Additions wait for the next
       // run, because ingress and DNS need the application that the Access sync makes (K-410).
-      spent += await this.refreshForeignPaths(api, now);
-      await this.syncTunnels(api, 6);
-      spent += await this.checkSites(api, 6);
-      await this.syncDns(api, 5);
-      spent += await this.syncGameDns(api, 4);
-      await this.syncRoutes(api, 5);
+      spent += await this.alarmStep("foreign paths", 1, () => this.refreshForeignPaths(api, now), 0);
+      await this.alarmStep("tunnels", undefined, () => this.syncTunnels(api, 6));
+      spent += await this.alarmStep("site checks", 6, () => this.checkSites(api, 6), 0);
+      await this.alarmStep("DNS", undefined, () => this.syncDns(api, 5));
+      spent += await this.alarmStep("game DNS", 4, () => this.syncGameDns(api, 4), 0);
+      await this.alarmStep("routes", undefined, () => this.syncRoutes(api, 5));
       // K-1124: after the tunnel and DNS steps, so an old Compose address has lost its record. The daily run spends
       // its calls on the compare; redirectWork asks for the next run at once.
       if (!daily)
@@ -13616,19 +13981,20 @@ export class Kitshn extends DurableObject<Env> {
           spent += 5;
         }
       // K-113: take an unwanted enrollment policy off the App Launcher before the sync deletes it.
-      spent += await this.syncLauncher(api, daily);
+      spent += await this.alarmStep("launcher", 3, () => this.syncLauncher(api, daily), 0);
       // K-406: at most 40 calls. `spent` counts the daily compare (12), the site checks (6), the redirect step (5),
       // the game records (4), the launcher step (3) and the path read of taken addresses (1); the tunnels, DNS records and offline routes above made at most 6 + 5 + 5, and the launcher
       // step after the sync needs 3. The login step and the sync share what is left. A policy that the sync
       // makes goes on the login applications in the next alarm, which runs at once (loginWork).
-      await this.syncAccessLocked(api, CALLS_PER_RUN - spent - 16 - 3);
+      await this.alarmStep("Access", 0, () => this.syncAccessLocked(api, CALLS_PER_RUN - spent - 16 - 3));
       // A policy that the sync just made goes on the App Launcher in the same run.
-      await this.syncLauncher(api, false);
+      await this.alarmStep("launcher after Access", 0, () => this.syncLauncher(api, false));
       // K-1623: an application that the sync made or made again changes the audiences of its provider.
-      this.pushGrants();
+      await this.alarmStep("grants", undefined, () => this.pushGrants());
 
       changed ||= daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
     }
+    if (this.failedAlarmSteps() !== failedBefore) changed = true;
     if (changed) this.broadcast();
     // K-1907, K-406: the pushes go out once, at the end, after the reconcile of broadcast queued its own.
     await this.flushPushes();
@@ -13825,6 +14191,42 @@ function rowAddresses(row: Pick<DeployRow, "address" | "addresses">): Array<stri
 
 /** A failed tunnel, DNS or route write tries again after this time. */
 const RETRY_MS = 5 * 60_000;
+
+/** K-406: the steps of the alarm that run on their own, so one that throws stops no other. */
+const ALARM_STEPS = [
+  "liveness",
+  "jobs",
+  "rollbacks",
+  "proposals",
+  "share ends",
+  "doors",
+  "open games",
+  "daily",
+  "uptime",
+  "bell",
+  "offline",
+  "audiences",
+  "foreign paths",
+  "tunnels",
+  "site checks",
+  "DNS",
+  "game DNS",
+  "routes",
+  "launcher",
+  "Access",
+  "launcher after Access",
+  "grants",
+] as const;
+type AlarmStep = (typeof ALARM_STEPS)[number];
+
+interface AlarmStepFailure {
+  readonly since: number;
+  readonly tries: number;
+  readonly retryAt: number;
+}
+
+/** K-406: 5 minutes after the first failure, then twice as long each time, at most an hour. */
+const alarmStepBackoff = (tries: number) => Math.min(RETRY_MS * 2 ** Math.max(0, tries - 1), HOUR_MS);
 /** K-1623: cloudflared takes a new ingress within seconds; a taken address moves its record a minute after. */
 const HANDOVER_INGRESS_MS = 60_000;
 /** K-705: the sticker of a provider card whose address something else serves. */
@@ -13842,6 +14244,8 @@ interface AddressHandover {
   /** The path applications of the portal on the address, as kitshn last read them, and when. */
   readonly paths: ReadonlyArray<ForeignPath>;
   readonly pathsAt: number;
+  /** A give-back runs: the host left `served` before the record moves back (K-1623). */
+  readonly returning: boolean;
   /** The record moved and the portal no longer holds the exact host, so the address stays with kitshn for good. */
   readonly released: boolean;
 }

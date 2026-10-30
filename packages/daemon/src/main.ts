@@ -46,7 +46,15 @@ import {
   dropAttested,
   withAttester,
 } from "./attest.ts";
-import { credentialReply, readCredentialInput, repoOfCredential, repoOfRemote } from "./gitCredential.ts";
+import {
+  PUSH_MARK_KEY,
+  answersMarkedPush,
+  credentialReply,
+  permissionOfCredential,
+  readCredentialInput,
+  repoOfCredential,
+  repoOfRemote,
+} from "./gitCredential.ts";
 import { composeLogs, followLogs, rangeArgs, searchLogs, withLogLimits } from "./logs.ts";
 import {
   type Caller,
@@ -96,19 +104,33 @@ import {
   uptime,
 } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { oldBinaries, oldBinaryName, swapBinary } from "./update.ts";
+import { restartSoon } from "./restart.ts";
+import {
+  UPDATE_STABLE_MS,
+  type UpdateMarker,
+  dropStep,
+  installUpdate,
+  markerPath,
+  nextBinaryName,
+  oldBinaries,
+  readMarker,
+  restorePrevious,
+  runStep,
+  writeMarker,
+} from "./update.ts";
 import { ownSid } from "./winpipe.ts";
 import {
+  type PathFacts,
   type Platform,
   RELEASES,
   WINDOWS_CLOUDFLARED,
-  WINDOWS_TASKS,
   ownUid,
   cloudflaredUrl,
   expectedDaemonUid,
   expectedHash,
   isDigits,
   localSocket,
+  otherUsersSockets,
   versionJson,
   pathsFor,
   releaseAsset,
@@ -139,6 +161,7 @@ import {
   keptPlan,
   listening,
   publicAddresses,
+  systemTool,
 } from "./doors.ts";
 import { AGENT_USAGE, type AgentTransport, runAgentCommand, timeBody } from "kitshn/agent";
 import { CliError } from "kitshn/cli-error";
@@ -313,34 +336,29 @@ async function statusCommand() {
   );
 }
 
+const pathFacts = (path: string): PathFacts | null => {
+  try {
+    const stat = lstatSync(path);
+    return { uid: stat.uid, mode: stat.mode, directory: stat.isDirectory(), socket: stat.isSocket() };
+  } catch {
+    return null;
+  }
+};
+const tmpEntries = (() => {
+  try {
+    return readdirSync("/tmp");
+  } catch {
+    return [];
+  }
+})();
+const userNameOf = (uid: number): string | null => {
+  const name = spawnSync("id", ["-nu", String(uid)], { encoding: "utf8" });
+  return name.status === 0 ? name.stdout.trim() : null;
+};
 /** K-701: where the commands find the daemon: their own socket, or the one trusted shared socket in /tmp. */
 // K-621: Windows has one pipe per user and no shared socket.
 const foundSocket =
-  platform === "win32"
-    ? paths.socket
-    : localSocket(
-        process.env,
-        paths,
-        (path) => {
-          try {
-            const stat = lstatSync(path);
-            return { uid: stat.uid, mode: stat.mode, directory: stat.isDirectory(), socket: stat.isSocket() };
-          } catch {
-            return null;
-          }
-        },
-        (() => {
-          try {
-            return readdirSync("/tmp");
-          } catch {
-            return [];
-          }
-        })(),
-        (uid) => {
-          const name = spawnSync("id", ["-nu", String(uid)], { encoding: "utf8" });
-          return name.status === 0 ? name.stdout.trim() : null;
-        },
-      );
+  platform === "win32" ? paths.socket : localSocket(process.env, paths, pathFacts, tmpEntries, userNameOf);
 const socketPath = typeof foundSocket === "string" ? foundSocket : paths.socket;
 const daemonUid = expectedDaemonUid(process.env, socketPath, ownUid());
 /** K-701: why no daemon answers. A shared folder that another user made first keeps the daemon out of it. */
@@ -355,7 +373,12 @@ function notRunning(): string {
     if (problem)
       return `${folder} belongs to another user or is not safe (${problem}), so the daemon cannot listen there. Ask root to remove it, then restart the daemon.`;
   }
-  return `the daemon is not running (no daemon listens on ${socketPath}). Start it with: kitshn service install`;
+  const others = otherUsersSockets(pathFacts, tmpEntries, userNameOf);
+  const shared =
+    others.length > 0
+      ? ` kitshn uses a shared socket only of the user kitshn, so it does not use ${others.join(", ")}.`
+      : "";
+  return `no daemon of yours runs (no daemon listens on ${socketPath}). Start it with: kitshn service install.${shared}`;
 }
 
 /**
@@ -474,7 +497,7 @@ function daemonTransport(): AgentTransport {
 }
 
 /** K-1763, K-1764: one `github-token` ask for a repo; the answer, or null when the daemon does not run. */
-async function askToken(repo: string): Promise<Answer | null> {
+async function askToken(repo: string, permission: "read" | "write" | "auto"): Promise<Answer | null> {
   if (typeof daemonUid === "string") return null;
   const outcome = await askLocal(
     socketPath,
@@ -483,7 +506,7 @@ async function askToken(repo: string): Promise<Answer | null> {
       type: "ask",
       action: "github-token",
       target: repo,
-      body: { permission: "auto" },
+      body: { permission },
       attestations: await attestationsFromEnv(),
     },
     90_000,
@@ -499,7 +522,8 @@ async function askToken(repo: string): Promise<Answer | null> {
  */
 async function gitCredentialCommand(operation: string | undefined) {
   if (operation !== "get" && operation !== "erase") return;
-  const repo = repoOfCredential(readCredentialInput(await Bun.stdin.text()));
+  const fields = readCredentialInput(await Bun.stdin.text());
+  const repo = repoOfCredential(fields);
   if (repo === null) return;
   // Git erases a credential that GitHub refused, so the daemon drops the kept token of that repo.
   if (operation === "erase") {
@@ -510,7 +534,11 @@ async function gitCredentialCommand(operation: string | undefined) {
       }).catch(() => null);
     return;
   }
-  const reply = credentialReply(await askToken(repo));
+  // No legacy fallback: a config from before the push mark asks for read on a push, and says how to fix it.
+  if (spawnSync("git", ["config", "--get", PUSH_MARK_KEY], { encoding: "utf8" }).status !== 0)
+    console.error("kitshn: run `kitshn setup-git` again; pushes need its new mark (K-1763).");
+  const permission = permissionOfCredential(fields);
+  const reply = credentialReply(await askToken(repo, permission), permission === "write");
   if (reply.stderr) console.error(reply.stderr);
   process.stdout.write(reply.stdout);
 }
@@ -540,9 +568,15 @@ function setupGitCommand() {
   git("--add", scope, ours);
   for (const helper of previous) git("--add", scope, helper);
   git("credential.https://github.com.useHttpPath", "true");
+  // Known limit: a remote with its own pushurl or a user name in its URL is not marked, so its push asks for read.
+  git(PUSH_MARK_KEY, "https://github.com/");
   console.log(
     `git asks kitshn first for github.com, then: ${previous.length > 0 ? previous.join(", ") : "nothing else"}.`,
   );
+  for (const helper of previous.filter((helper) => !answersMarkedPush(helper)))
+    console.warn(
+      `kitshn: ${helper} looks up the user name, so it does not answer a push that kitshn marks; such a push works only through kitshn or gh (K-1763).`,
+    );
 }
 
 /** K-1764: `kitshn gh <args>` runs gh with a token for the repo of --repo or of the remote origin. */
@@ -552,7 +586,7 @@ async function ghCommand(argv: ReadonlyArray<string>) {
   const repo = at >= 0 ? (argv[at + 1] ?? null) : repoOfRemote(remote);
   const env = { ...process.env };
   if (repo !== null) {
-    const answer = await askToken(repo);
+    const answer = await askToken(repo, "auto");
     if (
       answer?.type === "ask" &&
       answer.outcome === "done" &&
@@ -871,12 +905,35 @@ function pruneSamples() {
 
 /**
  * K-612, K-617: downloads the daemon of the release that kitshn names, checks it against the release's
- * SHA256SUMS, puts it in place of this binary, and exits; the service manager starts the new one.
+ * SHA256SUMS, puts it in place of this binary, and exits; the service manager starts the new one. K-629: the new
+ * one must pass a start check first, the previous one stays beside it, and the new one sends the job result once
+ * kitshn accepts it, so this returns null after a swap.
  */
-async function updateDaemon(
-  version: string,
-): Promise<{ ok: boolean; exitCode: number | null; output: string }> {
+/** K-629: an update that runs now; a second one is refused, so two never share the `.new` file. */
+let updating = false;
+
+async function updateDaemon(jobId: number, version: string): Promise<JobOutcome | null> {
   const failed = (output: string) => ({ ok: false, exitCode: null, output });
+  if (updating) return failed("Another update of this daemon runs now.");
+  // An unconfirmed update keeps the previous binary as its way back, so no other update replaces it.
+  if (updateWatch) return failed(`The update to edge-${updateWatch.marker.to} waits for its confirmation.`);
+  updating = true;
+  try {
+    const outcome = await installRelease(jobId, version, failed);
+    // After a swap the daemon restarts, so the lock stays until it exits.
+    if (outcome !== null) updating = false;
+    return outcome;
+  } catch (error) {
+    updating = false;
+    throw error;
+  }
+}
+
+async function installRelease(
+  jobId: number,
+  version: string,
+  failed: (output: string) => JobOutcome,
+): Promise<JobOutcome | null> {
   if (!/^[0-9a-f]{12}$/.test(version)) return failed(`kitshn named no valid release (${version}).`);
   // A daemon run from source has the runtime as its execPath; replacing that would break the runtime.
   if (VERSION === "dev") return failed("This daemon runs from source; update it from the repo.");
@@ -893,25 +950,170 @@ async function updateDaemon(
     if (!expected || expected !== actual)
       return failed(`${name} of edge-${version} does not match its SHA256SUMS.`);
     const bytes = gunzipSync(packed);
-    const next = `${process.execPath}.new`;
+    const next = nextBinaryName(process.execPath, platform === "win32");
     // A leftover file keeps its old mode, so start fresh and set the mode explicitly.
     rmSync(next, { force: true });
     writeFileSync(next, bytes);
     chmodSync(next, 0o755);
-    // K-620: Windows cannot replace a running .exe, but it can rename one; the next start deletes the old one.
-    if (platform === "win32")
-      await swapBinary(
-        { rename: renameSync },
-        process.execPath,
+    const refused = await installUpdate(
+      {
+        rename: renameSync,
+        copy: (from, to) => {
+          copyFileSync(from, to);
+          chmodSync(to, 0o755);
+        },
+        remove: (file) => rmSync(file, { force: true }),
+        version: (file) => {
+          const check = spawnSync(file, ["version"], {
+            encoding: "utf8",
+            timeout: 30_000,
+            windowsHide: true,
+          });
+          if (check.status === 0) return { ok: true, version: check.stdout.trim() };
+          return {
+            ok: false,
+            error: check.error
+              ? String(check.error)
+              : `exit ${check.status}, ${(check.stdout + check.stderr).trim().slice(-300)}`,
+          };
+        },
+        writeMarker: (marker) => writeMarker(paths.data, marker),
+        removeMarker: () => rmSync(markerPath(paths.data), { force: true }),
+      },
+      {
+        binary: process.execPath,
         next,
-        oldBinaryName(process.execPath, Date.now()),
-      );
-    else renameSync(next, process.execPath);
+        windows: platform === "win32",
+        jobId,
+        from: VERSION,
+        to: version,
+        now: Date.now(),
+      },
+    );
+    if (refused !== null) return failed(refused);
   } catch (error) {
     return failed(`The update failed: ${String(error)}`);
   }
-  restartSoon();
-  return { ok: true, exitCode: 0, output: `Updated ${VERSION} to ${version}; restarting.` };
+  log(`updated ${VERSION} to ${version}; restarting`);
+  restartSoon(platform);
+  return null;
+}
+
+/**
+ * K-629: the watch of a new daemon. Until kitshn accepts a connection, a timer rolls it back at the deadline; after
+ * that, the connection must stay up for UPDATE_STABLE_MS before the daemon confirms the update.
+ */
+let updateWatch: { marker: UpdateMarker; timer: ReturnType<typeof setTimeout> } | null = null;
+
+function deadlineTimer(marker: UpdateMarker) {
+  return setTimeout(
+    () => void rollBackUpdate(marker, "The new daemon did not reach kitshn within 5 minutes."),
+    Math.max(0, marker.deadline - Date.now()),
+  );
+}
+
+/** K-629: kitshn accepted a connection; the update counts once it stayed up for UPDATE_STABLE_MS. */
+function updateAccepted() {
+  const watch = updateWatch;
+  if (!watch) return;
+  clearTimeout(watch.timer);
+  watch.timer = setTimeout(confirmUpdate, UPDATE_STABLE_MS);
+}
+
+/** K-629: the accepted connection closed too soon, which counts as a failed start. */
+function updateDropped() {
+  const watch = updateWatch;
+  if (!watch) return;
+  clearTimeout(watch.timer);
+  const step = dropStep(watch.marker, Date.now());
+  if (step.kind === "roll-back") {
+    void rollBackUpdate(watch.marker, step.reason);
+    return;
+  }
+  watch.marker = step.marker;
+  try {
+    writeMarker(paths.data, step.marker);
+  } catch (error) {
+    void rollBackUpdate(watch.marker, `kitshn could not write update.json (${String(error)}).`);
+    return;
+  }
+  watch.timer = deadlineTimer(step.marker);
+}
+
+/** K-629: the connection stayed up, so the update holds: the marker goes, and kitshn gets the result. */
+function confirmUpdate() {
+  const watch = updateWatch;
+  if (!watch) return;
+  updateWatch = null;
+  rmSync(markerPath(paths.data), { force: true });
+  log(
+    `edge-${watch.marker.to} stayed connected; edge-${watch.marker.from} stays at ${watch.marker.previous}`,
+  );
+  pendingResults.push({
+    type: "jobResult",
+    id: watch.marker.jobId,
+    result: {
+      ok: true,
+      exitCode: 0,
+      output: `Updated ${watch.marker.from} to ${watch.marker.to}; the new daemon stayed connected to kitshn.`,
+    },
+  });
+  flushResults();
+}
+
+/** K-629: puts the previous daemon back and restarts; that daemon reports the reason to kitshn. */
+async function rollBackUpdate(marker: UpdateMarker, reason: string) {
+  if (updateWatch) clearTimeout(updateWatch.timer);
+  updateWatch = null;
+  log(`the update to edge-${marker.to} failed: ${reason} edge-${marker.from} comes back.`);
+  try {
+    writeMarker(paths.data, { ...marker, state: "rolled-back", reason });
+  } catch (error) {
+    // The previous daemon then reports that it started on another release than the marker names.
+    log(`update.json was not written: ${String(error)}`);
+  }
+  try {
+    await restorePrevious(
+      { rename: renameSync },
+      process.execPath,
+      marker.previous,
+      platform === "win32",
+      Date.now(),
+    );
+  } catch (error) {
+    // This daemon keeps running, so it reports the failure itself.
+    log(`the previous daemon could not come back: ${String(error)}`);
+    rmSync(markerPath(paths.data), { force: true });
+    pendingResults.push({
+      type: "jobResult",
+      id: marker.jobId,
+      result: {
+        ok: false,
+        exitCode: null,
+        output: `${reason} The previous daemon could not come back: ${String(error)}`,
+      },
+    });
+    flushResults();
+    return;
+  }
+  restartSoon(platform);
+}
+
+/** K-629: after the gate of entry.ts: a new daemon waits for kitshn, the previous one reports why it is back. */
+function checkUpdate() {
+  const marker = readMarker(paths.data, log);
+  const step = runStep(marker, VERSION);
+  if (step.kind === "none" || marker === null) return;
+  if (step.kind === "report") {
+    rmSync(markerPath(paths.data), { force: true });
+    pendingResults.push({
+      type: "jobResult",
+      id: step.jobId,
+      result: { ok: false, exitCode: null, output: step.reason },
+    });
+    return;
+  }
+  updateWatch = { marker, timer: deadlineTimer(marker) };
 }
 
 /**
@@ -929,25 +1131,6 @@ function removeOldBinaries() {
     }
   });
   if (left.length > 0) setTimeout(removeOldBinaries, 60 * 60_000).unref();
-}
-
-/**
- * K-601: exits so that the service manager starts the daemon again. K-622: Task Scheduler does not start an action
- * that ended, so on Windows a hidden PowerShell runs the task again once this daemon is gone.
- */
-function restartSoon() {
-  if (platform === "win32")
-    spawn(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        `Start-Sleep 3; schtasks /Run /TN '${WINDOWS_TASKS.daemon}'`,
-      ],
-      { detached: true, stdio: "ignore", windowsHide: true },
-    ).unref();
-  setTimeout(() => process.exit(0), 500);
 }
 
 /** Ends a job and its children: its process group, or on Windows its process tree. */
@@ -1640,11 +1823,12 @@ function oneAtATime(project: string, work: () => Promise<JobOutcome>): Promise<J
   return next;
 }
 
+/** Resolves to null when the result comes later from another daemon (K-629). */
 function runJob(
   jobId: number,
   command: Command,
   notify?: { readonly url: string; readonly token: string },
-): Promise<JobOutcome> {
+): Promise<JobOutcome | null> {
   if (
     command.kind === "compose" ||
     command.kind === "compose-redeploy" ||
@@ -1665,7 +1849,7 @@ function runJob(
     ].join("\n");
     return Promise.resolve({ ok: true, exitCode: 0, output: text });
   }
-  if (command.kind === "update") return updateDaemon(command.version);
+  if (command.kind === "update") return updateDaemon(jobId, command.version);
   if (command.kind === "provider") return runProviderCommand(command, jobId);
   if (command.kind === "backup" || command.kind === "backup-restore") {
     if (!joined)
@@ -1696,7 +1880,7 @@ function runJob(
     return Promise.resolve({ ...outcome, exitCode: outcome.ok ? 0 : 1 });
   }
   if (command.kind === "restart") {
-    restartSoon();
+    restartSoon(platform);
     return Promise.resolve({ ok: true, exitCode: 0, output: "restarting" });
   }
   // `$KITSHN` is this daemon's binary, so a job can run `"$KITSHN" expose …` (K-1104).
@@ -1778,9 +1962,9 @@ function checkListening() {
     wanted.size === 0
       ? new Set<string>()
       : new Set(
-          [...listening(spawnSync("ss", ["-H", "-ltnu"], { encoding: "utf8" }).stdout ?? "")].filter((key) =>
-            wanted.has(key),
-          ),
+          [
+            ...listening(spawnSync(systemTool("ss"), ["-H", "-ltnu"], { encoding: "utf8" }).stdout ?? ""),
+          ].filter((key) => wanted.has(key)),
         );
   if ([...found].sort().join() === [...doorState.listening].sort().join()) return;
   doorState.listening = found;
@@ -2231,6 +2415,7 @@ function connect(config: JoinSecrets) {
       socket = ws;
       delay = 1000;
       stopped = false;
+      updateAccepted();
       flushResults();
       report();
       sendProviders();
@@ -2361,6 +2546,7 @@ function connect(config: JoinSecrets) {
             output: `[kitshn: ${String(error)}]`,
           }))
           .then((result) => {
+            if (result === null) return;
             // The connection can change while a job runs; the result goes out on the current one.
             pendingResults.push({ type: "jobResult", id: message.id, result });
             flushResults();
@@ -2372,6 +2558,8 @@ function connect(config: JoinSecrets) {
     };
     ws.onclose = (event) => {
       if (ping) clearInterval(ping);
+      // K-629: only the accepted connection counts; a refused one never started the stable time.
+      if (socket === ws) updateDropped();
       // K-1805: kitshn forgets the tails of a closed connection.
       if (socket === ws) stopTails();
       if (socket === ws) socket = null;
@@ -2594,6 +2782,8 @@ function skillCommand(action: string | undefined, repo: boolean) {
 async function runCommand() {
   const config = readConfig();
   log(`kitshn ${VERSION} starts as machine ${config.machineId}`);
+  // K-629: entry.ts ran the update gate; this start waits for kitshn or reports a rollback.
+  checkUpdate();
   // K-618: after an update, the global skill follows the new release.
   try {
     const refreshed = refreshGlobalSkill(homedir(), VERSION);

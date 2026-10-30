@@ -189,6 +189,8 @@ export function providerPushes(
   access: {
     readonly teamDomain: string;
     readonly audiencesOf: (cardId: string) => ReadonlyArray<string>;
+    /** K-1623: the host that kitshn serves for this card now, or null. */
+    readonly servedHost: (cardId: string) => string | null;
   },
 ): Array<ProviderPush> {
   return regs.flatMap(({ name, kinds }) => {
@@ -222,6 +224,9 @@ export function providerPushes(
         access: {
           teamDomain: access.teamDomain,
           audiences: siteAudiences(state, machineId, name, access.audiencesOf),
+          served: siteCards(state, machineId, name)
+            .flatMap((card) => access.servedHost(card.id) ?? [])
+            .sort(),
         },
       },
       ...kinds
@@ -252,11 +257,16 @@ export function siteAudiences(
   audiencesOf: (cardId: string) => ReadonlyArray<string>,
 ): Array<string> {
   const audiences = new Set<string>();
-  for (const card of state.resources.values())
-    if (card.machine === machineId && card.provider?.name === provider && card.provider.site)
-      for (const aud of audiencesOf(card.id)) audiences.add(aud);
+  for (const card of siteCards(state, machineId, provider))
+    for (const aud of audiencesOf(card.id)) audiences.add(aud);
   return [...audiences].sort();
 }
+
+/** K-1623: the cards of one provider on a machine that have a site. */
+const siteCards = (state: State, machineId: string, provider: string) =>
+  [...state.resources.values()].filter(
+    (card) => card.machine === machineId && card.provider?.name === provider && card.provider.site,
+  );
 
 /** K-717: a stored value that the kind still offers, else its default. */
 const settingValue = (

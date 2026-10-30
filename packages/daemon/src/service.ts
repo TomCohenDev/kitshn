@@ -107,6 +107,8 @@ const windowsUser = (env: Record<string, string | undefined>) =>
  * K-622: a Task Scheduler task of the user that starts at logon, with no time limit. `conhost --headless` runs the
  * console program with no window. Task Scheduler does not
  * start an action again after it exits, so a trigger every 5 minutes starts it again; a running one ignores it.
+ * K-629: a failed run starts again after 1 minute (999 times, the most Task Scheduler allows), so a new daemon that
+ * crashes reaches its rollback sooner.
  */
 function windowsTask(
   env: Record<string, string | undefined>,
@@ -133,6 +135,7 @@ function windowsTask(
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
     <Hidden>true</Hidden>
     <Enabled>true</Enabled>
   </Settings>
@@ -162,6 +165,38 @@ export const DAEMON_USER = "kitshn";
  * socket in /tmp of the system user `kitshn`, in its own folder with mode 0711, so an allowed local user needs no
  * setting. Another user can make a folder in /tmp under its own uid, so only the user name anchors the trust.
  */
+/** K-701: the folders `/tmp/kitshn-<uid>` that hold a socket, with the name of the user that owns each. */
+function sharedFolders(
+  facts: (path: string) => PathFacts | null,
+  tmpEntries: ReadonlyArray<string>,
+  userName: (uid: number) => string | null,
+) {
+  return tmpEntries
+    .filter((name) => name.startsWith("kitshn-") && isDigits(name.slice("kitshn-".length)))
+    .flatMap((name) => {
+      const folder = `/tmp/${name}`;
+      const owner = facts(folder);
+      if (owner === null || facts(`${folder}/kitshn.sock`) === null) return [];
+      return [
+        {
+          folder,
+          uid: Number(name.slice("kitshn-".length)),
+          owner: userName(owner.uid) ?? `id ${owner.uid}`,
+        },
+      ];
+    });
+}
+
+/** K-701: the shared sockets that kitshn does not use because another user than `kitshn` owns their folder. */
+export const otherUsersSockets = (
+  facts: (path: string) => PathFacts | null,
+  tmpEntries: ReadonlyArray<string>,
+  userName: (uid: number) => string | null,
+) =>
+  sharedFolders(facts, tmpEntries, userName)
+    .filter(({ owner }) => owner !== DAEMON_USER)
+    .map(({ folder, owner }) => `${folder}/kitshn.sock (user ${owner})`);
+
 export function localSocket(
   env: Record<string, string | undefined>,
   own: Paths,
@@ -173,13 +208,7 @@ export function localSocket(
   if (given) return given;
   if (facts(own.socket)?.socket) return own.socket;
   // Only folders of the user `kitshn` count, so another user's folder can neither pose as the daemon nor block it.
-  const found = tmpEntries
-    .filter((name) => name.startsWith("kitshn-") && isDigits(name.slice("kitshn-".length)))
-    .map((name) => ({ folder: `/tmp/${name}`, uid: Number(name.slice("kitshn-".length)) }))
-    .filter(({ folder }) => {
-      const owner = facts(folder);
-      return facts(`${folder}/kitshn.sock`) !== null && owner !== null && userName(owner.uid) === DAEMON_USER;
-    });
+  const found = sharedFolders(facts, tmpEntries, userName).filter(({ owner }) => owner === DAEMON_USER);
   if (found.length > 1) return { several: found.map(({ folder }) => `${folder}/kitshn.sock`) };
   const [one] = found;
   if (!one) return own.socket;

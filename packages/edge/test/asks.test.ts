@@ -543,6 +543,44 @@ it("runs an approved Owner ask of an unset right, and refuses it once the owner 
   const publish = await ask(near, "publish", "pg");
   expect(publish).toMatchObject({ outcome: "waiting" });
   expect(await approve(near, waitingId(publish))).toMatchObject({ ok: true });
+  // K-1711: "public": false moves the page out of Everyone into the agent circle that holds it, also when the
+  // machine has an earlier agent circle elsewhere.
+  await runInDurableObject(near, (_, state) => {
+    const earlier = {
+      id: "aa-earlier",
+      name: "Earlier",
+      color: "#00ccff",
+      level: "control",
+      members: [{ _tag: "machine", machineId: "vps", rights: { readsCode: { mode: "automatic" } } }],
+      match: "any",
+      needsPasskey: false,
+      endsAt: null,
+      x: -3000,
+      y: -3000,
+      r: 200,
+    };
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO circles (id, body) VALUES ('aa-earlier', ?)",
+      JSON.stringify(earlier),
+    );
+    // Circles load in row order, so the Agents row goes after Earlier.
+    const agents = state.storage.sql
+      .exec<{ body: string }>("SELECT body FROM circles WHERE id = 'agents'")
+      .one();
+    state.storage.sql.exec("DELETE FROM circles WHERE id = 'agents'");
+    state.storage.sql.exec("INSERT INTO circles (id, body) VALUES ('agents', ?)", agents.body);
+  });
+  await evictDurableObject(near);
+  expect(await ask(near, "publish", "pg", { body: { public: false } })).toMatchObject({ outcome: "done" });
+  const landed = await runInDurableObject(near, (_, state) => {
+    const place = state.storage.sql
+      .exec<{ x: number; y: number }>("SELECT x, y FROM places WHERE id = 'pg'")
+      .one();
+    state.storage.sql.exec("DELETE FROM circles WHERE id = 'aa-earlier'");
+    return place;
+  });
+  await evictDurableObject(near);
+  expect(Math.hypot(landed.x - 1000, landed.y)).toBeLessThan(200);
   // The reviewer's deploy probe: "deploys" unset waits for the Owner; set to off meanwhile, the approval refuses.
   const offLater = await setup({ addsApps: { mode: "automatic" } });
   const deploy = await ask(offLater, "deploy", "card");

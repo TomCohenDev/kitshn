@@ -14,8 +14,8 @@ This page says what the parts are, where each piece of state lives, how requests
 | App Workers | Cloudflare | One Worker script per environment of a static site or Worker app. |
 | `kitshn` daemon | Each machine | Runs `cloudflared`, runs jobs (Compose deploys, commands), checks local sites, keeps sample history, serves the local socket for providers. |
 | Providers | Each machine | Programs such as T3 Code that add resource kinds through the local socket. |
-| `kitshn` npm package | App repos and Actions | `defineApp`, `defineApps`, the recipe types, and the GitHub Action that evaluates the recipe and sends JSON. |
-| GitHub App | GitHub | Webhooks for pull request close, deployment statuses, repo discovery, "New app". |
+| `kitshn` npm package | App repos and Actions | `defineApp`, `defineApps`, the recipe types, and the CLI that the deploy workflow runs to read the recipe and send JSON (K-803). |
+| GitHub App | GitHub | Webhooks for pull request close, deployment statuses, repo checks (K-819), Actions dispatch (K-718); "New app" is planned (K-908). |
 
 ```text
  people, devices ──► Cloudflare edge ──► Access (circles as policies)
@@ -40,18 +40,18 @@ This page says what the parts are, where each piece of state lives, how requests
 | Resource index (machines, apps, environments, pages, files) | Durable Object SQLite | R2 holds the bytes. |
 | Revisions (history) | Durable Object SQLite | Pruned after 90 days or 5,000 entries (K-1503). |
 | Job queue and command results | Durable Object SQLite | Expired jobs pruned daily. |
-| App vars and secrets | Durable Object SQLite, secrets encrypted | Key in a Worker secret (K-809). `KITSHN_*` GitHub values win on deploy. |
+| App vars and secrets (planned, K-808) | Durable Object SQLite, secrets encrypted | Key in a Worker secret (K-809). Today only `KITSHN_*` GitHub values reach a deploy. |
 | Presence and latest sample | Durable Object memory, presence also in SQLite on change | Samples never written (K-606). Presence keeps the system of the last status (K-524). |
 | Card icons of static sites, Compose apps, live sites, pages and files | Durable Object SQLite, at most 100 KB each | Written only when the bytes change (K-1113), and from a daemon at most once an hour per site (K-1114). Not R2, so icons work without R2 and need no second check. |
 | Sample history | Daemon disk | 30 days. |
 | Access applications and policies | Cloudflare Access | Compiled from shares. kitshn is the source; Access is the copy. |
 | Tunnel ingress, DNS records, Worker routes | Cloudflare | Compiled from resources. |
 | Machine token, tunnel token | Daemon file, mode 0600 | Never in the Durable Object at rest. During a join, encrypted like MM-1201. |
-| Machine key pair (planned, K-1702) | Private half in a daemon file, mode 0600; public half in Durable Object SQLite | |
-| Pass signing key (planned, K-1771) | Durable Object storage; public halves of retired keys for 6 minutes | Passes are only for outside services, so kitshn stores no pass ids. |
-| Ask events and their label index (planned, K-1717, K-1756) | Durable Object SQLite, one row per ask and one per label, indexed on (key, value, time) | 30 days, at most 5,000 events, as K-1610. |
-| App pull request runs (planned, K-1767) | Durable Object SQLite, one row per pull request and commit | The owner's Deploy approves that commit. |
-| GitHub installation ids (planned, K-1762) | Durable Object SQLite, one row per owner | Repo tokens live only in memory: the daemon's, and kitshn's for revocation (K-1716). |
+| Machine key pair (K-1702) | Private half in a daemon file, mode 0600; public half in Durable Object SQLite | |
+| Pass signing key (K-1771) | Durable Object storage; public halves of retired keys for 6 minutes | Passes are only for outside services, so kitshn stores no pass ids. |
+| Ask events and their label index (K-1717, K-1756) | Durable Object SQLite, one row per ask and one per label, indexed on (key, value, time) | 30 days, at most 5,000 events, as K-1610. |
+| App pull request runs (K-1767) | Durable Object SQLite, one row per pull request and commit | The owner's Deploy approves that commit. |
+| GitHub installation ids (K-1762) | Durable Object SQLite, one row per owner | Repo tokens live only in memory: the daemon's, and kitshn's for revocation (K-1716). |
 | Live GitHub tokens (K-1762) | Durable Object SQLite `github_tokens`, one row per live token | The token is sealed under a key from the App secret, for revocation after a sleep (K-1716). Backups leave the table out. The daemon keeps its copy in memory. |
 | Recipe | App repo | The only state in Git. |
 | Page and file bytes | R2 | |
@@ -68,7 +68,7 @@ This page says what the parts are, where each piece of state lives, how requests
 3. **A visitor opens a Compose app.** Access checks the circles of its application. The tunnel sends the request to the machine, and `cloudflared` sends it to the Unix socket of the service. The Worker is not on this path.
 4. **A visitor opens a live site whose machine is off.** The Durable Object saw the daemon socket close and added a Worker route for that address. Access checks the visitor. The Worker tries the origin, gets 530 or error 1033, and answers with the offline page from its assets. When the daemon connects again, the route goes away.
 5. **A visitor opens a page.** Public page: the Worker serves it from R2. Other page: the Worker reads the Access JWT. Without one, it sends the visitor to `/login`, an Access application, which sends the visitor back. Then the Worker checks the circles and serves the page.
-6. **An app deploys.** Actions evaluates `kitshn.config.ts` and sends JSON with its OIDC token. The Worker checks the token and the schema. For a Compose app, the Durable Object picks a machine (K-610), gives Actions a signed R2 upload URL for the source archive, and sends the job to the daemon. The daemon builds and starts the app and streams logs; the Actions step prints them over one WebSocket. For a static site or Worker app, Actions uploads the files, and the Worker uploads the script through the Workers API.
+6. **An app deploys.** Actions evaluates `kitshn.config.ts` and sends JSON with its OIDC token. The Worker checks the token and the schema. For a Compose app, the Durable Object picks a machine (K-610), gives Actions a signed R2 upload URL for the source archive, and sends the job to the daemon. The daemon builds and starts the app; the Actions step asks for the deploy state every few seconds and prints the job output at the end (K-813). For a static site or Worker app, Actions uploads the files, and the Worker uploads the script through the Workers API.
 7. **T3 Code asks for a level.** T3 Code reads the Access JWT on its request and checks the grant table that the daemon pushed (K-706). There is no network call.
 8. **A pull request closes.** The GitHub App webhook reaches the Worker. The Durable Object queues a teardown job for the machine and the Cloudflare clean-up for the alarm.
 9. **An agent key adds an app (K-718, K-819).** The owner turns on "may add apps" and, for a public app, "may publish" for the key in its agent circle. The agent creates the repo and pushes. The first deploy step records the repo and waits. `GET kit.<zone>/agent/state` lists the waiting repos with `repoId`. The agent sends `{"state": "allowed"}` to `POST kit.<zone>/agent/repos/<repoId>`, which starts the waiting branch. The card starts in the agent circle, and a Compose app runs only on a machine that the key manages. To publish, the agent moves the card into the overlap of its agent circle and Everyone with `POST kit.<zone>/agent/apply`. A page or a file comes with `kitshn publish` (K-1116). Each call carries the key's `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers.

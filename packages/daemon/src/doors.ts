@@ -1,6 +1,6 @@
 // Section 20: the door of game servers on this machine. The daemon has no privilege, so one root helper writes the
 // nftables table; the daemon sends it the game ports and the open doors as plain lines.
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, type SpawnSyncReturns, spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { dirname } from "node:path";
@@ -272,12 +272,32 @@ export function listening(ssOutput: string): ReadonlySet<string> {
   return found;
 }
 
+/**
+ * K-2002: the full path of a system tool, so a root shell whose PATH has no /usr/sbin (`su` without `-`) finds it.
+ * Falls back to the bare name, which the PATH resolves.
+ */
+export function systemTool(
+  name: "sudo" | "visudo" | "systemctl" | "ss",
+  exists: (path: string) => boolean = existsSync,
+): string {
+  return ["/usr/sbin", "/usr/bin", "/sbin", "/bin"].map((dir) => `${dir}/${name}`).find(exists) ?? name;
+}
+
+/** Why a tool run failed, or null when it exited with 0. A missing tool says so instead of an empty output. */
+export function toolProblem(name: string, run: SpawnSyncReturns<string>, failed = "failed"): string | null {
+  if (run.status === 0) return null;
+  if ((run.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return `${name} was not found`;
+  const output = `${run.stdout ?? ""}${run.stderr ?? ""}`.trim();
+  return `${name} ${failed}: ${output || run.error?.message || `exit ${run.status ?? run.signal}`}`;
+}
+
 /** Why this machine cannot gate game ports, or null when it can (K-2002). */
 export function doorsProblem(platform: NodeJS.Platform): string | null {
   if (platform !== "linux") return "game servers need a Linux machine with nftables";
   if (!existsSync(HELPER_PATH))
     return `the door helper is not installed; run \`kitshn doors install\` as root`;
-  const check = spawnSync("sudo", ["-n", "-l", HELPER_PATH, "apply"], { encoding: "utf8" });
+  const check = spawnSync(systemTool("sudo"), ["-n", "-l", HELPER_PATH, "apply"], { encoding: "utf8" });
+  if ((check.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return "sudo was not found";
   if (check.status !== 0) return "the daemon user may not run the door helper (sudoers)";
   const { v4, v6 } = publicAddresses();
   if (v4 === null && v6 === null)
@@ -287,13 +307,13 @@ export function doorsProblem(platform: NodeJS.Platform): string | null {
 
 /** K-2005: writes the plan into the firewall through the helper, and keeps it, so a restart writes it again. */
 export function applyDoors(plan: DoorPlan, keptFile: string, now: number): { ok: boolean; output: string } {
-  const run = spawnSync("sudo", ["-n", HELPER_PATH, "apply"], {
+  const run = spawnSync(systemTool("sudo"), ["-n", HELPER_PATH, "apply"], {
     input: helperInput(plan, now),
     encoding: "utf8",
     timeout: 30_000,
   });
-  const output = `${run.stdout ?? ""}${run.stderr ?? ""}`.trim();
-  if (run.status !== 0) return { ok: false, output: output || `the door helper failed (${run.status})` };
+  const problem = toolProblem("sudo", run, "could not run the door helper");
+  if (problem !== null) return { ok: false, output: problem };
   mkdirSync(dirname(keptFile), { recursive: true });
   writeFileSync(`${keptFile}.new`, JSON.stringify(plan), { mode: 0o600 });
   renameSync(`${keptFile}.new`, keptFile);
@@ -364,9 +384,9 @@ export function doorsCommand(action: string | undefined, user: string | undefine
   if (process.getuid?.() !== 0) throw new Error("run `kitshn doors install|uninstall` as root");
   if (action === "uninstall") {
     spawnSync("/bin/sh", ["-c", `[ -x ${HELPER_PATH} ] && ${HELPER_PATH} off || true`], { stdio: "inherit" });
-    spawnSync("systemctl", ["disable", "kitshn-doors.service"], { stdio: "inherit" });
+    spawnSync(systemTool("systemctl"), ["disable", "kitshn-doors.service"], { stdio: "inherit" });
     rmSync(BOOT_UNIT_PATH, { force: true });
-    spawnSync("systemctl", ["daemon-reload"], { stdio: "inherit" });
+    spawnSync(systemTool("systemctl"), ["daemon-reload"], { stdio: "inherit" });
     rmSync(SUDOERS_PATH, { force: true });
     rmSync(HELPER_PATH, { force: true });
     console.log(
@@ -381,17 +401,24 @@ export function doorsCommand(action: string | undefined, user: string | undefine
   chmodSync(HELPER_PATH, 0o755);
   const staged = `${SUDOERS_PATH}.new`;
   writeFileSync(staged, sudoersLine(user), { mode: 0o440 });
-  const check = spawnSync("visudo", ["-cf", staged], { encoding: "utf8" });
-  if (check.status !== 0) {
+  const problem = toolProblem(
+    "visudo",
+    spawnSync(systemTool("visudo"), ["-cf", staged], { encoding: "utf8" }),
+    "refused the sudoers line",
+  );
+  if (problem !== null) {
     rmSync(staged, { force: true });
-    throw new Error(`visudo refused the sudoers line: ${check.stdout}${check.stderr}`);
+    throw new Error(problem);
   }
   renameSync(staged, SUDOERS_PATH);
   writeFileSync(BOOT_UNIT_PATH, BOOT_UNIT, { mode: 0o644 });
   for (const argv of [["daemon-reload"], ["enable", "kitshn-doors.service"]]) {
-    const step = spawnSync("systemctl", argv, { encoding: "utf8" });
-    if (step.status !== 0)
-      throw new Error(`systemctl ${argv.join(" ")} failed: ${step.stdout}${step.stderr}`);
+    const problem = toolProblem(
+      "systemctl",
+      spawnSync(systemTool("systemctl"), argv, { encoding: "utf8" }),
+      `${argv.join(" ")} failed`,
+    );
+    if (problem !== null) throw new Error(problem);
   }
   console.log(
     `kitshn: installed ${HELPER_PATH}, ${SUDOERS_PATH} for ${user} and ${BOOT_UNIT_PATH}. Restart the daemon to report doors.`,

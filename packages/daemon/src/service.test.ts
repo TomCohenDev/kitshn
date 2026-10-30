@@ -4,6 +4,7 @@ import {
   expectedDaemonUid,
   expectedHash,
   localSocket,
+  otherUsersSockets,
   pathsFor,
   releaseAsset,
   serviceCommands,
@@ -49,6 +50,9 @@ describe("daemon service (K-601)", () => {
     const task = serviceFile("win32", "C:\\k\\kitshn.exe", { USERDOMAIN: "PC", USERNAME: "ya" });
     expect(task).toContain("<UserId>PC\\ya</UserId>");
     expect(task).toContain("<Interval>PT5M</Interval>");
+    expect(task).toContain(
+      "<RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>",
+    );
     expect(task).toContain("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>");
     expect(task).toContain(
       "<Command>conhost.exe</Command><Arguments>--headless &quot;C:\\k\\kitshn.exe&quot; run</Arguments>",
@@ -155,6 +159,10 @@ describe("daemon service (K-601)", () => {
       "/tmp/kitshn-1001/kitshn.sock": { ...sock, uid: 1001 },
     };
     expect(localSocket({}, root, at(mallory), ["kitshn-1001"], named)).toBe(root.socket);
+    // So "not running" names it, instead of only the caller's own socket.
+    expect(otherUsersSockets(at({ ...daemon, ...mallory }), [...tmp, "kitshn-1001"], named)).toEqual([
+      "/tmp/kitshn-1001/kitshn.sock (user mallory)",
+    ]);
     // Another user's fake socket next to the daemon's neither counts nor blocks the daemon's.
     expect(localSocket({}, root, at({ ...daemon, ...mallory }), [...tmp, "kitshn-1001"], named)).toBe(
       "/tmp/kitshn-1000/kitshn.sock",

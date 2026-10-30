@@ -3,7 +3,16 @@
 export type NotificationLevel = "info" | "warn" | "error";
 
 /** K-1904: the sources of this version; a mute names one of them. */
-export const NOTIFICATION_SOURCES = ["deploy", "uptime", "kitshn.ask", "app", "limits", "machine"] as const;
+export const NOTIFICATION_SOURCES = [
+  "deploy",
+  "uptime",
+  "kitshn.ask",
+  "app",
+  "limits",
+  "machine",
+  "alarm",
+  "update",
+] as const;
 
 /** K-1903: "run" calls the handler of the source at once; "link" opens a path of the map. */
 export type NotificationAction =

@@ -73,7 +73,7 @@ describe("the providers of a machine (K-704, K-705)", () => {
     // K-1608: the answer to register gives the saved state, from before kitshn answers; access is null until kitshn
     // sends it (K-1623).
     expect(registry.savedFor("t3")).toMatchObject({ access: null });
-    const access = { teamDomain: "team.cloudflareaccess.com", audiences: ["aud-app"] };
+    const access = { teamDomain: "team.cloudflareaccess.com", audiences: ["aud-app"], served: [] };
     registry.setPushed(pushKey.access("t3"), access);
     expect(registry.savedFor("t3")).toEqual({
       grants: { a: [] },

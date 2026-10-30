@@ -130,3 +130,13 @@ export const LEVEL_COLORS: Record<Level, string> = {
  * it is the selection colour in light mode.
  */
 export const CIRCLE_COLORS = ["#6C5CE7", "#FF5277", "#00B3FF", "#FFB347", "#7CFF8A", "#14B8A6"];
+
+/**
+ * K-537: the line of a level in the relationship lens. Lines stay ink, because the level colours are also circle
+ * colours; the weight says how much, and a dash marks a look-only share.
+ */
+export const LEVEL_LINES: Record<Level, { readonly width: number; readonly dash: string | null }> = {
+  view: { width: 2, dash: "7 5" },
+  use: { width: 4, dash: null },
+  control: { width: 7, dash: null },
+};

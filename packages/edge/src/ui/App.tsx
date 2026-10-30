@@ -143,7 +143,7 @@ import { GONE_STICKER, REPO_STICKERS, RepoList, setRepoState } from "./Repos.tsx
 import { AskEvents, LinkEvents, BotRuns, approveFromHash } from "./Asks.tsx";
 import { PassSettingsPanel } from "./Passes.tsx";
 import { LibraryView } from "./Library.tsx";
-import { AddMachine, MachinePanel, MachinesView, queueJob } from "./Machines.tsx";
+import { AddMachine, MachinePanel, MachinesView, queueJob, setAutoUpdate } from "./Machines.tsx";
 import {
   ACCESS_TIPS,
   ALONE_KEY,
@@ -157,6 +157,7 @@ import { overlay } from "./held.ts";
 import { HistoryView } from "./History.tsx";
 import { UsageView } from "./Usage.tsx";
 import { UptimeRow } from "./Uptime.tsx";
+import { ReachList } from "./Reach.tsx";
 import { NotificationsView } from "./Notifications.tsx";
 import {
   fitMap,
@@ -1582,6 +1583,10 @@ export function App(props: { readonly panels?: boolean } = {}) {
     logs: setLogs,
     backups: setBackupsCard,
     runJob: (machine, command) => void runJob(machine, command),
+    setAutoUpdate: (machine, on) =>
+      void setAutoUpdate(machine.machine.id, on).then(({ text, error }) =>
+        showToast({ text, error, undo: null }),
+      ),
     runProviderCommand: (machine, command, question) =>
       void (async () => {
         if (question !== null && !(await ask(question))) return;
@@ -3287,6 +3292,7 @@ function CardPanel(props: {
           })}
         </ul>
       )}
+      {state.places.has(resource.id) ? <ReachList state={state} selected={resource.id} /> : null}
       {isGameCard(resource) ? (
         <GameDoors resource={resource} onRemove={() => props.onRemoveGame(resource)} />
       ) : null}

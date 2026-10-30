@@ -14,6 +14,8 @@ import {
 } from "../core/model.ts";
 import type { AccessState, MachineView, Snapshot } from "../core/protocol.ts";
 import { isAgentKey } from "../core/agent.ts";
+import type { ActionProgress } from "../core/progress.ts";
+import { ProgressSticker } from "./Progress.tsx";
 import { AGENT_TIP, LEVEL_TIPS, MATCH_TIPS, MEMBER_HELP, PASSKEY_TIP, RightStickers } from "./Circle.tsx";
 import { MachineRightStickers } from "./MachineRights.tsx";
 import { type KindInfo, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS, kindInfo } from "./kinds.ts";
@@ -157,6 +159,8 @@ interface Props {
   readonly access: Readonly<Record<string, AccessState>>;
   /** K-1125: up or down of each checked card. */
   readonly uptime: Snapshot["uptime"];
+  /** K-538: the action of each card that runs, failed, or ended a moment ago. */
+  readonly progress: Snapshot["progress"];
   readonly machines: ReadonlyMap<string, MachineView>;
   readonly selection: Selection;
   readonly onSelect: (selection: Selection) => void;
@@ -861,6 +865,7 @@ export function MapView(props: Props) {
               count={stack && index === 0 ? stack[1].length : null}
               open={open}
               access={props.access[resource.id] ?? null}
+              progress={props.progress[resource.id] ?? null}
               downSince={
                 props.uptime[resource.id]?.up === false ? (props.uptime[resource.id]?.since ?? null) : null
               }
@@ -1049,6 +1054,11 @@ export function CircleView(props: {
   );
 }
 
+/** K-538: the progress sticker says this Access error already, so the K-407 sticker would repeat it. */
+const progressSays = (progress: ActionProgress | null, error: string) =>
+  progress?.retry?.reason === error ||
+  (progress?.outcome.state === "failed" && progress.outcome.reason === error);
+
 export function CardView(props: {
   resource: Resource;
   /** `cardLayer`: its z-index on the map, or null for document order. */
@@ -1064,6 +1074,8 @@ export function CardView(props: {
   count: number | null;
   open: boolean;
   access: AccessState | null;
+  /** K-538: the action that runs on the card, failed, or ended a moment ago. */
+  progress: ActionProgress | null;
   /** K-1125: when the card went down, or null while it is up or unchecked. */
   downSince: number | null;
   machine: MachineView | null;
@@ -1118,17 +1130,20 @@ export function CardView(props: {
         </span>
       ) : null}
       <div class="states">
-        {props.access?.state === "applying" ? (
+        {props.progress ? (
+          <ProgressSticker progress={props.progress} panel={`#map/${encodeURIComponent(resource.id)}`} />
+        ) : null}
+        {props.access?.state === "applying" && !props.progress ? (
           <span class="sticker wait state" data-tip={ACCESS_TIPS.applying}>
             applying
           </span>
         ) : null}
-        {props.access?.state === "retrying" ? (
+        {props.access?.state === "retrying" && !progressSays(props.progress, props.access.error) ? (
           <span class="sticker wait state" data-tip={`${ACCESS_TIPS.retrying} ${props.access.error}`}>
             retrying
           </span>
         ) : null}
-        {props.access?.state === "failed" ? (
+        {props.access?.state === "failed" && !progressSays(props.progress, props.access.error) ? (
           <span
             class="sticker state"
             data-tip={`Failed: Cloudflare refused the change. ${props.access.error}`}

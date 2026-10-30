@@ -577,6 +577,52 @@ input[type="search"]::-webkit-search-cancel-button {
 .card .meter-bar > span.hot {
   background: var(--error);
 }
+/* K-538: the progress sticker. Its fill moves by one transform transition per step, so nothing repaints. */
+.sticker.action-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.sticker.action-progress.failed {
+  background: var(--error);
+}
+.progress-track {
+  width: 2.4em;
+  height: 0.6em;
+  border: var(--bw) solid var(--border);
+  border-radius: 2px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--ink);
+  transform: scaleX(0);
+  transform-origin: left;
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-fill {
+    transition: none !important;
+  }
+}
+.progress-steps {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.progress-steps li.next {
+  color: var(--muted);
+}
+.progress-steps li.running,
+.progress-steps li.retrying {
+  font-weight: 800;
+}
+.progress-steps li.failed {
+  color: var(--error-fg);
+  font-weight: 800;
+}
 .card .foot {
   display: flex;
   gap: 4px;
@@ -1648,6 +1694,8 @@ pre.output {
   border: var(--bw) solid var(--border);
   border-radius: var(--radius);
   box-shadow: 3px 3px 0 0 var(--shadow-ink);
+  /* K-538: a step list in a tip has one line per step. */
+  white-space: pre-line;
 }
 
 .check,

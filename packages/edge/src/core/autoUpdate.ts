@@ -39,7 +39,7 @@ export type DaemonUpdate =
   | { readonly state: "failed"; readonly reason: string };
 
 /** The last line of a job's output, which holds the error of a failed update. */
-const lastLine = (output: string) =>
+export const lastLine = (output: string) =>
   output
     .trim()
     .split("\n")

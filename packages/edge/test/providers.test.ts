@@ -4,6 +4,7 @@ import type { ProviderReport } from "@kitshn/local";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Machine, MachineStatus } from "../src/core/machine.ts";
 import { type Circle, OWNER_CIRCLE_ID, type Resource, providerCardId } from "../src/core/model.ts";
+import { type ActionProgress, currentStep } from "../src/core/progress.ts";
 import { accessToken, send, stubAccessCerts } from "./access.ts";
 
 const machine: Machine = {
@@ -818,9 +819,25 @@ it("takes over a provider site's address with its application first, then ingres
       machineId: string,
     ): Array<{ key: string; hash: string; push: { access?: { served: Array<string> } } }>;
     sentGrants: ReadonlyMap<string, string>;
+    scheduleAlarm(): Promise<void>;
+    ctx: DurableObjectState;
+    reconcileProgress(): boolean;
+    progressRows(): ReadonlyMap<string, { progress: ActionProgress }>;
   };
   const run = <T>(fn: (instance: Internals) => T) =>
     runInDurableObject(stub, async (instance) => await fn(instance as unknown as Internals));
+  // K-538: the step that the card shows, after the state moved it on.
+  const progress = () =>
+    run((instance) => {
+      instance.reconcileProgress();
+      const value = instance.progressRows().get(appId)?.progress;
+      return value ? { step: currentStep(value), outcome: value.outcome.state } : null;
+    });
+  const alarm = () =>
+    run(async (instance) => {
+      await instance.scheduleAlarm();
+      return instance.ctx.storage.getAlarm();
+    });
   const state = () =>
     runInDurableObject(stub, (_, storage) => ({
       site: storage.storage.sql
@@ -866,6 +883,7 @@ it("takes over a provider site's address with its application first, then ingres
     await statusOf(run((instance) => instance.takeAddress(person("owner@example.com"), appId, api))),
   ).toBe(200);
   expect(await card()).toMatchObject({ addresses: ["t3-vps.example.com"], provider: { stickers: [] } });
+  expect(await progress()).toEqual({ step: 0, outcome: "running" });
   // The provider learns which hosts kitshn serves: none before the record moved.
   const served = (instance: Internals) =>
     instance.pushesOf("vps").find((item) => item.key === "access:t3")?.push.access?.served;
@@ -889,6 +907,18 @@ it("takes over a provider site's address with its application first, then ingres
     // As the alarm does after the Access sync: the access push with the new audience goes out.
     (instance as unknown as { pushGrants(): void }).pushGrants();
   });
+  // K-538: a tunnel write that got no clear answer shows on the sticker as a retry with its reason, not a bar at 90%.
+  const retry = await run((instance) => {
+    const storage = (instance as unknown as { ctx: DurableObjectState }).ctx.storage;
+    storage.sql.exec(
+      "INSERT OR REPLACE INTO tunnel_objects (machine_id, body, applied, error, retry_at) VALUES ('vps', '', '', 'Cloudflare answered 503', ?)",
+      Date.now() + 300_000,
+    );
+    instance.reconcileProgress();
+    storage.sql.exec("DELETE FROM tunnel_objects WHERE machine_id = 'vps'");
+    return instance.progressRows().get(appId)?.progress.retry?.reason;
+  });
+  expect(retry).toBe("Cloudflare answered 503");
   await run((instance) => instance.syncTunnels(api, 6));
   expect(calls.at(-1)?.endsWith("/cfd_tunnel/tunnel-vps/configurations with the host")).toBe(true);
   // The portal's Bypass path comes first, with no check; the host keeps kitshn's.
@@ -898,6 +928,8 @@ it("takes over a provider site's address with its application first, then ingres
   ]);
   expect(tunnelIngress[0]).not.toHaveProperty("originRequest");
   expect(await run((instance) => instance.handoverOf(appId)?.ingressAt)).not.toBeNull();
+  // The application and the route are done; the card waits for the machine to apply kitshn's audience.
+  expect(await progress()).toEqual({ step: 2, outcome: "running" });
   // The zone's records path, as kitshn asked for the record of the address.
   const records = calls
     .find((call) => call.startsWith("GET") && call.includes("/dns_records"))!
@@ -910,12 +942,27 @@ it("takes over a provider site's address with its application first, then ingres
   // The record waits until the machine applied the access push that holds kitshn's audience.
   await run((instance) => instance.syncDns(api, 5));
   expect(calls.some((call) => call.includes("dns_records/"))).toBe(false);
+  // K-411: a handover whose wait is over but whose audience is not applied yet sets no alarm for now, so the alarm
+  // does not run again and again until `applied` comes.
+  expect(await alarm()).toBeGreaterThan(Date.now() + 5_000);
+  // K-411: until then, the handover sets no alarm; only the periodic one of a connected daemon stays.
+  const ingressAt = Date.now();
+  await run((instance) => instance.setHandover(appId, { ...instance.handoverOf(appId), ingressAt }));
+  expect(await alarm()).toBeGreaterThan(ingressAt + 15_000);
   const hash = await run((instance) => instance.hashesOf("vps").get("access:t3"));
   await runInDurableObject(stub, (instance) =>
     instance.webSocketMessage(
       daemonSocket("signed"),
       JSON.stringify({ type: "applied", key: "access:t3", hash }),
     ),
+  );
+  // The `applied` message wakes the record step for the moment that Access had its 15 seconds, not a cycle later.
+  expect(await runInDurableObject(stub, (_, state) => state.storage.getAlarm())).toBeLessThanOrEqual(
+    ingressAt + 15_000,
+  );
+  expect(await progress()).toEqual({ step: 3, outcome: "running" });
+  await run((instance) =>
+    instance.setHandover(appId, { ...instance.handoverOf(appId), ingressAt: Date.now() - 15_000 }),
   );
   await run((instance) => instance.syncDns(api, 5));
   // The kept record changes in place; kitshn makes no second one and deletes none.
@@ -925,6 +972,7 @@ it("takes over a provider site's address with its application first, then ingres
   expect(await state()).toEqual({ site: "ok", records: ["portal-record"] });
   expect(await run((instance) => instance.handoverOf(appId)?.switched)).toBe(true);
   expect(await run(served)).toEqual(["t3-vps.example.com"]);
+  expect(await progress()).toEqual({ step: 5, outcome: "done" });
 
   // Giving it back points the record at what served it, forgets the record, and takes the address off the card.
   // The host leaves `served`, and that push goes out, before the record call.
@@ -951,6 +999,7 @@ it("takes over a provider site's address with its application first, then ingres
     ),
   ).toBe(200);
   expect(atRecordCall).toEqual({ served: [], sent: true });
+  expect(await progress()).toEqual({ step: 3, outcome: "done" });
   expect(calls).toEqual([`PUT ${records}/portal-record portal.cfargotunnel.com`]);
   expect(await state()).toEqual({ site: "refused", records: [] });
   expect(await card()).toMatchObject({ addresses: [], provider: { stickers: [{ text: "address in use" }] } });
@@ -973,6 +1022,79 @@ it("takes over a provider site's address with its application first, then ingres
   });
   await sql("DELETE FROM access_objects WHERE key LIKE 'app:p-%'");
   await sql("DELETE FROM places WHERE id LIKE 'p-%'");
+});
+
+it("keeps the action of each card true across a restart and a second job (K-538)", async () => {
+  const { stub, sql } = await setup();
+  type Internals = {
+    progressRows(): Map<string, { source: { _tag: string; jobId?: number }; progress: ActionProgress }>;
+    setProgress(id: string, value: unknown): boolean;
+    reconcileProgress(): boolean;
+    dismissProgress(caller: unknown, id: string): Response;
+    sql(query: string, ...values: Array<string | number>): Array<{ id: number }>;
+  };
+  const run = <T>(fn: (instance: Internals) => T) =>
+    runInDurableObject(stub, async (instance) => await fn(instance as unknown as Internals));
+  const row = () => run((instance) => instance.progressRows().get("vps") ?? null);
+  const owner = {
+    visitor: { kitshn: false, email: "owner@example.com", clientId: null, ip: null },
+    actor: { _tag: "person" as const, email: "owner@example.com" },
+  };
+  const addJob = (command: object) =>
+    run(
+      (instance) =>
+        instance.sql(
+          `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
+           VALUES ('vps', '[]', ?, 'queued', 0, 9999999999999, '{}', '{}', NULL, '') RETURNING id`,
+          JSON.stringify(command),
+        )[0]!.id,
+    );
+
+  // A give-back runs only in its request, so after a restart nothing drives it: it ends as interrupted.
+  await sql(
+    "INSERT OR REPLACE INTO meta (key, value) VALUES ('progress:vps', ?)",
+    JSON.stringify({
+      source: { _tag: "give-back" },
+      progress: {
+        action: "Give the address back",
+        steps: [{ label: "Point the DNS record back", expectedMs: 1_500, startedAt: 0, endedAt: null }],
+        outcome: { state: "running" },
+        retry: null,
+      },
+    }),
+  );
+  expect((await row())?.progress.outcome).toMatchObject({
+    state: "failed",
+    reason: expect.stringContaining("Interrupted"),
+  });
+  expect(await statusOf(run((instance) => instance.dismissProgress(owner, "vps")))).toBe(200);
+  expect(await row()).toBeNull();
+
+  // A job's action resumes from its job after a restart.
+  const first = await addJob({ kind: "update", version: "aaaaaaaaaaaa" });
+  await run((instance) => instance.reconcileProgress());
+  await run((instance) => {
+    const current = instance.progressRows().get("vps")!;
+    const steps = current.progress.steps.map((step, index) =>
+      index === 3 ? { ...step, expectedMs: 7_777 } : step,
+    );
+    instance.setProgress("vps", { ...current, progress: { ...current.progress, steps } });
+  });
+  await evictDurableObject(stub);
+  expect((await row())?.source.jobId).toBe(first);
+  expect((await row())?.progress.outcome.state).toBe("running");
+
+  // A second job takes the card and keeps the times that the first one learned; the first never takes it back.
+  const second = await addJob({ kind: "update", version: "aaaaaaaaaaaa" });
+  await run((instance) => instance.reconcileProgress());
+  const started = await row();
+  expect(started?.source.jobId).toBe(second);
+  expect(started?.progress.steps[3]?.expectedMs).toBe(7_777);
+  await addJob({ kind: "restart" });
+  await run((instance) => instance.reconcileProgress());
+  expect(await row()).toEqual(started);
+  await sql("DELETE FROM jobs WHERE machine_id = 'vps'");
+  await sql("DELETE FROM meta WHERE key = 'progress:vps'");
 });
 
 /** A Response from the Durable Object, read whole, so a later eviction does not wait for its body. */

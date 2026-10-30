@@ -130,7 +130,9 @@ it("refuses a mute of a card that does not exist or of an unknown source (K-1905
 
 it("runs the later alarm steps when one throws, skips it with backoff, and tells the owner until it works (K-406, K-1910)", async () => {
   const stub = env.KITSHN.getByName("alarm-steps");
-  const t0 = Date.parse("2026-10-30T12:00:00Z");
+  // An hour after the real time, taken before Date.now is mocked: the storage alarm keeps the real clock and moves an
+  // alarm in the past to now, so a fixed date fails once the real clock passes it.
+  const t0 = Math.ceil(Date.now() / 1000) * 1000 + 60 * 60_000;
   const result = await runInDurableObject(stub, async (instance, state) => {
     const kitshn = instance as unknown as Kitshn & Record<string, unknown> & { alarm(): Promise<void> };
     let clock = t0;

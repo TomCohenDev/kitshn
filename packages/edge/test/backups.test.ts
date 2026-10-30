@@ -324,7 +324,7 @@ describe("backup runs (K-1817 to K-1819)", () => {
           instance as unknown as { dropRemovedRepositories(bucket: R2Bucket, now: number): Promise<void> }
         ).dropRemovedRepositories(env.BUCKET!, now);
       });
-    const start = Date.parse("2026-11-01T03:00:00Z");
+    const start = Date.now();
     await drop(start);
     await drop(start + 6 * day);
     expect((await env.BUCKET!.list({ prefix: "backups/app-gone/" })).objects).toHaveLength(1);

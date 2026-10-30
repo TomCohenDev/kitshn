@@ -17,6 +17,7 @@ import {
   type ProjectVolume,
   type ServerToDaemon,
   type AskOutcome,
+  type AppAccess,
 } from "@kitshn/edge/machine";
 import type { DoorPlan } from "@kitshn/edge/game";
 import type { BackupReport } from "@kitshn/edge/backups";
@@ -32,7 +33,7 @@ import {
   WINDOW_ACTIONS,
 } from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
-import { withNotify } from "./notify.ts";
+import { type Notify, accessEnv, withAppEnv } from "./appEnv.ts";
 import { HELPER_IMAGE, backup, finishRestores, restore, unpauseMarked } from "./backup.ts";
 import { keyPlan } from "./keys.ts";
 import {
@@ -1235,8 +1236,9 @@ async function deployFile(deployId: string, file: string): Promise<Buffer> {
  */
 async function composeUp(
   command: Extract<Command, { kind: "compose" | "compose-redeploy" | "compose-rollback" }>,
-  notify?: { readonly url: string; readonly token: string },
+  job: { readonly notify?: Notify | undefined; readonly access?: AppAccess | undefined },
 ): Promise<JobOutcome> {
+  const { notify, access } = job;
   const dir = join(paths.data, "apps", command.project);
   // K-818: each deploy unpacks into a new folder that no running container mounts, so the old app runs on
   // while the new one is read, checked and built. A job of the same app never runs at the same time.
@@ -1299,6 +1301,7 @@ async function composeUp(
       KITSHN_PARAMS_FILE: join(dir, "params.env"),
       // K-1908: the app passes these on in its Compose file, as it does with KITSHN_DATA_DIR.
       ...(notify ? { KITSHN_NOTIFY_URL: notify.url, KITSHN_NOTIFY_TOKEN: notify.token } : {}),
+      ...(access ? accessEnv(access) : {}),
     };
     // Compose files from KitSHn 1 name this network, so the daemon makes it when it is missing.
     if (!(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok) {
@@ -1368,7 +1371,7 @@ async function composeUp(
     // Build and start from the checked config itself, so the repo's files are not read again. It stays with
     // the last good build, so a teardown reads the same services.
     // K-1908: the token stays out of this file, which stays with the last good build.
-    writeFileSync(checked, JSON.stringify(withNotify(withLogLimits(config), notify)), { mode: 0o600 });
+    writeFileSync(checked, JSON.stringify(withAppEnv(withLogLimits(config), job)), { mode: 0o600 });
     // The params file again: without it Compose reads the repo's `.env`, and `COMPOSE_PROFILES` is lost.
     const run = [
       "compose",
@@ -1702,14 +1705,14 @@ function oneAtATime(project: string, work: () => Promise<JobOutcome>): Promise<J
 function runJob(
   jobId: number,
   command: Command,
-  notify?: { readonly url: string; readonly token: string },
+  job: { readonly notify?: Notify | undefined; readonly access?: AppAccess | undefined } = {},
 ): Promise<JobOutcome | null> {
   if (
     command.kind === "compose" ||
     command.kind === "compose-redeploy" ||
     command.kind === "compose-rollback"
   )
-    return oneAtATime(command.project, () => composeUp(command, notify));
+    return oneAtATime(command.project, () => composeUp(command, job));
   if (command.kind === "compose-down") return oneAtATime(command.project, () => composeDown(command));
   if (command.kind === "compose-volume-remove")
     return oneAtATime(command.project, () => removeVolume(command));
@@ -2483,7 +2486,7 @@ function connect(config: JoinSecrets) {
       } else if (message.type === "job") {
         log(`job ${message.id}: ${message.command.kind}`);
         // A job that throws (for example a file it cannot delete) still sends a result, and never ends the daemon.
-        void runJob(message.id, message.command, message.notify)
+        void runJob(message.id, message.command, message)
           .catch((error: unknown): JobOutcome => ({
             ok: false,
             exitCode: null,

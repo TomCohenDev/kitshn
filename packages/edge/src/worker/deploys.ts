@@ -1,6 +1,7 @@
 import { ICON_LIMIT, type IconType, iconType } from "kitshn/icon";
 import { DEFAULT_APP } from "kitshn/names";
 import { type DeployEvent, type WorkerApp, workerBindingNames } from "kitshn/recipe";
+import type { AppAccess } from "../core/machine.ts";
 
 /** K-903: kitshn refuses a new preview at this many Worker scripts in the account. */
 export const SCRIPT_LIMIT = 90;
@@ -253,6 +254,7 @@ export function workerMetadata(
   input: {
     readonly kv: ReadonlyMap<string, string>;
     readonly secrets: Readonly<Record<string, string>>;
+    readonly access: AppAccess;
     readonly assets: {
       readonly jwt: string;
       readonly headers: string | null;
@@ -279,6 +281,13 @@ export function workerMetadata(
     bindings.push({ type: "plain_text", name, text });
   for (const [name, text] of Object.entries(input.secrets))
     bindings.push({ type: "secret_text", name, text });
+  // K-822: a var or secret of the app with the same name wins.
+  const access = {
+    KITSHN_ACCESS_TEAM_DOMAIN: input.access.teamDomain,
+    KITSHN_ACCESS_AUDIENCES: input.access.audiences.join(","),
+  };
+  for (const [name, text] of Object.entries(access))
+    if (!names.includes(name) && !(name in input.secrets)) bindings.push({ type: "plain_text", name, text });
   const runWorkerFirst = app.assets?.runWorkerFirst;
   const classes = [...new Set(Object.values(app.durableObjects ?? {}))].sort();
   const metadata = {

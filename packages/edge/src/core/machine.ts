@@ -357,6 +357,8 @@ export type ServerToDaemon =
       readonly command: Command;
       /** K-1908: the notify address and a new token for a Compose app; the daemon passes both to `docker compose`. */
       readonly notify?: { readonly url: string; readonly token: string };
+      /** K-822: the Access values of a Compose app, read when the job goes out. */
+      readonly access?: AppAccess;
     }
   /** K-1804: search the logs of the Compose app `project`. */
   | { readonly type: "logs"; readonly id: string; readonly project: string; readonly search: LogSearch }
@@ -371,6 +373,13 @@ const ED25519 = { name: "Ed25519" } as const;
 const base64url = (data: Uint8Array) =>
   base64(data).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 const unbase64url = (text: string) => unbase64(text.replaceAll("-", "+").replaceAll("_", "/"));
+
+/** K-822: what an app needs to check kitshn's Access logins itself. */
+export interface AppAccess {
+  readonly teamDomain: string;
+  /** The AUD tags of kitshn's Access applications on the addresses of the card. */
+  readonly audiences: ReadonlyArray<string>;
+}
 
 /** K-1702: the private half of a machine key, as the daemon keeps it in `machine.key`. */
 export interface MachinePrivateKey {

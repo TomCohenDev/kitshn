@@ -94,6 +94,7 @@ import {
   type ServerToDaemon,
   type AskOutcome,
   type AskResult,
+  type AppAccess,
   allowedFor,
   connectText,
   FORWARD_HEADERS,
@@ -3656,15 +3657,27 @@ export class Kitshn extends DurableObject<Env> {
             ? site.address
             : null;
         },
-        audiencesOf: (cardId) =>
-          [...this.access.values()].flatMap((row) =>
-            row.key.startsWith(`app:${cardId}:`) && row.cfId && row.aud ? [row.aud] : [],
-          ),
+        audiencesOf: (cardId) => this.audiencesOf(cardId),
       },
     ).map((push) => {
       const text = JSON.stringify(push);
       return { key: push.key, hash: `${fnv(text)}${fnv(text, 0x050c5d1f)}`, push };
     });
+  }
+
+  /** K-603: the AUD tags of kitshn's Access applications of a card that exist in Cloudflare. */
+  private audiencesOf(cardId: string) {
+    return [...this.access.values()].flatMap((row) =>
+      row.key.startsWith(`app:${cardId}:`) && row.cfId && row.aud ? [row.aud] : [],
+    );
+  }
+
+  /** K-822: read at each deploy, redeploy and rollback, so the app always gets the current audiences. */
+  private appAccess(cardId: string): AppAccess {
+    return {
+      teamDomain: this.env.ACCESS_TEAM_DOMAIN,
+      audiences: [...new Set(this.audiencesOf(cardId))].sort(),
+    };
   }
 
   /** K-709: the kinds of desired state that the providers registered, with their JSON Schema. */
@@ -6042,14 +6055,20 @@ export class Kitshn extends DurableObject<Env> {
           command = { kind: "shell", script };
         }
       }
-      // K-1908: each Compose job of an app gets a new notify token.
-      const notify =
+      // K-1908, K-822: each Compose job of an app gets a new notify token and the current Access values.
+      const app =
         command.kind === "compose" ||
         command.kind === "compose-redeploy" ||
         command.kind === "compose-rollback"
-          ? { url: this.notifyUrl(), token: this.mintNotifyToken(command.project, `job:${job.id}`) }
-          : undefined;
-      send(socket, { type: "job", id: job.id, command, ...(notify ? { notify } : {}) });
+          ? {
+              notify: {
+                url: this.notifyUrl(),
+                token: this.mintNotifyToken(command.project, `job:${job.id}`),
+              },
+              access: this.appAccess(command.project),
+            }
+          : {};
+      send(socket, { type: "job", id: job.id, command, ...app });
       this.sql("UPDATE jobs SET state = 'sent', machine_id = ? WHERE id = ?", machine.id, job.id);
       // K-627: the rollout step follows the release that went out, and only later connections show its outcome.
       if (queuedCommand.kind === "update" && this.rollout().step?.jobId === job.id)
@@ -8782,6 +8801,8 @@ export class Kitshn extends DurableObject<Env> {
               KITSHN_NOTIFY_URL: this.notifyUrl(),
               KITSHN_NOTIFY_TOKEN: this.mintNotifyToken(row.resource_id, `deploy:${row.id}`),
             },
+            // K-822: after the Access sync of this deploy, so the audiences are current.
+            access: this.appAccess(row.resource_id),
             assets:
               app.assets === undefined
                 ? null

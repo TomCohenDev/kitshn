@@ -3096,10 +3096,10 @@ function loadProviders(): Providers {
   try {
     value = existsSync(providersFile()) ? JSON.parse(readFileSync(providersFile(), "utf8")) : null;
   } catch (error) {
-    value = { broken: String(error) };
+    log(`${providersFile()} is no JSON, so no provider loads: ${String(error)}`);
   }
-  const { saved, problem } = parseSaved(value);
-  if (problem) log(`${providersFile()} is broken, so the daemon starts with no providers: ${problem}`);
+  const { saved, problems } = parseSaved(value);
+  for (const problem of problems) log(`${providersFile()}: ${problem}`);
   return new Providers(
     saved,
     (next) => {

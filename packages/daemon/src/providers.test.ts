@@ -228,8 +228,46 @@ describe("the providers of a machine (K-704, K-705)", () => {
     expect(registry.forget("t3")).toMatch(/no provider/);
   });
 
-  it("starts empty from a broken file and says why (K-006)", () => {
-    expect(parseSaved({ providers: [{ name: "site" }] }).problem).not.toBeNull();
-    expect(parseSaved(null)).toEqual({ saved: { providers: [], pushed: {} }, problem: null });
+  it("drops only the items of the file that do not decode, and names each (K-006)", () => {
+    // The file of a Windows daemon from before this fix: its owner -1 drops, and both providers still load.
+    const windows = parseSaved({
+      providers: [
+        { name: "t3", online: true, kinds: [...kinds], commands: [], resources: [thread("a")] },
+        { name: "site" },
+      ],
+      pushed: { "grants:t3": {} },
+      owners: { t3: -1, grok: 1001 },
+    });
+    expect(windows.saved.providers.map((report) => [report.name, report.online])).toEqual([["t3", false]]);
+    expect(windows.saved.owners).toEqual({ grok: 1001 });
+    expect(windows.saved.pushed).toEqual({ "grants:t3": {} });
+    expect(windows.problems).toEqual([
+      expect.stringMatching(/^providers\[1\] dropped/),
+      "the owner of t3 dropped: -1 is no user id",
+    ]);
+    expect(parseSaved("not an object").problems).toEqual(["the file holds no object, so no provider loads"]);
+    expect(parseSaved(null)).toEqual({ saved: { providers: [], pushed: {} }, problems: [] });
+  });
+
+  it("binds no user on Windows, which has no user ids, and its saved file loads again whole (K-621, K-704)", () => {
+    let saved: unknown = null;
+    const registry = new Providers(
+      { providers: [], pushed: {} },
+      (value) => (saved = value),
+      () => {},
+    );
+    // A Windows daemon is its own caller with the user id -1 (WINDOWS_UID).
+    expect(registry.apply(register([thread("a")]), 1, new Set(), -1, true)).toMatchObject({ ok: true });
+    expect(saved).toMatchObject({ owners: {} });
+    const restarted = parseSaved(JSON.parse(JSON.stringify(saved)));
+    expect(restarted.problems).toEqual([]);
+    expect(restarted.saved.providers.map((report) => report.name)).toEqual(["t3"]);
+    // The next start registers it again with no bind in the way.
+    const again = new Providers(
+      restarted.saved,
+      () => {},
+      () => {},
+    );
+    expect(again.apply(register([thread("a")]), 2, new Set(), -1, true)).toMatchObject({ ok: true });
   });
 });

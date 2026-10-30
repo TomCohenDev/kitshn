@@ -1,4 +1,4 @@
-// A provider without a connection (K-704, K-515): the "t3 offline since <time>" sticker with its tip, and the line
+// A provider without a connection (K-704, K-515): the "T3 lost kitshn" sticker with its tip, and the line
 // in the machine panel. The demo machines are offline, so the scenario gives the Mac a state on its way in.
 import { DESKTOP, type Scenario } from "../capture-views.ts";
 

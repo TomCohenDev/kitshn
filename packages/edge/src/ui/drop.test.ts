@@ -8,8 +8,9 @@ import {
   type State,
   circlesHolding,
 } from "../core/model.ts";
+import type { Machine } from "../core/machine.ts";
 import { seed } from "../core/seed.ts";
-import { dropPlan, titleHover } from "./drop.ts";
+import { dropHover, dropPlan } from "./drop.ts";
 
 /** K-509, K-522: a card from the tray drops as a card from the map does. */
 
@@ -21,6 +22,16 @@ const card = (id: string, kind: Resource["kind"]): Resource => ({
   status: "running",
   group: null,
   machine: null,
+});
+
+const joined = (id: string): Machine => ({
+  id,
+  name: id,
+  labels: [],
+  order: 0,
+  serviceTokenId: `t-${id}`,
+  clientId: `c-${id}`,
+  tunnelId: `u-${id}`,
 });
 
 const her: Circle = {
@@ -125,9 +136,15 @@ describe("dropPlan", () => {
         circles: new Map([...base.circles, ["machines", machines]]),
         resources: new Map([...base.resources, ["win", card("win", "machine")]]),
         places: from ? new Map([...base.places, ["win", from]]) : base.places,
+        machines: new Map([
+          ["win", joined("win")],
+          ["mac", joined("mac")],
+        ]),
       };
     };
     const title = { _tag: "title", id: "machines" } as const;
+    const hoverText = (base: State, id: string, target: Parameters<typeof dropHover>[2]) =>
+      dropHover(base, new Map([[id, point]]), target).lines.map((line) => line.text);
 
     it.each([
       ["map", start],
@@ -139,7 +156,7 @@ describe("dropPlan", () => {
       expect(next.circles.get("machines")?.members).toContainEqual({ _tag: "machine", machineId: "win" });
       expect(next.places.get("win")).toEqual(base.places.get("win"));
       expect(plan && "rightsIn" in plan ? plan.rightsIn : null).toBe("machines");
-      expect(titleHover(base, ["win"], "machines")).toBe("+ win joins Machines");
+      expect(hoverText(base, "win", title)).toEqual(["+ win joins Machines"]);
     });
 
     it("changes nothing for a member, and says so", () => {
@@ -152,12 +169,12 @@ describe("dropPlan", () => {
         ]),
       };
       expect(dropPlan(member, new Map([["win", point]]), title, "s-new")).toBeNull();
-      expect(titleHover(member, ["win"], "machines")).toMatch(/already/);
+      expect(hoverText(member, "win", title)[0]).toMatch(/already/);
     });
 
     it("shares a card that is no machine, as the body of the circle does", () => {
       const base = withMachine(start);
-      expect(titleHover(base, ["map"], "machines")).toBeNull();
+      expect(hoverText(base, "map", title).some((line) => line.startsWith("+ Machines can"))).toBe(true);
       const next = after(base, dropPlan(base, new Map([["map", point]]), title, "s-new"));
       expect(next.places.get("map")).toEqual(point);
       expect(next.circles.get("machines")?.members).toEqual(machines.members);
@@ -179,6 +196,87 @@ describe("dropPlan", () => {
         "s-new",
       );
       expect(owner && "ask" in owner ? owner.ask : "").toMatch(/kitshn itself/);
+    });
+
+    it("refuses a machine that would lock a person out of an all-must-match circle, with no hover that says it joins", () => {
+      const base = withMachine(start);
+      const both: Circle = { ...her, id: "both", name: "Both", match: "all" };
+      const all: State = { ...base, circles: new Map([...base.circles, ["both", both]]) };
+      const target = { _tag: "title", id: "both" } as const;
+      const plan = dropPlan(all, new Map([["win", point]]), target, "s-new");
+      expect(plan && "refused" in plan ? plan.refused : "").toMatch(/no one/);
+      expect(hoverText(all, "win", target)[0]).toMatch(/no one/);
+    });
+
+    it("shows the refusal of the drop in the hover, for a public circle and during a pause", () => {
+      const base = withMachine(start);
+      const everyone = { _tag: "title", id: EVERYONE_CIRCLE_ID } as const;
+      expect(hoverText(base, "win", everyone)[0]).toMatch(/public/);
+      expect(dropHover(base, new Map([["win", point]]), everyone).joins).toBe(false);
+      const paused: State = { ...base, paused: "keep-public" };
+      const plan = dropPlan(paused, new Map([["win", point]]), { _tag: "map" }, "s-new");
+      expect(hoverText(paused, "win", { _tag: "map" })[0]).toBe(
+        plan && "refused" in plan ? plan.refused : "?",
+      );
+    });
+
+    it("never says a circle gives what Access does not give, and uses the kind's word for a level", () => {
+      const base = withMachine(start);
+      const ended: Circle = { ...her, id: "ended", name: "Ended", x: 3000, y: 0, endsAt: 1 };
+      const nobody: Circle = { ...her, id: "nobody", name: "Nobody", x: 3000, y: 900, members: [] };
+      const circles = new Map([...base.circles, ["ended", ended], ["nobody", nobody]]);
+      const thread: Resource = {
+        ...card("thread", "t3.thread" as Resource["kind"]),
+        provider: { levels: { view: "read", use: "send", control: "admin" } } as NonNullable<
+          Resource["provider"]
+        >,
+      };
+      const with3: State = {
+        ...base,
+        circles,
+        resources: new Map([...base.resources, ["thread", thread]]),
+      };
+      const text = (at: { x: number; y: number }) =>
+        dropHover(with3, new Map([["thread", at]]), { _tag: "map" }).lines.map((line) => line.text);
+      expect(text({ x: 3000, y: 0 })[0]).toMatch(/has ended/);
+      expect(text({ x: 3000, y: 900 })[0]).toMatch(/lets no one in/);
+      expect(text({ x: her.x, y: her.y })[0]).toBe("+ Her can send thread");
+    });
+
+    it("leaves a stack with a machine at home, and keeps the join in the toast of a mixed drag", () => {
+      const base = withMachine(start);
+      const stacked: State = {
+        ...base,
+        places: new Map([...base.places, ["map", start]]),
+        stacks: new Map([["s1", { id: "s1", name: "", members: ["win", "map"] }]]),
+      };
+      const moves = new Map([
+        ["win", point],
+        ["map", point],
+      ]);
+      const next = after(stacked, dropPlan(stacked, moves, title, "s-new"));
+      expect(next.places.get("win")).toEqual(start);
+      expect(next.places.get("map")).toEqual(start);
+      const mixed = dropPlan(
+        base,
+        new Map([
+          ["win", point],
+          ["tray", point],
+        ]),
+        title,
+        "s-new",
+      );
+      expect(mixed && "note" in mixed ? mixed.note : "").toMatch(/win joined Machines/);
+      expect(after(base, mixed).places.get("tray")).toEqual(point);
+    });
+
+    it("says what the join opens only when it does", () => {
+      const base = withMachine(start);
+      const ended = { ...machines, id: "gone", name: "Gone", endsAt: 1 };
+      const with3: State = { ...base, circles: new Map([...base.circles, ["gone", ended]]) };
+      const plan = dropPlan(with3, new Map([["win", point]]), { _tag: "title", id: "gone" }, "s-new");
+      expect(plan && "done" in plan ? plan.done : "").toMatch(/has ended/);
+      expect(plan && "done" in plan ? plan.done : "").not.toMatch(/opens what/);
     });
 
     it("says that a machine in the body of a circle is shared, not a member", () => {

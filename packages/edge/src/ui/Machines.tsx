@@ -1,4 +1,4 @@
-import { useState } from "preact/hooks";
+import { useMemo, useState } from "preact/hooks";
 import type { Command } from "../core/machine.ts";
 import type { State } from "../core/model.ts";
 import type { JobView, MachineView } from "../core/protocol.ts";
@@ -7,7 +7,7 @@ import { type HealthCell, healthCell, healthProblems } from "../core/health.ts";
 import { ProgressSticker } from "./Progress.tsx";
 import { MACHINE_TIPS, untilText } from "./actions.ts";
 import { Switch, WhyOff, useDialogEscape } from "./controls.tsx";
-import { connectChecklist, machineProblems } from "./machine-signs.ts";
+import { connectChecklist, isNewMachine, machineProblems } from "./machine-signs.ts";
 import { callApi, hiddenChecklists, useStore } from "./store.ts";
 
 /** "5 min", "3 h", "2 d": how long ago a time was (K-515). */
@@ -97,14 +97,25 @@ const keepPress = (event: PointerEvent) => event.stopPropagation();
  */
 function MachineStickers(props: { view: MachineView; state: State }) {
   const { snapshot } = useStore();
+  const { machine: own } = props.view;
+  // A card renders on each frame of a pan, so this work waits for what it reads to change.
+  const signs = useMemo(
+    () => machineProblems(props.view, healthProblems(snapshot?.machines ?? [], own.id, Date.now())),
+    [props.view, snapshot?.machines],
+  );
+  const steps = useMemo(
+    () =>
+      snapshot && isNewMachine(own, Date.now())
+        ? connectChecklist(props.view, props.state, snapshot.access)
+        : null,
+    [props.view, props.state.resources, props.state.circles, snapshot?.access],
+  );
   if (!snapshot) return null;
   const { machine, online, status } = props.view;
   const queued = snapshot.queuedJobs[machine.id] ?? 0;
   // The snapshot holds only the asks that this viewer may answer (K-1902).
   const asks = snapshot.proposals.filter((proposal) => proposal.machineId === machine.id).length;
   const panel = `#map/${encodeURIComponent(machine.id)}`;
-  const signs = machineProblems(props.view, healthProblems(snapshot.machines, machine.id, Date.now()));
-  const steps = connectChecklist(props.view, props.state, snapshot.access);
   const update = props.view.update;
   // K-628: an update in progress or a failed one shows also while the daemon restarts or is offline.
   const version =
@@ -189,16 +200,6 @@ function MachineStickers(props: { view: MachineView; state: State }) {
           {signs.length > 1 ? ` +${signs.length - 1}` : ""}
         </a>
       ) : null}
-      {!steps.every((step) => step.done) && !hiddenChecklists().has(machine.id) ? (
-        <a
-          class="sticker info"
-          href={panel}
-          onPointerDown={keepPress}
-          data-tip="Connect this machine: its panel lists the steps, and each ticks itself off."
-        >
-          connect {steps.filter((step) => step.done).length}/{steps.length}
-        </a>
-      ) : null}
       {queued > 0 ? (
         <a
           class="sticker info"
@@ -210,6 +211,17 @@ function MachineStickers(props: { view: MachineView; state: State }) {
         </a>
       ) : null}
       {version}
+      {/* Last: the row is clipped at two lines, and this one matters least. */}
+      {steps && !steps.every((step) => step.done) && !hiddenChecklists().has(machine.id) ? (
+        <a
+          class="sticker info"
+          href={panel}
+          onPointerDown={keepPress}
+          data-tip="Connect this machine: its panel lists the steps, and each ticks itself off."
+        >
+          connect {steps.filter((step) => step.done).length}/{steps.length}
+        </a>
+      ) : null}
     </>
   );
 }
@@ -266,7 +278,7 @@ const shortFingerprint = (fingerprint: string) => `${fingerprint.slice(0, "SHA25
 
 /** K-1702, K-1705, K-1706: the key of the machine, "Rotate key" and "Reset key". */
 function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error: boolean) => void }) {
-  const { machine, keyFailure } = props.view;
+  const { machine } = props.view;
   const [rekey, setRekey] = useState<{ command: string; expiresAt: number } | null>(null);
   const path = `/api/machines/${encodeURIComponent(machine.id)}`;
   const rotate = async () => {
@@ -319,11 +331,6 @@ function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error
         </button>
       </div>
       <WhyOff reason={rotateOff} />
-      {keyFailure ? (
-        <p class="muted">
-          Failed check {ago(keyFailure.at)} ago: {keyFailure.reason}
-        </p>
-      ) : null}
       {props.view.status?.attesters?.length ? (
         <p
           class="muted"
@@ -348,15 +355,19 @@ function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error
 
 /** K-602: "Add machine" makes a service token, a tunnel and a join code that works once for 10 minutes. */
 export function AddMachine(props: { onClose: () => void }) {
-  useDialogEscape(props.onClose);
   const [name, setName] = useState("");
   const [labels, setLabels] = useState("");
   const [result, setResult] = useState<{ command: string; windowsCommand: string; expiresAt: number } | null>(
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  // The join command shows once, so only its Close button ends it.
+  useDialogEscape(result ? () => undefined : props.onClose);
   return (
-    <div class="scrim" onClick={(event) => event.target === event.currentTarget && props.onClose()}>
+    <div
+      class="scrim"
+      onClick={(event) => !result && event.target === event.currentTarget && props.onClose()}
+    >
       <div class="dialog" role="dialog" aria-label="Add machine">
         <h2>Add machine</h2>
         {result ? (
@@ -504,6 +515,7 @@ export function MachinePanel(props: {
   onToast: (text: string, error: boolean) => void;
 }) {
   const { view } = props;
+  const { snapshot } = useStore();
   const [script, setScript] = useState("");
   const run = props.onRun;
   const jobs = props.jobs.filter((job) => job.machineId === view.machine.id);
@@ -526,11 +538,13 @@ export function MachinePanel(props: {
         ) : null}
       </div>
       <MachineKeyRow view={view} onToast={props.onToast} />
-      {machineProblems(view, []).map((problem) => (
-        <p key={problem.short} class="error">
-          {problem.long}
-        </p>
-      ))}
+      {machineProblems(view, healthProblems(snapshot?.machines ?? [], view.machine.id, Date.now())).map(
+        (problem) => (
+          <p key={problem.long} class="error">
+            {problem.long}
+          </p>
+        ),
+      )}
       {view.online
         ? (view.status?.refusedProviders ?? []).map((refusal) => (
             <details key={refusal.provider} class="raw">

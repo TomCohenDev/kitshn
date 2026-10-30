@@ -595,22 +595,26 @@ function memberActions(state: State, h: ActionHandlers, machine: Resource): Arra
   const of = circles.filter((circle) => machineMember(circle, machine.id));
   const others = circles.filter((circle) => !machineMember(circle, machine.id));
   return [
-    {
-      id: "join",
-      label: "Add to circle as member",
-      keywords: "member control group",
-      tip: `${machine.name} joins a circle and opens what it holds. Its card does not move.`,
-      items: others.map((circle) => {
-        const plan = joinPlan(state, [machine.id], circle);
-        return {
-          id: `join:${circle.id}`,
-          label: circle.name,
-          tip: `${machine.name} joins ${circle.name}, with no agent right yet.`,
-          ...("refused" in plan ? { refused: plan.refused } : refusedBy(state, plan.edits)),
-          run: () => h.joinCircle(machine, circle),
-        };
-      }),
-    },
+    ...(others.length === 0
+      ? []
+      : [
+          {
+            id: "join",
+            label: "Add to circle as member",
+            keywords: "member control group",
+            tip: `${machine.name} joins a circle and opens what it holds. Its card does not move.`,
+            items: others.map((circle) => {
+              const plan = joinPlan(state, [machine.id], circle);
+              return {
+                id: `join:${circle.id}`,
+                label: circle.name,
+                tip: `${machine.name} joins ${circle.name}, with no agent right yet.`,
+                ...("refused" in plan ? { refused: plan.refused } : refusedBy(state, plan.edits)),
+                run: () => h.joinCircle(machine, circle),
+              };
+            }),
+          },
+        ]),
     ...(of.length > 0
       ? [
           {
@@ -627,6 +631,36 @@ function memberActions(state: State, h: ActionHandlers, machine: Resource): Arra
           },
         ]
       : []),
+  ];
+}
+
+/** K-539: the same join as the card's menu, from the side of the circle. No list when every machine is in it. */
+function addMachineActions(ctx: ActionContext, h: ActionHandlers, circle: Circle): Array<Action> {
+  if (isPublicCircle(circle)) return [];
+  const items = [...ctx.machines.values()]
+    .filter((view) => !machineMember(circle, view.machine.id))
+    .flatMap((view): Array<Action> => {
+      const machine = ctx.state.resources.get(view.machine.id);
+      if (!machine) return [];
+      const plan = joinPlan(ctx.state, [machine.id], circle);
+      return [
+        {
+          id: `add-machine:${machine.id}`,
+          label: machine.name,
+          tip: `${machine.name} joins ${circle.name}, with no agent right yet.`,
+          ...("refused" in plan ? { refused: plan.refused } : refusedBy(ctx.state, plan.edits)),
+          run: () => h.joinCircle(machine, circle),
+        },
+      ];
+    });
+  if (items.length === 0) return [];
+  return [
+    {
+      id: "add-machine",
+      label: "Add machine as member",
+      tip: `A machine joins ${circle.name} and opens what it holds.`,
+      items,
+    },
   ];
 }
 
@@ -1065,32 +1099,7 @@ export function circleActions(ctx: ActionContext, h: ActionHandlers, circle: Cir
         run: () => h.addMember(circle.id),
       },
     ],
-    // K-539: the same join as the card's menu, from the side of the circle.
-    isPublicCircle(circle)
-      ? []
-      : [
-          {
-            id: "add-machine",
-            label: "Add machine as member",
-            tip: `A machine joins ${circle.name} and opens what it holds.`,
-            items: [...ctx.machines.values()]
-              .filter((view) => !machineMember(circle, view.machine.id))
-              .flatMap((view) => {
-                const machine = ctx.state.resources.get(view.machine.id);
-                if (!machine) return [];
-                const plan = joinPlan(ctx.state, [machine.id], circle);
-                return [
-                  {
-                    id: `add-machine:${machine.id}`,
-                    label: machine.name,
-                    tip: `${machine.name} joins ${circle.name}, with no agent right yet.`,
-                    ...("refused" in plan ? { refused: plan.refused } : refusedBy(ctx.state, plan.edits)),
-                    run: () => h.joinCircle(machine, circle),
-                  },
-                ];
-              }),
-          },
-        ],
+    addMachineActions(ctx, h, circle),
     undoItemAction(ctx, h, { kind: "circle", id: circle.id }),
     // K-211: the Owner circle cannot be deleted.
     circle.id === OWNER_CIRCLE_ID
@@ -1228,6 +1237,8 @@ export function actionsFor(ctx: ActionContext, h: ActionHandlers, target: MenuTa
 }
 
 export type PaletteEntry = {
+  /** Tells apart two entries with one label, such as the same action on two cards of one name. */
+  readonly id?: string;
   readonly label: string;
   readonly tip: string;
   readonly danger?: true;
@@ -1240,12 +1251,14 @@ export type PaletteEntry = {
  * "…" and opens its items as a second list; the words of its items find it too. A refused action and the current
  * choice of a radio group have no entry: there is nothing to run.
  */
-export function flatten(groups: ActionGroups, prefix: string): Array<PaletteEntry> {
-  const walk = (action: Action, label: string): Array<PaletteEntry> => {
+export function flatten(groups: ActionGroups, prefix: string, scope = ""): Array<PaletteEntry> {
+  const walk = (action: Action, label: string, parent: string): Array<PaletteEntry> => {
+    const id = `${parent}/${action.id}`;
     if (action.refused !== undefined || action.checked) return [];
     if (!("items" in action))
       return [
         {
+          id,
           label,
           tip: action.tip,
           run: action.run,
@@ -1254,11 +1267,12 @@ export function flatten(groups: ActionGroups, prefix: string): Array<PaletteEntr
         },
       ];
     // Opening the second list runs nothing, so only its items can be dangerous.
-    const items = action.items.flatMap((item) => walk(item, item.label));
+    const items = action.items.flatMap((item) => walk(item, item.label, id));
     if (items.length === 0) return [];
     const keywords = [action.keywords, ...items.flatMap((item) => [item.label, item.keywords])];
     return [
       {
+        id,
         label: label.endsWith("…") ? label : `${label}…`,
         tip: action.tip,
         keywords: keywords.filter((word) => word !== undefined).join(" "),
@@ -1268,7 +1282,7 @@ export function flatten(groups: ActionGroups, prefix: string): Array<PaletteEntr
   };
   return groups
     .flat()
-    .flatMap((action) => walk(action, prefix ? `${prefix} · ${action.label}` : action.label));
+    .flatMap((action) => walk(action, prefix ? `${prefix} · ${action.label}` : action.label, scope));
 }
 
 /**
@@ -1325,13 +1339,14 @@ export function paletteEntries(ctx: ActionContext, h: ActionHandlers): Array<Pal
       flatten(
         cardActions(ctx, h, resource).map((group) => group.filter((action) => !SELECTION_IDS.has(action.id))),
         `${kindInfo(resource).icon} ${resource.name}`,
+        `card:${resource.id}`,
       ),
     ),
     ...[...state.stacks.values()].flatMap((stack) =>
-      flatten(stackActions(ctx, h, stack), `Stack ${stackTitle(state, stack)}`),
+      flatten(stackActions(ctx, h, stack), `Stack ${stackTitle(state, stack)}`, `stack:${stack.id}`),
     ),
     ...[...state.circles.values()].flatMap((circle) =>
-      flatten(circleActions(ctx, h, circle), `⭕ ${circle.name}`),
+      flatten(circleActions(ctx, h, circle), `⭕ ${circle.name}`, `circle:${circle.id}`),
     ),
   ];
 }

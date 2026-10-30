@@ -154,7 +154,7 @@ import { AddMachine, MachinePanel, MachinesView, queueJob, setAutoUpdate } from 
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TrayCard, type View, measureMap } from "./Map.tsx";
 import { type DropTarget, dropPlan } from "./drop.ts";
 import { joinPlan, leaveEdit, machineMember } from "./members.ts";
-import { connectChecklist } from "./machine-signs.ts";
+import { connectChecklist, isNewMachine } from "./machine-signs.ts";
 import { overlay } from "./held.ts";
 import { HistoryView } from "./History.tsx";
 import { UsageView } from "./Usage.tsx";
@@ -3537,19 +3537,30 @@ function CardPanel(props: {
   );
 }
 
-/** K-633: the steps of a new machine. It goes when all are done; "Hide" and "Show" keep a machine that skips one quiet. */
+/**
+ * K-633: the connect steps. They open by themselves for a new machine; "Show" reaches them on any machine with an open
+ * step, and "Hide" is per device. They go when all are done.
+ */
 function ConnectChecklist(props: { view: MachineView; state: State }) {
   const { snapshot } = useStore();
-  const steps = connectChecklist(props.view, props.state, snapshot?.access ?? {});
+  const access = snapshot?.access;
+  const [asked, setAsked] = useState(false);
+  const steps = useMemo(
+    () => connectChecklist(props.view, props.state, access ?? {}),
+    [props.view, props.state.resources, props.state.circles, access],
+  );
   if (steps.every((step) => step.done)) return null;
   const id = props.view.machine.id;
-  if (hiddenChecklists().has(id))
+  if (!asked && (!isNewMachine(props.view.machine, Date.now()) || hiddenChecklists().has(id)))
     return (
       <button
         type="button"
         class="btn"
-        data-tip="Show the steps of this machine again, and the connect sticker on its card."
-        onClick={() => setChecklistHidden(id, false)}
+        data-tip="Show the steps that are still open for this machine."
+        onClick={() => {
+          setChecklistHidden(id, false);
+          setAsked(true);
+        }}
       >
         Show the connect steps
       </button>
@@ -3571,7 +3582,10 @@ function ConnectChecklist(props: { view: MachineView; state: State }) {
         type="button"
         class="btn"
         data-tip="Hide these steps on this device, for a machine that skips one, such as one with no T3."
-        onClick={() => setChecklistHidden(id, true)}
+        onClick={() => {
+          setChecklistHidden(id, true);
+          setAsked(false);
+        }}
       >
         Hide
       </button>

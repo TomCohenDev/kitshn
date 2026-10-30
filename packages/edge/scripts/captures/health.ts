@@ -1,5 +1,5 @@
 // The health check (K-630, K-631): the grid in the Machines view with a red link and its tip, a "Check now" that
-// runs on the VPS, an offline machine whose row is unknown, and the "checks red" sticker on the machine card. The
+// runs on the VPS, an offline machine whose row is unknown, and the "check red" sticker on the machine card. The
 // demo machines are offline, so the scenario gives them reports on their way in.
 import { DESKTOP, type Scenario } from "../capture-views.ts";
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { MachineView } from "../core/protocol.ts";
 import { seed } from "../core/seed.ts";
 import type { State } from "../core/model.ts";
-import { connectChecklist, machineProblems } from "./machine-signs.ts";
+import { connectChecklist, isNewMachine, machineProblems } from "./machine-signs.ts";
 
 const view = (over: Partial<MachineView>): MachineView =>
   ({
@@ -18,6 +18,13 @@ describe("machineProblems (K-515)", () => {
     expect(machineProblems(view({}), [])).toEqual([]);
     const lost = { offlineProviders: [{ provider: "t3", reason: "the connection closed", at: 1 }] };
     expect(machineProblems(view({ online: false, status: lost as never }), [])).toEqual([]);
+  });
+
+  it("shows a failed key check also while offline, because that is often why", () => {
+    const failed = { at: 1, reason: "bad signature" };
+    expect(
+      machineProblems(view({ online: false, keyFailure: failed }), []).map((sign) => sign.short),
+    ).toEqual(["key check failed"]);
   });
 
   it("names a provider that lost its connection, and puts a refusal first", () => {
@@ -75,5 +82,25 @@ describe("connectChecklist (K-633)", () => {
       { "t3-mac": { state: "applied" } },
     );
     expect(rows.every((row) => row.done)).toBe(true);
+  });
+
+  it("does not tick the address for another app on the machine", () => {
+    const blog = { id: "blog", kind: "site.compose", addresses: ["blog.example.com"], machine: "mac" };
+    const rows = connectChecklist(view({}), state({ resources: new Map([["blog", blog as never]]) }), {
+      blog: { state: "applied" },
+    });
+    expect(rows.find((row) => row.label.includes("address"))?.done).toBe(false);
+  });
+
+  it("flips a tick back when the machine leaves its last circle", () => {
+    expect(done(connectChecklist(view({ lastSeen: 5 }), state({}), {}))).not.toContain("Member of a circle");
+  });
+
+  it("calls a machine new for 7 days after it joined, and never without a join time", () => {
+    const machine = view({}).machine;
+    const day = 24 * 60 * 60_000;
+    expect(isNewMachine(machine, 10 * day)).toBe(false);
+    expect(isNewMachine({ ...machine, joinedAt: day }, 7 * day)).toBe(true);
+    expect(isNewMachine({ ...machine, joinedAt: day }, 8 * day)).toBe(false);
   });
 });

@@ -1,3 +1,4 @@
+import { circlePolicies } from "../core/access.ts";
 import type { Edit } from "../core/changes.ts";
 import {
   ADMIN_RESOURCE_ID,
@@ -92,21 +93,39 @@ export type JoinPlan =
  * K-539: every outcome of a machine joining a circle, for a drop on the title, the menus and the panels. A change of
  * what joining means is a change here. A member joins with no right set, so its agents gain nothing yet (K-1730).
  */
-export function joinPlan(state: State, machines: ReadonlyArray<string>, circle: Circle): JoinPlan {
+export function joinPlan(
+  state: State,
+  machines: ReadonlyArray<string>,
+  circle: Circle,
+  now = Date.now(),
+): JoinPlan {
   if (isPublicCircle(circle))
     return {
       refused: `${circle.name} is public: anyone opens what it holds, so a machine needs no membership there.`,
     };
   const added = machines.map((machineId): Member => ({ _tag: "machine", machineId }));
+  const after: Circle = { ...circle, members: [...circle.members, ...added] };
   const names = machines.map((id) => state.resources.get(id)?.name ?? id).join(", ");
+  // K-402: Access has no policy for a machine and a person who must match together, so no one would get in.
+  if (circlePolicies(after, state.machines).size === 0)
+    return {
+      refused: `${circle.name} must match all its members, and a machine and a person cannot match together, so no one would get in.`,
+    };
+  const one = machines.length === 1;
+  const opens =
+    circle.endsAt !== null && circle.endsAt <= now
+      ? `${circle.name} has ended, so ${one ? "it opens" : "they open"} nothing.`
+      : circle.match === "all"
+        ? `${one ? "It opens" : "They open"} what ${circle.name} holds only together with its other members.`
+        : `${one ? "It opens" : "They open"} what ${circle.name} holds.`;
   const agents = isAgentCircle(circle);
-  const opens = circlesHolding(state, ADMIN_RESOURCE_ID).some((held) => held.id === circle.id);
+  const holdsAdmin = circlesHolding(state, ADMIN_RESOURCE_ID).some((held) => held.id === circle.id);
   return {
-    edits: [{ _tag: "circle", id: circle.id, after: { ...circle, members: [...circle.members, ...added] } }],
-    done: `${names} joined ${circle.name}: ${machines.length === 1 ? "it opens" : "they open"} what ${circle.name} holds. ${agents ? "No agent rights yet." : "A circle with people gives no agent rights."}`,
+    edits: [{ _tag: "circle", id: circle.id, after }],
+    done: `${names} joined ${circle.name}. ${opens} ${agents ? "No agent rights yet." : "A circle with people gives no agent rights."}`,
     rightsIn: agents ? circle.id : null,
-    ask: opens
-      ? `${circle.name} holds kitshn itself, so ${names} would change everything in kitshn. Add ${machines.length === 1 ? "it" : "them"} anyway?`
+    ask: holdsAdmin
+      ? `${circle.name} holds kitshn itself, so ${names} would change everything in kitshn. Add ${one ? "it" : "them"} anyway?`
       : null,
   };
 }

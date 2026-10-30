@@ -51,6 +51,8 @@ export default {
           snapshot?: { machines: Array<Record<string, unknown> & { machine: { id: string } }> };
         };
         for (const each of data.snapshot?.machines ?? [])
+          Object.assign(each.machine, { joinedAt: Date.now() - 24 * 60 * 60_000 });
+        for (const each of data.snapshot?.machines ?? [])
           if (each.machine.id === "mac")
             Object.assign(each, {
               online: true,

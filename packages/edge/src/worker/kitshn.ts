@@ -5421,6 +5421,7 @@ export class Kitshn extends DurableObject<Env> {
         labels,
         order: Math.max(0, ...[...this.state.machines.values()].map((item) => item.order + 1)),
         serviceTokenId: madeToken.id,
+        joinedAt: Date.now(),
         clientId: madeToken.client_id,
         tunnelId: madeTunnel.id,
         // K-1703: the key comes with the join code, so this machine never connects without one.

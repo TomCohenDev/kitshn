@@ -20,11 +20,13 @@ const matching = (entries: ReadonlyArray<PaletteEntry>, query: string) => {
 
 const fresh: PaletteCursor = { label: null, picked: false };
 
-/** The list that these labels open from the current entries, or null when one of them is gone. */
-function listAt(entries: ReadonlyArray<PaletteEntry>, labels: ReadonlyArray<string>) {
+const keyOf = (entry: PaletteEntry) => entry.id ?? entry.label;
+
+/** The list that these keys open from the current entries, or null when one of them is gone. */
+function listAt(entries: ReadonlyArray<PaletteEntry>, keys: ReadonlyArray<string>) {
   let list = entries;
-  for (const label of labels) {
-    const entry = list.find((each) => each.label === label);
+  for (const key of keys) {
+    const entry = list.find((each) => keyOf(each) === key);
     if (!entry || !("items" in entry)) return null;
     list = entry.items;
   }
@@ -44,7 +46,7 @@ export function Palette(props: {
   const [query, setQuery] = useState(props.initialQuery);
   const [cursor, setCursor] = useState<PaletteCursor>(fresh);
   /**
-   * The labels of the entries whose second lists are open, the newest last. Labels, so that each list comes from the
+   * The keys of the entries whose second lists are open, the newest last. Keys, so that each list comes from the
    * current entries and a change on the map never leaves an older action to run.
    */
   const [path, setPath] = useState<ReadonlyArray<string>>([]);
@@ -52,6 +54,12 @@ export function Palette(props: {
   const open = listAt(props.entries, path);
   const entries = open ?? props.entries;
   const shownPath = open ? path : [];
+  /** The labels of the open lists, for the line above the input. */
+  const trail = shownPath.map(
+    (_, depth) =>
+      listAt(props.entries, shownPath.slice(0, depth))?.find((entry) => keyOf(entry) === shownPath[depth])
+        ?.label,
+  );
   // Events sent in one task (a script or an agent: input, ArrowDown, Enter) arrive before any render, so the
   // keys read the query and the cursor as the last key left them, not as the last render showed them.
   const live = useRef({ query: props.initialQuery, cursor: fresh });
@@ -60,7 +68,7 @@ export function Palette(props: {
     setCursor(next);
   };
   const matches = matching(entries, query);
-  const labels = matches.map((entry) => entry.label);
+  const labels = matches.map(keyOf);
   const { index: active } = paletteActive(labels, cursor);
   const listId = useId();
   const input = useRef<HTMLInputElement>(null);
@@ -97,7 +105,7 @@ export function Palette(props: {
           }
           return word && matching(entry.items, word).length > 0;
         });
-      return go([...pathNow.current, entry.label], kept.join(" "));
+      return go([...pathNow.current, keyOf(entry)], kept.join(" "));
     }
     props.onClose();
     entry.run();
@@ -109,7 +117,7 @@ export function Palette(props: {
     >
       <div class="dialog" role="dialog" aria-label="Command palette">
         {shownPath.length > 0 ? (
-          <p class="help palette-path">{shownPath.join(" › ")} · Escape goes back.</p>
+          <p class="help palette-path">{trail.join(" › ")} · Escape goes back.</p>
         ) : null}
         <input
           class="field"
@@ -141,7 +149,7 @@ export function Palette(props: {
             else if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter") {
               const now = event.currentTarget.value;
               const list = matching(listAt(props.entries, pathNow.current) ?? props.entries, now);
-              const names = list.map((entry) => entry.label);
+              const names = list.map(keyOf);
               const from = now === live.current.query ? live.current.cursor : fresh;
               if (event.key === "Enter") {
                 const at = paletteActive(names, from);
@@ -155,7 +163,7 @@ export function Palette(props: {
         <ul role="listbox" id={listId} aria-label="Matches">
           {matches.map((entry, index) => (
             <li
-              key={entry.label}
+              key={keyOf(entry)}
               id={`${listId}-${index}`}
               role="option"
               data-tip={
@@ -166,7 +174,7 @@ export function Palette(props: {
               data-danger={entry.danger || undefined}
               aria-selected={index === active}
               onClick={() => run(entry)}
-              onMouseEnter={() => moveCursor(query, { label: entry.label, picked: false })}
+              onMouseEnter={() => moveCursor(query, { label: keyOf(entry), picked: false })}
             >
               {entry.label}
             </li>

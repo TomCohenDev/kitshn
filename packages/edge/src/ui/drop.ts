@@ -1,5 +1,13 @@
-import { type Edit, applyChanges, resolveEdits } from "../core/changes.ts";
-import { type Point, type State, circlesHolding, insideCircle } from "../core/model.ts";
+import { circlePolicies } from "../core/access.ts";
+import { type Edit, type ShareDiff, applyChanges, resolveEdits, shareDiff } from "../core/changes.ts";
+import {
+  type Point,
+  type State,
+  circlesHolding,
+  insideCircle,
+  levelName,
+  stackTitle,
+} from "../core/model.ts";
 import { placeInside } from "../core/place.ts";
 import { leaveStacks, refusal, stackOntoEdits } from "./actions.ts";
 import { joinPlan, machineMember } from "./members.ts";
@@ -33,20 +41,89 @@ export type DropPlan =
 const machinesOf = (state: State, ids: ReadonlyArray<string>) =>
   ids.filter((id) => state.resources.get(id)?.kind === "machine");
 
+/** One line of the label beside a drag. */
+export interface DropLine {
+  readonly text: string;
+  readonly minus?: true;
+}
+
+const MAX_LINES = 6;
+
 /**
- * K-539: what the hover over a circle's title says, or null when the title acts as the circle's body: a card that is
- * no machine is only shared, as anywhere in the circle.
+ * What one share change means, in the words of the card's kind (K-205). A circle that ended, or that Access has no
+ * policy for, holds the card and lets no one in, so it never says "can".
  */
-export function titleHover(state: State, ids: ReadonlyArray<string>, circleId: string): string | null {
-  const circle = state.circles.get(circleId);
-  const machines = machinesOf(state, ids);
-  if (!circle || machines.length === 0) return null;
-  const name = (list: ReadonlyArray<string>) =>
-    list.map((id) => state.resources.get(id)?.name ?? id).join(", ");
-  const joining = machines.filter((id) => !machineMember(circle, id));
-  if (joining.length > 0)
-    return `+ ${name(joining)} ${joining.length === 1 ? "joins" : "join"} ${circle.name}`;
-  return `${name(machines)} ${machines.length === 1 ? "is a member" : "are members"} of ${circle.name} already`;
+export function shareLines(
+  diffs: ReadonlyArray<ShareDiff>,
+  machines: State["machines"],
+  now = Date.now(),
+): ReadonlyArray<DropLine> {
+  const lines = diffs.slice(0, MAX_LINES).map(({ resource, circle, to }): DropLine => {
+    if (to === null)
+      return { text: `\u2212 ${circle.name} can no longer open ${resource.name}`, minus: true };
+    if (circle.endsAt !== null && circle.endsAt <= now)
+      return { text: `${circle.name} has ended: it gives no one ${resource.name}` };
+    if (circlePolicies(circle, machines).size === 0)
+      return { text: `${circle.name} lets no one in, so it gives no one ${resource.name}` };
+    return { text: `+ ${circle.name} can ${levelName(resource, to)} ${resource.name}` };
+  });
+  return diffs.length > MAX_LINES ? [...lines, { text: `and ${diffs.length - MAX_LINES} more` }] : lines;
+}
+
+/**
+ * K-539: the label beside a drag of cards, from the plan that the drop runs, so a hover never says what the drop does
+ * not do. `joins` marks a title that takes a machine now.
+ */
+export function dropHover(
+  state: State,
+  moves: ReadonlyMap<string, Point>,
+  target: DropTarget,
+  now = Date.now(),
+): { readonly lines: ReadonlyArray<DropLine>; readonly joins: boolean } {
+  const quiet = { joins: false };
+  if (target._tag === "away") return { lines: [{ text: "Not here: nothing changes" }], ...quiet };
+  const plan = dropPlan(state, moves, target, "hover");
+  if (plan && "refused" in plan) return { lines: [{ text: plan.refused, minus: true }], ...quiet };
+  const ids = [...moves.keys()];
+  if (target._tag === "tray")
+    return {
+      lines: [
+        plan
+          ? { text: "To the tray: out of every circle, private", minus: true }
+          : { text: "Back to the tray: nothing changes" },
+      ],
+      ...quiet,
+    };
+  if (!plan) {
+    const circle = target._tag === "title" ? state.circles.get(target.id) : undefined;
+    const members = circle ? machinesOf(state, ids).filter((id) => machineMember(circle, id)) : [];
+    if (!circle || members.length === 0) return { lines: [], ...quiet };
+    const name = members.map((id) => state.resources.get(id)?.name ?? id).join(", ");
+    return {
+      lines: [
+        { text: `${name} ${members.length === 1 ? "is a member" : "are members"} of ${circle.name} already` },
+      ],
+      ...quiet,
+    };
+  }
+  if (target._tag === "card") {
+    const stack = [...state.stacks.values()].find((each) => each.members.includes(target.id));
+    const name = stack ? stackTitle(state, stack) : (state.resources.get(target.id)?.name ?? "this card");
+    return { lines: [{ text: `Stack with ${name}` }], ...quiet };
+  }
+  const shares = shareLines(
+    shareDiff(state, applyChanges(state, resolveEdits(state, plan.edits))),
+    state.machines,
+    now,
+  );
+  const circle = target._tag === "title" ? state.circles.get(target.id) : undefined;
+  const joining = circle ? machinesOf(state, ids).filter((id) => !machineMember(circle, id)) : [];
+  if (!circle || joining.length === 0) return { lines: shares, ...quiet };
+  const name = joining.map((id) => state.resources.get(id)?.name ?? id).join(", ");
+  return {
+    lines: [{ text: `+ ${name} ${joining.length === 1 ? "joins" : "join"} ${circle.name}` }, ...shares],
+    joins: true,
+  };
 }
 
 /**
@@ -125,15 +202,24 @@ function titlePlan(
 ): DropPlan {
   const circle = state.circles.get(circleId);
   const machines = machinesOf(state, ids);
-  const others = new Map([...moves].filter(([id]) => !machines.includes(id)));
+  // A stack moves as one, so a card that shares a stack with one of these machines stays with it.
+  const stuck = [...state.stacks.values()]
+    .filter((stack) => stack.members.some((id) => machines.includes(id)))
+    .flatMap((stack) => stack.members);
+  const others = new Map([...moves].filter(([id]) => !machines.includes(id) && !stuck.includes(id)));
   const shared = others.size > 0 ? dropPlan(state, others, { _tag: "map" }, newStackId) : null;
+  // The drop is one revision, so a refusal of the other cards refuses the join too, and it says why.
+  if (shared && "refused" in shared) return shared;
   const joining = circle ? machines.filter((id) => !machineMember(circle, id)) : [];
   if (!circle || joining.length === 0) return shared;
   const join = joinPlan(state, joining, circle);
   if ("refused" in join) return join;
-  const edits = [...(shared && "edits" in shared ? shared.edits : []), ...join.edits];
+  const edits = [...(shared?.edits ?? []), ...join.edits];
   const refused = refusal(state, edits);
-  return refused ? { refused } : { edits, done: join.done, rightsIn: join.rightsIn, ask: join.ask };
+  // `note` keeps the join in the toast when the other cards' share changes lead it.
+  return refused
+    ? { refused }
+    : { edits, done: join.done, note: join.done, rightsIn: join.rightsIn, ask: join.ask };
 }
 
 /** K-539: a machine card in the body of a circle is shared with it, and the toast says that it is no member. */

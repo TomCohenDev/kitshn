@@ -2,7 +2,13 @@ import { ICON_LIMIT, iconType, pageDataIcon } from "kitshn/icon";
 import { DurableObject } from "cloudflare:workers";
 import { createHash, randomBytes } from "node:crypto";
 import { Schema } from "effect";
-import { ACCESS_NAME_PREFIX, ENROLLMENT_KEY, type OldAddress, desiredAccess } from "../core/access.ts";
+import {
+  ACCESS_NAME_PREFIX,
+  ASK_APP,
+  ENROLLMENT_KEY,
+  type OldAddress,
+  desiredAccess,
+} from "../core/access.ts";
 import {
   FOLDER_SITE_PREFIX,
   appRestart,
@@ -66,6 +72,8 @@ import {
 import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
+  AGENT_RIGHT_NAMES,
+  MACHINE_RIGHTS,
   OWNER_CIRCLE_ID,
   shareKey,
   MACHINE_RIGHT_NAMES,
@@ -256,6 +264,8 @@ import {
   ASK_EVENT_DAYS,
   ASK_RIGHT,
   type AskAction,
+  type ProposalAction,
+  forwardShown,
   PROPOSAL_MS,
   type Proposal,
   APPROVED_WINDOW_MS,
@@ -334,6 +344,7 @@ import { type VapidKey, generateVapidJwk, pushTopic, sendPush, vapidKey } from "
 import {
   type Mute,
   NOTIFICATIONS_KEEP_MS,
+  INFO_OPEN_MS,
   NOTIFICATIONS_MAX,
   type Notification,
   type NotificationInput,
@@ -458,6 +469,7 @@ import {
   socketStart,
 } from "./machines.ts";
 import { adminHosts, type Env, loginPages } from "./env.ts";
+import { askPage, helpPageHeaders, wantedAddress } from "./help-pages.ts";
 
 /** What a WebSocket of this Durable Object belongs to. */
 type Attachment =
@@ -1231,6 +1243,18 @@ export class Kitshn extends DurableObject<Env> {
       });
       return decided.ok ? null : decided.error;
     });
+    // K-819: "Allow" and "Block" of a waiting repo run from its notification, as from the repo list.
+    this.actionHandlers.set("repo", async (notification, action, caller) => {
+      if (action !== "allow" && action !== "block") return `The repo has no action ${action}.`;
+      const answer = await this.setRepoState(caller, notification.key, {
+        state: action === "allow" ? "allowed" : "blocked",
+      });
+      if (answer.ok) return null;
+      const body: unknown = await answer.json().catch(() => null);
+      return isRecord(body) && typeof body["error"] === "string"
+        ? body["error"]
+        : `answered ${answer.status}`;
+    });
     void ctx.blockConcurrencyWhile(async () => {
       // Numbered migrations: each runs once per database, with its version, in one transaction.
       ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
@@ -1808,6 +1832,10 @@ export class Kitshn extends DurableObject<Env> {
       [...removed, ...leaving],
       [...this.oldAddresses(), ...going],
       loginPages(this.env),
+      // K-1132: only once the bootstrap made the help application, so the redirect lands on a page.
+      this.env.KITSHN_HELP_PAGES === "1"
+        ? { host: this.env.KITSHN_HOST, askLive: Boolean(this.access.get(ASK_APP)?.aud) }
+        : null,
     );
   }
 
@@ -3828,14 +3856,14 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   private broadcast() {
+    const repos = this.repoViews();
     // K-1904: the sources that kitshn derives from its own state follow each change before the maps hear of it.
-    this.reconcileNotifications();
+    this.reconcileNotifications(repos);
     this.reconcileProgress();
     // K-1716: a change can take a code right away.
     this.revokeTokens(null, true);
     // K-1608: the pushes go out, and their hashes count the queue, before the maps read the counts.
     this.pushGrants();
-    const repos = this.repoViews();
     for (const socket of this.ctx.getWebSockets("map")) {
       const attachment = attachmentOf(socket);
       if (attachment?.kind !== "map") continue;
@@ -4301,6 +4329,8 @@ export class Kitshn extends DurableObject<Env> {
       return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
     if (path === "/internal/public-cards") return this.publicCards();
     if (path === "/internal/invite-clients") return Response.json(this.inviteClients().shared);
+    if (path === "/internal/denied") return Response.json(this.refusedAt(new URL(request.url).searchParams));
+    if (path === "/ask") return this.askForAccess(request);
     if (path === "/internal/badge") return this.badge(new URL(request.url).searchParams);
     if (path === "/internal/notify" && request.method === "POST") return this.appNotify(request);
     if (path === "/internal/import-status") return Response.json(this.importStatus());
@@ -7498,6 +7528,10 @@ export class Kitshn extends DurableObject<Env> {
         NOTIFICATIONS_MAX,
       );
       this.sql("DELETE FROM notification_mutes WHERE until IS NOT NULL AND until < ?", now);
+      // K-1905: an info notification closes itself after a day, so it never waits for a Dismiss.
+      for (const notification of this.openNotifications.values())
+        if (notification.level === "info" && notification.openedAt < now - INFO_OPEN_MS)
+          this.setNotificationState(notification.source, notification.key, "closed", now);
       // K-1908: a removed app card loses its notify tokens here, so a quick Undo keeps them.
       this.sql("DELETE FROM notify_tokens WHERE card_id NOT IN (SELECT id FROM resources)");
       // A token whose deploy or job never reported back goes after a day.
@@ -9672,36 +9706,24 @@ export class Kitshn extends DurableObject<Env> {
       ),
     );
     const target = `${call.method} ${call.path}`.slice(0, 512);
+    let waiting: string | null = null;
     const answer = await (async (): Promise<Response> => {
       if (this.state.paused) return refuse(409, "kitshn is paused, so machines wait until Resume (K-1504).");
       const right = forwardRight(path, request.method);
       if (right === undefined)
         return refuse(403, `A machine forwards no call to ${request.method} ${path} (K-1714).`);
-      if (right !== null) {
-        const mode = machineRightMode(this.state, machine.id, right, now);
-        // A forwarded call carries a body that a proposal does not keep, so it cannot wait for the Owner (K-1776).
-        if (mode === null)
-          return refuse(
-            403,
-            machineRightOff(this.state, machine.id, right, now)
-              ? `The right "${MACHINE_RIGHT_NAMES[right]}" is off for this machine (K-1720). Ask the owner to turn it on.`
-              : `The right "${MACHINE_RIGHT_NAMES[right]}" is not set for this machine, and this call cannot wait for an approval. Ask the owner to set it to automatic (K-1776).`,
-            right,
-          );
-        if (mode.mode === "ask")
-          return refuse(
-            409,
-            `The right "${MACHINE_RIGHT_NAMES[right]}" asks ${this.state.circles.get(mode.circleId)?.name ?? mode.circleId}, and this call cannot wait for an approval. The owner sets it to automatic (K-1714).`,
-          );
-        const failed = conditionProblem(mode.conditions, labels, prefixes);
-        if (failed) return refuse(403, failed);
-      }
-      // A page or a folder site into Everyone also needs the conditions of "publishes", as `apply` does (K-1754).
+      // K-1776: the body is read once; an approval binds the hash of what its approver read, so only this call runs.
+      // A copy, so the call itself still streams its own body (a rebuilt body stalls the R2 upload in workerd).
+      const bytes =
+        request.method === "GET" ? new Uint8Array() : new Uint8Array(await request.clone().arrayBuffer());
       const input: unknown = path.startsWith("/agent/sites/")
-        ? await request
-            .clone()
-            .json()
-            .catch(() => null)
+        ? (() => {
+            try {
+              return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+            } catch {
+              return null;
+            }
+          })()
         : null;
       // `finish` lands the site with the `public` of its plan, so it checks the labels again (K-1123).
       const plannedPublic = () =>
@@ -9711,22 +9733,108 @@ export class Kitshn extends DurableObject<Env> {
           machine.clientId,
           isRecord(input) ? String(input["deployId"] ?? "") : "",
         )[0]?.public === 1;
+      // A page or a folder site into Everyone also needs "publishes", as `apply` does (K-1754).
       const publishes =
         (path === "/agent/library" && request.headers.get("x-kitshn-public") === "true") ||
         (path === "/agent/sites/plan" && isRecord(input) && input["public"] === true) ||
         (path === "/agent/sites/finish" && plannedPublic());
-      if (publishes) {
-        const failed = conditionProblem(
-          machineRightMode(this.state, machine.id, "publishes", now)?.conditions,
-          labels,
-          prefixes,
-        );
+      // K-1776: the files and the finish of a folder site count the rights that the approval of their plan gave, so one
+      // approval covers the whole publish.
+      const planned =
+        path === "/agent/sites/assets" || path === "/agent/sites/finish"
+          ? approvedRights(
+              this.sql<{ approved: string }>(
+                `SELECT deploys.approved FROM deploys JOIN agent_sites ON agent_sites.card_id = deploys.resource_id
+                 AND agent_sites.client_id = ? WHERE deploys.id = ? AND deploys.state = 'planned'`,
+                machine.clientId,
+                isRecord(input) ? String(input["deployId"] ?? "") : "",
+              )[0]?.approved ?? "[]",
+            )
+          : [];
+      // A new folder site also needs "adds apps" (K-1123); its finish uses what the plan was approved for.
+      const newSite =
+        path === "/agent/sites/plan" &&
+        isRecord(input) &&
+        !this.folderSiteKnown(machine.clientId, String(input["folder"] ?? "").trim(), now);
+      const game =
+        request.method === "DELETE" &&
+        path.startsWith("/agent/cards/") &&
+        this.gameRows("card_id = ?", decodeURIComponent(path.slice("/agent/cards/".length))).length > 0;
+      const needed = [
+        ...new Set<MachineRight>([
+          ...(right === null ? [] : [right]),
+          ...(game ? (["addsApps"] as const) : []),
+          ...(newSite ? (["addsApps"] as const) : []),
+          ...(publishes ? (["publishes"] as const) : []),
+        ]),
+      ];
+      const { shown, body: shownBody } = await forwardShown(target, request.headers, bytes);
+      const hash = await shownHash(shown);
+      const approved: Array<MachineRight> = [];
+      // K-1714: an approval binds the machine and the thread that asked (an attested label), and runs one call.
+      const thread = labels["t3.thread.id"] ?? null;
+      const used = new Set<string>();
+      let wait: { readonly right: MachineRight; readonly circleId: string } | null = null;
+      for (const need of needed) {
+        const mode = machineRightMode(this.state, machine.id, need, now);
+        if (mode === null && machineRightOff(this.state, machine.id, need, now))
+          return refuse(
+            403,
+            `The right "${MACHINE_RIGHT_NAMES[need]}" is off for this machine (K-1720). Ask the owner to turn it on.`,
+            need,
+          );
+        const failed = conditionProblem(mode?.conditions, labels, prefixes);
         if (failed) return refuse(403, failed);
+        if (mode?.mode === "automatic") continue;
+        if (planned.includes(need)) {
+          approved.push(need);
+          continue;
+        }
+        // K-1776: an unset right asks the Owner; "ask <circle>" asks that circle.
+        const circleId = mode?.circleId ?? OWNER_CIRCLE_ID;
+        const approval = this.forwardApproval(machine.id, hash, circleId, thread, now);
+        if (approval === null) wait ??= { right: need, circleId };
+        else {
+          approved.push(need);
+          used.add(approval);
+        }
       }
-      return this.agentRequest(path, request, {
-        ...caller,
-        actor: { _tag: "machine", machineId: machine.id, name: machine.name },
-      });
+      // An approval of a call that cannot run would only cost the approver a click.
+      if (wait !== null && circlesOf(this.state, caller.visitor, now).size === 0)
+        return refuse(403, "This agent is in no agent circle, so it manages nothing (K-718).");
+      if (wait !== null) {
+        const proposal = await this.forwardProposal(
+          machine,
+          target,
+          shownBody,
+          labels,
+          wait,
+          hash,
+          thread,
+          now,
+        );
+        if (proposal.outcome === "refused") return refuse(409, proposal.reason);
+        waiting = proposal.proposalId;
+        return Response.json(
+          {
+            error: proposal.line,
+            outcome: "waiting",
+            proposalId: proposal.proposalId,
+            circle: proposal.circle,
+            expiresAt: proposal.expiresAt,
+          },
+          { status: 409 },
+        );
+      }
+      // No await since the approvals were read, so no other call can use them in between.
+      for (const id of used)
+        this.sql("UPDATE proposals SET used_at = ? WHERE id = ? AND used_at IS NULL", now, id);
+      return this.agentRequest(
+        path,
+        request,
+        { ...caller, actor: { _tag: "machine", machineId: machine.id, name: machine.name } },
+        approved,
+      );
     })();
     const detail = answer.ok
       ? null
@@ -9744,16 +9852,104 @@ export class Kitshn extends DurableObject<Env> {
       labels,
       answer.ok
         ? { outcome: "done", result: null }
-        : { outcome: "refused", reason: detail ?? `answered ${answer.status}` },
+        : waiting !== null
+          ? { outcome: "waiting", proposalId: waiting }
+          : { outcome: "refused", reason: detail ?? `answered ${answer.status}` },
     );
     return answer;
+  }
+
+  /** K-1123: true when this agent has a live folder site of this folder, so a plan updates it. */
+  private folderSiteKnown(clientId: string, folder: string, now: number) {
+    const [stored] = this.sql<AgentSiteRow>(
+      "SELECT * FROM agent_sites WHERE client_id = ? AND folder = ?",
+      clientId,
+      folder,
+    );
+    return stored !== undefined && this.siteLive(stored, now);
+  }
+
+  /**
+   * K-1714, K-1776: the unused approval of exactly this forwarded call (its shown hash) of this machine and thread, from
+   * this circle, within the hour; null when there is none.
+   */
+  private forwardApproval(
+    machineId: string,
+    hash: string,
+    circleId: string,
+    thread: string | null,
+    now: number,
+  ): string | null {
+    const [row] = this.sql<{ id: string }>(
+      `SELECT id FROM proposals WHERE machine_id = ? AND action = 'forward' AND shown_hash = ? AND circle_id = ?
+       AND state = 'approved' AND used_at IS NULL AND decided_at > ? AND json_extract(labels, '$."t3.thread.id"') IS ?
+       LIMIT 1`,
+      machineId,
+      hash,
+      circleId,
+      now - APPROVED_WINDOW_MS,
+      thread,
+    );
+    return row?.id ?? null;
+  }
+
+  /**
+   * K-1776: the proposal of a forwarded call that waits. The same call again gets the open proposal, not a new one,
+   * so an agent that runs its command again does not fill the Inbox.
+   */
+  private async forwardProposal(
+    machine: Machine,
+    target: string,
+    body: unknown,
+    labels: Readonly<Record<string, string>>,
+    wait: { readonly right: MachineRight; readonly circleId: string },
+    hash: string,
+    thread: string | null,
+    now: number,
+  ): Promise<
+    | { readonly outcome: "refused"; readonly reason: string }
+    | {
+        readonly outcome: "waiting";
+        readonly proposalId: string;
+        readonly circle: string;
+        readonly expiresAt: number;
+        readonly line: string;
+      }
+  > {
+    const [open] = this.sql<{ id: string; expires_at: number }>(
+      `SELECT id, expires_at FROM proposals WHERE machine_id = ? AND action = 'forward' AND shown_hash = ? AND circle_id = ?
+       AND state = 'pending' AND expires_at > ? AND json_extract(labels, '$."t3.thread.id"') IS ? LIMIT 1`,
+      machine.id,
+      hash,
+      wait.circleId,
+      now,
+      thread,
+    );
+    const made = open
+      ? { outcome: "waiting" as const, proposalId: open.id }
+      : await this.propose(machine, "forward", target, body, null, labels, wait.right, wait.circleId, now);
+    if (made.outcome !== "waiting")
+      return {
+        outcome: "refused",
+        reason: made.outcome === "refused" ? made.reason : "kitshn made no proposal.",
+      };
+    const expiresAt = open?.expires_at ?? now + PROPOSAL_MS;
+    const circle = this.state.circles.get(wait.circleId)?.name ?? wait.circleId;
+    const hours = Math.max(1, Math.round((expiresAt - now) / HOUR_MS));
+    return {
+      outcome: "waiting",
+      proposalId: made.proposalId,
+      circle,
+      expiresAt,
+      line: `waiting: ${circle} must approve this call (right "${MACHINE_RIGHT_NAMES[wait.right]}", proposal ${made.proposalId}, expires in ${hours} h). After the approval, run the same command once more within 1 hour, from the same thread; a changed call asks again (K-1776).`,
+    };
   }
 
   private async agentRequest(
     path: string,
     request: Request,
     caller: Caller,
-    approved: MachineRight | null = null,
+    approved: ReadonlyArray<MachineRight> = [],
   ) {
     const now = Date.now();
     // K-1714: a machine's token over HTTP is a call that its daemon forwarded and signed; asks use the connection.
@@ -9764,7 +9960,9 @@ export class Kitshn extends DurableObject<Env> {
     const machineMay = (right: MachineRight) => {
       if (!machine) return true;
       // An approval of this call (K-1723, K-1776) counts also when the right is off.
-      return approved === right || machineRightMode(this.state, machine.id, right, now)?.mode === "automatic";
+      return (
+        approved.includes(right) || machineRightMode(this.state, machine.id, right, now)?.mode === "automatic"
+      );
     };
     const machinePaths = ["/agent/state", "/agent/apply", "/agent/organize", "/agent/jobs", "/agent/deploy"];
     if (
@@ -9835,12 +10033,32 @@ export class Kitshn extends DurableObject<Env> {
       const checked = new Set(this.uptimeTargets().map((card) => card.id));
       // K-1726: a machine sees the open asks of the circles that it is a member of, so its agent can answer them.
       const answerable = machine ? this.answerableProposals(caller.visitor) : [];
+      // The servers and the link events are most of the answer, so they come only with `?all=1`.
+      const all = new URL(request.url).searchParams.get("all") === "1";
+      const circleRef = (id: string) => ({ id, name: this.state.circles.get(id)?.name ?? id });
       return Response.json({
-        rights,
+        // The names of the map, with the mode of each right (K-1720) for a machine, and its circle for "ask".
+        rights: machine
+          ? // "reads code" and "writes code" hold per repo (K-1733), so they are not one mode of the machine.
+            MACHINE_RIGHTS.filter((right) => right !== "readsCode" && right !== "writesCode").map((right) => {
+              const mode = machineRightMode(this.state, machine.id, right, now);
+              const base = { id: right, name: MACHINE_RIGHT_NAMES[right] };
+              if (mode?.mode === "automatic") return { ...base, mode: "automatic" as const };
+              // K-1776: a right that no circle sets asks the Owner; only "off" refuses.
+              if (mode === null && machineRightOff(this.state, machine.id, right, now))
+                return { ...base, mode: "off" as const };
+              return { ...base, mode: "ask" as const, circle: circleRef(mode?.circleId ?? OWNER_CIRCLE_ID) };
+            })
+          : AGENT_RIGHTS.map((right) => ({
+              id: right,
+              name: AGENT_RIGHT_NAMES[right],
+              mode: rights.includes(right) ? "automatic" : "off",
+            })),
+        ...(machine ? { proposals: answerable } : {}),
         // K-619: a machine sees its own listening ports, the list of the site wizard.
-        ...(machine ? { proposals: answerable, servers: this.machineView(machine).servers } : {}),
+        ...(machine && all ? { servers: this.machineView(machine).servers } : {}),
         // K-1610: the newest 50 calls from or to this machine.
-        ...(machine ? { linkEvents: this.recentLinkEvents(machine.id) } : {}),
+        ...(machine && all ? { linkEvents: this.recentLinkEvents(machine.id) } : {}),
         // K-631: the health cells from and to this machine, from the reports in the socket attachments.
         ...(machine ? { health: this.healthOf(machine.id) } : {}),
         // K-819: with "may add apps", the waiting repos that the key may allow.
@@ -9859,7 +10077,10 @@ export class Kitshn extends DurableObject<Env> {
         cards: [...managed].flatMap((id) => {
           const resource = this.state.resources.get(id);
           if (!resource) return [];
-          const { kind, name, addresses, status } = resource;
+          const { kind, name, addresses } = resource;
+          // A machine card has no status of its own; its connection is the live one.
+          const known = kind === "machine" ? this.state.machines.get(id) : undefined;
+          const status = known ? (this.openSocket(known.id) ? "online" : "offline") : resource.status;
           const backup = this.latestBackups().get(id);
           const uptime = checked.has(id) ? (this.uptime.get(id) ?? UP) : null;
           return [
@@ -9874,8 +10095,8 @@ export class Kitshn extends DurableObject<Env> {
               endsAt: this.state.ends.get(id) ?? null,
               added: added.has(id),
               circles: circlesHolding(this.state, id)
-                .map((c) => c.id)
-                .filter(visible),
+                .filter((circle) => visible(circle.id))
+                .map((circle) => ({ id: circle.id, name: circle.name })),
               // K-718: what the owner snapshot shows of the card, so an agent needs no owner read.
               deploy: deploys.newest.get(id) ?? null,
               backup: backup ? { at: backup.at, state: backup.state, error: backup.error } : null,
@@ -9909,7 +10130,7 @@ export class Kitshn extends DurableObject<Env> {
         const probe: Change = { _tag: "place", id, before: place, after: place };
         // A separate after state, so a published card in Everyone needs "publishes" now, as the real move does.
         const after = applyChanges(this.state, [probe]);
-        return agentRefusal(this.state, after, caller.visitor, [probe], now, added, null) === null;
+        return agentRefusal(this.state, after, caller.visitor, [probe], now, added) === null;
       };
       const plan = organize(this.state, this.drawn ?? NO_SIZES, mayMove);
       if ("refused" in plan) return Response.json({ error: plan.refused }, { status: 409 });
@@ -9919,10 +10140,17 @@ export class Kitshn extends DurableObject<Env> {
     // K-1123: an agent key publishes a folder as a static site, in the steps of a repo deploy (K-805).
     if (path.startsWith("/agent/sites/") && request.method === "POST") {
       const input: unknown = await request.json().catch(() => null);
-      return this.agentSite(agent, path.slice("/agent/sites/".length), isRecord(input) ? input : {}, now);
+      return this.agentSite(
+        agent,
+        path.slice("/agent/sites/".length),
+        isRecord(input) ? input : {},
+        now,
+        approved,
+      );
     }
     // K-1116: an agent key publishes a page or a file, the same upload as a drop on the map.
-    if (path === "/agent/library" && request.method === "POST") return this.agentPublish(agent, request, now);
+    if (path === "/agent/library" && request.method === "POST")
+      return this.agentPublish(agent, request, now, approved);
     // K-2006: an agent adds a game on a machine that it controls and closes its doors; it never opens one.
     if (path === "/agent/games" && request.method === "POST") {
       const body: unknown = await request.json().catch(() => null);
@@ -9942,6 +10170,39 @@ export class Kitshn extends DurableObject<Env> {
           { status: 403 },
         );
       return this.createGame(agent.actor, body);
+    }
+    // K-1117, K-1123: an agent takes down a page, a file or a folder site that it published, and needs no right,
+    // because that lowers access (K-715). A game card goes on below, with "adds apps".
+    const removed =
+      path.startsWith("/agent/cards/") && request.method === "DELETE"
+        ? decodeURIComponent(path.slice("/agent/cards/".length))
+        : null;
+    if (removed !== null && !removed.includes("/") && this.gameRows("card_id = ?", removed).length === 0) {
+      const card = this.agentCard(agent, removed, now);
+      if (card === null)
+        return Response.json(
+          { error: `This agent removes only what it published; "${removed}" is none of that (K-1117).` },
+          { status: 403 },
+        );
+      return this.isFolderSite(card) ? this.removeApp(agent, card) : this.deleteItem(agent, card);
+    }
+    // K-1117, K-821: an agent goes back to the previous version of a page, a file or a folder site that it published.
+    if (path.startsWith("/agent/cards/") && path.endsWith("/previous") && request.method === "POST") {
+      const named = decodeURIComponent(path.slice("/agent/cards/".length, -"/previous".length));
+      const card = this.agentCard(agent, named, now);
+      if (card === null)
+        return Response.json(
+          { error: `This agent changes only what it published; "${named}" is none of that (K-1117).` },
+          { status: 403 },
+        );
+      if (!this.isFolderSite(card)) return this.restorePrevious(agent, card, "agent");
+      const back = this.rollbackChoices(card).find((choice, index) => index > 0 && choice.why === null);
+      if (!back)
+        return Response.json(
+          { error: "This folder site has no previous version to go back to (K-821)." },
+          { status: 409 },
+        );
+      return this.rollbackResponse(agent, card, back.deployId);
     }
     // K-2006: an agent removes a game card on a machine that it controls, with "adds apps", as it adds one.
     if (
@@ -9991,6 +10252,7 @@ export class Kitshn extends DurableObject<Env> {
         path.slice("/agent/cards/".length, -"/handover".length),
         isRecord(input) ? input : {},
         now,
+        approved,
       );
     }
     if (path.startsWith("/agent/library/") && path.endsWith("/content") && request.method === "GET") {
@@ -10280,7 +10542,7 @@ export class Kitshn extends DurableObject<Env> {
               now,
             ),
           );
-        return event(await this.runAsk(machine, action, target, raw["body"], needs, labels));
+        return event(await this.runAsk(machine, action, target, raw["body"], [needs], labels));
       }
       const failed = conditionProblem(mode.conditions, labels, prefixes);
       if (failed) return event({ outcome: "refused", reason: failed });
@@ -10297,13 +10559,13 @@ export class Kitshn extends DurableObject<Env> {
     }
     // K-532: Organize keeps every share, so it never moves a card into Everyone and needs no "publishes".
     if (needs === "apply" && action !== "organize") {
-      const edits = this.askEdits(machine, action, target, raw["body"], now, null);
+      const edits = this.askEdits(machine, action, target, raw["body"], now, []);
       if (typeof edits === "string") {
         // K-1720: a move into Everyone needs "publishes"; with "ask <circle>" it waits for an approval.
         const mode = machineRightMode(this.state, machine.id, "publishes", now);
         const failed = conditionProblem(mode?.conditions, labels, prefixes);
         if (failed) return event({ outcome: "refused", reason: failed });
-        const withApproval = this.askEdits(machine, action, target, raw["body"], now, "publishes");
+        const withApproval = this.askEdits(machine, action, target, raw["body"], now, ["publishes"]);
         if (mode?.mode === "ask" && typeof withApproval !== "string")
           return event(
             await this.propose(
@@ -10338,7 +10600,7 @@ export class Kitshn extends DurableObject<Env> {
         return event({ outcome: "refused", reason: edits });
       }
     }
-    return event(await this.runAsk(machine, action, target, raw["body"], null, labels));
+    return event(await this.runAsk(machine, action, target, raw["body"], [], labels));
   }
 
   /**
@@ -10351,7 +10613,7 @@ export class Kitshn extends DurableObject<Env> {
     target: string,
     body: unknown,
     now: number,
-    approved: MachineRight | null,
+    approved: ReadonlyArray<MachineRight>,
   ): ReadonlyArray<Edit> | string {
     const visitor = { email: null, clientId: machine.clientId, ip: null };
     let edits: ReadonlyArray<Edit>;
@@ -10416,7 +10678,7 @@ export class Kitshn extends DurableObject<Env> {
     action: AskAction,
     target: string,
     body: unknown,
-    approved: MachineRight | null,
+    approved: ReadonlyArray<MachineRight>,
     labels: Readonly<Record<string, string>> = {},
   ): Promise<AskOutcome> {
     if (action === "pass") return this.issuePass(machine, target, labels);
@@ -10458,12 +10720,13 @@ export class Kitshn extends DurableObject<Env> {
       visitor: { email: null, clientId: machine.clientId, ip: null },
       actor: { _tag: "machine", machineId: machine.id, name: machine.name },
     };
-    const request = new Request(`https://kitshn.internal${mapped.path}`, {
+    const url = new URL(mapped.path, "https://kitshn.internal");
+    const request = new Request(url, {
       method: mapped.method,
       headers: { "content-type": "application/json" },
       ...(mapped.method === "POST" ? { body: JSON.stringify(mapped.body) } : {}),
     });
-    const response = await this.agentRequest(mapped.path, request, caller, approved);
+    const response = await this.agentRequest(url.pathname, request, caller, approved);
     const json: unknown = await response.json().catch(() => null);
     if (response.ok) return { outcome: "done", result: json };
     return {
@@ -10893,7 +11156,7 @@ export class Kitshn extends DurableObject<Env> {
   /** K-1722: an ask that waits for one member of its approver circle. */
   private async propose(
     machine: Machine,
-    action: AskAction,
+    action: ProposalAction,
     target: string,
     body: unknown,
     reason: string | null,
@@ -11035,7 +11298,8 @@ export class Kitshn extends DurableObject<Env> {
       return { ok: true };
     }
     // K-1723: the approval of a token opens the window; the daemon asks again and gets the token, so no row holds it.
-    if (WINDOW_ACTIONS.has(proposal.action)) {
+    // K-1776: a forwarded call works the same way: the daemon or the agent sends the same call again.
+    if (proposal.action === "forward" || WINDOW_ACTIONS.has(proposal.action)) {
       this.sendAskResult(proposal.machineId, { proposalId, outcome: "approved" });
       this.broadcast();
       return { ok: true };
@@ -11046,7 +11310,7 @@ export class Kitshn extends DurableObject<Env> {
           proposal.action,
           proposal.target,
           proposal.body,
-          proposal.right,
+          [proposal.right],
           proposal.labels,
         )
       : ({ outcome: "refused", reason: "The machine that asked is gone." } as const);
@@ -11624,7 +11888,12 @@ export class Kitshn extends DurableObject<Env> {
    * K-1116: `kitshn publish` of an agent key. A name that this key published before updates that card (K-1117);
    * a new name is a new upload, in the tray or in one of its agent circles, and public only with "may publish".
    */
-  private async agentPublish(agent: Caller, request: Request, now: number) {
+  private async agentPublish(
+    agent: Caller,
+    request: Request,
+    now: number,
+    approved: ReadonlyArray<MachineRight> = [],
+  ) {
     const clientId = agent.visitor.clientId;
     if (!clientId) return Response.json({ error: "Only an agent publishes here (K-1116)." }, { status: 403 });
     const header = (key: string) => {
@@ -11662,7 +11931,7 @@ export class Kitshn extends DurableObject<Env> {
     const kind = uploadKind(name);
     const dot = name.lastIndexOf(".");
     const title = header("x-kitshn-title") || (kind === "page" && dot > 0 ? name.slice(0, dot) : name);
-    const place = () => agentUploadPlace(this.state, agent.visitor, circle, publish, Date.now());
+    const place = () => agentUploadPlace(this.state, agent.visitor, circle, publish, Date.now(), approved);
     return this.upload(agent, request, kind, { clientId, source, title, place });
   }
 
@@ -11845,14 +12114,20 @@ export class Kitshn extends DurableObject<Env> {
    * K-1123: the steps of a folder site: `plan` checks the key, the name and the address; `assets` opens the upload
    * session; `finish` makes the card, if it is new, where K-1116 lets it land, and publishes the files.
    */
-  private async agentSite(agent: Caller, step: string, input: Record<string, unknown>, now: number) {
+  private async agentSite(
+    agent: Caller,
+    step: string,
+    input: Record<string, unknown>,
+    now: number,
+    approved: ReadonlyArray<MachineRight> = [],
+  ) {
     const fail = (status: number, error: string) => Response.json({ error }, { status });
     const api = this.api();
     if (!api) return fail(503, "kitshn has no Cloudflare API token here.");
     const clientId = agent.visitor.clientId;
     if (!clientId) return fail(403, "Only an agent publishes a folder site (K-1123).");
     try {
-      if (step === "plan") return await this.agentSitePlan(api, agent, clientId, input, now);
+      if (step === "plan") return await this.agentSitePlan(api, agent, clientId, input, now, approved);
       const [row] = this.sql<DeployRow>(
         "SELECT * FROM deploys WHERE id = ?",
         String(input["deployId"] ?? ""),
@@ -11899,11 +12174,12 @@ export class Kitshn extends DurableObject<Env> {
       const refusal = this.agentSiteMayChange(agent, site.card_id, now);
       if (refusal) return fail(403, refusal);
     } else {
-      // The right can go between the plan and the files.
-      if (!agentHas(this.state, agent.visitor, "addsApps", now))
+      // The right can go between the plan and the files; an approval of the plan counts for its finish (K-1776).
+      const planned = approvedRights(row.approved);
+      if (!agentHas(this.state, agent.visitor, "addsApps", now, planned))
         return fail(403, 'A folder site needs the right "may add apps" (K-718, K-1123).');
       // The rights and the circles can change between the plan and the files, so the spot counts now.
-      const spot = agentUploadPlace(this.state, agent.visitor, site.circle, site.public === 1, now);
+      const spot = agentUploadPlace(this.state, agent.visitor, site.circle, site.public === 1, now, planned);
       if (typeof spot === "string") return fail(403, spot);
       this.addFolderCard(agent.actor, site, spot, !spot);
     }
@@ -11924,6 +12200,7 @@ export class Kitshn extends DurableObject<Env> {
     clientId: string,
     input: Record<string, unknown>,
     now: number,
+    approved: ReadonlyArray<MachineRight>,
   ) {
     const fail = (status: number, error: string) => Response.json({ error }, { status });
     const text = (key: string) => (typeof input[key] === "string" ? (input[key] as string).trim() : "");
@@ -11955,15 +12232,15 @@ export class Kitshn extends DurableObject<Env> {
       if (refusal) return fail(403, refusal);
       const address = this.state.resources.get(known.card_id)?.addresses[0] ?? known.address;
       return Response.json({
-        deployId: this.planFolderDeploy(known, address, now),
+        deployId: this.planFolderDeploy(known, address, now, approved),
         card: known.card_id,
         address,
         updated: true,
       });
     }
-    if (!agentHas(this.state, agent.visitor, "addsApps", now))
+    if (!agentHas(this.state, agent.visitor, "addsApps", now, approved))
       return fail(403, 'A folder site needs the right "may add apps" (K-718, K-1123).');
-    const spot = agentUploadPlace(this.state, agent.visitor, circle, open, now);
+    const spot = agentUploadPlace(this.state, agent.visitor, circle, open, now, approved);
     if (typeof spot === "string") return fail(403, spot);
     if (!zonesOf(this.env).some((zone) => zone.name === zoneName))
       return fail(409, `kitshn does not publish on ${zoneName} (K-1111).`);
@@ -11987,15 +12264,21 @@ export class Kitshn extends DurableObject<Env> {
       agent_tray: 0,
       created_at: now,
     };
-    return await this.planNewFolderSite(api, site, now, stored?.card_id);
+    return await this.planNewFolderSite(api, site, now, stored?.card_id, approved);
   }
 
   /** K-1123: the deploy row of one upload of a folder site. */
-  private planFolderDeploy(site: Pick<AgentSiteRow, "card_id" | "folder">, address: string, now: number) {
+  /** `approved`: the rights that an approval of this plan gave (K-1776); its files and its finish count them. */
+  private planFolderDeploy(
+    site: Pick<AgentSiteRow, "card_id" | "folder">,
+    address: string,
+    now: number,
+    approved: ReadonlyArray<MachineRight> = [],
+  ) {
     const deployId = crypto.randomUUID();
     this.sql(
-      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, addresses, app_key)
-       VALUES (?, ?, NULL, 'folder', ?, ?, ?, NULL, 'deploy', 'folder', 'planned', ?, '', 'static', ?, 'app')`,
+      `INSERT INTO deploys (id, repo, repo_id, environment, resource_id, address, script, starts_in, kind, sha, state, expires_at, branch, app, addresses, app_key, approved)
+       VALUES (?, ?, NULL, 'folder', ?, ?, ?, NULL, 'deploy', 'folder', 'planned', ?, '', 'static', ?, 'app', ?)`,
       deployId,
       `folder ${site.folder}`,
       site.card_id,
@@ -12003,6 +12286,7 @@ export class Kitshn extends DurableObject<Env> {
       `kitshn-${site.card_id}`,
       now + DEPLOY_MS,
       JSON.stringify([address]),
+      JSON.stringify(approved),
     );
     this.startDeployAction(deployId, {
       app: "static",
@@ -12017,7 +12301,13 @@ export class Kitshn extends DurableObject<Env> {
    * K-1123, K-1129: the plan of a new folder site. Call it with no await between the name check and this call, so
    * two plans at once cannot take one name. `replaces` is an old site row of the same folder that counts for nothing.
    */
-  private async planNewFolderSite(api: Api, site: AgentSiteRow, now: number, replaces?: string) {
+  private async planNewFolderSite(
+    api: Api,
+    site: AgentSiteRow,
+    now: number,
+    replaces?: string,
+    approved: ReadonlyArray<MachineRight> = [],
+  ) {
     const deployId = this.ctx.storage.transactionSync(() => {
       if (replaces) this.sql("DELETE FROM agent_sites WHERE card_id = ?", replaces);
       this.sql(
@@ -12031,7 +12321,7 @@ export class Kitshn extends DurableObject<Env> {
         site.public,
         site.created_at,
       );
-      return this.planFolderDeploy(site, site.address, now);
+      return this.planFolderDeploy(site, site.address, now, approved);
     });
     // The plan holds its address from here; a refusal below lets it go again.
     const release = (response: Response) => {
@@ -12260,7 +12550,13 @@ export class Kitshn extends DurableObject<Env> {
    * K-1127: a key hands a page or a folder site that it may change over to a repo that its user made, by the repo's
    * GitHub id and owner id. For an hour, the first push deploy of that repo takes the card, with its circles and shares.
    */
-  private handOver(agent: Caller, named: string, input: Record<string, unknown>, now: number) {
+  private handOver(
+    agent: Caller,
+    named: string,
+    input: Record<string, unknown>,
+    now: number,
+    approved: ReadonlyArray<MachineRight> = [],
+  ) {
     const fail = (status: number, error: string) => Response.json({ error }, { status });
     const repo = typeof input["repo"] === "string" ? input["repo"].trim() : "";
     const repoId = typeof input["repoId"] === "string" ? input["repoId"] : "";
@@ -12280,7 +12576,7 @@ export class Kitshn extends DurableObject<Env> {
         409,
         "Only a page or a folder site becomes a repo; put a file into a folder site first (K-1127).",
       );
-    if (!agentHas(this.state, agent.visitor, "addsApps", now))
+    if (!agentHas(this.state, agent.visitor, "addsApps", now, approved))
       return fail(403, 'A repo adds an app, so it needs the right "may add apps" (K-718, K-1127).');
     if (this.sql("SELECT 1 FROM repos WHERE repo_id = ?", repoId).length > 0)
       return fail(409, `kitshn knows ${repo} already; a handover is for a new repo (K-1127).`);
@@ -12303,8 +12599,8 @@ export class Kitshn extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       this.sql("DELETE FROM handovers WHERE card_id = ? OR repo_id = ?", card, repoId);
       this.sql(
-        `INSERT INTO handovers (repo_id, owner_id, repo, card_id, client_id, client_name, address, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO handovers (repo_id, owner_id, repo, card_id, client_id, client_name, address, expires_at, approved)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         repoId,
         ownerId,
         repo,
@@ -12313,6 +12609,7 @@ export class Kitshn extends DurableObject<Env> {
         name,
         JSON.stringify(addresses),
         expiresAt,
+        JSON.stringify(approved),
       );
       this.insertRevision(
         agent.actor,
@@ -12384,7 +12681,7 @@ export class Kitshn extends DurableObject<Env> {
     const fits =
       card !== undefined &&
       (card.kind === "page" || this.isFolderSite(card.id)) &&
-      agentHas(this.state, key.visitor, "addsApps", now) &&
+      agentHas(this.state, key.visitor, "addsApps", now, approvedRights(row.approved)) &&
       (this.agentMayChange(key, row.card_id, now) === null ||
         this.agentSiteMayChange(key, row.card_id, now) === null);
     if (!fits) {
@@ -13911,6 +14208,111 @@ export class Kitshn extends DurableObject<Env> {
       .join("\n");
   }
 
+  /** K-1132: the card whose Access application has this audience tag. */
+  private cardOfAudience(kid: string): Resource | null {
+    if (kid === "") return null;
+    for (const row of this.access.values())
+      if (row.key.startsWith("app:") && row.aud === kid)
+        return this.state.resources.get(row.key.split(":")[1] ?? "") ?? null;
+    return null;
+  }
+
+  /**
+   * K-1132: the card and the wanted address of a refusal. A refusal on `/ask` itself (a stranger, K-111) carries the
+   * refusal of the card inside its own `original_url`.
+   */
+  private refusedAt(params: URLSearchParams): { readonly card: string | null; readonly original: string } {
+    let kid = params.get("kid") ?? "";
+    let original = params.get("original_url") ?? "";
+    const askAud = this.access.get(ASK_APP)?.aud;
+    if (askAud && kid === askAud) {
+      const inner = URL.parse(`https://${original}`)?.searchParams;
+      kid = inner?.get("kid") ?? "";
+      original = inner?.get("original_url") ?? "";
+    }
+    return { card: this.cardOfAudience(kid)?.name ?? null, original };
+  }
+
+  /**
+   * K-1132: `/ask`, behind its own application, which only people whom a circle lets in pass. GET shows the refusal with
+   * "Ask for access" and the email of the login; POST from that page opens the ask.
+   */
+  private async askForAccess(request: Request) {
+    const url = new URL(request.url);
+    const zone = this.env.KITSHN_ZONE;
+    const refused = (status: number, text: string) =>
+      new Response(askPage({ step: "refused", text, zone }), { status, headers: helpPageHeaders });
+    const aud = this.access.get(ASK_APP)?.aud;
+    if (!aud) return refused(503, "This kitshn takes no asks yet. Ask the person who sent you the link.");
+    if (request.method !== "GET" && request.method !== "POST") return refused(405, "Open the link again.");
+    const caller = await approverOf(request, this.env, aud, false, Date.now());
+    if (typeof caller === "string" || caller.visitor.email === null)
+      return refused(401, "Log in with your email first, then ask again.");
+    if (request.method === "POST" && request.headers.get("origin") !== `https://${url.host}`)
+      return refused(403, "Send the ask from its own page.");
+    const kid =
+      request.method === "POST"
+        ? String((await request.formData().catch(() => null))?.get("kid") ?? "")
+        : (url.searchParams.get("kid") ?? "");
+    const card = this.cardOfAudience(kid);
+    if (!card) return refused(404, "kitshn does not know this place. Ask the person who sent you the link.");
+    if (request.method === "POST") return this.accessAsk(card, caller.visitor.email);
+    return new Response(
+      askPage({
+        step: "confirm",
+        zone,
+        card: card.name,
+        kid,
+        email: caller.visitor.email,
+        wanted: wantedAddress(url.searchParams.get("original_url") ?? "", zone),
+        host: this.env.KITSHN_HOST,
+        teamDomain: this.env.ACCESS_TEAM_DOMAIN,
+      }),
+      { status: 403, headers: helpPageHeaders },
+    );
+  }
+
+  /**
+   * K-1132: a refused visitor asks the owner for access to one card. It opens one Inbox item, with the email that the
+   * login proved; the same ask while one is open, or past the limit of open asks, opens nothing.
+   */
+  private accessAsk(card: Resource, email: string) {
+    const zone = this.env.KITSHN_ZONE;
+    const answer = (status: number, text: string) =>
+      new Response(askPage({ step: status === 200 ? "done" : "refused", text, zone }), {
+        status,
+        headers: helpPageHeaders,
+      });
+    const key = `${card.id}:${email.toLowerCase()}`;
+    if (this.openNotifications.has(`access\u0000${key}`))
+      return answer(200, `You asked for ${card.name} already. The owner sees it in the Inbox.`);
+    const open = [...this.openNotifications.values()].filter((each) => each.source === "access").length;
+    if (open >= ACCESS_ASKS_OPEN)
+      return answer(
+        429,
+        "The owner has many open asks now. Try again later, or ask the person who sent you the link.",
+      );
+    const now = Date.now();
+    this.notify({
+      source: "access",
+      key,
+      // A dismissed ask opens again only on another day.
+      episode: String(Math.floor(now / DAY)),
+      card: card.id,
+      recipients: { _tag: "owner" },
+      level: "warn",
+      priority: "normal",
+      title: clip(`${email} asks for access to ${card.name}`, TITLE_MAX),
+      text: clip(
+        `No circle of ${card.name} holds this email, so Access refused it. To let them in, add the email to a circle that shares ${card.name}.`,
+        TEXT_MAX,
+      ),
+      actions: [{ id: "show", label: "Show card", kind: "link", path: `#map/${card.id}` }],
+    });
+    this.broadcast();
+    return answer(200, `The owner sees your ask for ${card.name} in the Inbox.`);
+  }
+
   /** K-1904: the sources that kitshn derives from its own state. */
   /** K-1910: limits at 80% or more of the last hourly read, and machines that stay offline 15 minutes. */
   private reconcileOwnSources(now: number) {
@@ -14205,8 +14607,35 @@ export class Kitshn extends DurableObject<Env> {
     return due.length > 0;
   }
 
-  private reconcileNotifications() {
+  private reconcileNotifications(repos: ReadonlyArray<RepoView>) {
     this.reconcileOwnSources(Date.now());
+    // K-819: a repo that waits for Allow, with Allow and Block on the notification itself.
+    const waiting = new Set<string>();
+    for (const repo of repos) {
+      if (repo.state !== "waiting" || repo.goneOnGitHub) continue;
+      waiting.add(repo.repoId);
+      this.notify({
+        source: "repo",
+        key: repo.repoId,
+        episode: String(repo.firstSeen),
+        card: null,
+        recipients: { _tag: "owner" },
+        level: "warn",
+        priority: "normal",
+        title: clip(`${repo.name} waits for Allow`, TITLE_MAX),
+        text: clip(
+          `${repo.branch ? `A push to ${repo.branch} waits. ` : ""}Allow lets ${repo.name} deploy; Block stops its deploys (K-819).`,
+          TEXT_MAX,
+        ),
+        actions: [
+          { id: "allow", label: "Allow", kind: "run" },
+          { id: "block", label: "Block", kind: "run" },
+        ],
+      });
+    }
+    for (const notification of this.openNotifications.values())
+      if (notification.source === "repo" && !waiting.has(notification.key))
+        this.setNotificationState("repo", notification.key, "closed");
     const notes = new Map(
       this.deploys()
         .notes.filter((note) => this.state.resources.has(note.resource_id))
@@ -14455,7 +14884,9 @@ export class Kitshn extends DurableObject<Env> {
     const now = Date.now();
     const sends = queue.flatMap(({ notification, device, tries }) =>
       // A mute holds for every push of its card and source, also a state change of priority high.
-      (notification.state === "open" && !onBell(notification, this.mutes, now)) ||
+      (notification.state === "open" &&
+        notification.snoozedUntil !== null &&
+        notification.snoozedUntil > now) ||
       muted(notification, this.mutes, now)
         ? []
         : [...devices.values()]
@@ -14832,6 +15263,8 @@ const backupRun = (row: BackupRow): BackupRun => ({
 });
 
 interface DeployRow extends Record<string, SqlStorageValue> {
+  /** K-1776: the rights, as JSON, that an approval of a folder site plan gave; its files and finish count them. */
+  approved: string;
   id: string;
   repo: string;
   /** K-819: GitHub's id of the repo; null only for an old row whose card id holds none. */
@@ -15261,6 +15694,23 @@ interface AgentSiteRow extends Record<string, SqlStorageValue> {
   created_at: number;
 }
 
+/** K-1776: the rights that a stored approval gave; anything else in the column counts for nothing. */
+const approvedRights = (text: string): ReadonlyArray<MachineRight> => {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return Array.isArray(parsed)
+      ? parsed.filter(
+          (right): right is MachineRight => typeof right === "string" && right in MACHINE_RIGHT_NAMES,
+        )
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+/** K-1132: at most this many open asks for access, so strangers with an email cannot fill the Inbox. */
+const ACCESS_ASKS_OPEN = 20;
+
 /** K-1123: a folder site has no repo; this deployer only names it in the deploy log of `ensureCard`. */
 const folderDeployer = (folder: string): Deployer => ({
   repo: `folder ${folder}`,
@@ -15300,6 +15750,8 @@ interface HandoverRow extends Record<string, SqlStorageValue> {
   /** The addresses that the repo's card gets, the main one first, as JSON. */
   address: string;
   expires_at: number;
+  /** K-1776: the rights, as JSON, that an approval of the handover gave; the repo's first deploy counts them. */
+  approved: string;
 }
 
 /** K-1127: a GitHub numeric id, as the API and the deploy token give it. */
@@ -15405,7 +15857,9 @@ export function forwardRight(path: string, method: string): MachineRight | null 
     return "addsPages";
   if (card !== null && card.endsWith("/handover") && method === "POST") return "addsApps";
   if (path === "/agent/games" && method === "POST") return "addsApps";
-  if (card !== null && !card.includes("/") && method === "DELETE") return "addsApps";
+  // A removal lowers access (K-715), so it needs only a card that the machine manages; a game also "adds apps".
+  if (card !== null && !card.includes("/") && method === "DELETE") return null;
+  if (card !== null && card.endsWith("/previous") && method === "POST") return "addsPages";
   if (card !== null && card.includes("/doors") && (method === "GET" || method === "DELETE")) return null;
   if (path === "/agent/logs" && method === "POST") return null;
   return undefined;

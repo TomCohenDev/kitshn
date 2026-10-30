@@ -12,13 +12,56 @@ it("takes a call that the daemon forwarded and signed, with the right of its pat
   const key = await newMachineKey();
   await setup({ deploys: { mode: "automatic" } }, key);
   const address = "/agent/cards/no-such-card/address";
-  const off = await forwarded(key, "POST", address, "nonce-off-0123456789");
-  expect(off.status).toBe(403);
-  // A forwarded call cannot wait for the Owner, so an unset right refuses it too, and says how to fix it.
-  expect(await off.json()).toEqual({
-    error: expect.stringContaining('"adds pages" is not set'),
-    need: "addsPages",
+  // K-1776: an unset right asks the Owner, and the same call again gets the same proposal, not a second one.
+  const unset = await forwarded(key, "POST", address, "nonce-off-0123456789");
+  expect(unset.status).toBe(409);
+  const waiting = (await unset.json()) as {
+    error: string;
+    outcome: string;
+    proposalId: string;
+    circle: string;
+  };
+  expect(waiting).toMatchObject({
+    outcome: "waiting",
+    circle: "Owner",
+    error: expect.stringMatching(/^waiting: /),
   });
+  const again = await forwarded(key, "POST", address, "nonce-off-1123456789");
+  expect(((await again.json()) as { proposalId: string }).proposalId).toBe(waiting.proposalId);
+  // A changed call is another call, so the approval of the first does not run it.
+  const other = await forwarded(
+    key,
+    "POST",
+    address,
+    "nonce-off-2123456789",
+    JSON.stringify({ address: "y" }),
+  );
+  expect(((await other.json()) as { proposalId: string }).proposalId).not.toBe(waiting.proposalId);
+  const stub = env.KITSHN.getByName("kitshn");
+  const decided = await runInDurableObject(stub, (instance) =>
+    (
+      instance as unknown as {
+        decide(id: string, decision: "approved", by: object): Promise<{ ok: boolean }>;
+      }
+    ).decide(waiting.proposalId, "approved", {
+      actor: { _tag: "person", email: "owner@example.com" },
+      visitor: { email: "owner@example.com", clientId: null, ip: null },
+      machineId: null,
+      reason: null,
+    }),
+  );
+  expect(decided).toEqual({ ok: true });
+  // The approval runs the same call once more within the hour; the path itself answers for the unknown card.
+  const approved = await forwarded(key, "POST", address, "nonce-off-3123456789");
+  expect((await approved.json()) as { error?: string }).toEqual({
+    error: expect.not.stringMatching(/K-1714|K-1776|adds pages|waiting/),
+  });
+  await runInDurableObject(stub, (_, state) => state.storage.sql.exec("DELETE FROM ask_events"));
+  // "off" still refuses at once, with the right for the CLI's offer.
+  await setup({ deploys: { mode: "automatic" }, addsPages: { mode: "off" } }, key);
+  const off = await forwarded(key, "POST", address, "nonce-off-4123456789");
+  expect(off.status).toBe(403);
+  expect(await off.json()).toEqual({ error: expect.stringContaining("is off"), need: "addsPages" });
   await setup({ deploys: { mode: "automatic" }, addsPages: { mode: "automatic" } }, key);
   const passed = await forwarded(
     key,
@@ -42,9 +85,9 @@ it("takes a call that the daemon forwarded and signed, with the right of its pat
   }
   // The used nonce stays in storage, so a restart of the object does not let a copied call run again.
   await evictDurableObject(env.KITSHN.getByName("kitshn"));
-  const again = await forwarded(key, "POST", address, "nonce-on-01234567890");
-  expect(again.status).toBe(403);
-  expect(await again.json()).toEqual({ error: expect.stringContaining("nonce") });
+  const reused = await forwarded(key, "POST", address, "nonce-on-01234567890");
+  expect(reused.status).toBe(403);
+  expect(await reused.json()).toEqual({ error: expect.stringContaining("nonce") });
   const events = await runInDurableObject(env.KITSHN.getByName("kitshn"), (_, state) =>
     state.storage.sql
       .exec<{ action: string; target: string }>("SELECT action, target FROM ask_events ORDER BY id")

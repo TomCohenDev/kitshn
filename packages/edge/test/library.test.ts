@@ -141,6 +141,29 @@ describe("agent publish (K-1116, K-1117)", () => {
     expect(refused.status).toBe(403);
   });
 
+  it("goes back to the previous version and removes a page that it published, and not one of another key (K-1117)", async () => {
+    stubAccessCerts();
+    await apply([
+      { _tag: "circle", id: "agents", after: agentCircle("agents", "agent-1.access", 2000) },
+      { _tag: "circle", id: "others", after: agentCircle("others", "agent-2.access", 3000) },
+    ]);
+    const id = await idOf(await publish("agent-1.access", "gone.html", "<p>one</p>"));
+    await publish("agent-1.access", "gone.html", "<p>two</p>");
+    const call = async (clientId: string, method: string, path: string) =>
+      send(path, {
+        method,
+        headers: { "cf-access-jwt-assertion": await agent(clientId), "content-type": "application/json" },
+        ...(method === "POST" ? { body: "{}" } : {}),
+      });
+    const back = await call("agent-1.access", "POST", `/agent/cards/${id}/previous`);
+    expect(back.status, await back.clone().text()).toBe(200);
+    expect(await content(id)).toBe("<p>one</p>");
+    expect((await call("agent-2.access", "DELETE", `/agent/cards/${id}`)).status).toBe(403);
+    const removed = await call("agent-1.access", "DELETE", `/agent/cards/${id}`);
+    expect(removed.status, await removed.clone().text()).toBe(200);
+    expect((await call("agent-1.access", "POST", `/agent/cards/${id}/previous`)).status).toBe(403);
+  });
+
   it("has no /agent/publish route any more; a public move goes through /agent/apply (K-718)", async () => {
     stubAccessCerts();
     await apply([{ _tag: "circle", id: "agents", after: agentCircle("agents", "agent-1.access", 2000) }]);

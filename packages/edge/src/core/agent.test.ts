@@ -425,9 +425,9 @@ describe("rights of machines with a mode (K-1720, K-1730)", () => {
     const asking = withMachine({ addsApps: { mode: "ask", circleId: "owner" } });
     expect(machineRightMode(asking, "vps", "addsApps", 0)).toEqual({ mode: "ask", circleId: "owner" });
     expect(agentHas(asking, as("vps-token"), "addsApps", 0)).toBe(false);
-    expect(agentHas(asking, as("vps-token"), "addsApps", 0, "addsApps")).toBe(true);
+    expect(agentHas(asking, as("vps-token"), "addsApps", 0, ["addsApps"])).toBe(true);
     // An approval of one right gives no other right.
-    expect(agentHas(asking, as("vps-token"), "publishes", 0, "addsApps")).toBe(false);
+    expect(agentHas(asking, as("vps-token"), "publishes", 0, ["addsApps"])).toBe(false);
   });
 
   it("gives an agent key no new control from a machine in its circle (K-1730)", () => {

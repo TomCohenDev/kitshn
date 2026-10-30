@@ -20,6 +20,8 @@ export interface Env {
   readonly ACCESS_AGENT_AUD?: string;
   /** K-1601: the audience tag of the `/device` Access application (service tokens of phones and desktop apps). */
   readonly ACCESS_DEVICE_AUD?: string;
+  /** K-1132: "1" once the bootstrap made the Bypass application of `/public/help`, so refusals may go there. */
+  readonly KITSHN_HELP_PAGES?: string;
   /** K-1504: the audience tag of the `/api/fresh` application, a passkey check of at most 10 minutes. */
   readonly ACCESS_FRESH_AUD?: string;
   /** K-1004: the audience tags of the login applications of `pages.<zone>` and `files.<zone>`. */

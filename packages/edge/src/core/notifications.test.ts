@@ -23,6 +23,8 @@ describe("notifications (K-1901, K-1905)", () => {
   it("shows an open notification on the bell until a mute or a snooze hides it, and never a closed one", () => {
     expect(onBell(open, [], 10)).toBe(true);
     expect(onBell({ ...open, state: "closed" }, [], 10)).toBe(false);
+    // An info notification never counts on the bell (K-1905).
+    expect(onBell({ ...open, level: "info" }, [], 10)).toBe(false);
     expect(onBell({ ...open, snoozedUntil: 20 }, [], 10)).toBe(false);
     expect(onBell({ ...open, snoozedUntil: 5 }, [], 10)).toBe(true);
     expect(onBell(open, [{ card: "shop", source: "deploy", until: null }], 10)).toBe(false);

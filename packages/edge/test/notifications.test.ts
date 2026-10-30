@@ -221,3 +221,37 @@ it("runs the later alarm steps when one throws, skips it with backoff, and tells
     { key: "Access", state: "closed" },
   ]);
 });
+
+it("opens a notification for a repo that waits for Allow, whose Allow runs from the notification (K-819, K-1903)", async () => {
+  stubAccessCerts();
+  const stub = env.KITSHN.getByName("kitshn");
+  const id = await runInDurableObject(stub, (instance) => {
+    const kitshn = instance as unknown as Kitshn;
+    kitshn.sql(
+      "INSERT INTO repos (repo_id, name, state, first_seen, branch) VALUES ('77', 'o/waits', 'waiting', 1, NULL)",
+    );
+    kitshn.broadcast();
+    const [row] = kitshn.sql(
+      "SELECT id, actions FROM notifications WHERE source = 'repo' AND state = 'open'",
+    );
+    return row;
+  });
+  expect(JSON.parse(String(id?.["actions"]))).toContainEqual({ id: "allow", label: "Allow", kind: "run" });
+  const answer = await send(`/api/notifications/${id?.["id"]}/actions/allow`, {
+    method: "POST",
+    headers: {
+      "cf-access-jwt-assertion": await accessToken("admin-aud", { email: "owner@example.com" }),
+      "content-type": "application/json",
+    },
+    body: "{}",
+  });
+  expect(answer.status, await answer.clone().text()).toBe(200);
+  const after = await runInDurableObject(stub, (instance) => {
+    const kitshn = instance as unknown as Kitshn;
+    return {
+      repo: kitshn.sql("SELECT state FROM repos WHERE repo_id = '77'")[0]?.["state"],
+      notification: kitshn.sql("SELECT state FROM notifications WHERE source = 'repo'")[0]?.["state"],
+    };
+  });
+  expect(after).toEqual({ repo: "allowed", notification: "closed" });
+});

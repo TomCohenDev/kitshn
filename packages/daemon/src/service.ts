@@ -147,7 +147,7 @@ function windowsTask(
 }
 
 /** K-701: the private socket folder sits in a folder that only its user can pass, so the shared one is in /tmp. */
-const sharedSocketOf = (uid: number) => `/tmp/kitshn-${uid}/kitshn.sock`;
+export const sharedSocketOf = (uid: number) => `/tmp/kitshn-${uid}/kitshn.sock`;
 
 /** The owner and the permission bits of a path, from `lstat`; null when it is missing. */
 export interface PathFacts {

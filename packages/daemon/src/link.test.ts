@@ -3,9 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ReachedCard } from "@kitshn/local";
 import { describe, expect, it } from "vitest";
-import { linkSocketProblem, linkTarget, serveLinks } from "./link.ts";
+import { linkPeerAdmitted, linkSocketProblem, linkTarget, serveLinks } from "./link.ts";
 
 const platform = process.platform === "darwin" ? "darwin" : "linux";
+const own = process.getuid!();
 
 const card = (address: string | null): ReachedCard => ({
   machineId: "b",
@@ -17,6 +18,27 @@ const card = (address: string | null): ReachedCard => ({
 });
 
 describe("the link proxy (K-1609)", () => {
+  it("admits the daemon user and the users of kitshn local-users, and no other user (K-701)", async () => {
+    expect(linkPeerAdmitted(1000, 1000, [])).toBe(true);
+    expect(linkPeerAdmitted(1001, 1000, [1001])).toBe(true);
+    expect(linkPeerAdmitted(1002, 1000, [1001])).toBe(false);
+    // A list that cannot be read admits no local user.
+    expect(linkPeerAdmitted(1001, 1000, null)).toBe(false);
+    // The proxy drops a peer that the check refuses, before it reads a request.
+    const path = join(mkdtempSync(join(tmpdir(), "kitshn-link-")), "link.sock");
+    const links = await serveLinks(path, {
+      reachOf: () => [],
+      token: () => null,
+      log: () => {},
+      peers: { platform, access: "shared", admits: (uid) => linkPeerAdmitted(uid, own + 1, []) },
+    });
+    try {
+      await expect(fetch("http://link/t3/b/x", { unix: path } as RequestInit)).rejects.toThrow();
+    } finally {
+      links.stop();
+    }
+  });
+
   it("reaches only the address of the card of the provider that the path names, on a machine in reach, and a path never changes the host", () => {
     const other: ReachedCard = { ...card("other-b.example.com"), kind: "other.app" };
     const reachOf = (provider: string) =>
@@ -60,9 +82,12 @@ describe("the link proxy (K-1609)", () => {
       token: () => ({ clientId: "a.access", clientSecret: "secret" }),
       log: () => {},
       scheme: "http",
+      peers: { platform, access: "private", admits: (uid) => linkPeerAdmitted(uid, own, []) },
     });
     try {
-      expect(linkSocketProblem(platform, path)).toBeNull();
+      // Whoever asks, also a local user, takes a socket of the daemon user with mode 0600, and no other owner (K-701).
+      expect(linkSocketProblem(platform, path, own)).toBeNull();
+      expect(linkSocketProblem(platform, path, own + 1)).toMatch(/not to the daemon user/);
       const answer = await fetch("http://link/t3/b/api/thing", {
         unix: path,
         method: "POST",
@@ -86,8 +111,8 @@ describe("the link proxy (K-1609)", () => {
       expect(await webSocketEcho(path, "/t3/b/ws", "hi")).toBe("echo hi");
       // A provider refuses a socket that another user could open or replace (K-621).
       chmodSync(path, 0o666);
-      expect(linkSocketProblem(platform, path)).toMatch(/mode 666/);
-      expect(linkSocketProblem(platform, join(folder, "none.sock"))).toMatch(/no link proxy/);
+      expect(linkSocketProblem(platform, path, own)).toMatch(/mode 666/);
+      expect(linkSocketProblem(platform, join(folder, "none.sock"), own)).toMatch(/no link proxy/);
     } finally {
       links.stop();
       void upstream.stop(true);

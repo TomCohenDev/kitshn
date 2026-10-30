@@ -1,13 +1,15 @@
 // K-1609, K-711: the link proxy. A provider reaches the address of a card on another machine through this machine's
-// daemon, which adds the machine token. The provider never holds a Cloudflare credential. One server serves a Unix
-// socket in the daemon's private folder, and a named pipe on Windows with the rules of K-621.
+// daemon, which adds the machine token. The provider never holds a Cloudflare credential. It serves a Unix socket in
+// the daemon's private folder and one in its shared folder for local users (K-701), or a named pipe on Windows (K-621).
 import { chmodSync, lstatSync, rmSync } from "node:fs";
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
 import { type Socket, connect as connectTcp, createServer as createListener } from "node:net";
 import { Readable } from "node:stream";
 import { connect as connectTls } from "node:tls";
 import type { ReachedCard } from "@kitshn/local";
-import type { Platform } from "./service.ts";
+import { dirname } from "node:path";
+import { type Platform, sharedSocketOf } from "./service.ts";
+import { peerUid } from "./peer.ts";
 import { pipeServerProblem } from "./winpipe.ts";
 
 /** The Access service token of this machine (K-107). */
@@ -94,7 +96,20 @@ interface LinkOptions {
   readonly log: (text: string) => void;
   /** `http` only in tests. */
   readonly scheme?: "https" | "http";
+  /**
+   * K-701, K-1609: a Unix socket checks the user id of each peer and admits only the peers that `admits` names:
+   * `private` has mode 0600 in the daemon's private folder, `shared` mode 0666 in its shared folder.
+   */
+  readonly peers?: {
+    readonly platform: Platform;
+    readonly access: "private" | "shared";
+    readonly admits: (uid: number) => boolean;
+  };
 }
+
+/** K-701, K-1609: the daemon user and the users of `kitshn local-users` use the link proxy, as the main socket. */
+export const linkPeerAdmitted = (uid: number, daemonUid: number, localUsers: ReadonlyArray<number> | null) =>
+  uid === daemonUid || (localUsers?.includes(uid) ?? false);
 
 /**
  * K-1609: serves the link proxy on `path`: a Unix socket of mode 0600 in the daemon's private folder, or on Windows a
@@ -180,6 +195,16 @@ export function serveLinks(path: string, options: LinkOptions): Promise<{ readon
     upstream.on("close", () => client.destroy());
   });
   const listener = createListener((socket) => {
+    const peers = options.peers;
+    if (peers) {
+      // Bun gives the descriptor of a node:net socket on its handle; a peer that cannot be read is refused (K-006).
+      const uid = peerUid(peers.platform, (socket as unknown as { _handle?: { fd?: unknown } })._handle?.fd);
+      if (uid === null || !peers.admits(uid)) {
+        options.log(`link: refused the user id ${uid ?? "that cannot be read"}`);
+        socket.destroy();
+        return;
+      }
+    }
     // A connection that never sends a byte holds a pipe instance for nothing, for example a read-only one.
     const quiet = setTimeout(() => socket.destroy(), LINK_FIRST_BYTE_MS);
     socket.once("data", () => clearTimeout(quiet));
@@ -198,7 +223,8 @@ export function serveLinks(path: string, options: LinkOptions): Promise<{ readon
       ),
     );
     listener.listen(path, () => {
-      if (!path.startsWith("\\\\.\\pipe\\")) chmodSync(path, 0o600);
+      if (!path.startsWith("\\\\.\\pipe\\"))
+        chmodSync(path, options.peers?.access === "shared" ? 0o666 : 0o600);
       resolve({
         stop: () => {
           listener.close();
@@ -235,9 +261,10 @@ function tunnelAnswer(upstream: Socket, client: Socket) {
 
 /**
  * K-1609, K-621: why a provider must not use the link socket `path`, or null. On Windows, the pipe's server must run as
- * this account; elsewhere, the socket must be this user's, with mode 0600.
+ * this account. Elsewhere, the socket must belong to the daemon user `daemonUid`, as the caller finds it for the main
+ * socket (K-701): mode 0600 in its private folder, or 0666 in its shared folder. The proxy checks each peer on both.
  */
-export function linkSocketProblem(platform: Platform, path: string): string | null {
+export function linkSocketProblem(platform: Platform, path: string, daemonUid: number): string | null {
   if (platform === "win32") {
     const problem = pipeServerProblem(path);
     return problem === "missing" ? `no link proxy serves ${path}.` : problem;
@@ -245,12 +272,17 @@ export function linkSocketProblem(platform: Platform, path: string): string | nu
   try {
     const stat = lstatSync(path);
     if (!stat.isSocket()) return `${path} is not a socket.`;
-    if (stat.uid !== process.getuid!())
-      return `${path} belongs to the user id ${stat.uid}, not to this user.`;
-    if ((stat.mode & 0o777) !== 0o600)
-      return `${path} has the mode ${(stat.mode & 0o777).toString(8)}, not 600.`;
+    if (stat.uid !== daemonUid)
+      return `${path} belongs to the user id ${stat.uid}, not to the daemon user ${daemonUid}.`;
+    const mode = stat.mode & 0o777;
+    const shared = path === `${sharedLinkFolder(daemonUid)}/link.sock`;
+    if (mode !== (shared ? 0o666 : 0o600))
+      return `${path} has the mode ${mode.toString(8)}, not ${shared ? "666" : "600"}.`;
     return null;
   } catch {
     return `no link proxy serves ${path}.`;
   }
 }
+
+/** K-701: the shared folder of a daemon user, where the users of `kitshn local-users` find its sockets. */
+const sharedLinkFolder = (daemonUid: number) => dirname(sharedSocketOf(daemonUid));

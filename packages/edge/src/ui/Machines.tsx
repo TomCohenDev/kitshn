@@ -15,6 +15,10 @@ export function ago(time: number | null, now = Date.now()): string {
   return hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} d`;
 }
 
+/** "15:40": a time of today, short enough for a sticker on a card (K-515). */
+const clock = (time: number) =>
+  new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+
 const JOB_TIPS: Record<JobView["state"], string> = {
   queued: "Queued: the job waits for the machine.",
   sent: "Sent: the machine has the job and runs it.",
@@ -100,6 +104,7 @@ function MachineStickers(props: { view: MachineView }) {
   const asks = snapshot.proposals.filter((proposal) => proposal.machineId === machine.id).length;
   const panel = `#map/${encodeURIComponent(machine.id)}`;
   const refused = status?.refusedProviders ?? [];
+  const offline = status?.offlineProviders ?? [];
   const update = props.view.update;
   // K-628: an update in progress or a failed one shows also while the daemon restarts or is offline.
   const version =
@@ -183,6 +188,23 @@ function MachineStickers(props: { view: MachineView }) {
             .join(" · ")}
         >
           {refused.length === 1 ? "provider refused" : `${refused.length} providers refused`}
+        </a>
+      ) : null}
+      {online && offline.length > 0 ? (
+        <a
+          class="sticker"
+          href={panel}
+          onPointerDown={keepPress}
+          data-tip={offline
+            .map(
+              (entry) =>
+                `Provider ${entry.provider} offline since ${clock(entry.at)} (${ago(entry.at)}): ${entry.reason}. Its cards do not update until it registers again.`,
+            )
+            .join(" · ")}
+        >
+          {offline.length === 1
+            ? `${offline[0]!.provider} offline since ${clock(offline[0]!.at)}`
+            : `${offline.length} providers offline`}
         </a>
       ) : null}
       {queued > 0 ? (
@@ -506,6 +528,13 @@ export function MachinePanel(props: {
         ? (view.status?.refusedProviders ?? []).map((refusal) => (
             <p key={refusal.provider} class="muted">
               Provider {refusal.provider} refused for {ago(refusal.at)}: {refusal.reason}
+            </p>
+          ))
+        : null}
+      {view.online
+        ? (view.status?.offlineProviders ?? []).map((entry) => (
+            <p key={`offline-${entry.provider}`} class="muted">
+              Provider {entry.provider} offline since {clock(entry.at)} ({ago(entry.at)}): {entry.reason}
             </p>
           ))
         : null}

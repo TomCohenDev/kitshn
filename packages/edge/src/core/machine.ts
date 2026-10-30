@@ -81,6 +81,8 @@ export interface MachineStatus {
   readonly listening?: ReadonlyArray<string>;
   /** K-704: the providers whose last registration the daemon refused; only from a signed connection. */
   readonly refusedProviders?: ReadonlyArray<ProviderRefusal>;
+  /** K-704, K-515: the registered providers without a connection, since `at` and why; only from a signed connection. */
+  readonly offlineProviders?: ReadonlyArray<ProviderRefusal>;
 }
 
 /** K-605, K-606: the latest resource sample. The Durable Object keeps it in memory only. */

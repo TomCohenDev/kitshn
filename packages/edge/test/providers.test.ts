@@ -1146,3 +1146,42 @@ it("opens one notification for a refused provider from a signed status, and clos
   await status("signed", []);
   expect((await notifications()).map((row) => row.state)).toEqual(["closed"]);
 });
+
+it("opens a notification for a provider offline 5 minutes, keeps it beside refusals, and closes it when it is back (K-704)", async () => {
+  const { stub } = await setup();
+  const status = (offlineProviders: Array<object>) =>
+    runInDurableObject(stub, (instance) =>
+      instance.webSocketMessage(
+        daemonSocket("signed"),
+        JSON.stringify({
+          type: "status",
+          status: {
+            version: "dev",
+            os: "Linux 6",
+            arch: "x64",
+            hostname: "vps",
+            tunnel: "running",
+            refusedProviders: [],
+            offlineProviders,
+          },
+        }),
+      ),
+    );
+  const notifications = () =>
+    runInDurableObject(stub, (_, state) =>
+      state.storage.sql
+        .exec<{ key: string; state: string; text: string }>(
+          "SELECT key, state, text FROM notifications WHERE source = 'provider' AND key LIKE 'offline:%' ORDER BY id",
+        )
+        .toArray(),
+    );
+  await status([{ provider: "t3", reason: "the connection closed", at: Date.now() - 60_000 }]);
+  expect(await notifications()).toEqual([]);
+  // Five minutes offline: one notification, which a status without refusals keeps.
+  await status([{ provider: "t3", reason: "the connection closed", at: Date.now() - 6 * 60_000 }]);
+  expect(await notifications()).toEqual([
+    { key: "offline:vps:t3", state: "open", text: expect.stringContaining("the connection closed") },
+  ]);
+  await status([]);
+  expect((await notifications()).map((row) => row.state)).toEqual(["closed"]);
+});

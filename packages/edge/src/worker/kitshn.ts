@@ -5073,11 +5073,16 @@ export class Kitshn extends DurableObject<Env> {
         ...gameStatus(message.status),
         // K-1708: a connection on the token alone opens no notification.
         ...(attachment.check === "signed"
-          ? { refusedProviders: providerRefusals(message.status.refusedProviders) }
+          ? {
+              refusedProviders: providerRefusals(message.status.refusedProviders),
+              // The same shape as a refusal: the provider, since when, and why.
+              offlineProviders: providerRefusals(message.status.offlineProviders),
+            }
           : {}),
       };
       saveMachine(socket, { ...attachment, status });
       if (status.refusedProviders) this.notifyRefusals(machine, status.refusedProviders);
+      if (status.offlineProviders) this.notifyOfflineProviders(machine, status.offlineProviders, Date.now());
       // K-627: a daemon that connects, or that runs another release now, can start or end an update.
       if (attachment.status === null || attachment.status.version !== status.version) this.autoUpdate();
       this.updateGameAddresses(machine.id, status.publicAddresses);
@@ -13895,6 +13900,48 @@ export class Kitshn extends DurableObject<Env> {
         this.setNotificationState("provider", notification.key, "closed");
   }
 
+  /**
+   * K-704: a provider without a connection for `PROVIDER_OFFLINE_MS` opens a notification for its machine card, and it
+   * closes when the provider registers again. Its key never starts with the machine id, so `notifyRefusals` keeps it.
+   */
+  private notifyOfflineProviders(machine: Machine, offline: ReadonlyArray<ProviderRefusal>, now: number) {
+    const keys = new Set<string>();
+    for (const entry of offline) {
+      if (now - entry.at < PROVIDER_OFFLINE_MS) continue;
+      const key = `offline:${machine.id}:${entry.provider}`;
+      keys.add(key);
+      this.notify({
+        source: "provider",
+        key,
+        episode: String(entry.at),
+        card: machine.id,
+        recipients: { _tag: "owner" },
+        level: "error",
+        priority: "normal",
+        title: `The provider ${entry.provider} of ${machine.name} is offline`,
+        text: `Since ${new Date(entry.at).toISOString()}: ${entry.reason}. Its cards do not update until it registers again.`,
+        actions: [{ id: "show", label: "Show machine", kind: "link", path: `#map/${machine.id}` }],
+      });
+    }
+    for (const notification of this.openNotifications.values())
+      if (
+        notification.source === "provider" &&
+        notification.key.startsWith(`offline:${machine.id}:`) &&
+        !keys.has(notification.key)
+      )
+        this.setNotificationState("provider", notification.key, "closed");
+  }
+
+  /** K-704: the offline providers of every connected daemon, as the alarm sees them every few minutes. */
+  private checkOfflineProviders(now: number) {
+    for (const machine of this.state.machines.values()) {
+      const socket = this.openSocket(machine.id);
+      const attachment = socket ? attachmentOf(socket) : null;
+      const offline = attachment?.kind === "machine" ? attachment.status?.offlineProviders : undefined;
+      if (offline) this.notifyOfflineProviders(machine, offline, now);
+    }
+  }
+
   /** K-1908: the address that an app sends its notifications to. */
   private notifyUrl() {
     return `https://${this.env.KITSHN_HOST}/notify`;
@@ -14446,6 +14493,7 @@ export class Kitshn extends DurableObject<Env> {
       this.autoUpdate();
     if ((await this.alarmStep("rollbacks", 0, () => this.settleRollbacks())) > 0) changed = true;
     await this.alarmStep("proposals", undefined, () => this.expireProposals(now));
+    await this.alarmStep("provider offline", undefined, () => this.checkOfflineProviders(now));
     const before = JSON.stringify(accessStates(this.desired(now), this.access));
     await this.alarmStep("share ends", undefined, () => this.endShares(now));
     if (await this.alarmStep("doors", false, () => this.closeLostDoors(now))) changed = true;
@@ -14749,6 +14797,8 @@ function rowAddresses(row: Pick<DeployRow, "address" | "addresses">): Array<stri
 
 /** A failed tunnel, DNS or route write tries again after this time. */
 const RETRY_MS = 5 * 60_000;
+/** K-704: a provider without a connection this long opens a notification. */
+const PROVIDER_OFFLINE_MS = 5 * 60_000;
 
 /** K-406: the steps of the alarm that run on their own, so one that throws stops no other. */
 const ALARM_STEPS = [
@@ -14756,6 +14806,7 @@ const ALARM_STEPS = [
   "jobs",
   "rollbacks",
   "proposals",
+  "provider offline",
   "share ends",
   "doors",
   "open games",

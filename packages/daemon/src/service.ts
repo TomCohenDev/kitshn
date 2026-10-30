@@ -99,6 +99,13 @@ function stopByPath(
   ];
 }
 
+/**
+ * K-622: whether `whoami /groups` shows an elevated token (high or system integrity). Tasks that an elevated
+ * window makes carry an access list that the user's normal token cannot use, so the daemon would be denied.
+ */
+export const windowsElevated = (whoamiGroups: string) =>
+  whoamiGroups.includes("S-1-16-12288") || whoamiGroups.includes("S-1-16-16384");
+
 /** K-622: the Windows account of the tasks, as Task Scheduler names it. */
 const windowsUser = (env: Record<string, string | undefined>) =>
   env["USERDOMAIN"] ? `${env["USERDOMAIN"]}\\${env["USERNAME"] ?? ""}` : (env["USERNAME"] ?? "");

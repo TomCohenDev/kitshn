@@ -9,6 +9,7 @@ import {
   releaseAsset,
   serviceCommands,
   serviceFile,
+  windowsElevated,
   tunnelCommands,
   tunnelServiceFile,
   tunnelStateOf,
@@ -38,6 +39,11 @@ describe("daemon service (K-601)", () => {
     expect(windows.config).toBe("C:\\Users\\Ya\\AppData\\Local\\kitshn\\machine.json");
     expect(windows.socket).toBe("\\\\.\\pipe\\kitshn-ya");
     expect(windows.sharedSocket).toBe("");
+  });
+
+  it("refuses an elevated Windows window, whose tasks the user could not start (K-622)", () => {
+    expect(windowsElevated("Mandatory Label\\High Mandatory Level   Label   S-1-16-12288")).toBe(true);
+    expect(windowsElevated("Mandatory Label\\Medium Mandatory Level Label   S-1-16-8192")).toBe(false);
   });
 
   it("restarts the daemon after every exit", () => {

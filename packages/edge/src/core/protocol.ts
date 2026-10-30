@@ -18,6 +18,7 @@ import type {
 import type { RepoGate } from "./repos.ts";
 import type { Proposal } from "./asks.ts";
 import type { ProviderCommand } from "@kitshn/local";
+import type { ActionProgress } from "./progress.ts";
 
 /** K-1623: a provider card's address that something else serves, that kitshn takes over now, or took over. */
 export type AddressHold = "in-use" | "taking" | "taken";
@@ -144,6 +145,8 @@ export interface Snapshot {
   readonly handoverCards: ReadonlyArray<string>;
   /** K-1623: provider cards whose address something else serves, that kitshn takes over now, or took over. */
   readonly addressHolds: Readonly<Record<string, AddressHold>>;
+  /** K-538: the action of each card that runs, failed and waits for Dismiss, or ended a moment ago. */
+  readonly progress: Readonly<Record<string, ActionProgress>>;
   /** K-1123, K-1129: the folder sites that no repo took over; a folder from the owner gives them a new version. */
   readonly folderSites: ReadonlyArray<string>;
   /** K-1128: the redirect addresses of each site card, by card id. */

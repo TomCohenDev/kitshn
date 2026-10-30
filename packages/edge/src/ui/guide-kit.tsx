@@ -230,6 +230,7 @@ export function fixtureCard(
       count={null}
       open={false}
       access={null}
+      progress={null}
       downSince={null}
       machine={null}
       pullRequest={null}

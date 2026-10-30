@@ -95,6 +95,7 @@ import {
   useStoredWidth,
 } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
+import { ProgressRow } from "./Progress.tsx";
 import { FOLDER_SITE_PREFIX } from "../core/apps.ts";
 import { peekable } from "./frames.ts";
 import { type FolderFiles, droppedFolder, pickedFolder, uploadFolder } from "./folders.ts";
@@ -1649,6 +1650,7 @@ export function App() {
           state={state}
           access={store.snapshot.access}
           uptime={store.snapshot.uptime}
+          progress={store.snapshot.progress}
           selection={selection}
           onSelect={select}
           hidden={hidden}
@@ -2859,6 +2861,7 @@ function CardPanel(props: {
   onToast: (text: string, error: boolean) => void;
 }) {
   const { resource, state, machine } = props;
+  const progress = useStore().snapshot?.progress[resource.id] ?? null;
   const holding = circlesHolding(state, resource.id);
   const address = resource.addresses[0];
   const stack = [...state.stacks.values()].find((each) => each.members.includes(resource.id));
@@ -3015,6 +3018,7 @@ function CardPanel(props: {
           )}
         </div>
       ) : null}
+      {progress ? <ProgressRow cardId={resource.id} progress={progress} onToast={props.onToast} /> : null}
       {props.access ? <AccessRow access={props.access} /> : null}
       {props.uptime ? <UptimeRow resource={resource} uptime={props.uptime} /> : null}
       {props.deployNote ? (

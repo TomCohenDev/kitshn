@@ -4,6 +4,7 @@ import type { ProviderReport } from "@kitshn/local";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Machine, MachineStatus } from "../src/core/machine.ts";
 import { type Circle, OWNER_CIRCLE_ID, type Resource, providerCardId } from "../src/core/model.ts";
+import { type ActionProgress, currentStep } from "../src/core/progress.ts";
 import { accessToken, send, stubAccessCerts } from "./access.ts";
 
 const machine: Machine = {
@@ -818,9 +819,25 @@ it("takes over a provider site's address with its application first, then ingres
       machineId: string,
     ): Array<{ key: string; hash: string; push: { access?: { served: Array<string> } } }>;
     sentGrants: ReadonlyMap<string, string>;
+    scheduleAlarm(): Promise<void>;
+    ctx: DurableObjectState;
+    reconcileProgress(): boolean;
+    progressRows(): ReadonlyMap<string, { progress: ActionProgress }>;
   };
   const run = <T>(fn: (instance: Internals) => T) =>
     runInDurableObject(stub, async (instance) => await fn(instance as unknown as Internals));
+  // K-538: the step that the card shows, after the state moved it on.
+  const progress = () =>
+    run((instance) => {
+      instance.reconcileProgress();
+      const value = instance.progressRows().get(appId)?.progress;
+      return value ? { step: currentStep(value), outcome: value.outcome.state } : null;
+    });
+  const alarm = () =>
+    run(async (instance) => {
+      await instance.scheduleAlarm();
+      return instance.ctx.storage.getAlarm();
+    });
   const state = () =>
     runInDurableObject(stub, (_, storage) => ({
       site: storage.storage.sql
@@ -866,6 +883,7 @@ it("takes over a provider site's address with its application first, then ingres
     await statusOf(run((instance) => instance.takeAddress(person("owner@example.com"), appId, api))),
   ).toBe(200);
   expect(await card()).toMatchObject({ addresses: ["t3-vps.example.com"], provider: { stickers: [] } });
+  expect(await progress()).toEqual({ step: 0, outcome: "running" });
   // The provider learns which hosts kitshn serves: none before the record moved.
   const served = (instance: Internals) =>
     instance.pushesOf("vps").find((item) => item.key === "access:t3")?.push.access?.served;
@@ -898,6 +916,8 @@ it("takes over a provider site's address with its application first, then ingres
   ]);
   expect(tunnelIngress[0]).not.toHaveProperty("originRequest");
   expect(await run((instance) => instance.handoverOf(appId)?.ingressAt)).not.toBeNull();
+  // The application and the route are done; the card waits for the machine to apply kitshn's audience.
+  expect(await progress()).toEqual({ step: 2, outcome: "running" });
   // The zone's records path, as kitshn asked for the record of the address.
   const records = calls
     .find((call) => call.startsWith("GET") && call.includes("/dns_records"))!
@@ -905,17 +925,29 @@ it("takes over a provider site's address with its application first, then ingres
   await run((instance) => instance.syncDns(api, 5));
   expect(calls.some((call) => call.includes("dns_records/"))).toBe(false);
   await run((instance) =>
-    instance.setHandover(appId, { ...instance.handoverOf(appId), ingressAt: Date.now() - 61_000 }),
+    instance.setHandover(appId, { ...instance.handoverOf(appId), ingressAt: Date.now() - 16_000 }),
   );
   // The record waits until the machine applied the access push that holds kitshn's audience.
   await run((instance) => instance.syncDns(api, 5));
   expect(calls.some((call) => call.includes("dns_records/"))).toBe(false);
+  // K-411: until then, the handover sets no alarm; only the periodic one of a connected daemon stays.
+  const ingressAt = Date.now();
+  await run((instance) => instance.setHandover(appId, { ...instance.handoverOf(appId), ingressAt }));
+  expect(await alarm()).toBeGreaterThan(ingressAt + 15_000);
   const hash = await run((instance) => instance.hashesOf("vps").get("access:t3"));
   await runInDurableObject(stub, (instance) =>
     instance.webSocketMessage(
       daemonSocket("signed"),
       JSON.stringify({ type: "applied", key: "access:t3", hash }),
     ),
+  );
+  // The `applied` message wakes the record step for the moment that Access had its 15 seconds, not a cycle later.
+  expect(await runInDurableObject(stub, (_, state) => state.storage.getAlarm())).toBeLessThanOrEqual(
+    ingressAt + 15_000,
+  );
+  expect(await progress()).toEqual({ step: 3, outcome: "running" });
+  await run((instance) =>
+    instance.setHandover(appId, { ...instance.handoverOf(appId), ingressAt: Date.now() - 15_000 }),
   );
   await run((instance) => instance.syncDns(api, 5));
   // The kept record changes in place; kitshn makes no second one and deletes none.
@@ -925,6 +957,7 @@ it("takes over a provider site's address with its application first, then ingres
   expect(await state()).toEqual({ site: "ok", records: ["portal-record"] });
   expect(await run((instance) => instance.handoverOf(appId)?.switched)).toBe(true);
   expect(await run(served)).toEqual(["t3-vps.example.com"]);
+  expect(await progress()).toEqual({ step: 5, outcome: "done" });
 
   // Giving it back points the record at what served it, forgets the record, and takes the address off the card.
   // The host leaves `served`, and that push goes out, before the record call.
@@ -951,6 +984,7 @@ it("takes over a provider site's address with its application first, then ingres
     ),
   ).toBe(200);
   expect(atRecordCall).toEqual({ served: [], sent: true });
+  expect(await progress()).toEqual({ step: 3, outcome: "done" });
   expect(calls).toEqual([`PUT ${records}/portal-record portal.cfargotunnel.com`]);
   expect(await state()).toEqual({ site: "refused", records: [] });
   expect(await card()).toMatchObject({ addresses: [], provider: { stickers: [{ text: "address in use" }] } });

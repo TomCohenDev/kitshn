@@ -54,6 +54,7 @@ import {
   manualStep,
   withoutMachine,
   isRelease,
+  lastLine,
   nextAutoUpdate,
   parseRollout,
   startStep,
@@ -298,6 +299,15 @@ import {
   pushKey,
   reportProblem,
 } from "@kitshn/local";
+import {
+  type ActionProgress,
+  type PlannedStep,
+  failProgress,
+  finishProgress,
+  progressShown,
+  reachStep,
+  startProgress,
+} from "../core/progress.ts";
 import { seed } from "../core/seed.ts";
 import { type Visitor, circleMatches, visitorLevel } from "../core/visitor.ts";
 import { APPROVE_APPS } from "../core/access.ts";
@@ -880,6 +890,9 @@ export class Kitshn extends DurableObject<Env> {
   private keyFailures = new Map<string, { readonly at: number; readonly reason: string }>();
   /** K-627: the rollout of `meta`, read once. */
   private rolloutCache: Rollout | null = null;
+  private progressCache: Map<string, StoredProgress> | null = null;
+  /** K-538: a job came since `reconcileProgress` last read the open jobs; true at wake, so it reads them once. */
+  private jobsAdded = true;
 
   private meta(key: string): string | null {
     const [row] = this.sql<{ value: string }>("SELECT value FROM meta WHERE key = ?", key);
@@ -901,6 +914,133 @@ export class Kitshn extends DurableObject<Env> {
   private setHandover(siteId: string, value: AddressHandover | null) {
     if (value === null) this.sql("DELETE FROM meta WHERE key = ?", `address-handover:${siteId}`);
     else this.setMeta(`address-handover:${siteId}`, JSON.stringify(value));
+  }
+
+  /** K-538: the last action of each card, kept after it ends so the next run of it learns its times. */
+  private progressRows(): Map<string, StoredProgress> {
+    return (this.progressCache ??= new Map(
+      // A key range, so the primary key index reads only these rows; LIKE would read all of meta.
+      this.sql<{ key: string; value: string }>(
+        "SELECT key, value FROM meta WHERE key >= 'progress:' AND key < 'progress;'",
+      ).map((row) => [row.key.slice(PROGRESS_META.length), JSON.parse(row.value) as StoredProgress]),
+    ));
+  }
+
+  /** Returns true when the progress of the card changed. */
+  private setProgress(cardId: string, value: StoredProgress | null) {
+    const rows = this.progressRows();
+    if (deepEqual(rows.get(cardId) ?? null, value)) return false;
+    if (value === null) {
+      rows.delete(cardId);
+      this.sql("DELETE FROM meta WHERE key = ?", PROGRESS_META + cardId);
+    } else {
+      rows.set(cardId, value);
+      this.setMeta(PROGRESS_META + cardId, JSON.stringify(value));
+    }
+    return true;
+  }
+
+  /** K-538: a new action of a card replaces its last one. */
+  private startAction(
+    cardId: string,
+    source: StoredProgress["source"],
+    action: string,
+    plan: ReadonlyArray<PlannedStep>,
+    now = Date.now(),
+  ) {
+    const before = this.progressRows().get(cardId)?.progress ?? null;
+    this.setProgress(cardId, { source, progress: startProgress(action, plan, now, before) });
+  }
+
+  private moveAction(cardId: string, change: (progress: ActionProgress) => ActionProgress) {
+    const row = this.progressRows().get(cardId);
+    if (row) this.setProgress(cardId, { ...row, progress: change(row.progress) });
+  }
+
+  /**
+   * K-538: moves each running action on from the state that drives it, and starts the action of each new job that has
+   * one. It runs before each map update, so every client shows the same steps. Returns true when one changed.
+   */
+  private reconcileProgress(now = Date.now()) {
+    let changed = false;
+    for (const [cardId, row] of this.progressRows()) {
+      if (row.progress.outcome.state !== "running") continue;
+      const progress =
+        row.source._tag === "job"
+          ? this.jobProgress(row.source.jobId, row.progress, now)
+          : row.source._tag === "takeover"
+            ? this.takeoverProgress(cardId, row.progress, now)
+            : row.progress;
+      if (this.setProgress(cardId, { ...row, progress })) changed = true;
+    }
+    const tracked = new Set(
+      [...this.progressRows().values()].flatMap((row) =>
+        row.source._tag === "job" ? [row.source.jobId] : [],
+      ),
+    );
+    // The open jobs only after a new job came, so most map updates read no job rows.
+    const active = this.jobsAdded
+      ? this.sql<{ id: number; machine_id: string | null; command: string }>(
+          "SELECT id, machine_id, command FROM jobs WHERE state IN ('queued', 'sent') ORDER BY id",
+        )
+      : [];
+    this.jobsAdded = false;
+    for (const job of active) {
+      if (tracked.has(job.id)) continue;
+      const command = JSON.parse(job.command) as Command;
+      const action = jobAction(command, this.state.machines.get(job.machine_id ?? "")?.name ?? null);
+      const cardId = command.kind === "update" ? job.machine_id : action ? actionCard(command) : null;
+      if (!action || cardId === null || !this.state.resources.has(cardId)) continue;
+      this.startAction(cardId, { _tag: "job", jobId: job.id }, action.action, action.plan, now);
+      this.moveAction(cardId, (progress) => this.jobProgress(job.id, progress, now));
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** K-538: the step of a job's action, from the job and, for an update, the daemon's connection. */
+  private jobProgress(jobId: number, progress: ActionProgress, now: number): ActionProgress {
+    const [job] = this.sql<{
+      state: string;
+      output: string;
+      expires_at: number;
+      machine_id: string | null;
+      command: string;
+    }>("SELECT state, output, expires_at, machine_id, command FROM jobs WHERE id = ?", jobId);
+    if (!job) return failProgress(progress, "kitshn no longer has the job of this action.", now);
+    // The connection closed during the job; the daemon may still send its result (OFFLINE_OUTPUT).
+    const closed = job.state === "failed" && job.output === OFFLINE_OUTPUT;
+    if (job.state === "done") return finishProgress(progress, now);
+    if (job.state === "expired" || ((closed || job.state === "queued") && job.expires_at <= now))
+      return failProgress(progress, "The machine did not finish the job before it expired.", now);
+    if (job.state === "failed" && !closed) return failProgress(progress, lastLine(job.output), now);
+    if (job.state === "queued") return progress;
+    const command = JSON.parse(job.command) as Command;
+    if (command.kind !== "update") return reachStep(progress, 1, now);
+    // K-629: the daemon downloads and checks, restarts, then keeps its new connection for 3 minutes.
+    const status = job.machine_id === null ? null : this.liveStatus(job.machine_id);
+    const step = status?.version === command.version ? 3 : closed || status === null ? 2 : 1;
+    return reachStep(progress, step, now);
+  }
+
+  /** K-1623, K-538: the step of "Take the address", from the handover, the Access row and the machine's push. */
+  private takeoverProgress(cardId: string, progress: ActionProgress, now: number): ActionProgress {
+    const site = this.liveSites.get(cardId);
+    const handover = this.handoverOf(cardId);
+    if (handover?.switched) return finishProgress(progress, now);
+    if (!site || !handover || site.state !== "handover")
+      return failProgress(progress, "The handover stopped: the site or its handover went.", now);
+    const app = Boolean(this.access.get(`app:${site.id}:${site.address}`)?.cfId);
+    const step = !app
+      ? 0
+      : handover.ingressAt === null
+        ? 1
+        : !this.audienceApplied(site)
+          ? 2
+          : now < handover.ingressAt + HANDOVER_INGRESS_MS
+            ? 3
+            : 4;
+    return reachStep(progress, step, now);
   }
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -938,12 +1078,15 @@ export class Kitshn extends DurableObject<Env> {
       this.reconcilePresence();
       // K-821: a restart cut off any run rollback that did not wait for a job.
       this.settleRollbacks();
+      // K-538: the progress rows and the open jobs, read at wake, so a map update reads only new jobs.
+      this.reconcileProgress();
       await this.scheduleAlarm();
     });
   }
 
   private sql<T extends Record<string, SqlStorageValue>>(query: string, ...bindings: Array<SqlStorageValue>) {
     if (!query.trimStart().startsWith("SELECT") && query.includes("deploys")) this.deployFacts = null;
+    if (query.trimStart().startsWith("INSERT INTO jobs")) this.jobsAdded = true;
     return this.ctx.storage.sql.exec<T>(query, ...bindings).toArray();
   }
 
@@ -3316,6 +3459,11 @@ export class Kitshn extends DurableObject<Env> {
           return handover && !handover.released ? [[site.id, "taken"]] : [];
         }),
       ),
+      progress: Object.fromEntries(
+        [...this.progressRows()].flatMap(([id, row]) =>
+          this.state.resources.has(id) && progressShown(row.progress, Date.now()) ? [[id, row.progress]] : [],
+        ),
+      ),
       handoverCards: this.sql<{ id: string }>(
         `SELECT id FROM library WHERE added_by IS NOT NULL AND kind = 'page'
          UNION SELECT card_id AS id FROM agent_sites
@@ -3411,6 +3559,8 @@ export class Kitshn extends DurableObject<Env> {
 
   /** Sends one changed machine to every open map, instead of a whole snapshot. */
   private sendMachine(machine: Machine) {
+    // K-538: a machine that changed can move an update on, and the steps of an action live in the snapshot.
+    if (this.reconcileProgress()) return this.broadcast();
     const message: ServerMessage = { type: "machine", view: this.machineView(machine) };
     for (const socket of this.ctx.getWebSockets("map")) send(socket, message);
   }
@@ -3418,6 +3568,7 @@ export class Kitshn extends DurableObject<Env> {
   private broadcast() {
     // K-1904: the sources that kitshn derives from its own state follow each change before the maps hear of it.
     this.reconcileNotifications();
+    this.reconcileProgress();
     // K-1716: a change can take a code right away.
     this.revokeTokens(null, true);
     // K-1608: the pushes go out, and their hashes count the queue, before the maps read the counts.
@@ -3968,6 +4119,11 @@ export class Kitshn extends DurableObject<Env> {
         api,
       );
     }
+    if (path.startsWith("/api/cards/") && path.endsWith("/progress/dismiss") && request.method === "POST")
+      return this.dismissProgress(
+        caller,
+        decodeURIComponent(path.slice("/api/cards/".length, -"/progress/dismiss".length)),
+      );
     if (path.startsWith("/api/cards/") && path.endsWith("/give-address-back") && request.method === "POST") {
       const api = this.api();
       if (!api) return Response.json({ error: "kitshn has no Cloudflare token." }, { status: 503 });
@@ -4746,6 +4902,8 @@ export class Kitshn extends DurableObject<Env> {
         );
         this.applied.set(id, message.hash);
         this.sendMachine(machine);
+        // K-411: a taken address waits for this push, so its next step runs now, not at the next cycle.
+        if (this.sitesOf(machine.id).some((site) => site.state === "handover")) await this.scheduleAlarm();
       }
     } else if (message.type === "icon") {
       await this.liveIcon(machine, message.site, message.icon);
@@ -5325,6 +5483,7 @@ export class Kitshn extends DurableObject<Env> {
       });
       this.putResource(withAddressInUse({ ...now.card, addresses: [address] }, false));
       this.insertRevision(caller.actor, `Took over ${address} for ${now.card.name}`, [], null);
+      this.startAction(id, { _tag: "takeover" }, "Take the address", TAKE_ADDRESS_STEPS);
     });
     this.load();
     this.broadcast();
@@ -5362,10 +5521,27 @@ export class Kitshn extends DurableObject<Env> {
         { status: 502 },
       );
     }
+    // K-538: the steps run in this request, and the card shows each one as it goes.
+    this.startAction(id, { _tag: "give-back" }, "Give the address back", [
+      ...(handover.switched
+        ? [
+            { label: "Tell T3 that kitshn stops serving the address", expectedMs: 500 },
+            { label: "Point the DNS record back", expectedMs: 1_500 },
+          ]
+        : []),
+      { label: "Take the address off the card", expectedMs: 500 },
+    ]);
+    const fail = (error: string, status: number) => {
+      this.moveAction(id, (progress) => failProgress(progress, error, Date.now()));
+      this.broadcast();
+      return Response.json({ error }, { status });
+    };
     if (handover.switched) {
       // The provider learns first that kitshn no longer serves the host, so it can start its own route again.
       this.setHandover(id, { ...handover, returning: true });
       this.pushGrants();
+      this.moveAction(id, (progress) => reachStep(progress, 1, Date.now()));
+      this.broadcast();
       try {
         await api("PUT", `${this.zonePath(site.address)}/dns_records/${handover.recordId}`, {
           type: "CNAME",
@@ -5377,11 +5553,7 @@ export class Kitshn extends DurableObject<Env> {
       } catch (error) {
         const current = this.handoverOf(id);
         if (current) this.setHandover(id, { ...current, returning: false });
-        this.pushGrants();
-        return Response.json(
-          { error: `kitshn could not give ${site.address} back: ${String(error)}. Try again.` },
-          { status: 502 },
-        );
+        return fail(`kitshn could not give ${site.address} back: ${String(error)}. Try again.`, 502);
       }
     }
     this.ctx.storage.transactionSync(() => {
@@ -5391,10 +5563,22 @@ export class Kitshn extends DurableObject<Env> {
       this.setHandover(id, null);
       this.putResource(withAddressInUse({ ...card, addresses: [] }, true));
       this.insertRevision(caller.actor, `Gave ${site.address} back from ${card.name}`, [], null);
+      this.moveAction(id, (progress) => finishProgress(progress, Date.now()));
     });
     this.load();
     this.broadcast();
     void this.scheduleAlarm();
+    return Response.json({});
+  }
+
+  /** K-538: a failed action stays on its card until someone with control dismisses it. */
+  private dismissProgress(caller: Caller, id: string) {
+    if (!this.canControl(caller.visitor, id))
+      return Response.json({ error: "Dismiss needs control on the card." }, { status: 403 });
+    if (this.progressRows().get(id)?.progress.outcome.state !== "failed")
+      return Response.json({ error: "This card has no failed action." }, { status: 409 });
+    this.setProgress(id, null);
+    this.broadcast();
     return Response.json({});
   }
 
@@ -6160,6 +6344,7 @@ export class Kitshn extends DurableObject<Env> {
     // K-717: the settings of a card go with it, and so does a taken address of it (K-1623).
     this.sql("DELETE FROM card_settings WHERE card_id = ?", id);
     this.setHandover(id, null);
+    this.setProgress(id, null);
     // K-1124: a forgotten card does not come back, so its old addresses go free.
     this.sql("DELETE FROM old_addresses WHERE card_id = ?", id);
     this.sql("DELETE FROM share_settings WHERE id LIKE ?", `${id}/%`);
@@ -6742,10 +6927,11 @@ export class Kitshn extends DurableObject<Env> {
     );
     if (proposal?.expires_at && !waits("proposals"))
       next = Math.min(next, Math.max(proposal.expires_at, now));
-    // K-1623: a taken address moves its record as soon as its ingress waited long enough.
+    // K-1623, K-411: a taken address moves its record as soon as the machine has the audience and the ingress waited.
+    // Before the machine applied the audience, the `applied` message wakes the alarm, so no run waits for it.
     for (const site of this.liveSites.values()) {
       const ingressAt = site.state === "handover" ? this.handoverOf(site.id)?.ingressAt : null;
-      if (typeof ingressAt === "number" && !waits("tunnels"))
+      if (typeof ingressAt === "number" && !waits("DNS") && this.audienceApplied(site))
         next = Math.min(next, Math.max(ingressAt + HANDOVER_INGRESS_MS, now));
     }
     const desired = this.desired(now);
@@ -14028,6 +14214,8 @@ export class Kitshn extends DurableObject<Env> {
       changed ||= daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
     }
     if (this.failedAlarmSteps() !== failedBefore) changed = true;
+    // K-538: the steps that this run did, such as the ingress of a taken address.
+    if (this.reconcileProgress()) changed = true;
     if (changed) this.broadcast();
     // K-1907, K-406: the pushes go out once, at the end, after the reconcile of broadcast queued its own.
     await this.flushPushes();
@@ -14260,8 +14448,72 @@ interface AlarmStepFailure {
 
 /** K-406: 5 minutes after the first failure, then twice as long each time, at most an hour. */
 const alarmStepBackoff = (tries: number) => Math.min(RETRY_MS * 2 ** Math.max(0, tries - 1), HOUR_MS);
-/** K-1623: cloudflared takes a new ingress within seconds; a taken address moves its record a minute after. */
-const HANDOVER_INGRESS_MS = 60_000;
+/**
+ * K-1623, K-411: a taken address moves its record this long after the tunnel got its ingress. cloudflared takes an
+ * ingress within seconds, and a new Access application answered after about 10 seconds in the test of 2026-10-29.
+ */
+const HANDOVER_INGRESS_MS = 15_000;
+
+/** K-538: the meta key prefix of the last action of a card. */
+const PROGRESS_META = "progress:";
+
+/** K-538: an action and what drives its steps: a job, the handover of the address, or a give-back that runs at once. */
+interface StoredProgress {
+  readonly source:
+    | { readonly _tag: "job"; readonly jobId: number }
+    | { readonly _tag: "takeover" }
+    | { readonly _tag: "give-back" };
+  readonly progress: ActionProgress;
+}
+
+const TAKE_ADDRESS_STEPS: ReadonlyArray<PlannedStep> = [
+  { label: "Make kitshn's Access application", expectedMs: 4_000 },
+  { label: "Add the route to the machine's tunnel", expectedMs: 3_000 },
+  { label: "Wait until T3 has kitshn's audience", expectedMs: 2_000 },
+  { label: "Wait until Access answers on the address", expectedMs: HANDOVER_INGRESS_MS },
+  { label: "Move the DNS record to the tunnel", expectedMs: 2_000 },
+];
+
+/** K-538: the card of a Compose job's action. */
+const actionCard = (command: Command) =>
+  command.kind === "compose" || command.kind === "compose-redeploy" || command.kind === "compose-rollback"
+    ? command.project
+    : null;
+
+/** K-538: the action and the steps of a job that a card shows, or null for a job without one. */
+function jobAction(
+  command: Command,
+  machine: string | null,
+): { readonly action: string; readonly plan: ReadonlyArray<PlannedStep> } | null {
+  const on = machine ?? "a machine";
+  const wait = { label: `Wait until ${on} takes the job`, expectedMs: 2_000 };
+  switch (command.kind) {
+    case "update":
+      return {
+        action: "Update daemon",
+        plan: [
+          { label: `Wait until ${on} is online and idle`, expectedMs: 2_000 },
+          { label: "Download and check the new daemon", expectedMs: 20_000 },
+          { label: "Restart on the new release", expectedMs: 15_000 },
+          { label: "Keep the new connection up for 3 minutes", expectedMs: 180_000 },
+        ],
+      };
+    case "compose":
+      return { action: "Deploy", plan: [wait, { label: `Build and start on ${on}`, expectedMs: 60_000 }] };
+    case "compose-redeploy":
+      return {
+        action: "Redeploy",
+        plan: [wait, { label: `Start the last build again on ${on}`, expectedMs: 20_000 }],
+      };
+    case "compose-rollback":
+      return {
+        action: "Roll back",
+        plan: [wait, { label: `Start the kept build on ${on}`, expectedMs: 20_000 }],
+      };
+    default:
+      return null;
+  }
+}
 /** K-705: the sticker of a provider card whose address something else serves. */
 const ADDRESS_IN_USE = "address in use";
 

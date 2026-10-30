@@ -29,7 +29,7 @@ describe("client apps of all machines (K-720)", () => {
         { machine: "mac", provider: "t3", clients: [fork] },
         { machine: "pc", provider: "t3", clients: [] },
       ]),
-    ).toEqual({ clients: [{ ...fork, provider: "t3", machines: ["vps", "mac"] }], agree: true });
+    ).toMatchObject({ clients: [{ ...fork, provider: "t3", machines: ["vps", "mac"] }], agree: true });
   });
 
   it("keeps a client of the same id with another open link apart, and disagrees", () => {
@@ -44,6 +44,16 @@ describe("client apps of all machines (K-720)", () => {
         { ...fork, provider: "t3", machines: ["vps"] },
       ],
       agree: false,
+      shared: [],
     });
+  });
+
+  it("puts on the public page only the clients that every declaring machine declares", () => {
+    const store = { ...fork, id: "t3code", open: "t3code://n?u={inviteUrl}" };
+    const { shared } = inviteClients([
+      { machine: "evil", provider: "t3", clients: [store, other] },
+      { machine: "vps", provider: "t3", clients: [store, fork] },
+    ]);
+    expect(shared).toEqual([{ ...store, provider: "t3", machines: ["evil", "vps"] }]);
   });
 });

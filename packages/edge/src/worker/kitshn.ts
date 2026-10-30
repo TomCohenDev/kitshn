@@ -4054,7 +4054,7 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/internal/offline")
       return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
     if (path === "/internal/public-cards") return this.publicCards();
-    if (path === "/internal/invite-clients") return Response.json(this.inviteClients().clients);
+    if (path === "/internal/invite-clients") return Response.json(this.inviteClients().shared);
     if (path === "/internal/badge") return this.badge(new URL(request.url).searchParams);
     if (path === "/internal/notify" && request.method === "POST") return this.appNotify(request);
     if (path === "/internal/import-status") return Response.json(this.importStatus());
@@ -7463,13 +7463,15 @@ export class Kitshn extends DurableObject<Env> {
     });
     this.load();
     this.broadcast();
+    const { clients, agree } = this.inviteClients();
     return Response.json({
       tokenId: token.id,
       clientId: token.client_id,
       name,
       link: `https://${this.env.KITSHN_HOST}/join/device#code=${code}`,
       expiresAt,
-      ...this.inviteClients(),
+      clients,
+      agree,
     });
   }
 

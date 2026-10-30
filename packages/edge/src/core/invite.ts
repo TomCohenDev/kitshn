@@ -16,7 +16,8 @@ export interface InviteClient extends ProviderClient {
 /**
  * K-720: the client apps of every machine. Equal declarations merge and list each machine; a client of the same id with
  * other values stays apart with its own machines. `agree` is true when every machine that declares clients declares the
- * same ones, so the invite dialog may open on the first client instead of the plain link.
+ * same ones, so the invite dialog may open on the first client instead of the plain link. `shared` holds the clients that
+ * every such machine declares; only they go on the public invite page, which names no machine.
  */
 export function inviteClients(
   declared: ReadonlyArray<{
@@ -24,7 +25,11 @@ export function inviteClients(
     readonly provider: string;
     readonly clients: ReadonlyArray<ProviderClient>;
   }>,
-): { readonly clients: ReadonlyArray<InviteClient>; readonly agree: boolean } {
+): {
+  readonly clients: ReadonlyArray<InviteClient>;
+  readonly agree: boolean;
+  readonly shared: ReadonlyArray<InviteClient>;
+} {
   const found = new Map<string, InviteClient>();
   const lists = new Map<string, Array<string>>();
   for (const { machine, provider, clients } of declared)
@@ -35,5 +40,10 @@ export function inviteClients(
       lists.set(machine, [...(lists.get(machine) ?? []), key]);
     }
   const shapes = new Set([...lists.values()].map((keys) => JSON.stringify([...keys].sort())));
-  return { clients: [...found.values()], agree: shapes.size <= 1 };
+  const clients = [...found.values()];
+  return {
+    clients,
+    agree: shapes.size <= 1,
+    shared: clients.filter((client) => client.machines.length === lists.size),
+  };
 }

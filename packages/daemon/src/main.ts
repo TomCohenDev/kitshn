@@ -397,8 +397,13 @@ async function providerCommand(argv: ReadonlyArray<string>) {
     { platform, daemonUid: daemonUid as number },
     process.stdin,
     (bytes) => process.stdout.write(bytes),
-  ).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
-  if (outcome !== "closed") fail(notRunning());
+  ).catch((error: unknown) =>
+    fail(`the daemon connection failed: ${error instanceof Error ? error.message : String(error)}`),
+  );
+  if (outcome === "closed") process.exit(0);
+  // T3 waits for stdout to end before it starts the bridge again, and stdin alone would keep this process alive.
+  if ("lost" in outcome) fail(`${outcome.lost}; start kitshn provider again (K-704).`);
+  fail(notRunning());
 }
 
 /**

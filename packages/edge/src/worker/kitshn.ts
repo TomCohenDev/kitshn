@@ -43,7 +43,22 @@ import {
   endText,
   shareDiff,
   summarize,
+  withAutoUpdate,
 } from "../core/changes.ts";
+import {
+  type LiveStatus,
+  type Rollout,
+  type StepJob,
+  advanceRollout,
+  daemonUpdate,
+  manualStep,
+  withoutMachine,
+  isRelease,
+  nextAutoUpdate,
+  parseRollout,
+  startStep,
+  stepSent,
+} from "../core/autoUpdate.ts";
 import {
   ADMIN_RESOURCE_ID,
   AGENT_RIGHTS,
@@ -861,6 +876,8 @@ export class Kitshn extends DurableObject<Env> {
 
   /** K-1708: the last failed challenge of each machine, for the panel. Memory only (K-1302). */
   private keyFailures = new Map<string, { readonly at: number; readonly reason: string }>();
+  /** K-627: the rollout of `meta`, read once. */
+  private rolloutCache: Rollout | null = null;
 
   private meta(key: string): string | null {
     const [row] = this.sql<{ value: string }>("SELECT value FROM meta WHERE key = ?", key);
@@ -1188,6 +1205,16 @@ export class Kitshn extends DurableObject<Env> {
         if (change.after === null) this.sql("DELETE FROM card_ends WHERE id = ?", change.id);
         else
           this.sql("INSERT OR REPLACE INTO card_ends (id, ends_at) VALUES (?, ?)", change.id, change.after);
+        continue;
+      }
+      if (change._tag === "autoUpdate") {
+        const machine = this.state.machines.get(change.id);
+        if (!machine) throw new RuleError(`No machine "${change.id}" exists.`);
+        this.sql(
+          "UPDATE machines SET body = ? WHERE id = ?",
+          JSON.stringify(withAutoUpdate(machine, change.after)),
+          change.id,
+        );
         continue;
       }
       if (change._tag === "address") {
@@ -1545,6 +1572,12 @@ export class Kitshn extends DurableObject<Env> {
       );
     });
     this.state = after;
+    // K-627: Resume or the setting can let the next automatic update go.
+    // K-626: a machine whose setting goes off neither holds nor stops the rollout.
+    for (const change of changes)
+      if (change._tag === "autoUpdate" && !change.after)
+        this.saveRollout(withoutMachine(this.rollout(), change.id));
+    if (changes.some((change) => change._tag === "pause" || change._tag === "autoUpdate")) this.autoUpdate();
     this.clearAccessFailures();
     this.closeLostDoors(now);
     this.syncOpenGames(now);
@@ -3355,6 +3388,8 @@ export class Kitshn extends DurableObject<Env> {
       orphanVolumes: orphanVolumes(live?.volumes ?? [], this.state),
       servers: live?.servers ?? [],
       queued: this.queuedFor(machine, live?.status ?? null),
+      // K-628: kept between the events that change it (K-627), so a view reads no job rows.
+      update: daemonUpdate(this.rollout(), machine.id, this.env.KITSHN_VERSION),
     };
   }
 
@@ -4630,6 +4665,8 @@ export class Kitshn extends DurableObject<Env> {
         ...gameStatus(message.status),
       };
       saveMachine(socket, { ...attachment, status });
+      // K-627: a daemon that connects, or that runs another release now, can start or end an update.
+      if (attachment.status === null || attachment.status.version !== status.version) this.autoUpdate();
       this.updateGameAddresses(machine.id, status.publicAddresses);
       // K-2005: a daemon that connects gets its door plan, also an empty one: the last card may have gone while it was
       // offline for longer than a plan job waits, and only an empty plan removes its table and its boot ports.
@@ -4797,6 +4834,25 @@ export class Kitshn extends DurableObject<Env> {
           this.continueRollback(command.group, result.ok === true ? null : error);
         // K-817: a failed build gives up the DNS record that its plan made.
         if (result.ok !== true) void this.scheduleAlarm();
+      }
+      // K-628: History shows each update of a daemon, and the next automatic update can go.
+      if (job && command?.kind === "update") {
+        this.insertRevision(
+          JSON.parse(job.actor) as Actor,
+          result.ok === true
+            ? `Updated the daemon of ${machine.name} to edge-${command.version} (K-628)`
+            : `The daemon of ${machine.name} did not update to edge-${command.version}: ${
+                String(result.output ?? "")
+                  .trim()
+                  .split("\n")
+                  .at(-1)
+                  ?.slice(0, 200) ?? ""
+              } (K-628)`,
+          [],
+          null,
+        );
+        this.load();
+        this.autoUpdate();
       }
       if (job && (command?.kind === "backup" || command?.kind === "backup-restore"))
         this.backupResult(command, JSON.parse(job.actor) as Actor, result);
@@ -5487,6 +5543,7 @@ export class Kitshn extends DurableObject<Env> {
         id,
       );
       this.insertRevision(actor, `Cancelled job #${id}`, [], null);
+      this.endStep(id);
     });
     this.load();
     this.broadcast();
@@ -5551,7 +5608,7 @@ export class Kitshn extends DurableObject<Env> {
     const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
     const parsed = parseCommand(input["command"]);
     if (typeof parsed === "string") return Response.json({ error: parsed }, { status: 400 });
-    if (parsed.kind === "update" && !/^[0-9a-f]{12}$/.test(this.env.KITSHN_VERSION)) {
+    if (parsed.kind === "update" && !isRelease(this.env.KITSHN_VERSION)) {
       return Response.json(
         {
           error: `This kitshn runs the build "${this.env.KITSHN_VERSION}", which has no release to update to.`,
@@ -5623,6 +5680,19 @@ export class Kitshn extends DurableObject<Env> {
       return inserted;
     });
     if (command.kind === "shell") this.load();
+    // K-627: "Update daemon" replaces a queued automatic update of the machine, and becomes the step of a machine that
+    // holds or stopped the rollout, so its success ends that.
+    if (command.kind === "update" && machineId !== null && typeof row?.id === "number") {
+      this.sql(
+        `UPDATE jobs SET state = 'failed', output = ? WHERE machine_id = ? AND state = 'queued' AND id != ?
+         AND json_extract(command, '$.kind') = 'update' AND json_extract(visitor, '$.kitshn') = 1`,
+        "The owner sent Update daemon, so kitshn dropped this automatic update.",
+        machineId,
+        row.id,
+      );
+      this.saveRollout(manualStep(this.rollout(), machineId, row.id));
+      this.autoUpdate();
+    }
     this.deliverJobs();
     this.broadcast();
     void this.scheduleAlarm();
@@ -5651,6 +5721,32 @@ export class Kitshn extends DurableObject<Env> {
     for (const job of queued) {
       const visitor = JSON.parse(job.visitor) as Visitor & { readonly kitshn?: true };
       const queuedCommand = JSON.parse(job.command) as Command;
+      // K-627: an automatic update waits while kitshn is paused, and goes when the owner turned the setting off.
+      const automatic = visitor.kitshn === true && queuedCommand.kind === "update";
+      if (
+        automatic &&
+        job.machine_id !== null &&
+        this.state.machines.get(job.machine_id)?.autoUpdate === false
+      ) {
+        this.sql(
+          "UPDATE jobs SET state = 'failed', output = ? WHERE id = ?",
+          "Update daemon automatically is off on this machine, so kitshn dropped this update (K-626).",
+          job.id,
+        );
+        this.endStep(job.id);
+        continue;
+      }
+      if (automatic && this.state.paused) continue;
+      // K-627: a daemon that runs the release already needs no automatic update; the step ends as done.
+      const running = automatic && job.machine_id !== null ? this.liveStatus(job.machine_id) : null;
+      if (running?.version === this.env.KITSHN_VERSION) {
+        this.sql(
+          "UPDATE jobs SET state = 'done', output = ? WHERE id = ?",
+          `The daemon runs edge-${running.version} already.`,
+          job.id,
+        );
+        continue;
+      }
       // K-718: a redeploy that an agent key asked for goes out only while every check of its start still holds.
       if (visitor.kitshn && visitor.clientId !== null) {
         const reason =
@@ -5694,9 +5790,11 @@ export class Kitshn extends DurableObject<Env> {
         const status = this.machineView(machine).status;
         // The daemon sends its status just after it connects; the job waits for it.
         if (!status) continue;
+        // K-627: the row names the release that it installs, so the update state of that release finds it.
+        this.sql("UPDATE jobs SET command = ? WHERE id = ?", JSON.stringify(command), job.id);
         const fail = (output: string) =>
           this.sql("UPDATE jobs SET state = 'failed', output = ? WHERE id = ?", output, job.id);
-        if (!/^[0-9a-f]{12}$/.test(command.version)) {
+        if (!isRelease(command.version)) {
           fail(`This kitshn runs the build "${command.version}", which has no release to update to.`);
           continue;
         }
@@ -5722,16 +5820,141 @@ export class Kitshn extends DurableObject<Env> {
           : undefined;
       send(socket, { type: "job", id: job.id, command, ...(notify ? { notify } : {}) });
       this.sql("UPDATE jobs SET state = 'sent', machine_id = ? WHERE id = ?", machine.id, job.id);
+      // K-627: the rollout step follows the release that went out, and only later connections show its outcome.
+      if (queuedCommand.kind === "update" && this.rollout().step?.jobId === job.id)
+        this.saveRollout(stepSent(this.rollout(), this.env.KITSHN_VERSION, Date.now()));
       sent++;
     }
     return sent;
   }
 
-  /** K-609: the owner sets the labels and the order of a machine. */
+  /** K-627: the one rollout of daemon updates, kept in `meta` so it survives a deploy and an eviction. */
+  private rollout(): Rollout {
+    return (this.rolloutCache ??= parseRollout(this.meta("daemon_rollout")));
+  }
+
+  private saveRollout(rollout: Rollout) {
+    if (deepEqual(rollout, this.rollout())) return;
+    this.setMeta("daemon_rollout", JSON.stringify(rollout));
+    this.rolloutCache = rollout;
+  }
+
+  /** K-627: the job of the rollout step, as `advanceRollout` reads it. */
+  private stepJob(jobId: number): StepJob {
+    const [row] = this.sql<{ state: string; output: string; expires_at: number }>(
+      "SELECT state, output, expires_at FROM jobs WHERE id = ?",
+      jobId,
+    );
+    if (!row || row.state === "expired" || (row.state === "queued" && row.expires_at <= Date.now()))
+      return { state: "gone", output: "" };
+    if (row.state === "failed")
+      return { state: row.output === OFFLINE_OUTPUT ? "closed" : "failed", output: row.output };
+    if (row.state === "queued" || row.state === "sent" || row.state === "done")
+      return { state: row.state, output: row.output };
+    throw new Error(`An update job has the state ${row.state}.`);
+  }
+
+  /** The status of a machine while it is online, with the start of its connection, else null. */
+  private liveStatus(machineId: string): LiveStatus {
+    const socket = this.openSocket(machineId);
+    const attachment = socket ? attachmentOf(socket) : null;
+    return attachment?.kind === "machine" && attachment.status
+      ? { ...attachment.status, connectedAt: attachment.since }
+      : null;
+  }
+
+  /** K-627: the rollout step is over without a failure: its job was cancelled or dropped. */
+  private endStep(jobId: number) {
+    const rollout = this.rollout();
+    if (rollout.step?.jobId === jobId) this.saveRollout({ ...rollout, step: null });
+  }
+
+  /**
+   * K-627: moves the rollout on and queues the next automatic update, if one may go. K-628 keeps the notification of a
+   * failed update true. Returns whether it queued or sent a job.
+   */
+  private autoUpdate(): boolean {
+    const version = this.env.KITSHN_VERSION;
+    // Delivery first: it drops an automatic update of a machine whose setting is off, which ends that step.
+    const delivered = this.deliverJobs();
+    const stored = this.rollout();
+    // A removed machine neither holds the rollout nor stops it.
+    const before: Rollout = {
+      ...stored,
+      step: stored.step && this.state.machines.has(stored.step.machineId) ? stored.step : null,
+      failed: stored.failed && this.state.machines.has(stored.failed.machineId) ? stored.failed : null,
+    };
+    let rollout = advanceRollout(before, before.step ? this.stepJob(before.step.jobId) : null, (id) =>
+      this.liveStatus(id),
+    );
+    const next = nextAutoUpdate(
+      version,
+      this.state.paused !== null,
+      rollout,
+      [...this.state.machines.values()].map((machine) => ({
+        id: machine.id,
+        order: machine.order,
+        autoUpdate: machine.autoUpdate !== false,
+        hasKey: machine.key?.kind === "public",
+        status: this.liveStatus(machine.id),
+      })),
+    );
+    if (next !== null) {
+      const jobId = this.queueKitshnJob(
+        next,
+        { kind: "update", version },
+        { _tag: "kitshn", reason: "automatic daemon update (K-627)" },
+        Date.now() + JOB_EXPIRY_MS,
+        // K-1608: the update waits while a provider of the machine reports busy.
+        true,
+      );
+      rollout = startStep(rollout, version, next, jobId);
+    }
+    this.saveRollout(rollout);
+    const failed = rollout.version === version ? rollout.failed : null;
+    const machine = failed ? this.state.machines.get(failed.machineId) : undefined;
+    if (failed && machine)
+      this.notify({
+        source: "update",
+        key: failed.machineId,
+        episode: version,
+        card: failed.machineId,
+        recipients: { _tag: "owner" },
+        level: "error",
+        priority: "normal",
+        title: clip(`The daemon of ${machine.name} did not update`, TITLE_MAX),
+        text: `${failed.reason} kitshn updates no other daemon to edge-${version} until this one runs it. Update daemon in its panel tries again.`,
+        actions: [
+          {
+            id: "show",
+            label: "Show machine",
+            kind: "link",
+            path: `#map/${encodeURIComponent(failed.machineId)}`,
+          },
+        ],
+      });
+    const resolved = [...this.openNotifications.values()].filter(
+      (notification) => notification.source === "update" && notification.key !== failed?.machineId,
+    );
+    for (const notification of resolved) this.setNotificationState("update", notification.key, "closed");
+    return delivered + this.deliverJobs() > 0 || next !== null;
+  }
+
+  /** K-609: the owner sets the labels and the order of a machine. K-626: and "Update daemon automatically". */
   private updateMachine(caller: Caller, id: string, body: unknown) {
-    const machine = this.state.machines.get(id);
-    if (!machine) return Response.json({ error: `No machine "${id}" exists.` }, { status: 404 });
     const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+    const before = this.state.machines.get(id);
+    if (!before) return Response.json({ error: `No machine "${id}" exists.` }, { status: 404 });
+    if (input["autoUpdate"] !== undefined) {
+      if (typeof input["autoUpdate"] !== "boolean")
+        return Response.json({ error: "autoUpdate is true or false." }, { status: 400 });
+      const on = before.autoUpdate !== false;
+      if (on !== input["autoUpdate"])
+        this.commit(caller.actor, [{ _tag: "autoUpdate", id, before: on, after: input["autoUpdate"] }], null);
+    }
+    const machine = this.state.machines.get(id) ?? before;
+    if (input["labels"] === undefined && input["order"] === undefined && input["allow"] === undefined)
+      return Response.json(machine);
     const labels = input["labels"] === undefined ? machine.labels : parseLabels(input["labels"]);
     if (typeof labels === "string") return Response.json({ error: labels }, { status: 400 });
     const order = input["order"] === undefined ? machine.order : Number(input["order"]);
@@ -5808,10 +6031,13 @@ export class Kitshn extends DurableObject<Env> {
 
   /** Returns how many jobs expired. */
   private expireJobs(now: number) {
-    return this.sql(
+    const expired = this.sql(
       "UPDATE jobs SET state = 'expired' WHERE state IN ('queued', 'sent') AND expires_at <= ? RETURNING id",
       now,
     ).length;
+    // K-627: an expired step ends without a failure, and the next machine can go.
+    if (expired > 0) this.autoUpdate();
+    return expired;
   }
 
   /**
@@ -8754,7 +8980,13 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** A job that kitshn makes itself, so it needs no member with control (K-614). Returns the job id. */
-  private queueKitshnJob(machineId: string, command: Command, actor: Actor, expiresAt: number) {
+  private queueKitshnJob(
+    machineId: string,
+    command: Command,
+    actor: Actor,
+    expiresAt: number,
+    whenIdle = false,
+  ) {
     const now = Date.now();
     if (
       command.kind === "compose" ||
@@ -8763,13 +8995,14 @@ export class Kitshn extends DurableObject<Env> {
     )
       failQueuedDowns(this.query, command.project, REPLACED);
     const [row] = this.sql<{ id: number }>(
-      `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output)
-       VALUES (?, '[]', ?, 'queued', ?, ?, ?, '${KITSHN_JOB}', NULL, '') RETURNING id`,
+      `INSERT INTO jobs (machine_id, labels, command, state, created_at, expires_at, actor, visitor, exit_code, output, when_idle)
+       VALUES (?, '[]', ?, 'queued', ?, ?, ?, '${KITSHN_JOB}', NULL, '', ?) RETURNING id`,
       machineId,
       JSON.stringify(command),
       now,
       expiresAt,
       JSON.stringify(actor),
+      whenIdle ? 1 : 0,
     );
     if (!row) throw new Error("The job insert returned no id.");
     return row.id;

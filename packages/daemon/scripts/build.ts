@@ -21,7 +21,7 @@ for (const [target, name] of targets) {
     "bun",
     [
       "build",
-      "src/main.ts",
+      "src/entry.ts",
       "--compile",
       `--target=${target}`,
       `--define=KITSHN_VERSION="${version}"`,

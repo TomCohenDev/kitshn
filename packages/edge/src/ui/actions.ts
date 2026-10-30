@@ -9,6 +9,7 @@ import {
   ruleViolation,
 } from "../core/changes.ts";
 import { keepsScript } from "../core/apps.ts";
+import { isRelease } from "../core/autoUpdate.ts";
 import type { Command } from "../core/machine.ts";
 import {
   ADMIN_RESOURCE_ID,
@@ -136,6 +137,8 @@ export interface ActionHandlers {
   /** K-1819: opens the backups of a Compose card. */
   readonly backups: (resource: Resource) => void;
   readonly runJob: (view: MachineView, command: Command) => void;
+  /** K-626: "Update daemon automatically" of a machine. */
+  readonly setAutoUpdate: (view: MachineView, on: boolean) => void;
   /** K-707, K-1615: a provider command; `confirm` asks first. */
   readonly runProviderCommand: (view: MachineView, command: Command, confirm: string | null) => void;
   readonly removeMachine: (view: MachineView) => void;
@@ -202,12 +205,11 @@ function undoItemAction(ctx: ActionContext, h: ActionHandlers, item: Item): Arra
   return [{ ...base, label, ...(check.answer.allowed ? {} : { refused: check.answer.reason }) }];
 }
 
-/** K-617: a local build names no release, so there is nothing to update a daemon to. */
-export const isRelease = (version: string) => /^[0-9a-f]{12}$/.test(version);
-
 export const MACHINE_TIPS = {
   restart: "Restart the daemon. The tunnel keeps running, so apps and sites keep serving.",
   update: (version: string) => `Update daemon: install the daemon of release ${version}.`,
+  autoUpdate:
+    "Update daemon automatically: kitshn installs each new release on this machine, one machine at a time, when no provider is busy (K-626).",
   remove:
     "Remove machine: deletes its service token, its tunnel and its queue at once. History records it; Undo cannot bring it back.",
 } as const;
@@ -787,6 +789,19 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
                   tip: MACHINE_TIPS.update(ctx.version),
                   run: () => h.runJob(machine, { kind: "update", version: ctx.version }),
                 },
+                machine.machine.autoUpdate === false
+                  ? {
+                      id: "auto-update-on",
+                      label: "Turn on Update daemon automatically",
+                      tip: MACHINE_TIPS.autoUpdate,
+                      run: () => h.setAutoUpdate(machine, true),
+                    }
+                  : {
+                      id: "auto-update-off",
+                      label: "Turn off Update daemon automatically",
+                      tip: MACHINE_TIPS.autoUpdate,
+                      run: () => h.setAutoUpdate(machine, false),
+                    },
               ]
             : []),
         ]

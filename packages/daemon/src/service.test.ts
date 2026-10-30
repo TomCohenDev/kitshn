@@ -50,6 +50,9 @@ describe("daemon service (K-601)", () => {
     const task = serviceFile("win32", "C:\\k\\kitshn.exe", { USERDOMAIN: "PC", USERNAME: "ya" });
     expect(task).toContain("<UserId>PC\\ya</UserId>");
     expect(task).toContain("<Interval>PT5M</Interval>");
+    expect(task).toContain(
+      "<RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>",
+    );
     expect(task).toContain("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>");
     expect(task).toContain(
       "<Command>conhost.exe</Command><Arguments>--headless &quot;C:\\k\\kitshn.exe&quot; run</Arguments>",

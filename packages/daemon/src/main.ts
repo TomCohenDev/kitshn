@@ -33,7 +33,7 @@ import {
 } from "@kitshn/local";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { withNotify } from "./notify.ts";
-import { backup, finishRestores, restore, unpauseMarked } from "./backup.ts";
+import { HELPER_IMAGE, backup, finishRestores, restore, unpauseMarked } from "./backup.ts";
 import { keyPlan } from "./keys.ts";
 import {
   AttestationError,
@@ -66,15 +66,6 @@ import {
 } from "./local.ts";
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
 import { localUsersOf, peerDecision } from "./peer.ts";
-import { movedVolume, takeoverPlan } from "./kitshn1.ts";
-import {
-  HELPER_IMAGE,
-  daemonUser,
-  dockerKind,
-  printable,
-  rootTakeover,
-  rootTakeoverPlan,
-} from "./takeover.ts";
 import {
   chmodSync,
   copyFileSync,
@@ -96,7 +87,6 @@ import {
   freemem,
   homedir,
   hostname,
-  userInfo,
   loadavg,
   platform as osPlatform,
   release,
@@ -736,26 +726,6 @@ function localUsersCommand(action: string | undefined, who: string | undefined) 
     console.log(`The user ${who} now reaches the daemon with kitshn, through ${paths.sharedSocket}.`);
 }
 
-/** K-1404: the takeover of KitSHn 1 data by root, for a daemon user with rootless Docker. */
-async function kitshn1TakeoverCommand(repo?: string, environment?: string, project?: string, user?: string) {
-  if (!repo || !environment || !project || !user)
-    fail("usage: kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>");
-  if (ownUid() !== 0) fail("kitshn1-takeover runs as root: it stops KitSHn 1 and reads /persistent.");
-  const failWith = (error: unknown) =>
-    fail(printable(error instanceof Error ? error.message : String(error)));
-  const daemon = await daemonUser(user).catch(failWith);
-  const plan = rootTakeoverPlan({
-    repo,
-    environment,
-    project,
-    user: daemon,
-    persistentRoot: KITSHN1_PERSISTENT,
-    exists: existsSync,
-  });
-  if (typeof plan === "string") fail(printable(plan));
-  await rootTakeover(plan, daemon).catch(failWith);
-}
-
 /** A user id, from a number or a user name. */
 function uidOf(who: string): number {
   if (isDigits(who)) return Number(who);
@@ -1223,9 +1193,6 @@ async function deployFile(deployId: string, file: string): Promise<Buffer> {
   return Buffer.from(await response.arrayBuffer());
 }
 
-/** K-1404: the persistent root of KitSHn 1 on this machine. */
-const KITSHN1_PERSISTENT = process.env["KITSHN1_PERSISTENT"] ?? "/persistent";
-
 /**
  * K-812, K-607: builds and starts a Compose app with the variables of KitSHn 1, so its `compose.yml` works
  * unchanged: the app listens on `$KITSHN_DEFAULT_SOCKET`. Then the socket becomes a live site under the
@@ -1245,10 +1212,6 @@ async function composeUp(
   const scratch = join(dir, "private");
   const checked = join(scratch, "compose.checked.json");
   let output = "";
-  /** K-1404: the KitSHn 1 project that this job stopped, which a failure starts again. */
-  let stoppedKitshn1: string | null = null;
-  /** The volumes that the takeover made, which a failure removes so a retry copies fresh. */
-  const madeVolumes: Array<string> = [];
   /** K-818: the containers of the old app that this job stopped, which a failure before `up` starts again. */
   let stoppedIds: Array<string> = [];
   let upStarted = false;
@@ -1288,22 +1251,7 @@ async function composeUp(
     }
     mkdirSync(source);
     await step("unpack the source", "tar", ["-xzf", join(dir, "source.tgz"), "-C", source]);
-    // K-1404: the first deploy of an app on this machine takes over the data of its KitSHn 1 deployment.
-    // KitSHn 1 stops first, so no write lands after the copy; root-owned files need a short container.
     const data = join(dir, "data");
-    const marker = join(dir, "kitshn1-taken");
-    const takeover =
-      command.kind === "compose"
-        ? takeoverPlan({
-            repo: command.repo,
-            environment: command.environment,
-            persistentRoot: KITSHN1_PERSISTENT,
-            hasData: existsSync(data),
-            taken: existsSync(marker),
-            exists: existsSync,
-          })
-        : ({ kind: "skip", note: null } as const);
-    if (takeover.kind === "skip" && takeover.note) output += `${takeover.note}\n`;
     const env = {
       ...process.env,
       KITSHN_RECIPE: command.repo,
@@ -1317,15 +1265,14 @@ async function composeUp(
       // K-1908: the app passes these on in its Compose file, as it does with KITSHN_DATA_DIR.
       ...(notify ? { KITSHN_NOTIFY_URL: notify.url, KITSHN_NOTIFY_TOKEN: notify.token } : {}),
     };
-    // KitSHn 1 apps join this network; it exists on a KitSHn 1 host and is made elsewhere.
+    // Compose files from KitSHn 1 name this network, so the daemon makes it when it is missing.
     if (!(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok) {
       // Another deploy may make it at the same moment; only a network that is still missing is an error.
       const made = await runProgram("docker", ["network", "create", "kitshn-edge"]);
       if (!made.ok && !(await runProgram("docker", ["network", "inspect", "kitshn-edge"])).ok)
         throw new Error(`docker network create kitshn-edge failed: ${made.output}`);
     }
-    // K-818: risky Compose settings run only when the owner allows them for this repo on this machine. The
-    // check runs before the takeover, so a refused deploy leaves KitSHn 1 as it is.
+    // K-818: risky Compose settings run only when the owner allows them for this repo on this machine.
     const refuse = (risks: ReadonlyArray<string>) => {
       const refused = risks.filter((risk) => !command.allowed.includes(risk));
       if (refused.length > 0)
@@ -1379,92 +1326,6 @@ async function composeUp(
     refuse(envFileRisks(await readConfig(["--no-interpolate"]), roots, real));
     const config = await readConfig([]);
     refuse(composeRisks(config, command.project, roots, real));
-    if (takeover.kind === "take") {
-      // K-1404: rootless Docker sees neither the KitSHn 1 project nor its root-owned files; root takes the data over.
-      // A Docker that kitshn cannot name stops the deploy too, so it never copies on the wrong Docker.
-      const kind = dockerKind(await runProgram("docker", ["info", "--format", "{{json .SecurityOptions}}"]));
-      if (kind === "unknown")
-        throw new Error(
-          `KitSHn 1 data waits at ${takeover.dataDir}, and docker info failed, so kitshn copies nothing (K-1404).`,
-        );
-      if (kind === "rootless") {
-        const self = userInfo();
-        throw new Error(
-          `KitSHn 1 data waits at ${takeover.dataDir}, and this daemon uses rootless Docker. As root, run: ` +
-            `${process.execPath} kitshn1-takeover ${command.repo} ${command.environment} --project ${command.project} --user ${self.username}` +
-            " Then deploy again (K-1404).",
-        );
-      }
-      // Set first: a stop that fails half-way still gets its start back.
-      stoppedKitshn1 = takeover.project;
-      await step("stop the KitSHn 1 app", "docker", ["compose", "-p", takeover.project, "stop"], {
-        cwd: paths.data,
-      });
-      // A staged copy becomes the data folder only when it is complete.
-      const staged = `${data}.kitshn1`;
-      output += await removeAsRoot(staged, `${command.project}-stage`);
-      mkdirSync(staged, { recursive: true });
-      await step("copy the KitSHn 1 data", "docker", [
-        "run",
-        "--rm",
-        "--network",
-        "none",
-        "-v",
-        `${takeover.dataDir}:/from:ro`,
-        "-v",
-        `${staged}:/to`,
-        HELPER_IMAGE,
-        "cp",
-        "-a",
-        "/from/.",
-        "/to/",
-      ]);
-      const volumes = await runProgram("docker", [
-        "volume",
-        "ls",
-        "-q",
-        "--filter",
-        `label=com.docker.compose.project=${takeover.project}`,
-      ]);
-      if (!volumes.ok) throw new Error(`docker volume ls failed: ${volumes.output}`);
-      for (const volume of volumes.output
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean)) {
-        const target = movedVolume(volume, takeover.project, command.project);
-        if (!target) continue;
-        const suffix = target.slice(command.project.length + 1);
-        madeVolumes.push(target);
-        await step(`create the volume ${target}`, "docker", [
-          "volume",
-          "create",
-          "--label",
-          `com.docker.compose.project=${command.project}`,
-          "--label",
-          `com.docker.compose.volume=${suffix}`,
-          target,
-        ]);
-        await step(`copy the volume ${volume}`, "docker", [
-          "run",
-          "--rm",
-          "--network",
-          "none",
-          "-v",
-          `${volume}:/from:ro`,
-          "-v",
-          `${target}:/to`,
-          HELPER_IMAGE,
-          "cp",
-          "-a",
-          "/from/.",
-          "/to/",
-        ]);
-      }
-      renameSync(staged, data);
-      writeFileSync(marker, `${takeover.dataDir}\n`);
-      output += `KitSHn 1 data of ${takeover.project} copied from ${takeover.dataDir}; it stays there for a rollback.\n`;
-      output += `KitSHn 1 is stopped, so the site is down until you move the DNS record of ${command.name} to the tunnel (K-1404).\n`;
-    }
     // The container user may not be the daemon user; the socket directory must take its socket.
     mkdirSync(sockets, { recursive: true });
     chmodSync(sockets, 0o777);
@@ -1523,7 +1384,6 @@ async function composeUp(
     // Set first: a stop that fails half-way still gets its start back.
     stoppedIds = ids;
     if (ids.length > 0) await step("stop the app", "docker", ["stop", ...ids]);
-    // The takeover may also have brought links into the data folder.
     const moved = sourceRisks(config, roots, real).filter((risk) => !command.allowed.includes(risk));
     if (moved.length > 0) throw new Error(`a path changed after the check: ${moved.join(", ")} (K-818)`);
     // A teardown takes down what the last `up` started, also when that `up` failed.
@@ -1593,24 +1453,6 @@ async function composeUp(
         (cleanup: unknown) => `${String(cleanup)}\n`,
       );
     }
-    // A takeover that did not end in a running app gives the site back to KitSHn 1, and the next deploy
-    // copies its data again, so no write of KitSHn 1 is lost.
-    if (stoppedKitshn1 !== null) {
-      // By its project label alone; the app's folder holds no Compose file.
-      await runProgram("docker", ["compose", "-p", command.project, "down"], { cwd: dir });
-      rmSync(join(dir, "kitshn1-taken"), { force: true });
-      for (const folder of ["data", "data.kitshn1"])
-        output += await removeAsRoot(
-          join(dir, folder),
-          `${command.project}-${folder.replace(".", "-")}`,
-        ).catch((cleanup: unknown) => `${String(cleanup)}\n`);
-      for (const volume of madeVolumes)
-        output += (await runProgram("docker", ["volume", "rm", volume])).output;
-      const started = await runProgram("docker", ["compose", "-p", stoppedKitshn1, "start"], {
-        cwd: paths.data,
-      });
-      output += `$ start the KitSHn 1 app ${stoppedKitshn1} again\n${started.output}`;
-    }
     return { ok: false, exitCode: null, output };
   }
 }
@@ -1676,8 +1518,6 @@ async function countKept() {
   report();
 }
 
-/** Short root jobs on app folders (copy, clean-up); busybox has `cp -a` and `find -delete` and is a few MB. */
-// Pinned by digest, so no app can take the name with an image of its own (K-818).
 /** K-818: the source folders of an app: the one of its last deploy, and any of a deploy that failed in `up`. */
 const sourceFolders = (dir: string): Array<string> =>
   existsSync(dir)
@@ -3253,9 +3093,6 @@ switch (command) {
   case "unexpose":
     unexposeCommand(args[0]);
     break;
-  case "kitshn1-takeover":
-    await kitshn1TakeoverCommand(args[0], args[1], flag("--project"), flag("--user"));
-    break;
   default:
     console.log(`kitshn ${VERSION}
 
@@ -3282,8 +3119,6 @@ kitshn doors install --user <u>         as root: the helper that gates game port
 kitshn doors uninstall                  as root: remove it and its firewall table
 kitshn unexpose <name>                  stop sharing it
 kitshn servers [--json]                 the servers that listen on this machine, with their page title (K-619)
-kitshn kitshn1-takeover <owner/repo> <environment> --project <card> --user <daemon user>
-                                        as root: move KitSHn 1 data into rootless Docker (K-1404)
 kitshn skill install [--repo]            the skill for coding agents, global or in this repo (K-618)
 kitshn skill check                      exit 1 when a copy of the skill is from another release
 kitshn version [--json]                 the version; --json: {"product":"kitshn","generation":2,"version"}`);

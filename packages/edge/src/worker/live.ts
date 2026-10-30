@@ -275,7 +275,7 @@ export function reachableAddresses(input: {
 }
 
 /**
- * K-817, K-1404: why a deploy may not take an address with DNS records, or null. A record that kitshn made for this
+ * K-817: why a deploy may not take an address with DNS records, or null. A record that kitshn made for this
  * same card does not block; one that kitshn made for another card, also one that waits for removal, does until it
  * is gone, and so does a record of anything else.
  */

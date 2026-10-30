@@ -120,4 +120,4 @@ Read the Actions log first: the deploy step prints the job output and the final 
 
 ## Move from KitSHn 1
 
-Replace `.kitshn.yaml` with `kitshn.config.ts`, and point the workflow at `kitshn2-deploy.yml`. Delete `Caddyfile.j2` and the `KITSHN_SSH_KEY` secret; kitshn 2 needs neither. The first deploy on the same machine takes over the KitSHn 1 data once (K-1404). Then move the DNS record of the address to kitshn.
+Replace `.kitshn.yaml` with `kitshn.config.ts`, and point the workflow at `kitshn2-deploy.yml`. Delete `Caddyfile.j2` and the `KITSHN_SSH_KEY` secret; kitshn 2 needs neither. The app starts with an empty data folder; kitshn moves no KitSHn 1 data. Then move the DNS record of the address to kitshn.

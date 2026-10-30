@@ -7699,7 +7699,7 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /**
-   * K-817, K-1404, K-408: why a card may not take these addresses, or null. With `onCloudflare`, it also refuses a
+   * K-817, K-408: why a card may not take these addresses, or null. With `onCloudflare`, it also refuses a
    * hostname that another Worker, a foreign Access application or a DNS record that kitshn did not make holds.
    */
   /**
@@ -7772,7 +7772,7 @@ export class Kitshn extends DurableObject<Env> {
           { status: 409 },
         );
       }
-      // Only an address that nothing uses yet: kitshn never takes over a record that it did not make (K-1404).
+      // Only an address that nothing uses yet: kitshn never takes over a record that it did not make (K-817).
       // A record that kitshn made for this same card (an address that comes back before its record went) is fine.
       if (existing?.addresses.includes(address)) continue;
       const [kitshnRow] = this.sql<{ card_id: string | null }>(

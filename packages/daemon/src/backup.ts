@@ -3,7 +3,10 @@ import { BACKUP_POLICY, type BackupReport, PACK_MIB } from "@kitshn/edge/backups
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { HELPER_IMAGE } from "./takeover.ts";
+
+/** busybox, pinned by digest, so no app can take the name with an image of its own (K-818). */
+export const HELPER_IMAGE =
+  "busybox:1.38@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e";
 
 /** K-1812: restic 0.19.1, the multi-arch image index pinned by digest. */
 export const RESTIC_IMAGE =

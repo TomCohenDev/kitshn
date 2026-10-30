@@ -306,7 +306,7 @@ describe("several addresses of a Compose app (K-817)", () => {
   });
 });
 
-describe("DNS records of an address that moves between cards (K-817, K-1404)", () => {
+describe("DNS records of an address that moves between cards (K-817)", () => {
   it("refuses card B while card A's record of X waits for removal, and lets B in once it is gone", () => {
     // Card A dropped X; its record stays until the tunnel sync deletes it.
     const aRow = { card_id: "app-a" };

@@ -113,7 +113,8 @@ const windowsUser = (env: Record<string, string | undefined>) =>
 /**
  * K-622: a Task Scheduler task of the user that starts at logon, with no time limit. `conhost --headless` runs the
  * console program with no window. Task Scheduler does not
- * start an action again after it exits, so a trigger every 5 minutes starts it again; a running one ignores it.
+ * start an action again after it exits, so a trigger every 5 minutes starts it again; a running one ignores it. The
+ * repetition of a logon trigger runs only after the next logon, so a time trigger repeats from the registration on.
  * K-629: a failed run starts again after 1 minute (999 times, the most Task Scheduler allows), so a new daemon that
  * crashes reaches its rollback sooner.
  */
@@ -133,6 +134,11 @@ function windowsTask(
       <UserId>${user}</UserId>
       <Repetition><Interval>PT5M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
     </LogonTrigger>
+    <TimeTrigger>
+      <StartBoundary>2026-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <Repetition><Interval>PT5M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+    </TimeTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author"><UserId>${user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal>

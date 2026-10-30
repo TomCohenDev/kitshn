@@ -59,6 +59,10 @@ describe("daemon service (K-601)", () => {
     expect(task).toContain(
       "<RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>",
     );
+    // The repetition of a logon trigger starts only at the next logon; the time trigger repeats from now on.
+    expect(task).toMatch(
+      /<TimeTrigger>\s*<StartBoundary>[^<]+<\/StartBoundary>\s*<Enabled>true<\/Enabled>\s*<Repetition><Interval>PT5M</,
+    );
     expect(task).toContain("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>");
     expect(task).toContain(
       "<Command>conhost.exe</Command><Arguments>--headless &quot;C:\\k\\kitshn.exe&quot; run</Arguments>",

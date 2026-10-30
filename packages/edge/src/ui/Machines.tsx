@@ -1,7 +1,7 @@
 import { useState } from "preact/hooks";
 import type { Command } from "../core/machine.ts";
 import type { JobView, MachineView } from "../core/protocol.ts";
-import { isRelease } from "../core/autoUpdate.ts";
+import { isRelease, restartsAfterUpdate } from "../core/autoUpdate.ts";
 import { type HealthCell, healthCell, healthProblems } from "../core/health.ts";
 import { ProgressSticker } from "./Progress.tsx";
 import { MACHINE_TIPS, untilText } from "./actions.ts";
@@ -164,7 +164,7 @@ function MachineStickers(props: { view: MachineView }) {
         class="sticker wait"
         href={panel}
         onPointerDown={keepPress}
-        data-tip={`Behind: the daemon runs edge-${status.version}, the Worker runs edge-${snapshot.version}. ${machine.autoUpdate === false ? "Update daemon in its panel installs it (K-612)." : "kitshn updates it when no other machine updates and no provider is busy (K-627)."}`}
+        data-tip={`Behind: the daemon runs edge-${status.version}, the Worker runs edge-${snapshot.version}. ${!restartsAfterUpdate(status) ? "This Windows daemon cannot start its task again after an update, so kitshn does not update it by itself. Update daemon in its panel installs it; then run schtasks /run /tn \\kitshn\\daemon on the PC (K-622)." : machine.autoUpdate === false ? "Update daemon in its panel installs it (K-612)." : "kitshn updates it when no other machine updates and no provider is busy (K-627)."}`}
       >
         behind
       </a>

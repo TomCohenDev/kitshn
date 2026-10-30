@@ -40,7 +40,7 @@ export interface StepJob {
 
 /** The daemon as kitshn sees it now: its status and the start of its connection while online, else null. */
 export type LiveStatus =
-  (Pick<MachineStatus, "version" | "capabilities"> & { readonly connectedAt: number }) | null;
+  (Pick<MachineStatus, "version" | "capabilities" | "os"> & { readonly connectedAt: number }) | null;
 
 /** K-628: what the card shows about the update of its daemon. */
 export type DaemonUpdate =
@@ -133,6 +133,13 @@ export interface AutoUpdatePick {
   readonly whenIdle: boolean;
 }
 
+/**
+ * K-622: a Windows daemon without `task-restart` cannot start its task again after the swap, so the new daemon would
+ * not run until someone starts the task. It updates only by hand.
+ */
+export const restartsAfterUpdate = (status: Pick<MachineStatus, "os" | "capabilities">) =>
+  !status.os.startsWith("win32") || (status.capabilities ?? []).includes("task-restart");
+
 /** K-627: the BEHIND machines of a release that get automatic updates, in the owner's order. */
 const behindMachines = (version: string, machines: ReadonlyArray<AutoUpdateMachine>) =>
   machines
@@ -143,7 +150,8 @@ const behindMachines = (version: string, machines: ReadonlyArray<AutoUpdateMachi
         machine.status !== null &&
         isRelease(machine.status.version) &&
         machine.status.version !== version &&
-        (machine.status.capabilities ?? []).includes("update"),
+        (machine.status.capabilities ?? []).includes("update") &&
+        restartsAfterUpdate(machine.status),
     )
     .toSorted((a, b) => a.order - b.order || a.id.localeCompare(b.id));
 

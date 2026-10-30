@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { withNotify } from "./notify.ts";
+import { withAppEnv } from "./appEnv.ts";
 
 const notify = { url: "https://kit.example.com/notify", token: "secret-token" };
 
-describe("withNotify (K-1908)", () => {
+describe("withAppEnv (K-1908, K-822)", () => {
   it("gives every service the address and the token from the environment, and leaves the token in no field", () => {
     const config = {
       name: "money",
@@ -23,7 +23,7 @@ describe("withNotify (K-1908)", () => {
         },
       },
     };
-    const result = withNotify(config, notify);
+    const result = withAppEnv(config, { notify });
     const again = "${KITSHN_NOTIFY_TOKEN}";
     expect(result).toEqual({
       name: "money",
@@ -53,12 +53,42 @@ describe("withNotify (K-1908)", () => {
         web: { environment: { KITSHN_NOTIFY_URL: "https://other.example.com", KITSHN_NOTIFY_TOKEN: "own" } },
       },
     };
-    expect(withNotify(config, notify)).toEqual(config);
+    expect(withAppEnv(config, { notify })).toEqual(config);
+  });
+
+  it("gives every service the Access values in the checked config, and keeps a value that the app sets itself", () => {
+    const access = { teamDomain: "team.cloudflareaccess.com", audiences: ["aud-1", "aud-2"] };
+    const config = {
+      services: {
+        web: { image: "web" },
+        api: { image: "api", environment: { KITSHN_ACCESS_AUDIENCES: "own" } },
+      },
+    };
+    expect(withAppEnv(config, { access })).toEqual({
+      services: {
+        web: {
+          image: "web",
+          environment: {
+            KITSHN_ACCESS_TEAM_DOMAIN: "team.cloudflareaccess.com",
+            KITSHN_ACCESS_AUDIENCES: "aud-1,aud-2",
+          },
+        },
+        api: {
+          image: "api",
+          environment: {
+            KITSHN_ACCESS_TEAM_DOMAIN: "team.cloudflareaccess.com",
+            KITSHN_ACCESS_AUDIENCES: "own",
+          },
+        },
+      },
+    });
   });
 
   it("changes nothing without a notify token, and refuses an environment that is not a map", () => {
     const config = { services: { web: { image: "web" } } };
-    expect(withNotify(config, undefined)).toBe(config);
-    expect(() => withNotify({ services: { web: { environment: ["A=1"] } } }, notify)).toThrow(/not a map/);
+    expect(withAppEnv(config, {})).toBe(config);
+    expect(() => withAppEnv({ services: { web: { environment: ["A=1"] } } }, { notify })).toThrow(
+      /not a map/,
+    );
   });
 });

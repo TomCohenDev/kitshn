@@ -150,6 +150,8 @@ describe("site icon of a deploy (K-1113)", () => {
 });
 
 describe("Worker apps (K-806)", () => {
+  const access = { teamDomain: "team.cloudflareaccess.com", audiences: [] };
+
   it("declares the Durable Object classes as exports, from the recipe only, so a retry sends the same", () => {
     const result = workerMetadata(
       {
@@ -157,26 +159,28 @@ describe("Worker apps (K-806)", () => {
         compatibilityDate: "2026-10-01",
         durableObjects: { ROOMS: "Room", LOBBY: "Room" },
       },
-      { kv: new Map(), secrets: {}, assets: null },
+      { kv: new Map(), secrets: {}, access, assets: null },
     );
     if ("error" in result) throw new Error(result.error);
     expect(result.metadata["exports"]).toEqual({ Room: { type: "durable-object", storage: "sqlite" } });
     expect(result.metadata).not.toHaveProperty("migrations");
   });
 
-  it("sets the KV ids of the environment and passes the values of the run as secrets", () => {
+  it("sets the KV ids of the environment, passes the values of the run as secrets and the Access values as vars (K-822)", () => {
     const result = workerMetadata(
       {
         main: "worker.js",
         compatibilityDate: "2026-10-01",
         kv: ["STATS"],
         durableObjects: { ROOMS: "Room" },
-        vars: { MODE: "live" },
+        // The app's own value wins over kitshn's.
+        vars: { MODE: "live", KITSHN_ACCESS_TEAM_DOMAIN: "own.example.com" },
         assets: { folder: "site", runWorkerFirst: ["/api/*"] },
       },
       {
         kv: new Map([["STATS", "ns-1"]]),
         secrets: { GITHUB_TOKEN: "t" },
+        access: { teamDomain: "team.cloudflareaccess.com", audiences: ["aud-1", "aud-2"] },
         assets: { jwt: "j", headers: null, redirects: null },
       },
     );
@@ -186,7 +190,9 @@ describe("Worker apps (K-806)", () => {
       { type: "kv_namespace", name: "STATS", namespace_id: "ns-1" },
       { type: "durable_object_namespace", name: "ROOMS", class_name: "Room" },
       { type: "plain_text", name: "MODE", text: "live" },
+      { type: "plain_text", name: "KITSHN_ACCESS_TEAM_DOMAIN", text: "own.example.com" },
       { type: "secret_text", name: "GITHUB_TOKEN", text: "t" },
+      { type: "plain_text", name: "KITSHN_ACCESS_AUDIENCES", text: "aud-1,aud-2" },
     ]);
     expect(result.metadata["assets"]).toEqual({
       jwt: "j",
@@ -196,7 +202,7 @@ describe("Worker apps (K-806)", () => {
 
   it("refuses a secret with the name of a binding, and a KV binding without its namespace", () => {
     const app = { main: "worker.js", compatibilityDate: "2026-10-01", kv: ["STATS"] };
-    const base = { kv: new Map([["STATS", "ns-1"]]), secrets: {}, assets: null };
+    const base = { kv: new Map([["STATS", "ns-1"]]), secrets: {}, access, assets: null };
     expect(workerMetadata(app, { ...base, secrets: { STATS: "x" } })).toEqual({
       error: expect.stringMatching(/STATS/),
     });

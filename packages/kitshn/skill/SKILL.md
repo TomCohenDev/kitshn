@@ -79,6 +79,8 @@ The daemon carries the skill of its release (K-618). The line under the front ma
 
 A Compose app listens on the Unix socket `$KITSHN_DEFAULT_SOCKET` and publishes no ports (K-607). Only safe Compose keys pass; the deploy output names each refused setting, and only the owner can allow one on a machine (K-818).
 
+An app that needs the user identity checks the `Cf-Access-Jwt-Assertion` header itself, never the unsigned email header. kitshn gives it `KITSHN_ACCESS_TEAM_DOMAIN` and `KITSHN_ACCESS_AUDIENCES` (K-822). Verify the token with the keys of `https://$KITSHN_ACCESS_TEAM_DOMAIN/cdn-cgi/access/certs`, check that `iss` is `https://$KITSHN_ACCESS_TEAM_DOMAIN` and that `aud` holds one tag of the comma list. A site in Everyone gets no token: treat that request as a visitor with no identity.
+
 ## As an agent: call `kitshn`
 
 Call `kitshn` on the machine where you run. kitshn knows the machine and your thread, and gives you the access that the owner gave them. You set nothing yourself.

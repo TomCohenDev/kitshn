@@ -192,7 +192,9 @@ function fakeCloudflare(others: Record<string, number> = {}) {
     domains.filter((item) => item.hostname === hostname).map((item) => item.service);
   /** Deletes a KV namespace behind kitshn's back, as a restart in the middle of an orphan delete can leave it. */
   const dropKv = (id: string) => collection("/accounts/acct/storage/kv/namespaces").delete(id);
-  return { uploads, assets, state, scripts, served, dropKv, rollbacks };
+  /** The Access applications in the account, by id. */
+  const accessApps = collection("/accounts/acct/access/apps");
+  return { uploads, assets, state, scripts, served, dropKv, rollbacks, accessApps };
 }
 
 /** One repo of the test, so each test has its own cards. */
@@ -701,7 +703,7 @@ describe("rollback (K-821)", () => {
   const IMAGE = `sha256:${"a".repeat(64)}`;
 
   async function composeApp(id: string, name: string, keys: ReadonlyArray<string> = ["app"]) {
-    fakeCloudflare();
+    const cloudflare = fakeCloudflare();
     const app = repo(id, name);
     const machineId = `m-${id}`;
     const stub = env.KITSHN.getByName("kitshn");
@@ -761,12 +763,17 @@ describe("rollback (K-821)", () => {
       tunnel: "running",
       capabilities: ["compose-rollback"],
     };
+    /** What the daemon received. */
+    const received: Array<{ type: string; access?: unknown }> = [];
     /** The daemon connects. Sockets belong to the Durable Object that made them, so the pair comes from inside it. */
     const open = () =>
       runInDurableObject(stub, (_instance, durable) => {
         const pair = new WebSocketPair();
         durable.acceptWebSocket(pair[1], [machineId, "machines"]);
         pair[0].accept();
+        pair[0].addEventListener("message", (event) => {
+          received.push(JSON.parse(String(event.data)));
+        });
         pair[1].serializeAttachment({
           kind: "machine",
           machineId,
@@ -818,11 +825,11 @@ describe("rollback (K-821)", () => {
     const reconnect = async () => {
       socket = await open();
     };
-    return { app, stub, cardOf, result, commands, close, reconnect };
+    return { app, stub, cardOf, result, commands, close, reconnect, received, cloudflare };
   }
 
   it("rolls a Compose card back, forward and back again, each time to the build that its machine keeps", async () => {
-    const { app, result, commands, close } = await composeApp("63", "compose-a");
+    const { app, stub, result, commands, close, received, cloudflare } = await composeApp("63", "compose-a");
     const d1 = "d1-63";
     const d2 = "d2-63";
     const back = async () => {
@@ -836,9 +843,28 @@ describe("rollback (K-821)", () => {
       expect(String(again.body["error"])).toMatch(/runs now/);
       await result(true);
     };
+    /** K-822: the audience of the card's Access application in Cloudflare. */
+    const audience = (aud: string) =>
+      runInDurableObject(stub, (instance, durable) => {
+        cloudflare.accessApps.set("cf-app", { id: "cf-app", aud });
+        durable.storage.sql.exec(
+          "INSERT OR REPLACE INTO access_objects (key, cf_id, aud, body, tried, error) VALUES (?, 'cf-app', ?, '{}', '', NULL)",
+          `app:${app.card}:app.${app.address}`,
+          aud,
+        );
+        (instance as unknown as { accessCache: unknown }).accessCache = null;
+      });
+    await audience("aud-old");
+    await back();
+    // kitshn made the application again. The next rollback gets its new audience, not the one of that deploy.
+    await audience("aud-new");
     await back();
     await back();
-    await back();
+    expect(received.filter((message) => message.type === "job").map((message) => message.access)).toEqual([
+      { teamDomain: env.ACCESS_TEAM_DOMAIN, audiences: ["aud-old"] },
+      { teamDomain: env.ACCESS_TEAM_DOMAIN, audiences: ["aud-new"] },
+      { teamDomain: env.ACCESS_TEAM_DOMAIN, audiences: ["aud-new"] },
+    ]);
     // The daemon keeps builds by the deploy that built them, so the third job names d1 again, not a rollback row.
     expect(await commands()).toEqual([d1, d2, d1]);
     expect((await choices(app.card))[0]?.sha).toBe("11111111111111");

@@ -45,6 +45,8 @@ import {
   attestersOf,
   dropAttested,
   withAttester,
+  withAttesterUid,
+  attesterPrefixProblem,
 } from "./attest.ts";
 import {
   PUSH_MARK_KEY,
@@ -65,7 +67,7 @@ import {
   sharedFolderProblem,
 } from "./local.ts";
 import { type IconMemory, iconToSend, iconsDue, targetIcon } from "./icons.ts";
-import { localUsersOf, peerDecision } from "./peer.ts";
+import { localUsersEdit, localUsersOf, localUsersView, peerDecision, providerUsersOf } from "./peer.ts";
 import {
   chmodSync,
   copyFileSync,
@@ -708,33 +710,55 @@ async function attesterCommand(argv: ReadonlyArray<string>) {
 }
 
 /**
- * K-701: `kitshn local-users list|add|remove [user]` edits `localUsers` in `machine.json`. Only the daemon user
- * (and root) can read that file. The daemon reads the list at each new connection.
+ * K-701: `kitshn local-users list | add <user> [--provider] | remove <user>` asks the daemon, which edits its own
+ * `machine.json`, so the command works the same for root and the daemon user and never writes the caller's own file.
  */
-function localUsersCommand(action: string | undefined, who: string | undefined) {
-  readConfig();
-  const machine = JSON.parse(readFileSync(paths.config, "utf8")) as Record<string, unknown>;
-  const users = localUsersOf(machine);
-  if (users === null) fail(`localUsers in ${paths.config} is not a list of user ids. Fix it by hand.`);
+async function localUsersCommand(argv: ReadonlyArray<string>) {
+  const usage = "usage: kitshn local-users list | add <user or uid> [--provider] | remove <user or uid>";
   if (platform === "win32")
     fail("Windows has no local users for kitshn yet; only the user who joined uses it (K-624).");
-  const own = ownUid();
+  const provider = argv.includes("--provider");
+  const [action, who, ...rest] = argv.filter((arg) => arg !== "--provider");
+  if (rest.length > 0 || (provider && action !== "add")) fail(usage);
+  if (action !== "list" && action !== "add" && action !== "remove") fail(usage);
+  if (action !== "list" && !who) fail(usage);
+  const answer = await ask({
+    id: "1",
+    type: "local-users",
+    action: action as "list" | "add" | "remove",
+    ...(action === "list" ? {} : { uid: uidOf(who!), provider }),
+  });
+  if (answer === null) fail(notRunning());
+  if (answer!.type !== "local-users") fail("the daemon gave no list of local users.");
+  const { daemonUid: own, users } = answer as Extract<Answer, { type: "local-users" }>;
+  const rows = users.map((user) => (user.provider ? `${user.uid} (provider)` : String(user.uid)));
   if (action === "list") {
-    console.log([`${own} (the daemon user)`, ...users.map(String)].join("\n"));
+    console.log([`${own} (the daemon user)`, ...rows].join("\n"));
     return;
   }
-  if ((action !== "add" && action !== "remove") || !who)
-    fail("usage: kitshn local-users list|add|remove <user or uid>");
-  const uid = uidOf(who);
-  if (uid === own) fail("the daemon user always can use the local socket.");
-  const next = action === "add" ? [...new Set([...users, uid])] : users.filter((user) => user !== uid);
-  // Through a rename, so a stop never leaves half of the file that holds the machine token.
-  const temporary = `${paths.config}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify({ ...machine, localUsers: next }, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temporary, paths.config);
-  console.log(`Local users: ${next.length > 0 ? next.join(", ") : "none"}, and the daemon user ${own}.`);
+  console.log(`Local users: ${rows.length > 0 ? rows.join(", ") : "none"}, and the daemon user ${own}.`);
   if (action === "add")
-    console.log(`The user ${who} now reaches the daemon with kitshn, through ${paths.sharedSocket}.`);
+    console.log(
+      `The user ${who} now reaches the daemon with kitshn${provider ? ", and may run its own provider and attester" : ""}.`,
+    );
+}
+
+/**
+ * K-704: `kitshn providers rebind <name> --to-user <user>` moves a provider name, and the attester of its prefix, to a
+ * provider user, as root or the daemon user. The cards stay.
+ */
+async function providersCommand(argv: ReadonlyArray<string>) {
+  const at = argv.indexOf("--to-user");
+  const name = argv[1];
+  const user = at >= 0 ? argv[at + 1] : undefined;
+  if (argv[0] !== "rebind" || !name || name.startsWith("--") || !user || argv.length !== 4)
+    fail("usage: kitshn providers rebind <name> --to-user <user>");
+  const uid = uidOf(user!);
+  const answer = await ask({ id: "1", type: "provider-rebind", provider: name!, uid });
+  if (answer === null) fail(notRunning());
+  console.log(
+    `The provider ${name} now belongs to ${user} (user id ${uid}). Start it as that user; it registers again.`,
+  );
 }
 
 /** A user id, from a number or a user name. */
@@ -1983,6 +2007,65 @@ async function askAgain(
   );
 }
 
+/**
+ * K-704, K-1751: root or the daemon user moves a provider name to a provider user, with the attester of its prefix.
+ * The cards stay the same cards; the new user registers the name next.
+ */
+function rebindProvider(request: Extract<Request, { type: "provider-rebind" }>): Answer {
+  const machine = readMachineFile();
+  if (typeof machine !== "object" || machine === null || Array.isArray(machine))
+    throw new Error(`the daemon cannot read ${paths.config}, so it moves no provider.`);
+  if (!providerUsersOf(machine).includes(request.uid))
+    throw new Error(
+      `the user id ${request.uid} is not a provider user; add it first with kitshn local-users add <user> --provider (K-701).`,
+    );
+  const problem = registry().rebind(request.provider, request.uid);
+  if (problem) throw new Error(problem);
+  // The old connection no longer answers for the provider, so its waiting commands end now, with the reason.
+  for (const [commandId, waiter] of commandWaiters)
+    if (waiter.provider === request.provider) {
+      commandWaiters.delete(commandId);
+      waiter.settle({
+        ok: false,
+        exitCode: null,
+        output: `The provider ${request.provider} moved to the user id ${request.uid}; start it as that user and run the command again.`,
+      });
+    }
+  const next = withAttesterUid(machine as Record<string, unknown>, `${request.provider}.`, request.uid);
+  if (next !== machine) {
+    const temporary = `${paths.config}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    renameSync(temporary, paths.config);
+  }
+  log(`provider ${request.provider} now belongs to the user id ${request.uid}`);
+  sendProviders();
+  report();
+  return { id: request.id, type: "provider-rebind" };
+}
+
+/** K-701: lists or edits the local users of the daemon's own `machine.json`, for root or the daemon user. */
+function editLocalUsers(request: Extract<Request, { type: "local-users" }>): Answer {
+  const machine = readMachineFile();
+  if (typeof machine !== "object" || machine === null || Array.isArray(machine))
+    throw new Error(`the daemon cannot read ${paths.config}, so it changes no local user.`);
+  let current = machine as Record<string, unknown>;
+  if (request.action !== "list") {
+    if (request.uid === undefined) throw new Error(`local-users ${request.action} needs a user id.`);
+    const next = localUsersEdit(current, ownUid(), request.action, request.uid, request.provider === true);
+    if (typeof next === "string") throw new Error(next);
+    // Through a rename, so a stop never leaves half of the file that holds the machine token.
+    const temporary = `${paths.config}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    renameSync(temporary, paths.config);
+    log(`local users: ${request.action} ${request.uid}${request.provider ? " as a provider user" : ""}`);
+    current = next;
+  }
+  const users = localUsersView(current);
+  if (users === null)
+    throw new Error("localUsers in machine.json is not a list of user ids; fix it by hand.");
+  return { id: request.id, type: "local-users", daemonUid: ownUid(), users };
+}
+
 /** K-1751: writes one attester into `machine.json`, replacing an older entry of the same prefix. */
 function setAttester(request: Extract<Request, { type: "attester-set" }>, caller: Caller): Answer {
   // K-1751: the registering user must hold the port now; the entry keeps that uid, and each check compares it again.
@@ -1996,6 +2079,15 @@ function setAttester(request: Extract<Request, { type: "attester-set" }>, caller
     throw new Error(
       `kitshn refuses this attester: port ${port} is not held by user id ${caller.uid} (K-1751).`,
     );
+  // K-701: a provider user registers only the prefix of a provider name that belongs to it.
+  const prefixProblem = attesterPrefixProblem(
+    request.prefix,
+    request.tokenEnv,
+    caller.uid,
+    ownUid(),
+    registry().ownedBy(caller.uid),
+  );
+  if (prefixProblem) throw new Error(`kitshn refuses this attester: ${prefixProblem} (K-1751).`);
   const machine = readMachineFile();
   // A file that the daemon cannot read is never rewritten, so its tokens stay.
   if (typeof machine !== "object" || machine === null || Array.isArray(machine))
@@ -2658,10 +2750,16 @@ async function runCommand() {
     platform,
     // Read at each connection, so `kitshn local-users` needs no restart.
     decide: (peer: number) => peerDecision(peer, own, localUsersOf(readMachineFile())),
+    providerUsers: () => providerUsersOf(readMachineFile()),
     handle: answerLocal,
     log,
     closed: providerClosed,
-    refused: (provider: string, reason: string) => registry().refuse(provider, reason),
+    // K-704: a broken register marks the provider refused only when its own user sent it.
+    refused: (provider: string, reason: string, uid: number) => {
+      const owner = registry().ownerOf(provider);
+      if (owner === uid || (owner === undefined && (uid === own || uid === 0)))
+        registry().refuse(provider, reason);
+    },
   };
   const local = await listenLocal(paths.socket, { ...socketOptions, access: "private" });
   process.on("exit", local.stop);
@@ -2997,6 +3095,8 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
     if (error !== null) throw new Error(error);
     return { id, type: "desired-set" };
   }
+  if (request.type === "provider-rebind") return rebindProvider(request);
+  if (request.type === "local-users") return editLocalUsers(request);
   if (request.type === "provider-forget") {
     const problem = registry().forget(request.provider);
     if (problem) throw new Error(problem);
@@ -3006,7 +3106,13 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
   if (request.type === "register" || request.type === "upsert" || request.type === "remove") {
     if (!joined) throw new Error("the daemon has not read machine.json yet.");
     const handMade = readSites() ?? [];
-    const outcome = registry().apply(request, caller.connection, new Set(handMade.map((site) => site.name)));
+    const outcome = registry().apply(
+      request,
+      caller.connection,
+      new Set(handMade.map((site) => site.name)),
+      caller.uid,
+      caller.uid === ownUid() || caller.uid === 0,
+    );
     if (!outcome.ok) throw new Error(outcome.error);
     if (outcome.changed) {
       sendProviders();
@@ -3095,6 +3201,9 @@ switch (command) {
   case "provider":
     await providerCommand(args);
     break;
+  case "providers":
+    await providersCommand(args);
+    break;
   case "link-check":
     linkCheckCommand(args[0]);
     break;
@@ -3108,7 +3217,7 @@ switch (command) {
     await runAgentCommand(command, args, daemonTransport);
     break;
   case "local-users":
-    localUsersCommand(args[0], args[1]);
+    await localUsersCommand(args);
     break;
   case "version":
     console.log(args.includes("--json") ? versionJson(VERSION) : VERSION);
@@ -3144,7 +3253,10 @@ kitshn run                              run the daemon in the foreground
 kitshn rotate-key                       replace the machine key over the live connection (K-1705)
 kitshn rekey <code>                     make a new machine key with the key code of its panel (K-1706, K-1708)
 kitshn status                           the machine, its key, its connection to kitshn and its tunnel
-kitshn local-users list|add|remove <u>  who else may use the local socket, as the daemon user (K-701)
+kitshn local-users list|add|remove <u>  who else may use the local socket, as the daemon user (K-701);
+                                        add <u> --provider also lets it run a provider and its attester
+kitshn providers rebind <name> --to-user <u>
+                                        move a provider and its attester to a provider user (K-704)
 kitshn attester set --prefix <p.> --url <loopback url> --token-env <NAME>
                                         register an attester of thread labels, as the daemon user or root (K-1751)
 kitshn provider                         join stdin and stdout to the local socket, for a provider (K-704)

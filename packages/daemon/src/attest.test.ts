@@ -8,6 +8,8 @@ import {
   dropAttested,
   unregisteredT3,
   withAttester,
+  withAttesterUid,
+  attesterPrefixProblem,
 } from "./attest.ts";
 
 afterEach(() => vi.restoreAllMocks());
@@ -95,6 +97,32 @@ describe("attester answers and registration (K-1751, K-1752)", () => {
       ...t3,
       uid: 501,
     });
+    // K-704: a rebind of the provider moves the uid that each check compares with the port's user.
+    const rebound = withAttesterUid(
+      withAttester(machine, { ...t3, uid: 0 }) as Record<string, unknown>,
+      "t3.",
+      1002,
+    );
+    expect(attestersOf(rebound).attesters).toContainEqual({ ...t3, uid: 1002 });
+    expect(attestersOf(rebound).attesters).toContainEqual({
+      prefix: "x.",
+      address: "http://[::1]:2/",
+      tokenEnv: "X",
+    });
+    expect(withAttesterUid(machine, "none.", 1002)).toBe(machine);
+    // K-701: a provider user registers only the prefix of its own provider; the daemon user and root any prefix.
+    expect(attesterPrefixProblem("t3.", "T3_ACP_MCP_AUTHORIZATION", 1002, 1000, ["t3"])).toBeNull();
+    expect(attesterPrefixProblem("x.", "X_TOKEN", 1002, 1000, ["t3"])).toMatch(
+      /only the prefix of its own provider \(t3\.\)/,
+    );
+    expect(attesterPrefixProblem("t3.", "T3_X", 1002, 1000, [])).toMatch(/register the provider first/);
+    // `kitshn agent` sends the variable from every caller, so a provider user never names one of another tool.
+    expect(attesterPrefixProblem("t3.", "GITHUB_TOKEN", 1002, 1000, ["t3"])).toMatch(
+      /starts with T3_, not GITHUB_TOKEN/,
+    );
+    expect(attesterPrefixProblem("my-app.", "MY_APP_TOKEN", 1002, 1000, ["my-app"])).toBeNull();
+    expect(attesterPrefixProblem("x.", "GITHUB_TOKEN", 0, 1000, [])).toBeNull();
+    expect(attesterPrefixProblem("x.", "GITHUB_TOKEN", 1000, 1000, [])).toBeNull();
   });
 
   it("refuses the T3 credential on a machine where no t3. attester is registered, and lets a call without it pass", () => {

@@ -835,6 +835,8 @@ export class Kitshn extends DurableObject<Env> {
    * seconds, forgets one; that card then has no end, in the tray (K-509).
    */
   private pendingEnds = new Map<string, number>();
+  /** K-1104: the circle of `kitshn expose --circle` for a live site card that does not exist yet; same limit. */
+  private pendingCircles = new Map<string, string>();
   /**
    * K-1131: who asked for each site of the site wizard, by job id; `done` once that job succeeded. The new card's end
    * runs as that person, so the person can undo it (K-1506). Known limit: in memory only; after a wake the end runs as
@@ -6863,6 +6865,8 @@ export class Kitshn extends DurableObject<Env> {
         // K-212: the end time of `kitshn expose --time` waits for the card that the address check makes.
         if (report.endsAt !== undefined && report.endsAt > now && !this.state.resources.has(id))
           this.pendingEnds.set(id, report.endsAt);
+        if (report.circle !== undefined && !this.state.resources.has(id))
+          this.pendingCircles.set(id, report.circle);
         keep.add(id);
         const old = this.liveSites.get(id);
         if (old && old.target === report.target && old.dev === report.dev && old.up === report.up) continue;
@@ -6964,6 +6968,8 @@ export class Kitshn extends DurableObject<Env> {
         const card = this.state.resources.get(site.id);
         const endsAt = card ? undefined : this.pendingEnds.get(site.id);
         this.pendingEnds.delete(site.id);
+        const circle = card ? undefined : this.pendingCircles.get(site.id);
+        this.pendingCircles.delete(site.id);
         // The person whose wizard job made this site, else the machine of `kitshn expose --time`.
         const asked = [...this.siteAskers].find(([, each]) => each.done && each.siteId === site.id);
         if (asked) this.siteAskers.delete(asked[0]);
@@ -6993,13 +6999,15 @@ export class Kitshn extends DurableObject<Env> {
           endsAt !== undefined && endsAt > Date.now()
             ? [{ _tag: "cardEnd", id: site.id, before: null, after: endsAt }]
             : [];
-        this.persist(ends);
+        const placed = circle !== undefined && machine ? this.livePlace(machine, site.id, circle) : [];
+        this.persist([...ends, ...placed]);
         if (ends.length > 0)
           this.sql("UPDATE card_ends SET set_by = ? WHERE id = ?", JSON.stringify(by), site.id);
+        const into = placed.length > 0 ? ` in ${this.state.circles.get(circle ?? "")?.name ?? circle}` : "";
         this.insertRevision(
           { _tag: "kitshn", reason: `live site on ${machine?.name ?? site.machineId}` },
-          `${machine?.name ?? site.machineId} exposed ${site.address} (K-1104)${ends.length > 0 ? ` until ${endText(endsAt ?? 0)}` : ""}`,
-          ends,
+          `${machine?.name ?? site.machineId} exposed ${site.address}${into} (K-1104)${ends.length > 0 ? ` until ${endText(endsAt ?? 0)}` : ""}`,
+          [...ends, ...placed],
           null,
         );
       });
@@ -7009,6 +7017,28 @@ export class Kitshn extends DurableObject<Env> {
       this.broadcast();
     }
     return calls;
+  }
+
+  /**
+   * K-1104, K-718: the place of a new live site card in the circle of `kitshn expose --circle`, by the rules of an
+   * agent upload: only a circle where the machine has control. A refusal leaves the card in the tray (K-509).
+   */
+  private livePlace(machine: Machine, id: string, circle: string): Array<Change> {
+    const visitor = { email: null, clientId: machine.clientId, ip: null };
+    const spot = agentUploadPlace(this.state, visitor, circle, false, Date.now());
+    if (spot === null || typeof spot === "string") {
+      console.warn(`kitshn left ${id} in the tray: ${spot ?? "no circle"}`);
+      return [];
+    }
+    const changes: Array<Change> = [{ _tag: "place", id, before: null, after: spot }];
+    try {
+      this.checked(changes);
+    } catch (error) {
+      if (!(error instanceof RuleError)) throw error;
+      console.warn(`kitshn left ${id} in the tray: ${error.message}`);
+      return [];
+    }
+    return changes;
   }
 
   /**

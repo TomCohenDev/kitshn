@@ -1,4 +1,12 @@
-import type { Member } from "../core/model.ts";
+import type { Edit } from "../core/changes.ts";
+import {
+  ADMIN_RESOURCE_ID,
+  type Circle,
+  type Member,
+  type State,
+  circlesHolding,
+  isPublicCircle,
+} from "../core/model.ts";
 import { ipInRange } from "../core/visitor.ts";
 
 /** The kinds the "Add member" input can make. Devices come from the device list; machines from the map. */
@@ -60,3 +68,57 @@ export function memberFrom(kind: TypedKind, value: string): Member | string {
       return "kitshn cannot tell what this is. Type an email, a domain or a network, or pick the kind.";
   }
 }
+
+/** Whether the machine `machineId` is a member of `circle`. */
+export const machineMember = (circle: Circle, machineId: string) =>
+  circle.members.some((member) => member._tag === "machine" && member.machineId === machineId);
+
+/** K-1730: an agent circle holds devices and machines only, so only there do rights of a machine count. */
+export const isAgentCircle = (circle: Circle) =>
+  circle.members.every((member) => member._tag === "device" || member._tag === "machine");
+
+/** What a machine joining a circle does: the edit, what to say, and a question for a circle that holds kitshn itself. */
+export type JoinPlan =
+  | {
+      readonly edits: Array<Edit>;
+      readonly done: string;
+      /** The rights of the machines are in this circle's panel; null when the circle gives none. */
+      readonly rightsIn: string | null;
+      readonly ask: string | null;
+    }
+  | { readonly refused: string };
+
+/**
+ * K-539: every outcome of a machine joining a circle, for a drop on the title, the menus and the panels. A change of
+ * what joining means is a change here. A member joins with no right set, so its agents gain nothing yet (K-1730).
+ */
+export function joinPlan(state: State, machines: ReadonlyArray<string>, circle: Circle): JoinPlan {
+  if (isPublicCircle(circle))
+    return {
+      refused: `${circle.name} is public: anyone opens what it holds, so a machine needs no membership there.`,
+    };
+  const added = machines.map((machineId): Member => ({ _tag: "machine", machineId }));
+  const names = machines.map((id) => state.resources.get(id)?.name ?? id).join(", ");
+  const agents = isAgentCircle(circle);
+  const opens = circlesHolding(state, ADMIN_RESOURCE_ID).some((held) => held.id === circle.id);
+  return {
+    edits: [{ _tag: "circle", id: circle.id, after: { ...circle, members: [...circle.members, ...added] } }],
+    done: `${names} joined ${circle.name}: ${machines.length === 1 ? "it opens" : "they open"} what ${circle.name} holds. ${agents ? "No agent rights yet." : "A circle with people gives no agent rights."}`,
+    rightsIn: agents ? circle.id : null,
+    ask: opens
+      ? `${circle.name} holds kitshn itself, so ${names} would change everything in kitshn. Add ${machines.length === 1 ? "it" : "them"} anyway?`
+      : null,
+  };
+}
+
+/** The edit that takes a machine out of a circle; Undo puts it back with its rights. */
+export const leaveEdit = (circle: Circle, machineId: string): Edit => ({
+  _tag: "circle",
+  id: circle.id,
+  after: {
+    ...circle,
+    members: circle.members.filter(
+      (member) => !(member._tag === "machine" && member.machineId === machineId),
+    ),
+  },
+});

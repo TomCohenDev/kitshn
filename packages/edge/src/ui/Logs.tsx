@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { type DeployRun, type LogAnswer, type LogLine, matchesText, tailLines } from "../core/logs.ts";
 import type { Resource } from "../core/model.ts";
-import { Radio, Switch } from "./controls.tsx";
+import { Radio, Switch, useDialogEscape } from "./controls.tsx";
 import { callApi, startTail, stopTail } from "./store.ts";
 
 type Tab = "app" | "deploys";
@@ -50,6 +50,7 @@ function Lines(props: { lines: ReadonlyArray<LogLine> }) {
 
 /** K-1801: the logs of a Compose or Worker card: app logs and deploy runs, with search, a time range and Live. */
 export function LogsDialog(props: { card: Resource; onClose: () => void }) {
+  useDialogEscape(props.onClose);
   const { card } = props;
   const [tab, setTab] = useState<Tab>("app");
   const [text, setText] = useState("");

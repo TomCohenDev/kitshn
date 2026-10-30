@@ -31,9 +31,9 @@ export default {
       });
     });
     await page.reload();
-    const sticker = page.locator('[data-card="mac"]').getByText("t3 offline since").first();
+    const sticker = page.locator('[data-card="mac"]').getByText("T3 lost kitshn").first();
     await sticker.hover();
-    await page.getByText("Provider t3 offline since").first().waitFor();
+    await page.getByText("has no connection to its kitshn daemon").first().waitFor();
     await shot("card-sticker");
     await sticker.click();
     await page.getByText("the connection closed").first().waitFor();

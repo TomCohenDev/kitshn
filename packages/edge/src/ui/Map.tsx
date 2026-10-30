@@ -22,7 +22,8 @@ import { MachineRightStickers } from "./MachineRights.tsx";
 import { type KindInfo, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS, kindInfo } from "./kinds.ts";
 import { KeySticker, MachineLive, PresenceSticker, QueuedSticker } from "./Machines.tsx";
 import { type MenuTarget, untilText } from "./actions.ts";
-import { type DropTarget, landingPoints } from "./drop.ts";
+import { type DropTarget, landingPoints, titleHover } from "./drop.ts";
+import { isAgentCircle } from "./members.ts";
 import type { DrawnWire } from "../core/organize.ts";
 import { USER_STACK, headAngle, stacksOf } from "../core/place.ts";
 import { parseSiteInput } from "../core/sites.ts";
@@ -303,6 +304,8 @@ export function MapView(props: Props) {
       .find((element) => !dragged.has(element.closest<HTMLElement>("[data-card]")?.dataset["card"] ?? ""));
     if (top?.closest(".tray")) return { _tag: "tray" };
     if (top?.closest(".overlay-panel, header.bar")) return { _tag: "away" };
+    const title = top?.closest<HTMLElement>(".world [data-head]")?.dataset["head"];
+    if (title) return { _tag: "title", id: title };
     const id = top?.closest<HTMLElement>(".world [data-card]")?.dataset["card"];
     if (!id || id === grabbed) return { _tag: "map" };
     // A stack by group (K-508) keeps its cards; a drop there moves instead.
@@ -699,6 +702,7 @@ export function MapView(props: Props) {
     return () => observer.disconnect();
   }, [openKey, zoomedOut]);
   const draggedIds = drag?.type === "cards" && drag.moved ? new Set(drag.origins.keys()) : new Set<string>();
+  const titleText = hover?._tag === "title" ? titleHover(state, [...draggedIds], hover.id) : null;
   // K-537: the lens follows the stored map, so a drag only moves its lines.
   const lens = props.selection.cards.size === 1 && !zoomedOut ? [...props.selection.cards][0] : undefined;
   const lensLines = useMemo(() => (lens ? reachOf(state, lens, now) : []), [state, lens, now]);
@@ -815,6 +819,7 @@ export function MapView(props: Props) {
             state={shown}
             selected={props.selection.circle === circle.id}
             preview={previewCircles.has(circle.id)}
+            titleTarget={titleText !== null && hover?._tag === "title" && hover.id === circle.id}
             flash={props.flash.has(`circle:${circle.id}`)}
             headAngle={headAngles.get(circle.id) ?? 0}
             zoomedOut={zoomedOut}
@@ -947,7 +952,11 @@ export function MapView(props: Props) {
           }}
         />
       ) : null}
-      {draft && hover?._tag === "away" ? (
+      {draft && hover?._tag === "title" && titleText ? (
+        <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
+          <span>{titleText}</span>
+        </div>
+      ) : draft && hover?._tag === "away" ? (
         <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
           <span>Not here: nothing changes</span>
         </div>
@@ -972,10 +981,9 @@ export function MapView(props: Props) {
         <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
           {draft.diffs.slice(0, 6).map((diff) => (
             <span key={`${diff.resource.id}/${diff.circle.id}`} class={diff.to ? "" : "minus"}>
-              {diff.to ? `+ ${diff.circle.name} · ${diff.to}` : `− ${diff.circle.name}`}
-              {draft.diffs.some((other) => other.resource.id !== diff.resource.id)
-                ? ` (${diff.resource.name})`
-                : ""}
+              {diff.to
+                ? `+ ${diff.circle.name} can ${diff.to} ${diff.resource.name}`
+                : `− ${diff.circle.name} can no longer open ${diff.resource.name}`}
             </span>
           ))}
           {draft.diffs.length > 6 ? <span>and {draft.diffs.length - 6} more</span> : null}
@@ -1000,6 +1008,8 @@ export function CircleView(props: {
   state: State;
   selected: boolean;
   preview: boolean;
+  /** K-539: a machine card hangs over the title, so a drop adds it as a member. */
+  titleTarget?: boolean;
   flash: boolean;
   /** Where the head sits on the edge, in radians from the top (layout.ts). */
   headAngle: number;
@@ -1011,7 +1021,7 @@ export function CircleView(props: {
   const shown = circle.members.slice(0, 4);
   // K-718: rights count only in a circle of devices only.
   // K-1730: an agent circle holds devices and machines only.
-  const agentCircle = circle.members.every((member) => member._tag === "device" || member._tag === "machine");
+  const agentCircle = isAgentCircle(circle);
   const extra = circle.members.length - shown.length;
   const counts = new Map<CardKind, { readonly count: number; readonly info: KindInfo }>();
   if (props.zoomedOut) {
@@ -1036,7 +1046,7 @@ export function CircleView(props: {
       }}
     >
       <div
-        class="head"
+        class={`head${props.titleTarget ? " stack-target" : ""}`}
         data-head={circle.id}
         style={{
           left: px(circle.r + circle.r * Math.sin(props.headAngle)),
@@ -1239,7 +1249,7 @@ export function CardView(props: {
           ⏱ {untilText(endsAt)}
         </div>
       ) : null}
-      {props.machine ? <MachineLive view={props.machine} /> : null}
+      {props.machine ? <MachineLive view={props.machine} state={state} /> : null}
       <div class="foot">
         <KindSticker resource={resource} peek={peek} />
         {props.pullRequest !== null ? (

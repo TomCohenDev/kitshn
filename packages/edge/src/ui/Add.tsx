@@ -4,7 +4,7 @@ import type { MachineView } from "../core/protocol.ts";
 import { RESERVED_SITE_NAMES } from "../core/library.ts";
 import { type Circle, type Resource, isPublicCircle } from "../core/model.ts";
 import { type ServerReport, type SiteInput, parseSiteInput } from "../core/sites.ts";
-import { Radio, Switch } from "./controls.tsx";
+import { Radio, Switch, useDialogEscape } from "./controls.tsx";
 import { GameForm } from "./Games.tsx";
 import { LiveFrame } from "./Peek.tsx";
 import { callApi } from "./store.ts";
@@ -81,6 +81,7 @@ export function AddSite(props: {
   onClose: () => void;
   onDone: (text: string) => void;
 }) {
+  useDialogEscape(props.onClose);
   const [kind, setKind] = useState<"live" | "static" | "game">("live");
   /** U18: who opens the new site: null keeps it private in the tray. */
   const [who, setWho] = useState<string | null>(null);

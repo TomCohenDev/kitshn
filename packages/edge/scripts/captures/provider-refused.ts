@@ -1,4 +1,4 @@
-// A refused provider (K-704): the "provider refused" sticker with its tip, and the reason in the machine panel. The
+// A refused provider (K-704): the "kitshn refused T3" sticker with its tip, and the reason in the machine panel. The
 // demo machines are offline, so the scenario gives the Mac a state on its way in.
 import { DESKTOP, type Scenario } from "../capture-views.ts";
 
@@ -32,12 +32,12 @@ export default {
       });
     });
     await page.reload();
-    const sticker = page.locator('[data-card="mac"]').getByText("provider refused").first();
+    const sticker = page.locator('[data-card="mac"]').getByText("kitshn refused T3").first();
     await sticker.hover();
-    await page.getByText("Provider t3 refused").first().waitFor();
+    await page.getByText("sent a list row id over 64 characters").first().waitFor();
     await shot("card-sticker");
     await sticker.click();
-    await page.getByText("refused for 12 min").first().waitFor();
+    await page.getByText("Details").first().waitFor();
     await shot("panel-reason");
   },
 } satisfies Scenario;

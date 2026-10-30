@@ -1,6 +1,7 @@
 import { useId, useRef, useState } from "preact/hooks";
 import { encode } from "uqr";
 import { type InviteClient, openLink } from "../core/invite.ts";
+import { useDialogEscape } from "./controls.tsx";
 import { callApi } from "./store.ts";
 
 /** K-1601: a waiting invite of a phone or desktop app, as `POST /api/devices/invites` answers it. */
@@ -36,6 +37,8 @@ function QrCode(props: { text: string; label: string }) {
 
 /** K-1601: the invite of one app: its QR code and link. The code works once; kitshn cannot show it again. */
 export function InviteDialog(props: { invite: DeviceInvite; onClose: () => void }) {
+  // The code works once and kitshn cannot show it again, so Escape does not close this.
+  useDialogEscape(() => undefined);
   const { invite } = props;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

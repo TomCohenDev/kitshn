@@ -308,6 +308,39 @@ export function MenuItem(props: {
   );
 }
 
+/** The open dialogs, the newest last, each with what Escape does in it. */
+const dialogs: Array<{ current: () => void }> = [];
+
+const onDialogEscape = (event: KeyboardEvent) => {
+  const top = dialogs.at(-1);
+  if (event.key !== "Escape" || !top) return;
+  // A menu or the palette over the dialog takes its own Escape first.
+  if ((event.target as Element | null)?.closest?.('[role="menu"], .palette-scrim')) return;
+  event.stopPropagation();
+  event.preventDefault();
+  top.current();
+};
+
+/**
+ * Escape belongs to the newest open dialog wherever the focus is, so it never reaches the panel or the selection
+ * behind. `onEscape` is null for no dialog; a dialog that shows a secret once passes a function that does nothing.
+ */
+export function useDialogEscape(onEscape: (() => void) | null) {
+  const latest = useRef({ current: onEscape ?? (() => undefined) });
+  latest.current.current = onEscape ?? (() => undefined);
+  const open = onEscape !== null;
+  useEffect(() => {
+    if (!open) return;
+    const entry = latest.current;
+    if (dialogs.length === 0) addEventListener("keydown", onDialogEscape, true);
+    dialogs.push(entry);
+    return () => {
+      dialogs.splice(dialogs.indexOf(entry), 1);
+      if (dialogs.length === 0) removeEventListener("keydown", onDialogEscape, true);
+    };
+  }, [open]);
+}
+
 /** K-517: why an action is off, in text under it, because a phone shows no tooltip. */
 export function WhyOff(props: { readonly reason: string | null }) {
   return props.reason ? <p class="help why-off">{props.reason}</p> : null;

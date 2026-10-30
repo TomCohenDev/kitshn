@@ -43,6 +43,20 @@ const set = (next: Partial<StoreState>) => {
   for (const listener of listeners) listener();
 };
 
+const CHECKLISTS_KEY = "kitshn.hiddenChecklists";
+
+/** K-633: the machines whose "connect" sticker this device hides, such as one that never runs T3. */
+export const hiddenChecklists = (): ReadonlySet<string> =>
+  new Set(JSON.parse(localStorage.getItem(CHECKLISTS_KEY) ?? "[]") as Array<string>);
+
+export function setChecklistHidden(machine: string, hidden: boolean) {
+  const next = new Set(hiddenChecklists());
+  if (hidden) next.add(machine);
+  else next.delete(machine);
+  localStorage.setItem(CHECKLISTS_KEY, JSON.stringify([...next]));
+  set({});
+}
+
 export function useStore(): StoreState {
   const [, rerender] = useState(0);
   useEffect(() => {

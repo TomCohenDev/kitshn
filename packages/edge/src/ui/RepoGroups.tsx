@@ -2,7 +2,7 @@ import { useState } from "preact/hooks";
 import { type GitHubWay, type Resource } from "../core/model.ts";
 import type { RepoView } from "../core/protocol.ts";
 import { matchProblem, repoGroupMatches } from "../core/repoGroups.ts";
-import { Radio } from "./controls.tsx";
+import { Radio, useDialogEscape } from "./controls.tsx";
 import { callApi } from "./store.ts";
 
 const WAY_TEXT: Record<GitHubWay, { readonly label: string; readonly tip: string }> = {
@@ -29,6 +29,7 @@ export function AddRepoGroup(props: {
   readonly onClose: () => void;
   readonly onDone: (text: string) => void;
 }) {
+  useDialogEscape(props.onClose);
   const [match, setMatch] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

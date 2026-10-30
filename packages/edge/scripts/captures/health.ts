@@ -93,7 +93,7 @@ export default {
     await page.getByText(ACCESS_REFUSED).first().waitFor();
     await shot("grid-tip");
     await page.goto(`${new URL(page.url()).origin}/#map`);
-    const sticker = page.locator('[data-card="mac"]').getByText("1 check red").first();
+    const sticker = page.locator('[data-card="mac"]').getByText("check red").first();
     await sticker.hover();
     await page.getByText("Health check (K-631)").first().waitFor();
     await shot("card-sticker");

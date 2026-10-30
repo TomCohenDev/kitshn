@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { applyChanges, resolveEdits } from "../core/changes.ts";
-import { type Circle, type Resource, type State, circlesHolding } from "../core/model.ts";
+import {
+  type Circle,
+  EVERYONE_CIRCLE_ID,
+  OWNER_CIRCLE_ID,
+  type Resource,
+  type State,
+  circlesHolding,
+} from "../core/model.ts";
 import { seed } from "../core/seed.ts";
-import { dropPlan } from "./drop.ts";
+import { dropPlan, titleHover } from "./drop.ts";
 
 /** K-509, K-522: a card from the tray drops as a card from the map does. */
 
@@ -101,5 +108,84 @@ describe("dropPlan", () => {
 
   it.each(["map", "tray"])("changes nothing for a %s card let go over the panel or the toolbar", (id) => {
     expect(dropPlan(state(), new Map([[id, point]]), { _tag: "away" }, "s-new")).toBeNull();
+  });
+
+  describe("the title of a circle (K-539)", () => {
+    const machines: Circle = {
+      ...her,
+      id: "machines",
+      name: "Machines",
+      members: [{ _tag: "machine", machineId: "mac" }],
+    };
+    const start = { x: 2000, y: 2000 };
+    const withMachine = (from: typeof start | null): State => {
+      const base = state();
+      return {
+        ...base,
+        circles: new Map([...base.circles, ["machines", machines]]),
+        resources: new Map([...base.resources, ["win", card("win", "machine")]]),
+        places: from ? new Map([...base.places, ["win", from]]) : base.places,
+      };
+    };
+    const title = { _tag: "title", id: "machines" } as const;
+
+    it.each([
+      ["map", start],
+      ["tray", null],
+    ] as const)("adds a %s machine as a member with no right, and leaves its place alone", (_, from) => {
+      const base = withMachine(from);
+      const plan = dropPlan(base, new Map([["win", point]]), title, "s-new");
+      const next = after(base, plan);
+      expect(next.circles.get("machines")?.members).toContainEqual({ _tag: "machine", machineId: "win" });
+      expect(next.places.get("win")).toEqual(base.places.get("win"));
+      expect(plan && "rightsIn" in plan ? plan.rightsIn : null).toBe("machines");
+      expect(titleHover(base, ["win"], "machines")).toBe("+ win joins Machines");
+    });
+
+    it("changes nothing for a member, and says so", () => {
+      const base = withMachine(start);
+      const member = {
+        ...base,
+        circles: new Map([
+          ...base.circles,
+          ["machines", { ...machines, members: [{ _tag: "machine" as const, machineId: "win" }] }],
+        ]),
+      };
+      expect(dropPlan(member, new Map([["win", point]]), title, "s-new")).toBeNull();
+      expect(titleHover(member, ["win"], "machines")).toMatch(/already/);
+    });
+
+    it("shares a card that is no machine, as the body of the circle does", () => {
+      const base = withMachine(start);
+      expect(titleHover(base, ["map"], "machines")).toBeNull();
+      const next = after(base, dropPlan(base, new Map([["map", point]]), title, "s-new"));
+      expect(next.places.get("map")).toEqual(point);
+      expect(next.circles.get("machines")?.members).toEqual(machines.members);
+    });
+
+    it("refuses a public circle, and asks first for a circle that holds kitshn itself", () => {
+      const base = withMachine(start);
+      const everyone = dropPlan(
+        base,
+        new Map([["win", point]]),
+        { _tag: "title", id: EVERYONE_CIRCLE_ID },
+        "s-new",
+      );
+      expect(everyone && "refused" in everyone ? everyone.refused : "").toMatch(/public/);
+      const owner = dropPlan(
+        base,
+        new Map([["win", point]]),
+        { _tag: "title", id: OWNER_CIRCLE_ID },
+        "s-new",
+      );
+      expect(owner && "ask" in owner ? owner.ask : "").toMatch(/kitshn itself/);
+    });
+
+    it("says that a machine in the body of a circle is shared, not a member", () => {
+      const base = withMachine(start);
+      const plan = dropPlan(base, new Map([["win", point]]), { _tag: "map" }, "s-new");
+      expect(after(base, plan).circles.get("her")?.members).toEqual(her.members);
+      expect(plan && "note" in plan ? plan.note : "").toMatch(/not a member/);
+    });
   });
 });

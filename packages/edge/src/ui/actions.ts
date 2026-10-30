@@ -21,6 +21,7 @@ import {
   type Stack,
   type State,
   circlesHolding,
+  isPublicCircle,
   shareKey,
   stackTitle,
   levelName,
@@ -32,6 +33,7 @@ import { commandsFor } from "../core/providers.ts";
 import { kindInfo } from "./kinds.ts";
 import { ROLLBACK_DATA } from "./Rollback.tsx";
 import { hasLogs } from "../core/logs.ts";
+import { joinPlan, leaveEdit, machineMember } from "./members.ts";
 
 /** K-1801 */
 export const LOGS_TIP = "Logs: search what the app writes and its deploy runs, or follow new lines live.";
@@ -110,6 +112,9 @@ export interface ActionHandlers {
   /** K-212: a new end time, null for no end, or "now" to end the card at once. */
   readonly setTime: (resource: Resource, endsAt: number | null | "now") => void;
   readonly stackOnto: (ids: Array<string>, target: string) => void;
+  /** K-539: a machine joins or leaves a circle as a member; its share does not change. */
+  readonly joinCircle: (machine: Resource, circle: Circle) => void;
+  readonly leaveCircle: (machine: Resource, circle: Circle) => void;
   readonly pullOut: (stackId: string, id: string) => void;
   readonly unstack: (stackId: string) => void;
   /** K-521: opens a closed stack as a column on the map, or closes an open one. */
@@ -584,6 +589,47 @@ export function untilText(endsAt: number, now = Date.now()): string {
     : `until ${end.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
 }
 
+/** K-539: a machine joins and leaves circles as a member, without a drag, also on a phone. */
+function memberActions(state: State, h: ActionHandlers, machine: Resource): Array<Action> {
+  const circles = [...state.circles.values()];
+  const of = circles.filter((circle) => machineMember(circle, machine.id));
+  const others = circles.filter((circle) => !machineMember(circle, machine.id));
+  return [
+    {
+      id: "join",
+      label: "Add to circle as member",
+      keywords: "member control group",
+      tip: `${machine.name} joins a circle and opens what it holds. Its card does not move.`,
+      items: others.map((circle) => {
+        const plan = joinPlan(state, [machine.id], circle);
+        return {
+          id: `join:${circle.id}`,
+          label: circle.name,
+          tip: `${machine.name} joins ${circle.name}, with no agent right yet.`,
+          ...("refused" in plan ? { refused: plan.refused } : refusedBy(state, plan.edits)),
+          run: () => h.joinCircle(machine, circle),
+        };
+      }),
+    },
+    ...(of.length > 0
+      ? [
+          {
+            id: "leave",
+            label: "Remove from circle as member",
+            tip: `${machine.name} leaves a circle. Its share does not change.`,
+            items: of.map((circle) => ({
+              id: `leave:${circle.id}`,
+              label: circle.name,
+              tip: `${machine.name} leaves ${circle.name}. Undo puts it back with its rights.`,
+              ...refusedBy(state, [leaveEdit(circle, machine.id)]),
+              run: () => h.leaveCircle(machine, circle),
+            })),
+          },
+        ]
+      : []),
+  ];
+}
+
 /** K-212: a card on the map gets a time, or a timed card is extended, made permanent or ended now. */
 function timeAction(state: State, h: ActionHandlers, resource: Resource): Action {
   const endsAt = state.ends.get(resource.id);
@@ -780,6 +826,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
           ]
         : []),
     ],
+    resource.kind === "machine" ? memberActions(state, h, resource) : [],
     machine
       ? [
           {
@@ -1018,6 +1065,32 @@ export function circleActions(ctx: ActionContext, h: ActionHandlers, circle: Cir
         run: () => h.addMember(circle.id),
       },
     ],
+    // K-539: the same join as the card's menu, from the side of the circle.
+    isPublicCircle(circle)
+      ? []
+      : [
+          {
+            id: "add-machine",
+            label: "Add machine as member",
+            tip: `A machine joins ${circle.name} and opens what it holds.`,
+            items: [...ctx.machines.values()]
+              .filter((view) => !machineMember(circle, view.machine.id))
+              .flatMap((view) => {
+                const machine = ctx.state.resources.get(view.machine.id);
+                if (!machine) return [];
+                const plan = joinPlan(ctx.state, [machine.id], circle);
+                return [
+                  {
+                    id: `add-machine:${machine.id}`,
+                    label: machine.name,
+                    tip: `${machine.name} joins ${circle.name}, with no agent right yet.`,
+                    ...("refused" in plan ? { refused: plan.refused } : refusedBy(ctx.state, plan.edits)),
+                    run: () => h.joinCircle(machine, circle),
+                  },
+                ];
+              }),
+          },
+        ],
     undoItemAction(ctx, h, { kind: "circle", id: circle.id }),
     // K-211: the Owner circle cannot be deleted.
     circle.id === OWNER_CIRCLE_ID

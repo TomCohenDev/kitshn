@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { type BackupRun, gigabytes } from "../core/backups.ts";
 import type { Resource } from "../core/model.ts";
+import { useDialogEscape } from "./controls.tsx";
 import { callApi } from "./store.ts";
 
 // Two runs can fall in one minute, and the owner picks one to restore, so this time keeps its seconds.
@@ -47,6 +48,7 @@ export function BackupsDialog(props: {
   ask: (text: string) => Promise<boolean>;
 }) {
   const { card } = props;
+  useDialogEscape(props.onClose);
   const base = `/api/apps/${encodeURIComponent(card.id)}/backups`;
   const [runs, setRuns] = useState<ReadonlyArray<BackupRun> | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -126,6 +128,7 @@ const localTime = (text: string) => Date.parse(text.trim().replace(" ", "T"));
 
 /** K-1822: the time to restore to; the passkey check and the confirm come after it. */
 export function RestoreTimeDialog(props: { restoreUndo: string | null; onClose: () => void }) {
+  useDialogEscape(props.onClose);
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const go = (wish: RestoreWish) => {

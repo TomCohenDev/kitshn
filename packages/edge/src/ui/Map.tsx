@@ -10,7 +10,6 @@ import {
   circlesHolding,
   insideCircle,
   memberLabel,
-  stackTitle,
   type CardKind,
 } from "../core/model.ts";
 import type { AccessState, MachineView, Snapshot } from "../core/protocol.ts";
@@ -22,7 +21,8 @@ import { MachineRightStickers } from "./MachineRights.tsx";
 import { type KindInfo, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS, kindInfo } from "./kinds.ts";
 import { KeySticker, MachineLive, PresenceSticker, QueuedSticker } from "./Machines.tsx";
 import { type MenuTarget, untilText } from "./actions.ts";
-import { type DropTarget, landingPoints } from "./drop.ts";
+import { type DropTarget, dropHover, landingPoints, shareLines } from "./drop.ts";
+import { isAgentCircle } from "./members.ts";
 import type { DrawnWire } from "../core/organize.ts";
 import { USER_STACK, headAngle, stacksOf } from "../core/place.ts";
 import { parseSiteInput } from "../core/sites.ts";
@@ -242,8 +242,10 @@ export function MapView(props: Props) {
     readonly inTray: boolean;
   } | null>(null);
   /** What a drop of the dragged cards lands on now, for the hover feedback. */
-  const [hover, setHover] = useState<DropTarget | null>(null);
-  const stackTarget = hover?._tag === "card" ? hover.id : null;
+  const [hover, setHover] = useState<(ReturnType<typeof dropHover> & { readonly target: DropTarget }) | null>(
+    null,
+  );
+  const stackTarget = hover?.target._tag === "card" ? hover.target.id : null;
   const [draft, setDraft] = useState<{ state: State; diffs: Array<ShareDiff>; pointer: Point } | null>(null);
   /** K-523: a right press or a touch that may open the context menu. */
   const hold = useRef<{ press: Press; readonly target: MenuTarget; timer: number | null } | null>(null);
@@ -303,6 +305,8 @@ export function MapView(props: Props) {
       .find((element) => !dragged.has(element.closest<HTMLElement>("[data-card]")?.dataset["card"] ?? ""));
     if (top?.closest(".tray")) return { _tag: "tray" };
     if (top?.closest(".overlay-panel, header.bar")) return { _tag: "away" };
+    const title = top?.closest<HTMLElement>(".world .head[data-head]")?.dataset["head"];
+    if (title) return { _tag: "title", id: title };
     const id = top?.closest<HTMLElement>(".world [data-card]")?.dataset["card"];
     if (!id || id === grabbed) return { _tag: "map" };
     // A stack by group (K-508) keeps its cards; a drop there moves instead.
@@ -549,7 +553,8 @@ export function MapView(props: Props) {
       const onGrabbed = target._tag === "card" && target.id === drag.under;
       // Once the pointer leaves the card it was grabbed over, that card is a target like any other.
       if (!onGrabbed) drag.under = null;
-      setHover(onGrabbed ? { _tag: "map" } : target);
+      const over: DropTarget = onGrabbed ? { _tag: "map" } : target;
+      setHover({ target: over, ...dropHover(state, new Map(moves), over) });
       return;
     }
     if (drag.type === "circle") {
@@ -640,9 +645,6 @@ export function MapView(props: Props) {
     } else props.onView({ ...view, x: view.x - event.deltaX, y: view.y - event.deltaY });
   };
 
-  const targetStack = stackTarget
-    ? [...state.stacks.values()].find((stack) => stack.members.includes(stackTarget))
-    : undefined;
   const previewCircles = new Set(draft?.diffs.map((diff) => diff.circle.id));
   // A few frames at most, for the site cards nearest the centre of the view, and only when they are readable.
   // Candidates: drawn site and page cards whose centre is in the open part of the map (not under the tray
@@ -699,6 +701,8 @@ export function MapView(props: Props) {
     return () => observer.disconnect();
   }, [openKey, zoomedOut]);
   const draggedIds = drag?.type === "cards" && drag.moved ? new Set(drag.origins.keys()) : new Set<string>();
+  // A drag of cards says what its drop does (`dropHover`); a drag of a circle says what its move changes.
+  const labelLines = hover?.lines ?? (draft ? shareLines(draft.diffs, state.machines) : []);
   // K-537: the lens follows the stored map, so a drag only moves its lines.
   const lens = props.selection.cards.size === 1 && !zoomedOut ? [...props.selection.cards][0] : undefined;
   const lensLines = useMemo(() => (lens ? reachOf(state, lens, now) : []), [state, lens, now]);
@@ -815,6 +819,9 @@ export function MapView(props: Props) {
             state={shown}
             selected={props.selection.circle === circle.id}
             preview={previewCircles.has(circle.id)}
+            titleTarget={
+              hover?.joins === true && hover.target._tag === "title" && hover.target.id === circle.id
+            }
             flash={props.flash.has(`circle:${circle.id}`)}
             headAngle={headAngles.get(circle.id) ?? 0}
             zoomedOut={zoomedOut}
@@ -947,38 +954,13 @@ export function MapView(props: Props) {
           }}
         />
       ) : null}
-      {draft && hover?._tag === "away" ? (
+      {draft && labelLines.length > 0 ? (
         <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
-          <span>Not here: nothing changes</span>
-        </div>
-      ) : draft && hover?._tag === "tray" ? (
-        <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
-          {[...draggedIds].some((id) => state.places.has(id)) ? (
-            <span class="minus">To the tray: out of every circle, private</span>
-          ) : (
-            <span>Back to the tray: nothing changes</span>
-          )}
-        </div>
-      ) : draft && stackTarget ? (
-        <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
-          <span>
-            Stack with{" "}
-            {targetStack
-              ? stackTitle(state, targetStack)
-              : (state.resources.get(stackTarget)?.name ?? "this card")}
-          </span>
-        </div>
-      ) : draft && draft.diffs.length > 0 ? (
-        <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
-          {draft.diffs.slice(0, 6).map((diff) => (
-            <span key={`${diff.resource.id}/${diff.circle.id}`} class={diff.to ? "" : "minus"}>
-              {diff.to ? `+ ${diff.circle.name} · ${diff.to}` : `− ${diff.circle.name}`}
-              {draft.diffs.some((other) => other.resource.id !== diff.resource.id)
-                ? ` (${diff.resource.name})`
-                : ""}
+          {labelLines.map((line, index) => (
+            <span key={index} class={line.minus ? "minus" : ""}>
+              {line.text}
             </span>
           ))}
-          {draft.diffs.length > 6 ? <span>and {draft.diffs.length - 6} more</span> : null}
         </div>
       ) : null}
     </div>
@@ -1000,6 +982,8 @@ export function CircleView(props: {
   state: State;
   selected: boolean;
   preview: boolean;
+  /** K-539: a machine card hangs over the title, so a drop adds it as a member. */
+  titleTarget?: boolean;
   flash: boolean;
   /** Where the head sits on the edge, in radians from the top (layout.ts). */
   headAngle: number;
@@ -1011,7 +995,7 @@ export function CircleView(props: {
   const shown = circle.members.slice(0, 4);
   // K-718: rights count only in a circle of devices only.
   // K-1730: an agent circle holds devices and machines only.
-  const agentCircle = circle.members.every((member) => member._tag === "device" || member._tag === "machine");
+  const agentCircle = isAgentCircle(circle);
   const extra = circle.members.length - shown.length;
   const counts = new Map<CardKind, { readonly count: number; readonly info: KindInfo }>();
   if (props.zoomedOut) {
@@ -1036,7 +1020,7 @@ export function CircleView(props: {
       }}
     >
       <div
-        class="head"
+        class={`head${props.titleTarget ? " stack-target" : ""}`}
         data-head={circle.id}
         style={{
           left: px(circle.r + circle.r * Math.sin(props.headAngle)),
@@ -1239,7 +1223,7 @@ export function CardView(props: {
           ⏱ {untilText(endsAt)}
         </div>
       ) : null}
-      {props.machine ? <MachineLive view={props.machine} /> : null}
+      {props.machine ? <MachineLive view={props.machine} state={state} /> : null}
       <div class="foot">
         <KindSticker resource={resource} peek={peek} />
         {props.pullRequest !== null ? (

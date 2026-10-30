@@ -4,6 +4,7 @@ import {
   RuleError,
   applyChanges,
   isAppCard,
+  refuseLockout,
   refuseRaiseWhilePaused,
   resolveEdits,
   ruleViolation,
@@ -21,6 +22,7 @@ import {
   type Stack,
   type State,
   circlesHolding,
+  isPublicCircle,
   shareKey,
   stackTitle,
   levelName,
@@ -32,6 +34,7 @@ import { commandsFor } from "../core/providers.ts";
 import { kindInfo } from "./kinds.ts";
 import { ROLLBACK_DATA } from "./Rollback.tsx";
 import { hasLogs } from "../core/logs.ts";
+import { joinPlan, leaveEdit, machineMember } from "./members.ts";
 
 /** K-1801 */
 export const LOGS_TIP = "Logs: search what the app writes and its deploy runs, or follow new lines live.";
@@ -110,6 +113,9 @@ export interface ActionHandlers {
   /** K-212: a new end time, null for no end, or "now" to end the card at once. */
   readonly setTime: (resource: Resource, endsAt: number | null | "now") => void;
   readonly stackOnto: (ids: Array<string>, target: string) => void;
+  /** K-539: a machine joins or leaves a circle as a member; its share does not change. */
+  readonly joinCircle: (machine: Resource, circle: Circle) => void;
+  readonly leaveCircle: (machine: Resource, circle: Circle) => void;
   readonly pullOut: (stackId: string, id: string) => void;
   readonly unstack: (stackId: string) => void;
   /** K-521: opens a closed stack as a column on the map, or closes an open one. */
@@ -238,6 +244,7 @@ export function refusal(state: State, edits: ReadonlyArray<Edit>): string | null
   try {
     const after = applyChanges(state, resolveEdits(state, edits));
     refuseRaiseWhilePaused(state, after);
+    refuseLockout(state, after);
     return ruleViolation(after);
   } catch (error) {
     if (error instanceof RuleError) return error.message;
@@ -584,6 +591,81 @@ export function untilText(endsAt: number, now = Date.now()): string {
     : `until ${end.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
 }
 
+/** K-539: a machine joins and leaves circles as a member, without a drag, also on a phone. */
+function memberActions(state: State, h: ActionHandlers, machine: Resource): Array<Action> {
+  const circles = [...state.circles.values()];
+  const of = circles.filter((circle) => machineMember(circle, machine.id));
+  const others = circles.filter((circle) => !machineMember(circle, machine.id));
+  return [
+    ...(others.length === 0
+      ? []
+      : [
+          {
+            id: "join",
+            label: "Add to circle as member",
+            keywords: "member control group",
+            tip: `${machine.name} joins a circle and opens what it holds. Its card does not move.`,
+            items: others.map((circle) => {
+              const plan = joinPlan(state, [machine.id], circle);
+              return {
+                id: `join:${circle.id}`,
+                label: circle.name,
+                tip: `${machine.name} joins ${circle.name}, with no agent right yet.`,
+                ...("refused" in plan ? { refused: plan.refused } : refusedBy(state, plan.edits)),
+                run: () => h.joinCircle(machine, circle),
+              };
+            }),
+          },
+        ]),
+    ...(of.length > 0
+      ? [
+          {
+            id: "leave",
+            label: "Remove from circle as member",
+            tip: `${machine.name} leaves a circle. Its share does not change.`,
+            items: of.map((circle) => ({
+              id: `leave:${circle.id}`,
+              label: circle.name,
+              tip: `${machine.name} leaves ${circle.name}. Undo puts it back with its rights.`,
+              ...refusedBy(state, [leaveEdit(circle, machine.id)]),
+              run: () => h.leaveCircle(machine, circle),
+            })),
+          },
+        ]
+      : []),
+  ];
+}
+
+/** K-539: the same join as the card's menu, from the side of the circle. No list when every machine is in it. */
+function addMachineActions(ctx: ActionContext, h: ActionHandlers, circle: Circle): Array<Action> {
+  if (isPublicCircle(circle)) return [];
+  const items = [...ctx.machines.values()]
+    .filter((view) => !machineMember(circle, view.machine.id))
+    .flatMap((view): Array<Action> => {
+      const machine = ctx.state.resources.get(view.machine.id);
+      if (!machine) return [];
+      const plan = joinPlan(ctx.state, [machine.id], circle);
+      return [
+        {
+          id: `add-machine:${machine.id}`,
+          label: machine.name,
+          tip: `${machine.name} joins ${circle.name}, with no agent right yet.`,
+          ...("refused" in plan ? { refused: plan.refused } : refusedBy(ctx.state, plan.edits)),
+          run: () => h.joinCircle(machine, circle),
+        },
+      ];
+    });
+  if (items.length === 0) return [];
+  return [
+    {
+      id: "add-machine",
+      label: "Add machine as member",
+      tip: `A machine joins ${circle.name} and opens what it holds.`,
+      items,
+    },
+  ];
+}
+
 /** K-212: a card on the map gets a time, or a timed card is extended, made permanent or ended now. */
 function timeAction(state: State, h: ActionHandlers, resource: Resource): Action {
   const endsAt = state.ends.get(resource.id);
@@ -780,6 +862,7 @@ export function cardActions(ctx: ActionContext, h: ActionHandlers, resource: Res
           ]
         : []),
     ],
+    resource.kind === "machine" ? memberActions(state, h, resource) : [],
     machine
       ? [
           {
@@ -1018,6 +1101,7 @@ export function circleActions(ctx: ActionContext, h: ActionHandlers, circle: Cir
         run: () => h.addMember(circle.id),
       },
     ],
+    addMachineActions(ctx, h, circle),
     undoItemAction(ctx, h, { kind: "circle", id: circle.id }),
     // K-211: the Owner circle cannot be deleted.
     circle.id === OWNER_CIRCLE_ID
@@ -1155,6 +1239,8 @@ export function actionsFor(ctx: ActionContext, h: ActionHandlers, target: MenuTa
 }
 
 export type PaletteEntry = {
+  /** Tells apart two entries with one label, such as the same action on two cards of one name. */
+  readonly id?: string;
   readonly label: string;
   readonly tip: string;
   readonly danger?: true;
@@ -1167,12 +1253,14 @@ export type PaletteEntry = {
  * "…" and opens its items as a second list; the words of its items find it too. A refused action and the current
  * choice of a radio group have no entry: there is nothing to run.
  */
-export function flatten(groups: ActionGroups, prefix: string): Array<PaletteEntry> {
-  const walk = (action: Action, label: string): Array<PaletteEntry> => {
+export function flatten(groups: ActionGroups, prefix: string, scope = ""): Array<PaletteEntry> {
+  const walk = (action: Action, label: string, parent: string): Array<PaletteEntry> => {
+    const id = `${parent}/${action.id}`;
     if (action.refused !== undefined || action.checked) return [];
     if (!("items" in action))
       return [
         {
+          id,
           label,
           tip: action.tip,
           run: action.run,
@@ -1181,11 +1269,12 @@ export function flatten(groups: ActionGroups, prefix: string): Array<PaletteEntr
         },
       ];
     // Opening the second list runs nothing, so only its items can be dangerous.
-    const items = action.items.flatMap((item) => walk(item, item.label));
+    const items = action.items.flatMap((item) => walk(item, item.label, id));
     if (items.length === 0) return [];
     const keywords = [action.keywords, ...items.flatMap((item) => [item.label, item.keywords])];
     return [
       {
+        id,
         label: label.endsWith("…") ? label : `${label}…`,
         tip: action.tip,
         keywords: keywords.filter((word) => word !== undefined).join(" "),
@@ -1195,7 +1284,7 @@ export function flatten(groups: ActionGroups, prefix: string): Array<PaletteEntr
   };
   return groups
     .flat()
-    .flatMap((action) => walk(action, prefix ? `${prefix} · ${action.label}` : action.label));
+    .flatMap((action) => walk(action, prefix ? `${prefix} · ${action.label}` : action.label, scope));
 }
 
 /**
@@ -1252,13 +1341,14 @@ export function paletteEntries(ctx: ActionContext, h: ActionHandlers): Array<Pal
       flatten(
         cardActions(ctx, h, resource).map((group) => group.filter((action) => !SELECTION_IDS.has(action.id))),
         `${kindInfo(resource).icon} ${resource.name}`,
+        `card:${resource.id}`,
       ),
     ),
     ...[...state.stacks.values()].flatMap((stack) =>
-      flatten(stackActions(ctx, h, stack), `Stack ${stackTitle(state, stack)}`),
+      flatten(stackActions(ctx, h, stack), `Stack ${stackTitle(state, stack)}`, `stack:${stack.id}`),
     ),
     ...[...state.circles.values()].flatMap((circle) =>
-      flatten(circleActions(ctx, h, circle), `⭕ ${circle.name}`),
+      flatten(circleActions(ctx, h, circle), `⭕ ${circle.name}`, `circle:${circle.id}`),
     ),
   ];
 }

@@ -18,10 +18,10 @@ import {
   levelsOf,
 } from "../core/model.ts";
 import { CIRCLE_COLORS, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS } from "./kinds.ts";
-import { TYPED_KINDS, type TypedKind, memberFrom } from "./members.ts";
+import { TYPED_KINDS, type TypedKind, isAgentCircle, machineMember, memberFrom } from "./members.ts";
 import { isAgentKey } from "../core/agent.ts";
 import { callApi } from "./store.ts";
-import { Check, Switch } from "./controls.tsx";
+import { Check, Switch, useDialogEscape } from "./controls.tsx";
 import { ItemIcon } from "./ItemIcon.tsx";
 import { MachineRights, withMode } from "./MachineRights.tsx";
 import { selfApprovers } from "../core/asks.ts";
@@ -59,7 +59,10 @@ export const MEMBER_HELP: Record<Member["_tag"], string> = {
   everyone: "Everyone: anyone who can reach the address, with no login.",
 };
 
-const KIND_OPTIONS: Record<TypedKind | "device", { readonly label: string; readonly tip: string }> = {
+const KIND_OPTIONS: Record<
+  TypedKind | "device" | "machine",
+  { readonly label: string; readonly tip: string }
+> = {
   auto: {
     label: "auto",
     tip: "Auto: the text decides the kind, for example name@example.com is a person, example.com a domain and 10.0.0.0/8 a network.",
@@ -69,6 +72,7 @@ const KIND_OPTIONS: Record<TypedKind | "device", { readonly label: string; reado
   ip: { label: "network", tip: MEMBER_HELP.ip },
   everyone: { label: "everyone", tip: MEMBER_HELP.everyone },
   device: { label: "device", tip: `${MEMBER_HELP.device} Pick one or make a new token.` },
+  machine: { label: "machine", tip: `${MEMBER_HELP.machine} Pick one of the joined machines.` },
 };
 
 const LEVEL_HELP: Record<Level, string> = {
@@ -336,6 +340,8 @@ export interface DeviceSecret {
 
 /** K-106: a new token's secret, in a dialog that only "I saved it" closes; kitshn cannot show it again. */
 export function SecretDialog(props: { secret: DeviceSecret; onClose: () => void }) {
+  // Only "I saved it" closes it: kitshn cannot show the secret again.
+  useDialogEscape(() => undefined);
   const { secret } = props;
   return (
     <div class="scrim">
@@ -532,18 +538,23 @@ function DeviceList(props: {
 /** One control for every member kind: the text decides the kind, the segment overrides it. */
 function AddMember(props: {
   circle: Circle;
+  /** K-539: the joined machines, for the "machine" kind. */
+  machines: ReadonlyArray<{ readonly id: string; readonly name: string }>;
+  onJoinMachine: (machineId: string) => void;
   onAdd: (member: Member) => Promise<string | null>;
   onSecret: (secret: DeviceSecret) => void;
   onInvite: (invite: DeviceInvite) => void;
 }) {
-  const [kind, setKind] = useState<TypedKind | "device">("auto");
+  const [kind, setKind] = useState<TypedKind | "device" | "machine">("auto");
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const preview =
-    kind === "device" || kind === "everyone" || value.trim() === "" ? null : memberFrom(kind, value);
+    kind === "device" || kind === "machine" || kind === "everyone" || value.trim() === ""
+      ? null
+      : memberFrom(kind, value);
   const add = async () => {
-    if (kind === "device") return;
+    if (kind === "device" || kind === "machine") return;
     const member = memberFrom(kind, value);
     if (typeof member === "string") return setError(member);
     if (busy) return;
@@ -556,7 +567,7 @@ function AddMember(props: {
   return (
     <div class="add-member">
       <div class="pills" role="group" aria-label="Member kind">
-        {[...TYPED_KINDS, "device" as const].map((option) => (
+        {[...TYPED_KINDS, "device" as const, "machine" as const].map((option) => (
           <button
             key={option}
             type="button"
@@ -571,7 +582,26 @@ function AddMember(props: {
           </button>
         ))}
       </div>
-      {kind === "device" ? (
+      {kind === "machine" ? (
+        <div class="row">
+          {props.machines.filter((machine) => !machineMember(props.circle, machine.id)).length === 0 ? (
+            <span class="muted">Every joined machine is a member.</span>
+          ) : null}
+          {props.machines
+            .filter((machine) => !machineMember(props.circle, machine.id))
+            .map((machine) => (
+              <button
+                key={machine.id}
+                type="button"
+                class="btn"
+                data-tip={`${machine.name} joins ${props.circle.name}, with no agent right yet.`}
+                onClick={() => props.onJoinMachine(machine.id)}
+              >
+                + {machine.name}
+              </button>
+            ))}
+        </div>
+      ) : kind === "device" ? (
         <DeviceList
           taken={
             new Set(
@@ -629,6 +659,8 @@ export function CircleEditor(props: {
   onDelete: (circle: Circle) => void;
   onSelectCard: (id: string) => void;
   onSecret: (secret: DeviceSecret) => void;
+  /** K-539: a machine joins this circle through the one join of `joinPlan`. */
+  onJoinMachine: (machineId: string) => void;
 }) {
   const { circle, state } = props;
   // Edits that finish after a wait (a new device token) build on the circle as it is then, not as it was.
@@ -654,7 +686,7 @@ export function CircleEditor(props: {
   );
   // K-718: rights count only in a circle of devices only.
   // K-1730: an agent circle holds devices and machines only.
-  const agentCircle = circle.members.every((member) => member._tag === "device" || member._tag === "machine");
+  const agentCircle = isAgentCircle(circle);
   const hasPeople = circle.members.some((member) => member._tag === "email" || member._tag === "domain");
   return (
     <section class="editor">
@@ -752,7 +784,14 @@ export function CircleEditor(props: {
         ) : null}
       </ul>
       {inviteError ? <p class="error">{inviteError}</p> : null}
-      <AddMember circle={circle} onAdd={addMember} onSecret={props.onSecret} onInvite={setInvite} />
+      <AddMember
+        circle={circle}
+        machines={[...state.machines.values()]}
+        onJoinMachine={props.onJoinMachine}
+        onAdd={addMember}
+        onSecret={props.onSecret}
+        onInvite={setInvite}
+      />
       {invite ? <InviteDialog invite={invite} onClose={() => setInvite(null)} /> : null}
 
       <h3 class="label">Access</h3>

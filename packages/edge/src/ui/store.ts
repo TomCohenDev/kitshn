@@ -43,6 +43,22 @@ const set = (next: Partial<StoreState>) => {
   for (const listener of listeners) listener();
 };
 
+const CHECKLISTS_KEY = "kitshn.hiddenChecklists";
+let hidden: ReadonlySet<string> | null = null;
+
+/** K-633: the machines whose connect steps this device hides. Read once; every card asks on every frame of a pan. */
+export const hiddenChecklists = (): ReadonlySet<string> =>
+  (hidden ??= new Set(JSON.parse(localStorage.getItem(CHECKLISTS_KEY) ?? "[]") as Array<string>));
+
+export function setChecklistHidden(machine: string, on: boolean) {
+  const next = new Set(hiddenChecklists());
+  if (on) next.add(machine);
+  else next.delete(machine);
+  hidden = next;
+  localStorage.setItem(CHECKLISTS_KEY, JSON.stringify([...next]));
+  set({});
+}
+
 export function useStore(): StoreState {
   const [, rerender] = useState(0);
   useEffect(() => {

@@ -156,4 +156,22 @@ describe("command palette", () => {
       root.remove();
     }
   });
+
+  it("opens the list of the entry that was picked when two entries share a label", () => {
+    const ran: Array<string> = [];
+    const twin = (id: string): PaletteEntry => ({
+      id,
+      label: "docs · Share with…",
+      tip: "Share it.",
+      items: [{ id: `${id}/her`, label: "Her", tip: "Her.", run: () => ran.push(id) }],
+    });
+    withPalette([twin("card:a"), twin("card:b")], (input) => {
+      const key = (name: string) =>
+        act(() => void input.dispatchEvent(new KeyboardEvent("keydown", { key: name, bubbles: true })));
+      key("ArrowDown");
+      key("Enter");
+      key("Enter");
+      expect(ran).toEqual(["card:b"]);
+    });
+  });
 });

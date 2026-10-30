@@ -95,6 +95,7 @@ import {
   ToastView,
   TooltipLayer,
   WhyOff,
+  useDialogEscape,
   useScreenWidth,
   useStoredWidth,
 } from "./controls.tsx";
@@ -151,7 +152,9 @@ import { PassSettingsPanel } from "./Passes.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob, setAutoUpdate } from "./Machines.tsx";
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TrayCard, type View, measureMap } from "./Map.tsx";
-import { type DropTarget, dropPlan } from "./drop.ts";
+import { type DropTarget, dropPlan, givesNoOne } from "./drop.ts";
+import { joinPlan, leaveEdit, machineMember } from "./members.ts";
+import { connectChecklist, isNewMachine } from "./machine-signs.ts";
 import { overlay } from "./held.ts";
 import { HistoryView } from "./History.tsx";
 import { UsageView } from "./Usage.tsx";
@@ -180,6 +183,8 @@ import {
   organizeMap,
   undoRevision,
   useStore,
+  hiddenChecklists,
+  setChecklistHidden,
 } from "./store.ts";
 import { whenText } from "./time.ts";
 
@@ -232,7 +237,7 @@ const loadView = (): View | null => {
   return null;
 };
 
-/** Typing in a field or working in a dialog keeps its own Escape. */
+/** Typing in a field keeps its own Escape; a dialog takes it through `useDialogEscape`. */
 const ownsEscape = (target: EventTarget | null) =>
   target instanceof Element &&
   target.closest(
@@ -355,6 +360,7 @@ export function App() {
   const [signingOut, setSigningOut] = useState(false);
   const [menu, setMenu] = useState<{ readonly target: MenuTarget; readonly anchor: Rect } | null>(null);
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
+  useDialogEscape(confirm ? () => (confirm.resolve(false), setConfirm(null)) : null);
   const [route, setRoute] = useState(routeFromHash);
   /** The panel over the map, or null when closed. */
   // A phone opens on the map alone; its panel is a sheet that would cover half of it.
@@ -678,14 +684,42 @@ export function App() {
       showToast({ text: plan.refused, error: true, undo: null });
       return;
     }
+    if (plan.ask && !(await ask(plan.ask))) return;
     await commit(
       plan.edits,
       shareDiff(state, applyChanges(state, resolveEdits(state, plan.edits))),
       plan.done,
+      {
+        ...(plan.note ? { note: plan.note } : {}),
+        ...(plan.rightsIn ? { action: openRights(plan.rightsIn) } : {}),
+      },
     );
     const fresh = [...moves.keys()].filter((id) => !state.places.has(id));
-    if (fresh.length > 0 && target._tag !== "tray") select({ cards: new Set(fresh), circle: null });
+    if (fresh.length > 0 && (target._tag === "map" || target._tag === "card"))
+      select({ cards: new Set(fresh), circle: null });
   };
+
+  /** K-539: the toast's way from a new member to its rights, which the panel of its circle holds. */
+  const openRights = (circle: string) => ({
+    label: "Open rights",
+    tip: "Open the circle's panel, where each machine has its rights.",
+    run: () => select({ cards: new Set(), circle }),
+  });
+
+  /** K-539: a machine joins a circle without a drag: from its menu, its panel, the circle's panel or the palette. */
+  const joinCircle = async (machine: Resource, circle: Circle) => {
+    if (!state) return;
+    const plan = joinPlan(state, [machine.id], circle);
+    if ("refused" in plan) {
+      showToast({ text: plan.refused, error: true, undo: null });
+      return;
+    }
+    if (plan.ask && !(await ask(plan.ask))) return;
+    await commit(plan.edits, [], plan.done, plan.rightsIn ? { action: openRights(plan.rightsIn) } : {});
+  };
+
+  const leaveCircle = (machine: Resource, circle: Circle) =>
+    void commit([leaveEdit(circle, machine.id)], [], `${machine.name} left ${circle.name}.`);
 
   /** Selects an item and puts the focus into an input of its panel, after the panel renders. */
   const selectAndFocus = (next: Selection, selector: string) => {
@@ -860,7 +894,13 @@ export function App() {
     });
 
   /** Sends edits. K-210: a card that enters a public circle asks first. K-503: a share change shows Undo. */
-  const commit = async (edits: Array<Edit>, diffs: Array<ShareDiff>, done?: string) => {
+  const commit = async (
+    edits: Array<Edit>,
+    diffs: Array<ShareDiff>,
+    done?: string,
+    /** K-539: a line after the share changes, and a next step on the toast. */
+    extra?: { readonly note?: string; readonly action?: NonNullable<Toast["action"]> },
+  ) => {
     const goingPublic = diffs.filter((diff) => diff.to && !diff.from && isPublicCircle(diff.circle));
     const placed = edits.find((edit) => edit._tag === "place")?.id;
     // The drop stays where the owner let go while they answer; Cancel puts it back.
@@ -879,17 +919,27 @@ export function App() {
         .slice(0, 2)
         .map((diff) =>
           diff.to
-            ? `Shared ${diff.resource.name} with ${diff.circle.name} · ${diff.to}`
+            ? (givesNoOne(diff.resource, diff.circle, state?.machines ?? new Map()) ??
+              `Shared ${diff.resource.name} with ${diff.circle.name} · ${diff.to}`)
             : `Removed ${diff.resource.name} from ${diff.circle.name}`,
         )
         .join(". ");
+      const shared = diffs.length > 2 ? `${text}. And ${diffs.length - 2} more.` : text;
       showToast({
-        text: diffs.length > 2 ? `${text}. And ${diffs.length - 2} more.` : text,
+        text: extra?.note ? `${shared}. ${extra.note}` : shared,
         error: false,
         undo: result.revision,
         card: diffs[0]?.resource.id,
+        ...(extra?.action ? { action: extra.action } : {}),
       });
-    } else if (done) showToast({ text: done, error: false, undo: result.revision, card: placed });
+    } else if (done)
+      showToast({
+        text: done,
+        error: false,
+        undo: result.revision,
+        card: placed,
+        ...(extra?.action ? { action: extra.action } : {}),
+      });
   };
 
   const undo = async (revision: number, source: UndoSource) => {
@@ -1644,6 +1694,8 @@ export function App() {
       );
     },
     stackOnto: (ids, target) => void stacks.stackOnto(ids, target),
+    joinCircle: (machine, circle) => void joinCircle(machine, circle),
+    leaveCircle,
     pullOut: (stackId, id) => void stacks.pullOut(stackId, id),
     unstack: (stackId) => void stacks.unstack(stackId),
     toggleStack,
@@ -1894,6 +1946,8 @@ export function App() {
               onTime={handlers.setTime}
               onRemoveGame={handlers.removeGame}
               onNewCircle={(ids) => void newCircleFor(ids)}
+              onJoinCircle={(machine, circle) => void joinCircle(machine, circle)}
+              onLeaveCircle={leaveCircle}
               onRemoveApp={(resource) => void removeApp(resource)}
               onRollback={(resource, mode) => setRollback({ card: resource, mode })}
               previousVersions={previousVersions}
@@ -2428,6 +2482,8 @@ function Panel(props: {
   /** K-534: removes a game card after a confirm. */
   onRemoveGame: (resource: Resource) => void;
   onNewCircle: (ids: ReadonlyArray<string>) => void;
+  onJoinCircle: (machine: Resource, circle: Circle) => void;
+  onLeaveCircle: (machine: Resource, circle: Circle) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
   /** K-1117: the pages and files that have a previous version. */
@@ -2494,6 +2550,10 @@ function Panel(props: {
         onDelete={props.onDeleteCircle}
         onSelectCard={props.onSelectCard}
         onSecret={props.onSecret}
+        onJoinMachine={(id) => {
+          const machine = state.resources.get(id);
+          if (machine) props.onJoinCircle(machine, circle);
+        }}
       />
     );
   else if (cards.length === 1 && cards[0]) {
@@ -2514,6 +2574,8 @@ function Panel(props: {
         onTime={props.onTime}
         onRemoveGame={props.onRemoveGame}
         onNewCircle={props.onNewCircle}
+        onJoinCircle={props.onJoinCircle}
+        onLeaveCircle={props.onLeaveCircle}
         onRemoveApp={props.onRemoveApp}
         onRollback={props.onRollback}
         onRestorePrevious={props.previousVersions.has(cards[0].id) ? props.onRestorePrevious : null}
@@ -2887,6 +2949,8 @@ function CardPanel(props: {
   /** K-534: removes a game card after a confirm. */
   onRemoveGame: (resource: Resource) => void;
   onNewCircle: (ids: ReadonlyArray<string>) => void;
+  onJoinCircle: (machine: Resource, circle: Circle) => void;
+  onLeaveCircle: (machine: Resource, circle: Circle) => void;
   onRemoveApp: (resource: Resource) => void;
   onRollback: (resource: Resource, mode: "card" | "run") => void;
   /** K-1117: swaps a page or a file with its previous version, or null when it has none. */
@@ -3181,6 +3245,15 @@ function CardPanel(props: {
         </ul>
       )}
       {state.places.has(resource.id) ? <ReachList state={state} selected={resource.id} /> : null}
+      {resource.kind === "machine" && machine ? <ConnectChecklist view={machine} state={state} /> : null}
+      {resource.kind === "machine" ? (
+        <MemberOf
+          machine={resource}
+          circles={[...state.circles.values()]}
+          onJoin={props.onJoinCircle}
+          onLeave={props.onLeaveCircle}
+        />
+      ) : null}
       {state.places.has(resource.id) && resource.id !== ADMIN_RESOURCE_ID ? (
         <div style={{ margin: "12px 0" }}>
           <div
@@ -3462,6 +3535,113 @@ function CardPanel(props: {
         </>
       ) : null}
     </section>
+  );
+}
+
+/**
+ * K-633: the connect steps. They open by themselves for a new machine; "Show" reaches them on any machine with an open
+ * step, and "Hide" is per device. They go when all are done.
+ */
+function ConnectChecklist(props: { view: MachineView; state: State }) {
+  const { snapshot } = useStore();
+  const access = snapshot?.access;
+  const [asked, setAsked] = useState(false);
+  const steps = useMemo(
+    () => connectChecklist(props.view, props.state, access ?? {}),
+    [props.view, props.state.resources, props.state.circles, access],
+  );
+  if (steps.every((step) => step.done)) return null;
+  const id = props.view.machine.id;
+  if (!asked && (!isNewMachine(props.view.machine, Date.now()) || hiddenChecklists().has(id)))
+    return (
+      <button
+        type="button"
+        class="btn"
+        data-tip="Show the steps that are still open for this machine."
+        onClick={() => {
+          setChecklistHidden(id, false);
+          setAsked(true);
+        }}
+      >
+        Show the connect steps
+      </button>
+    );
+  return (
+    <section aria-label="Connect this machine">
+      <div class="label" data-tip="Each step ticks itself off when kitshn sees it happen.">
+        Connect this machine
+      </div>
+      <ol class="progress-steps">
+        {steps.map((step) => (
+          <li key={step.label} class={step.done ? "done" : "next"}>
+            {step.done ? "✓" : "·"} {step.label}
+            {step.done ? null : <p class="help">{step.next}</p>}
+          </li>
+        ))}
+      </ol>
+      <button
+        type="button"
+        class="btn"
+        data-tip="Hide these steps on this device, for a machine that skips one, such as one with no T3."
+        onClick={() => {
+          setChecklistHidden(id, true);
+          setAsked(false);
+        }}
+      >
+        Hide
+      </button>
+    </section>
+  );
+}
+
+/** K-539: the circles that a machine belongs to, each with its way out, and the others as one click in. */
+function MemberOf(props: {
+  machine: Resource;
+  circles: ReadonlyArray<Circle>;
+  onJoin: (machine: Resource, circle: Circle) => void;
+  onLeave: (machine: Resource, circle: Circle) => void;
+}) {
+  const { machine } = props;
+  const of = props.circles.filter((circle) => machineMember(circle, machine.id));
+  const others = props.circles.filter(
+    (circle) => !machineMember(circle, machine.id) && !isPublicCircle(circle),
+  );
+  return (
+    <>
+      <div
+        class="label"
+        data-tip={`Member of: ${machine.name} belongs to these circles and opens what they hold. Sharing the card only says who opens the machine.`}
+      >
+        Member of
+      </div>
+      {of.length === 0 ? <p class="muted">No circle yet.</p> : null}
+      {of.map((circle) => (
+        <div key={circle.id} class="row">
+          <span class="swatch" style={{ background: circle.color }} /> <b>{circle.name}</b>
+          <button
+            type="button"
+            class="btn"
+            data-tip={`${machine.name} leaves ${circle.name}. Its share stays. Undo puts it back with its rights.`}
+            onClick={() => props.onLeave(machine, circle)}
+          >
+            Leave
+          </button>
+        </div>
+      ))}
+      <div class="row">
+        {others.map((circle) => (
+          <button
+            key={circle.id}
+            type="button"
+            class="btn"
+            data-tip={`${machine.name} joins ${circle.name} as a member, with no agent right yet.`}
+            onClick={() => props.onJoin(machine, circle)}
+          >
+            + <span class="swatch" style={{ background: circle.color }} /> {circle.name}
+          </button>
+        ))}
+      </div>
+    </>
   );
 }
 

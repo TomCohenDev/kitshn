@@ -2,7 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import type { Resource } from "../core/model.ts";
 import { callApi } from "./store.ts";
 import { whenText } from "./time.ts";
-import { WhyOff } from "./controls.tsx";
+import { WhyOff, useDialogEscape } from "./controls.tsx";
 
 /** K-821: the text that every rollback dialog and tip shows, so nobody expects their data back or a secret to stay. */
 export const ROLLBACK_DATA =
@@ -35,6 +35,7 @@ export function RollbackDialog(props: {
   onClose: () => void;
   onDone: (text: string, error: boolean) => void;
 }) {
+  useDialogEscape(props.onClose);
   const { card, mode } = props;
   const base = `/api/apps/${encodeURIComponent(card.id)}`;
   const [choices, setChoices] = useState<ReadonlyArray<Choice> | null>(null);

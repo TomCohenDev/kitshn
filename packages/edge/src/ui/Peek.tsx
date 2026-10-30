@@ -1,7 +1,7 @@
 import { createPortal } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { type Resource, type State, activeShares, isPublicCircle } from "../core/model.ts";
-import { ResizeIcon } from "./controls.tsx";
+import { ResizeIcon, useDialogEscape } from "./controls.tsx";
 import { frameSandbox } from "./frames.ts";
 import { kindInfo } from "./kinds.ts";
 
@@ -233,7 +233,7 @@ function LargePreview(props: { resource: Resource; state: State; zone: string; o
   const address = props.resource.addresses[0] ?? "";
   const sandbox = frameSandbox(address, location.hostname, props.zone);
   const close = useRef<HTMLButtonElement>(null);
-  // Focus inside the dialog makes Escape its own, so the map keeps its selection (App's `ownsEscape`).
+  useDialogEscape(props.onClose);
   useEffect(() => close.current?.focus(), []);
   if (sandbox === null) return null;
   const url = `https://${address}`;
@@ -247,7 +247,6 @@ function LargePreview(props: { resource: Resource; state: State; zone: string; o
         role="dialog"
         aria-modal="true"
         aria-label={`Preview of ${props.resource.name}`}
-        onKeyDown={(event) => event.key === "Escape" && props.onClose()}
       >
         <header class="overlay-head">
           <h2>{props.resource.name}</h2>

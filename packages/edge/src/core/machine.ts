@@ -36,6 +36,8 @@ export interface Machine {
   readonly key?: MachineKey;
   /** K-626: "Update daemon automatically" is on unless this is false. */
   readonly autoUpdate?: false;
+  /** K-633: when it joined. Absent on a machine from before this field. */
+  readonly joinedAt?: number;
 }
 
 export type MachineKey =

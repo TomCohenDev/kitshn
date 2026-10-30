@@ -2305,6 +2305,7 @@ a > code {
   outline: 3px dashed var(--accent);
   outline-offset: 4px;
 }
+.head.stack-target,
 .mini.stack-target {
   outline: 3px dashed var(--accent);
   outline-offset: 2px;

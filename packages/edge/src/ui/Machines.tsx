@@ -1,13 +1,14 @@
-import { useState } from "preact/hooks";
+import { useMemo, useState } from "preact/hooks";
 import type { Command } from "../core/machine.ts";
+import type { State } from "../core/model.ts";
 import type { JobView, MachineView } from "../core/protocol.ts";
 import { isRelease, restartsAfterUpdate } from "../core/autoUpdate.ts";
 import { type HealthCell, healthCell, healthProblems } from "../core/health.ts";
 import { ProgressSticker } from "./Progress.tsx";
 import { MACHINE_TIPS, untilText } from "./actions.ts";
-import { Switch, WhyOff } from "./controls.tsx";
-import { refusalText } from "./refusal.ts";
-import { callApi, useStore } from "./store.ts";
+import { Switch, WhyOff, useDialogEscape } from "./controls.tsx";
+import { connectChecklist, isNewMachine, machineProblems } from "./machine-signs.ts";
+import { callApi, hiddenChecklists, useStore } from "./store.ts";
 
 /** "5 min", "3 h", "2 d": how long ago a time was (K-515). */
 export function ago(time: number | null, now = Date.now()): string {
@@ -17,10 +18,6 @@ export function ago(time: number | null, now = Date.now()): string {
   const hours = Math.round(minutes / 60);
   return hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} d`;
 }
-
-/** "15:40": a time of today, short enough for a sticker on a card (K-515). */
-const clock = (time: number) =>
-  new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 
 const JOB_TIPS: Record<JobView["state"], string> = {
   queued: "Queued: the job waits for the machine.",
@@ -51,7 +48,7 @@ export function PresenceSticker(props: { view: MachineView; time?: boolean }) {
  * the machine comes online or a sticker appears: the daemon line, CPU and memory bars from the newest sample (K-605),
  * and the stickers of its state. Offline, the bar row stays empty, because an old load is wrong.
  */
-export function MachineLive(props: { view: MachineView }) {
+export function MachineLive(props: { view: MachineView; state: State }) {
   const { online, status, sample, lastSeen } = props.view;
   const daemon = status ? `daemon ${status.version} · ${status.os} ${status.arch}` : "no status yet";
   return (
@@ -66,7 +63,7 @@ export function MachineLive(props: { view: MachineView }) {
         ) : null}
       </div>
       <div class="live-stickers">
-        <MachineStickers view={props.view} />
+        <MachineStickers view={props.view} state={props.state} />
       </div>
     </div>
   );
@@ -98,17 +95,27 @@ const keepPress = (event: PointerEvent) => event.stopPropagation();
  * of the Worker. The ask comes first, so it stays in view on a narrow card. Each is a link where it acts: the version
  * to the panel with "Update daemon" (K-612).
  */
-function MachineStickers(props: { view: MachineView }) {
+function MachineStickers(props: { view: MachineView; state: State }) {
   const { snapshot } = useStore();
+  const { machine: own } = props.view;
+  // A card renders on each frame of a pan, so this work waits for what it reads to change.
+  const signs = useMemo(
+    () => machineProblems(props.view, healthProblems(snapshot?.machines ?? [], own.id, Date.now())),
+    [props.view, snapshot?.machines],
+  );
+  const steps = useMemo(
+    () =>
+      snapshot && isNewMachine(own, Date.now())
+        ? connectChecklist(props.view, props.state, snapshot.access)
+        : null,
+    [props.view, props.state.resources, props.state.circles, snapshot?.access],
+  );
   if (!snapshot) return null;
   const { machine, online, status } = props.view;
   const queued = snapshot.queuedJobs[machine.id] ?? 0;
   // The snapshot holds only the asks that this viewer may answer (K-1902).
   const asks = snapshot.proposals.filter((proposal) => proposal.machineId === machine.id).length;
   const panel = `#map/${encodeURIComponent(machine.id)}`;
-  const refused = status?.refusedProviders ?? [];
-  const offline = status?.offlineProviders ?? [];
-  const problems = healthProblems(snapshot.machines, machine.id, Date.now());
   const update = props.view.update;
   // K-628: an update in progress or a failed one shows also while the daemon restarts or is offline.
   const version =
@@ -182,43 +189,15 @@ function MachineStickers(props: { view: MachineView }) {
           {asks} needs you
         </a>
       ) : null}
-      {online && refused.length > 0 ? (
+      {signs[0] ? (
         <a
           class="sticker"
           href={panel}
           onPointerDown={keepPress}
-          data-tip={refused
-            .map((refusal) => refusalText(refusal.provider, machine.name, refusal.reason))
-            .join(" · ")}
+          data-tip={signs.map((sign) => sign.long).join(" · ")}
         >
-          {refused.length === 1 ? "provider refused" : `${refused.length} providers refused`}
-        </a>
-      ) : null}
-      {online && offline.length > 0 ? (
-        <a
-          class="sticker"
-          href={panel}
-          onPointerDown={keepPress}
-          data-tip={offline
-            .map(
-              (entry) =>
-                `Provider ${entry.provider} offline since ${clock(entry.at)} (${ago(entry.at)}): ${entry.reason}. Its cards do not update until it registers again.`,
-            )
-            .join(" · ")}
-        >
-          {offline.length === 1
-            ? `${offline[0]!.provider} offline since ${clock(offline[0]!.at)}`
-            : `${offline.length} providers offline`}
-        </a>
-      ) : null}
-      {problems.length > 0 ? (
-        <a
-          class="sticker"
-          href="#machines"
-          onPointerDown={keepPress}
-          data-tip={`Health check (K-631): ${problems.join(" · ")}`}
-        >
-          {problems.length === 1 ? "1 check red" : `${problems.length} checks red`}
+          {signs[0].short}
+          {signs.length > 1 ? ` +${signs.length - 1}` : ""}
         </a>
       ) : null}
       {queued > 0 ? (
@@ -232,6 +211,17 @@ function MachineStickers(props: { view: MachineView }) {
         </a>
       ) : null}
       {version}
+      {/* Last: the row is clipped at two lines, and this one matters least. */}
+      {steps && !steps.every((step) => step.done) && !hiddenChecklists().has(machine.id) ? (
+        <a
+          class="sticker info"
+          href={panel}
+          onPointerDown={keepPress}
+          data-tip="Connect this machine: its panel lists the steps, and each ticks itself off."
+        >
+          connect {steps.filter((step) => step.done).length}/{steps.length}
+        </a>
+      ) : null}
     </>
   );
 }
@@ -288,7 +278,7 @@ const shortFingerprint = (fingerprint: string) => `${fingerprint.slice(0, "SHA25
 
 /** K-1702, K-1705, K-1706: the key of the machine, "Rotate key" and "Reset key". */
 function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error: boolean) => void }) {
-  const { machine, keyFailure } = props.view;
+  const { machine } = props.view;
   const [rekey, setRekey] = useState<{ command: string; expiresAt: number } | null>(null);
   const path = `/api/machines/${encodeURIComponent(machine.id)}`;
   const rotate = async () => {
@@ -341,11 +331,6 @@ function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error
         </button>
       </div>
       <WhyOff reason={rotateOff} />
-      {keyFailure ? (
-        <p class="muted">
-          Failed check {ago(keyFailure.at)} ago: {keyFailure.reason}
-        </p>
-      ) : null}
       {props.view.status?.attesters?.length ? (
         <p
           class="muted"
@@ -376,8 +361,15 @@ export function AddMachine(props: { onClose: () => void }) {
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  // The join command shows once, also when the request for it still runs, so only "Done" ends it then.
+  const locked = sending || result !== null;
+  useDialogEscape(locked ? () => undefined : props.onClose);
   return (
-    <div class="scrim" onClick={(event) => event.target === event.currentTarget && props.onClose()}>
+    <div
+      class="scrim"
+      onClick={(event) => !locked && event.target === event.currentTarget && props.onClose()}
+    >
       <div class="dialog" role="dialog" aria-label="Add machine">
         <h2>Add machine</h2>
         {result ? (
@@ -417,6 +409,8 @@ export function AddMachine(props: { onClose: () => void }) {
           <form
             onSubmit={async (event) => {
               event.preventDefault();
+              if (sending) return;
+              setSending(true);
               const response = await callApi<{ command: string; windowsCommand: string; expiresAt: number }>(
                 "POST",
                 "/api/machines",
@@ -428,6 +422,7 @@ export function AddMachine(props: { onClose: () => void }) {
                     .filter(Boolean),
                 },
               );
+              setSending(false);
               if ("error" in response) setError(response.error);
               else setResult(response);
             }}
@@ -460,6 +455,7 @@ export function AddMachine(props: { onClose: () => void }) {
                 class="btn"
                 type="button"
                 data-tip="Close this dialog; nothing changes."
+                disabled={sending}
                 onClick={props.onClose}
               >
                 Cancel
@@ -525,6 +521,7 @@ export function MachinePanel(props: {
   onToast: (text: string, error: boolean) => void;
 }) {
   const { view } = props;
+  const { snapshot } = useStore();
   const [script, setScript] = useState("");
   const run = props.onRun;
   const jobs = props.jobs.filter((job) => job.machineId === view.machine.id);
@@ -547,25 +544,19 @@ export function MachinePanel(props: {
         ) : null}
       </div>
       <MachineKeyRow view={view} onToast={props.onToast} />
+      {machineProblems(view, healthProblems(snapshot?.machines ?? [], view.machine.id, Date.now())).map(
+        (problem) => (
+          <p key={problem.long} class="error">
+            {problem.long}
+          </p>
+        ),
+      )}
       {view.online
         ? (view.status?.refusedProviders ?? []).map((refusal) => (
-            <div key={refusal.provider} class="refusal">
-              <p class="error">
-                kitshn refuses the provider {refusal.provider} for {ago(refusal.at)}:{" "}
-                {refusalText(refusal.provider, view.machine.name, refusal.reason)}
-              </p>
-              <details class="raw">
-                <summary data-tip="The reason as the provider check wrote it.">Details</summary>
-                <code>{refusal.reason}</code>
-              </details>
-            </div>
-          ))
-        : null}
-      {view.online
-        ? (view.status?.offlineProviders ?? []).map((entry) => (
-            <p key={`offline-${entry.provider}`} class="muted">
-              Provider {entry.provider} offline since {clock(entry.at)} ({ago(entry.at)}): {entry.reason}
-            </p>
+            <details key={refusal.provider} class="raw">
+              <summary data-tip="The reason as the provider check wrote it.">Details</summary>
+              <code>{refusal.reason}</code>
+            </details>
           ))
         : null}
       {view.sample ? (

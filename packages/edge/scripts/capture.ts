@@ -16,7 +16,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { type BrowserContext, type CDPSession, chromium, devices } from "playwright";
+import { type BrowserContext, type CDPSession, type Page, chromium, devices, errors } from "playwright";
 import type { Helpers, Scenario, Scheme, View } from "./capture-views.ts";
 
 const { values, positionals } = parseArgs({
@@ -79,7 +79,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
 async function devServer() {
   const port = await freePort();
   const state = mkdtempSync(join(tmpdir(), "kitshn-capture-"));
-  const child = spawn("npx", ["--no", "vite", "dev", "--port", String(port), "--strictPort"], {
+  // `--force`: a stopped server can leave Vite's shared dependency cache half written, and the next server's
+  // requests for those files then never answer.
+  const child = spawn("npx", ["--no", "vite", "dev", "--force", "--port", String(port), "--strictPort"], {
     cwd: edge,
     env: { ...process.env, KITSHN_DEV_STATE: state },
     detached: true,
@@ -214,8 +216,8 @@ async function runOnce(view: View, scheme: Scheme, url: string) {
       marked = Date.now();
     },
   };
-  await page.goto(url);
-  await page.waitForLoadState("networkidle");
+  page.on("pageerror", (error) => console.warn(`Page error: ${String(error).slice(0, 300)}`));
+  await firstLoad(page, url);
   await scenario.run(helpers);
   const audio = scenario.clip
     ? ((await page.evaluate(async () => {
@@ -270,6 +272,30 @@ async function runOnce(view: View, scheme: Scheme, url: string) {
   if (result.status !== 0) throw new Error("ffmpeg failed.");
   rmSync(raw, { force: true });
   if (audio) rmSync(join(out, `${view.name}-${scheme}.webm`), { force: true });
+}
+
+/**
+ * The first load of a fresh `vite dev` compiles every module, and a busy machine takes longer than the 30 s of a
+ * Playwright call, so only that load gets longer and more tries; a timeout in a scenario still fails at once.
+ */
+async function firstLoad(page: Page, url: string) {
+  const open = new Set<string>();
+  const done = (request: { url(): string }) => open.delete(request.url());
+  page.on("request", (request) => open.add(request.url()));
+  page.on("requestfinished", done);
+  page.on("requestfailed", done);
+  for (let tries = 3; ; tries--) {
+    try {
+      await page.goto(url, { timeout: 120_000 });
+      await page.waitForLoadState("networkidle", { timeout: 120_000 });
+      return;
+    } catch (error) {
+      if (tries === 1 || !(error instanceof errors.TimeoutError)) throw error;
+      console.warn(
+        `The first load timed out on ${[...open].slice(0, 3).join(", ")}; ${tries - 1} more tries.`,
+      );
+    }
+  }
 }
 
 for (const view of scenario.views) {

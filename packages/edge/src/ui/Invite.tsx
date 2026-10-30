@@ -52,6 +52,10 @@ export function InviteDialog(props: { invite: DeviceInvite; onClose: () => void 
     tabs.current?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next]?.focus();
   };
   const qrText = client ? openLink(client.open, invite.link) : invite.link;
+  // K-1601: the link names the app of the open tab, so its page offers that app as the main button.
+  const link = client
+    ? `${invite.link}${invite.link.includes("#") ? "&" : "#"}client=${encodeURIComponent(client.id)}`
+    : invite.link;
   const until = new Date(invite.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const cancel = async () => {
     if (busy) return;
@@ -125,14 +129,14 @@ export function InviteDialog(props: { invite: DeviceInvite; onClose: () => void 
           </div>
         </div>
         <div class="secret">
-          <code>{invite.link}</code>
+          <code>{link}</code>
         </div>
         <div class="row">
           <button
             type="button"
             class="btn"
             data-tip="Copy the invite link to the clipboard."
-            onClick={() => void navigator.clipboard.writeText(invite.link)}
+            onClick={() => void navigator.clipboard.writeText(link)}
           >
             Copy link
           </button>

@@ -12,7 +12,7 @@ import {
   shareKey,
 } from "../core/model.ts";
 import type { ProposalView, RevisionView } from "../core/protocol.ts";
-import { AccessRow, TrayCard } from "./App.tsx";
+import { AccessRow } from "./App.tsx";
 import { AskRow } from "./Asks.tsx";
 import { OverlayPanel, ToastView, TooltipLayer } from "./controls.tsx";
 import {
@@ -31,7 +31,7 @@ import {
 import { HistoryView } from "./History.tsx";
 import { stackOffsets } from "./layout.ts";
 import { MachineRightStickers } from "./MachineRights.tsx";
-import { CircleView, StackCard } from "./Map.tsx";
+import { CircleView, StackCard, TrayCard } from "./Map.tsx";
 import { PanicOpener, PausedBanner } from "./Pause.tsx";
 
 /**
@@ -426,17 +426,27 @@ function Arrangement(props: { base: State }) {
           <div class="tray-list">
             <TrayCard
               resource={resource("slides", "file", "slides.pdf", null)}
+              state={props.base}
               selected={false}
-              onDragStart={noop}
+              dragging={false}
+              access={null}
+              progress={null}
+              machine={null}
+              waitsFor={null}
+              zone="example.com"
               onMenu={noop}
-              onClick={noop}
             />
             <TrayCard
               resource={resource("notes", "page", "CI time table", null)}
+              state={props.base}
               selected={false}
-              onDragStart={noop}
+              dragging={false}
+              access={null}
+              progress={null}
+              machine={null}
+              waitsFor={null}
+              zone="example.com"
               onMenu={noop}
-              onClick={noop}
             />
           </div>
         </div>

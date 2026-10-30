@@ -1,7 +1,10 @@
 import type { Level, Member, Resource, ResourceKind } from "../core/model.ts";
 
 export interface KindInfo {
+  /** The kind of a group of cards, such as "Static sites", for the Show menu. */
   readonly label: string;
+  /** The kind of one card, such as "Static site", for its sticker and its panel. */
+  readonly name: string;
   /** What a card of this kind is (K-301), for its tooltip. */
   readonly help: string;
   readonly icon: string;
@@ -15,6 +18,7 @@ export const kindInfo = (resource: Pick<Resource, "kind" | "provider">): KindInf
   resource.provider
     ? {
         label: resource.provider.kindName,
+        name: resource.provider.kindName,
         help: `A ${resource.provider.kindName} of the provider ${resource.provider.name} on its machine (K-704).`,
         icon: "🧩",
         color: "var(--info)",
@@ -22,6 +26,7 @@ export const kindInfo = (resource: Pick<Resource, "kind" | "provider">): KindInf
       }
     : (KINDS[resource.kind as ResourceKind] ?? {
         label: resource.kind,
+        name: resource.kind,
         help: `A card of the kind ${resource.kind}.`,
         icon: "❔",
         color: "var(--info)",
@@ -35,6 +40,7 @@ export const kindInfo = (resource: Pick<Resource, "kind" | "provider">): KindInf
 export const KINDS: Record<ResourceKind, KindInfo> = {
   "kitshn.admin": {
     label: "Admin",
+    name: "Admin",
     help: "kitshn administration: whoever opens it changes kitshn.",
     icon: "🔐",
     color: "var(--accent)",
@@ -43,6 +49,7 @@ export const KINDS: Record<ResourceKind, KindInfo> = {
   },
   machine: {
     label: "Machines",
+    name: "Machine",
     help: "A machine with a daemon.",
     icon: "🖥",
     color: "var(--info)",
@@ -50,6 +57,7 @@ export const KINDS: Record<ResourceKind, KindInfo> = {
   },
   "site.static": {
     label: "Static sites",
+    name: "Static site",
     help: "A static site on Workers static assets.",
     icon: "🌐",
     color: "var(--green)",
@@ -57,6 +65,7 @@ export const KINDS: Record<ResourceKind, KindInfo> = {
   },
   "site.worker": {
     label: "Worker apps",
+    name: "Worker app",
     help: "A Worker app.",
     icon: "⚙️",
     color: "var(--green)",
@@ -64,6 +73,7 @@ export const KINDS: Record<ResourceKind, KindInfo> = {
   },
   "site.compose": {
     label: "Compose apps",
+    name: "Compose app",
     help: "A Compose app on a machine.",
     icon: "📦",
     color: "var(--green)",
@@ -71,6 +81,7 @@ export const KINDS: Record<ResourceKind, KindInfo> = {
   },
   "site.live": {
     label: "Live sites",
+    name: "Live site",
     help: "A local site of a machine, through its tunnel.",
     icon: "📡",
     color: "var(--warning)",
@@ -78,14 +89,23 @@ export const KINDS: Record<ResourceKind, KindInfo> = {
   },
   page: {
     label: "Pages",
+    name: "Page",
     help: "An HTML page in the library.",
     icon: "📄",
     color: "var(--yellow)",
     tilt: "-1.5deg",
   },
-  file: { label: "Files", help: "A file in R2.", icon: "🗂", color: "var(--warning)", tilt: "-2deg" },
+  file: {
+    label: "Files",
+    name: "File",
+    help: "A file in R2.",
+    icon: "🗂",
+    color: "var(--warning)",
+    tilt: "-2deg",
+  },
   repo: {
     label: "Repos",
+    name: "Repo",
     help: "A repo that has a recipe; its environments are its children.",
     icon: "📚",
     color: "var(--pink)",
@@ -93,6 +113,7 @@ export const KINDS: Record<ResourceKind, KindInfo> = {
   },
   game: {
     label: "Game servers",
+    name: "Game server",
     help: "A game server on a machine. A person in its circles opens the ports for their address on its join page.",
     icon: "🎮",
     color: "var(--green)",
@@ -100,6 +121,7 @@ export const KINDS: Record<ResourceKind, KindInfo> = {
   },
   "repo.group": {
     label: "Repo groups",
+    name: "Repo group",
     help: "The repos of an owner, or of a name pattern with one *. A right on it covers each repo that it matches.",
     icon: "🗃️",
     color: "var(--pink)",

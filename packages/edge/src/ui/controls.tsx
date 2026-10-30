@@ -308,6 +308,11 @@ export function MenuItem(props: {
   );
 }
 
+/** K-517: why an action is off, in text under it, because a phone shows no tooltip. */
+export function WhyOff(props: { readonly reason: string | null }) {
+  return props.reason ? <p class="help why-off">{props.reason}</p> : null;
+}
+
 export function MenuSep() {
   return <div class="menu-sep" role="separator" />;
 }

@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
-  type Actor,
   type Edit,
   type Item,
   type ShareDiff,
@@ -11,7 +10,6 @@ import {
 } from "../core/changes.ts";
 import {
   type Circle,
-  type GitHubWay,
   type Level,
   RESOURCE_KINDS,
   type Resource,
@@ -92,11 +90,11 @@ import {
   Menu,
   MenuItem,
   MenuSep,
-  MoreButton,
   OverlayPanel,
   ResizeEdge,
   ToastView,
   TooltipLayer,
+  WhyOff,
   useScreenWidth,
   useStoredWidth,
 } from "./controls.tsx";
@@ -119,6 +117,7 @@ import {
   slowUndoCheck,
   removeAppTip,
   LOGS_TIP,
+  MACHINE_TIPS,
   levelEdit,
   paletteEntries,
   NEW_CIRCLE,
@@ -156,10 +155,12 @@ import {
   ALONE_KEY,
   MapView,
   type Selection,
-  TRAY_CARDS_TYPE,
+  TrayCard,
   type View,
   measureMap,
+  offlineHost,
 } from "./Map.tsx";
+import { type DropTarget, dropPlan } from "./drop.ts";
 import { overlay } from "./held.ts";
 import { HistoryView } from "./History.tsx";
 import { UsageView } from "./Usage.tsx";
@@ -189,6 +190,7 @@ import {
   undoRevision,
   useStore,
 } from "./store.ts";
+import { whenText } from "./time.ts";
 
 const PREVIEWS_KEY = "kitshn.previews";
 /** The shelf folded or not, as the owner left it on this device; unset, it is open on a wide screen only. */
@@ -199,8 +201,16 @@ const SHELF_KEY = "kitshn.shelf";
  */
 const FIT_MIN_SCALE = 0.85;
 const wideScreen = () => innerWidth > 720;
+/**
+ * The toolbar width that holds every button in one row, measured with the labels of today. Known limit: a new
+ * toolbar button or a longer label needs a new measure; revisit when the toolbar wraps at 1512 px with no panel.
+ */
+const TOOLBAR_FULL = 1400;
 const UNDO_MS = 10_000;
-/** A press on a toast button this soon after it shows is the second press of the button that made it; it does nothing. */
+/**
+ * A press that started before the toast showed and ends on a toast button this soon after is the second press of the
+ * button that made it; it does nothing. A press that starts on the toast always counts.
+ */
 const TOAST_GUARD_MS = 500;
 
 interface Toast {
@@ -252,11 +262,15 @@ const TABS = {
     "History: every change as a sentence, with filters and Undo, in a panel over the map. Enlarge shows the full page.",
   usage: "Usage: how close the account is to the Cloudflare free plan limits, and how full each machine is.",
   notifications: "Notifications: what kitshn told you in the last 30 days, with Mute and Snooze.",
+  settings: "Settings: the GitHub way of other owners, passes, and sign-out of every session.",
 } as const;
 
 /** K-516, K-519: what the overlay panel shows. History, Library, Machines and Usage also have a full view (a tab). */
-/** "safety" is the big red button (K-1504); like "details", it has no full view. */
-type PanelKind = "details" | "safety" | "history" | "library" | "machines" | "usage" | "notifications";
+/** "safety" is the big red button (K-1504) and "settings" the settings of the owner; like "details", they have no full view. */
+type PanelKind =
+  "details" | "safety" | "settings" | "history" | "library" | "machines" | "usage" | "notifications";
+/** The panels without a full view of their own; Enlarge makes the panel large over the map. */
+type NoTab = "details" | "safety" | "settings";
 
 /** `html` font size in styles.css. */
 const REM = 18;
@@ -266,6 +280,7 @@ const TRAY_WIDTH: WidthLimits = { min: 160, max: 420, initial: 210 };
 const LIMITS = { panel: PANEL_WIDTH, tray: TRAY_WIDTH } as const;
 const PANEL_HEADINGS: Record<Exclude<PanelKind, "details">, string> = {
   safety: "Big red button",
+  settings: "Settings",
   history: "History",
   library: "Library",
   machines: "Machines",
@@ -279,7 +294,7 @@ const FLASH_MS = 1200;
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
 const routeFromHash = (): {
-  readonly tab: "map" | Exclude<PanelKind, "details" | "safety">;
+  readonly tab: "map" | Exclude<PanelKind, NoTab>;
   readonly id: string;
 } => {
   const [tab = "map", id = ""] = location.hash.slice(1).split("/");
@@ -318,6 +333,8 @@ export function App() {
   );
   /** Where the last press or drop ended, for a toast that names no card. */
   const lastPressY = useRef(0);
+  /** When the newest pointer press started, for the toast guard. */
+  const pressStartedAt = useRef(0);
   /** The palette's first query, or null while it is closed. */
   const [palette, setPalette] = useState<string | null>(null);
   const [addingMachine, setAddingMachine] = useState(false);
@@ -347,7 +364,8 @@ export function App() {
   const [confirm, setConfirm] = useState<{ text: string; resolve: (ok: boolean) => void } | null>(null);
   const [route, setRoute] = useState(routeFromHash);
   /** The panel over the map, or null when closed. */
-  const [panel, setPanel] = useState<PanelKind | null>("details");
+  // A phone opens on the map alone; its panel is a sheet that would cover half of it.
+  const [panel, setPanel] = useState<PanelKind | null>(() => (wideScreen() ? "details" : null));
   /** The details panel in its full view; History, Library and Machines use their tab for that. */
   const [detailsLarge, setDetailsLarge] = useState(false);
   /** K-1508: `itemKey`s of the cards and circles that a History row highlights now. */
@@ -475,7 +493,11 @@ export function App() {
       lastPressY.current = event.clientY;
     };
     addEventListener("pointerup", notePress, true);
-    // A drag from the tray or of files ends in `drop`, with no `pointerup`.
+    const notePressStart = () => {
+      pressStartedAt.current = Date.now();
+    };
+    addEventListener("pointerdown", notePressStart, true);
+    // A drag of files ends in `drop`, with no `pointerup`.
     addEventListener("drop", notePress, true);
     addEventListener("dragover", keepFiles);
     addEventListener("drop", keepFiles);
@@ -483,6 +505,7 @@ export function App() {
       removeEventListener("hashchange", onHash);
       removeEventListener("keydown", onKey);
       removeEventListener("pointerup", notePress, true);
+      removeEventListener("pointerdown", notePressStart, true);
       removeEventListener("drop", notePress, true);
       removeEventListener("dragover", keepFiles);
       removeEventListener("drop", keepFiles);
@@ -651,25 +674,51 @@ export function App() {
   };
 
   /**
-   * K-509: cards dragged from the tray land at the drop point, each in exactly the circles there, so they
-   * get those shares; a public circle asks first, as for any drag (K-210).
+   * K-509, K-522: a drop of cards after a drag, from the map or from the tray: `dropPlan` says what it does, `commit`
+   * asks first for a public circle (K-210) and shows Undo. Cards from the tray stay selected where they land.
    */
-  const placeFromTray = async (ids: Array<string>, at: Point) => {
+  const drop = async (moves: ReadonlyMap<string, Point>, target: DropTarget) => {
     if (!state) return;
-    const wanted = new Set(
-      [...state.circles.values()].filter((circle) => insideCircle(at, circle)).map((c) => c.id),
+    const plan = dropPlan(state, moves, target, `s-${crypto.randomUUID().slice(0, 8)}`);
+    if (!plan) return;
+    if ("refused" in plan) {
+      showToast({ text: plan.refused, error: true, undo: null });
+      return;
+    }
+    await commit(
+      plan.edits,
+      shareDiff(state, applyChanges(state, resolveEdits(state, plan.edits))),
+      plan.done,
     );
-    const edits: Array<Extract<Edit, { _tag: "place" }>> = ids
-      .filter((id) => state.resources.has(id) && !state.places.has(id))
-      .map((id, index) => ({
-        _tag: "place",
-        id,
-        after: placeInside(state, { x: at.x + (index % 2) * 30, y: at.y + index * 90 }, wanted) ?? at,
-      }));
-    if (edits.length === 0) return;
-    await commit(edits, shareDiff(state, applyChanges(state, resolveEdits(state, edits))));
-    select({ cards: new Set(edits.map((edit) => edit.id)), circle: null });
+    const fresh = [...moves.keys()].filter((id) => !state.places.has(id));
+    if (fresh.length > 0 && target._tag !== "tray") select({ cards: new Set(fresh), circle: null });
   };
+
+  /**
+   * U18: a live site that the wizard shared with a circle, by its address, until its card arrives; then the card
+   * drops into that circle as a drag would. Known limit: this lives in the page only, so a reload before the machine
+   * reports the site leaves the card in the tray. Revisit if the server takes the circle with the job.
+   */
+  const [arriving, setArriving] = useState<ReadonlyMap<string, string>>(new Map());
+  // The card comes from the server once the machine ran the job, so this follows the state.
+  useEffect(() => {
+    if (!state || arriving.size === 0) return;
+    for (const [address, circleId] of arriving) {
+      const card = [...state.resources.values()].find((resource) => resource.addresses.includes(address));
+      if (!card) continue;
+      setArriving((before) => new Map([...before].filter(([each]) => each !== address)));
+      const circle = state.circles.get(circleId);
+      if (!circle || state.places.has(card.id)) continue;
+      const at = placeInside(state, { x: circle.x, y: circle.y }, new Set([circle.id]));
+      if (at) void drop(new Map([[card.id, at]]), { _tag: "map" });
+      else
+        showToast({
+          text: `${card.name} waits in the tray: ${circle.name} has no free spot.`,
+          error: true,
+          undo: null,
+        });
+    }
+  }, [state, arriving]);
 
   /** Selects an item and puts the focus into an input of its panel, after the panel renders. */
   const selectAndFocus = (next: Selection, selector: string) => {
@@ -812,6 +861,9 @@ export function App() {
         : { text: `The backup of ${resource.name} is queued.`, error: false, undo: null },
     );
   };
+
+  const pressBeforeToast = () =>
+    pressStartedAt.current < toastShownAt.current && Date.now() - toastShownAt.current < TOAST_GUARD_MS;
 
   const showToast = (next: Toast) => {
     toastShownAt.current = Date.now();
@@ -996,9 +1048,11 @@ export function App() {
   };
 
   const takeAddress = async (resource: Resource) => {
+    const site = resource.provider?.site;
+    const address = resource.addresses[0] ?? (site ? `${site}.${store.snapshot?.zone ?? ""}` : "its address");
     if (
       !(await ask(
-        `Take over the address of ${resource.name}? Its machine needs a T3 that takes kitshn's Access audiences (fork #415). kitshn makes its Access application, then its tunnel route, and moves the DNS record once T3 has the new audience. Then take the address out of what served it.`,
+        `${resource.name} will answer at ${address} through kitshn. Progress shows on the card. This needs a T3 that takes kitshn audiences.`,
       ))
     )
       return;
@@ -1052,7 +1106,8 @@ export function App() {
 
   const fullPage = route.tab !== "map";
   const shownPanel: PanelKind | null = fullPage ? route.tab : panel;
-  const large = fullPage || ((panel === "details" || panel === "safety") && detailsLarge);
+  const large =
+    fullPage || ((panel === "details" || panel === "safety" || panel === "settings") && detailsLarge);
   /** The panel floats over the map, so the map keeps its width and fit and pan leave its part free. */
   const floating = shownPanel !== null && !large;
 
@@ -1147,6 +1202,11 @@ export function App() {
       LIMITS,
     );
   const widths = widthsFor(wantedPanel, wantedTray);
+  /**
+   * Below TOOLBAR_FULL, the map tools, the waiting repos and the title fold into "☰", so the toolbar stays one row
+   * also beside a floating panel. A phone always folds them, with the tabs.
+   */
+  const foldTools = !wide || screenWidth - 20 - (floating ? widths.panel + 14 : 0) < TOOLBAR_FULL;
   // The page's CSS reads these, also outside this tree's elements; a drag sets them alone until it ends.
   if (wide) {
     document.documentElement.style.setProperty("--panel-width", `${widths.panel || wantedPanel}px`);
@@ -1160,11 +1220,68 @@ export function App() {
     innerWidth - 12 - Math.min(width, innerWidth - 24);
   const shownTray = tray
     .filter((resource) =>
-      `${resource.name} ${resource.kind} ${resource.addresses[0] ?? ""}`
+      `${resource.name} ${resource.kind} ${kindInfo(resource).name} ${resource.addresses[0] ?? ""}`
         .toLowerCase()
         .includes(trayFilter.trim().toLowerCase()),
     )
     .reverse();
+  /** K-509: the shelf of new cards. The map draws it, so its cards drag, drop and open menus as map cards do. */
+  const trayView = (dragging: ReadonlySet<string>) => (
+    <aside class={`tray${trayOpen ? "" : " closed"}`}>
+      {wide && trayOpen ? (
+        <ResizeEdge
+          label="Shelf width"
+          width={widths.tray}
+          limits={TRAY_WIDTH}
+          grows="right"
+          cssVar="--tray-width"
+          fit={(wanted) => widthsFor(wantedPanel, wanted).tray}
+          onCommit={setTrayWidth}
+        />
+      ) : null}
+      <div class="tray-head">
+        <button
+          type="button"
+          class="label tray-toggle"
+          aria-expanded={trayOpen}
+          data-tip={`New cards arrive here, outside every circle, so they start private. A click ${trayOpen ? "folds" : "opens"} the shelf.`}
+          onClick={toggleTray}
+        >
+          New · private ({tray.length}) {trayOpen ? "▴" : "▾"}
+        </button>
+        <input
+          class="field"
+          type="search"
+          placeholder="Filter"
+          aria-label="Filter the tray"
+          data-tip="Filter the tray by name, kind or address."
+          value={trayFilter}
+          onInput={(event) => setTrayFilter((event.target as HTMLInputElement).value)}
+        />
+        <span class="help">
+          Drag cards onto the map, into a circle or onto a card. Shift-click picks several.
+        </span>
+      </div>
+      <div class="tray-list">
+        {shownTray.length === 0 ? <p class="help">No card matches.</p> : null}
+        {shownTray.map((resource) => (
+          <TrayCard
+            key={resource.id}
+            resource={resource}
+            state={state}
+            selected={selection.cards.has(resource.id)}
+            dragging={dragging.has(resource.id)}
+            access={store.snapshot?.access[resource.id] ?? null}
+            progress={store.snapshot?.progress[resource.id] ?? null}
+            machine={machines.get(resource.id) ?? null}
+            waitsFor={offlineHost(machines, resource)}
+            zone={store.snapshot?.zone ?? ""}
+            onMenu={(anchor) => setMenu({ target: { _tag: "card", id: resource.id }, anchor })}
+          />
+        ))}
+      </div>
+    </aside>
+  );
 
   /** The right edge of the shelf where it covers the map, or 0: a closed shelf on a phone covers none of it. */
   const shelfRight = () => {
@@ -1244,21 +1361,22 @@ export function App() {
   };
 
   /** A toolbar tab opens its panel over the map; Enlarge in the panel opens the full view. */
-  const openTab = (tab: "map" | Exclude<PanelKind, "details" | "safety">) => {
+  const openTab = (tab: "map" | Exclude<PanelKind, NoTab>) => {
     rememberOpener();
     setPanel(tab === "map" ? "details" : tab);
     location.hash = "map";
   };
 
-  /** K-1504: the toolbar opener, the palette and the map panel open the big red button here. */
-  const openSafety = () => {
+  /** K-1504: the toolbar opener and the palette open the big red button here; Settings opens the same way. */
+  const openPanel = (kind: "safety" | "settings") => {
     rememberOpener();
-    setPanel("safety");
+    setPanel(kind);
     location.hash = "map";
   };
+  const openSafety = () => openPanel("safety");
 
   const resizePanel = (kind: PanelKind) => {
-    if (kind === "details" || kind === "safety") setDetailsLarge(!large);
+    if (kind === "details" || kind === "safety" || kind === "settings") setDetailsLarge(!large);
     else if (large) openTab(kind);
     else location.hash = kind;
   };
@@ -1647,9 +1765,9 @@ export function App() {
                 }),
             )
           }
-          onDropCards={(ids, at) => void placeFromTray(ids, at)}
+          onDrop={(moves, target) => void drop(moves, target)}
           onDropSite={setAddingSite}
-          onStackOnto={(ids, target) => void stacks.stackOnto(ids, target)}
+          tray={trayShown ? trayView : null}
           previews={previews}
           peek={wide}
           zone={store.snapshot.zone}
@@ -1734,6 +1852,26 @@ export function App() {
                 Download state export
               </a>
             </>
+          ) : shownPanel === "settings" ? (
+            <section>
+              <GitHubDefaultWay
+                way={store.snapshot.githubDefaultWay}
+                onToast={(text, error) => showToast({ text, error, undo: null })}
+              />
+              <PassSettingsPanel onToast={(text, error) => showToast({ text, error, undo: null })} />
+              <div class="label" data-tip="Sessions: who is signed in to kitshn's apps.">
+                Sessions
+              </div>
+              <p class="muted">You are {actorLabel(store.snapshot.me)}.</p>
+              <button
+                class="btn danger"
+                data-tip="Sign out everywhere: ends every Access session of kitshn's apps at once. Everyone logs in again, you too. History records it."
+                disabled={signingOut}
+                onClick={() => void signOut(false)}
+              >
+                Sign out everywhere: ends every session
+              </button>
+            </section>
           ) : shownPanel === "history" ? (
             historyView
           ) : shownPanel === "library" ? (
@@ -1767,11 +1905,9 @@ export function App() {
               repos={store.snapshot.repos}
               proposals={store.snapshot.proposals}
               onOpenInbox={() => openTab("notifications")}
-              githubDefaultWay={store.snapshot.githubDefaultWay}
               botRuns={store.snapshot.botRuns}
               selection={selection}
               access={store.snapshot.access}
-              me={store.snapshot.me}
               accessTeam={store.snapshot.accessTeam}
               onSelectCard={(id) => select({ cards: new Set([id]), circle: null })}
               onSelectCircle={(id) => select({ cards: new Set(), circle: id })}
@@ -1812,7 +1948,6 @@ export function App() {
               onSetCardSetting={(card, key, value) => void setCardSetting(card, key, value)}
               deployNotes={store.snapshot.deployNotes}
               uptime={store.snapshot.uptime}
-              pause={pauseView}
               machines={machines}
               version={store.snapshot.version}
               jobs={store.snapshot.jobs}
@@ -1821,7 +1956,7 @@ export function App() {
               onRunJob={runJob}
               onRunProviderCommand={handlers.runProviderCommand}
               warnings={store.snapshot.accessWarnings}
-              onOpenSafety={openSafety}
+              onOpenSettings={() => openPanel("settings")}
               selectionActions={selectionActions(actionContext, handlers)}
               onSignOut={(retry) => void signOut(retry)}
               signOutWarning={store.snapshot.signOutWarning}
@@ -1849,6 +1984,8 @@ export function App() {
             setAddingSite(null);
             handlers.select({ cards: new Set([card.id]), circle: null });
           }}
+          circles={[...state.circles.values()]}
+          onShare={(address, circle) => setArriving((before) => new Map(before).set(address, circle))}
           onClose={() => setAddingSite(null)}
           onDone={(text) => showToast({ text, error: false, undo: null })}
         />
@@ -1911,7 +2048,7 @@ export function App() {
           if (target && picked.files.length > 0) void uploadFolders([picked], target);
         }}
       />
-      <header class={`bar${floating ? " beside-panel" : ""}`} ref={barRef}>
+      <header class={`bar${floating ? " beside-panel" : ""}${foldTools ? " folded" : ""}`} ref={barRef}>
         <h1>kitshn</h1>
         {wide ? (
           <div class="seg">
@@ -1929,32 +2066,50 @@ export function App() {
               </button>
             ))}
           </div>
-        ) : (
+        ) : null}
+        {foldTools ? (
           <button
             type="button"
             class="btn"
             aria-haspopup="menu"
             aria-expanded={moreMenu !== null}
             aria-label="Menu"
-            data-tip="The tabs, the kinds to show, Fit and Previews."
+            data-tip={
+              wide
+                ? "The kinds to show, Organize and Previews."
+                : "The tabs, the kinds to show, Fit, Organize, Previews and Settings."
+            }
             onClick={(event) => setMoreMenu(event.currentTarget.getBoundingClientRect())}
           >
             ☰
           </button>
-        )}
+        ) : null}
         {moreMenu ? (
           <Menu label="Menu" anchor={moreMenu} onClose={() => setMoreMenu(null)}>
-            {(["map", "machines", "library", "history", "usage"] as const).map((tab) => (
+            {wide
+              ? null
+              : (["map", "machines", "library", "history", "usage"] as const).map((tab) => (
+                  <MenuItem
+                    key={tab}
+                    checked={
+                      fullPage ? route.tab === tab : tab === "map" ? panel === "details" : panel === tab
+                    }
+                    tip={TABS[tab]}
+                    onSelect={() => openTab(tab)}
+                  >
+                    {tab[0]?.toUpperCase()}
+                    {tab.slice(1)}
+                  </MenuItem>
+                ))}
+            {wide ? null : (
               <MenuItem
-                key={tab}
-                checked={fullPage ? route.tab === tab : tab === "map" ? panel === "details" : panel === tab}
-                tip={TABS[tab]}
-                onSelect={() => openTab(tab)}
+                checked={panel === "settings"}
+                tip={TABS.settings}
+                onSelect={() => openPanel("settings")}
               >
-                {tab[0]?.toUpperCase()}
-                {tab.slice(1)}
+                Settings
               </MenuItem>
-            ))}
+            )}
             {waitingRepos > 0 ? (
               <MenuItem
                 tip="Repos that wait for you to allow their first deploy. It shows them in the panel."
@@ -2000,7 +2155,7 @@ export function App() {
           <>
             {wide ? <span class="sep" /> : null}
             {/* K-501: one menu for the kinds, so the toolbar stays short and "Machines" names only the tab. */}
-            {wide ? (
+            {!foldTools ? (
               <button
                 type="button"
                 class="btn"
@@ -2057,11 +2212,14 @@ export function App() {
             >
               +
             </button>
+            {/* Fit stays on a folded wide toolbar: it is the map tool that people use most. */}
             {wide ? (
+              <button class="btn" data-tip="Fit every circle and card in the view." onClick={fit}>
+                Fit
+              </button>
+            ) : null}
+            {!foldTools ? (
               <>
-                <button class="btn" data-tip="Fit every circle and card in the view." onClick={fit}>
-                  Fit
-                </button>
                 <button class="btn" data-tip={ORGANIZE_TIP} onClick={() => void organize()}>
                   Organize
                 </button>
@@ -2091,7 +2249,7 @@ export function App() {
           🔔
           {store.snapshot.bell > 0 ? <span class="sticker">{store.snapshot.bell}</span> : null}
         </button>
-        {waitingRepos > 0 && wide ? (
+        {waitingRepos > 0 && !foldTools ? (
           <button
             class="btn"
             data-tip="Repos that wait for you to allow their first deploy. A click shows them in the panel."
@@ -2114,6 +2272,18 @@ export function App() {
             Resume
           </button>
         ) : null}
+        {wide ? (
+          <button
+            type="button"
+            class="btn"
+            aria-pressed={panel === "settings"}
+            aria-label="Settings"
+            data-tip={TABS.settings}
+            onClick={() => openPanel("settings")}
+          >
+            ⚙
+          </button>
+        ) : null}
         <button
           class="btn"
           onClick={() => setPalette("")}
@@ -2133,67 +2303,6 @@ export function App() {
           </span>
         ) : null}
       </header>
-      {tray.length > 0 && route.tab === "map" ? (
-        <aside class={`tray${trayOpen ? "" : " closed"}`}>
-          {wide && trayOpen ? (
-            <ResizeEdge
-              label="Shelf width"
-              width={widths.tray}
-              limits={TRAY_WIDTH}
-              grows="right"
-              cssVar="--tray-width"
-              fit={(wanted) => widthsFor(wantedPanel, wanted).tray}
-              onCommit={setTrayWidth}
-            />
-          ) : null}
-          <div class="tray-head">
-            <button
-              type="button"
-              class="label tray-toggle"
-              aria-expanded={trayOpen}
-              data-tip={`New cards arrive here, outside every circle, so they start private. A click ${trayOpen ? "folds" : "opens"} the shelf.`}
-              onClick={toggleTray}
-            >
-              New · private ({tray.length}) {trayOpen ? "▴" : "▾"}
-            </button>
-            <input
-              class="field"
-              type="search"
-              placeholder="Filter"
-              aria-label="Filter the tray"
-              data-tip="Filter the tray by name, kind or address."
-              value={trayFilter}
-              onInput={(event) => setTrayFilter((event.target as HTMLInputElement).value)}
-            />
-            <span class="help">Drag cards onto the map. Shift-click picks several.</span>
-          </div>
-          <div class="tray-list">
-            {shownTray.length === 0 ? <p class="help">No card matches.</p> : null}
-            {shownTray.map((resource) => (
-              <TrayCard
-                key={resource.id}
-                resource={resource}
-                selected={selection.cards.has(resource.id)}
-                onDragStart={(event) => {
-                  // A selected card carries the whole selection of tray cards with it.
-                  const ids = selection.cards.has(resource.id)
-                    ? shownTray.filter((item) => selection.cards.has(item.id)).map((item) => item.id)
-                    : [resource.id];
-                  event.dataTransfer?.setData(TRAY_CARDS_TYPE, JSON.stringify(ids));
-                  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-                }}
-                onMenu={(anchor) => setMenu({ target: { _tag: "card", id: resource.id }, anchor })}
-                onClick={(event) => {
-                  const cards = new Set(event.shiftKey ? selection.cards : []);
-                  if (event.shiftKey && cards.has(resource.id)) cards.delete(resource.id);
-                  else cards.add(resource.id);
-                  select({ cards, circle: null });
-                }}
-              />
-            ))}
-          </div>
-        </aside>
-      ) : null}
       {pauseView && pausedReach ? (
         <PausedBanner
           pause={pauseView}
@@ -2211,6 +2320,7 @@ export function App() {
             { label: "Open History", tip: TABS.history, run: () => openTab("history") },
             { label: "Open Usage", tip: TABS.usage, run: () => openTab("usage") },
             { label: "Open Notifications", tip: TABS.notifications, run: () => openTab("notifications") },
+            { label: "Open Settings", tip: TABS.settings, run: () => openPanel("settings") },
             ...(pauseView
               ? [
                   { label: "Resume with passkey", tip: RESUME_TIP, run: startResume },
@@ -2284,7 +2394,7 @@ export function App() {
             toast.undo === null
               ? null
               : () => {
-                  if (Date.now() - toastShownAt.current < TOAST_GUARD_MS) return;
+                  if (pressBeforeToast()) return;
                   const revisions = [...(toast.undo === null ? [] : [toast.undo]), ...(toast.alsoUndo ?? [])];
                   setToast(null);
                   void (async () => {
@@ -2298,7 +2408,7 @@ export function App() {
                   label: toast.action.label,
                   tip: toast.action.tip,
                   run: () => {
-                    if (Date.now() - toastShownAt.current < TOAST_GUARD_MS) return;
+                    if (pressBeforeToast()) return;
                     setToast(null);
                     toast.action?.run();
                   },
@@ -2331,13 +2441,10 @@ function Panel(props: {
   proposals: ReadonlyArray<ProposalView>;
   /** K-1607: the asks wait in the Inbox of the Notifications view; the map panel only points there. */
   onOpenInbox: () => void;
-  /** K-1760: the GitHub way of owners with no owner group. */
-  githubDefaultWay: GitHubWay;
   /** K-1767: App pull request runs that wait for Deploy. */
   botRuns: Snapshot["botRuns"];
   selection: Selection;
   access: Readonly<Record<string, AccessState>>;
-  me: Actor;
   onEdit: (edits: Array<Edit>) => Promise<string | null>;
   onDeleteCircle: (circle: Circle) => void;
   onPlace: (resource: Resource) => void;
@@ -2374,7 +2481,6 @@ function Panel(props: {
   cardSettings: Snapshot["cardSettings"];
   providerCommands: Snapshot["providerCommands"];
   onSetCardSetting: (card: Resource, key: string, value: string) => void;
-  pause: PauseView | null;
   warnings: ReadonlyArray<string>;
   machines: ReadonlyMap<string, MachineView>;
   jobs: ReadonlyArray<JobView>;
@@ -2384,7 +2490,7 @@ function Panel(props: {
   onRunProviderCommand: (view: MachineView, command: Command, question: string | null) => void;
   version: string;
   onToast: (text: string, error: boolean) => void;
-  onOpenSafety: () => void;
+  onOpenSettings: () => void;
   /** K-521, K-529: the shared selection actions, so the panel shows the same refusals as the menu and the palette. */
   selectionActions: ReadonlyArray<Action>;
   onSignOut: (retry: boolean) => void;
@@ -2501,6 +2607,11 @@ function Panel(props: {
             ) : null,
           )}
         </div>
+        {props.selectionActions.map((action) =>
+          action.refused === undefined ? null : (
+            <WhyOff key={action.id} reason={`${action.short ?? action.label}: ${action.refused}`} />
+          ),
+        )}
       </section>
     );
     if (stackOfAll)
@@ -2550,8 +2661,6 @@ function Panel(props: {
             </li>
           ))}
         </ul>
-        <GitHubDefaultWay way={props.githubDefaultWay} onToast={props.onToast} />
-        <PassSettingsPanel onToast={props.onToast} />
         <BotRuns runs={props.botRuns} onToast={props.onToast} />
         {props.proposals.length > 0 ? (
           <button
@@ -2565,7 +2674,6 @@ function Panel(props: {
           </button>
         ) : null}
         <RepoList repos={props.repos} onToast={props.onToast} />
-        <p class="muted">You are {actorLabel(props.me)}.</p>
         {props.warnings.length > 0 || props.signOutWarning ? (
           <>
             <div
@@ -2595,33 +2703,9 @@ function Panel(props: {
             </ul>
           </>
         ) : null}
-        <div class="label" data-tip="Safety: stop everything at once, or end every session.">
-          Safety
-        </div>
         <div class="row">
-          <button
-            type="button"
-            class="btn danger"
-            data-tip={
-              props.pause
-                ? "Open the big red button: see who paused, what is closed, and close public sites too."
-                : "Open the big red button: lift its lid, then press to pause everything."
-            }
-            onClick={props.onOpenSafety}
-          >
-            {props.pause
-              ? `Big red button: ${props.pause.mode === "lockdown" ? "locked down" : "paused"}`
-              : "Big red button…"}
-          </button>
-        </div>
-        <div class="row">
-          <button
-            class="btn danger"
-            data-tip="Sign out everywhere: ends every Access session of kitshn's apps at once. Everyone logs in again, you too. History records it."
-            disabled={props.signingOut}
-            onClick={() => props.onSignOut(false)}
-          >
-            Sign out everywhere: ends every session
+          <button type="button" class="btn" data-tip={TABS.settings} onClick={props.onOpenSettings}>
+            Settings…
           </button>
         </div>
       </section>
@@ -2876,6 +2960,8 @@ function CardPanel(props: {
   const address = resource.addresses[0];
   const stack = [...state.stacks.values()].find((each) => each.members.includes(resource.id));
   const [removing, setRemoving] = useState<{ readonly circle: Circle; readonly anchor: Rect } | null>(null);
+  /** The circle row whose level and share end show; the row itself shows a set end as a sticker. */
+  const [opened, setOpened] = useState<string | null>(null);
   // The stack went while the choice was open (another device, or undo): the choice ends with it.
   if (removing && !stack) setRemoving(null);
   return (
@@ -2898,41 +2984,12 @@ function CardPanel(props: {
         </Menu>
       ) : null}
       <div class="label" data-tip={kindInfo(resource).help}>
-        {kindInfo(resource).label}
+        {kindInfo(resource).name}
       </div>
       <h2>
         <ItemIcon resource={resource} />
         {resource.name}
       </h2>
-      {resource.provider ? (
-        <ProviderFacts
-          resource={resource}
-          card={resource.provider}
-          values={props.cardSettings}
-          commands={
-            props.providerCommands[resource.machine ?? ""]?.find(
-              (item) => item.name === resource.provider?.name,
-            )?.commands ?? []
-          }
-          onSetting={(key, value) => props.onSetCardSetting(resource, key, value)}
-          onRow={
-            props.providerMachine
-              ? (command, row) =>
-                  props.onRunProviderCommand(
-                    props.providerMachine!,
-                    {
-                      kind: "provider",
-                      provider: resource.provider!.name,
-                      command: command.id,
-                      resource: resource.id,
-                      row,
-                    },
-                    command.confirm ? `${command.title} for this row of ${resource.name}?` : null,
-                  )
-              : null
-          }
-        />
-      ) : null}
       {address ? (
         <div class="row">
           <code>{address}</code>
@@ -2963,18 +3020,8 @@ function CardPanel(props: {
         (resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo)) ? (
         <AddressName address={address} onSave={(name) => props.onSetAddress(resource, name)} />
       ) : null}
-      {resource.kind === "repo.group" ? (
-        <RepoGroupPanel group={resource} repos={props.repos} onToast={props.onToast} />
-      ) : null}
       {address && props.repo ? (
         <p class="help">Its repo sets this address: change it in kitshn.config.ts.</p>
-      ) : null}
-      {resource.kind.startsWith("site.") ? (
-        <Redirects
-          addresses={props.redirects}
-          onAdd={(name) => props.onRedirect(resource, name, false)}
-          onRemove={(name) => void props.onRedirect(resource, name, true)}
-        />
       ) : null}
       {props.pullRequest !== null && props.repo ? (
         <div class="row">
@@ -2989,46 +3036,62 @@ function CardPanel(props: {
           </a>
         </div>
       ) : null}
-      {props.repo ? (
-        <div class="row">
-          <span class="label" data-tip="Deploys: whether pushes of the repo of this card deploy.">
-            Deploys
-          </span>
-          {props.repo.goneOnGitHub ? (
-            <span class={`sticker ${GONE_STICKER.style}`} data-tip={GONE_STICKER.tip}>
-              deleted on GitHub
-            </span>
-          ) : (
-            <span
-              class={`sticker ${REPO_STICKERS[props.repo.state].style}`}
-              data-tip={REPO_STICKERS[props.repo.state].tip}
-            >
-              {props.repo.state}
-            </span>
-          )}
-          {/* A repo marked deleted keeps Block, so a wrong mark stays recoverable; it never offers Allow. */}
-          {props.repo.goneOnGitHub && props.repo.state === "blocked" ? null : (
-            <button
-              type="button"
-              class={props.repo.state === "blocked" ? "btn" : "btn danger"}
-              data-tip={
-                props.repo.state === "blocked"
-                  ? `Allow deploys of ${props.repo.name} again.`
-                  : `Block deploys of ${props.repo.name}: kitshn refuses them until you allow it again.`
-              }
-              onClick={async () => {
-                if (!props.repo) return;
-                const next = props.repo.state === "blocked" ? "allowed" : "blocked";
-                const { text, error } = await setRepoState(props.repo, next);
-                props.onToast(text, error);
-              }}
-            >
-              {props.repo.state === "blocked" ? "Allow deploys" : "Block deploys"}
-            </button>
-          )}
-        </div>
+      {resource.provider ? (
+        <ProviderFacts
+          resource={resource}
+          card={resource.provider}
+          values={props.cardSettings}
+          commands={
+            props.providerCommands[resource.machine ?? ""]?.find(
+              (item) => item.name === resource.provider?.name,
+            )?.commands ?? []
+          }
+          onSetting={(key, value) => props.onSetCardSetting(resource, key, value)}
+          onRow={
+            props.providerMachine
+              ? (command, row) =>
+                  props.onRunProviderCommand(
+                    props.providerMachine!,
+                    {
+                      kind: "provider",
+                      provider: resource.provider!.name,
+                      command: command.id,
+                      resource: resource.id,
+                      row,
+                    },
+                    command.confirm ? `${command.title} for this row of ${resource.name}?` : null,
+                  )
+              : null
+          }
+        />
       ) : null}
-      {progress ? <ProgressRow cardId={resource.id} progress={progress} onToast={props.onToast} /> : null}
+      {resource.kind === "repo.group" ? (
+        <RepoGroupPanel group={resource} repos={props.repos} onToast={props.onToast} />
+      ) : null}
+      {progress ? (
+        <ProgressRow
+          cardId={resource.id}
+          progress={progress}
+          // A failed daemon update offers its next steps where it failed, not only in the machine panel below.
+          next={
+            machine && progress.action === "Update daemon"
+              ? [
+                  {
+                    label: "Try again",
+                    tip: MACHINE_TIPS.update(props.version),
+                    run: () => void props.onRunJob(machine, { kind: "update", version: props.version }),
+                  },
+                  {
+                    label: "Diagnostics",
+                    tip: "Collect diagnostics of the daemon as a job; the output shows in the machine panel.",
+                    run: () => void props.onRunJob(machine, { kind: "diagnostics" }),
+                  },
+                ]
+              : []
+          }
+          onToast={props.onToast}
+        />
+      ) : null}
       {props.access ? <AccessRow access={props.access} /> : null}
       {props.uptime ? <UptimeRow resource={resource} uptime={props.uptime} /> : null}
       {props.deployNote ? (
@@ -3051,137 +3114,6 @@ function CardPanel(props: {
         >
           Place on the map
         </button>
-      ) : null}
-      {hasLogs(resource.kind) && props.deployed ? (
-        <button class="btn" data-tip={LOGS_TIP} onClick={() => props.onLogs(resource)}>
-          Logs…
-        </button>
-      ) : null}
-      {resource.kind === "site.compose" && props.deployed && !props.preview ? (
-        <section aria-label="Backups">
-          <div class="label" data-tip="Backups: daily copies of the volumes and the data folder (K-1811).">
-            Backups
-          </div>
-          {props.backupsOff ? (
-            <p class="error">Backups are off: run the bootstrap with KITSHN_BACKUP_KEY_NOW=1 (K-1815).</p>
-          ) : null}
-          {props.r2Bucket && props.r2Bucket.bytes >= BACKUP_LIMIT_BYTES ? (
-            <p class="error">
-              Backups wait: the R2 bucket holds {gigabytes(props.r2Bucket.bytes)} of the 10 GB of the free
-              plan.
-            </p>
-          ) : null}
-          <div class="row">
-            {props.backup ? (
-              <>
-                <span>{backupLabel(props.backup)}</span>{" "}
-                {backupFailureShown(props.backup, progress) ? <BackupState run={props.backup} /> : null}
-              </>
-            ) : props.backupsOff ? null : (
-              <span class="muted">No backup yet; the first runs tonight.</span>
-            )}
-          </div>
-          <div class="row">
-            <button
-              class="btn"
-              data-tip="Back up the volumes and the data folder of this app now."
-              onClick={() => props.onBackUpNow(resource)}
-            >
-              Back up now
-            </button>
-            <button
-              class="btn"
-              data-tip="List the backups of this app, and restore one."
-              onClick={() => props.onBackups(resource)}
-            >
-              Backups…
-            </button>
-          </div>
-        </section>
-      ) : null}
-      {isAppCard(resource) && props.deployed && !props.preview ? (
-        <div class="row">
-          <button
-            class="btn"
-            data-tip={`Roll back: serve an earlier deploy of this card again. ${ROLLBACK_DATA}`}
-            onClick={() => props.onRollback(resource, "card")}
-          >
-            Roll back…
-          </button>
-          {/* K-1123: a folder site comes from no workflow run. */}
-          {resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo ? null : (
-            <button
-              class="btn"
-              data-tip={`Roll back every card of the workflow run that made this deploy. ${ROLLBACK_DATA}`}
-              onClick={() => props.onRollback(resource, "run")}
-            >
-              Roll back this run…
-            </button>
-          )}
-        </div>
-      ) : null}
-      {props.onRestorePrevious ? (
-        <button
-          class="btn"
-          data-tip="Put the previous version back. The current one becomes the previous version, so a second restore swaps them back (K-1117)."
-          onClick={() => props.onRestorePrevious?.(resource)}
-        >
-          Restore previous version
-        </button>
-      ) : null}
-      {isAppCard(resource) && props.deployed ? (
-        <button
-          class="btn danger"
-          data-tip={removeAppTip(resource, resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo)}
-          onClick={() => props.onRemoveApp(resource)}
-        >
-          Remove app
-        </button>
-      ) : null}
-      {props.orphanWorkers.length > 0 ? (
-        <>
-          <div
-            class="label"
-            data-tip="Orphaned Worker storage: Workers and KV namespaces of removed apps that still hold their data in Cloudflare."
-          >
-            Orphaned Worker storage
-          </div>
-          <p class="help">
-            What removed Worker apps left. Undo of a removal does not bring back deleted data.
-          </p>
-          <ul>
-            {props.orphanWorkers.map((orphan) => {
-              const parts = [
-                ...(orphan.script ? [`the Worker ${orphan.script} with its Durable Objects`] : []),
-                ...orphan.kv.map((name) => `the KV ${name}`),
-              ];
-              return (
-                <li key={orphan.card}>
-                  <div class="row">
-                    <code>{orphan.card}</code>
-                    <button
-                      class="btn danger"
-                      data-tip={`Delete ${parts.join(", ")} and their data. Undo cannot bring them back.`}
-                      onClick={() => props.onDeleteOrphanWorker(orphan)}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </>
-      ) : null}
-      {machine ? (
-        <MachinePanel
-          view={machine}
-          version={props.version}
-          jobs={props.jobs}
-          onRemove={() => props.onRemoveMachine(machine)}
-          onRun={(command) => props.onRunJob(machine, command)}
-          onToast={props.onToast}
-        />
       ) : null}
       <div
         class="label"
@@ -3240,6 +3172,24 @@ function CardPanel(props: {
                   >
                     Remove
                   </button>
+                  {setting?.endsAt != null ? (
+                    <span
+                      class="sticker wait"
+                      data-tip={`Share ends: ${resource.name} leaves ${circle.name} at this time; its other circles stay.`}
+                    >
+                      share ends {untilText(setting.endsAt).replace("until ", "")}
+                    </span>
+                  ) : null}
+                  <button
+                    type="button"
+                    class="more"
+                    aria-expanded={opened === circle.id}
+                    aria-label={`Level and share end in ${circle.name}`}
+                    data-tip={`${opened === circle.id ? "Hide" : "Show"} the level of ${resource.name} in ${circle.name} and when this share ends.`}
+                    onClick={() => setOpened(opened === circle.id ? null : circle.id)}
+                  >
+                    ⋯
+                  </button>
                 </div>
                 <div class="row">
                   {circle.members.map((member, index) => (
@@ -3248,43 +3198,52 @@ function CardPanel(props: {
                     </span>
                   ))}
                 </div>
-                <div class="field-row">
-                  <span
-                    class="label"
-                    data-tip="Level: the level of this card in this circle. Default follows the circle."
-                  >
-                    Level
-                  </span>
-                  <LevelOverride resource={resource} circle={circle} state={state} onEdit={props.onEdit} />
-                </div>
-                <div class="field-row">
-                  <span class="label" data-tip="Ends: at this date kitshn moves the card out of this circle.">
-                    Ends
-                  </span>
-                  <EndsPicker
-                    key={`${resource.id}/${circle.id}`}
-                    endsAt={setting?.endsAt ?? null}
-                    ends="kitshn moves the card out of this circle"
-                    onChange={(endsAt) => void put({ level: setting?.level ?? null, endsAt })}
-                  />
-                </div>
+                {opened === circle.id ? (
+                  <>
+                    <div class="field-row">
+                      <span
+                        class="label"
+                        data-tip="Level: the level of this card in this circle. Default follows the circle."
+                      >
+                        Level
+                      </span>
+                      <LevelOverride
+                        resource={resource}
+                        circle={circle}
+                        state={state}
+                        onEdit={props.onEdit}
+                      />
+                    </div>
+                    <div class="field-row">
+                      <span
+                        class="label"
+                        data-tip="Share ends: at this date the card leaves this one circle; its other circles stay."
+                      >
+                        Share ends
+                      </span>
+                      <EndsPicker
+                        key={`${resource.id}/${circle.id}`}
+                        endsAt={setting?.endsAt ?? null}
+                        ends="kitshn moves the card out of this circle"
+                        onChange={(endsAt) => void put({ level: setting?.level ?? null, endsAt })}
+                      />
+                    </div>
+                  </>
+                ) : null}
               </li>
             );
           })}
         </ul>
       )}
       {state.places.has(resource.id) ? <ReachList state={state} selected={resource.id} /> : null}
-      {isGameCard(resource) ? (
-        <GameDoors resource={resource} onRemove={() => props.onRemoveGame(resource)} />
-      ) : null}
       {state.places.has(resource.id) && resource.id !== ADMIN_RESOURCE_ID ? (
-        <div class="field-row">
-          <span
+        <div style={{ margin: "12px 0" }}>
+          <div
             class="label"
-            data-tip="Time: at its end, kitshn moves the card to the tray, out of every circle (K-212)."
+            data-tip="Card leaves every circle: at this time kitshn moves the card to the tray, out of every circle (K-212)."
           >
-            Time
-          </span>
+            Card leaves every circle
+          </div>
           <div>
             <EndsPicker
               key={resource.id}
@@ -3334,6 +3293,200 @@ function CardPanel(props: {
           </div>
         </>
       ) : null}
+      {isGameCard(resource) ? (
+        <GameDoors resource={resource} onRemove={() => props.onRemoveGame(resource)} />
+      ) : null}
+      {props.repo ? (
+        <div class="row">
+          <span class="label" data-tip="Deploys: whether pushes of the repo of this card deploy.">
+            Deploys
+          </span>
+          {props.repo.goneOnGitHub ? (
+            <span class={`sticker ${GONE_STICKER.style}`} data-tip={GONE_STICKER.tip}>
+              deleted on GitHub
+            </span>
+          ) : (
+            <span
+              class={`sticker ${REPO_STICKERS[props.repo.state].style}`}
+              data-tip={REPO_STICKERS[props.repo.state].tip}
+            >
+              {props.repo.state}
+            </span>
+          )}
+          {/* A repo marked deleted keeps Block, so a wrong mark stays recoverable; it never offers Allow. */}
+          {props.repo.goneOnGitHub && props.repo.state === "blocked" ? null : (
+            <button
+              type="button"
+              class={props.repo.state === "blocked" ? "btn" : "btn danger"}
+              data-tip={
+                props.repo.state === "blocked"
+                  ? `Allow deploys of ${props.repo.name} again.`
+                  : `Block deploys of ${props.repo.name}: kitshn refuses them until you allow it again.`
+              }
+              onClick={async () => {
+                if (!props.repo) return;
+                const next = props.repo.state === "blocked" ? "allowed" : "blocked";
+                const { text, error } = await setRepoState(props.repo, next);
+                props.onToast(text, error);
+              }}
+            >
+              {props.repo.state === "blocked" ? "Allow deploys" : "Block deploys"}
+            </button>
+          )}
+        </div>
+      ) : null}
+      {hasLogs(resource.kind) && props.deployed ? (
+        <button class="btn" data-tip={LOGS_TIP} onClick={() => props.onLogs(resource)}>
+          Logs…
+        </button>
+      ) : null}
+      {resource.kind === "site.compose" && props.deployed && !props.preview ? (
+        <section aria-label="Backups">
+          <div class="label" data-tip="Backups: daily copies of the volumes and the data folder (K-1811).">
+            Backups
+          </div>
+          {props.backupsOff ? (
+            <>
+              <p class="error">Backups are off: kitshn has no backup key yet.</p>
+              <details class="raw">
+                <summary data-tip="The one step that turns backups on.">How to turn them on</summary>
+                <p class="help">
+                  Run the bootstrap in a terminal with <code>KITSHN_BACKUP_KEY_NOW=1</code>. It prints the key
+                  once: keep it outside Cloudflare, because nobody reads the backups without it (K-1815).
+                </p>
+              </details>
+            </>
+          ) : null}
+          {props.r2Bucket && props.r2Bucket.bytes >= BACKUP_LIMIT_BYTES ? (
+            <p class="error">
+              Backups wait: the R2 bucket holds {gigabytes(props.r2Bucket.bytes)} of the 10 GB of the free
+              plan.
+            </p>
+          ) : null}
+          <div class="row">
+            {props.backup ? (
+              <>
+                <span>{backupLabel(props.backup)}</span>{" "}
+                {backupFailureShown(props.backup, progress) ? <BackupState run={props.backup} /> : null}
+              </>
+            ) : props.backupsOff ? null : (
+              <span class="muted">No backup yet; the first runs tonight.</span>
+            )}
+          </div>
+          <div class="row">
+            <button
+              class="btn"
+              disabled={props.backupsOff}
+              data-tip={
+                props.backupsOff
+                  ? "Back up now needs the backup key first."
+                  : "Back up the volumes and the data folder of this app now."
+              }
+              onClick={() => props.onBackUpNow(resource)}
+            >
+              Back up now
+            </button>
+            <button
+              class="btn"
+              data-tip="List the backups of this app, and restore one."
+              onClick={() => props.onBackups(resource)}
+            >
+              Backups…
+            </button>
+          </div>
+        </section>
+      ) : null}
+      {isAppCard(resource) && props.deployed && !props.preview ? (
+        <div class="row">
+          <button
+            class="btn"
+            data-tip={`Roll back: serve an earlier deploy of this card again. ${ROLLBACK_DATA}`}
+            onClick={() => props.onRollback(resource, "card")}
+          >
+            Roll back…
+          </button>
+          {/* K-1123: a folder site comes from no workflow run. */}
+          {resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo ? null : (
+            <button
+              class="btn"
+              data-tip={`Roll back every card of the workflow run that made this deploy. ${ROLLBACK_DATA}`}
+              onClick={() => props.onRollback(resource, "run")}
+            >
+              Roll back this run…
+            </button>
+          )}
+        </div>
+      ) : null}
+      {props.onRestorePrevious ? (
+        <button
+          class="btn"
+          data-tip="Put the previous version back. The current one becomes the previous version, so a second restore swaps them back (K-1117)."
+          onClick={() => props.onRestorePrevious?.(resource)}
+        >
+          Restore previous version
+        </button>
+      ) : null}
+      {resource.kind.startsWith("site.") ? (
+        <Redirects
+          addresses={props.redirects}
+          onAdd={(name) => props.onRedirect(resource, name, false)}
+          onRemove={(name) => void props.onRedirect(resource, name, true)}
+        />
+      ) : null}
+      {machine ? (
+        <MachinePanel
+          view={machine}
+          version={props.version}
+          jobs={props.jobs}
+          onRemove={() => props.onRemoveMachine(machine)}
+          onRun={(command) => props.onRunJob(machine, command)}
+          onToast={props.onToast}
+        />
+      ) : null}
+      {isAppCard(resource) && props.deployed ? (
+        <button
+          class="btn danger"
+          data-tip={removeAppTip(resource, resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo)}
+          onClick={() => props.onRemoveApp(resource)}
+        >
+          Remove app
+        </button>
+      ) : null}
+      {props.orphanWorkers.length > 0 ? (
+        <>
+          <div
+            class="label"
+            data-tip="Orphaned Worker storage: Workers and KV namespaces of removed apps that still hold their data in Cloudflare."
+          >
+            Orphaned Worker storage
+          </div>
+          <p class="help">
+            What removed Worker apps left. Undo of a removal does not bring back deleted data.
+          </p>
+          <ul>
+            {props.orphanWorkers.map((orphan) => {
+              const parts = [
+                ...(orphan.script ? [`the Worker ${orphan.script} with its Durable Objects`] : []),
+                ...orphan.kv.map((name) => `the KV ${name}`),
+              ];
+              return (
+                <li key={orphan.card}>
+                  <div class="row">
+                    <code>{orphan.card}</code>
+                    <button
+                      class="btn danger"
+                      data-tip={`Delete ${parts.join(", ")} and their data. Undo cannot bring them back.`}
+                      onClick={() => props.onDeleteOrphanWorker(orphan)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      ) : null}
     </section>
   );
 }
@@ -3360,40 +3513,6 @@ function ContextMenu(props: {
           : "the map";
   const label = target._tag === "add" ? "Add" : `Actions for ${name ?? "the map"}`;
   return <ActionMenu label={label} anchor={props.menu.anchor} groups={groups} onClose={props.onClose} />;
-}
-
-/** K-509: a card in the tray, private until it lands on the map. A drag places it; its menu is the map's (K-523). */
-export function TrayCard(props: {
-  readonly resource: Resource;
-  readonly selected: boolean;
-  readonly onDragStart: (event: DragEvent) => void;
-  readonly onMenu: (anchor: Rect) => void;
-  readonly onClick: (event: MouseEvent) => void;
-}) {
-  const { resource } = props;
-  return (
-    <div
-      class={`card${props.selected ? " sel" : ""}`}
-      data-tip={`${kindInfo(resource).help} Drag it onto the map; it lands in exactly the circles there.`}
-      draggable
-      onDragStart={props.onDragStart}
-      onContextMenu={(event) => {
-        // K-523: a tray card has the same menu as on the map, with Place on the map.
-        event.preventDefault();
-        props.onMenu({ left: event.clientX, top: event.clientY, width: 0, height: 0 });
-      }}
-      onClick={props.onClick}
-    >
-      <div class="name">
-        <ItemIcon resource={resource} />
-        {resource.name}
-      </div>
-      <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
-      <div class="foot">
-        <MoreButton name={resource.name} onOpen={props.onMenu} />
-      </div>
-    </div>
-  );
 }
 
 /** K-407: the Access row of a card panel: applied as a stamp; applying, retrying and failed as stickers with why. */
@@ -3521,8 +3640,8 @@ function ProviderFacts(props: {
       ))}
       {card.droppedAt !== undefined ? (
         <p class="help">
-          {card.name} no longer reports this card, since {new Date(card.droppedAt).toLocaleString()}. It keeps
-          its place and shares, offline, until {card.name} reports it again or you forget it.
+          {card.name} no longer reports this card, since {whenText(card.droppedAt)}. It keeps its place and
+          shares, offline, until {card.name} reports it again or you forget it.
         </p>
       ) : null}
       {card.stickers.length > 0 ? (

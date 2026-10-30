@@ -14,6 +14,17 @@ export default {
           name: "Pixel",
           link: "https://kit.example.com/join/device#code=3f9a1c07d2b84e6f9a0c5d1e7b2f4a68",
           expiresAt: Date.now() + 15 * 60_000,
+          clients: [
+            {
+              id: "t3-code",
+              name: "T3 Code",
+              open: "t3code://pair?url={inviteUrl}",
+              install: [],
+              provider: "t3",
+              machines: ["Mac"],
+            },
+          ],
+          agree: true,
         },
       }),
     );

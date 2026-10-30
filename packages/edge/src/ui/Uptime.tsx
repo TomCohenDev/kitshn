@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import type { Resource } from "../core/model.ts";
 import type { UptimeChange } from "../core/uptime.ts";
 import { callApi } from "./store.ts";
+import { whenText } from "./time.ts";
 
 const DAY_MS = 24 * 60 * 60_000;
 
@@ -48,9 +49,9 @@ export function UptimeRow(props: {
         <span class="muted">
           {uptime.up
             ? lastChange
-              ? `since ${new Date(lastChange.at).toLocaleString()}`
+              ? `since ${whenText(lastChange.at)}`
               : "no down time in the last 30 days"
-            : `since ${new Date(uptime.since).toLocaleString()}`}
+            : `since ${whenText(uptime.since)}`}
         </span>
       </div>
       <div class="uptime-strip" role="img" aria-label="Up and down in the last 24 hours">

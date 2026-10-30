@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import type { Circle, Point, Resource, State } from "../core/model.ts";
 import type { Notification } from "../core/notifications.ts";
 import type { AccessState, ProposalView } from "../core/protocol.ts";
-import { AccessRow, TrayCard } from "./App.tsx";
+import { AccessRow } from "./App.tsx";
 import {
   Entry,
   GuideHead,
@@ -36,7 +36,7 @@ import { IconTile } from "./ItemIcon.tsx";
 import { KINDS, LEVEL_COLORS, LEVEL_TILTS } from "./kinds.ts";
 import { stackOffsets } from "./layout.ts";
 import { KeySticker, PresenceSticker } from "./Machines.tsx";
-import { CardView, CircleView, StackCard } from "./Map.tsx";
+import { CardView, CircleView, StackCard, TrayCard } from "./Map.tsx";
 import { NotificationRow } from "./Notifications.tsx";
 import { PanicOpener, PausedBanner, SafetyView } from "./Pause.tsx";
 import type { Rect } from "./popover.ts";
@@ -564,23 +564,33 @@ function MapParts(props: { state: State }) {
       <Entry
         heading="Tray item"
         what="A new card, private until the owner drags it onto the map."
-        source="TrayCard · App.tsx"
+        source="TrayCard, CardView · Map.tsx"
       >
         <div class="tray guide-tray">
           <div class="tray-list">
             <TrayCard
               resource={resource("slides", "file", "slides.pdf", null)}
+              state={state}
               selected={false}
-              onDragStart={noop}
+              dragging={false}
+              access={null}
+              progress={null}
+              machine={null}
+              waitsFor={null}
+              zone="example.com"
               onMenu={noop}
-              onClick={noop}
             />
             <TrayCard
               resource={resource("notes", "page", "CI time table", null)}
+              state={state}
               selected
-              onDragStart={noop}
+              dragging={false}
+              access={null}
+              progress={null}
+              machine={null}
+              waitsFor={null}
+              zone="example.com"
               onMenu={noop}
-              onClick={noop}
             />
           </div>
         </div>

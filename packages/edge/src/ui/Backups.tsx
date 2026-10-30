@@ -2,8 +2,9 @@ import { useEffect, useState } from "preact/hooks";
 import { type BackupRun, gigabytes } from "../core/backups.ts";
 import type { Resource } from "../core/model.ts";
 import { callApi } from "./store.ts";
+import { whenText } from "./time.ts";
 
-const time = (at: number) => new Date(at).toLocaleString();
+const time = (at: number) => whenText(at);
 const size = (bytes: number | null) =>
   bytes === null
     ? ""

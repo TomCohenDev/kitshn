@@ -279,6 +279,15 @@ export function reshareEdits(
   return refused ? { refused } : { edits };
 }
 
+/** The edits that take `moving` out of their stacks, except `keep`; a stack left with one card goes (K-521). */
+export function leaveStacks(state: State, moving: ReadonlyArray<string>, keep?: Stack): Array<Edit> {
+  return [...state.stacks.values()].flatMap((stack): Array<Edit> => {
+    if (stack === keep || !stack.members.some((id) => moving.includes(id))) return [];
+    const rest = stack.members.filter((id) => !moving.includes(id));
+    return [{ _tag: "stack", id: stack.id, after: rest.length > 1 ? { ...stack, members: rest } : null }];
+  });
+}
+
 /**
  * K-522: the edits that put cards onto `target` (into its stack, or a new stack `newId`), with the toast text,
  * or null when no card moves. A card leaves its old stack; a stack left with one card goes.
@@ -294,12 +303,10 @@ export function stackOntoEdits(
   const into = [...state.stacks.values()].find((stack) => stack.members.includes(target));
   const moving = ids.filter((id) => id !== target && !into?.members.includes(id));
   if (moving.length === 0) return null;
-  const edits: Array<Edit> = moving.map((id) => ({ _tag: "place", id, after: place }));
-  for (const stack of state.stacks.values()) {
-    if (stack === into || !stack.members.some((id) => moving.includes(id))) continue;
-    const rest = stack.members.filter((id) => !moving.includes(id));
-    edits.push({ _tag: "stack", id: stack.id, after: rest.length > 1 ? { ...stack, members: rest } : null });
-  }
+  const edits: Array<Edit> = [
+    ...moving.map((id): Edit => ({ _tag: "place", id, after: place })),
+    ...leaveStacks(state, moving, into),
+  ];
   const targetName = state.resources.get(target)?.name;
   const id = into?.id ?? newId;
   edits.push({
@@ -1147,33 +1154,45 @@ export function actionsFor(ctx: ActionContext, h: ActionHandlers, target: MenuTa
   }
 }
 
-export interface PaletteEntry {
+export type PaletteEntry = {
   readonly label: string;
   readonly tip: string;
   readonly danger?: true;
   readonly keywords?: string;
-  readonly run: () => void;
-}
+  /** A sub-list, such as the circles of "Share with", opens as a second list (U11). */
+} & ({ readonly run: () => void } | { readonly items: ReadonlyArray<PaletteEntry> });
 
 /**
- * One entry per action, with sub-lists spelled out and the item name in front, so a search finds them. A
- * refused action and the current choice of a radio group have no entry: there is nothing to run.
+ * One entry per action, with the item name in front, so a search finds it. A sub-list is one entry that ends with
+ * "…" and opens its items as a second list; the words of its items find it too. A refused action and the current
+ * choice of a radio group have no entry: there is nothing to run.
  */
 export function flatten(groups: ActionGroups, prefix: string): Array<PaletteEntry> {
-  const walk = (action: Action, label: string): Array<PaletteEntry> =>
-    action.refused !== undefined || action.checked
-      ? []
-      : "items" in action
-        ? action.items.flatMap((item) => walk(item, `${label}: ${item.label}`))
-        : [
-            {
-              label,
-              tip: action.tip,
-              run: action.run,
-              ...(action.danger ? { danger: action.danger } : {}),
-              ...(action.keywords ? { keywords: action.keywords } : {}),
-            },
-          ];
+  const walk = (action: Action, label: string): Array<PaletteEntry> => {
+    if (action.refused !== undefined || action.checked) return [];
+    if (!("items" in action))
+      return [
+        {
+          label,
+          tip: action.tip,
+          run: action.run,
+          ...(action.danger ? { danger: action.danger } : {}),
+          ...(action.keywords ? { keywords: action.keywords } : {}),
+        },
+      ];
+    // Opening the second list runs nothing, so only its items can be dangerous.
+    const items = action.items.flatMap((item) => walk(item, item.label));
+    if (items.length === 0) return [];
+    const keywords = [action.keywords, ...items.flatMap((item) => [item.label, item.keywords])];
+    return [
+      {
+        label: label.endsWith("…") ? label : `${label}…`,
+        tip: action.tip,
+        keywords: keywords.filter((word) => word !== undefined).join(" "),
+        items,
+      },
+    ];
+  };
   return groups
     .flat()
     .flatMap((action) => walk(action, prefix ? `${prefix} · ${action.label}` : action.label));

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "preact/hooks";
 import type { NotificationLevel } from "../core/notifications.ts";
 import { DEFAULT_LEVELS, type PushDevice } from "../core/push.ts";
-import { Check } from "./controls.tsx";
+import { Check, WhyOff } from "./controls.tsx";
 import { callApi } from "./store.ts";
+import { whenText } from "./time.ts";
 
 interface PushState {
   readonly publicKey: string;
@@ -244,6 +245,13 @@ export function PushSection(props: { onToast: (text: string, error: boolean) => 
               Turn off
             </button>
           </div>
+          <WhyOff
+            reason={
+              state !== null && Date.now() - state.testAt < 60_000
+                ? "Send a test waits: one test a minute."
+                : null
+            }
+          />
         </>
       ) : (
         <button
@@ -262,8 +270,7 @@ export function PushSection(props: { onToast: (text: string, error: boolean) => 
           <strong>{device.label}</strong>
           {device.mine ? <span class="sticker ok">this device</span> : null}
           <span class="muted">
-            {device.email} ·{" "}
-            {device.lastOkAt ? `last push ${new Date(device.lastOkAt).toLocaleString()}` : "no push yet"}
+            {device.email} · {device.lastOkAt ? `last push ${whenText(device.lastOkAt)}` : "no push yet"}
           </span>
           <button
             class="btn"

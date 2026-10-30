@@ -1,7 +1,11 @@
 import { useState } from "preact/hooks";
 import { MACHINE_RIGHT_NAMES } from "../core/model.ts";
 import type { AskEventView, LinkEventView, ProposalView } from "../core/protocol.ts";
+import { ago } from "./Machines.tsx";
 import { callApi } from "./store.ts";
+
+/** K-1722: "in 23 h", or "now" once the ask ran out. */
+const expiresText = (at: number, now = Date.now()) => (at <= now ? "now" : `in ${ago(now, at)}`);
 
 /**
  * K-1722: the asks that wait for an approver circle. The Inbox of the Notifications view shows it (K-1607), and
@@ -212,8 +216,12 @@ export function AskRow(props: {
         {MACHINE_RIGHT_NAMES[props.proposal.right]}
       </span>
       <span class="name">
-        {props.proposal.machineName}: <code>{props.proposal.shown}</code>
+        {props.proposal.machineName}: <code class="shown">{props.proposal.shown}</code>
         {props.proposal.reason ? <span class="muted"> · {props.proposal.reason}</span> : null}
+        <span class="muted">
+          {" "}
+          · asked {ago(props.proposal.createdAt)} ago · expires {expiresText(props.proposal.expiresAt)}
+        </span>
         {Object.entries(props.proposal.labels).map(([key, value]) => (
           <span
             key={key}

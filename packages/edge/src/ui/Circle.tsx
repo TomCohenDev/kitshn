@@ -28,6 +28,7 @@ import { selfApprovers } from "../core/asks.ts";
 import type { ComponentChildren } from "preact";
 import { levelEdit } from "./actions.ts";
 import { type DeviceInvite, InviteDialog } from "./Invite.tsx";
+import { whenText } from "./time.ts";
 
 /** The sticker of each member kind: its name and a light sticker colour with black text. */
 const MEMBER_STICKERS: Record<Member["_tag"], { readonly label: string; readonly color: string }> = {
@@ -196,7 +197,7 @@ export function EndsPicker(props: {
           <span class="sticker wait" data-tip={`Ends: ${props.ends} at this time.`}>
             ends
           </span>{" "}
-          {new Date(props.endsAt).toLocaleString()}
+          {whenText(props.endsAt)}
         </p>
       ) : null}
     </div>

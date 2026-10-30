@@ -300,8 +300,14 @@ it("puts a wizard site in the circle of its request, and a failed job leaves no 
     );
     await daemon({ type: "jobResult", id, result: { ok, exitCode: ok ? 0 : 1, output: "" } });
   };
+  // A report names every site of the machine, so a name that it leaves out goes.
+  const reported: Array<string> = [];
   const arrive = async (name: string) => {
-    await daemon({ type: "sites", sites: [{ name, target: "http://localhost:5173", dev: false, up: true }] });
+    reported.push(name);
+    await daemon({
+      type: "sites",
+      sites: reported.map((each) => ({ name: each, target: "http://localhost:5173", dev: false, up: true })),
+    });
     await runInDurableObject(stub, async (instance) => {
       await (
         instance as unknown as { checkSites(api: () => Promise<[]>, budget: number): Promise<number> }
@@ -334,6 +340,23 @@ it("puts a wizard site in the circle of its request, and a failed job leaves no 
       .toArray(),
   );
   expect(open.map((row) => row.title)).toContain("A live site was not shared with Agents");
+
+  // A second site of the circle lands clear of the first.
+  await finish(await ask("second", "agents"), true);
+  await arrive("second");
+  const second = await placeOf("second");
+  expect(second && shared && (second.x !== shared.x || second.y !== shared.y)).toBe(true);
+
+  // While paused, access only goes down, so a site that arrives stays in the tray, and the owner hears it.
+  await finish(await ask("paused", "agents"), true);
+  const paused = await send("/api/apply", {
+    method: "POST",
+    headers: { "cf-access-jwt-assertion": owner, "content-type": "application/json" },
+    body: JSON.stringify({ edits: [{ _tag: "pause", after: "keep-public" }] }),
+  });
+  expect(paused.status, await paused.clone().text()).toBe(200);
+  await arrive("paused");
+  expect(await placeOf("paused")).toBeNull();
 
   // A circle that is gone refuses the request at once.
   const gone = await send("/api/sites/live", {

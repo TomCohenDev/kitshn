@@ -7047,22 +7047,27 @@ export class Kitshn extends DurableObject<Env> {
           machineId: site.machineId,
           name: machine?.name ?? site.machineId,
         };
-        this.putResource(
-          card
-            ? // K-705: a provider reports the status of its own cards, and its site's address comes on now.
-              card.provider
-              ? withAddressInUse({ ...card, addresses: [site.address] }, false)
-              : { ...card, status: site.up ? "running" : "stopped" }
-            : {
-                id: site.id,
-                kind: "site.live",
-                name: site.name,
-                addresses: [site.address],
-                status: site.up ? "running" : "stopped",
-                group: null,
-                machine: site.machineId,
-              },
-        );
+        const shown: Resource = card
+          ? // K-705: a provider reports the status of its own cards, and its site's address comes on now.
+            card.provider
+            ? withAddressInUse({ ...card, addresses: [site.address] }, false)
+            : { ...card, status: site.up ? "running" : "stopped" }
+          : {
+              id: site.id,
+              kind: "site.live",
+              name: site.name,
+              addresses: [site.address],
+              status: site.up ? "running" : "stopped",
+              group: null,
+              machine: site.machineId,
+            };
+        this.putResource(shown);
+        // The card is not in `this.state` until this revision ends, and the rules must see it: a share of a card that
+        // they cannot see would pass "while paused, access only goes down" (K-1504).
+        const withCard: State = {
+          ...this.state,
+          resources: new Map(this.state.resources).set(site.id, shown),
+        };
         // K-212: a card that `kitshn expose --time` made starts with its end time.
         const ends: Array<Change> =
           endsAt !== undefined && endsAt > Date.now()
@@ -7070,9 +7075,9 @@ export class Kitshn extends DurableObject<Env> {
             : [];
         const wished = card ? null : (asked?.[1].circle ?? null);
         const placed = wished
-          ? this.wizardPlace(site.id, wished)
+          ? this.wizardPlace(site.id, wished, withCard)
           : circle !== undefined && machine
-            ? this.livePlace(machine, site.id, circle)
+            ? this.livePlace(machine, site.id, circle, withCard)
             : [];
         if (wished && placed.length === 0) notShared = wished;
         this.persist([...ends, ...placed]);
@@ -7108,7 +7113,7 @@ export class Kitshn extends DurableObject<Env> {
    * K-1104, K-718: the place of a new live site card in the circle of `kitshn expose --circle`, by the rules of an
    * agent upload: only a circle where the machine has control. A refusal leaves the card in the tray (K-509).
    */
-  private livePlace(machine: Machine, id: string, circle: string): Array<Change> {
+  private livePlace(machine: Machine, id: string, circle: string, base: State): Array<Change> {
     const visitor = { email: null, clientId: machine.clientId, ip: null };
     const spot = agentUploadPlace(this.state, visitor, circle, false, Date.now());
     if (spot === null || typeof spot === "string") {
@@ -7117,7 +7122,7 @@ export class Kitshn extends DurableObject<Env> {
     }
     const changes: Array<Change> = [{ _tag: "place", id, before: null, after: spot }];
     try {
-      this.checked(changes);
+      this.checked(changes, base);
     } catch (error) {
       if (!(error instanceof RuleError)) throw error;
       console.warn(`kitshn left ${id} in the tray: ${error.message}`);
@@ -7130,13 +7135,16 @@ export class Kitshn extends DurableObject<Env> {
    * K-1131: the place of a new live site card in the circle that its wizard named. The owner chose it, so the rules of
    * the map hold, not the rights of the machine. A refusal leaves the card in the tray (K-509).
    */
-  private wizardPlace(id: string, circleId: string): Array<Change> {
-    const circle = this.state.circles.get(circleId);
-    const spot = circle ? placeInside(this.state, { x: circle.x, y: circle.y }, new Set([circle.id])) : null;
+  private wizardPlace(id: string, circleId: string, base: State): Array<Change> {
+    const circle = base.circles.get(circleId);
+    // Clear of the cards there, so two sites of one circle do not land on one point.
+    const spot = circle
+      ? placeInside(base, { x: circle.x, y: circle.y }, new Set([circle.id]), [...base.places.values()])
+      : null;
     if (!spot) return [];
     const changes: Array<Change> = [{ _tag: "place", id, before: null, after: spot }];
     try {
-      this.checked(changes);
+      this.checked(changes, base);
     } catch (error) {
       if (!(error instanceof RuleError)) throw error;
       return [];

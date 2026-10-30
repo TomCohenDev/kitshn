@@ -84,11 +84,19 @@ export function Palette(props: {
     if (!entry) return;
     // "riffle her": "her" names an item of the second list, so it stays as the filter there, and Enter runs it.
     if ("items" in entry) {
-      const label = entry.label.toLowerCase();
+      // Each word of the parent's label takes one word of the query, so "her share her" still filters by "her".
+      const parent = entry.label.toLowerCase().split(/\s+/);
       const kept = live.current.query
         .toLowerCase()
         .split(/\s+/)
-        .filter((word) => word && !label.includes(word) && matching(entry.items, word).length > 0);
+        .filter((word) => {
+          const taken = parent.findIndex((part) => part.includes(word));
+          if (word && taken >= 0) {
+            parent.splice(taken, 1);
+            return false;
+          }
+          return word && matching(entry.items, word).length > 0;
+        });
       return go([...pathNow.current, entry.label], kept.join(" "));
     }
     props.onClose();

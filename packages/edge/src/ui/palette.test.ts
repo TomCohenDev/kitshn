@@ -111,6 +111,23 @@ describe("command palette", () => {
     });
   });
 
+  it("filters by a word that is in the parent's name too (U11)", () => {
+    const ran: Array<string> = [];
+    const share: PaletteEntry = {
+      label: "Her · Share with…",
+      tip: "Share it.",
+      keywords: "Owner Her",
+      items: [
+        { label: "Owner", tip: "Owner.", run: () => ran.push("owner") },
+        { label: "Her", tip: "Her.", run: () => ran.push("her") },
+      ],
+    };
+    withPalette([share], (input) => {
+      inOneTask(input, "her share her", ["Enter"]);
+      expect(input.value).toBe("her");
+    });
+  });
+
   it("runs the action of the current entries after the map changed, not an older one (U11)", () => {
     const ran: Array<string> = [];
     const entriesOf = (version: string): ReadonlyArray<PaletteEntry> => [

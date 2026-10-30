@@ -7,7 +7,15 @@ import {
 import { env } from "cloudflare:workers";
 import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Machine, MachineStatus } from "../src/core/machine.ts";
+import {
+  FORWARD_HEADERS,
+  type Machine,
+  type MachineStatus,
+  forwardText,
+  newMachineKey,
+  signText,
+} from "../src/core/machine.ts";
+import { setup } from "./machine-http.ts";
 import type { Resource } from "../src/core/model.ts";
 import { type ActionProgress, currentStep } from "../src/core/progress.ts";
 import { environmentNames } from "../src/worker/deploys.ts";
@@ -1773,5 +1781,82 @@ describe("redirect addresses (K-1128)", () => {
     );
     expect(left).toEqual([]);
     expect((await add("alias-six.example.com")).status).toBe(200);
+  });
+});
+
+describe("forwarded folder site (K-1714, K-1776)", () => {
+  it("lets one Owner approval of the plan cover its files and its finish", async () => {
+    fakeCloudflare();
+    await noOldAddresses();
+    const key = await newMachineKey();
+    // "adds pages" is unset, so the plan asks the Owner; the site is new, so it also needs "adds apps".
+    await setup({ deploys: { mode: "automatic" }, addsApps: { mode: "automatic" } }, key);
+    const forward = async (path: string, body: unknown, nonce: string) => {
+      const at = Date.now();
+      const labels = "{}";
+      const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(labels)));
+      const labelsHash = [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      return call(
+        path,
+        "POST",
+        {
+          "cf-access-jwt-assertion": await new SignJWT({ common_name: "vps.access" })
+            .setProtectedHeader({ alg: "RS256", kid: "team" })
+            .setIssuer("https://team.example.com")
+            .setAudience("agent-aud")
+            .setIssuedAt()
+            .setExpirationTime("5m")
+            .sign(team.privateKey),
+          [FORWARD_HEADERS.signature]: await signText(
+            key,
+            forwardText("kit.example.com", "vps", { method: "POST", path, at, nonce, labelsHash }),
+          ),
+          [FORWARD_HEADERS.at]: String(at),
+          [FORWARD_HEADERS.nonce]: nonce,
+          [FORWARD_HEADERS.labels]: labels,
+        },
+        body,
+      );
+    };
+    const planBody = { folder: "fwd", address: "fwd-site" };
+    const waiting = await forward("/agent/sites/plan", planBody, "nonce-fwd-plan-0123456789");
+    expect(waiting.status, JSON.stringify(waiting.body)).toBe(409);
+    const proposalId = String(waiting.body["proposalId"]);
+    const stub = env.KITSHN.getByName("kitshn");
+    await runInDurableObject(stub, (instance) =>
+      (
+        instance as unknown as { decide(id: string, decision: "approved", by: object): Promise<unknown> }
+      ).decide(proposalId, "approved", {
+        actor: { _tag: "person", email: "owner@example.com" },
+        visitor: { email: "owner@example.com", clientId: null, ip: null },
+        machineId: null,
+        reason: null,
+      }),
+    );
+    const plan = await forward("/agent/sites/plan", planBody, "nonce-fwd-plan-1123456789");
+    expect(plan.status, JSON.stringify(plan.body)).toBe(200);
+    const deployId = plan.body["deployId"];
+    const manifest = { "/index.html": { hash: "0".repeat(32), size: 5 } };
+    const assets = await forward(
+      "/agent/sites/assets",
+      { deployId, manifest },
+      "nonce-fwd-assets-0123456789",
+    );
+    expect(assets.status, JSON.stringify(assets.body)).toBe(200);
+    let finish = { status: 503, body: {} as Record<string, unknown> };
+    for (let attempt = 0; attempt < 10 && finish.status === 503; attempt++)
+      finish = await forward(
+        "/agent/sites/finish",
+        { deployId, jwt: "done" },
+        `nonce-fwd-finish-${attempt}-0123456789`,
+      );
+    expect(finish.status, JSON.stringify(finish.body)).toBe(200);
+    // One approval covered the whole publish: no second proposal waits.
+    const proposals = await runInDurableObject(stub, (_, state) =>
+      state.storage.sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM proposals WHERE action = 'forward'")
+        .one(),
+    );
+    expect(proposals.n).toBe(1);
   });
 });

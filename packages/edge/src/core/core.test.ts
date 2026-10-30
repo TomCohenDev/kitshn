@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { circlePolicies, desiredAccess } from "./access.ts";
+import { ASK_APP, circlePolicies, desiredAccess } from "./access.ts";
 import {
   type Actor,
   applyChanges,
@@ -570,6 +570,33 @@ describe("kitshn login pages (K-1130)", () => {
     ];
     for (const [name, from, key, wanted] of rows) expect(page(from, key), name).toEqual([wanted]);
     expect(desiredAccess(state, 0, [], [], pages).loginPage).toBe("login");
+    // K-1132: with the help pages, a refused person goes to `/ask` once it exists, else to the help page. The admin
+    // never goes to `/ask`, which lies under its host.
+    const help = { host: "kit.example.com", askLive: true };
+    const live = desiredAccess(state, 0, [], [], pages, help);
+    expect(live.apps.get("app:riffle:riffle.example.com")?.custom_deny_url).toBe(
+      "https://kit.example.com/ask",
+    );
+    expect(live.apps.get("app:kitshn-admin:kit.example.com")?.custom_deny_url).toBe(
+      "https://kit.example.com/public/help/denied",
+    );
+    expect(
+      desiredAccess(state, 0, [], [], pages, { ...help, askLive: false }).apps.get(
+        "app:riffle:riffle.example.com",
+      )?.custom_deny_url,
+    ).toBe("https://kit.example.com/public/help/denied");
+    expect(desiredAccess(state, 0).apps.get("app:riffle:riffle.example.com")).not.toHaveProperty(
+      "custom_deny_url",
+    );
+    // K-111: `/ask` lets in only people that a circle lets in already: never a Bypass, so no stranger takes a seat.
+    const ask = live.apps.get(ASK_APP);
+    expect(ask).toMatchObject({
+      domain: "kit.example.com/ask",
+      custom_deny_url: "https://kit.example.com/public/help/denied",
+    });
+    expect(ask?.policyKeys.length).toBeGreaterThan(0);
+    for (const key of ask?.policyKeys ?? []) expect(live.policies.get(key)?.decision, key).toBe("allow");
+    expect(desiredAccess(state, 0).apps.has(ASK_APP)).toBe(false);
     // Without the pages the bootstrap made, nothing changes.
     expect(desiredAccess(tray, 0).apps.get("app:riffle:riffle.example.com")).not.toHaveProperty(
       "custom_pages",

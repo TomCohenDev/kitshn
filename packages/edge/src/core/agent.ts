@@ -113,13 +113,13 @@ export function agentHas(
   visitor: Visitor,
   right: AgentRight,
   now: number,
-  approved: MachineRight | null = null,
+  approved: ReadonlyArray<MachineRight> = [],
 ) {
   const machine = machineOf(state, visitor);
   // K-1723, K-1776: an approval of exactly this call counts also for a right that no circle sets; "off" never gets
   // this far, because the approval refuses first (proposalGone).
   if (machine)
-    return approved === right || machineRightMode(state, machine.id, right, now)?.mode === "automatic";
+    return approved.includes(right) || machineRightMode(state, machine.id, right, now)?.mode === "automatic";
   return [...circlesOf(state, visitor, now)].some((id) =>
     state.circles
       .get(id)
@@ -231,7 +231,7 @@ export function agentRefusal(
   changes: ReadonlyArray<Change>,
   now: number,
   added: ReadonlySet<string>,
-  approved: MachineRight | null = null,
+  approved: ReadonlyArray<MachineRight> = [],
 ) {
   const controlled = cardsControlledBy(state, visitor, now);
   const own = circlesOf(state, visitor, now);
@@ -287,7 +287,7 @@ export function agentUploadPlace(
   circleId: string | null,
   publish: boolean,
   now: number,
-  approved: MachineRight | null = null,
+  approved: ReadonlyArray<MachineRight> = [],
 ): Point | null | string {
   if (circleId === null && !publish) return null;
   const homes = controlCircles(state, visitor, now);

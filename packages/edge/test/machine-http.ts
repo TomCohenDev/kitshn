@@ -15,6 +15,7 @@ import { accessToken, send } from "./access.ts";
 export async function setup(
   rights: Partial<Record<string, RightMode>>,
   key: MachinePrivateKey | null = null,
+  spot: { readonly x: number; readonly y: number } = { x: 5000, y: 5000 },
 ) {
   const machine: Machine = {
     ...(key ? { key: { kind: "public" as const, publicKey: key.x, fingerprint: "f", since: 0 } } : {}),
@@ -35,8 +36,7 @@ export async function setup(
     match: "any",
     needsPasskey: false,
     endsAt: null,
-    x: 5000,
-    y: 5000,
+    ...spot,
     r: 200,
   };
   const stub = env.KITSHN.getByName("kitshn");

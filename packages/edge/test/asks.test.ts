@@ -141,6 +141,12 @@ it("refuses a right that is off and names it; a right that no circle sets asks t
       JSON.stringify(card),
     );
     state.storage.sql.exec("INSERT OR REPLACE INTO places (id, x, y) VALUES ('money', 5000, 5000)");
+    // A machine card stores "unknown"; its connection is its live status.
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO resources (id, body) VALUES ('vps', ?)",
+      JSON.stringify({ ...card, id: "vps", kind: "machine", name: "vps", status: "unknown" }),
+    );
+    state.storage.sql.exec("INSERT OR REPLACE INTO places (id, x, y) VALUES ('vps', 5010, 5010)");
     state.storage.sql.exec(
       "INSERT OR REPLACE INTO backups (run, card, machine_id, at, state, error) VALUES ('b1', 'money', 'vps', 7, 'done', NULL)",
     );
@@ -162,10 +168,27 @@ it("refuses a right that is off and names it; a right that no circle sets asks t
     deploy: null,
     backup: { at: 7, state: "done", error: null },
     uptime: null,
+    // Each circle of a card comes with its name, so no id is left to look up.
+    circles: [{ id: "agents", name: expect.any(String) }],
   });
+  expect(cards.find((card) => card["id"] === "vps")).toMatchObject({ status: "offline" });
+  // The rights carry the names and modes of the map; servers and link events need `all`.
+  const result = answer.outcome === "done" ? (answer.result as Record<string, unknown>) : {};
+  expect(result["rights"]).toContainEqual({ id: "deploys", name: "deploys", mode: "automatic" });
+  expect(result["rights"]).toContainEqual({
+    id: "addsPages",
+    name: "adds pages",
+    mode: "ask",
+    circle: { id: "owner", name: "Owner" },
+  });
+  expect(result).not.toHaveProperty("linkEvents");
+  const all = await ask(stub, "state", "", { body: { all: true } });
+  expect(all.outcome === "done" ? all.result : null).toHaveProperty("linkEvents");
   await runInDurableObject(stub, (_, state) => {
     for (const table of ["resources", "places", "backups"])
-      state.storage.sql.exec(`DELETE FROM ${table} WHERE ${table === "backups" ? "card" : "id"} = 'money'`);
+      state.storage.sql.exec(
+        `DELETE FROM ${table} WHERE ${table === "backups" ? "card" : "id"} IN ('money', 'vps')`,
+      );
   });
   await evictDurableObject(stub);
 });

@@ -41,6 +41,8 @@ export interface AppBody {
   readonly policyKeys: ReadonlyArray<string>;
   /** K-1130: the kitshn login page of the application; absent while the bootstrap made no pages. */
   readonly custom_pages?: ReadonlyArray<string>;
+  /** K-1132: where Access sends a visitor whom no policy lets in, instead of its own "no access" page. */
+  readonly custom_deny_url?: string;
 }
 
 /** K-1130: the ids of the kitshn Access login pages that the bootstrap made. */
@@ -60,6 +62,18 @@ export interface DesiredAccess {
   readonly logins: { readonly login: ReadonlyArray<string>; readonly passkey: ReadonlyArray<string> };
   /** K-1130: the login page of the login applications of pages and files, or null without kitshn pages. */
   readonly loginPage: string | null;
+}
+
+/** K-1132: the key of the application of `/ask`, where a refused person asks the owner for access. */
+export const ASK_APP = "app:ask:help";
+
+/**
+ * K-1132: the help pages are on (the bootstrap made the Bypass application of `/public/help`) on this host. `askLive`
+ * is true once the application of `/ask` exists in Cloudflare, so a refusal may go there without a redirect loop.
+ */
+export interface HelpPages {
+  readonly host: string;
+  readonly askLive: boolean;
 }
 
 /** K-1723: the keys of the two approve applications. */
@@ -225,8 +239,18 @@ export function desiredAccess(
   removed: ReadonlyArray<RemovedSite> = [],
   old: ReadonlyArray<OldAddress> = [],
   pages: LoginPages | null = null,
+  help: HelpPages | null = null,
 ): DesiredAccess {
   const page = (id: string | undefined) => (id === undefined ? {} : { custom_pages: [id] });
+  // K-1132: a refused person goes to `/ask` once it exists, else to the help page. The admin and `/ask` itself always
+  // go to the help page, because `/ask` lies under the admin host and a refusal there would send it back to `/ask`.
+  const denyUrl = (direct: boolean) =>
+    help === null
+      ? {}
+      : {
+          custom_deny_url:
+            help.askLive && !direct ? `https://${help.host}/ask` : `https://${help.host}/public/help/denied`,
+        };
   const policies = new Map<string, PolicyBody>();
   const apps = new Map<string, AppBody>();
   for (const resource of state.resources.values()) {
@@ -289,6 +313,7 @@ export function desiredAccess(
         same_site_cookie_attribute: "lax",
         policyKeys,
         ...loginPage,
+        ...denyUrl(resource.id === ADMIN_RESOURCE_ID),
       });
     }
   }
@@ -405,5 +430,22 @@ export function desiredAccess(
       ...page(pages?.login),
     });
   }
+  // K-1132, K-111: `/ask` lets in only people whom some circle lets in already, so no stranger takes a seat. It reuses
+  // the people policies of the cards, without Everyone, which compiles to a Bypass.
+  const askers = [...policies.entries()]
+    .filter(([key, body]) => key.endsWith(":people") && body.decision === "allow")
+    .map(([key]) => key);
+  if (help !== null && host && askers.length > 0)
+    apps.set(ASK_APP, {
+      name: `${ACCESS_NAME_PREFIX}ask for access`,
+      type: "self_hosted",
+      domain: `${host}/ask`,
+      session_duration: "24h",
+      same_site_cookie_attribute: "lax",
+      path_cookie_attribute: true,
+      policyKeys: askers,
+      ...page(pages?.login),
+      ...denyUrl(true),
+    });
   return { policies, apps, logins: { login, passkey }, loginPage: pages?.login ?? null };
 }

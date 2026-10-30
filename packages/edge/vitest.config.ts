@@ -29,6 +29,7 @@ export default defineConfig({
                 ACCESS_ADMIN_AUD: "admin-aud",
                 ACCESS_AGENT_AUD: "agent-aud",
                 ACCESS_DEVICE_AUD: "device-aud",
+                KITSHN_HELP_PAGES: "1",
                 ACCESS_CONNECT_AUD: "connect-aud",
                 KITSHN_BACKUP_KEY: "test-backup-key",
                 DEV_IDENTITY: "",

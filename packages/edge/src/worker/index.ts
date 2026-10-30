@@ -27,6 +27,7 @@ import { originDown, seenText } from "./live.ts";
 import { adminHosts, type Env } from "./env.ts";
 import { type JoinView, joinHeaders, joinPage } from "./join-page.ts";
 import { invitePage, invitePageHeaders } from "./invite-page.ts";
+import { deniedPage, helpPageHeaders, loginHelpPage, wantedAddress } from "./help-pages.ts";
 import type { ProviderClient } from "@kitshn/local";
 import { gameNameError } from "../core/game.ts";
 import { readUsage } from "./usage.ts";
@@ -427,6 +428,27 @@ async function usageAnswer(
 
 const HEX = "0123456789abcdef";
 
+/** K-1132: the page of a visitor whom no circle knows. The Durable Object reads the card of the tag. */
+async function denied(url: URL, env: Env) {
+  const answer = await env.KITSHN.getByName("kitshn").fetch(
+    `https://kitshn.internal/internal/denied?${new URLSearchParams({
+      kid: (url.searchParams.get("kid") ?? "").slice(0, 128),
+      original_url: (url.searchParams.get("original_url") ?? "").slice(0, 2048),
+    })}`,
+  );
+  const known = (await answer.json()) as { readonly card: string | null; readonly original: string };
+  return new Response(
+    deniedPage({
+      zone: env.KITSHN_ZONE,
+      card: known.card,
+      wanted: wantedAddress(known.original, env.KITSHN_ZONE),
+      host: env.KITSHN_HOST,
+      teamDomain: env.ACCESS_TEAM_DOMAIN,
+    }),
+    { status: 403, headers: helpPageHeaders },
+  );
+}
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
@@ -449,6 +471,12 @@ export default {
         return Response.json({ error: "The agent path takes a service token only." }, { status: 403 });
       const headers = new Headers(request.headers);
       headers.set("x-kitshn-caller", JSON.stringify(caller));
+      return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
+    }
+    // K-1132: a refused person asks the owner for access. The Durable Object checks the token of the `/ask` application.
+    if (url.pathname === "/ask") {
+      const headers = new Headers(request.headers);
+      headers.delete("x-kitshn-caller");
       return env.KITSHN.getByName("kitshn").fetch(new Request(request, { headers }));
     }
     // K-1601: devices read their machines. Access lets any service token in; the Durable Object decides what each opens.
@@ -676,6 +704,10 @@ export default {
     ) {
       return badge(request, env, ctx);
     }
+    // K-1132: the help pages, also for a visitor whom Access refused.
+    if (url.pathname === "/public/help/login" && request.method === "GET")
+      return new Response(loginHelpPage(env.KITSHN_ZONE), { headers: helpPageHeaders });
+    if (url.pathname === "/public/help/denied" && request.method === "GET") return denied(url, env);
     // K-1118, K-1119: only these public paths exist; any other one is not found, never the app shell.
     if (url.pathname.startsWith("/public/"))
       return new Response("Not found.", { status: 404, headers: { "cache-control": "no-store" } });

@@ -7,7 +7,7 @@ import {
   type RightCondition,
   type RightMode,
 } from "./model.ts";
-import type { Machine } from "./machine.ts";
+import { FORWARD_HEADERS, type Machine } from "./machine.ts";
 import { type Visitor, circleMatches } from "./visitor.ts";
 
 /** K-1711: the actions of an ask. The daemon checks the same list (`@kitshn/local`). */
@@ -31,6 +31,9 @@ export const ASK_ACTIONS = [
   "restore",
 ] as const;
 export type AskAction = (typeof ASK_ACTIONS)[number];
+
+/** K-1776: a proposal is for an ask, or for one call that a daemon forwarded (K-1714). */
+export type ProposalAction = AskAction | "forward";
 
 export const isAskAction = (value: unknown): value is AskAction =>
   typeof value === "string" && (ASK_ACTIONS as ReadonlyArray<string>).includes(value);
@@ -93,7 +96,12 @@ export function askRequest(
   const object = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
   switch (action) {
     case "state":
-      return { method: "GET", path: "/agent/state", body: null };
+      // `{"all": true}` adds the servers and the link events of the machine.
+      return {
+        method: "GET",
+        path: object["all"] === true ? "/agent/state?all=1" : "/agent/state",
+        body: null,
+      };
     case "apply":
       return { method: "POST", path: "/agent/apply", body: { edits: object["edits"] } };
     case "organize":
@@ -133,7 +141,7 @@ export function askRequest(
  * K-1722: what an approver reads before an approval: the action, the target and every field of the body that
  * decides the effect. The proposal stores its hash, and the approval runs exactly the stored body.
  */
-export function shownAsk(action: AskAction, target: string, body: unknown): string {
+export function shownAsk(action: ProposalAction, target: string, body: unknown): string {
   const object = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
   switch (action) {
     case "job":
@@ -150,6 +158,15 @@ export function shownAsk(action: AskAction, target: string, body: unknown): stri
       return `back up ${target} now`;
     case "restore":
       return `restore ${target} to the backup run ${JSON.stringify(object["run"] ?? null)}`;
+    case "forward": {
+      const headers =
+        typeof object["headers"] === "object" && object["headers"] !== null ? object["headers"] : {};
+      return [
+        target,
+        ...Object.entries(headers).map(([key, value]) => `${key}: ${String(value)}`),
+        String(object["body"] ?? ""),
+      ].join("\n");
+    }
     default:
       return `${action} ${target} ${JSON.stringify(body ?? null)}`.trim();
   }
@@ -171,7 +188,7 @@ export const MAX_OPEN_PROPOSALS = 20;
 export interface Proposal {
   readonly id: string;
   readonly machineId: string;
-  readonly action: AskAction;
+  readonly action: ProposalAction;
   readonly target: string;
   readonly body: unknown;
   readonly reason: string | null;
@@ -189,7 +206,7 @@ export interface Proposal {
 /** K-1724: a proposal expires 24 hours after the ask (K-1607). */
 export const PROPOSAL_MS = 24 * 60 * 60_000;
 
-/** K-1723: after an approval of a token, the same ask of that machine runs at once for this long. */
+/** K-1723: after an approval of a token or of a forwarded call, the same ask of that machine runs at once for this long. */
 export const APPROVED_WINDOW_MS = 60 * 60_000;
 
 /**
@@ -340,3 +357,36 @@ export function parseConditions(text: string): Array<RightCondition> | string {
 
 export const formatConditions = (conditions: ReadonlyArray<RightCondition> | undefined) =>
   (conditions ?? []).map((condition) => `${condition.key}=${condition.values.join(",")}`).join("; ");
+
+/** K-1776: a forwarded body up to this many characters of text shows in full; a longer one shows its size and hash. */
+const SHOWN_BODY = 1000;
+
+/**
+ * K-1776: what an approver reads of a forwarded call: the `x-kitshn-` headers, which decide its effect, and the body,
+ * as text when it is short, else as its size and SHA-256. The approval binds the hash of exactly this text.
+ */
+export async function forwardShown(
+  target: string,
+  headers: Headers,
+  body: Uint8Array<ArrayBuffer>,
+): Promise<{ readonly shown: string; readonly body: unknown }> {
+  const kitshn = Object.fromEntries(
+    [...headers.entries()].filter(
+      ([key]) =>
+        key.startsWith("x-kitshn-") && !(Object.values(FORWARD_HEADERS) as Array<string>).includes(key),
+    ),
+  );
+  let text: string | null = null;
+  try {
+    text =
+      body.length <= SHOWN_BODY
+        ? new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body)
+        : null;
+  } catch {
+    text = null;
+  }
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", body));
+  const hex = [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const proposalBody = { headers: kitshn, body: text ?? `${body.length} bytes, sha256 ${hex}` };
+  return { shown: shownAsk("forward", target, proposalBody), body: proposalBody };
+}

@@ -292,6 +292,13 @@ export const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
     `CREATE TABLE device_invites (lookup TEXT PRIMARY KEY, token_id TEXT NOT NULL UNIQUE, client_id TEXT NOT NULL,
       name TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
   ],
+  // 41: the rights that an Owner or circle approval of a forwarded folder site plan or handover gave (K-1776), as JSON,
+  // so the files, the finish and the first deploy count them; and when a forwarded call used its approval (K-1714).
+  [
+    "ALTER TABLE deploys ADD COLUMN approved TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE proposals ADD COLUMN used_at INTEGER",
+    "ALTER TABLE handovers ADD COLUMN approved TEXT NOT NULL DEFAULT '[]'",
+  ],
 ];
 
 /** K-819: the migration after which the Durable Object derives the repo ids of older deploy rows. */

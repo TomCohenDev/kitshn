@@ -298,6 +298,10 @@ HTML
   esac
   cat <<'HTML'
 <cf-access-authbox></cf-access-authbox>
+HTML
+  # K-1130: the public help page of K-1132, for a visitor who does not know this login.
+  printf '<p class="note"><a href="https://%s/public/help/login">What is this login?</a></p>\n' "$KITSHN_HOST"
+  cat <<'HTML'
 </main>
 </body>
 </html>
@@ -376,6 +380,9 @@ app "$KITSHN_HOST/notify" "kitshn notify (public)" 24h "$public_policy" >/dev/nu
 app "$KITSHN_HOST/public/cards.json" "kitshn public cards (public)" 24h "$public_policy" >/dev/null
 # K-1119: deploy badges for READMEs. The path covers every badge below it.
 app "$KITSHN_HOST/public/badges" "kitshn badges (public)" 24h "$public_policy" >/dev/null
+# K-1132: the help pages: "What is this login?" and the page that Access sends a refused visitor to.
+app "$KITSHN_HOST/public/help" "kitshn help (public)" 24h "$public_policy" >/dev/null
+# The Worker makes the application of /ask itself, from the people of the circles, so no stranger takes a seat (K-111).
 CONNECT_AUD=$(with_old "$(app "$KITSHN_HOST/connect" "kitshn connect" 24h "$machines_policy" "$(page login)")" /connect)
 # K-718: agent keys reach /agent with their service token; the Worker decides what each key may do.
 AGENT_AUD=$(with_old "$(app "$KITSHN_HOST/agent" "kitshn agent keys" 24h "$machines_policy" "$(page login)")" /agent)
@@ -544,6 +551,7 @@ metadata=$(jq -nc --arg jwt "$assets_jwt" --arg date "$COMPATIBILITY_DATE" --arg
       {type: "plain_text", name: "ACCESS_AGENT_AUD", text: $agent_aud},
       {type: "plain_text", name: "ACCESS_DEVICE_AUD", text: $device_aud},
       {type: "plain_text", name: "ACCESS_FRESH_AUD", text: $fresh_aud},
+      {type: "plain_text", name: "KITSHN_HELP_PAGES", text: "1"},
       {type: "plain_text", name: "OWNER_EMAILS", text: $owners},
       {type: "plain_text", name: "OWNER_DEVICES", text: $devices},
       {type: "plain_text", name: "CLOUDFLARE_ACCOUNT_ID", text: $account},

@@ -14,6 +14,8 @@ export const NOTIFICATION_SOURCES = [
   "update",
   "provider",
   "health",
+  "repo",
+  "access",
 ] as const;
 
 /** K-1903: "run" calls the handler of the source at once; "link" opens a path of the map. */
@@ -63,6 +65,9 @@ export interface Mute {
   readonly until: number | null;
 }
 
+/** K-1905: an open info notification closes itself after this long, so it needs no Dismiss. */
+export const INFO_OPEN_MS = 24 * 60 * 60_000;
+
 /** K-1901 */
 export const TITLE_MAX = 100;
 export const TEXT_MAX = 500;
@@ -72,9 +77,9 @@ export const NOTIFICATIONS_MAX = 500;
 /** K-1901: a source cannot send more than the limits; a longer text ends with "…". */
 export const clip = (text: string, max: number) => (text.length <= max ? text : `${text.slice(0, max - 1)}…`);
 
-/** K-1905: a notification counts on the bell while it is open and neither muted nor snoozed. */
+/** K-1905: a notification counts on the bell while it is open, not info, and neither muted nor snoozed. */
 export function onBell(notification: Notification, mutes: ReadonlyArray<Mute>, now: number): boolean {
-  if (notification.state !== "open") return false;
+  if (notification.state !== "open" || notification.level === "info") return false;
   if (notification.snoozedUntil !== null && notification.snoozedUntil > now) return false;
   return !muted(notification, mutes, now);
 }

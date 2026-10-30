@@ -18,6 +18,8 @@ export interface ActionProgress {
   readonly action: string;
   readonly steps: ReadonlyArray<ProgressStep>;
   readonly outcome: ProgressOutcome;
+  /** The step that runs got no clear answer from Cloudflare; kitshn tries again at `at` (K-407, K-410). */
+  readonly retry: { readonly reason: string; readonly at: number } | null;
 }
 
 export interface PlannedStep {
@@ -33,7 +35,8 @@ const MIN_EXPECTED_MS = 500;
 
 /**
  * Starts an action at its first step. A step takes its time from `previous` when that is a run of the same action
- * with the same steps that ended well, so the estimate follows the real speed of that card.
+ * with the same steps: the time it took when that run ended well, else the time that run expected. So the estimate
+ * follows the real speed of that card, and a run that another one replaced keeps what it learned.
  */
 export function startProgress(
   action: string,
@@ -44,7 +47,6 @@ export function startProgress(
   if (plan.length === 0) throw new Error(`The action ${action} has no steps.`);
   const learned =
     previous?.action === action &&
-    previous.outcome.state === "done" &&
     previous.steps.length === plan.length &&
     previous.steps.every((step, index) => step.label === plan[index]?.label)
       ? previous.steps
@@ -52,13 +54,16 @@ export function startProgress(
   return {
     action,
     outcome: { state: "running" },
+    retry: null,
     steps: plan.map((step, index) => {
       const before = learned?.[index];
       const measured =
-        before?.startedAt != null && before.endedAt != null ? before.endedAt - before.startedAt : null;
+        previous?.outcome.state === "done" && before?.startedAt != null && before.endedAt != null
+          ? Math.max(MIN_EXPECTED_MS, before.endedAt - before.startedAt)
+          : null;
       return {
         label: step.label,
-        expectedMs: measured === null ? step.expectedMs : Math.max(MIN_EXPECTED_MS, measured),
+        expectedMs: measured ?? before?.expectedMs ?? step.expectedMs,
         startedAt: index === 0 ? now : null,
         endedAt: null,
       };
@@ -92,10 +97,17 @@ export function reachStep(progress: ActionProgress, index: number, now: number):
   };
 }
 
+/** Sets or clears the retry of the step that runs. */
+export function withRetry(progress: ActionProgress, retry: ActionProgress["retry"]): ActionProgress {
+  if (progress.outcome.state !== "running") return progress;
+  return { ...progress, retry };
+}
+
 export function finishProgress(progress: ActionProgress, now: number): ActionProgress {
   if (progress.outcome.state !== "running") return progress;
   return {
     ...progress,
+    retry: null,
     outcome: { state: "done", at: now },
     steps: progress.steps.map((step) => ({
       ...step,
@@ -108,7 +120,7 @@ export function finishProgress(progress: ActionProgress, now: number): ActionPro
 /** The step that runs keeps no end, so the list names the step that failed. */
 export function failProgress(progress: ActionProgress, reason: string, now: number): ActionProgress {
   if (progress.outcome.state !== "running") return progress;
-  return { ...progress, outcome: { state: "failed", at: now, reason } };
+  return { ...progress, retry: null, outcome: { state: "failed", at: now, reason } };
 }
 
 export interface ProgressBar {
@@ -137,6 +149,9 @@ export function progressBar(progress: ActionProgress, now: number): ProgressBar 
     return { from: before / total, to: before / total, ms: 0 };
   const hold = step.expectedMs * STEP_HOLD;
   const elapsed = Math.min(hold, Math.max(0, now - (step.startedAt ?? now)));
+  // A step that waits for a retry stands still where it is.
+  if (progress.retry !== null)
+    return { from: (before + elapsed) / total, to: (before + elapsed) / total, ms: 0 };
   return { from: (before + elapsed) / total, to: (before + hold) / total, ms: Math.round(hold - elapsed) };
 }
 
@@ -144,12 +159,12 @@ export function progressBar(progress: ActionProgress, now: number): ProgressBar 
 export const progressShown = (progress: ActionProgress, now: number) =>
   progress.outcome.state !== "done" || now - progress.outcome.at < DONE_SHOWN_MS;
 
-/** The step list for a tooltip: one line per step, with ✓ for a done step, → for the one that runs, ✗ for a failure. */
+/** The step list for a tooltip: one line per step, with ✓ for a done step, → for the one that runs, ↻ for a retry and ✗ for a failure. */
 export function progressLines(progress: ActionProgress): Array<string> {
   const index = currentStep(progress);
   const failed = progress.outcome.state === "failed";
   return progress.steps.map((step, at) => {
-    const mark = at < index ? "✓" : at === index ? (failed ? "✗" : "→") : "·";
+    const mark = at < index ? "✓" : at === index ? (failed ? "✗" : progress.retry ? "↻" : "→") : "·";
     return `${mark} ${step.label}`;
   });
 }

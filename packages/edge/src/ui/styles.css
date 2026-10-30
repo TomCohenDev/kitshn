@@ -583,18 +583,21 @@ input[type="search"]::-webkit-search-cancel-button {
   align-items: center;
   gap: 4px;
 }
+.sticker.action-progress.failed {
+  background: var(--error);
+}
 .progress-track {
   width: 2.4em;
   height: 0.6em;
-  border: 2px solid #000000;
+  border: var(--bw) solid var(--border);
   border-radius: 2px;
-  background: #ffffff;
+  background: var(--surface);
   overflow: hidden;
 }
 .progress-fill {
   display: block;
   height: 100%;
-  background: #000000;
+  background: var(--ink);
   transform: scaleX(0);
   transform-origin: left;
 }
@@ -612,7 +615,8 @@ input[type="search"]::-webkit-search-cancel-button {
 .progress-steps li.next {
   color: var(--muted);
 }
-.progress-steps li.running {
+.progress-steps li.running,
+.progress-steps li.retrying {
   font-weight: 800;
 }
 .progress-steps li.failed {

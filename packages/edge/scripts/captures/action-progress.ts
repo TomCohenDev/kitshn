@@ -23,6 +23,8 @@ export default {
           snapshot["progress"] = {
             tick3d: {
               action: "Take the address",
+              retry: null,
+              canDismiss: true,
               outcome: { state: "running" },
               steps: [
                 step("Make kitshn's Access application", 4_000, now - 9_000, now - 6_000),
@@ -34,6 +36,8 @@ export default {
             },
             "kitshn-repo": {
               action: "Redeploy",
+              retry: null,
+              canDismiss: true,
               outcome: { state: "done", at: now },
               steps: [
                 step("Wait until vps takes the job", 2_000, now - 30_000, now - 29_000),
@@ -42,6 +46,8 @@ export default {
             },
             vps: {
               action: "Update daemon",
+              retry: null,
+              canDismiss: true,
               outcome: {
                 state: "failed",
                 at: now,

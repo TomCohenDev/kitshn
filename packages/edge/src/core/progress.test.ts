@@ -7,6 +7,7 @@ import {
   progressShown,
   reachStep,
   startProgress,
+  withRetry,
 } from "./progress.ts";
 
 const PLAN = [
@@ -31,12 +32,25 @@ describe("action progress (K-538)", () => {
     expect(progressShown(progress, 6_999)).toBe(true);
     expect(progressShown(progress, 7_000)).toBe(false);
     // The next run of the same action expects the times this run took.
-    expect(startProgress("Act", PLAN, 10_000, progress).steps.map((step) => step.expectedMs)).toEqual([
+    const next = startProgress("Act", PLAN, 10_000, progress);
+    expect(next.steps.map((step) => step.expectedMs)).toEqual([2_000, 2_000]);
+    // A run that replaces a running one, such as a second job on the card, keeps what that one learned.
+    expect(startProgress("Act", PLAN, 11_000, next).steps.map((step) => step.expectedMs)).toEqual([
       2_000, 2_000,
     ]);
     expect(startProgress("Other", PLAN, 10_000, progress).steps.map((step) => step.expectedMs)).toEqual([
       1_000, 3_000,
     ]);
+  });
+
+  it("stands still while its step waits for a retry, and moves on when the step does", () => {
+    const retrying = withRetry(startProgress("Act", PLAN, 0, null), {
+      reason: "Cloudflare: 503",
+      at: 300_000,
+    });
+    expect(progressBar(retrying, 450)).toEqual({ from: 450 / 4_000, to: 450 / 4_000, ms: 0 });
+    expect(progressShown(retrying, 1_000_000)).toBe(true);
+    expect(finishProgress(retrying, 2_000).retry).toBeNull();
   });
 
   it("stops at the failed step with its reason and stays shown", () => {
@@ -47,7 +61,7 @@ describe("action progress (K-538)", () => {
     expect(progressShown(failed, 1_000_000)).toBe(true);
     // A failure ends the action: no later state moves or finishes it.
     expect(finishProgress(reachStep(failed, 2, 1_000), 1_000)).toBe(failed);
-    // A failed run teaches nothing.
+    // A failed run measured nothing, so the next run keeps the times that it expected.
     expect(startProgress("Act", PLAN, 0, failed).steps.map((step) => step.expectedMs)).toEqual([
       1_000, 3_000,
     ]);

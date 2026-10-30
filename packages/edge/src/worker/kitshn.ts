@@ -307,6 +307,7 @@ import {
   progressShown,
   reachStep,
   startProgress,
+  withRetry,
 } from "../core/progress.ts";
 import { seed } from "../core/seed.ts";
 import { type Visitor, circleMatches, visitorLevel } from "../core/visitor.ts";
@@ -961,23 +962,22 @@ export class Kitshn extends DurableObject<Env> {
    * K-538: moves each running action on from the state that drives it, and starts the action of each new job that has
    * one. It runs before each map update, so every client shows the same steps. Returns true when one changed.
    */
-  private reconcileProgress(now = Date.now()) {
+  private reconcileProgress(now = Date.now(), wake = false) {
     let changed = false;
     for (const [cardId, row] of this.progressRows()) {
       if (row.progress.outcome.state !== "running") continue;
+      // A job and a handover resume from their stored state. A give-back runs only in its request, so a running
+      // one at wake lost its request.
       const progress =
         row.source._tag === "job"
           ? this.jobProgress(row.source.jobId, row.progress, now)
           : row.source._tag === "takeover"
             ? this.takeoverProgress(cardId, row.progress, now)
-            : row.progress;
+            : wake
+              ? failProgress(row.progress, INTERRUPTED, now)
+              : row.progress;
       if (this.setProgress(cardId, { ...row, progress })) changed = true;
     }
-    const tracked = new Set(
-      [...this.progressRows().values()].flatMap((row) =>
-        row.source._tag === "job" ? [row.source.jobId] : [],
-      ),
-    );
     // The open jobs only after a new job came, so most map updates read no job rows.
     const active = this.jobsAdded
       ? this.sql<{ id: number; machine_id: string | null; command: string }>(
@@ -986,11 +986,13 @@ export class Kitshn extends DurableObject<Env> {
       : [];
     this.jobsAdded = false;
     for (const job of active) {
-      if (tracked.has(job.id)) continue;
       const command = JSON.parse(job.command) as Command;
       const action = jobAction(command, this.state.machines.get(job.machine_id ?? "")?.name ?? null);
       const cardId = command.kind === "update" ? job.machine_id : action ? actionCard(command) : null;
       if (!action || cardId === null || !this.state.resources.has(cardId)) continue;
+      // A card shows the newest job: a job never takes the card back from itself or from a newer one.
+      const shown = this.progressRows().get(cardId)?.source;
+      if (shown?._tag === "job" && shown.jobId >= job.id) continue;
       this.startAction(cardId, { _tag: "job", jobId: job.id }, action.action, action.plan, now);
       this.moveAction(cardId, (progress) => this.jobProgress(job.id, progress, now));
       changed = true;
@@ -1007,7 +1009,7 @@ export class Kitshn extends DurableObject<Env> {
       machine_id: string | null;
       command: string;
     }>("SELECT state, output, expires_at, machine_id, command FROM jobs WHERE id = ?", jobId);
-    if (!job) return failProgress(progress, "kitshn no longer has the job of this action.", now);
+    if (!job) return failProgress(progress, `${INTERRUPTED} kitshn no longer has its job.`, now);
     // The connection closed during the job; the daemon may still send its result (OFFLINE_OUTPUT).
     const closed = job.state === "failed" && job.output === OFFLINE_OUTPUT;
     if (job.state === "done") return finishProgress(progress, now);
@@ -1040,7 +1042,29 @@ export class Kitshn extends DurableObject<Env> {
           : now < handover.ingressAt + HANDOVER_INGRESS_MS
             ? 3
             : 4;
-    return reachStep(progress, step, now);
+    // K-407, K-410: a refused or unclear Cloudflare write of the step that runs shows on the sticker.
+    const waiting = (alarmStep: AlarmStep) => {
+      const failure = this.alarmSteps().get(alarmStep);
+      return failure && failure.retryAt > now
+        ? { reason: `The ${alarmStep} step of kitshn failed.`, at: failure.retryAt }
+        : null;
+    };
+    let retry: ActionProgress["retry"] = null;
+    if (step === 0) {
+      const access = accessStates(this.desired(now), this.access)[cardId];
+      if (access?.state === "failed") return failProgress(progress, access.error, now);
+      retry = access?.state === "retrying" ? { reason: access.error, at: access.at } : waiting("Access");
+    } else if (step === 1) {
+      const row = this.tunnelRows().find((item) => item.machine_id === site.machineId);
+      retry = row?.error ? { reason: row.error, at: row.retry_at } : waiting("tunnels");
+    } else if (step === 4) {
+      const [row] = this.sql<{ error: string | null; retry_at: number }>(
+        "SELECT error, retry_at FROM dns_objects WHERE address = ?",
+        site.address,
+      );
+      retry = row?.error ? { reason: row.error, at: row.retry_at } : waiting("DNS");
+    }
+    return withRetry(reachStep(progress, step, now), retry);
   }
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -1078,8 +1102,9 @@ export class Kitshn extends DurableObject<Env> {
       this.reconcilePresence();
       // K-821: a restart cut off any run rollback that did not wait for a job.
       this.settleRollbacks();
-      // K-538: the progress rows and the open jobs, read at wake, so a map update reads only new jobs.
-      this.reconcileProgress();
+      // K-538: the progress rows and the open jobs, read at wake, so a map update reads only new jobs. An action that
+      // nothing drives after a restart ends as interrupted.
+      this.reconcileProgress(Date.now(), true);
       await this.scheduleAlarm();
     });
   }
@@ -3461,7 +3486,9 @@ export class Kitshn extends DurableObject<Env> {
       ),
       progress: Object.fromEntries(
         [...this.progressRows()].flatMap(([id, row]) =>
-          this.state.resources.has(id) && progressShown(row.progress, Date.now()) ? [[id, row.progress]] : [],
+          this.state.resources.has(id) && progressShown(row.progress, Date.now())
+            ? [[id, { ...row.progress, canDismiss: this.canControl(caller.visitor, id) }]]
+            : [],
         ),
       ),
       handoverCards: this.sql<{ id: string }>(
@@ -14453,6 +14480,9 @@ const alarmStepBackoff = (tries: number) => Math.min(RETRY_MS * 2 ** Math.max(0,
  * ingress within seconds, and a new Access application answered after about 10 seconds in the test of 2026-10-29.
  */
 const HANDOVER_INGRESS_MS = 15_000;
+
+/** K-538: the reason of an action that a restart of kitshn cut off; Dismiss takes it off the card. */
+const INTERRUPTED = "Interrupted: kitshn restarted during this action.";
 
 /** K-538: the meta key prefix of the last action of a card. */
 const PROGRESS_META = "progress:";

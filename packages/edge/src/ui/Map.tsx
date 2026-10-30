@@ -1054,6 +1054,11 @@ export function CircleView(props: {
   );
 }
 
+/** K-538: the progress sticker says this Access error already, so the K-407 sticker would repeat it. */
+const progressSays = (progress: ActionProgress | null, error: string) =>
+  progress?.retry?.reason === error ||
+  (progress?.outcome.state === "failed" && progress.outcome.reason === error);
+
 export function CardView(props: {
   resource: Resource;
   /** `cardLayer`: its z-index on the map, or null for document order. */
@@ -1133,12 +1138,12 @@ export function CardView(props: {
             applying
           </span>
         ) : null}
-        {props.access?.state === "retrying" ? (
+        {props.access?.state === "retrying" && !progressSays(props.progress, props.access.error) ? (
           <span class="sticker wait state" data-tip={`${ACCESS_TIPS.retrying} ${props.access.error}`}>
             retrying
           </span>
         ) : null}
-        {props.access?.state === "failed" ? (
+        {props.access?.state === "failed" && !progressSays(props.progress, props.access.error) ? (
           <span
             class="sticker state"
             data-tip={`Failed: Cloudflare refused the change. ${props.access.error}`}

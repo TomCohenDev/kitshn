@@ -11,6 +11,10 @@ import { callApi } from "./store.ts";
 /** The card starts a drag on a press; a link on it opens instead. */
 const keepPress = (event: PointerEvent) => event.stopPropagation();
 
+/** K-407, K-410: why a step waits, and when kitshn tries again. */
+const retryText = (retry: NonNullable<ActionProgress["retry"]>) =>
+  `${retry.reason} Next try at ${new Date(retry.at).toLocaleTimeString()}.`;
+
 /** K-538: the tip of the sticker, with one line per step, so a hover shows what runs and what comes. */
 function progressTip(progress: ActionProgress) {
   const { outcome, steps } = progress;
@@ -19,10 +23,10 @@ function progressTip(progress: ActionProgress) {
       ? `${progress.action} failed: ${outcome.reason}`
       : outcome.state === "done"
         ? `${progress.action}: done.`
-        : `${progress.action}: step ${currentStep(progress) + 1} of ${steps.length}.`;
-  const foot =
-    outcome.state === "failed" ? "The card panel has Dismiss." : "The card panel lists the steps too.";
-  return [head, ...progressLines(progress), foot].join("\n");
+        : progress.retry
+          ? `${progress.action}: step ${currentStep(progress) + 1} of ${steps.length} waits. ${retryText(progress.retry)}`
+          : `${progress.action}: step ${currentStep(progress) + 1} of ${steps.length}.`;
+  return [head, ...progressLines(progress), "The card panel lists the steps too."].join("\n");
 }
 
 /**
@@ -50,6 +54,7 @@ function Fill(props: { progress: ActionProgress }) {
   const step = currentStep(props.progress);
   const startedAt = props.progress.steps[step]?.startedAt ?? null;
   const outcome = props.progress.outcome.state;
+  const retrying = props.progress.retry !== null;
   useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return;
@@ -61,7 +66,7 @@ function Fill(props: { progress: ActionProgress }) {
     void element.offsetWidth;
     element.style.transition = `transform ${bar.ms}ms linear`;
     element.style.transform = `scaleX(${bar.to})`;
-  }, [step, startedAt, outcome]);
+  }, [step, startedAt, outcome, retrying]);
   return <span ref={ref} class="progress-fill" />;
 }
 
@@ -85,13 +90,15 @@ export function ProgressSticker(props: { progress: ActionProgress; panel: string
   const failed = progress.outcome.state === "failed";
   return (
     <a
-      class={`sticker state action-progress${failed ? "" : " wait"}`}
+      class={`sticker state action-progress ${failed ? "failed" : "wait"}`}
       href={props.panel}
       onPointerDown={keepPress}
       data-tip={tip}
     >
       {failed ? (
         "✗ failed"
+      ) : progress.retry ? (
+        "↻ retrying"
       ) : (
         <>
           <span class="progress-track">
@@ -107,7 +114,7 @@ export function ProgressSticker(props: { progress: ActionProgress; panel: string
 /** K-538: the steps of the card's action in its panel, for touch and keyboard, where a tooltip does not reach. */
 export function ProgressRow(props: {
   cardId: string;
-  progress: ActionProgress;
+  progress: ActionProgress & { readonly canDismiss: boolean };
   onToast: (text: string, error: boolean) => void;
 }) {
   const { progress } = props;
@@ -128,25 +135,45 @@ export function ProgressRow(props: {
       {progress.outcome.state === "done" ? (
         <span class="stamp">✓ done</span>
       ) : failed ? (
-        <span class="sticker">failed</span>
+        <span class="sticker action-progress failed">failed</span>
+      ) : progress.retry ? (
+        <span class="sticker wait">retrying</span>
       ) : (
         <span class="sticker wait">
           step {index + 1} of {progress.steps.length}
         </span>
       )}
       {progress.outcome.state === "failed" ? <span class="muted">{progress.outcome.reason}</span> : null}
+      {progress.retry ? <span class="muted">{retryText(progress.retry)}</span> : null}
       <ol class="progress-steps">
         {progress.steps.map((step, at) => {
-          const state = at < index ? "done" : at === index ? (failed ? "failed" : "running") : "next";
+          const state =
+            at < index
+              ? "done"
+              : at === index
+                ? failed
+                  ? "failed"
+                  : progress.retry
+                    ? "retrying"
+                    : "running"
+                : "next";
           return (
             <li key={step.label} class={state}>
-              {state === "done" ? "✓" : state === "failed" ? "✗" : state === "running" ? "→" : "·"}{" "}
+              {state === "done"
+                ? "✓"
+                : state === "failed"
+                  ? "✗"
+                  : state === "retrying"
+                    ? "↻"
+                    : state === "running"
+                      ? "→"
+                      : "·"}{" "}
               {step.label}
             </li>
           );
         })}
       </ol>
-      {failed ? (
+      {failed && progress.canDismiss ? (
         <button
           type="button"
           class="btn"

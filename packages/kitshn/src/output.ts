@@ -8,6 +8,8 @@ export interface CardOutput {
   readonly kind: "page" | "file" | "folder";
   readonly updated: boolean;
   readonly revision?: number | null;
+  /** C2 of the UX audit: the circles that open the card; [] in the tray; null when no circle of the agent holds it. */
+  readonly circles?: ReadonlyArray<{ readonly id: string; readonly name: string }> | null;
 }
 
 const KINDS: ReadonlyArray<string> = ["page", "file", "folder"];
@@ -22,6 +24,7 @@ export function cardOutput(answer: {
   readonly kind?: unknown;
   readonly updated: boolean;
   readonly revision?: number | null;
+  readonly circles?: CardOutput["circles"];
 }): string {
   const { address, card, kind } = answer;
   if (typeof address !== "string" || address === "") throw new Error("kitshn answered without an address");
@@ -33,6 +36,7 @@ export function cardOutput(answer: {
     kind: kind as CardOutput["kind"],
     updated: answer.updated,
     ...(answer.revision === undefined ? {} : { revision: answer.revision }),
+    ...(answer.circles === undefined ? {} : { circles: answer.circles }),
   };
   return `${JSON.stringify(output)}\n`;
 }

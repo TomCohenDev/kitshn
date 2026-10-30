@@ -9,6 +9,8 @@ export interface SiteEntry {
   readonly dev: boolean;
   /** K-212: `kitshn expose --time`: the end time that the new card gets, in milliseconds. */
   readonly endsAt?: number;
+  /** K-1104: `kitshn expose --circle`: the circle id of the new card; kitshn checks it (K-718). */
+  readonly circle?: string;
 }
 
 const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -53,12 +55,13 @@ export function parseSiteFile(value: unknown): Array<SiteEntry> | null {
     ) {
       return null;
     }
-    const endsAt = entry.endsAt;
+    const { endsAt, circle } = entry;
     sites.push({
       name: entry.name,
       target: entry.target,
       dev: entry.dev === true,
       ...(typeof endsAt === "number" && Number.isFinite(endsAt) ? { endsAt } : {}),
+      ...(typeof circle === "string" && circle !== "" ? { circle } : {}),
     });
   }
   return sites;

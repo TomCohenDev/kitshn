@@ -219,6 +219,8 @@ export interface LiveSiteReport {
   readonly up: boolean;
   /** K-212: `kitshn expose --time`: the end time that the new card gets. */
   readonly endsAt?: number;
+  /** K-1104: `kitshn expose --circle`: the circle, by id or name, of the new card. */
+  readonly circle?: string;
 }
 
 /** Messages from a daemon to kitshn over `/connect`. The text "ping" is answered by the auto response. */

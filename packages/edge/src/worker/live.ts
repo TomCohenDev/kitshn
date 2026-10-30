@@ -54,6 +54,9 @@ export function parseSites(value: unknown): { sites: Array<LiveSiteReport>; refu
         dev: site.dev === true,
         up: site.up === true,
         ...(typeof site.endsAt === "number" && Number.isFinite(site.endsAt) ? { endsAt: site.endsAt } : {}),
+        ...(typeof site.circle === "string" && site.circle !== ""
+          ? { circle: site.circle.slice(0, 64) }
+          : {}),
       });
   }
   return { sites, refused };

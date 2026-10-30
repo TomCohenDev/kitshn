@@ -34,5 +34,9 @@ describe("exposed sites (K-1104, K-1107)", () => {
     expect(parseSiteFile([{ name: "x" }])).toBeNull();
     expect(parseSiteFile([{ name: "x", target: "http://example.com" }])).toBeNull();
     expect(parseSiteFile([])).toEqual([]);
+    // K-1104: the circle of `kitshn expose --circle` stays with its site.
+    expect(parseSiteFile([{ name: "x", target: "http://localhost:1", circle: "agents" }])).toEqual([
+      { name: "x", target: "http://localhost:1", dev: false, circle: "agents" },
+    ]);
   });
 });

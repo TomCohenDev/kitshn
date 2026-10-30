@@ -160,7 +160,29 @@ import {
   publicAddresses,
   systemTool,
 } from "./doors.ts";
-import { AGENT_USAGE, type AgentTransport, runAgentCommand, timeBody } from "kitshn/agent";
+import {
+  type AgentState,
+  type AgentTransport,
+  forwardWaiting,
+  isAgentCommand,
+  localTime,
+  parseState,
+  reachText,
+  runAgentCommand,
+  timeBody,
+  waitingLine,
+} from "kitshn/agent";
+import {
+  ASK_ACTION_HELP,
+  askActionsText,
+  forwardAndWait,
+  helpText,
+  isMachineCommand,
+  liveAddress,
+  rightLines,
+  serverTable,
+  unexposeRefusal,
+} from "./cli.ts";
 import { CliError } from "kitshn/cli-error";
 import { checkSkill, installGlobalSkill, installRepoSkill, refreshGlobalSkill } from "./skill.ts";
 import { appSocketFolder, removeOldSockets, socketPathProblem, upOnSocket } from "./sockets.ts";
@@ -184,6 +206,12 @@ const JOB_TIMEOUT_MS = 10 * 60_000;
 const OUTPUT_LIMIT = 64 * 1024;
 
 const log = (text: string) => console.log(`${new Date().toISOString()} ${text}`);
+
+/** C6 of the UX audit: bad arguments exit 2, with the next step. */
+function usage(text: string): never {
+  console.error(`kitshn: ${text}`);
+  process.exit(2);
+}
 
 function fail(text: string): never {
   console.error(`kitshn: ${text}`);
@@ -323,10 +351,18 @@ async function statusCommand() {
   if (answer === null) fail(notRunning());
   if (answer.type !== "status") fail(`the daemon answered ${answer.type} to status.`);
   const { status } = answer;
+  // C11 of the UX audit: the map name and the rights come from kitshn, so they need the connection.
+  const state = await stateOrReason();
+  const card =
+    typeof state === "string" ? undefined : state.cards.find((each) => each.id === status.machineId);
+  const rights = typeof state === "string" ? [`unknown: ${state}`] : rightLines(state.rights);
   console.log(
     [
       `version  ${status.version}`,
       `machine  ${status.machineId}`,
+      `name     ${card?.name ?? (typeof state === "string" ? "unknown" : "not in a circle of this machine")}`,
+      `server   ${status.server ?? "unknown"}`,
+      ...rights.map((line, index) => `${index === 0 ? "rights  " : "        "} ${line}`),
       `key      ${status.fingerprint ?? "none (kitshn rekey <code>)"}`,
       `kitshn   ${status.connection}`,
       `tunnel   ${status.tunnel}`,
@@ -340,6 +376,15 @@ async function statusCommand() {
       ),
     ].join("\n"),
   );
+}
+
+/** The state of this machine from kitshn (K-1711), or why there is none. */
+async function stateOrReason(all = false): Promise<AgentState | string> {
+  try {
+    return await daemonTransport().state(all);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 /** K-630: the last health check of this machine, or a new one with `--now`. */
@@ -487,15 +532,22 @@ async function attestationsFromEnv(): Promise<Record<string, string>> {
 
 /**
  * K-1714: the agent commands (publish, address, logs, repo, redirect) reach `/agent` through the daemon, which adds
- * the machine identity and the attested labels, so the agent needs no token.
+ * the machine identity and the attested labels, so the agent needs no token. A call that waits for an approval
+ * (K-1776) waits here for the answer, and after "approved" goes once more, from the same thread.
  */
 function daemonTransport(): AgentTransport {
   if (typeof daemonUid === "string") throw new CliError(daemonUid);
   const peer = { platform, daemonUid: daemonUid as number };
-  const ask = async (request: Request) => {
-    const outcome = await askLocal(socketPath, request, 120_000, peer).catch((error: unknown) => {
-      throw new CliError(error instanceof Error ? error.message : String(error));
-    });
+  const ask = async (
+    request: Request,
+    follow?: (answer: Answer) => boolean,
+    onLine?: (answer: Answer) => void,
+  ) => {
+    const outcome = await askLocal(socketPath, request, 120_000, peer, follow, onLine).catch(
+      (error: unknown) => {
+        throw new CliError(error instanceof Error ? error.message : String(error));
+      },
+    );
     if (outcome.kind === "not-running") throw new CliError(notRunning());
     if (outcome.answer.type === "error") throw new CliError(outcome.answer.error);
     return outcome.answer;
@@ -504,12 +556,28 @@ function daemonTransport(): AgentTransport {
     server: async () => {
       const answer = await ask({ id: "1", type: "status" });
       const server = answer.type === "status" ? answer.status.server : undefined;
-      if (!server) throw new CliError("the daemon names no kitshn server; update the daemon.");
+      if (!server) throw new CliError("the daemon names no kitshn server. Update kitshn on this machine.");
       return server;
+    },
+    state: async (all = false) => {
+      const answer = await ask({
+        id: "1",
+        type: "ask",
+        action: "state",
+        target: "",
+        ...(all ? { body: { all: true } } : {}),
+        attestations: await attestationsFromEnv(),
+      });
+      if (answer.type === "ask" && answer.outcome === "done") return parseState(answer.result);
+      throw new CliError(
+        answer.type === "ask" && answer.outcome === "refused"
+          ? answer.reason
+          : `kitshn sent no state (${answer.type}). Run kitshn status.`,
+      );
     },
     call: async (path, init) => {
       const body = init.body === undefined ? undefined : Buffer.from(init.body).toString("base64");
-      const answer = await ask({
+      const request: Extract<Request, { type: "forward" }> = {
         id: "1",
         type: "forward",
         method: init.method,
@@ -517,9 +585,8 @@ function daemonTransport(): AgentTransport {
         ...(init.headers ? { headers: { ...init.headers } } : {}),
         ...(body === undefined ? {} : { body }),
         attestations: await attestationsFromEnv(),
-      });
-      if (answer.type !== "forward")
-        throw new CliError(`the daemon answered ${answer.type} to a forwarded call.`);
+      };
+      const answer = await forwardAndWait(ask, request, (line) => console.error(line), Date.now);
       return new Response(Buffer.from(answer.body, "base64"), {
         status: answer.status,
         headers: answer.contentType ? { "content-type": answer.contentType } : {},
@@ -646,14 +713,16 @@ async function ghCommand(argv: ReadonlyArray<string>) {
 async function agentCommand(argv: ReadonlyArray<string>) {
   const [action, ...rest] = argv;
   if (!(ASK_ACTIONS as ReadonlyArray<string>).includes(action ?? ""))
-    fail(`kitshn agent <action>: the action is one of ${ASK_ACTIONS.join(", ")}.`);
+    usage(
+      `${action ? `kitshn agent does not know the action ${action}.` : "name the action."} The actions:\n${askActionsText()}`,
+    );
   let target = "";
   let reason: string | undefined;
   let body: unknown;
   const labels: Record<string, string> = {};
   for (let index = 0; index < rest.length; index++) {
     const word = rest[index] ?? "";
-    const value = () => rest[++index] ?? fail(`${word} needs a value.`);
+    const value = () => rest[++index] ?? usage(`${word} needs a value.`);
     if (word === "--reason") reason = value();
     // K-1774: `--aud` is the alias of the JWT claim name.
     else if (word === "--audience" || word === "--aud") target = value();
@@ -662,16 +731,17 @@ async function agentCommand(argv: ReadonlyArray<string>) {
       try {
         body = JSON.parse(text);
       } catch {
-        fail("--body is not JSON.");
+        usage(`--body is not JSON. Example: --body '{"mode":"redeploy"}'.`);
       }
     } else if (word === "--label") {
       const pair = value();
       const equals = pair.indexOf("=");
-      if (equals <= 0) fail(`--label ${pair}: write <key>=<value>.`);
+      if (equals <= 0) usage(`--label ${pair}: write <key>=<value>.`);
       labels[pair.slice(0, equals)] = pair.slice(equals + 1);
-    } else if (word.startsWith("--")) fail(`kitshn agent does not know ${word}.`);
+    } else if (word.startsWith("--"))
+      usage(`kitshn agent does not know ${word}. It takes --reason, --label, --body and --audience.`);
     else if (target === "") target = word;
-    else fail(`kitshn agent takes one target, not also ${word}.`);
+    else usage(`kitshn agent takes one target, not also ${word}. ${ASK_ACTION_HELP[action as AskAction]}.`);
   }
   if (typeof daemonUid === "string") fail(daemonUid);
   const request: Request = {
@@ -692,7 +762,13 @@ async function agentCommand(argv: ReadonlyArray<string>) {
     (answer) => answer.type === "ask" && answer.outcome === "waiting",
     (answer) => {
       if (answer.type === "ask" && answer.outcome === "waiting")
-        console.error(`waiting: proposal ${answer.proposalId} asks its approver circle (K-1722).`);
+        console.error(
+          waitingLine(
+            { proposalId: answer.proposalId, circle: "its approver circle", expiresAt: null },
+            Date.now(),
+            WINDOW_ACTIONS.has(action as AskAction),
+          ),
+        );
     },
   ).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   if (outcome.kind === "not-running") fail(notRunning());
@@ -700,7 +776,9 @@ async function agentCommand(argv: ReadonlyArray<string>) {
   if (answer.type === "error") fail(answer.error);
   if (answer.type === "ask" && answer.outcome === "refused") fail(answer.reason);
   if (answer.type === "ask-result" && answer.outcome !== "approved")
-    fail(`${answer.outcome}: proposal ${answer.proposalId}${answer.reason ? ` (${answer.reason})` : ""}.`);
+    fail(
+      `${answer.outcome}: proposal ${answer.proposalId}${answer.reason ? ` (${answer.reason})` : ""}. Nothing ran; run the command again to ask again.`,
+    );
   const result =
     answer.type === "ask" && answer.outcome === "done"
       ? answer.result
@@ -2636,21 +2714,25 @@ function writeSites(sites: ReadonlyArray<SiteEntry>) {
 }
 
 /**
- * K-1104, K-1131: `kitshn expose <port, address or socket> --name <name> [--dev] [--time 1h]`. With `--time`, the new
- * card gets that end time (K-212); at the end it leaves every circle for the tray.
+ * K-1104, K-1131: `kitshn expose <port, address or socket> --name <name> [--circle <circle>] [--dev] [--time 1h]`.
+ * With `--time`, the new card gets that end time (K-212); at the end it leaves every circle for the tray. With
+ * `--circle`, kitshn puts the new card in that circle when this machine has control there (K-718).
  */
-function exposeCommand(
+async function exposeCommand(
   value: string | undefined,
-  name: string | undefined,
-  dev: boolean,
-  time: string | undefined,
-  onlyNew: boolean,
+  options: {
+    readonly name: string | undefined;
+    readonly dev: boolean;
+    readonly time: string | undefined;
+    readonly onlyNew: boolean;
+    readonly circle: string | undefined;
+    readonly json: boolean;
+  },
 ) {
-  const usage =
-    "usage: kitshn expose <port, localhost:port or /path/to.sock> --name <name> [--dev] [--time 30m|1h|4h|1d]";
-  if (!value || !name) fail(usage);
-  const target = targetOf(value);
-  if (typeof target !== "string") fail(target.error);
+  const { name, dev, time, onlyNew } = options;
+  if (!value || !name) usage(`name the server and the site.\n${helpText("expose", VERSION)}`);
+  const target = targetOf(value!);
+  if (typeof target !== "string") usage(target.error);
   // `--ends-at` is the time in milliseconds, as the site wizard sends it (K-1131); `--time` is a span from now.
   const at = time !== undefined && isDigits(time) ? Number(time) : undefined;
   const end = time === undefined || at !== undefined ? undefined : timeBody(time, Date.now());
@@ -2661,17 +2743,51 @@ function exposeCommand(
         ? end.endsAt
         : undefined;
   if (time !== undefined && endsAt === undefined)
-    fail(`--time takes 30m, 1h, 4h or 1d, and --ends-at a future time in milliseconds, not ${time}.`);
+    usage(`--time takes 30m, 1h, 4h or 1d, and --ends-at a future time in milliseconds, not ${time}.`);
   const current = readSites();
   if (current === null) fail(`${sitesFile()} is broken. Fix it or delete it, then expose the sites again.`);
   // K-1131: the site wizard only makes sites; it never points a shared name at another server.
   if (onlyNew && current!.some((site) => site.name === name))
-    fail(`${name} is shared already on this machine. Pick another name.`);
-  const sites = addSite(current!, { name, target, dev, ...(endsAt === undefined ? {} : { endsAt }) });
-  if (typeof sites === "string") fail(sites);
+    fail(
+      `${name} is shared already on this machine. Pick another name, or run kitshn unexpose ${name} first.`,
+    );
+  const state = await stateOrReason();
+  let circle: { readonly id: string; readonly name: string } | null = null;
+  if (options.circle !== undefined) {
+    if (typeof state === "string") fail(`kitshn cannot check the circle: ${state}`);
+    const control = (state as AgentState).circles.filter((each) => each.level === "control");
+    circle =
+      control.find((each) => each.id === options.circle || each.name === options.circle) ??
+      fail(
+        `"${options.circle}" is not a circle where this machine has control (K-718). ${control.length > 0 ? `Pick one of: ${control.map((each) => each.name).join(", ")}.` : "Ask the owner to add this machine to a circle at control."}`,
+      );
+  }
+  const sites = addSite(current!, {
+    name: name!,
+    target: target as string,
+    dev,
+    ...(endsAt === undefined ? {} : { endsAt }),
+    ...(circle === null ? {} : { circle: circle.id }),
+  });
+  if (typeof sites === "string") usage(sites);
   writeSites(sites as Array<SiteEntry>);
+  const { address, pending } = liveAddress(
+    name!,
+    typeof state === "string" ? null : state,
+    readConfig().server,
+  );
+  if (options.json)
+    return void process.stdout.write(
+      `${JSON.stringify({ name, target, address, pending, endsAt: endsAt ?? null, circles: circle === null ? [] : [circle] })}\n`,
+    );
   console.log(
-    `Exposed ${target} as ${name}. Its card arrives in the tray of the map, private until you share it${endsAt === undefined ? "" : `, and it leaves every circle at ${new Date(endsAt).toISOString()}`}.`,
+    [
+      `Exposed ${target} as https://${address}${pending ? " (address pending: kitshn checks it, then makes the card)" : ""}.`,
+      circle === null ? reachText([]).replace("a first publish", "kitshn expose") : reachText([circle]),
+      ...(endsAt === undefined
+        ? []
+        : [`It leaves every circle at ${localTime(endsAt, Date.now())}; kitshn time <card> stop keeps it.`]),
+    ].join(" "),
   );
 }
 
@@ -2680,24 +2796,14 @@ async function serversCommand(asJson: boolean) {
   const servers = await scanServers(platform, [], true);
   if (asJson) return void process.stdout.write(`${JSON.stringify(servers)}\n`);
   if (servers.length === 0) return void console.log("No server listens on this machine.");
-  for (const server of servers)
-    console.log(
-      [
-        String(server.port).padEnd(6),
-        (server.process ?? "?").padEnd(16),
-        server.status ?? "no http",
-        server.title ?? "",
-      ]
-        .join(" ")
-        .trimEnd(),
-    );
-  console.log("Share one with: kitshn expose <port> --name <name> [--time 1h]");
+  for (const line of serverTable(servers, readSites() ?? [])) console.log(line);
+  console.log("Share one with: kitshn expose <port> --name <name> [--circle <circle>] [--time 1h]");
 }
 
 function unexposeCommand(name: string | undefined) {
   const sites = readSites();
   if (sites === null) fail(`${sitesFile()} is broken. Fix it or delete it.`);
-  if (!name || !sites!.some((site) => site.name === name)) fail(`no live site is named ${name ?? "(none)"}.`);
+  if (!name || !sites!.some((site) => site.name === name)) fail(unexposeRefusal(name, sites!));
   writeSites(sites!.filter((site) => site.name !== name));
   console.log(`Stopped exposing ${name}.`);
 }
@@ -2777,7 +2883,7 @@ function skillCommand(action: string | undefined, repo: boolean) {
       const result = checkSkill(homedir(), process.cwd(), VERSION);
       for (const line of result.lines) console.log(line);
       if (!result.ok) process.exit(1);
-    } else fail("usage: kitshn skill install [--repo] | kitshn skill check");
+    } else usage(`name what to do with the skill.\n${helpText("skill", VERSION)}`);
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
@@ -3125,7 +3231,16 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
       },
     };
   }
-  if (request.type === "forward") return forwardCall(request);
+  if (request.type === "forward") {
+    const answer = await forwardCall(request);
+    // K-1776: a call that waits for an approval gets the answer of its proposal, so the command can send it again.
+    const wait =
+      answer.type === "forward"
+        ? forwardWaiting(answer.status, Buffer.from(answer.body, "base64").toString("utf8"))
+        : null;
+    if (wait) proposalWaiters.set(wait.proposalId, [...(proposalWaiters.get(wait.proposalId) ?? []), emit]);
+    return answer;
+  }
   if (request.type === "command-result") {
     const waiter = commandWaiters.get(request.commandId);
     if (
@@ -3265,6 +3380,23 @@ const flag = (name: string) => {
   return index >= 0 ? args[index + 1] : undefined;
 };
 
+// C5 of the UX audit: `kitshn --help`, `kitshn help <command>` and `kitshn <command> --help`; gh takes its own.
+const flagArgs = args.includes("--") ? args.slice(0, args.indexOf("--")) : args;
+if (command === undefined || command === "help" || command === "--help" || command === "-h") {
+  console.log(helpText(command === "help" ? (args[0] ?? null) : null, VERSION));
+  process.exit(0);
+}
+if (command === "--version" || command === "-v") {
+  console.log(VERSION);
+  process.exit(0);
+}
+if (!isMachineCommand(command) && !isAgentCommand(command) && command !== "git-credential")
+  usage(`kitshn does not know ${command}. Run kitshn --help for the commands.`);
+if (command !== "gh" && (flagArgs.includes("--help") || flagArgs.includes("-h"))) {
+  console.log(helpText(command, VERSION));
+  process.exit(0);
+}
+
 switch (command) {
   case "join":
     await joinCommand(args[0], flag("--server"));
@@ -3312,6 +3444,7 @@ switch (command) {
     linkCheckCommand(args[0]);
     break;
   case "publish":
+  case "unpublish":
   case "address":
   case "logs":
   case "repo":
@@ -3333,13 +3466,14 @@ switch (command) {
     skillCommand(args[0], args.includes("--repo"));
     break;
   case "expose":
-    exposeCommand(
-      args[0],
-      flag("--name"),
-      args.includes("--dev"),
-      flag("--time") ?? flag("--ends-at"),
-      args.includes("--new"),
-    );
+    await exposeCommand(args[0], {
+      name: flag("--name"),
+      dev: args.includes("--dev"),
+      time: flag("--time") ?? flag("--ends-at"),
+      onlyNew: args.includes("--new"),
+      circle: flag("--circle"),
+      json: args.includes("--json"),
+    });
     break;
   case "servers":
     await serversCommand(args.includes("--json"));
@@ -3348,36 +3482,5 @@ switch (command) {
     unexposeCommand(args[0]);
     break;
   default:
-    console.log(`kitshn ${VERSION}
-
-kitshn join <code> --server <address>   join this machine to kitshn (K-602)
-kitshn service install                  run the daemon as a user service (K-601)
-kitshn service uninstall                stop and remove the user service
-kitshn run                              run the daemon in the foreground
-kitshn rotate-key                       replace the machine key over the live connection (K-1705)
-kitshn rekey <code>                     make a new machine key with the key code of its panel (K-1706, K-1708)
-kitshn status                           the machine, its key, its connection to kitshn and its tunnel
-kitshn health [--now] [--json]          the last check of the providers and links of this machine (K-630)
-kitshn local-users list|add|remove <u>  who else may use the local socket, as the daemon user (K-701);
-                                        add <u> --provider also lets it run a provider and its attester
-kitshn providers rebind <name> --to-user <u>
-                                        move a provider and its attester to a provider user (K-704)
-kitshn attester set --prefix <p.> --url <loopback url> --token-env <NAME>
-                                        register an attester of thread labels, as the daemon user or root (K-1751)
-kitshn provider                         join stdin and stdout to the local socket, for a provider (K-704)
-kitshn provider forget <name>           drop a provider that does not run, as the daemon user or root (K-704)
-kitshn link-check <socket or pipe>      exit 0 when this account's daemon serves that link proxy (K-1609)
-kitshn agent <action> [target]          ask kitshn as this machine (K-1710): --reason, --label k=v, --body json
-${AGENT_USAGE}
-kitshn setup-git                        git asks kitshn first for github.com tokens (K-1763)
-kitshn gh <args>                        gh with a kitshn token for this repo (K-1764)
-kitshn expose <port|socket> --name <n>  share a local server at <n>.<zone> (K-1104); --dev sets Host localhost;
-                                        also localhost:5173 or http://127.0.0.1:5173/ (K-1131); --time 1h ends it (K-212)
-kitshn doors install --user <u>         as root: the helper that gates game ports, for the daemon user (K-2005)
-kitshn doors uninstall                  as root: remove it and its firewall table
-kitshn unexpose <name>                  stop sharing it
-kitshn servers [--json]                 the servers that listen on this machine, with their page title (K-619)
-kitshn skill install [--repo]            the skill for coding agents, global or in this repo (K-618)
-kitshn skill check                      exit 1 when a copy of the skill is from another release
-kitshn version [--json]                 the version; --json: {"product":"kitshn","generation":2,"version"}`);
+    usage(`kitshn does not know ${command}. Run kitshn --help for the commands.`);
 }

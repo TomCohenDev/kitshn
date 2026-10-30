@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { Machine } from "../src/core/machine.ts";
 import { type Circle, OWNER_CIRCLE_ID, type Resource } from "../src/core/model.ts";
 import { accessToken, send, stubAccessCerts } from "./access.ts";
+import { setup as agentSetup } from "./machine-http.ts";
 
 /** K-1131: the site wizard only makes new sites, through one service that queues `kitshn expose --new`. */
 
@@ -236,4 +237,40 @@ it("ends a wizard site as the owner who asked, who can undo it; a failed request
   ]);
   expect((await post(owner, "/api/undo", { revision: expiry?.id })).status).toBe(200);
   expect((await seen()).places[card.id]).toEqual(vps);
+});
+
+it("puts a card of expose --circle in that circle only when the machine controls it, else in the tray (K-1104, K-718)", async () => {
+  stubAccessCerts();
+  await agentSetup({ addsPages: { mode: "automatic" } });
+  const stub = env.KITSHN.getByName("kitshn");
+  const owner = await accessToken("admin-aud", { email: "owner@example.com" });
+  await runInDurableObject(stub, (instance) =>
+    instance.webSocketMessage(
+      daemonSocket(),
+      JSON.stringify({
+        type: "sites",
+        sites: [
+          { name: "shared", target: "http://localhost:5173", dev: false, up: true, circle: "Agents" },
+          { name: "mine", target: "http://localhost:5174", dev: false, up: true, circle: OWNER_CIRCLE_ID },
+        ],
+      }),
+    ),
+  );
+  await runInDurableObject(stub, async (instance) => {
+    await (
+      instance as unknown as { checkSites(api: () => Promise<[]>, budget: number): Promise<number> }
+    ).checkSites(async () => [], 6);
+  });
+  const seen = (await (
+    await send("/api/state", { headers: { "cf-access-jwt-assertion": owner } })
+  ).json()) as {
+    places: Record<string, { x: number; y: number }>;
+    resources: ReadonlyArray<Resource>;
+  };
+  const placeOf = (name: string) =>
+    seen.places[seen.resources.find((resource) => resource.name === name)?.id ?? ""] ?? null;
+  const shared = placeOf("shared");
+  // The machine has control in Agents (r 200 at 5000, 5000), not in the Owner circle.
+  expect(shared && Math.hypot(shared.x - 5000, shared.y - 5000) < 200).toBe(true);
+  expect(placeOf("mine")).toBeNull();
 });

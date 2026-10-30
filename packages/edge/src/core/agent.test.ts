@@ -5,6 +5,7 @@ import {
   agentDeployPlan,
   agentHas,
   agentHomeCircle,
+  agentMayCommand,
   agentMayRunOn,
   agentRefusal,
   agentUploadPlace,
@@ -170,6 +171,8 @@ describe("agent keys (K-718)", () => {
       members: [{ _tag: "machine", machineId: "m1" }],
     });
     expect(agentMayRunOn({ ...inside, circles }, as("agent-1"), "m1", 0)).toBe(false);
+    // An agent key has no closed commands: it stays under the full limit (K-1732).
+    expect(agentMayCommand({ ...inside, circles }, as("agent-1"), "m1", "restart", 0)).toBe(false);
   });
   it("calls a device an agent only when it has an agent circle", () => {
     expect(isAgentKey(start(), { _tag: "device", tokenId: "t9", clientId: "tv", name: "TV" }, 0)).toBe(false);

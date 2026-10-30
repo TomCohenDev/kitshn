@@ -18,7 +18,7 @@ const machine: Machine = {
 };
 
 /** A daemon socket of a machine that passed its key check (K-1704); it keeps what kitshn sends. */
-const daemonSocket = (sent: Array<ServerToDaemon>) =>
+const daemonSocket = (sent: Array<ServerToDaemon>, status: object | null = null) =>
   ({
     deserializeAttachment: () => ({
       kind: "machine",
@@ -28,7 +28,7 @@ const daemonSocket = (sent: Array<ServerToDaemon>) =>
       check: "signed",
       answered: true,
       rotateBy: null,
-      status: null,
+      status,
       sample: null,
     }),
     serializeAttachment() {},
@@ -67,6 +67,20 @@ async function setup(rights: Partial<Record<string, RightMode>>, circle: Partial
       "agents",
       JSON.stringify(agents),
     );
+    // A card that the agent circle holds, for an ask that stays inside K-718.
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO resources (id, body) VALUES ('managed', ?)",
+      JSON.stringify({
+        id: "managed",
+        kind: "site.static",
+        name: "managed",
+        addresses: [],
+        status: "unknown",
+        group: null,
+        machine: null,
+      }),
+    );
+    state.storage.sql.exec("INSERT OR REPLACE INTO places (id, x, y) VALUES ('managed', 5000, 5000)");
   });
   await evictDurableObject(stub);
   return stub;
@@ -226,7 +240,7 @@ it("waits for one answer of its approver circle; a second answer gets already de
   expect(states).toEqual([{ state: "denied" }]);
   // K-1727: in a passkey circle, a member machine answers only while "machines may approve" is on.
   const locked = await setup({ deploys: { mode: "ask", circleId: "agents" } }, { needsPasskey: true });
-  const asked = await ask(locked, "deploy", "card");
+  const asked = await ask(locked, "deploy", "managed");
   const machineAnswer = () =>
     runInDurableObject(locked, (instance) =>
       (instance as unknown as Instance).decide(
@@ -684,7 +698,7 @@ it("shows a live ask only to who may answer it, on /api/state and on the socket 
     );
   });
   await evictDurableObject(stub);
-  expect(await ask(stub, "deploy", "card")).toMatchObject({ outcome: "waiting" });
+  expect(await ask(stub, "deploy", "managed")).toMatchObject({ outcome: "waiting" });
   const token = (claims: { email: string } | { common_name: string }) => accessToken("admin-aud", claims);
   const person = await token({ email: "owner@example.com" });
   const live = async (jwt: string) => {
@@ -726,13 +740,217 @@ it("shows a live ask only to who may answer it, on /api/state and on the socket 
     needsPasskey: true,
     members,
   } as Partial<Circle>);
-  expect(await ask(locked, "deploy", "card")).toMatchObject({ outcome: "waiting" });
+  expect(await ask(locked, "deploy", "managed")).toMatchObject({ outcome: "waiting" });
   expect(await live(await token({ common_name: "mac.access" }))).toEqual([]);
   const open = await setup({ deploys: { mode: "ask", circleId: "agents" } }, {
     needsPasskey: true,
     machinesMayApprove: true,
     members,
   } as Partial<Circle>);
-  expect(await ask(open, "deploy", "card")).toMatchObject({ outcome: "waiting" });
+  expect(await ask(open, "deploy", "managed")).toMatchObject({ outcome: "waiting" });
   expect(await live(await token({ common_name: "mac.access" }))).toMatchObject([{ machineId: "vps" }]);
+});
+
+/**
+ * K-718: the machine vps with its card `vps` and the Compose card `shop` that runs on it. A card inside `inCircle` is in
+ * the agent circle, so the machine manages it. The daemon connection takes jobs, and `sent` keeps them.
+ */
+async function machineWithCards(stub: DurableObjectStub, inCircle: ReadonlyArray<"vps" | "shop">) {
+  const place = (id: "vps" | "shop") => (inCircle.includes(id) ? 5000 : 9000);
+  await runInDurableObject(stub, (_, state) => {
+    const { sql } = state.storage;
+    const card = { addresses: [], status: "running", group: null, machine: "vps" };
+    sql.exec(
+      "INSERT OR REPLACE INTO machines (id, body) VALUES ('vps', ?)",
+      JSON.stringify({ ...machine, labels: ["deploy"] }),
+    );
+    for (const [id, kind] of [
+      ["vps", "machine"],
+      ["shop", "site.compose"],
+    ] as const) {
+      sql.exec(
+        "INSERT OR REPLACE INTO resources (id, body) VALUES (?, ?)",
+        id,
+        JSON.stringify({ ...card, id, kind, name: id }),
+      );
+      sql.exec("INSERT OR REPLACE INTO places (id, x, y) VALUES (?, ?, ?)", id, place(id), place(id));
+    }
+    sql.exec(
+      "INSERT OR REPLACE INTO repos (repo_id, name, state, first_seen) VALUES ('77', 'o/shop', 'allowed', 0)",
+    );
+    sql.exec(
+      `INSERT OR REPLACE INTO deploys (id, repo, repo_id, environment, resource_id, address, script, kind, sha, state, expires_at,
+         app, machine_id, compose_file)
+       VALUES ('d-shop', 'o/shop', '77', 'prod', 'shop', 'shop.example.com', '', 'deploy', 'abc', 'done', 1, 'compose', 'vps', 'compose.yml')`,
+    );
+    sql.exec("DELETE FROM jobs");
+  });
+  await evictDurableObject(stub);
+  const sent: Array<ServerToDaemon> = [];
+  const socket = daemonSocket(sent, { capabilities: ["compose-redeploy", "compose-guard"] });
+  await runInDurableObject(stub, (instance) => {
+    (instance as unknown as { openSocket(id: string): WebSocket }).openSocket = () => socket;
+  });
+  const jobs = () => sent.flatMap((message) => (message.type === "job" ? [message.command.kind] : []));
+  return { jobs };
+}
+
+const askedCircle = (stub: DurableObjectStub, id: string) =>
+  runInDurableObject(
+    stub,
+    (_, state) =>
+      state.storage.sql.exec<{ circle_id: string }>("SELECT circle_id FROM proposals WHERE id = ?", id).one()
+        .circle_id,
+  );
+
+const proposalOf = (answer: AskOutcome) => {
+  if (answer.outcome !== "waiting") throw new Error(`The ask did not wait: ${JSON.stringify(answer)}`);
+  return answer.proposalId;
+};
+
+const decideAs = (stub: DurableObjectStub, id: string, by: object) =>
+  runInDurableObject(stub, (instance) => (instance as unknown as Instance).decide(id, "approved", by));
+
+const shell = { body: { command: { kind: "shell", script: "uptime" } } };
+const restart = { body: { command: { kind: "restart" } } };
+
+it("asks the Owner for a shell job outside K-718, and the approved job goes out (K-718, K-1776)", async () => {
+  for (const rights of [
+    { runsCommands: { mode: "automatic" } },
+    { runsCommands: { mode: "ask", circleId: "agents" } },
+    {},
+  ] as const) {
+    const stub = await setup(rights);
+    const { jobs } = await machineWithCards(stub, ["vps"]);
+    const id = proposalOf(await ask(stub, "job", "vps", shell));
+    expect(await askedCircle(stub, id)).toBe(OWNER_CIRCLE_ID);
+    expect(jobs()).toEqual([]);
+    expect(await decideAs(stub, id, owner)).toMatchObject({ ok: true });
+    expect(jobs()).toEqual(["shell"]);
+  }
+  // A machine in no agent circle, such as a new machine in the tray, gets the same ask.
+  const tray = await setup({}, { members: [] });
+  const fresh = await machineWithCards(tray, []);
+  const asked = proposalOf(await ask(tray, "job", "vps", restart));
+  expect(await decideAs(tray, asked, owner)).toMatchObject({ ok: true });
+  expect(fresh.jobs()).toEqual(["restart"]);
+  // Inside K-718 the same right runs at once; "off" refuses, whatever the cards.
+  const inside = await setup({ runsCommands: { mode: "automatic" } });
+  const running = await machineWithCards(inside, ["vps", "shop"]);
+  expect(await ask(inside, "job", "vps", shell)).toMatchObject({ outcome: "done" });
+  expect(running.jobs()).toEqual(["shell"]);
+  const off = await setup({ runsCommands: { mode: "off" } });
+  await machineWithCards(off, ["vps"]);
+  expect(await ask(off, "job", "vps", shell)).toMatchObject({ outcome: "refused", need: "runsCommands" });
+});
+
+it("runs a closed command with only the machine card, and asks the Owner without it (K-718)", async () => {
+  const stub = await setup({ runsCommands: { mode: "automatic" } });
+  const { jobs } = await machineWithCards(stub, ["vps"]);
+  expect(await ask(stub, "job", "vps", restart)).toMatchObject({ outcome: "done" });
+  expect(await ask(stub, "job", "vps", { body: { command: { kind: "diagnostics" } } })).toMatchObject({
+    outcome: "done",
+  });
+  expect(jobs()).toEqual(["restart", "diagnostics"]);
+  const outside = await setup({ runsCommands: { mode: "automatic" } });
+  const other = await machineWithCards(outside, []);
+  const id = proposalOf(await ask(outside, "job", "vps", restart));
+  expect(await askedCircle(outside, id)).toBe(OWNER_CIRCLE_ID);
+  expect(await decideAs(outside, id, owner)).toMatchObject({ ok: true });
+  expect(other.jobs()).toEqual(["restart"]);
+});
+
+it("asks the Owner for a deploy of a card that the machine does not manage, and the approved one goes out (K-718)", async () => {
+  const stub = await setup({ deploys: { mode: "automatic" } });
+  const { jobs } = await machineWithCards(stub, []);
+  const id = proposalOf(await ask(stub, "deploy", "shop"));
+  expect(await askedCircle(stub, id)).toBe(OWNER_CIRCLE_ID);
+  expect(await decideAs(stub, id, owner)).toMatchObject({ ok: true });
+  expect(jobs()).toEqual(["compose-redeploy"]);
+  const state = await runInDurableObject(
+    stub,
+    (_, durable) => durable.storage.sql.exec<{ state: string }>("SELECT state FROM jobs").one().state,
+  );
+  expect(state).toBe("sent");
+});
+
+it("only a person lifts the K-718 limit of a machine (K-718, K-1723)", async () => {
+  // The scope held at the ask, and the circle that answers has no person: the card left, so the ask ends.
+  const stub = await setup({ runsCommands: { mode: "ask", circleId: "agents" } });
+  await machineWithCards(stub, ["vps", "shop"]);
+  const id = proposalOf(await ask(stub, "job", "vps", shell));
+  expect(await askedCircle(stub, id)).toBe("agents");
+  await machineWithCards(stub, ["vps"]);
+  const asMachine = {
+    ...owner,
+    visitor: { email: null, clientId: "vps.access", ip: null },
+    machineId: "vps",
+  };
+  expect(await decideAs(stub, id, asMachine)).toMatchObject({
+    ok: false,
+    error: expect.stringContaining("no longer allowed"),
+  });
+  // A machine in the Owner circle does not approve a call outside K-718, and the ask stays for a person.
+  const held = await setup({});
+  await machineWithCards(held, ["vps"]);
+  const ownerCircle = await runInDurableObject(held, (_, state) => {
+    const { sql } = state.storage;
+    const before = sql
+      .exec<{ body: string }>("SELECT body FROM circles WHERE id = ?", OWNER_CIRCLE_ID)
+      .one().body;
+    const circle = JSON.parse(before) as Circle;
+    sql.exec(
+      "INSERT OR REPLACE INTO machines (id, body) VALUES ('mac', ?)",
+      JSON.stringify({
+        ...machine,
+        id: "mac",
+        name: "mac",
+        clientId: "mac.access",
+        serviceTokenId: "token-mac",
+      }),
+    );
+    sql.exec(
+      "UPDATE circles SET body = ? WHERE id = ?",
+      JSON.stringify({
+        ...circle,
+        needsPasskey: false,
+        members: [...circle.members, { _tag: "machine", machineId: "mac" }],
+      }),
+      OWNER_CIRCLE_ID,
+    );
+    return before;
+  });
+  await evictDurableObject(held);
+  const asked = proposalOf(await ask(held, "job", "vps", shell));
+  expect(
+    await decideAs(held, asked, {
+      ...owner,
+      visitor: { email: null, clientId: "mac.access", ip: null },
+      machineId: "mac",
+    }),
+  ).toMatchObject({ ok: false, error: expect.stringContaining("Only a person") });
+  expect(await decideAs(held, asked, owner)).toMatchObject({ ok: true });
+  await runInDurableObject(held, (_, state) => {
+    state.storage.sql.exec("UPDATE circles SET body = ? WHERE id = ?", ownerCircle, OWNER_CIRCLE_ID);
+    state.storage.sql.exec("DELETE FROM machines WHERE id = 'mac'");
+  });
+  await evictDurableObject(held);
+});
+
+it("refuses at once a job that no approval can run (K-718, K-909, K-1722)", async () => {
+  const stub = await setup({});
+  await machineWithCards(stub, ["vps"]);
+  const volume = { command: { kind: "compose-volume-remove", project: "p", volume: "v" } };
+  expect(await ask(stub, "job", "vps", { body: volume })).toEqual({
+    outcome: "refused",
+    reason: expect.stringContaining("does not delete volumes"),
+  });
+  expect(await ask(stub, "job", "vps", { body: { command: { kind: "nothing" } } })).toMatchObject({
+    outcome: "refused",
+  });
+  const open = await runInDurableObject(
+    stub,
+    (_, state) => state.storage.sql.exec("SELECT id FROM proposals").toArray().length,
+  );
+  expect(open).toBe(0);
 });

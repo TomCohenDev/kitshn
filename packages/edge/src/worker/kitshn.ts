@@ -218,7 +218,7 @@ import {
   agentDeployPlan,
   agentHas,
   agentHomeCircle,
-  agentMayRunOn,
+  agentMayCommand,
   agentRefusal,
   cardsControlledBy,
   circlesOf,
@@ -5696,10 +5696,10 @@ export class Kitshn extends DurableObject<Env> {
    * K-614, K-718: a sender with the admin needs control on the machine card; any other sender is an agent key
    * and needs the card in its agent circles, checked again when the job goes out.
    */
-  private mayRunOn(visitor: Visitor, machineId: string) {
+  private mayRunOn(visitor: Visitor, machineId: string, kind: Command["kind"]) {
     return this.hasAdmin(visitor)
       ? this.canControl(visitor, machineId)
-      : agentMayRunOn(this.state, visitor, machineId, Date.now());
+      : agentMayCommand(this.state, visitor, machineId, kind, Date.now());
   }
 
   /**
@@ -6172,7 +6172,7 @@ export class Kitshn extends DurableObject<Env> {
     return queued;
   }
 
-  private addJob(caller: Caller, body: unknown) {
+  private addJob(caller: Caller, body: unknown, ownerApproved = false) {
     const input = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
     const parsed = parseCommand(input["command"]);
     if (typeof parsed === "string") return Response.json({ error: parsed }, { status: 400 });
@@ -6213,7 +6213,7 @@ export class Kitshn extends DurableObject<Env> {
         : parsed.kind === "compose-volume-remove" && orphan
           ? { ...parsed, project: orphan.project }
           : (providerCommand ?? parsed);
-    if (machineId !== null && !this.canControl(caller.visitor, machineId)) {
+    if (machineId !== null && !ownerApproved && !this.canControl(caller.visitor, machineId)) {
       return Response.json(
         {
           error:
@@ -6236,7 +6236,7 @@ export class Kitshn extends DurableObject<Env> {
         now,
         now + JOB_EXPIRY_MS,
         JSON.stringify(caller.actor),
-        JSON.stringify(caller.visitor),
+        JSON.stringify(ownerApproved ? { ...caller.visitor, ownerApproved } : caller.visitor),
         // K-613: "when online and idle" waits until no provider of the machine reports busy (K-1608).
         input["whenIdle"] === true ? 1 : 0,
       );
@@ -6287,7 +6287,11 @@ export class Kitshn extends DurableObject<Env> {
       Date.now(),
     );
     for (const job of queued) {
-      const visitor = JSON.parse(job.visitor) as Visitor & { readonly kitshn?: true };
+      const visitor = JSON.parse(job.visitor) as Visitor & {
+        readonly kitshn?: true;
+        /** K-1776: a person of the Owner circle approved this one call, so K-718 does not hold it back. */
+        readonly ownerApproved?: boolean;
+      };
       const queuedCommand = JSON.parse(job.command) as Command;
       // K-627: an automatic update waits while kitshn is paused, and goes when the owner turned the setting off.
       const automatic = visitor.kitshn === true && queuedCommand.kind === "update";
@@ -6320,7 +6324,8 @@ export class Kitshn extends DurableObject<Env> {
         const reason =
           queuedCommand.kind !== "compose-redeploy"
             ? "kitshn makes no other job for an agent."
-            : !cardsControlledBy(this.state, visitor, Date.now()).has(queuedCommand.project)
+            : !visitor.ownerApproved &&
+                !cardsControlledBy(this.state, visitor, Date.now()).has(queuedCommand.project)
               ? "The key no longer manages the card."
               : (this.redeployRefusal(job.machine_id, queuedCommand.project) ??
                 this.repoRefusal(this.repoIdOfCard(queuedCommand.project)));
@@ -6331,7 +6336,9 @@ export class Kitshn extends DurableObject<Env> {
       }
       // A job that kitshn makes itself (a deploy) needs no member with control (K-614).
       const allowed = new Set(
-        visitor.kitshn ? online : [...online].filter((id) => this.mayRunOn(visitor, id)),
+        visitor.kitshn || visitor.ownerApproved
+          ? online
+          : [...online].filter((id) => this.mayRunOn(visitor, id, queuedCommand.kind)),
       );
       const machine =
         job.machine_id !== null
@@ -9981,6 +9988,8 @@ export class Kitshn extends DurableObject<Env> {
     request: Request,
     caller: Caller,
     approved: ReadonlyArray<MachineRight> = [],
+    /** K-1776: a person of the Owner circle approved this one call, so K-718 does not refuse it. */
+    ownerApproved = false,
   ) {
     const now = Date.now();
     // K-1714: a machine's token over HTTP is a call that its daemon forwarded and signed; asks use the connection.
@@ -10005,7 +10014,7 @@ export class Kitshn extends DurableObject<Env> {
     )
       return Response.json({ error: `A machine has no ask for ${path} yet (K-1711).` }, { status: 403 });
     const own = circlesOf(this.state, caller.visitor, now);
-    if (own.size === 0)
+    if (own.size === 0 && !ownerApproved)
       return Response.json(
         { error: "This agent is in no agent circle, so it manages nothing (K-718)." },
         { status: 403 },
@@ -10326,17 +10335,13 @@ export class Kitshn extends DurableObject<Env> {
       // K-718, K-909: an agent key removes nothing, also no orphaned volume.
       const command = isRecord(body) && isRecord(body["command"]) ? body["command"] : null;
       if (command?.["kind"] === "compose-volume-remove")
-        return Response.json({ error: "An agent does not delete volumes (K-718, K-909)." }, { status: 403 });
+        return Response.json({ error: NO_VOLUME_JOBS }, { status: 403 });
       // Only the machines whose cards it manages; a label job could land on any machine.
-      if (typeof machineId !== "string" || !agentMayRunOn(this.state, caller.visitor, machineId, Date.now()))
-        return Response.json(
-          {
-            error:
-              "An agent runs jobs only on a machine whose card, and every card that runs on it, it manages (K-718).",
-          },
-          { status: 403 },
-        );
-      return this.addJob(agent, body);
+      const outside = ownerApproved
+        ? null
+        : this.outsideAgentLimit(caller.visitor, "job", typeof machineId === "string" ? machineId : "", body);
+      if (outside !== null) return Response.json({ error: outside }, { status: 403 });
+      return this.addJob(agent, body, ownerApproved);
     }
     if (path.startsWith("/agent/jobs/") && request.method === "GET") {
       const id = Number(path.slice("/agent/jobs/".length));
@@ -10411,8 +10416,8 @@ export class Kitshn extends DurableObject<Env> {
           { error: 'Send {"card": <id>, "mode": "redeploy" | "build"}.' },
           { status: 400 },
         );
-      if (!cardsControlledBy(this.state, caller.visitor, Date.now()).has(card))
-        return Response.json({ error: `This agent has no control on the card "${card}".` }, { status: 403 });
+      const outside = ownerApproved ? null : this.outsideAgentLimit(caller.visitor, "deploy", card, null);
+      if (outside !== null) return Response.json({ error: outside }, { status: 403 });
       const row = this.lastDone(card);
       const machine = row?.machine_id ? this.state.machines.get(row.machine_id) : undefined;
       const plan = agentDeployPlan(
@@ -10427,9 +10432,23 @@ export class Kitshn extends DurableObject<Env> {
       if (plan.kind === "build")
         return this.agentBuild(agent, repoId, plan.branch, row?.workflow ?? AGENT_WORKFLOW);
       if (!machine) return Response.json({ error: "The machine of this app is gone." }, { status: 409 });
-      return this.agentRedeploy(agent, machine.id, plan.command);
+      return this.agentRedeploy(agent, machine.id, plan.command, ownerApproved);
     }
     return Response.json({ error: `The agent path has no ${request.method} ${path}.` }, { status: 404 });
+  }
+
+  /** K-718: why this sender may not run this job or deploy without a person, or null. `addJob` refuses a bad command. */
+  private outsideAgentLimit(visitor: Visitor, action: ProposalAction, target: string, body: unknown) {
+    const now = Date.now();
+    if (action === "deploy")
+      return cardsControlledBy(this.state, visitor, now).has(target)
+        ? null
+        : `This agent has no control on the card "${target}".`;
+    if (action !== "job") return null;
+    const command = parseCommand(isRecord(body) ? body["command"] : null);
+    return typeof command === "string" || agentMayCommand(this.state, visitor, target, command.kind, now)
+      ? null
+      : "An agent runs jobs only on a machine whose card, and every card that runs on it, it manages (K-718).";
   }
 
   /** K-1710: answers one ask of a machine on its own connection. */
@@ -10548,6 +10567,13 @@ export class Kitshn extends DurableObject<Env> {
         outcome: "refused",
         reason: `This machine does not manage the card ${target} (K-718).`,
       });
+    // K-718, K-909: a job that no approval can run refuses at once, so the Owner gets no ask that cannot run.
+    if (action === "job") {
+      const command = parseCommand(isRecord(raw["body"]) ? raw["body"]["command"] : null);
+      if (typeof command === "string") return event({ outcome: "refused", reason: command });
+      if (command.kind === "compose-volume-remove")
+        return event({ outcome: "refused", reason: NO_VOLUME_JOBS });
+    }
     const needs = ASK_RIGHT[action];
     if (needs === "member")
       throw new Error(`The action ${action} needs membership, and only approve and deny do.`);
@@ -10577,6 +10603,22 @@ export class Kitshn extends DurableObject<Env> {
       }
       const failed = conditionProblem(mode.conditions, labels, prefixes);
       if (failed) return event({ outcome: "refused", reason: failed });
+      // K-718: a call outside the limit of the machine asks the Owner, whatever the mode of its right.
+      const visitor = { email: null, clientId: machine.clientId, ip: null };
+      if (this.outsideAgentLimit(visitor, action, target, raw["body"]) !== null)
+        return event(
+          await this.propose(
+            machine,
+            action,
+            target,
+            raw["body"],
+            reason,
+            labels,
+            needs,
+            OWNER_CIRCLE_ID,
+            now,
+          ),
+        );
       if (
         mode.mode === "ask" &&
         !(
@@ -10711,6 +10753,7 @@ export class Kitshn extends DurableObject<Env> {
     body: unknown,
     approved: ReadonlyArray<MachineRight>,
     labels: Readonly<Record<string, string>> = {},
+    ownerApproved = false,
   ): Promise<AskOutcome> {
     if (action === "pass") return this.issuePass(machine, target, labels);
     // K-1819, K-1820: a backup now or a restore of a Compose card that the machine manages.
@@ -10757,7 +10800,7 @@ export class Kitshn extends DurableObject<Env> {
       headers: { "content-type": "application/json" },
       ...(mapped.method === "POST" ? { body: JSON.stringify(mapped.body) } : {}),
     });
-    const response = await this.agentRequest(url.pathname, request, caller, approved);
+    const response = await this.agentRequest(url.pathname, request, caller, approved, ownerApproved);
     const json: unknown = await response.json().catch(() => null);
     if (response.ok) return { outcome: "done", result: json };
     return {
@@ -11302,6 +11345,17 @@ export class Kitshn extends DurableObject<Env> {
       }
       return { ok: false, error: `This ask is no longer allowed: ${gone}` };
     }
+    // K-718: only a person lifts the limit of a machine, so the approval of a machine leaves the ask open for a person.
+    if (decision === "approved" && by.machineId !== null) {
+      const asker = this.state.machines.get(proposal.machineId);
+      const outside = this.outsideAgentLimit(
+        { email: null, clientId: asker?.clientId ?? null, ip: null },
+        proposal.action,
+        proposal.target,
+        proposal.body,
+      );
+      if (outside !== null) return { ok: false, error: `Only a person approves this ask: ${outside}` };
+    }
     const [won] = this.sql<{ id: string }>(
       "UPDATE proposals SET state = ?, decided_at = ?, decided_by = ? WHERE id = ? AND state = 'pending' AND expires_at > ? RETURNING id",
       decision,
@@ -11343,6 +11397,7 @@ export class Kitshn extends DurableObject<Env> {
           proposal.body,
           [proposal.right],
           proposal.labels,
+          proposal.circleId === OWNER_CIRCLE_ID && by.machineId === null,
         )
       : ({ outcome: "refused", reason: "The machine that asked is gone." } as const);
     const result = outcome.outcome === "done" ? outcome.result : null;
@@ -11393,7 +11448,10 @@ export class Kitshn extends DurableObject<Env> {
         ? codeRightOff(this.state, proposal.machineId, proposal.right, proposal.target, now)
         : machineRightOff(this.state, proposal.machineId, proposal.right, now);
     if (off) return `the owner set the right "${MACHINE_RIGHT_NAMES[proposal.right]}" to off.`;
-    const ownerAsk = mode === null && proposal.circleId === OWNER_CIRCLE_ID;
+    // K-718: a job or a deploy outside the limit of the machine waits for the Owner, whatever the mode of its right.
+    const ownerAsk =
+      proposal.circleId === OWNER_CIRCLE_ID &&
+      (mode === null || proposal.action === "job" || proposal.action === "deploy");
     if (!ownerAsk && (mode?.mode !== "ask" || mode.circleId !== proposal.circleId))
       return `the right "${MACHINE_RIGHT_NAMES[proposal.right]}" no longer asks this circle.`;
     const failed = conditionProblem(
@@ -11420,7 +11478,15 @@ export class Kitshn extends DurableObject<Env> {
       this.sql("SELECT 1 AS one FROM repos WHERE repo_id = ?", proposal.target).length === 0
     )
       return `kitshn no longer knows the repo ${proposal.target}.`;
-    return null;
+    // K-718: another circle approves only inside the limit of the machine, so the limit counts at this moment.
+    if (proposal.circleId === OWNER_CIRCLE_ID) return null;
+    const asker = this.state.machines.get(proposal.machineId);
+    return this.outsideAgentLimit(
+      { email: null, clientId: asker?.clientId ?? null, ip: null },
+      proposal.action,
+      proposal.target,
+      proposal.body,
+    );
   }
 
   /** K-1722 to K-1724: the answer goes to the machine's open connection; an offline machine misses it. */
@@ -11671,6 +11737,7 @@ export class Kitshn extends DurableObject<Env> {
     caller: Caller,
     machineId: string,
     command: Extract<Command, { kind: "compose-redeploy" }>,
+    ownerApproved: boolean,
   ) {
     const now = Date.now();
     const id = this.ctx.storage.transactionSync(() => {
@@ -11683,7 +11750,7 @@ export class Kitshn extends DurableObject<Env> {
         now,
         now + DEPLOY_MS,
         JSON.stringify(caller.actor),
-        JSON.stringify({ ...caller.visitor, kitshn: true }),
+        JSON.stringify({ ...caller.visitor, kitshn: true, ownerApproved }),
       );
       this.insertRevision(caller.actor, `Redeployed the last good build of ${command.name}`, [], null);
       return inserted?.id ?? null;
@@ -15685,6 +15752,7 @@ function parsePausedBy(
   return { actor: JSON.parse(actor) as Actor, at: Number(at) };
 }
 
+const NO_VOLUME_JOBS = "An agent does not delete volumes (K-718, K-909).";
 const KITSHN_JOB = JSON.stringify({ email: null, clientId: null, ip: null, kitshn: true });
 
 /** K-718: the workflow file that an agent key starts in an app repo, the one that the map's recipe shows. */

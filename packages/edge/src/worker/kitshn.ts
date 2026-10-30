@@ -56,6 +56,9 @@ import {
   isRelease,
   lastLine,
   nextAutoUpdate,
+  BUSY_CAP_MS,
+  releaseBusyStep,
+  withBusyWaits,
   parseRollout,
   startStep,
   stepSent,
@@ -3846,6 +3849,7 @@ export class Kitshn extends DurableObject<Env> {
    * name stay, offline. An address that another card or another machine's site holds stays off the card.
    */
   private updateProviders(machine: Machine, value: unknown) {
+    const wasBusy = this.busy(machine.id);
     let reports: ReadonlyArray<ProviderReport>;
     try {
       reports = decodeProviderReports(value);
@@ -4021,6 +4025,8 @@ export class Kitshn extends DurableObject<Env> {
     this.broadcast();
     // K-1608: a report can end `busy`, so a job that waits for an idle machine goes now.
     this.deliverJobs();
+    // K-627: a machine that turns busy or idle can change which machine the rollout updates next.
+    if (this.busy(machine.id) !== wasBusy) this.autoUpdate();
     void this.scheduleAlarm();
   }
 
@@ -6137,28 +6143,34 @@ export class Kitshn extends DurableObject<Env> {
     let rollout = advanceRollout(before, before.step ? this.stepJob(before.step.jobId) : null, (id) =>
       this.liveStatus(id),
     );
-    const next = nextAutoUpdate(
-      version,
-      this.state.paused !== null,
-      rollout,
-      [...this.state.machines.values()].map((machine) => ({
-        id: machine.id,
-        order: machine.order,
-        autoUpdate: machine.autoUpdate !== false,
-        hasKey: machine.key?.kind === "public",
-        status: this.liveStatus(machine.id),
-      })),
-    );
+    // K-627: a step whose job still waits for a busy machine holds no other machine; its job goes, without a failure.
+    const held = rollout.step;
+    if (held) {
+      rollout = releaseBusyStep(rollout, this.stepJob(held.jobId), (id) => this.busy(id));
+      if (rollout.step === null)
+        this.sql("UPDATE jobs SET state = 'expired' WHERE id = ? AND state = 'queued'", held.jobId);
+    }
+    const now = Date.now();
+    const machines = [...this.state.machines.values()].map((machine) => ({
+      id: machine.id,
+      order: machine.order,
+      autoUpdate: machine.autoUpdate !== false,
+      hasKey: machine.key?.kind === "public",
+      status: this.liveStatus(machine.id),
+      busy: this.busy(machine.id),
+    }));
+    rollout = withBusyWaits(rollout, version, machines, now);
+    const next = nextAutoUpdate(version, this.state.paused !== null, rollout, machines, now);
     if (next !== null) {
       const jobId = this.queueKitshnJob(
-        next,
+        next.machineId,
         { kind: "update", version },
         { _tag: "kitshn", reason: "automatic daemon update (K-627)" },
-        Date.now() + JOB_EXPIRY_MS,
-        // K-1608: the update waits while a provider of the machine reports busy.
-        true,
+        now + JOB_EXPIRY_MS,
+        // K-1608: an idle machine's update still waits if it turns busy; after the cap it goes while busy.
+        next.whenIdle,
       );
-      rollout = startStep(rollout, version, next, jobId);
+      rollout = startStep(rollout, version, next.machineId, jobId, next.whenIdle);
     }
     this.saveRollout(rollout);
     const failed = rollout.version === version ? rollout.failed : null;
@@ -6980,6 +6992,9 @@ export class Kitshn extends DurableObject<Env> {
       "SELECT MIN(expires_at) AS expires_at FROM jobs WHERE state IN ('queued', 'sent')",
     );
     if (job?.expires_at && !waits("jobs")) next = Math.min(next, Math.max(job.expires_at, now));
+    // K-627: a busy machine gets its update when its wait reaches the cap.
+    for (const since of Object.values(this.rollout().busySince ?? {}))
+      next = Math.min(next, Math.max(since + BUSY_CAP_MS, now));
     // K-1724: the next proposal that expires.
     const [proposal] = this.sql<{ expires_at: number | null }>(
       "SELECT MIN(expires_at) AS expires_at FROM proposals WHERE state = 'pending'",
@@ -14187,6 +14202,9 @@ export class Kitshn extends DurableObject<Env> {
     await this.alarmStep("liveness", undefined, () => this.checkLiveness(now));
     // The alarm runs every 2 minutes while a daemon is connected, so it tells the maps only about real changes.
     let changed = (await this.alarmStep("jobs", 0, () => this.expireJobs(now))) > 0;
+    // K-627: a busy machine whose wait reached the cap gets its update now.
+    if (Object.values(this.rollout().busySince ?? {}).some((since) => since + BUSY_CAP_MS <= now))
+      this.autoUpdate();
     if ((await this.alarmStep("rollbacks", 0, () => this.settleRollbacks())) > 0) changed = true;
     await this.alarmStep("proposals", undefined, () => this.expireProposals(now));
     const before = JSON.stringify(accessStates(this.desired(now), this.access));

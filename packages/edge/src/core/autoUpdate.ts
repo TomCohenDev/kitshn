@@ -15,12 +15,22 @@ export interface Rollout {
     readonly jobId: number;
     /** When kitshn sent the job; only a connection after it can show that the daemon came back. */
     readonly sentAt: number | null;
+    /** The job waits while the machine is busy (K-1608); false after `BUSY_CAP_MS`. Absent in older rollouts: true. */
+    readonly whenIdle?: boolean;
   } | null;
   readonly failed: { readonly machineId: string; readonly reason: string } | null;
   readonly updated: ReadonlyArray<string>;
+  /** Since when each BEHIND machine waits because a provider reports `busy`; absent in older rollouts. */
+  readonly busySince?: Readonly<Record<string, number>>;
 }
 
 export const NO_ROLLOUT: Rollout = { version: "", step: null, failed: null, updated: [] };
+
+/**
+ * K-627: a busy machine gets its update at the latest this long after kitshn first found it busy, also while busy.
+ * Until then kitshn updates the next machines, so a machine whose agents always run never holds the rollout.
+ */
+export const BUSY_CAP_MS = 2 * 60 * 60 * 1000;
 
 /** K-627: the job of the step. "closed": it failed only because the connection closed. "gone": expired or none. */
 export interface StepJob {
@@ -35,6 +45,8 @@ export type LiveStatus =
 /** K-628: what the card shows about the update of its daemon. */
 export type DaemonUpdate =
   | { readonly state: "updating" }
+  /** K-627: a provider reports `busy`, so the update waits until the machine is idle, at the latest until `until`. */
+  | { readonly state: "waiting"; readonly reason: "busy"; readonly until: number }
   | { readonly state: "updated" }
   | { readonly state: "failed"; readonly reason: string };
 
@@ -111,36 +123,94 @@ export interface AutoUpdateMachine {
   /** K-1708: a machine without a key gets no jobs. */
   readonly hasKey: boolean;
   readonly status: LiveStatus;
+  /** K-1608: a running provider card of the machine reports `busy`. */
+  readonly busy: boolean;
+}
+
+/** K-627: what kitshn queues next: the machine, and whether its job waits while the machine is busy. */
+export interface AutoUpdatePick {
+  readonly machineId: string;
+  readonly whenIdle: boolean;
+}
+
+/** K-627: the BEHIND machines of a release that get automatic updates, in the owner's order. */
+const behindMachines = (version: string, machines: ReadonlyArray<AutoUpdateMachine>) =>
+  machines
+    .filter(
+      (machine) =>
+        machine.autoUpdate &&
+        machine.hasKey &&
+        machine.status !== null &&
+        isRelease(machine.status.version) &&
+        machine.status.version !== version &&
+        (machine.status.capabilities ?? []).includes("update"),
+    )
+    .toSorted((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+
+/**
+ * K-627: the rollout with the wait of each BEHIND machine that is busy now: a wait keeps its start while the machine
+ * stays busy, and ends when it is idle, updated or gone.
+ */
+export function withBusyWaits(
+  rollout: Rollout,
+  version: string,
+  machines: ReadonlyArray<AutoUpdateMachine>,
+  now: number,
+): Rollout {
+  const busySince = Object.fromEntries(
+    behindMachines(version, machines)
+      .filter((machine) => machine.busy)
+      .map((machine) => [machine.id, rollout.busySince?.[machine.id] ?? now]),
+  );
+  return { ...rollout, busySince };
+}
+
+/**
+ * K-627: a step whose job still waits for a busy machine holds nothing: it ends without a failure, and kitshn comes
+ * back to that machine later. A step sent after the cap, or a job that already went out, stays.
+ */
+export function releaseBusyStep(
+  rollout: Rollout,
+  job: StepJob | null,
+  busy: (machineId: string) => boolean,
+): Rollout {
+  const step = rollout.step;
+  if (!step || step.whenIdle === false || job?.state !== "queued" || !busy(step.machineId)) return rollout;
+  return { ...rollout, step: null };
 }
 
 /**
  * K-627: the one machine that gets the next automatic update, or null. Nothing while kitshn is paused, while a step
- * of any release runs, or after one failed on this release; then the first BEHIND machine in the owner's order.
+ * of any release runs, or after one failed on this release; then the first BEHIND machine in the owner's order that is
+ * idle, or that waited `BUSY_CAP_MS` while busy (`rollout.busySince`, from `withBusyWaits`).
  */
 export function nextAutoUpdate(
   version: string,
   paused: boolean,
   rollout: Rollout,
   machines: ReadonlyArray<AutoUpdateMachine>,
-): string | null {
+  now: number,
+): AutoUpdatePick | null {
   if (!isRelease(version) || paused || rollout.step !== null) return null;
   if (rollout.version === version && rollout.failed !== null) return null;
-  const behind = machines.filter(
-    (machine) =>
-      machine.autoUpdate &&
-      machine.hasKey &&
-      machine.status !== null &&
-      isRelease(machine.status.version) &&
-      machine.status.version !== version &&
-      (machine.status.capabilities ?? []).includes("update"),
-  );
-  return behind.toSorted((a, b) => a.order - b.order || a.id.localeCompare(b.id))[0]?.id ?? null;
+  for (const machine of behindMachines(version, machines)) {
+    if (!machine.busy) return { machineId: machine.id, whenIdle: true };
+    const since = rollout.busySince?.[machine.id] ?? now;
+    if (now - since >= BUSY_CAP_MS) return { machineId: machine.id, whenIdle: false };
+  }
+  return null;
 }
 
 /** K-627: the rollout with a new step; a new release starts a new rollout. */
-export const startStep = (rollout: Rollout, version: string, machineId: string, jobId: number): Rollout => ({
-  ...(rollout.version === version ? rollout : { ...NO_ROLLOUT, version }),
-  step: { machineId, jobId, sentAt: null },
+export const startStep = (
+  rollout: Rollout,
+  version: string,
+  machineId: string,
+  jobId: number,
+  whenIdle = true,
+): Rollout => ({
+  ...(rollout.version === version ? rollout : { ...NO_ROLLOUT, version, busySince: rollout.busySince ?? {} }),
+  step: { machineId, jobId, sentAt: null, whenIdle },
 });
 
 /**
@@ -150,7 +220,7 @@ export const startStep = (rollout: Rollout, version: string, machineId: string, 
 export function stepSent(rollout: Rollout, version: string, now: number): Rollout {
   if (rollout.step === null) return rollout;
   return {
-    ...startStep(rollout, version, rollout.step.machineId, rollout.step.jobId),
+    ...startStep(rollout, version, rollout.step.machineId, rollout.step.jobId, rollout.step.whenIdle ?? true),
     step: { ...rollout.step, sentAt: now },
   };
 }
@@ -158,6 +228,8 @@ export function stepSent(rollout: Rollout, version: string, now: number): Rollou
 /** K-628: what the card of a machine shows for the release of the Worker. */
 export function daemonUpdate(rollout: Rollout, machineId: string, version: string): DaemonUpdate | null {
   if (rollout.step?.machineId === machineId) return { state: "updating" };
+  const since = rollout.busySince?.[machineId];
+  if (since !== undefined) return { state: "waiting", reason: "busy", until: since + BUSY_CAP_MS };
   if (rollout.version !== version) return null;
   if (rollout.failed?.machineId === machineId) return { state: "failed", reason: rollout.failed.reason };
   return rollout.updated.includes(machineId) ? { state: "updated" } : null;

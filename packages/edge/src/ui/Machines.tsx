@@ -2,7 +2,7 @@ import { useState } from "preact/hooks";
 import type { Command } from "../core/machine.ts";
 import type { JobView, MachineView } from "../core/protocol.ts";
 import { isRelease } from "../core/autoUpdate.ts";
-import { MACHINE_TIPS } from "./actions.ts";
+import { MACHINE_TIPS, untilText } from "./actions.ts";
 import { Switch } from "./controls.tsx";
 import { callApi, useStore } from "./store.ts";
 
@@ -111,6 +111,15 @@ function MachineStickers(props: { view: MachineView }) {
         data-tip={`Updating: kitshn installs the daemon of edge-${snapshot.version}. Other machines wait for this one (K-627).`}
       >
         updating
+      </a>
+    ) : update?.state === "waiting" ? (
+      <a
+        class="sticker wait"
+        href={panel}
+        onPointerDown={keepPress}
+        data-tip={`Update waits: busy, ${ago(Date.now(), update.until)} left. A provider of this machine reports busy, so kitshn updates the other machines first, and this one when it is idle, or ${untilText(update.until)} also while busy (K-627).`}
+      >
+        update waits
       </a>
     ) : update?.state === "failed" ? (
       <a

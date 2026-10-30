@@ -156,6 +156,13 @@ export const Request = Schema.Union([
   }),
   /** K-704: `kitshn provider forget <name>`: the daemon drops a provider that does not run, so it no longer reports it. */
   Schema.Struct({ id: Id, type: Schema.Literal("provider-forget"), provider: ProviderName }),
+  /** K-704: root or the daemon user moves a provider name, and the attester of its prefix, to another user. */
+  Schema.Struct({
+    id: Id,
+    type: Schema.Literal("provider-rebind"),
+    provider: ProviderName,
+    uid: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  }),
   /**
    * K-709: a provider sets the part of a desired state of this machine, or the shared part. kitshn stores it and pushes
    * it to every machine of the provider. Only the connection that registered the provider sends it.
@@ -323,6 +330,7 @@ export const Answer = Schema.Union([
   Schema.Struct({ id: Id, type: Schema.Literal("remove") }),
   Schema.Struct({ id: Id, type: Schema.Literal("command-result") }),
   Schema.Struct({ id: Id, type: Schema.Literal("provider-forget") }),
+  Schema.Struct({ id: Id, type: Schema.Literal("provider-rebind") }),
   /** K-706: an event: the grant tables of every resource of the provider, sent on each change. */
   Schema.Struct({ type: Schema.Literal("grants"), provider: Schema.String, tables: GrantTables }),
   /**

@@ -18,6 +18,38 @@ export const unregisteredT3 = (
     ? "this T3 thread is not checked: the T3 server has not registered with kitshn."
     : null;
 
+/**
+ * K-701, K-1751: why a user may not register an attester of `prefix`, or null. The daemon user and root register any
+ * prefix; a provider user only `<name>.` of a provider name that belongs to it (`owned`).
+ */
+export function attesterPrefixProblem(
+  prefix: string,
+  uid: number,
+  own: number,
+  owned: ReadonlyArray<string>,
+): string | null {
+  if (uid === own || uid === 0 || owned.some((name) => prefix === `${name}.`)) return null;
+  return owned.length > 0
+    ? `the user id ${uid} registers only the prefix of its own provider (${owned.map((name) => `${name}.`).join(", ")})`
+    : `the user id ${uid} registers only the prefix of its own provider; register the provider first`;
+}
+
+/**
+ * K-704, K-1751: `machine.json` with the attester of `prefix` bound to another user id, as a rebind of its provider
+ * moves it; the same object when no attester has that prefix.
+ */
+export function withAttesterUid(
+  machine: Record<string, unknown>,
+  prefix: string,
+  uid: number,
+): Record<string, unknown> {
+  const old = Array.isArray(machine["attesters"]) ? (machine["attesters"] as Array<unknown>) : [];
+  const ofPrefix = (item: unknown): item is Record<string, unknown> =>
+    typeof item === "object" && item !== null && (item as Record<string, unknown>)["prefix"] === prefix;
+  if (!old.some(ofPrefix)) return machine;
+  return { ...machine, attesters: old.map((item) => (ofPrefix(item) ? { ...item, uid } : item)) };
+}
+
 /** K-1751: one attester of `machine.json`: its label prefix, its loopback address and the variable of the token. */
 export interface Attester {
   readonly prefix: string;

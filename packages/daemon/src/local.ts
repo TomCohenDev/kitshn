@@ -4,7 +4,7 @@ import { type Answer, type Request, MAX_LINE_LENGTH, line, readAnswer, readReque
 import { type Stats, chmodSync, existsSync, lstatSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { dirname } from "node:path";
-import { type PeerDecision, peerUid, requestAllowed } from "./peer.ts";
+import { type PeerDecision, peerUid, requestAllowed, requestSenders } from "./peer.ts";
 import { type Platform, ownUid } from "./service.ts";
 import { pipeServerProblem } from "./winpipe.ts";
 
@@ -78,6 +78,8 @@ export interface LocalOptions {
   readonly platform: Platform;
   /** Called for each connection with the peer user id. A peer whose user id the kernel does not give never passes. */
   readonly decide: (peer: number) => PeerDecision;
+  /** K-701: the local users that may also run a provider; read at each request. */
+  readonly providerUsers?: () => ReadonlyArray<number>;
   /** Answers with the id of the request. `emit` sends a later event on the same connection (K-703, K-1722). */
   readonly handle: (request: Request, caller: Caller, emit: (event: Answer) => void) => Promise<Answer>;
   readonly log: (text: string) => void;
@@ -238,17 +240,17 @@ async function answerLine(
   const read = readRequest(text);
   if (!read.ok) {
     const provider = registeringProvider(text);
-    if (provider !== null && requestAllowed("register", uid, ownUid()))
+    if (provider !== null && requestAllowed("register", uid, ownUid(), options.providerUsers?.() ?? []))
       options.refused?.(provider, read.answer.error);
     return send(read.answer);
   }
   const { request } = read;
-  if (!requestAllowed(request.type, uid, ownUid())) {
+  if (!requestAllowed(request.type, uid, ownUid(), options.providerUsers?.() ?? [])) {
     options.log(`local socket: refused ${request.type} from user id ${uid}`);
     return send({
       id: request.id,
       type: "error",
-      error: `${request.type} is not allowed for the user id ${uid}; only the daemon user and root may send it (K-701).`,
+      error: `${request.type} is not allowed for the user id ${uid}; only ${requestSenders(request.type)} may send it (K-701).`,
     });
   }
   options.log(`local socket: ${request.type} from user id ${uid}`);

@@ -32,22 +32,28 @@ interface Entry {
 interface Saved {
   readonly providers: ReadonlyArray<ProviderReport>;
   readonly pushed: Readonly<Record<string, unknown>>;
+  /** K-704: the user id that each provider name belongs to; the first accepted `register` binds it. */
+  readonly owners?: Readonly<Record<string, number>>;
 }
 
 /** A refusal reason fits the text of a notification (K-1901). */
 const MAX_REFUSAL_LENGTH = 500;
 
 const decodePushed = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
+const decodeOwners = Schema.decodeUnknownSync(
+  Schema.Record(Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+);
 
 /** K-1608: the saved state of `providers.json`; a file that does not decode starts empty, and says why. */
 export function parseSaved(value: unknown): { saved: Saved; problem: string | null } {
   if (value === null) return { saved: { providers: [], pushed: {} }, problem: null };
   try {
-    const record = value as { providers?: unknown; pushed?: unknown };
+    const record = value as { providers?: unknown; pushed?: unknown; owners?: unknown };
     return {
       saved: {
         providers: decodeProviderReports(record.providers).map((report) => ({ ...report, online: false })),
         pushed: decodePushed(record.pushed ?? {}),
+        owners: decodeOwners(record.owners ?? {}),
       },
       problem: null,
     };
@@ -65,6 +71,7 @@ export class Providers {
   // Known limit: memory only, so a daemon restart forgets a refusal until the provider tries again.
   private readonly refusals = new Map<string, ProviderRefusal>();
   private pushed: Record<string, unknown>;
+  private readonly owners: Map<string, number>;
 
   constructor(
     saved: Saved,
@@ -74,6 +81,30 @@ export class Providers {
   ) {
     for (const report of saved.providers) this.entries.set(report.name, { report, connection: null });
     this.pushed = { ...saved.pushed };
+    this.owners = new Map(Object.entries(saved.owners ?? {}));
+  }
+
+  /** K-704: the user id that a provider name belongs to, or undefined before its first accepted `register`. */
+  ownerOf(provider: string): number | undefined {
+    return this.owners.get(provider);
+  }
+
+  /** K-704, K-1751: the provider names that belong to a user id, so its attester prefix is one of them. */
+  ownedBy(uid: number): Array<string> {
+    return [...this.owners].filter(([, owner]) => owner === uid).map(([name]) => name);
+  }
+
+  /**
+   * K-704: moves a provider name to another user id. The cards stay the same cards; a connection of the old user
+   * goes offline, so its next request must `register` again, which the new bind refuses.
+   */
+  rebind(provider: string, uid: number): string | null {
+    const entry = this.entries.get(provider);
+    if (!entry) return `this machine has no provider ${provider}.`;
+    this.owners.set(provider, uid);
+    if (entry.connection !== null) this.entries.set(provider, { ...entry, connection: null });
+    this.persist();
+    return null;
   }
 
   /** K-704 to K-705: applies one request of the connection `connection`; `takenSites` are the names of `sites.json`. */
@@ -81,8 +112,15 @@ export class Providers {
     request: Exclude<ProviderRequest, { type: "command-result" }>,
     connection: number,
     takenSites: ReadonlySet<string>,
+    uid: number,
   ): ProviderOutcome {
     const old = this.entries.get(request.provider);
+    const owner = this.owners.get(request.provider);
+    if (request.type === "register" && owner !== undefined && owner !== uid) {
+      const error = `${request.provider} belongs to the user id ${owner}, not to ${uid}; root or the daemon user moves it with kitshn providers rebind ${request.provider} --to-user <user> (K-704).`;
+      this.refuse(request.provider, error);
+      return { ok: false, error };
+    }
     if (request.type !== "register" && old?.connection !== connection)
       return { ok: false, error: `register ${request.provider} on this connection first (K-704).` };
     const report: ProviderReport =
@@ -107,8 +145,10 @@ export class Providers {
     }
     if (request.type === "register" && this.refusals.delete(request.provider)) this.refusalsChanged();
     this.entries.set(request.provider, { report, connection });
+    const bound = request.type === "register" && owner === undefined;
+    if (bound) this.owners.set(request.provider, uid);
     const changed = JSON.stringify(old?.report) !== JSON.stringify(report);
-    if (changed) this.persist();
+    if (changed || bound) this.persist();
     return { ok: true, changed };
   }
 
@@ -138,6 +178,7 @@ export class Providers {
     if (!entry) return `this machine has no provider ${provider}.`;
     if (entry.connection !== null) return `${provider} is connected; stop it first.`;
     this.entries.delete(provider);
+    this.owners.delete(provider);
     for (const key of Object.keys(this.pushed))
       if (
         key === pushKey.grants(provider) ||
@@ -228,6 +269,7 @@ export class Providers {
     this.save({
       providers: this.reports().map((report) => ({ ...report, online: false })),
       pushed: this.pushed,
+      owners: Object.fromEntries(this.owners),
     });
   }
 }

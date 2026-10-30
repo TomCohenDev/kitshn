@@ -53,33 +53,49 @@ function readPeer(calls: Calls, fd: number): number | null {
 }
 
 /**
- * K-701: who may send each request. A user in `localUsers` reads the status and asks kitshn (K-1710); the
- * machine-admin requests stay with the daemon user and root. A new request kind must take a side here.
+ * K-701: who may send each request. A user in `localUsers` reads the status and asks kitshn (K-1710). A provider user
+ * (`kitshn local-users add <user> --provider`) also runs a provider and its attester. The machine-admin requests stay
+ * with the daemon user and root. A new request kind must take a side here.
  */
-const REQUEST_SENDERS: Record<Request["type"], "local-users" | "daemon-user-or-root"> = {
+const REQUEST_SENDERS: Record<Request["type"], "local-users" | "providers" | "daemon-user-or-root"> = {
   status: "local-users",
   "rotate-key": "daemon-user-or-root",
   reconnect: "daemon-user-or-root",
   ask: "local-users",
   "forget-token": "local-users",
   forward: "local-users",
-  // K-1751: an attester vouches for threads, so only the daemon user and root register one.
-  "attester-set": "daemon-user-or-root",
+  // K-1751: an attester vouches for threads; a provider user registers only the prefix of its own provider.
+  "attester-set": "providers",
   // K-704: a provider adds cards that circles share and enforces their grants, so it acts for the machine.
-  register: "daemon-user-or-root",
-  upsert: "daemon-user-or-root",
-  remove: "daemon-user-or-root",
-  "command-result": "daemon-user-or-root",
+  register: "providers",
+  upsert: "providers",
+  remove: "providers",
+  "command-result": "providers",
+  "desired-set": "providers",
+  audit: "providers",
   "provider-forget": "daemon-user-or-root",
-  "desired-set": "daemon-user-or-root",
-  audit: "daemon-user-or-root",
+  "provider-rebind": "daemon-user-or-root",
   // K-1612, K-605: a local user cancels the machine's own queued jobs and reads its samples, as with `ask`.
   "job-cancel": "local-users",
   samples: "local-users",
 };
 
-export const requestAllowed = (type: Request["type"], uid: number, own: number) =>
-  REQUEST_SENDERS[type] === "local-users" || uid === own || uid === 0;
+export const requestAllowed = (
+  type: Request["type"],
+  uid: number,
+  own: number,
+  providerUsers: ReadonlyArray<number>,
+) =>
+  REQUEST_SENDERS[type] === "local-users" ||
+  uid === own ||
+  uid === 0 ||
+  (REQUEST_SENDERS[type] === "providers" && providerUsers.includes(uid));
+
+/** K-701: who may send a request, for the refusal. */
+export const requestSenders = (type: Request["type"]) =>
+  REQUEST_SENDERS[type] === "providers"
+    ? "the daemon user, root and provider users (kitshn local-users add <user> --provider)"
+    : "the daemon user and root";
 
 export type PeerDecision = { readonly accept: true } | { readonly accept: false; readonly reason: string };
 
@@ -99,6 +115,7 @@ export function peerDecision(
 
 const LocalUsers = Schema.Struct({
   localUsers: Schema.optionalKey(Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))),
+  providerUsers: Schema.optionalKey(Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))),
 });
 const decodeLocalUsers = Schema.decodeUnknownSync(LocalUsers);
 
@@ -108,5 +125,19 @@ export function localUsersOf(machine: unknown): ReadonlyArray<number> | null {
     return decodeLocalUsers(machine).localUsers ?? [];
   } catch {
     return null;
+  }
+}
+
+/**
+ * K-701: the local users that may also run a provider (`--provider`): `providerUsers` of `machine.json`, only those
+ * that `localUsers` still holds; none when it cannot be read (K-006).
+ */
+export function providerUsersOf(machine: unknown): ReadonlyArray<number> {
+  try {
+    const decoded = decodeLocalUsers(machine);
+    const local = decoded.localUsers ?? [];
+    return (decoded.providerUsers ?? []).filter((uid) => local.includes(uid));
+  } catch {
+    return [];
   }
 }

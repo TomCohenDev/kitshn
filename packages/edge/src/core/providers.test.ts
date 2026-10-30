@@ -116,6 +116,17 @@ describe("grant tables (K-706)", () => {
         endsAt: null,
       },
     ]);
+    // A machine's daemon token held as a device member is that machine, so the provider can tell it from a device.
+    const viaToken = state([
+      circle("her", [
+        { _tag: "device", tokenId: "t-vps", clientId: "vps.access", name: "kitshn machine vps" },
+        { _tag: "device", tokenId: "d", clientId: "phone.access", name: "phone" },
+      ]),
+    ]);
+    expect(grantsOf(viaToken, thread(viaToken), 0)[0]?.circle.rules).toEqual([
+      { machine: { machineId: "vps", clientId: "vps.access" } },
+      { device: { clientId: "phone.access", name: "phone" } },
+    ]);
   });
 
   it("carries the earlier end date and drops an ended share (K-209)", () => {

@@ -74,8 +74,14 @@ const ruleOf = (member: Member, machines: ReadonlyMap<string, Machine>): GrantRu
       return { domain: member.domain.toLowerCase() };
     case "ip":
       return { ip: member.range };
-    case "device":
-      return { device: { clientId: member.clientId, name: member.name } };
+    case "device": {
+      // A machine's daemon token held as a device member is that machine (K-107): the provider admits machines only
+      // through a machine rule.
+      const machine = [...machines.values()].find((item) => item.clientId === member.clientId);
+      return machine
+        ? { machine: { machineId: machine.id, clientId: machine.clientId } }
+        : { device: { clientId: member.clientId, name: member.name } };
+    }
     case "machine": {
       const machine = machines.get(member.machineId);
       return machine ? { machine: { machineId: machine.id, clientId: machine.clientId } } : null;

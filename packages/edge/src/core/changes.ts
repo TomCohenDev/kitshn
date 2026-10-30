@@ -23,6 +23,7 @@ import {
   shareLevel,
   stackTitle,
 } from "./model.ts";
+import { circlePolicies } from "./access.ts";
 import type { Machine } from "./machine.ts";
 
 /** One edit that a client asks for. `after: null` deletes. */
@@ -991,6 +992,48 @@ export function refuseResume(changes: Array<Change>): Array<Change> {
     (!change.after || (change.before === "lockdown" && change.after === "keep-public"));
   if (changes.some(opens)) throw new RuleError("Resume needs your passkey again: press Resume on the map.");
   return changes;
+}
+
+/**
+ * K-539: why a circle's new members or new match would admit no one whom it admits now, or null. A member who leaves
+ * is the owner's choice, so this looks only at what a change adds. Access cannot ask for a person and a token, or for
+ * two tokens, so such a circle gets no policy (K-402); a token added to a network means that only the token gets in.
+ */
+export function lockoutReason(
+  before: Circle,
+  after: Circle,
+  machines: ReadonlyMap<string, Machine>,
+): string | null {
+  const keyOf = (member: Member) =>
+    member._tag === "machine" ? `machine:${member.machineId}` : JSON.stringify(member);
+  const had = before.members.map(keyOf);
+  const has = after.members.map(keyOf);
+  if (had.some((key) => !has.includes(key))) return null;
+  if (before.match === after.match && has.length === had.length) return null;
+  const tokens = after.members.filter((member) => member._tag === "device" || member._tag === "machine");
+  const people = after.members.some((member) => member._tag === "email" || member._tag === "domain");
+  const start = `${after.name} must match all its members, and`;
+  if (circlePolicies(after, machines).size === 0) {
+    if (after.match === "any") return `${after.name} names a machine that kitshn does not know.`;
+    if (tokens.length > 1)
+      return `${start} Access cannot ask for two machines or devices at once, so no one would get in.`;
+    if (people && tokens.length > 0)
+      return `${start} Access cannot ask for a person and a machine or device at once, so no one would get in.`;
+    return `${start} it names a machine that kitshn does not know, so no one would get in.`;
+  }
+  const newToken = tokens.some((member) => !had.includes(keyOf(member)));
+  if (after.match === "all" && newToken && circlePolicies(before, machines).size > 0)
+    return `${start} a machine or device cannot stand in for the others, so only it would get in, and the visitors who get in now would not.`;
+  return null;
+}
+
+/** K-539: a change that adds to a circle keeps someone it admits now in. */
+export function refuseLockout(before: State, after: State): void {
+  for (const [id, circle] of after.circles) {
+    const old = before.circles.get(id);
+    const reason = old && old !== circle ? lockoutReason(old, circle, after.machines) : null;
+    if (reason) throw new RuleError(reason);
+  }
 }
 
 /**

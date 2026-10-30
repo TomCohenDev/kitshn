@@ -275,6 +275,40 @@ it("puts a card of expose --circle in that circle only when the machine controls
   expect(placeOf("mine")).toBeNull();
 });
 
+it("refuses on the server a change that would admit no one whom a circle admits now (K-539)", async () => {
+  stubAccessCerts();
+  await agentSetup({ addsPages: { mode: "automatic" } });
+  const owner = await accessToken("admin-aud", { email: "owner@example.com" });
+  const apply = (circle: object) =>
+    send("/api/apply", {
+      method: "POST",
+      headers: { "cf-access-jwt-assertion": owner, "content-type": "application/json" },
+      body: JSON.stringify({ edits: [{ _tag: "circle", id: "people", after: circle }] }),
+    });
+  const people = {
+    id: "people",
+    name: "People",
+    color: "#FF5277",
+    level: "view",
+    members: [{ _tag: "email", email: "her@example.com" }],
+    match: "any",
+    needsPasskey: false,
+    endsAt: null,
+    x: 9000,
+    y: 9000,
+    r: 200,
+  };
+  const made = await apply(people);
+  expect(made.status, await made.clone().text()).toBe(200);
+  const members = [...people.members, { _tag: "machine", machineId: "vps" }];
+  // Any may match, so the machine joins; then the switch to "all must match" would lock her out.
+  const joined = await apply({ ...people, members });
+  expect(joined.status, await joined.clone().text()).toBe(200);
+  const refused = await apply({ ...people, members, match: "all" });
+  expect(await refused.text()).toContain("no one would get in");
+  expect(refused.status).not.toBe(200);
+});
+
 it("puts a wizard site in the circle of its request, and a failed job leaves no wish for a later card (K-1131)", async () => {
   stubAccessCerts();
   await agentSetup({ addsPages: { mode: "automatic" } });

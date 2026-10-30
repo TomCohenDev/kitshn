@@ -10,6 +10,7 @@ import {
 } from "../core/model.ts";
 import type { Machine } from "../core/machine.ts";
 import { seed } from "../core/seed.ts";
+import { refusal } from "./actions.ts";
 import { dropHover, dropPlan } from "./drop.ts";
 
 /** K-509, K-522: a card from the tray drops as a card from the map does. */
@@ -284,6 +285,75 @@ describe("dropPlan", () => {
       const plan = dropPlan(base, new Map([["win", point]]), { _tag: "map" }, "s-new");
       expect(after(base, plan).circles.get("her")?.members).toEqual(her.members);
       expect(plan && "note" in plan ? plan.note : "").toMatch(/not a member/);
+    });
+  });
+
+  describe("a change that would admit no one who gets in now (K-539)", () => {
+    const email = { _tag: "email", email: "her@example.com" } as const;
+    const network = { _tag: "ip", range: "10.0.0.0/8" } as const;
+    const win = { _tag: "machine", machineId: "win" } as const;
+    const mac = { _tag: "machine", machineId: "mac" } as const;
+    const device = { _tag: "device", tokenId: "d", clientId: "c", name: "d" } as const;
+    const base = (circle: Circle): State => {
+      const s = state();
+      return {
+        ...s,
+        circles: new Map([...s.circles, [circle.id, circle]]),
+        machines: new Map([
+          ["win", joined("win")],
+          ["mac", joined("mac")],
+        ]),
+      };
+    };
+    const change = (before: Partial<Circle>, after: Partial<Circle>) => {
+      const old = { ...her, ...before };
+      return refusal(base(old), [{ _tag: "circle", id: her.id, after: { ...old, ...after } }]);
+    };
+
+    it.each([
+      ["a machine joins with a person", { match: "all" }, { match: "all", members: [email, win] }, /person/],
+      [
+        "a person joins with a machine",
+        { match: "all", members: [win] },
+        { match: "all", members: [win, email] },
+        /person/,
+      ],
+      ["a switch with a person and a machine", { members: [email, win] }, { match: "all" }, /person/],
+      ["a second machine", { match: "all", members: [win] }, { match: "all", members: [win, mac] }, /two/],
+      [
+        "a machine joins with a device",
+        { match: "all", members: [device] },
+        { match: "all", members: [device, win] },
+        /two/,
+      ],
+      [
+        "a machine joins a network",
+        { match: "all", members: [network] },
+        { match: "all", members: [network, win] },
+        /visitors/,
+      ],
+    ] as const)("refuses %s, and says who it blames", (_, before, after, reason) => {
+      expect(change(before, after)).toMatch(reason);
+    });
+
+    it.each([
+      [
+        "a machine joins an empty all-must-match circle",
+        { match: "all", members: [] },
+        { match: "all", members: [win] },
+      ],
+      ["a machine joins with a person when any may match", { members: [email] }, { members: [email, win] }],
+      [
+        "a person joins a network: they were on it",
+        { match: "all", members: [network] },
+        { match: "all", members: [network, email] },
+      ],
+      ["a switch with a person and a network", { members: [email, network] }, { match: "all" }],
+      ["the last member leaves", { members: [email] }, { members: [] }],
+      ["a machine leaves", { match: "all", members: [email, win] }, { match: "all", members: [email] }],
+      ["a rename of a circle that lets no one in", { match: "all", members: [email, win] }, { name: "New" }],
+    ] as const)("allows %s", (_, before, after) => {
+      expect(change(before, after)).toBeNull();
     });
   });
 });

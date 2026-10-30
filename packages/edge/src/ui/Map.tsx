@@ -956,8 +956,8 @@ export function MapView(props: Props) {
       ) : null}
       {draft && labelLines.length > 0 ? (
         <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
-          {labelLines.map((line) => (
-            <span key={line.text} class={line.minus ? "minus" : ""}>
+          {labelLines.map((line, index) => (
+            <span key={index} class={line.minus ? "minus" : ""}>
               {line.text}
             </span>
           ))}

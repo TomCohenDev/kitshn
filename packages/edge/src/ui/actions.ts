@@ -4,6 +4,7 @@ import {
   RuleError,
   applyChanges,
   isAppCard,
+  refuseLockout,
   refuseRaiseWhilePaused,
   resolveEdits,
   ruleViolation,
@@ -243,6 +244,7 @@ export function refusal(state: State, edits: ReadonlyArray<Edit>): string | null
   try {
     const after = applyChanges(state, resolveEdits(state, edits));
     refuseRaiseWhilePaused(state, after);
+    refuseLockout(state, after);
     return ruleViolation(after);
   } catch (error) {
     if (error instanceof RuleError) return error.message;

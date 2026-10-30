@@ -1,5 +1,4 @@
-import { circlePolicies } from "../core/access.ts";
-import type { Edit } from "../core/changes.ts";
+import { type Edit, lockoutReason } from "../core/changes.ts";
 import {
   ADMIN_RESOURCE_ID,
   type Circle,
@@ -106,18 +105,13 @@ export function joinPlan(
   const added = machines.map((machineId): Member => ({ _tag: "machine", machineId }));
   const after: Circle = { ...circle, members: [...circle.members, ...added] };
   const names = machines.map((id) => state.resources.get(id)?.name ?? id).join(", ");
-  // K-402: Access has no policy for a machine and a person who must match together, so no one would get in.
-  if (circlePolicies(after, state.machines).size === 0)
-    return {
-      refused: `${circle.name} must match all its members, and a machine and a person cannot match together, so no one would get in.`,
-    };
+  const lockout = lockoutReason(circle, after, state.machines);
+  if (lockout) return { refused: lockout };
   const one = machines.length === 1;
   const opens =
     circle.endsAt !== null && circle.endsAt <= now
       ? `${circle.name} has ended, so ${one ? "it opens" : "they open"} nothing.`
-      : circle.match === "all"
-        ? `${one ? "It opens" : "They open"} what ${circle.name} holds only together with its other members.`
-        : `${one ? "It opens" : "They open"} what ${circle.name} holds.`;
+      : `${one ? "It opens" : "They open"} what ${circle.name} holds.`;
   const agents = isAgentCircle(circle);
   const holdsAdmin = circlesHolding(state, ADMIN_RESOURCE_ID).some((held) => held.id === circle.id);
   return {

@@ -361,12 +361,14 @@ export function AddMachine(props: { onClose: () => void }) {
     null,
   );
   const [error, setError] = useState<string | null>(null);
-  // The join command shows once, so only its Close button ends it.
-  useDialogEscape(result ? () => undefined : props.onClose);
+  const [sending, setSending] = useState(false);
+  // The join command shows once, also when the request for it still runs, so only "Done" ends it then.
+  const locked = sending || result !== null;
+  useDialogEscape(locked ? () => undefined : props.onClose);
   return (
     <div
       class="scrim"
-      onClick={(event) => !result && event.target === event.currentTarget && props.onClose()}
+      onClick={(event) => !locked && event.target === event.currentTarget && props.onClose()}
     >
       <div class="dialog" role="dialog" aria-label="Add machine">
         <h2>Add machine</h2>
@@ -407,6 +409,8 @@ export function AddMachine(props: { onClose: () => void }) {
           <form
             onSubmit={async (event) => {
               event.preventDefault();
+              if (sending) return;
+              setSending(true);
               const response = await callApi<{ command: string; windowsCommand: string; expiresAt: number }>(
                 "POST",
                 "/api/machines",
@@ -418,6 +422,7 @@ export function AddMachine(props: { onClose: () => void }) {
                     .filter(Boolean),
                 },
               );
+              setSending(false);
               if ("error" in response) setError(response.error);
               else setResult(response);
             }}
@@ -450,6 +455,7 @@ export function AddMachine(props: { onClose: () => void }) {
                 class="btn"
                 type="button"
                 data-tip="Close this dialog; nothing changes."
+                disabled={sending}
                 onClick={props.onClose}
               >
                 Cancel

@@ -35,6 +35,7 @@ import {
   undoAnswer,
   prepareUndo,
   undoTarget,
+  refuseLockout,
   refuseRaiseWhilePaused,
   refuseResume,
   removeAppChanges,
@@ -1852,6 +1853,7 @@ export class Kitshn extends DurableObject<Env> {
     const violation = ruleViolation(after);
     if (violation) throw new RuleError(violation);
     refuseRaiseWhilePaused(base, after);
+    refuseLockout(base, after);
     return after;
   }
 

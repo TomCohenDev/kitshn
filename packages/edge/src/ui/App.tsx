@@ -152,7 +152,7 @@ import { PassSettingsPanel } from "./Passes.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob, setAutoUpdate } from "./Machines.tsx";
 import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TrayCard, type View, measureMap } from "./Map.tsx";
-import { type DropTarget, dropPlan } from "./drop.ts";
+import { type DropTarget, dropPlan, givesNoOne } from "./drop.ts";
 import { joinPlan, leaveEdit, machineMember } from "./members.ts";
 import { connectChecklist, isNewMachine } from "./machine-signs.ts";
 import { overlay } from "./held.ts";
@@ -919,7 +919,8 @@ export function App() {
         .slice(0, 2)
         .map((diff) =>
           diff.to
-            ? `Shared ${diff.resource.name} with ${diff.circle.name} · ${diff.to}`
+            ? (givesNoOne(diff.resource, diff.circle, state?.machines ?? new Map()) ??
+              `Shared ${diff.resource.name} with ${diff.circle.name} · ${diff.to}`)
             : `Removed ${diff.resource.name} from ${diff.circle.name}`,
         )
         .join(". ");

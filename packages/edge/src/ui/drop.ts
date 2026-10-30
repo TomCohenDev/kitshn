@@ -1,7 +1,9 @@
 import { circlePolicies } from "../core/access.ts";
 import { type Edit, type ShareDiff, applyChanges, resolveEdits, shareDiff } from "../core/changes.ts";
 import {
+  type Circle,
   type Point,
+  type Resource,
   type State,
   circlesHolding,
   insideCircle,
@@ -49,6 +51,20 @@ export interface DropLine {
 
 const MAX_LINES = 6;
 
+/** What a share in a circle that ended, or that Access has no policy for, really gives; null for any other circle. */
+export function givesNoOne(
+  resource: Resource,
+  circle: Circle,
+  machines: State["machines"],
+  now = Date.now(),
+): string | null {
+  if (circle.endsAt !== null && circle.endsAt <= now)
+    return `${circle.name} has ended: it gives no one ${resource.name}`;
+  return circlePolicies(circle, machines).size === 0
+    ? `${circle.name} lets no one in, so it gives no one ${resource.name}`
+    : null;
+}
+
 /**
  * What one share change means, in the words of the card's kind (K-205). A circle that ended, or that Access has no
  * policy for, holds the card and lets no one in, so it never says "can".
@@ -61,10 +77,8 @@ export function shareLines(
   const lines = diffs.slice(0, MAX_LINES).map(({ resource, circle, to }): DropLine => {
     if (to === null)
       return { text: `\u2212 ${circle.name} can no longer open ${resource.name}`, minus: true };
-    if (circle.endsAt !== null && circle.endsAt <= now)
-      return { text: `${circle.name} has ended: it gives no one ${resource.name}` };
-    if (circlePolicies(circle, machines).size === 0)
-      return { text: `${circle.name} lets no one in, so it gives no one ${resource.name}` };
+    const nobody = givesNoOne(resource, circle, machines, now);
+    if (nobody) return { text: nobody };
     return { text: `+ ${circle.name} can ${levelName(resource, to)} ${resource.name}` };
   });
   return diffs.length > MAX_LINES ? [...lines, { text: `and ${diffs.length - MAX_LINES} more` }] : lines;

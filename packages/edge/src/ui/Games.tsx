@@ -14,7 +14,7 @@ import {
 import type { ServerReport } from "../core/sites.ts";
 import { Radio } from "./controls.tsx";
 import { callApi, useStore } from "./store.ts";
-import { whenText } from "./time.ts";
+import { untilText } from "./actions.ts";
 
 /** K-534: a game card as `GET /api/games` gives it (K-2001 to K-2008). */
 export type GameView = Game & {
@@ -308,7 +308,7 @@ export function GameDoors(props: { resource: Resource; onRemove: () => void }) {
           {doors.map((door) => (
             <li key={`${door.person}/${door.address}`} class="row">
               <span class="grow">
-                {door.person} · <code>{door.address}</code> · until {whenText(door.endsAt)}
+                {door.person} · <code>{door.address}</code> · {untilText(door.endsAt)}
               </span>
               {asking === door.address ? (
                 <>

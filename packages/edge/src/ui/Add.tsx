@@ -2,7 +2,7 @@ import { deployWorkflow } from "kitshn/templates";
 import { useState } from "preact/hooks";
 import type { MachineView } from "../core/protocol.ts";
 import { RESERVED_SITE_NAMES } from "../core/library.ts";
-import type { Circle, Resource } from "../core/model.ts";
+import { type Circle, type Resource, isPublicCircle } from "../core/model.ts";
 import { type ServerReport, type SiteInput, parseSiteInput } from "../core/sites.ts";
 import { Radio, Switch } from "./controls.tsx";
 import { GameForm } from "./Games.tsx";
@@ -76,8 +76,8 @@ export function AddSite(props: {
   onShowCard: (card: Resource) => void;
   /** U18: the circles that a new live site may go to. */
   circles: ReadonlyArray<Circle>;
-  /** U18: the card of `address` goes into this circle when it arrives. */
-  onShare: (address: string, circle: string) => void;
+  /** K-210: asks before a new site goes into a public circle. */
+  onConfirmPublic: (circle: string) => Promise<boolean>;
   onClose: () => void;
   onDone: (text: string) => void;
 }) {
@@ -121,6 +121,7 @@ export function AddSite(props: {
               ? `${shownName}.${props.zone} is the card ${taken.name} already. Pick another name.`
               : null;
     if (problem) return setError(problem);
+    if (whoCircle && isPublicCircle(whoCircle) && !(await props.onConfirmPublic(whoCircle.name))) return;
     setBusy(true);
     const after = SITE_TIMES.find((each) => each.flag === time)?.ms ?? null;
     const result = await callApi<{ id: number }>("POST", "/api/sites/live", {
@@ -129,10 +130,10 @@ export function AddSite(props: {
       name: shownName,
       dev,
       endsAt: after === null ? null : Date.now() + after,
+      circle: whoCircle?.id ?? null,
     });
     setBusy(false);
     if ("error" in result) return setError(result.error);
-    if (whoCircle) props.onShare(`${shownName}.${props.zone}`, whoCircle.id);
     const ends =
       after === null
         ? ""

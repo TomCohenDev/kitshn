@@ -90,4 +90,53 @@ describe("command palette", () => {
     });
     expect(ran).toEqual([]);
   });
+
+  it("keeps the word that names an item, so one Enter opens the list and the next runs the item (U11)", () => {
+    const ran: Array<string> = [];
+    const share: PaletteEntry = {
+      label: "riffle · Share with…",
+      tip: "Share it.",
+      keywords: "Her Owner",
+      items: [
+        { label: "Her", tip: "Her.", run: () => ran.push("her") },
+        { label: "Owner", tip: "Owner.", run: () => ran.push("owner") },
+      ],
+    };
+    withPalette([share], (input) => {
+      inOneTask(input, "riffle her", ["Enter"]);
+      expect(ran).toEqual([]);
+      expect(input.value).toBe("her");
+      act(() => void input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+      expect(ran).toEqual(["her"]);
+    });
+  });
+
+  it("runs the action of the current entries after the map changed, not an older one (U11)", () => {
+    const ran: Array<string> = [];
+    const entriesOf = (version: string): ReadonlyArray<PaletteEntry> => [
+      {
+        label: "riffle · Share with…",
+        tip: "Share it.",
+        items: [{ label: "Her", tip: "Her.", run: () => ran.push(version) }],
+      },
+    ];
+    const root = document.createElement("div");
+    document.body.append(root);
+    const show = (entries: ReadonlyArray<PaletteEntry>) =>
+      act(() => render(h(Palette, { initialQuery: "", onClose: () => undefined, entries }), root));
+    try {
+      show(entriesOf("old"));
+      const input = root.querySelector<HTMLInputElement>('input[aria-label="Find"]');
+      if (!input) throw new Error("no input");
+      const enter = () =>
+        act(() => void input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+      enter();
+      show(entriesOf("new"));
+      enter();
+      expect(ran).toEqual(["new"]);
+    } finally {
+      render(null, root);
+      root.remove();
+    }
+  });
 });

@@ -1,11 +1,8 @@
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { MACHINE_RIGHT_NAMES } from "../core/model.ts";
 import type { AskEventView, LinkEventView, ProposalView } from "../core/protocol.ts";
-import { ago } from "./Machines.tsx";
 import { callApi } from "./store.ts";
-
-/** K-1722: "in 23 h", or "now" once the ask ran out. */
-const expiresText = (at: number, now = Date.now()) => (at <= now ? "now" : `in ${ago(now, at)}`);
+import { whenText } from "./time.ts";
 
 /**
  * K-1722: the asks that wait for an approver circle. The Inbox of the Notifications view shows it (K-1607), and
@@ -19,6 +16,12 @@ export function AskList(props: {
   readonly onToast: (text: string, error: boolean) => void;
 }) {
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
+  // The age and the expiry of each row read the clock when it renders, so a quiet Inbox renders once a minute.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => tick((each) => each + 1), 60_000);
+    return () => clearInterval(timer);
+  }, []);
   if (props.proposals.length === 0) return null;
   const deny = async (proposal: ProposalView) => {
     setBusy((ids) => new Set(ids).add(proposal.id));
@@ -220,7 +223,7 @@ export function AskRow(props: {
         {props.proposal.reason ? <span class="muted"> · {props.proposal.reason}</span> : null}
         <span class="muted">
           {" "}
-          · asked {ago(props.proposal.createdAt)} ago · expires {expiresText(props.proposal.expiresAt)}
+          · asked {whenText(props.proposal.createdAt)} · expires {whenText(props.proposal.expiresAt)}
         </span>
         {Object.entries(props.proposal.labels).map(([key, value]) => (
           <span

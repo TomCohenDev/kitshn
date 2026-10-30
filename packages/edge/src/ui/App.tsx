@@ -150,16 +150,7 @@ import { AskEvents, LinkEvents, BotRuns, approveFromHash } from "./Asks.tsx";
 import { PassSettingsPanel } from "./Passes.tsx";
 import { LibraryView } from "./Library.tsx";
 import { AddMachine, MachinePanel, MachinesView, queueJob, setAutoUpdate } from "./Machines.tsx";
-import {
-  ACCESS_TIPS,
-  ALONE_KEY,
-  MapView,
-  type Selection,
-  TrayCard,
-  type View,
-  measureMap,
-  offlineHost,
-} from "./Map.tsx";
+import { ACCESS_TIPS, ALONE_KEY, MapView, type Selection, TrayCard, type View, measureMap } from "./Map.tsx";
 import { type DropTarget, dropPlan } from "./drop.ts";
 import { overlay } from "./held.ts";
 import { HistoryView } from "./History.tsx";
@@ -206,6 +197,8 @@ const wideScreen = () => innerWidth > 720;
  * toolbar button or a longer label needs a new measure; revisit when the toolbar wraps at 1512 px with no panel.
  */
 const TOOLBAR_FULL = 1400;
+/** Below this width the tabs fold into "☰" too. Same limit as TOOLBAR_FULL. */
+const TOOLBAR_TABS = 1010;
 const UNDO_MS = 10_000;
 /**
  * A press that started before the toast showed and ends on a toast button this soon after is the second press of the
@@ -694,32 +687,6 @@ export function App() {
     if (fresh.length > 0 && target._tag !== "tray") select({ cards: new Set(fresh), circle: null });
   };
 
-  /**
-   * U18: a live site that the wizard shared with a circle, by its address, until its card arrives; then the card
-   * drops into that circle as a drag would. Known limit: this lives in the page only, so a reload before the machine
-   * reports the site leaves the card in the tray. Revisit if the server takes the circle with the job.
-   */
-  const [arriving, setArriving] = useState<ReadonlyMap<string, string>>(new Map());
-  // The card comes from the server once the machine ran the job, so this follows the state.
-  useEffect(() => {
-    if (!state || arriving.size === 0) return;
-    for (const [address, circleId] of arriving) {
-      const card = [...state.resources.values()].find((resource) => resource.addresses.includes(address));
-      if (!card) continue;
-      setArriving((before) => new Map([...before].filter(([each]) => each !== address)));
-      const circle = state.circles.get(circleId);
-      if (!circle || state.places.has(card.id)) continue;
-      const at = placeInside(state, { x: circle.x, y: circle.y }, new Set([circle.id]));
-      if (at) void drop(new Map([[card.id, at]]), { _tag: "map" });
-      else
-        showToast({
-          text: `${card.name} waits in the tray: ${circle.name} has no free spot.`,
-          error: true,
-          undo: null,
-        });
-    }
-  }, [state, arriving]);
-
   /** Selects an item and puts the focus into an input of its panel, after the panel renders. */
   const selectAndFocus = (next: Selection, selector: string) => {
     select(next);
@@ -1206,7 +1173,10 @@ export function App() {
    * Below TOOLBAR_FULL, the map tools, the waiting repos and the title fold into "☰", so the toolbar stays one row
    * also beside a floating panel. A phone always folds them, with the tabs.
    */
-  const foldTools = !wide || screenWidth - 20 - (floating ? widths.panel + 14 : 0) < TOOLBAR_FULL;
+  const barWidth = screenWidth - 20 - (floating ? widths.panel + 14 : 0);
+  const foldTools = !wide || barWidth < TOOLBAR_FULL;
+  // Resume takes room in the toolbar while paused.
+  const foldTabs = !wide || barWidth < TOOLBAR_TABS + (pauseView ? 100 : 0);
   // The page's CSS reads these, also outside this tree's elements; a drag sets them alone until it ends.
   if (wide) {
     document.documentElement.style.setProperty("--panel-width", `${widths.panel || wantedPanel}px`);
@@ -1274,7 +1244,6 @@ export function App() {
             access={store.snapshot?.access[resource.id] ?? null}
             progress={store.snapshot?.progress[resource.id] ?? null}
             machine={machines.get(resource.id) ?? null}
-            waitsFor={offlineHost(machines, resource)}
             zone={store.snapshot?.zone ?? ""}
             onMenu={(anchor) => setMenu({ target: { _tag: "card", id: resource.id }, anchor })}
           />
@@ -1985,7 +1954,10 @@ export function App() {
             handlers.select({ cards: new Set([card.id]), circle: null });
           }}
           circles={[...state.circles.values()]}
-          onShare={(address, circle) => setArriving((before) => new Map(before).set(address, circle))}
+          // K-210: a card that enters a public circle asks first, also when it arrives later.
+          onConfirmPublic={(circle) =>
+            ask(`A new site in ${circle} is public. Anyone with the address can open it.`)
+          }
           onClose={() => setAddingSite(null)}
           onDone={(text) => showToast({ text, error: false, undo: null })}
         />
@@ -2050,7 +2022,7 @@ export function App() {
       />
       <header class={`bar${floating ? " beside-panel" : ""}${foldTools ? " folded" : ""}`} ref={barRef}>
         <h1>kitshn</h1>
-        {wide ? (
+        {!foldTabs ? (
           <div class="seg">
             {(["map", "machines", "library", "history", "usage"] as const).map((tab) => (
               <button
@@ -2075,9 +2047,11 @@ export function App() {
             aria-expanded={moreMenu !== null}
             aria-label="Menu"
             data-tip={
-              wide
-                ? "The kinds to show, Organize and Previews."
-                : "The tabs, the kinds to show, Fit, Organize, Previews and Settings."
+              !wide
+                ? "The tabs, the kinds to show, Fit, Organize, Previews and Settings."
+                : foldTabs
+                  ? "The tabs, the kinds to show, Organize and Previews."
+                  : "The kinds to show, Organize and Previews."
             }
             onClick={(event) => setMoreMenu(event.currentTarget.getBoundingClientRect())}
           >
@@ -2086,7 +2060,7 @@ export function App() {
         ) : null}
         {moreMenu ? (
           <Menu label="Menu" anchor={moreMenu} onClose={() => setMoreMenu(null)}>
-            {wide
+            {!foldTabs
               ? null
               : (["map", "machines", "library", "history", "usage"] as const).map((tab) => (
                   <MenuItem
@@ -2990,6 +2964,52 @@ function CardPanel(props: {
         <ItemIcon resource={resource} />
         {resource.name}
       </h2>
+      {address ? (
+        <div class="row">
+          <code>{address}</code>
+          <button
+            class="btn"
+            data-tip={`Copy https://${address} to the clipboard.`}
+            onClick={() => void navigator.clipboard.writeText(`https://${address}`)}
+          >
+            Copy address
+          </button>
+          <a
+            class="btn"
+            href={`https://${address}`}
+            target="_blank"
+            rel="noreferrer"
+            data-tip="Open the address in a new tab."
+          >
+            Open
+          </a>
+        </div>
+      ) : null}
+      {props.peek && peekable(resource) ? (
+        <PeekRow key={resource.id} resource={resource} state={state} zone={props.zone} />
+      ) : null}
+      {address &&
+      (resource.kind === "page" ||
+        resource.kind === "file" ||
+        (resource.id.startsWith(FOLDER_SITE_PREFIX) && !props.repo)) ? (
+        <AddressName address={address} onSave={(name) => props.onSetAddress(resource, name)} />
+      ) : null}
+      {address && props.repo ? (
+        <p class="help">Its repo sets this address: change it in kitshn.config.ts.</p>
+      ) : null}
+      {props.pullRequest !== null && props.repo ? (
+        <div class="row">
+          <a
+            class="btn"
+            href={`https://github.com/${props.repo.name}/pull/${props.pullRequest}`}
+            target="_blank"
+            rel="noreferrer"
+            data-tip={`Open pull request #${props.pullRequest} of ${props.repo.name} on GitHub. This preview goes when it closes.`}
+          >
+            Pull request #{props.pullRequest} ↗
+          </a>
+        </div>
+      ) : null}
       {address ? (
         <div class="row">
           <code>{address}</code>

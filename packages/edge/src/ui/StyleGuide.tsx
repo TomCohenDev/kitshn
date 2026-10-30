@@ -576,7 +576,6 @@ function MapParts(props: { state: State }) {
               access={null}
               progress={null}
               machine={null}
-              waitsFor={null}
               zone="example.com"
               onMenu={noop}
             />
@@ -588,7 +587,6 @@ function MapParts(props: { state: State }) {
               access={null}
               progress={null}
               machine={null}
-              waitsFor={null}
               zone="example.com"
               onMenu={noop}
             />

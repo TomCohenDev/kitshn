@@ -14,8 +14,8 @@ function distance(at: number, now: number): string {
 }
 
 /**
- * A time for people: "5 min ago · 15:11" today, "in 2 d · Nov 1, 09:00" on another day. The local time has no
- * seconds; logs keep their own exact times.
+ * A time for people: "5 min ago · 3:11 PM" today, "in 2 d · Nov 1, 9:00 AM" on another day, in the browser's locale,
+ * with no seconds. After "until" use `untilText`, which has no "in". Logs keep their own exact times.
  */
 export function whenText(at: number, now = Date.now()): string {
   const date = new Date(at);

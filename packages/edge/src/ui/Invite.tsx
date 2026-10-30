@@ -53,9 +53,11 @@ export function InviteDialog(props: { invite: DeviceInvite; onClose: () => void 
   };
   const qrText = client ? openLink(client.open, invite.link) : invite.link;
   // K-1601: the link names the app of the open tab, so its page offers that app as the main button.
-  const link = client
-    ? `${invite.link}${invite.link.includes("#") ? "&" : "#"}client=${encodeURIComponent(client.id)}`
-    : invite.link;
+  // Only an app that every machine declares is on that page (K-720); for any other the page would pick another app.
+  const link =
+    client && invite.agree
+      ? `${invite.link}${invite.link.includes("#") ? "&" : "#"}client=${encodeURIComponent(client.id)}`
+      : invite.link;
   const until = new Date(invite.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const cancel = async () => {
     if (busy) return;

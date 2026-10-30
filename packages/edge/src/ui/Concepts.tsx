@@ -432,7 +432,6 @@ function Arrangement(props: { base: State }) {
               access={null}
               progress={null}
               machine={null}
-              waitsFor={null}
               zone="example.com"
               onMenu={noop}
             />
@@ -444,7 +443,6 @@ function Arrangement(props: { base: State }) {
               access={null}
               progress={null}
               machine={null}
-              waitsFor={null}
               zone="example.com"
               onMenu={noop}
             />

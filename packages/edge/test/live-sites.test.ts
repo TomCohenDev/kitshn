@@ -274,3 +274,79 @@ it("puts a card of expose --circle in that circle only when the machine controls
   expect(shared && Math.hypot(shared.x - 5000, shared.y - 5000) < 200).toBe(true);
   expect(placeOf("mine")).toBeNull();
 });
+
+it("puts a wizard site in the circle of its request, and a failed job leaves no wish for a later card (K-1131)", async () => {
+  stubAccessCerts();
+  await agentSetup({ addsPages: { mode: "automatic" } });
+  const stub = env.KITSHN.getByName("kitshn");
+  const owner = await accessToken("admin-aud", { email: "owner@example.com" });
+  const ask = async (name: string, circle: string | null) => {
+    const response = await send("/api/sites/live", {
+      method: "POST",
+      headers: { "cf-access-jwt-assertion": owner, "content-type": "application/json" },
+      body: JSON.stringify({ machineId: "vps", server: "5173", name, dev: false, endsAt: null, circle }),
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    return ((await response.json()) as { id: number }).id;
+  };
+  const daemon = (message: object) =>
+    runInDurableObject(stub, (instance) =>
+      instance.webSocketMessage(daemonSocket(), JSON.stringify(message)),
+    );
+  const finish = async (id: number, ok: boolean) => {
+    await runInDurableObject(
+      stub,
+      (_, state) => void state.storage.sql.exec("UPDATE jobs SET state = 'sent' WHERE id = ?", id),
+    );
+    await daemon({ type: "jobResult", id, result: { ok, exitCode: ok ? 0 : 1, output: "" } });
+  };
+  const arrive = async (name: string) => {
+    await daemon({ type: "sites", sites: [{ name, target: "http://localhost:5173", dev: false, up: true }] });
+    await runInDurableObject(stub, async (instance) => {
+      await (
+        instance as unknown as { checkSites(api: () => Promise<[]>, budget: number): Promise<number> }
+      ).checkSites(async () => [], 6);
+    });
+  };
+  const placeOf = async (name: string) => {
+    const seen = (await (
+      await send("/api/state", { headers: { "cf-access-jwt-assertion": owner } })
+    ).json()) as { places: Record<string, { x: number; y: number }>; resources: ReadonlyArray<Resource> };
+    const card = seen.resources.find((resource) => resource.name === name);
+    if (!card) throw new Error(`no card ${name}`);
+    return seen.places[card.id] ?? null;
+  };
+
+  // The owner chose the Agents circle (r 200 at 5000, 5000), whatever the rights of the machine are.
+  await finish(await ask("wizard", "agents"), true);
+  await arrive("wizard");
+  const shared = await placeOf("wizard");
+  expect(shared && Math.hypot(shared.x - 5000, shared.y - 5000) < 200).toBe(true);
+
+  // The job of "Share with" fails, and the retry says Private: the card stays in the tray.
+  await finish(await ask("retry", "agents"), false);
+  await finish(await ask("retry", null), true);
+  await arrive("retry");
+  expect(await placeOf("retry")).toBeNull();
+  const open = await runInDurableObject(stub, (_, state) =>
+    state.storage.sql
+      .exec<{ title: string }>("SELECT title FROM notifications WHERE source = 'site' AND state = 'open'")
+      .toArray(),
+  );
+  expect(open.map((row) => row.title)).toContain("A live site was not shared with Agents");
+
+  // A circle that is gone refuses the request at once.
+  const gone = await send("/api/sites/live", {
+    method: "POST",
+    headers: { "cf-access-jwt-assertion": owner, "content-type": "application/json" },
+    body: JSON.stringify({
+      machineId: "vps",
+      server: "5173",
+      name: "x",
+      dev: false,
+      endsAt: null,
+      circle: "gone",
+    }),
+  });
+  expect(gone.status).toBe(400);
+});

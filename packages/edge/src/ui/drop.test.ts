@@ -75,6 +75,23 @@ describe("dropPlan", () => {
     expect(circlesHolding(next, id).map((circle) => circle.id)).toEqual(["her"]);
   });
 
+  it("keeps four tray cards dropped on a circle inside it, however far they fan out", () => {
+    const base = state();
+    const cards = ["t1", "t2", "t3", "t4"];
+    const withTray: State = {
+      ...base,
+      resources: new Map([
+        ...base.resources,
+        ...cards.map((id): [string, Resource] => [id, card(id, "file")]),
+      ]),
+    };
+    const moves = new Map(
+      cards.map((id, index) => [id, { x: her.x + (index % 2) * 30, y: her.y + index * 90 }]),
+    );
+    const next = after(withTray, dropPlan(withTray, moves, { _tag: "map" }, "s-new"));
+    for (const id of cards) expect(circlesHolding(next, id).map((circle) => circle.id)).toEqual(["her"]);
+  });
+
   it("takes a map card out of every circle over the tray, and leaves a tray card as it is", () => {
     const base = state();
     const back = dropPlan(base, new Map([["riffle", point]]), { _tag: "tray" }, "s-new");

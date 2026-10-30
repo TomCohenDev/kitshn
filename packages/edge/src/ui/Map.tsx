@@ -22,7 +22,7 @@ import { MachineRightStickers } from "./MachineRights.tsx";
 import { type KindInfo, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS, kindInfo } from "./kinds.ts";
 import { KeySticker, MachineLive, PresenceSticker, QueuedSticker } from "./Machines.tsx";
 import { type MenuTarget, untilText } from "./actions.ts";
-import type { DropTarget } from "./drop.ts";
+import { type DropTarget, landingPoints } from "./drop.ts";
 import type { DrawnWire } from "../core/organize.ts";
 import { USER_STACK, headAngle, stacksOf } from "../core/place.ts";
 import { parseSiteInput } from "../core/sites.ts";
@@ -544,7 +544,7 @@ export function MapView(props: Props) {
         id,
         { x: Math.round(origin.x + dx), y: Math.round(origin.y + dy) },
       ]);
-      preview(placeChanges(moves), pointer);
+      preview(placeChanges(landingPoints(state, new Map(moves))), pointer);
       const target = dropTargetAt(event.clientX, event.clientY, new Set(drag.origins.keys()), null);
       const onGrabbed = target._tag === "card" && target.id === drag.under;
       // Once the pointer leaves the card it was grabbed over, that card is a target like any other.
@@ -923,7 +923,6 @@ export function MapView(props: Props) {
                 props.uptime[resource.id]?.up === false ? (props.uptime[resource.id]?.since ?? null) : null
               }
               machine={props.machines.get(resource.id) ?? null}
-              waitsFor={offlineHost(props.machines, resource)}
               pullRequest={props.pullRequests[resource.id] ?? null}
               preview={previewIds.has(resource.id)}
               peek={props.peek && props.selection.cards.size === 1}
@@ -1121,12 +1120,6 @@ export function CircleView(props: {
   );
 }
 
-/** The name of the machine of a card, or of a machine card itself, while it is offline. */
-export const offlineHost = (machines: ReadonlyMap<string, MachineView>, resource: Resource) => {
-  const host = machines.get(resource.id) ?? machines.get(resource.machine ?? "");
-  return host && !host.online ? host.machine.name : null;
-};
-
 /** K-538: the progress sticker says this Access error already, so the K-407 sticker would repeat it. */
 const progressSays = (progress: ActionProgress | null, error: string) =>
   progress?.retry?.reason === error ||
@@ -1153,8 +1146,6 @@ export function CardView(props: {
   /** K-1125: when the card went down, or null while it is up or unchecked. */
   downSince: number | null;
   machine: MachineView | null;
-  /** K-407: the offline machine that this card lives on, or that it is, so "applying" says what it waits for. */
-  waitsFor?: string | null;
   pullRequest: number | null;
   preview: boolean;
   /** A fixed phase of its preview frame, for the style guide (`/neo-brutalism`). */
@@ -1209,18 +1200,9 @@ export function CardView(props: {
           <ProgressSticker progress={props.progress} panel={`#map/${encodeURIComponent(resource.id)}`} />
         ) : null}
         {props.access?.state === "applying" && !props.progress ? (
-          props.waitsFor ? (
-            <span
-              class="sticker wait state"
-              data-tip={`${ACCESS_TIPS.applying} ${props.waitsFor} is offline, so the change waits for it.`}
-            >
-              waits for {props.waitsFor}
-            </span>
-          ) : (
-            <span class="sticker wait state" data-tip={ACCESS_TIPS.applying}>
-              applying
-            </span>
-          )
+          <span class="sticker wait state" data-tip={ACCESS_TIPS.applying}>
+            applying
+          </span>
         ) : null}
         {props.access?.state === "retrying" && !progressSays(props.progress, props.access.error) ? (
           <span class="sticker wait state" data-tip={`${ACCESS_TIPS.retrying} ${props.access.error}`}>
@@ -1308,7 +1290,6 @@ export function TrayCard(props: {
   readonly access: AccessState | null;
   readonly progress: ActionProgress | null;
   readonly machine: MachineView | null;
-  readonly waitsFor: string | null;
   readonly zone: string;
   readonly onMenu: (anchor: Rect) => void;
 }) {

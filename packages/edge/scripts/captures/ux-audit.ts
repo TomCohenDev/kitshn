@@ -139,10 +139,12 @@ export default {
       await shot("tray-drag");
       await page.mouse.up();
       await page.waitForTimeout(800);
+      // tick3d is in Everyone, so the drop asks first; the shot shows the drop after the answer.
+      await page.getByRole("button", { name: "Continue", exact: true }).click({ timeout: 2000 });
+      await page.waitForTimeout(800);
       await shot("tray-dropped");
-    });
-    await maybe("undo the drop", async () => {
-      await page.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 1000 });
+      await page.getByRole("button", { name: "Undo" }).first().click({ timeout: 2000 });
+      await page.waitForTimeout(500);
     });
     await maybe("card panel", async () => {
       await card(page, "riffle").click({ timeout: 3000 });

@@ -2,9 +2,9 @@ import { useEffect, useState } from "preact/hooks";
 import { type BackupRun, gigabytes } from "../core/backups.ts";
 import type { Resource } from "../core/model.ts";
 import { callApi } from "./store.ts";
-import { whenText } from "./time.ts";
 
-const time = (at: number) => whenText(at);
+// Two runs can fall in one minute, and the owner picks one to restore, so this time keeps its seconds.
+const time = (at: number) => new Date(at).toLocaleString([], { dateStyle: "short", timeStyle: "medium" });
 const size = (bytes: number | null) =>
   bytes === null
     ? ""

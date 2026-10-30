@@ -7,6 +7,7 @@ import type { ProposalView } from "../core/protocol.ts";
 import { AskList } from "./Asks.tsx";
 import { PushSection } from "./Push.tsx";
 import { callApi } from "./store.ts";
+import { untilText } from "./actions.ts";
 import { whenText } from "./time.ts";
 
 const HOUR = 60 * 60_000;
@@ -134,7 +135,7 @@ export function NotificationsView(props: {
             <div key={`${mute.card}/${mute.source}`} class="row">
               <span>
                 {mute.source} of {cardName(mute.card)}
-                {mute.until ? ` until ${whenText(mute.until)}` : " until you unmute"}
+                {mute.until ? ` ${untilText(mute.until)}` : " until you unmute"}
               </span>
               <button
                 class="btn"
@@ -183,7 +184,7 @@ export function NotificationRow(props: {
         {props.card ? ` · ${props.card}` : ""} · opened {whenText(props.notification.openedAt, props.now)}
         {props.notification.closedAt ? ` · closed ${whenText(props.notification.closedAt, props.now)}` : ""}
         {props.notification.snoozedUntil && props.notification.snoozedUntil > props.now
-          ? ` · snoozed until ${whenText(props.notification.snoozedUntil, props.now)}`
+          ? ` · snoozed ${untilText(props.notification.snoozedUntil, props.now)}`
           : ""}
       </p>
       <div class="row">

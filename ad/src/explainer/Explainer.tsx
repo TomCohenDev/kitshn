@@ -1,5 +1,14 @@
 import type React from "react";
-import { AbsoluteFill, Audio, Img, Sequence, spring, staticFile, useCurrentFrame, useVideoConfig } from "remotion";
+import {
+  AbsoluteFill,
+  Audio,
+  Img,
+  Sequence,
+  spring,
+  staticFile,
+  useCurrentFrame,
+  useVideoConfig,
+} from "remotion";
 import { said as saidIn, type Timeline } from "../timeline";
 import { BOX, C, MONO, SANS, SLUG } from "./config";
 
@@ -46,7 +55,8 @@ export const Explainer: React.FC<ExplainerProps> = ({ timeline }) => {
   const t = frame / fps;
   const said = (track: string, word: string, n = 1) => saidIn(tl, track, word, n);
   const first = (track: string) => tl.words.find((w) => w.track === track)!.start;
-  const pop = (at: number, damping = 11) => spring({ frame: frame - at * fps, fps, config: { damping, stiffness: 190 } });
+  const pop = (at: number, damping = 11) =>
+    spring({ frame: frame - at * fps, fps, config: { damping, stiffness: 190 } });
 
   const T = {
     intro: first("intro"),
@@ -90,7 +100,9 @@ export const Explainer: React.FC<ExplainerProps> = ({ timeline }) => {
       {t < T.intro + 0.3 ? <Hook t={t} pop={pop} said={said} out={T.intro} /> : null}
       {t > T.intro - 0.3 && t < T.deploy + 0.3 ? <Intro t={t} pop={pop} T={T} /> : null}
       {t > T.deploy - 0.3 && t < T.pull + 0.3 ? <Deploy t={t} pop={pop} T={T} /> : null}
-      {t > T.pull - 0.3 && t < T.tunnel + 0.3 ? <Screens t={t} T={T} dragFrom={dragFrom} dragTo={dragTo} /> : null}
+      {t > T.pull - 0.3 && t < T.tunnel + 0.3 ? (
+        <Screens t={t} T={T} dragFrom={dragFrom} dragTo={dragTo} />
+      ) : null}
       {t > T.tunnel - 0.3 && t < T.friendly + 0.3 ? <Tunnel t={t} pop={pop} T={T} /> : null}
       {t > T.friendly - 0.3 && t < T.end + 0.3 ? <Offline t={t} T={T} /> : null}
       {t > T.end - 0.3 ? <End t={t} pop={pop} T={T} /> : null}
@@ -135,14 +147,14 @@ type Pop = (at: number, damping?: number) => number;
 type Times = Record<string, number>;
 
 /** A small flat card in the map's style: icon, name, address, kind sticker. */
-const MiniCard: React.FC<{ icon: string; name: string; sub: string; kind: string; tone?: string; style?: React.CSSProperties }> = ({
-  icon,
-  name,
-  sub,
-  kind,
-  tone = C.green,
-  style,
-}) => (
+const MiniCard: React.FC<{
+  icon: string;
+  name: string;
+  sub: string;
+  kind: string;
+  tone?: string;
+  style?: React.CSSProperties;
+}> = ({ icon, name, sub, kind, tone = C.green, style }) => (
   <div
     style={{
       width: 300,
@@ -164,12 +176,12 @@ const MiniCard: React.FC<{ icon: string; name: string; sub: string; kind: string
   </div>
 );
 
-const Sticker: React.FC<{ tone?: string; tilt?: number; style?: React.CSSProperties; children: React.ReactNode }> = ({
-  tone = C.yellow,
-  tilt = -3,
-  style,
-  children,
-}) => (
+const Sticker: React.FC<{
+  tone?: string;
+  tilt?: number;
+  style?: React.CSSProperties;
+  children: React.ReactNode;
+}> = ({ tone = C.yellow, tilt = -3, style, children }) => (
   <span
     style={{
       display: "inline-block",
@@ -188,12 +200,12 @@ const Sticker: React.FC<{ tone?: string; tilt?: number; style?: React.CSSPropert
 );
 
 /** 0–7 s: you built something; who gets to open it? */
-const Hook: React.FC<{ t: number; pop: Pop; said: (track: string, word: string, n?: number) => number; out: number }> = ({
-  t,
-  pop,
-  said,
-  out,
-}) => {
+const Hook: React.FC<{
+  t: number;
+  pop: Pop;
+  said: (track: string, word: string, n?: number) => number;
+  out: number;
+}> = ({ t, pop, said, out }) => {
   const head = ["You", "built", "something."];
   const question = ["Now:", "who", "gets", "to", "open", "it?"];
   const now = said("hook", "now");
@@ -205,12 +217,29 @@ const Hook: React.FC<{ t: number; pop: Pop; said: (track: string, word: string, 
   const asked = ramp(t, now, now + 0.5);
   return (
     <AbsoluteFill style={{ opacity: win(t, -1, out, 0.3), alignItems: "center", justifyContent: "center" }}>
-      <div style={{ position: "absolute", top: 210, display: "flex", gap: 26, fontSize: 112, fontWeight: 800, letterSpacing: "-0.03em" }}>
+      <div
+        style={{
+          position: "absolute",
+          top: 210,
+          display: "flex",
+          gap: 26,
+          fontSize: 112,
+          fontWeight: 800,
+          letterSpacing: "-0.03em",
+        }}
+      >
         {(asked < 0.5 ? head : question).map((word, i) => {
           const at = said("hook", word.replace(/\W/g, ""));
           const k = pop(at);
           return (
-            <span key={`${asked < 0.5}-${i}`} style={{ display: "inline-block", opacity: clamp(k * 2), transform: `translateY(${(1 - k) * 40}px) scale(${0.7 + 0.3 * k})` }}>
+            <span
+              key={`${asked < 0.5}-${i}`}
+              style={{
+                display: "inline-block",
+                opacity: clamp(k * 2),
+                transform: `translateY(${(1 - k) * 40}px) scale(${0.7 + 0.3 * k})`,
+              }}
+            >
               {word}
             </span>
           );
@@ -221,9 +250,24 @@ const Hook: React.FC<{ t: number; pop: Pop; said: (track: string, word: string, 
           const k = pop(card.at, 9);
           const wobble = asked * Math.sin(t * 5 + i * 2) * 4;
           return (
-            <div key={card.name} style={{ position: "relative", transform: `translateY(${(1 - k) * 160}px) scale(${k}) rotate(${(i - 1) * 3 + wobble}deg)`, opacity: clamp(k * 3) }}>
+            <div
+              key={card.name}
+              style={{
+                position: "relative",
+                transform: `translateY(${(1 - k) * 160}px) scale(${k}) rotate(${(i - 1) * 3 + wobble}deg)`,
+                opacity: clamp(k * 3),
+              }}
+            >
               <MiniCard {...card} />
-              <div style={{ position: "absolute", right: -18, top: -22, opacity: asked, transform: `scale(${pop(now + 0.25 + i * 0.12, 8)})` }}>
+              <div
+                style={{
+                  position: "absolute",
+                  right: -18,
+                  top: -22,
+                  opacity: asked,
+                  transform: `scale(${pop(now + 0.25 + i * 0.12, 8)})`,
+                }}
+              >
                 <Sticker tilt={8 - i * 6} style={{ fontSize: 40, padding: "0 18px" }}>
                   ?
                 </Sticker>
@@ -242,21 +286,68 @@ const Intro: React.FC<{ t: number; pop: Pop; T: Times }> = ({ t, pop, T }) => {
   const name = pop(T.kitchen);
   const ring = ramp(t, T.circleWord, T.circleWord + 0.55);
   return (
-    <AbsoluteFill style={{ opacity: win(t, T.intro - 0.3, T.deploy, 0.3), alignItems: "center", justifyContent: "center" }}>
+    <AbsoluteFill
+      style={{
+        opacity: win(t, T.intro - 0.3, T.deploy, 0.3),
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
       <div style={{ display: "flex", alignItems: "center", gap: 36, transform: `translateY(-90px)` }}>
-        <Img src={staticFile("logo.svg")} style={{ width: 190, height: 190, transform: `scale(${logo}) rotate(${(1 - logo) * -25}deg)` }} />
-        <div style={{ fontSize: 170, fontWeight: 800, letterSpacing: "-0.04em", opacity: clamp(name * 2), transform: `translateX(${(1 - name) * -40}px)` }}>
+        <Img
+          src={staticFile("logo.svg")}
+          style={{ width: 190, height: 190, transform: `scale(${logo}) rotate(${(1 - logo) * -25}deg)` }}
+        />
+        <div
+          style={{
+            fontSize: 170,
+            fontWeight: 800,
+            letterSpacing: "-0.04em",
+            opacity: clamp(name * 2),
+            transform: `translateX(${(1 - name) * -40}px)`,
+          }}
+        >
           kitshn
         </div>
       </div>
-      <div style={{ position: "absolute", top: 640, display: "flex", gap: 22, fontSize: 64, fontWeight: 600 }}>
-        <span style={{ opacity: clamp(pop(T.push) * 2), transform: `translateY(${(1 - pop(T.push)) * 30}px)` }}>Push a repo.</span>
-        <span style={{ position: "relative", opacity: clamp(pop(T.share) * 2), transform: `translateY(${(1 - pop(T.share)) * 30}px)` }}>
+      <div
+        style={{ position: "absolute", top: 640, display: "flex", gap: 22, fontSize: 64, fontWeight: 600 }}
+      >
+        <span
+          style={{ opacity: clamp(pop(T.push) * 2), transform: `translateY(${(1 - pop(T.push)) * 30}px)` }}
+        >
+          Push a repo.
+        </span>
+        <span
+          style={{
+            position: "relative",
+            opacity: clamp(pop(T.share) * 2),
+            transform: `translateY(${(1 - pop(T.share)) * 30}px)`,
+          }}
+        >
           Share it with a{" "}
           <span style={{ position: "relative" }}>
             circle.
-            <svg width="260" height="130" viewBox="0 0 260 130" style={{ position: "absolute", left: -12, top: -30, overflow: "visible" }}>
-              <ellipse cx="128" cy="64" rx="118" ry="52" fill="none" stroke={C.yellow} strokeWidth="7" strokeLinecap="round" pathLength={1} strokeDasharray="1" strokeDashoffset={1 - ring} transform="rotate(-6 128 64)" />
+            <svg
+              width="260"
+              height="130"
+              viewBox="0 0 260 130"
+              style={{ position: "absolute", left: -12, top: -30, overflow: "visible" }}
+            >
+              <ellipse
+                cx="128"
+                cy="64"
+                rx="118"
+                ry="52"
+                fill="none"
+                stroke={C.yellow}
+                strokeWidth="7"
+                strokeLinecap="round"
+                pathLength={1}
+                strokeDasharray="1"
+                strokeDashoffset={1 - ring}
+                transform="rotate(-6 128 64)"
+              />
             </svg>
           </span>
         </span>
@@ -277,7 +368,21 @@ const Deploy: React.FC<{ t: number; pop: Pop; T: Times }> = ({ t, pop, T }) => {
   const live = pop(T.live, 8);
   return (
     <AbsoluteFill style={{ opacity: win(t, T.deploy - 0.3, T.pull, 0.3) }}>
-      <div style={{ position: "absolute", left: 110, top: 330, width: 720, padding: "28px 34px", background: C.surface, borderRadius: 28, fontFamily: MONO, fontSize: 31, whiteSpace: "nowrap", boxShadow: "0 24px 60px -30px #000" }}>
+      <div
+        style={{
+          position: "absolute",
+          left: 110,
+          top: 330,
+          width: 720,
+          padding: "28px 34px",
+          background: C.surface,
+          borderRadius: 28,
+          fontFamily: MONO,
+          fontSize: 31,
+          whiteSpace: "nowrap",
+          boxShadow: "0 24px 60px -30px #000",
+        }}
+      >
         <div style={{ display: "flex", gap: 10, marginBottom: 22 }}>
           {[C.red, C.yellow, C.green].map((c) => (
             <span key={c} style={{ width: 16, height: 16, borderRadius: 99, background: c, opacity: 0.8 }} />
@@ -286,19 +391,52 @@ const Deploy: React.FC<{ t: number; pop: Pop; T: Times }> = ({ t, pop, T }) => {
         <span style={{ color: C.muted }}>~/riffle $ </span>
         {typed}
         <span style={{ opacity: Math.floor(t * 3) % 2 ? 1 : 0, color: C.yellow }}>▍</span>
-        <div style={{ marginTop: 26, color: C.muted, fontSize: 24, whiteSpace: "normal", opacity: ramp(t, T.deploy + 1.15, T.deploy + 1.4) }}>
+        <div
+          style={{
+            marginTop: 26,
+            color: C.muted,
+            fontSize: 24,
+            whiteSpace: "normal",
+            opacity: ramp(t, T.deploy + 1.15, T.deploy + 1.4),
+          }}
+        >
           kitshn deploy · GitHub signs the run, no secret in the repo
         </div>
       </div>
       <svg width="1920" height="1080" style={{ position: "absolute", inset: 0 }}>
         {[0, 1].map((i) => (
-          <path key={i} d={`M 830 ${470} C 960 470, 960 ${300 + i * 380}, 1110 ${300 + i * 380}`} fill="none" stroke={C.yellow} strokeWidth="5" strokeDasharray="14 14" strokeDashoffset={-t * 60} opacity={0.85 * clamp(line * 2 - i)} />
+          <path
+            key={i}
+            d={`M 830 ${470} C 960 470, 960 ${300 + i * 380}, 1110 ${300 + i * 380}`}
+            fill="none"
+            stroke={C.yellow}
+            strokeWidth="5"
+            strokeDasharray="14 14"
+            strokeDashoffset={-t * 60}
+            opacity={0.85 * clamp(line * 2 - i)}
+          />
         ))}
       </svg>
       {dest.map((d, i) => {
         const k = pop(d.at);
         return (
-          <div key={d.name} style={{ position: "absolute", left: 1120, top: 210 + i * 380, width: 620, padding: "26px 32px", background: C.surface, borderRadius: 28, transform: `scale(${k})`, opacity: clamp(k * 2), display: "flex", gap: 24, alignItems: "center" }}>
+          <div
+            key={d.name}
+            style={{
+              position: "absolute",
+              left: 1120,
+              top: 210 + i * 380,
+              width: 620,
+              padding: "26px 32px",
+              background: C.surface,
+              borderRadius: 28,
+              transform: `scale(${k})`,
+              opacity: clamp(k * 2),
+              display: "flex",
+              gap: 24,
+              alignItems: "center",
+            }}
+          >
             <span style={{ fontSize: 64 }}>{d.icon}</span>
             <div>
               <div style={{ fontSize: 46, fontWeight: 800 }}>{d.name}</div>
@@ -307,7 +445,21 @@ const Deploy: React.FC<{ t: number; pop: Pop; T: Times }> = ({ t, pop, T }) => {
           </div>
         );
       })}
-      <div style={{ position: "absolute", left: 300, top: 690, transform: `scale(${live}) rotate(-4deg)`, opacity: clamp(live * 2), display: "flex", alignItems: "center", gap: 16, padding: "14px 26px", borderRadius: 999, background: C.surface }}>
+      <div
+        style={{
+          position: "absolute",
+          left: 300,
+          top: 690,
+          transform: `scale(${live}) rotate(-4deg)`,
+          opacity: clamp(live * 2),
+          display: "flex",
+          alignItems: "center",
+          gap: 16,
+          padding: "14px 26px",
+          borderRadius: 999,
+          background: C.surface,
+        }}
+      >
         <span style={{ fontFamily: MONO, fontSize: 30 }}>riffle.example.com</span>
         <Sticker tone={C.green} tilt={4} style={{ fontSize: 28 }}>
           live
@@ -318,7 +470,12 @@ const Deploy: React.FC<{ t: number; pop: Pop; T: Times }> = ({ t, pop, T }) => {
 };
 
 /** The real map: preview cards, circles and members, the drag with its preview, the toast, the panel, machines. */
-const Screens: React.FC<{ t: number; T: Times; dragFrom: number; dragTo: number }> = ({ t, T, dragFrom, dragTo }) => {
+const Screens: React.FC<{ t: number; T: Times; dragFrom: number; dragTo: number }> = ({
+  t,
+  T,
+  dragFrom,
+  dragTo,
+}) => {
   const shot = (name: string) => staticFile(`shots/ad-${name}-dark.png`);
   const plates: { name: string; from: number; to: number }[] = [
     { name: "riffle", from: T.pull - 0.3, to: T.map },
@@ -353,9 +510,22 @@ const Screens: React.FC<{ t: number; T: Times; dragFrom: number; dragTo: number 
   const py = lerp(BOX.grab.y, BOX.drop.y, k) - Math.sin(k * Math.PI) * 120;
   const dragging = t >= dragFrom && t < dragTo;
   const pointerOn = t >= T.drag && t < T.drop + 0.6;
-  const pointer = t < dragFrom ? { x: BOX.grab.x + 90 * (1 - ramp(t, T.drag, dragFrom)), y: BOX.grab.y + 70 * (1 - ramp(t, T.drag, dragFrom)) } : t < dragTo ? { x: px, y: py } : BOX.drop;
+  const pointer =
+    t < dragFrom
+      ? {
+          x: BOX.grab.x + 90 * (1 - ramp(t, T.drag, dragFrom)),
+          y: BOX.grab.y + 70 * (1 - ramp(t, T.drag, dragFrom)),
+        }
+      : t < dragTo
+        ? { x: px, y: py }
+        : BOX.drop;
   const pressed = t >= dragFrom - 0.08 && t < T.drop;
-  const rings: { box: { x: number; y: number; w: number; h: number }; from: number; to: number; r?: number }[] = [
+  const rings: {
+    box: { x: number; y: number; w: number; h: number };
+    from: number;
+    to: number;
+    r?: number;
+  }[] = [
     ...BOX.previews.map((box, i) => ({ box, from: T.preview + 0.1 * i, to: T.map, r: 14 })),
     ...BOX.cards.map((box, i) => ({ box, from: T.card + i * 0.07, to: T.circle, r: 14 })),
     ...BOX.heads.map((box, i) => ({ box, from: T.circle + i * 0.07, to: T.email - 0.2, r: 999 })),
@@ -368,16 +538,65 @@ const Screens: React.FC<{ t: number; T: Times; dragFrom: number; dragTo: number 
   ];
   return (
     <AbsoluteFill style={{ opacity: win(t, T.pull - 0.3, T.tunnel + 0.3, 0.3), overflow: "hidden" }}>
-      <div style={{ position: "absolute", left: 0, top: 0, width: 1920, height: 1080, transformOrigin: "0 0", transform: `translate(${960 - cam.x * cam.z}px, ${540 - cam.y * cam.z}px) scale(${cam.z})` }}>
+      <div
+        style={{
+          position: "absolute",
+          left: 0,
+          top: 0,
+          width: 1920,
+          height: 1080,
+          transformOrigin: "0 0",
+          transform: `translate(${960 - cam.x * cam.z}px, ${540 - cam.y * cam.z}px) scale(${cam.z})`,
+        }}
+      >
         {plates.map((p) => {
           const o = win(t, p.from, p.to, 0.18);
-          return o > 0 ? <Img key={p.name} src={shot(p.name)} style={{ position: "absolute", inset: 0, width: 1920, height: 1080, opacity: o }} /> : null;
+          return o > 0 ? (
+            <Img
+              key={p.name}
+              src={shot(p.name)}
+              style={{ position: "absolute", inset: 0, width: 1920, height: 1080, opacity: o }}
+            />
+          ) : null;
         })}
         {dragging ? (
           <>
-            <div style={{ position: "absolute", left: BOX.tray.x - 10, top: BOX.tray.y - 10, width: BOX.tray.w + 20, height: BOX.tray.h + 20, ...dots, backgroundSize: "22px 22px", backgroundPosition: `${-(BOX.tray.x - 10)}px ${-(BOX.tray.y - 10)}px`, borderRadius: 14 }} />
-            <div style={{ position: "absolute", left: px - (BOX.grab.x - BOX.tray.x), top: py - (BOX.grab.y - BOX.tray.y), width: BOX.tray.w, height: BOX.tray.h, overflow: "hidden", borderRadius: 14, transform: `rotate(${-3 * Math.sin(k * Math.PI)}deg) scale(${1 + 0.06 * Math.sin(k * Math.PI)})`, boxShadow: "0 20px 30px -16px #000" }}>
-              <Img src={shot("select")} style={{ position: "absolute", left: -BOX.tray.x, top: -BOX.tray.y, width: 1920, height: 1080 }} />
+            <div
+              style={{
+                position: "absolute",
+                left: BOX.tray.x - 10,
+                top: BOX.tray.y - 10,
+                width: BOX.tray.w + 20,
+                height: BOX.tray.h + 20,
+                ...dots,
+                backgroundSize: "22px 22px",
+                backgroundPosition: `${-(BOX.tray.x - 10)}px ${-(BOX.tray.y - 10)}px`,
+                borderRadius: 14,
+              }}
+            />
+            <div
+              style={{
+                position: "absolute",
+                left: px - (BOX.grab.x - BOX.tray.x),
+                top: py - (BOX.grab.y - BOX.tray.y),
+                width: BOX.tray.w,
+                height: BOX.tray.h,
+                overflow: "hidden",
+                borderRadius: 14,
+                transform: `rotate(${-3 * Math.sin(k * Math.PI)}deg) scale(${1 + 0.06 * Math.sin(k * Math.PI)})`,
+                boxShadow: "0 20px 30px -16px #000",
+              }}
+            >
+              <Img
+                src={shot("select")}
+                style={{
+                  position: "absolute",
+                  left: -BOX.tray.x,
+                  top: -BOX.tray.y,
+                  width: 1920,
+                  height: 1080,
+                }}
+              />
             </div>
           </>
         ) : null}
@@ -385,9 +604,33 @@ const Screens: React.FC<{ t: number; T: Times; dragFrom: number; dragTo: number 
           const o = win(t, from, to, 0.2);
           if (o <= 0) return null;
           const grow = 1 + 0.08 * Math.sin((t - from) * 6);
-          return <div key={i} style={{ position: "absolute", left: box.x - 6, top: box.y - 6, width: box.w + 12, height: box.h + 12, borderRadius: r, border: `3px solid ${C.yellow}`, boxShadow: `0 0 0 6px ${C.yellow}33`, opacity: o, transform: `scale(${grow})` }} />;
+          return (
+            <div
+              key={i}
+              style={{
+                position: "absolute",
+                left: box.x - 6,
+                top: box.y - 6,
+                width: box.w + 12,
+                height: box.h + 12,
+                borderRadius: r,
+                border: `3px solid ${C.yellow}`,
+                boxShadow: `0 0 0 6px ${C.yellow}33`,
+                opacity: o,
+                transform: `scale(${grow})`,
+              }}
+            />
+          );
         })}
-        {pointerOn ? <Pointer x={pointer.x} y={pointer.y} pressed={pressed} scale={1 / cam.z} opacity={win(t, T.drag, T.drop + 0.6, 0.2)} /> : null}
+        {pointerOn ? (
+          <Pointer
+            x={pointer.x}
+            y={pointer.y}
+            pressed={pressed}
+            scale={1 / cam.z}
+            opacity={win(t, T.drag, T.drop + 0.6, 0.2)}
+          />
+        ) : null}
       </div>
       <Chip show={win(t, T.cfAccess, T.machines, 0.25)} at={{ left: 90, top: 90 }}>
         🔒 Cloudflare Access
@@ -397,15 +640,59 @@ const Screens: React.FC<{ t: number; T: Times; dragFrom: number; dragTo: number 
   );
 };
 
-const Pointer: React.FC<{ x: number; y: number; pressed: boolean; scale: number; opacity: number }> = ({ x, y, pressed, scale, opacity }) => (
-  <svg width="40" height="48" viewBox="0 0 20 24" style={{ position: "absolute", left: x, top: y, transformOrigin: "0 0", transform: `scale(${scale * 1.9 * (pressed ? 0.88 : 1)})`, opacity, overflow: "visible", filter: "drop-shadow(0 3px 4px #0008)" }}>
-    <path d="M1 1 L1 19 L6 14.5 L9.5 22 L13 20.5 L9.6 13.2 L16 13 Z" fill={C.ink} stroke={C.graphite} strokeWidth="1.5" strokeLinejoin="round" />
+const Pointer: React.FC<{ x: number; y: number; pressed: boolean; scale: number; opacity: number }> = ({
+  x,
+  y,
+  pressed,
+  scale,
+  opacity,
+}) => (
+  <svg
+    width="40"
+    height="48"
+    viewBox="0 0 20 24"
+    style={{
+      position: "absolute",
+      left: x,
+      top: y,
+      transformOrigin: "0 0",
+      transform: `scale(${scale * 1.9 * (pressed ? 0.88 : 1)})`,
+      opacity,
+      overflow: "visible",
+      filter: "drop-shadow(0 3px 4px #0008)",
+    }}
+  >
+    <path
+      d="M1 1 L1 19 L6 14.5 L9.5 22 L13 20.5 L9.6 13.2 L16 13 Z"
+      fill={C.ink}
+      stroke={C.graphite}
+      strokeWidth="1.5"
+      strokeLinejoin="round"
+    />
   </svg>
 );
 
-const Chip: React.FC<{ show: number; at: React.CSSProperties; children: React.ReactNode }> = ({ show, at, children }) =>
+const Chip: React.FC<{ show: number; at: React.CSSProperties; children: React.ReactNode }> = ({
+  show,
+  at,
+  children,
+}) =>
   show > 0 ? (
-    <div style={{ position: "absolute", ...at, padding: "14px 30px", borderRadius: 999, background: C.yellow, color: C.graphite, fontSize: 40, fontWeight: 800, opacity: show, transform: `translateY(${(1 - show) * -20}px) rotate(-2deg)`, boxShadow: "0 18px 40px -18px #000" }}>
+    <div
+      style={{
+        position: "absolute",
+        ...at,
+        padding: "14px 30px",
+        borderRadius: 999,
+        background: C.yellow,
+        color: C.graphite,
+        fontSize: 40,
+        fontWeight: 800,
+        opacity: show,
+        transform: `translateY(${(1 - show) * -20}px) rotate(-2deg)`,
+        boxShadow: "0 18px 40px -18px #000",
+      }}
+    >
       {children}
     </div>
   ) : null;
@@ -421,7 +708,22 @@ const Gate: React.FC<{ t: number; at: number; until: number }> = ({ t, at, until
       {rows.map((row, i) => {
         const o = win(t, at + i * 0.35, until, 0.25);
         return o > 0 ? (
-          <div key={row.who} style={{ display: "flex", alignItems: "center", gap: 16, padding: "12px 26px", borderRadius: 999, background: C.surface, fontSize: 34, fontWeight: 600, opacity: o, transform: `translateX(${(1 - o) * -40}px)`, boxShadow: "0 18px 40px -18px #000" }}>
+          <div
+            key={row.who}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 16,
+              padding: "12px 26px",
+              borderRadius: 999,
+              background: C.surface,
+              fontSize: 34,
+              fontWeight: 600,
+              opacity: o,
+              transform: `translateX(${(1 - o) * -40}px)`,
+              boxShadow: "0 18px 40px -18px #000",
+            }}
+          >
             <span style={{ fontFamily: MONO, fontSize: 30 }}>{row.who}</span>
             <Sticker tone={row.ok ? C.green : C.pink} tilt={row.ok ? -4 : 4} style={{ fontSize: 28 }}>
               {row.ok ? "✓ in" : "✗ stopped"}
@@ -440,7 +742,20 @@ const Tunnel: React.FC<{ t: number; pop: Pop; T: Times }> = ({ t, pop, T }) => {
   const tile = (left: number, icon: string, name: string, sub: string, at: number, grey = 0) => {
     const k = pop(at);
     return (
-      <div style={{ position: "absolute", left, top: 360, width: 460, padding: "34px 36px", borderRadius: 32, background: C.surface, transform: `scale(${k})`, opacity: clamp(k * 2) * (1 - grey * 0.45), filter: `grayscale(${grey})` }}>
+      <div
+        style={{
+          position: "absolute",
+          left,
+          top: 360,
+          width: 460,
+          padding: "34px 36px",
+          borderRadius: 32,
+          background: C.surface,
+          transform: `scale(${k})`,
+          opacity: clamp(k * 2) * (1 - grey * 0.45),
+          filter: `grayscale(${grey})`,
+        }}
+      >
         <div style={{ fontSize: 80 }}>{icon}</div>
         <div style={{ fontSize: 50, fontWeight: 800, marginTop: 6 }}>{name}</div>
         <div style={{ fontSize: 28, color: C.muted }}>{sub}</div>
@@ -452,16 +767,57 @@ const Tunnel: React.FC<{ t: number; pop: Pop; T: Times }> = ({ t, pop, T }) => {
       {tile(190, "🐧", "VPS", "rootless Docker · Compose", T.tunnel - 0.25, off)}
       {tile(1270, "☁️", "Cloudflare", "your address, your Access", T.tunnel)}
       <svg width="1920" height="1080" style={{ position: "absolute", inset: 0 }}>
-        <path d="M 650 520 L 1270 520" stroke={C.yellow} strokeWidth="10" strokeLinecap="round" strokeDasharray="2 26" strokeDashoffset={-t * 90} opacity={(1 - off) * ramp(t, T.tunnel, T.tunnel + 0.4)} />
-        <path d="M 650 520 L 1270 520" stroke={C.muted} strokeWidth="4" strokeDasharray="10 14" opacity={off * 0.6} />
+        <path
+          d="M 650 520 L 1270 520"
+          stroke={C.yellow}
+          strokeWidth="10"
+          strokeLinecap="round"
+          strokeDasharray="2 26"
+          strokeDashoffset={-t * 90}
+          opacity={(1 - off) * ramp(t, T.tunnel, T.tunnel + 0.4)}
+        />
+        <path
+          d="M 650 520 L 1270 520"
+          stroke={C.muted}
+          strokeWidth="4"
+          strokeDasharray="10 14"
+          opacity={off * 0.6}
+        />
       </svg>
-      <div style={{ position: "absolute", left: 830, top: 440, fontSize: 30, color: C.muted, opacity: ramp(t, T.tunnel, T.tunnel + 0.4) * (1 - off) }}>tunnel</div>
-      <div style={{ position: "absolute", left: 470, top: 300, transform: `scale(${lock}) rotate(6deg)`, opacity: clamp(lock * 2) * (1 - off) }}>
+      <div
+        style={{
+          position: "absolute",
+          left: 830,
+          top: 440,
+          fontSize: 30,
+          color: C.muted,
+          opacity: ramp(t, T.tunnel, T.tunnel + 0.4) * (1 - off),
+        }}
+      >
+        tunnel
+      </div>
+      <div
+        style={{
+          position: "absolute",
+          left: 470,
+          top: 300,
+          transform: `scale(${lock}) rotate(6deg)`,
+          opacity: clamp(lock * 2) * (1 - off),
+        }}
+      >
         <Sticker tone={C.green} tilt={0} style={{ fontSize: 30, padding: "6px 20px" }}>
           🔒 no open ports
         </Sticker>
       </div>
-      <div style={{ position: "absolute", left: 470, top: 300, transform: `scale(${pop(T.off, 8)}) rotate(-5deg)`, opacity: off }}>
+      <div
+        style={{
+          position: "absolute",
+          left: 470,
+          top: 300,
+          transform: `scale(${pop(T.off, 8)}) rotate(-5deg)`,
+          opacity: off,
+        }}
+      >
         <Sticker tone={C.pink} tilt={0} style={{ fontSize: 30, padding: "6px 20px" }}>
           offline
         </Sticker>
@@ -475,7 +831,17 @@ const Offline: React.FC<{ t: number; T: Times }> = ({ t, T }) => {
   const k = ramp(t, T.friendly - 0.3, T.friendly + 0.4);
   return (
     <AbsoluteFill style={{ opacity: win(t, T.friendly - 0.3, T.end, 0.3), overflow: "hidden" }}>
-      <Img src={staticFile("shots/ad-offline-dark.png")} style={{ position: "absolute", inset: 0, width: 1920, height: 1080, transform: `scale(${lerp(1.15, 1.6, ramp(t, T.friendly, T.end))}) translateY(${(1 - k) * 80}px)`, transformOrigin: "960 520px" }} />
+      <Img
+        src={staticFile("shots/ad-offline-dark.png")}
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: 1920,
+          height: 1080,
+          transform: `scale(${lerp(1.15, 1.6, ramp(t, T.friendly, T.end))}) translateY(${(1 - k) * 80}px)`,
+          transformOrigin: "960 520px",
+        }}
+      />
     </AbsoluteFill>
   );
 };
@@ -486,17 +852,51 @@ const End: React.FC<{ t: number; pop: Pop; T: Times }> = ({ t, pop, T }) => {
   const b = pop(T.endShare);
   const url = pop(T.endPush + 0.2, 9);
   return (
-    <AbsoluteFill style={{ opacity: clamp((t - T.end + 0.3) / 0.3), alignItems: "center", justifyContent: "center" }}>
+    <AbsoluteFill
+      style={{ opacity: clamp((t - T.end + 0.3) / 0.3), alignItems: "center", justifyContent: "center" }}
+    >
       <div style={{ display: "flex", alignItems: "center", gap: 30, transform: "translateY(-150px)" }}>
-        <Img src={staticFile("logo.svg")} style={{ width: 150, height: 150, transform: `scale(${logo}) rotate(${(1 - logo) * 20}deg)` }} />
-        <div style={{ fontSize: 140, fontWeight: 800, letterSpacing: "-0.04em", opacity: clamp(logo * 2) }}>kitshn</div>
+        <Img
+          src={staticFile("logo.svg")}
+          style={{ width: 150, height: 150, transform: `scale(${logo}) rotate(${(1 - logo) * 20}deg)` }}
+        />
+        <div style={{ fontSize: 140, fontWeight: 800, letterSpacing: "-0.04em", opacity: clamp(logo * 2) }}>
+          kitshn
+        </div>
       </div>
-      <div style={{ position: "absolute", top: 560, fontSize: 60, fontWeight: 600, display: "flex", gap: 22 }}>
-        <span style={{ opacity: clamp(a * 2), transform: `translateY(${(1 - a) * 30}px)` }}>Push a repo.</span>
-        <span style={{ opacity: clamp(b * 2), transform: `translateY(${(1 - b) * 30}px)` }}>Share it with a circle.</span>
+      <div
+        style={{ position: "absolute", top: 560, fontSize: 60, fontWeight: 600, display: "flex", gap: 22 }}
+      >
+        <span style={{ opacity: clamp(a * 2), transform: `translateY(${(1 - a) * 30}px)` }}>
+          Push a repo.
+        </span>
+        <span style={{ opacity: clamp(b * 2), transform: `translateY(${(1 - b) * 30}px)` }}>
+          Share it with a circle.
+        </span>
       </div>
-      <div style={{ position: "absolute", top: 720, display: "flex", gap: 20, alignItems: "center", transform: `scale(${url})`, opacity: clamp(url * 2) }}>
-        <span style={{ padding: "14px 36px", borderRadius: 999, background: C.yellow, color: C.graphite, fontSize: 46, fontWeight: 800 }}>kitshn.com</span>
+      <div
+        style={{
+          position: "absolute",
+          top: 720,
+          display: "flex",
+          gap: 20,
+          alignItems: "center",
+          transform: `scale(${url})`,
+          opacity: clamp(url * 2),
+        }}
+      >
+        <span
+          style={{
+            padding: "14px 36px",
+            borderRadius: 999,
+            background: C.yellow,
+            color: C.graphite,
+            fontSize: 46,
+            fontWeight: 800,
+          }}
+        >
+          kitshn.com
+        </span>
         <span style={{ fontSize: 32, color: C.muted }}>open source · MIT</span>
       </div>
     </AbsoluteFill>
@@ -510,8 +910,32 @@ const Caption: React.FC<{ t: number; tl: Timeline }> = ({ t, tl }) => {
   const text = line.text.replace(/\[[^\]]*\]\s*/g, "").replace(/kitchen/gi, "kitshn");
   const o = win(t, line.start - 0.1, line.end + 0.35, 0.15);
   return (
-    <div style={{ position: "absolute", left: 0, right: 0, bottom: 54, display: "flex", justifyContent: "center", opacity: o }}>
-      <div style={{ maxWidth: 1500, padding: "12px 30px", borderRadius: 22, background: "#161618e6", color: C.ink, fontSize: 38, fontWeight: 600, textAlign: "center", lineHeight: 1.3 }}>{text}</div>
+    <div
+      style={{
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: 54,
+        display: "flex",
+        justifyContent: "center",
+        opacity: o,
+      }}
+    >
+      <div
+        style={{
+          maxWidth: 1500,
+          padding: "12px 30px",
+          borderRadius: 22,
+          background: "#161618e6",
+          color: C.ink,
+          fontSize: 38,
+          fontWeight: 600,
+          textAlign: "center",
+          lineHeight: 1.3,
+        }}
+      >
+        {text}
+      </div>
     </div>
   );
 };

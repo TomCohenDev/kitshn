@@ -108,7 +108,10 @@ export default {
       const answer = await route.fetch();
       const body = (await answer.text())
         .replaceAll("{{site}}", "riffle.example.com")
-        .replaceAll("{{reason}}", "VPS is off, so riffle is off the menu for now. It comes back when VPS is on.")
+        .replaceAll(
+          "{{reason}}",
+          "VPS is off, so riffle is off the menu for now. It comes back when VPS is on.",
+        )
         .replaceAll("{{seen}}", "12 minutes ago");
       await route.fulfill({ response: answer, body });
     });

@@ -20,7 +20,10 @@ export const C = {
   red: "#ff5c7a",
 };
 
-export const SANS = loadBricolage("normal", { weights: ["400", "600", "800"], subsets: ["latin"] }).fontFamily;
+export const SANS = loadBricolage("normal", {
+  weights: ["400", "600", "800"],
+  subsets: ["latin"],
+}).fontFamily;
 export const MONO = loadMono("normal", { weights: ["400", "600"], subsets: ["latin"] }).fontFamily;
 
 /**

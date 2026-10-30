@@ -20,7 +20,14 @@ export type Timeline = {
   energy: Record<string, number[]>;
   words: Span[];
   lines: Span[];
-  clips: { id: string; kind: "music" | "voice" | "sfx"; file: string; start: number; end: number; gain_db: number }[];
+  clips: {
+    id: string;
+    kind: "music" | "voice" | "sfx";
+    file: string;
+    start: number;
+    end: number;
+    gain_db: number;
+  }[];
   markers: { name: string; t: number }[];
   mix: string;
 };
@@ -33,7 +40,8 @@ export const loadTimeline = async (slug: string): Promise<Timeline> => {
 
 /** Index of the first event > t (so events[i - 1] is the last one at or before t). */
 const upper = (events: number[], t: number) => {
-  let lo = 0, hi = events.length;
+  let lo = 0,
+    hi = events.length;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
     if (events[mid] <= t) lo = mid + 1;
@@ -69,9 +77,16 @@ export const beatPhase = (tl: Timeline, t: number) => {
 
 export const section = (tl: Timeline, t: number) => {
   const all = tl.sections.length ? tl.sections : [{ name: "All", start: 0, end: tl.duration }];
-  const index = Math.max(0, all.findIndex((s, i) => t < s.end || i === all.length - 1));
+  const index = Math.max(
+    0,
+    all.findIndex((s, i) => t < s.end || i === all.length - 1),
+  );
   const s = all[index];
-  return { index, section: s, progress: Math.min(Math.max((t - s.start) / Math.max(s.end - s.start, 1e-6), 0), 1) };
+  return {
+    index,
+    section: s,
+    progress: Math.min(Math.max((t - s.start) / Math.max(s.end - s.start, 1e-6), 0), 1),
+  };
 };
 
 export const word = (tl: Timeline, t: number, track?: string) =>

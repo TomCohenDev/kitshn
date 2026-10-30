@@ -203,7 +203,10 @@ const JOURNEYS = {
       {
         t: "A machine gets the job",
         d: "kitshn picks the first online machine with the right labels and sends the job over its WebSocket. The daemon fetches the source from R2.",
-        go: [["do", "daemon"], ["r2", "daemon"]],
+        go: [
+          ["do", "daemon"],
+          ["r2", "daemon"],
+        ],
         say: { daemon: "job: photos" },
       },
       {
@@ -265,7 +268,10 @@ const JOURNEYS = {
       {
         t: "The machine comes back",
         d: "The daemon reconnects and the route goes away. Visits go straight through the tunnel again, and cost kitshn nothing.",
-        go: [["daemon", "do"], ["visitor", "access", "tunnel", "daemon"]],
+        go: [
+          ["daemon", "do"],
+          ["visitor", "access", "tunnel", "daemon"],
+        ],
         say: { worker: "− route", daemon: ["back", "ok"] },
       },
     ],
@@ -305,7 +311,12 @@ for (const wire of wires.values()) if (wire.text) svg.append(wire.text);
 
 const box = (id) => {
   const n = nodes[id];
-  return { x: n.offsetLeft, y: n.offsetTop, r: n.offsetLeft + n.offsetWidth, b: n.offsetTop + n.offsetHeight };
+  return {
+    x: n.offsetLeft,
+    y: n.offsetTop,
+    r: n.offsetLeft + n.offsetWidth,
+    b: n.offsetTop + n.offsetHeight,
+  };
 };
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 

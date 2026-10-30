@@ -1027,8 +1027,7 @@ section {
   border-radius: 50%;
   background:
     radial-gradient(circle at 50% 38%, var(--ink) 0 22%, transparent 23%),
-    radial-gradient(circle at 50% 105%, var(--ink) 0 42%, transparent 43%),
-    var(--pink);
+    radial-gradient(circle at 50% 105%, var(--ink) 0 42%, transparent 43%), var(--pink);
 }
 .folio-work {
   display: grid;

@@ -347,9 +347,7 @@ section[id] {
   grid-row: auto;
 }
 .node.gate {
-  background:
-    repeating-linear-gradient(-45deg, transparent 0 12px, #19191b0d 12px 24px),
-    var(--accent);
+  background: repeating-linear-gradient(-45deg, transparent 0 12px, #19191b0d 12px 24px), var(--accent);
 }
 .node.gate small {
   color: var(--ink);

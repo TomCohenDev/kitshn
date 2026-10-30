@@ -45,26 +45,38 @@ interface Saved {
 const MAX_REFUSAL_LENGTH = 500;
 
 const decodePushed = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
-const decodeOwners = Schema.decodeUnknownSync(
-  Schema.Record(Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-);
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** K-1608: the saved state of `providers.json`; a file that does not decode starts empty, and says why. */
-export function parseSaved(value: unknown): { saved: Saved; problem: string | null } {
-  if (value === null) return { saved: { providers: [], pushed: {} }, problem: null };
+/**
+ * K-1608: the saved state of `providers.json`, item by item: a provider or an owner that does not decode is left
+ * out and named in `problems`, and the rest loads. Only a file that is no object at all starts empty. An owner of
+ * -1, which a Windows daemon saved before it stopped binding (K-621), is such an item.
+ */
+export function parseSaved(value: unknown): { saved: Saved; problems: ReadonlyArray<string> } {
+  const empty: Saved = { providers: [], pushed: {} };
+  if (value === null) return { saved: empty, problems: [] };
+  if (!isRecord(value)) return { saved: empty, problems: ["the file holds no object, so no provider loads"] };
+  const problems: Array<string> = [];
+  const providers: Array<ProviderReport> = [];
+  for (const [index, item] of (Array.isArray(value["providers"]) ? value["providers"] : []).entries())
+    try {
+      const [report] = decodeProviderReports([item]);
+      if (report) providers.push({ ...report, online: false });
+    } catch (error) {
+      problems.push(`providers[${index}] dropped: ${String(error)}`);
+    }
+  const owners: Record<string, number> = {};
+  for (const [name, uid] of Object.entries(isRecord(value["owners"]) ? value["owners"] : {}))
+    if (typeof uid === "number" && Number.isSafeInteger(uid) && uid >= 0) owners[name] = uid;
+    else problems.push(`the owner of ${name} dropped: ${JSON.stringify(uid)} is no user id`);
+  let pushed: Readonly<Record<string, unknown>> = {};
   try {
-    const record = value as { providers?: unknown; pushed?: unknown; owners?: unknown };
-    return {
-      saved: {
-        providers: decodeProviderReports(record.providers).map((report) => ({ ...report, online: false })),
-        pushed: decodePushed(record.pushed ?? {}),
-        owners: decodeOwners(record.owners ?? {}),
-      },
-      problem: null,
-    };
+    pushed = decodePushed(value["pushed"] ?? {});
   } catch (error) {
-    return { saved: { providers: [], pushed: {} }, problem: String(error) };
+    problems.push(`the saved pushes dropped: ${String(error)}`);
   }
+  return { saved: { providers, pushed, owners }, problems };
 }
 
 /** The outcome of one provider request: an error text, or what changed. */
@@ -173,7 +185,8 @@ export class Providers {
     this.entries.set(request.provider, { report, connection });
     // K-704: a provider that comes back changes the status of the machine.
     if (old !== undefined && old.connection === null) this.refusalsChanged();
-    const bound = request.type === "register" && owner === undefined;
+    // K-621: Windows has no user ids, and its pipe admits only the daemon's own account, so nothing to bind there.
+    const bound = request.type === "register" && owner === undefined && uid >= 0;
     if (bound) this.owners.set(request.provider, uid);
     const changed = JSON.stringify(old?.report) !== JSON.stringify(report);
     if (changed || bound) this.persist();

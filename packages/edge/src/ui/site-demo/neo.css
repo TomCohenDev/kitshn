@@ -233,8 +233,9 @@ header.bar,
   font-weight: 800;
 }
 
-/* A held card trails the pointer by a beat and leans into its motion (feel.ts sets `--lean`); let go, it springs
-   into place. Undo and Organize glide the cards the same way. */
+/* A held card stays under the pointer and leans into its motion (feel.ts sets `--lean`, which eases); let go, it
+   springs into place. Undo and Organize glide the cards the same way. A held card that eased its place too would
+   restart the ease at each pointer move and lag behind the pointer. */
 .card {
   padding: 8px 10px;
   border: var(--bw) solid var(--ink);
@@ -256,8 +257,6 @@ header.bar,
   transform: translate(-3px, -4px) rotate(var(--lean, -2deg)) scale(1.04);
   box-shadow: 9px 10px 0 0 var(--ink);
   transition:
-    left 110ms ease-out,
-    top 110ms ease-out,
     transform 120ms ease-out,
     box-shadow 160ms var(--spring);
 }

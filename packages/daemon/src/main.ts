@@ -121,6 +121,7 @@ import {
   RELEASES,
   WINDOWS_CLOUDFLARED,
   ownUid,
+  windowsElevated,
   cloudflaredUrl,
   expectedDaemonUid,
   expectedHash,
@@ -797,10 +798,17 @@ function uidOf(who: string): number {
   return Number(result.stdout.trim());
 }
 
+/** One service step. A step that may fail means "already so", such as ending a task that does not exist, so it is quiet. */
 const run = (argv: ReadonlyArray<string>, mayFail = false) => {
   const [program = "", ...rest] = argv;
-  const result = spawnSync(program, rest, { stdio: "inherit" });
-  if (result.status !== 0 && !mayFail) fail(`${argv.join(" ")} failed.`);
+  const result = spawnSync(program, rest, { stdio: mayFail ? "ignore" : "inherit", windowsHide: true });
+  if (result.status === 0 || mayFail) return;
+  // K-622: tasks that an administrator window made are not the user's to replace.
+  const hint =
+    platform === "win32" && program === "schtasks"
+      ? " If an administrator window made the kitshn tasks before, remove them in an administrator PowerShell with `kitshn service uninstall`, then run the join again in a normal window."
+      : "";
+  fail(`${argv.join(" ")} failed.${hint}`);
 };
 
 const tunnel = tunnelCommands(platform, paths.tunnelService, ownUid());
@@ -858,6 +866,13 @@ async function serviceCommand(action: string | undefined) {
   const file = paths.service;
   const commands = serviceCommands(platform, file, ownUid());
   if (action === "install") {
+    if (
+      platform === "win32" &&
+      windowsElevated(spawnSync("whoami", ["/groups"], { encoding: "utf8", windowsHide: true }).stdout ?? "")
+    )
+      fail(
+        "run this in a normal PowerShell window, not as administrator: the daemon runs as you, and tasks that an administrator window makes are not yours to start (K-622).",
+      );
     // The tunnel service starts before the old daemon stops, so a daemon that still runs its own cloudflared
     // hands over with no gap.
     await ensureTunnel(readConfig());

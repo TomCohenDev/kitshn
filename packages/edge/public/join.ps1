@@ -7,6 +7,12 @@
 param([string]$Code, [string]$Server)
 $ErrorActionPreference = 'Stop'
 if (-not $Code -or -not $Server) { throw 'usage: & ([scriptblock]::Create((irm <kitshn address>/join/windows.ps1))) <code> <kitshn address>' }
+# K-622: the daemon runs as this user. Tasks that an administrator window makes carry an access list that the user's
+# normal token cannot use, so the daemon would be denied. An elevated window stops here, before anything changes.
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  throw 'kitshn: run this in a normal PowerShell window, not as administrator.'
+}
 if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw "kitshn: no Windows daemon for the CPU $($env:PROCESSOR_ARCHITECTURE) (K-620)." }
 
 $bin = Join-Path $env:LOCALAPPDATA 'Programs\kitshn'
@@ -59,7 +65,9 @@ if ($LASTEXITCODE -ne 0) { throw 'kitshn: the daemon task could not start.' }
 # K-618: the skill for coding agents on this machine. A failure here stops no join.
 & $exe skill install
 if ($LASTEXITCODE -ne 0) { Write-Warning "kitshn: the skill was not installed; run $exe skill install later." }
-# The commands find kitshn in a new terminal.
+# The user Path gets the folder; only windows that open after this see it.
 $path = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (($path -split ';') -notcontains $bin) { [Environment]::SetEnvironmentVariable('Path', "$path;$bin", 'User') }
-Write-Host "Done. To remove kitshn from this machine: kitshn service uninstall"
+Write-Host "Done. kitshn is at $exe"
+Write-Host "In this window, run it by that full path. A new PowerShell window also knows the short name kitshn."
+Write-Host "To remove kitshn from this machine: kitshn service uninstall"

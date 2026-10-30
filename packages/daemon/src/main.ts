@@ -159,6 +159,7 @@ import {
 import { AGENT_USAGE, type AgentTransport, runAgentCommand, timeBody } from "kitshn/agent";
 import { CliError } from "kitshn/cli-error";
 import { checkSkill, installGlobalSkill, installRepoSkill, refreshGlobalSkill } from "./skill.ts";
+import { appSocketFolder, removeOldSockets, socketPathProblem, upOnSocket } from "./sockets.ts";
 
 declare const KITSHN_VERSION: string;
 const VERSION = typeof KITSHN_VERSION === "string" ? KITSHN_VERSION : "dev";
@@ -1243,8 +1244,11 @@ async function composeUp(
   // K-818: each deploy unpacks into a new folder that no running container mounts, so the old app runs on
   // while the new one is read, checked and built. A job of the same app never runs at the same time.
   const source = join(dir, `src-${Date.now().toString(36)}`);
-  const sockets = join(dir, "sockets");
+  // K-607: a short folder of its own, so the socket path fits any card id (K-804).
+  const sockets = appSocketFolder(paths.data, command.project);
   const socketPath = join(sockets, "default.sock");
+  /** K-607: the folder of the app before 2026-10-30; its next deploy that comes up removes it. */
+  const oldSockets = join(dir, "sockets");
   /** K-818: the configs hold the values of the params, so they stay in a folder of the daemon user only. */
   const scratch = join(dir, "private");
   const checked = join(scratch, "compose.checked.json");
@@ -1259,6 +1263,9 @@ async function composeUp(
     if (!result.ok) throw new Error(`${title} failed with exit code ${result.exitCode ?? "none"}`);
   };
   try {
+    // Before the old app stops, so a data folder with a long path fails the deploy with its reason.
+    const tooLong = socketPathProblem(socketPath, platform);
+    if (tooLong) throw new Error(tooLong);
     mkdirSync(dir, { recursive: true });
     // K-718: the last build that came up stays in good/ with its params; a redeploy starts it again.
     const good = join(dir, "good");
@@ -1427,22 +1434,20 @@ async function composeUp(
     // A teardown takes down what the last `up` started, also when that `up` failed.
     copyFileSync(checked, join(scratch, "down.json"));
     copyFileSync(env.KITSHN_PARAMS_FILE, join(scratch, "down.env"));
-    upStarted = true;
-    await step("docker compose up", "docker", [...run, "up", "-d", "--no-build", "--remove-orphans"], {
-      cwd: source,
-      env,
+    // A broken sites.json fails before `up`, so the old app starts again on its old route.
+    await upOnSocket({ read: readSites, write: writeSites }, { name: command.name, socketPath }, () => {
+      upStarted = true;
+      return step("docker compose up", "docker", [...run, "up", "-d", "--no-build", "--remove-orphans"], {
+        cwd: source,
+        env,
+      });
     });
+    void checkSites();
     const until = Date.now() + SOCKET_WAIT_MS;
     while (!(await probe(`unix:${socketPath}`))) {
       if (Date.now() > until) throw new Error(`the app opened no socket at ${socketPath} within 3 minutes`);
       await new Promise((done) => setTimeout(done, 2000));
     }
-    const sites = readSites();
-    if (sites === null) throw new Error(`${sitesFile()} is broken; fix it, then deploy again`);
-    const next = addSite(sites, { name: command.name, target: `unix:${socketPath}`, dev: false });
-    if (typeof next === "string") throw new Error(next);
-    writeSites(next);
-    void checkSites();
     // K-821: the deploy of this build: a redeploy starts the build of good/ again, so it keeps its id.
     const deployId = command.kind === "compose-redeploy" ? keptId(good) : command.deployId;
     const kept: Record<string, string> = {};
@@ -1475,6 +1480,7 @@ async function composeUp(
       output += await removeAsRoot(old, `${command.project}-${basename(old)}`).catch(
         (cleanup: unknown) => `${String(cleanup)}\n`,
       );
+    output += removeOldSockets(oldSockets);
     output += `\nThe app answers on its socket; the tunnel sends ${command.name} there.\n`;
     return { ok: true, exitCode: 0, output, images: kept };
   } catch (error) {
@@ -1647,7 +1653,9 @@ async function composeDown(command: Extract<Command, { kind: "compose-down" }>):
   const output = `${result.output}${removed.output}`;
   if (!removed.ok) return { ok: false, exitCode: removed.exitCode, output };
   try {
-    return { ...result, output: output + (await removeAsRoot(dir, command.project)) };
+    const app = await removeAsRoot(dir, command.project);
+    const sockets = await removeAsRoot(appSocketFolder(paths.data, command.project), `${command.project}-s`);
+    return { ...result, output: output + app + sockets };
   } catch (error) {
     return {
       ok: false,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseRange } from "../worker/restic.ts";
-import { nextBackupAt, pauseLimit, resticObject } from "./backups.ts";
+import { BACK_UP_NOW, backupFailureShown, nextBackupAt, pauseLimit, resticObject } from "./backups.ts";
 
 const ID = "f".repeat(64);
 
@@ -32,5 +32,17 @@ describe("backup timing (K-1816, K-1817)", () => {
   it("starts the nightly backups at the next 03:00 UTC", () => {
     expect(nextBackupAt(Date.parse("2026-10-28T02:59:00Z"))).toBe(Date.parse("2026-10-28T03:00:00Z"));
     expect(nextBackupAt(Date.parse("2026-10-28T03:00:00Z"))).toBe(Date.parse("2026-10-29T03:00:00Z"));
+  });
+});
+
+describe("the backup failed sticker (K-1819, K-538)", () => {
+  it("hides only while a failed Back up now says the same", () => {
+    const failed = { state: "failed" } as const;
+    const action = (name: string, state: string) => ({ action: name, outcome: { state } });
+    expect(backupFailureShown(failed, action(BACK_UP_NOW, "failed"))).toBe(false);
+    // A daily backup has no action, and a newer action on the card replaces the failed one.
+    expect(backupFailureShown(failed, null)).toBe(true);
+    expect(backupFailureShown(failed, action("Deploy", "running"))).toBe(true);
+    expect(backupFailureShown({ state: "done" }, action(BACK_UP_NOW, "failed"))).toBe(true);
   });
 });

@@ -5,6 +5,7 @@ import type { Command, Machine } from "../src/core/machine.ts";
 import type { Resource } from "../src/core/model.ts";
 import { SECRET_ROWS, stateExport } from "../src/worker/backups.ts";
 import { OFFLINE_OUTPUT } from "../src/worker/kitshn.ts";
+import { type ActionProgress, currentStep } from "../src/core/progress.ts";
 import { accessToken, send, stubAccessCerts } from "./access.ts";
 
 /** K-1813, K-1814, K-1831: restic reaches a card's repository through the Worker, and the export of the state. */
@@ -65,6 +66,23 @@ async function restic(machineId: string, path: string, init: RequestInit<Incomin
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+/** K-538: the action that a card shows, with the step that runs and how it ended. */
+const shown = (card: string) =>
+  runInDurableObject(stub(), (instance) => {
+    const row = (instance as unknown as { progressRows(): Map<string, { progress: ActionProgress }> })
+      .progressRows()
+      .get(card)?.progress;
+    return row
+      ? {
+          action: row.action,
+          steps: row.steps.length,
+          step: currentStep(row),
+          outcome: row.outcome.state,
+          reason: row.outcome.state === "failed" ? row.outcome.reason : null,
+        }
+      : null;
+  });
 
 describe("restic through the Worker (K-1813, K-1814)", () => {
   it("serves the repository of a card to the machine that runs its job, with ranges and v2 lists", async () => {
@@ -217,6 +235,7 @@ describe("backup runs (K-1817 to K-1819)", () => {
     const started = await admin("/api/apps/app-runs/backups", "POST");
     const run = started.body["run"];
     expect(run).toEqual(expect.any(String));
+    expect(await shown("app-runs")).toMatchObject({ action: "Back up now", step: 0, outcome: "running" });
     const job = await runInDurableObject(
       stub(),
       (_instance, durable) =>
@@ -251,6 +270,7 @@ describe("backup runs (K-1817 to K-1819)", () => {
         }),
       );
     });
+    expect(await shown("app-runs")).toMatchObject({ steps: 2, step: 2, outcome: "done" });
     const listed = await admin("/api/apps/app-runs/backups", "GET");
     expect(listed.body["runs"]).toContainEqual(
       expect.objectContaining({ run, state: "done", bytes: 2000, added: 300, error: null, pauseMs: 50_000 }),
@@ -307,6 +327,12 @@ describe("backup runs (K-1817 to K-1819)", () => {
           },
         }),
       );
+    });
+    expect(await shown("app-runs")).toMatchObject({
+      action: "Restore",
+      step: 1,
+      outcome: "failed",
+      reason: "The restore failed, and the data of before stays",
     });
     const after = (await admin("/api/apps/app-runs/backups", "GET")).body["runs"];
     expect(after).toContainEqual(expect.objectContaining({ run: before, state: "done", error: null }));
@@ -382,7 +408,20 @@ describe("restore to a time (K-1822, K-1771)", () => {
 
   it("finishes after the restart: History, job ids after the old highest, and the pass key last", async () => {
     const caller = { visitor: { email: "owner@example.com", clientId: null, ip: null }, actor };
-    await env.BUCKET!.put("state/restore-pending.json", JSON.stringify(finish));
+    // K-538: the request started the steps on the admin card; the restart lost that row, so R2 carries it.
+    const steps = ["find", "restart", "record", "rotate"].map((label, index) => ({
+      label,
+      expectedMs: 1_000,
+      startedAt: index < 2 ? 0 : null,
+      endedAt: index < 1 ? 0 : null,
+    }));
+    const progress = {
+      action: "Restore kitshn to a time",
+      steps,
+      outcome: { state: "running" },
+      retry: null,
+    };
+    await env.BUCKET!.put("state/restore-pending.json", JSON.stringify({ ...finish, progress }));
     const rotated = await runInDurableObject(stub(), async (instance) => {
       const spy = vi.spyOn(
         instance as unknown as { rotatePassKey(actor: unknown): Promise<void> },
@@ -412,7 +451,48 @@ describe("restore to a time (K-1822, K-1771)", () => {
     }));
     expect(after.summary).toMatch(/Restored kitshn to 2026-10-28T12:00:00.000Z.*bookmark-before/);
     expect(after.seq).toBeGreaterThanOrEqual(500);
+    expect(await shown("kitshn-admin")).toMatchObject({
+      action: "Restore kitshn to a time",
+      step: 4,
+      outcome: "done",
+    });
     expect(await env.BUCKET!.head("state/restore-pending.json")).toBeNull();
+  });
+
+  it("carries the steps of the request through R2 to the finish on the admin card (K-538)", async () => {
+    const caller = { visitor: { email: "owner@example.com", clientId: null, ip: null }, actor };
+    await runInDurableObject(stub(), async (instance, state) => {
+      // The real restore rewinds the storage and restarts the object; here the restart is only the reset of restoring.
+      vi.spyOn(state.storage, "getBookmarkForTime").mockResolvedValue("bookmark-then");
+      vi.spyOn(state.storage, "onNextSessionRestoreBookmark").mockResolvedValue("bookmark-undo");
+      const abort = vi.spyOn(state, "abort").mockImplementation(() => undefined);
+      vi.useFakeTimers();
+      try {
+        const response = await instance.fetch(
+          new Request("https://kitshn.internal/fresh/restore-time", {
+            method: "POST",
+            headers: { "x-kitshn-caller": JSON.stringify(caller), "content-type": "application/json" },
+            body: JSON.stringify({ at: Date.now() - 60_000 }),
+          }),
+        );
+        expect(response.status).toBe(200);
+        vi.runAllTimers();
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(abort).toHaveBeenCalledTimes(1);
+      (instance as unknown as { restoring: unknown }).restoring = null;
+    });
+    expect(await shown("kitshn-admin")).toMatchObject({ step: 1, outcome: "running" });
+    await runInDurableObject(stub(), (instance) =>
+      (instance as unknown as { finishPendingRestore(): Promise<void> }).finishPendingRestore(),
+    );
+    expect(await shown("kitshn-admin")).toMatchObject({
+      action: "Restore kitshn to a time",
+      steps: 4,
+      step: 4,
+      outcome: "done",
+    });
   });
 
   it("finishes at the next alarm when the poll timed out, and only once", async () => {

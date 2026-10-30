@@ -59,7 +59,13 @@ import {
   RestoreTimeDialog,
   backupLabel,
 } from "./Backups.tsx";
-import { type BackupRun, BACKUP_LIMIT_BYTES, type BucketSize, gigabytes } from "../core/backups.ts";
+import {
+  type BackupRun,
+  BACKUP_LIMIT_BYTES,
+  type BucketSize,
+  backupFailureShown,
+  gigabytes,
+} from "../core/backups.ts";
 import type {
   AccessState,
   DeployNote,
@@ -3064,7 +3070,8 @@ function CardPanel(props: {
           <div class="row">
             {props.backup ? (
               <>
-                <span>{backupLabel(props.backup)}</span> <BackupState run={props.backup} />
+                <span>{backupLabel(props.backup)}</span>{" "}
+                {backupFailureShown(props.backup, progress) ? <BackupState run={props.backup} /> : null}
               </>
             ) : props.backupsOff ? null : (
               <span class="muted">No backup yet; the first runs tonight.</span>

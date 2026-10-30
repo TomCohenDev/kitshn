@@ -9,6 +9,7 @@ import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Machine, MachineStatus } from "../src/core/machine.ts";
 import type { Resource } from "../src/core/model.ts";
+import { type ActionProgress, currentStep } from "../src/core/progress.ts";
 import { environmentNames } from "../src/worker/deploys.ts";
 import worker from "../src/worker/index.ts";
 
@@ -340,9 +341,72 @@ const storageRows = (card: string) =>
       .toArray(),
   );
 
+/** K-538: the action that a card shows: its name, step labels, the step that runs and how it ended. */
+const shown = (card: string) =>
+  runInDurableObject(env.KITSHN.getByName("kitshn"), (instance) => {
+    const row = (instance as unknown as { progressRows(): Map<string, { progress: ActionProgress }> })
+      .progressRows()
+      .get(card)?.progress;
+    return row
+      ? {
+          action: row.action,
+          steps: row.steps.map((step) => step.label),
+          step: currentStep(row),
+          outcome: row.outcome.state,
+          reason: row.outcome.state === "failed" ? row.outcome.reason : null,
+          retry: row.retry?.reason ?? null,
+        }
+      : null;
+  });
+
 afterEach(() => vi.restoreAllMocks());
 
 describe("Worker deploys (K-806, K-909)", () => {
+  it("shows the steps of a deploy onto its card, a 503 as a retry, and a failed step with its reason (K-538)", async () => {
+    fakeCloudflare();
+    const app = repo("91", "steps");
+    await allow(app);
+    expect((await deploy(app)).status).toBe(200);
+    const plan = await step(app, "/deploy/plan", { recipe: recipe(), event: {} });
+    const deployId = plan.body["deployId"];
+    expect(await shown(app.card)).toEqual({
+      action: "Deploy",
+      steps: ["Build in GitHub Actions", "Make the KV namespaces", "Make the new version live"],
+      step: 0,
+      outcome: "running",
+      reason: null,
+      retry: null,
+    });
+    expect((await step(app, "/deploy/storage", { deployId })).status).toBe(200);
+    expect(await shown(app.card)).toMatchObject({ step: 1, outcome: "running" });
+    const module = "export class Room {} export default {};";
+    let finish = await step(app, "/deploy/finish", { deployId, module });
+    // The Access application of a new address is not ready yet: the step waits, and the next call goes on.
+    for (let attempt = 0; attempt < 10 && finish.status === 503; attempt++) {
+      expect(await shown(app.card)).toMatchObject({ step: 2, outcome: "running", retry: expect.any(String) });
+      finish = await step(app, "/deploy/finish", { deployId, module });
+    }
+    expect(finish.status, JSON.stringify(finish.body)).toBe(200);
+    expect(await shown(app.card)).toMatchObject({ step: 3, outcome: "done", retry: null });
+    // The CLI gives up after the KV step and says why.
+    const third = (await step(app, "/deploy/plan", { recipe: recipe(), event: {} })).body["deployId"];
+    await step(app, "/deploy/storage", { deployId: third });
+    await step(app, "/deploy/fail", { deployId: third, reason: "The build failed." });
+    expect(await shown(app.card)).toMatchObject({ step: 1, outcome: "failed", reason: "The build failed." });
+    // A runner that dies says nothing: a map update reads no deploy row, and the alarm ends the action at its expiry.
+    const dead = (await step(app, "/deploy/plan", { recipe: recipe(), event: {} })).body["deployId"];
+    await runInDurableObject(env.KITSHN.getByName("kitshn"), (instance, durable) => {
+      durable.storage.sql.exec("UPDATE deploys SET expires_at = 0 WHERE id = ?", String(dead));
+      (instance as unknown as { broadcast(): void }).broadcast();
+    });
+    expect(await shown(app.card)).toMatchObject({ step: 0, outcome: "running" });
+    await runInDurableObject(env.KITSHN.getByName("kitshn"), (instance) => instance.alarm());
+    expect(await shown(app.card)).toMatchObject({
+      outcome: "failed",
+      reason: expect.stringMatching(/expired/),
+    });
+  });
+
   it("deploys again after a step that failed after the upload", async () => {
     const cloudflare = fakeCloudflare();
     const app = repo("42", "rooms");
@@ -694,6 +758,14 @@ describe("rollback (K-821)", () => {
     expect(result.body["state"]).toBe("failed");
     expect(cloudflare.rollbacks.map((item) => item.script)).toEqual([`kitshn-${cv.card}`]);
     expect((result.body["notes"] as Array<string>).at(-1)).toMatch(/stopped here/);
+    // K-538: the card where it started shows one step per card, and the step that failed.
+    expect(await shown(app.card)).toMatchObject({
+      action: "Roll back this run",
+      steps: [expect.any(String), expect.any(String)],
+      step: 1,
+      outcome: "failed",
+      reason: expect.stringMatching(/stopped here/),
+    });
   });
 
   /**
@@ -897,11 +969,17 @@ describe("rollback (K-821)", () => {
     };
     const started = await admin(`/api/apps/${app.card}/run-rollback`, "POST");
     expect(started.body["state"]).toBe("running");
+    // K-538: the Compose job of the step does not take the card from the run rollback's own action.
+    expect(await shown(app.card)).toMatchObject({ action: "Roll back this run", outcome: "running" });
     // A second run rollback of the same cards waits until the first ends.
     expect((await admin(`/api/apps/${app.card}/run-rollback`, "POST")).status).toBe(409);
     await result(false);
     expect(await rollbackRow()).toMatchObject({ state: "failed" });
     expect(JSON.parse((await rollbackRow()).notes).at(-1)).toMatch(/stopped here/);
+    expect(await shown(app.card)).toMatchObject({
+      outcome: "failed",
+      reason: expect.stringMatching(/stopped here/),
+    });
 
     // The machine goes offline and its job expires with no result: the run rollback stops.
     await endRunningRows();
@@ -926,6 +1004,7 @@ describe("rollback (K-821)", () => {
     await result(true);
     await result(true);
     expect(await rollbackRow()).toMatchObject({ state: "done" });
+    expect(await shown(app.card)).toMatchObject({ action: "Roll back this run", outcome: "done" });
     for (const key of ["app", "cv"]) expect((await choices(cardOf(key)))[0]?.sha).toBe("11111111111111");
     await close();
   });
@@ -1010,12 +1089,24 @@ describe("folder sites (K-1123)", () => {
     const script = `kitshn-${card.id}`;
     expect(cloudflare.served("demo-site.example.com")).toEqual([script]);
     // The same folder again deploys the same card.
-    expect(
-      (await agentStep("folder-key.access", "/agent/sites/plan", { folder: "demo" })).body,
-    ).toMatchObject({
+    const update = await agentStep("folder-key.access", "/agent/sites/plan", { folder: "demo" });
+    expect(update.body).toMatchObject({
       address: "demo-site.example.com",
       updated: true,
     });
+    // K-538: a folder site has no build in Actions; its card shows the upload, then the checkmark.
+    expect(await shown(card.id)).toMatchObject({
+      steps: ["Upload the files to Cloudflare", "Make the new version live"],
+      step: 0,
+      outcome: "running",
+    });
+    const updateId = update.body["deployId"];
+    await agentStep("folder-key.access", "/agent/sites/assets", { deployId: updateId, manifest });
+    expect(
+      (await agentStep("folder-key.access", "/agent/sites/finish", { deployId: updateId, jwt: "done" }))
+        .status,
+    ).toBe(200);
+    expect(await shown(card.id)).toMatchObject({ step: 2, outcome: "done" });
 
     const removed = await admin(`/api/apps/${card.id}`, "DELETE");
     expect(removed.status, JSON.stringify(removed.body)).toBe(200);

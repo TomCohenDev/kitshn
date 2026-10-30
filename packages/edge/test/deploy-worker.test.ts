@@ -393,6 +393,18 @@ describe("Worker deploys (K-806, K-909)", () => {
     await step(app, "/deploy/storage", { deployId: third });
     await step(app, "/deploy/fail", { deployId: third, reason: "The build failed." });
     expect(await shown(app.card)).toMatchObject({ step: 1, outcome: "failed", reason: "The build failed." });
+    // A runner that dies says nothing: a map update reads no deploy row, and the alarm ends the action at its expiry.
+    const dead = (await step(app, "/deploy/plan", { recipe: recipe(), event: {} })).body["deployId"];
+    await runInDurableObject(env.KITSHN.getByName("kitshn"), (instance, durable) => {
+      durable.storage.sql.exec("UPDATE deploys SET expires_at = 0 WHERE id = ?", String(dead));
+      (instance as unknown as { broadcast(): void }).broadcast();
+    });
+    expect(await shown(app.card)).toMatchObject({ step: 0, outcome: "running" });
+    await runInDurableObject(env.KITSHN.getByName("kitshn"), (instance) => instance.alarm());
+    expect(await shown(app.card)).toMatchObject({
+      outcome: "failed",
+      reason: expect.stringMatching(/expired/),
+    });
   });
 
   it("deploys again after a step that failed after the upload", async () => {

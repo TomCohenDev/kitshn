@@ -459,6 +459,42 @@ describe("restore to a time (K-1822, K-1771)", () => {
     expect(await env.BUCKET!.head("state/restore-pending.json")).toBeNull();
   });
 
+  it("carries the steps of the request through R2 to the finish on the admin card (K-538)", async () => {
+    const caller = { visitor: { email: "owner@example.com", clientId: null, ip: null }, actor };
+    await runInDurableObject(stub(), async (instance, state) => {
+      // The real restore rewinds the storage and restarts the object; here the restart is only the reset of restoring.
+      vi.spyOn(state.storage, "getBookmarkForTime").mockResolvedValue("bookmark-then");
+      vi.spyOn(state.storage, "onNextSessionRestoreBookmark").mockResolvedValue("bookmark-undo");
+      const abort = vi.spyOn(state, "abort").mockImplementation(() => undefined);
+      vi.useFakeTimers();
+      try {
+        const response = await instance.fetch(
+          new Request("https://kitshn.internal/fresh/restore-time", {
+            method: "POST",
+            headers: { "x-kitshn-caller": JSON.stringify(caller), "content-type": "application/json" },
+            body: JSON.stringify({ at: Date.now() - 60_000 }),
+          }),
+        );
+        expect(response.status).toBe(200);
+        vi.runAllTimers();
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(abort).toHaveBeenCalledTimes(1);
+      (instance as unknown as { restoring: unknown }).restoring = null;
+    });
+    expect(await shown("kitshn-admin")).toMatchObject({ step: 1, outcome: "running" });
+    await runInDurableObject(stub(), (instance) =>
+      (instance as unknown as { finishPendingRestore(): Promise<void> }).finishPendingRestore(),
+    );
+    expect(await shown("kitshn-admin")).toMatchObject({
+      action: "Restore kitshn to a time",
+      steps: 4,
+      step: 4,
+      outcome: "done",
+    });
+  });
+
   it("finishes at the next alarm when the poll timed out, and only once", async () => {
     await env.BUCKET!.put("state/restore-pending.json", JSON.stringify({ ...finish, undo: "bookmark-late" }));
     const calls = await runInDurableObject(stub(), async (instance) => {

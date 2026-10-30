@@ -143,6 +143,7 @@ import {
   type BucketSize,
   R2_FREE_BYTES,
   gigabytes,
+  BACK_UP_NOW,
 } from "../core/backups.ts";
 import { bucketSize, stateExport, writeExport } from "./backups.ts";
 import {
@@ -988,7 +989,12 @@ export class Kitshn extends DurableObject<Env> {
     });
     try {
       const response = await call();
-      if (response.ok) return response;
+      if (response.ok) {
+        // A finish that went live set the row to done.
+        this.settleDeployAction(row.id);
+        this.broadcast();
+        return response;
+      }
       const body: unknown = await response
         .clone()
         .json()
@@ -1025,7 +1031,11 @@ export class Kitshn extends DurableObject<Env> {
    * K-538: moves each running action on from the state that drives it, and starts the action of each new job that has
    * one. It runs before each map update, so every client shows the same steps. Returns true when one changed.
    */
-  private reconcileProgress(now = Date.now(), wake = false) {
+  /**
+   * `settle` also reads the rows of deploys and run rollbacks, at wake and in the alarm: their state changes move their
+   * stickers at once (settleDeployAction, settleRollbackAction), so this catches only a deploy that expired.
+   */
+  private reconcileProgress(now = Date.now(), wake = false, settle = wake) {
     let changed = false;
     for (const [cardId, row] of this.progressRows()) {
       if (row.progress.outcome.state !== "running") continue;
@@ -1040,9 +1050,13 @@ export class Kitshn extends DurableObject<Env> {
           : source._tag === "takeover"
             ? this.takeoverProgress(cardId, row.progress, now)
             : source._tag === "deploy"
-              ? this.deployProgress(source.deployId, row.progress, now)
+              ? settle
+                ? this.deployProgress(source.deployId, row.progress, now)
+                : row.progress
               : source._tag === "rollback"
-                ? this.runRollbackProgress(source.id, row.progress, now)
+                ? settle
+                  ? this.runRollbackProgress(source.id, row.progress, now)
+                  : row.progress
                 : wake
                   ? failProgress(row.progress, INTERRUPTED, now)
                   : row.progress;
@@ -1098,6 +1112,26 @@ export class Kitshn extends DurableObject<Env> {
     const status = job.machine_id === null ? null : this.liveStatus(job.machine_id);
     const step = status?.version === command.version ? 3 : closed || status === null ? 2 : 1;
     return reachStep(progress, step, now);
+  }
+
+  /** K-538: a deploy changed its state, so the sticker of its card follows. It reads the row only for a shown action. */
+  private settleDeployAction(deployId: string) {
+    for (const [cardId, row] of this.progressRows())
+      if (row.source._tag === "deploy" && row.source.deployId === deployId)
+        this.setProgress(cardId, {
+          ...row,
+          progress: this.deployProgress(deployId, row.progress, Date.now()),
+        });
+  }
+
+  /** K-538: a run rollback moved on or ended, so the sticker of the card where it started follows. */
+  private settleRollbackAction(id: string) {
+    for (const [cardId, row] of this.progressRows())
+      if (row.source._tag === "rollback" && row.source.id === id)
+        this.setProgress(cardId, {
+          ...row,
+          progress: this.runRollbackProgress(id, row.progress, Date.now()),
+        });
   }
 
   /** K-538: the end of a static or Worker deploy, from its row; the calls of the CLI move its steps (deployCall). */
@@ -2659,7 +2693,7 @@ export class Kitshn extends DurableObject<Env> {
     if (refusal) return Response.json({ error: refusal }, { status: 409 });
     const { run, jobId } = this.queueBackup(card, actor, false, Date.now());
     // K-538: only a backup that someone started shows its steps; the daily ones keep the K-1819 sticker.
-    this.startBackupAction(card, jobId, "Back up now", "Back up the volumes and the data folder");
+    this.startBackupAction(card, jobId, BACK_UP_NOW, "Back up the volumes and the data folder");
     this.deliverJobs();
     this.broadcast();
     return Response.json({ run });
@@ -3221,6 +3255,7 @@ export class Kitshn extends DurableObject<Env> {
           id,
         );
         // K-538: the sticker of the run moves on with each card.
+        this.settleRollbackAction(id);
         this.broadcast();
         if (result.jobId !== null) return;
       }
@@ -3242,6 +3277,7 @@ export class Kitshn extends DurableObject<Env> {
       return;
     }
     this.sql("UPDATE rollbacks SET next = next + 1, job_id = NULL WHERE id = ?", id);
+    this.settleRollbackAction(id);
     // Set now, so the alarm does not settle the rollback before the next step starts.
     this.advancing.add(id);
     void this.advanceRollback(id).then(() => this.broadcast());
@@ -3278,6 +3314,7 @@ export class Kitshn extends DurableObject<Env> {
       id,
     );
     if (!row) return;
+    this.settleRollbackAction(id);
     this.recordRevision(
       JSON.parse(row.actor) as Actor,
       state === "done" ? "The run rollback ended (K-821)" : `The run rollback stopped: ${notes.at(-1) ?? ""}`,
@@ -3366,11 +3403,12 @@ export class Kitshn extends DurableObject<Env> {
     // publish is a first publish.
     for (const { before, after } of apps)
       if (before && !after && this.isFolderSite(before.id))
-        this.sql(
-          "UPDATE deploys SET state = 'failed', reason = ? WHERE resource_id = ? AND state = 'planned'",
+        for (const { id } of this.sql<{ id: string }>(
+          "UPDATE deploys SET state = 'failed', reason = ? WHERE resource_id = ? AND state = 'planned' RETURNING id",
           "The owner removed the site.",
           before.id,
-        );
+        ))
+          this.settleDeployAction(id);
     // A stop that still waits goes, and the app starts again (a short restart where it never stopped).
     for (const card of restored) {
       failQueuedDowns(this.query, card.id, "The undo of the removal replaced this job (K-909).");
@@ -8003,11 +8041,13 @@ export class Kitshn extends DurableObject<Env> {
       output,
       repoId,
     );
-    return this.sql<{ id: string; app: string }>(
+    const stopped = this.sql<{ id: string; app: string }>(
       `UPDATE deploys SET state = 'failed' WHERE repo_id = ? AND kind = 'deploy' AND state IN ('planned', 'running')
        RETURNING id, app`,
       repoId,
     );
+    for (const { id } of stopped) this.settleDeployAction(id);
+    return stopped;
   }
 
   /**
@@ -8095,6 +8135,7 @@ export class Kitshn extends DurableObject<Env> {
           reason,
           row.id,
         );
+        this.settleDeployAction(row.id);
         this.broadcast();
         // K-817: a failed Compose deploy gives up the DNS record that its plan made.
         if (row.app === "compose") void this.scheduleAlarm();
@@ -11616,6 +11657,7 @@ export class Kitshn extends DurableObject<Env> {
     });
     this.folderUploads.delete(row.id);
     this.folderDrops.delete(site.card_id);
+    this.settleDeployAction(row.id);
   }
 
   /** K-1129: a new folder site of the owner, at the drop point or in the tray, or a new version of a folder site. */
@@ -14509,8 +14551,8 @@ export class Kitshn extends DurableObject<Env> {
       changed ||= daily || JSON.stringify(accessStates(this.desired(now), this.access)) !== before;
     }
     if (this.failedAlarmSteps() !== failedBefore) changed = true;
-    // K-538: the steps that this run did, such as the ingress of a taken address.
-    if (this.reconcileProgress()) changed = true;
+    // K-538: the steps that this run did, such as the ingress of a taken address, and deploys that expired.
+    if (this.reconcileProgress(Date.now(), false, true)) changed = true;
     if (changed) this.broadcast();
     // K-1907, K-406: the pushes go out once, at the end, after the reconcile of broadcast queued its own.
     await this.flushPushes();

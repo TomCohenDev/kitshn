@@ -83,3 +83,15 @@ export function resticObject(card: string, path: string): { key: string } | { li
 
 /** K-1818: "1.2 GB" in decimal units, as Cloudflare counts R2. */
 export const gigabytes = (bytes: number) => `${(bytes / 1000 ** 3).toFixed(1)} GB`;
+
+/** K-538: the action of "Back up now" on its card. */
+export const BACK_UP_NOW = "Back up now";
+
+/**
+ * K-1819, K-538: false while the card's latest action is a failed "Back up now", whose sticker already says that the
+ * backup failed. The daily backups have no such action, so their failure keeps the K-1819 sticker.
+ */
+export const backupFailureShown = (
+  run: Pick<BackupRun, "state">,
+  action: { readonly action: string; readonly outcome: { readonly state: string } } | null,
+) => !(run.state === "failed" && action?.action === BACK_UP_NOW && action.outcome.state === "failed");

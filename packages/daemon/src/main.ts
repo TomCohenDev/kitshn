@@ -159,7 +159,7 @@ import {
 import { AGENT_USAGE, type AgentTransport, runAgentCommand, timeBody } from "kitshn/agent";
 import { CliError } from "kitshn/cli-error";
 import { checkSkill, installGlobalSkill, installRepoSkill, refreshGlobalSkill } from "./skill.ts";
-import { appSocketFolder, socketPathProblem } from "./sockets.ts";
+import { appSocketFolder, removeOldSockets, socketPathProblem, upOnSocket } from "./sockets.ts";
 
 declare const KITSHN_VERSION: string;
 const VERSION = typeof KITSHN_VERSION === "string" ? KITSHN_VERSION : "dev";
@@ -1434,22 +1434,20 @@ async function composeUp(
     // A teardown takes down what the last `up` started, also when that `up` failed.
     copyFileSync(checked, join(scratch, "down.json"));
     copyFileSync(env.KITSHN_PARAMS_FILE, join(scratch, "down.env"));
-    upStarted = true;
-    await step("docker compose up", "docker", [...run, "up", "-d", "--no-build", "--remove-orphans"], {
-      cwd: source,
-      env,
+    // A broken sites.json fails before `up`, so the old app starts again on its old route.
+    await upOnSocket({ read: readSites, write: writeSites }, { name: command.name, socketPath }, () => {
+      upStarted = true;
+      return step("docker compose up", "docker", [...run, "up", "-d", "--no-build", "--remove-orphans"], {
+        cwd: source,
+        env,
+      });
     });
+    void checkSites();
     const until = Date.now() + SOCKET_WAIT_MS;
     while (!(await probe(`unix:${socketPath}`))) {
       if (Date.now() > until) throw new Error(`the app opened no socket at ${socketPath} within 3 minutes`);
       await new Promise((done) => setTimeout(done, 2000));
     }
-    const sites = readSites();
-    if (sites === null) throw new Error(`${sitesFile()} is broken; fix it, then deploy again`);
-    const next = addSite(sites, { name: command.name, target: `unix:${socketPath}`, dev: false });
-    if (typeof next === "string") throw new Error(next);
-    writeSites(next);
-    void checkSites();
     // K-821: the deploy of this build: a redeploy starts the build of good/ again, so it keeps its id.
     const deployId = command.kind === "compose-redeploy" ? keptId(good) : command.deployId;
     const kept: Record<string, string> = {};
@@ -1500,19 +1498,6 @@ async function composeUp(
       );
     }
     return { ok: false, exitCode: null, output };
-  }
-}
-
-/** K-607: the sockets folder of an app before the short one; a file in it that is no socket keeps it. */
-function removeOldSockets(folder: string): string {
-  if (!existsSync(folder)) return "";
-  try {
-    if (readdirSync(folder, { withFileTypes: true }).some((entry) => !entry.isSocket()))
-      return `kitshn keeps ${folder}: it holds more than sockets.\n`;
-    rmSync(folder, { recursive: true, force: true });
-    return `$ remove the old sockets folder ${folder}\n`;
-  } catch (error) {
-    return `kitshn could not remove ${folder}: ${String(error)}\n`;
   }
 }
 

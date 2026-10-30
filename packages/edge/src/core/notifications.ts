@@ -13,6 +13,7 @@ export const NOTIFICATION_SOURCES = [
   "alarm",
   "update",
   "provider",
+  "health",
 ] as const;
 
 /** K-1903: "run" calls the handler of the source at once; "link" opens a path of the map. */

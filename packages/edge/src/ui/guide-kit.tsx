@@ -57,6 +57,7 @@ export const machineView = (online: boolean, key: MachineKey | null): MachineVie
     os: first.os,
     keyFailure: null,
     orphanVolumes: [],
+    health: null,
     servers: [],
     queued: 0,
     update: null,

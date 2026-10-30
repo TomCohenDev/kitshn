@@ -34,6 +34,35 @@ describe("local socket framing (K-702)", () => {
     });
   });
 
+  it("reads a health answer, and refuses a report with an error longer than its limit (K-630)", () => {
+    const link = {
+      provider: "t3",
+      machineId: "b",
+      status: 403,
+      ms: 12,
+      failures: 2,
+      since: 1,
+      error: "refused",
+    };
+    const report = {
+      at: 5,
+      providers: [{ provider: "t3", failures: 0, since: null, error: null }],
+      links: [link],
+    };
+    expect(readAnswer(JSON.stringify({ id: "h", type: "health", report }))).toEqual({
+      id: "h",
+      type: "health",
+      report,
+    });
+    expect(readAnswer('{"id":"h","type":"health","report":null}')).toEqual({
+      id: "h",
+      type: "health",
+      report: null,
+    });
+    const long = { ...report, links: [{ ...link, error: "x".repeat(161) }] };
+    expect(() => readAnswer(JSON.stringify({ id: "h", type: "health", report: long }))).toThrow();
+  });
+
   it("throws on an answer that does not match, since daemon and client then disagree", () => {
     expect(() => readAnswer('{"id":"a","type":"status"}')).toThrow();
     expect(readAnswer('{"id":"a","type":"reconnect"}')).toEqual({ id: "a", type: "reconnect" });

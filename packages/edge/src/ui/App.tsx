@@ -1744,7 +1744,11 @@ export function App() {
               onShowCard={(id) => handlers.select({ cards: new Set([id]), circle: null })}
             />
           ) : shownPanel === "machines" ? (
-            <MachinesView machines={store.snapshot.machines} onAdd={() => setAddingMachine(true)} />
+            <MachinesView
+              machines={store.snapshot.machines}
+              onAdd={() => setAddingMachine(true)}
+              onToast={(text, error) => showToast({ text, error, undo: null })}
+            />
           ) : shownPanel === "usage" ? (
             <UsageView machines={store.snapshot.machines} r2Bucket={store.snapshot.r2Bucket} />
           ) : shownPanel === "notifications" ? (

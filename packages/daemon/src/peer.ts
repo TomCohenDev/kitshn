@@ -80,6 +80,7 @@ const REQUEST_SENDERS: Record<Request["type"], "local-users" | "providers" | "da
   // K-1612, K-605: a local user cancels the machine's own queued jobs and reads its samples, as with `ask`.
   "job-cancel": "local-users",
   samples: "local-users",
+  health: "local-users",
 };
 
 export const requestAllowed = (

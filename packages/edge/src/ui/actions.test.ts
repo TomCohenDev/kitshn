@@ -107,6 +107,7 @@ function context(version = "0123456789ab"): ActionContext {
     os: null,
     keyFailure: null,
     orphanVolumes: [],
+    health: null,
     servers: [],
     queued: 0,
     update: null,

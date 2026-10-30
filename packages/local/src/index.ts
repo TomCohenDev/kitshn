@@ -15,8 +15,10 @@ import {
   ProviderClient,
   ProviderResource,
 } from "./provider.ts";
+import { HealthReport } from "./health.ts";
 
 export * from "./provider.ts";
+export * from "./health.ts";
 
 /** The longest line, in UTF-16 code units, that the daemon reads; a longer line ends the connection. */
 /** K-1714: room for a forwarded body of `MAX_FORWARD_BYTES` in base64 and its request. */
@@ -187,6 +189,8 @@ export const Request = Schema.Union([
   Schema.Struct({ id: Id, type: Schema.Literal("job-cancel"), jobId: Schema.Int }),
   /** K-605, K-606: the resource sample now and the samples of the last hour, read on this machine only. */
   Schema.Struct({ id: Id, type: Schema.Literal("samples") }),
+  /** K-630: the last health check of this machine; with `now`, a new one first. */
+  Schema.Struct({ id: Id, type: Schema.Literal("health"), now: Schema.optionalKey(Schema.Boolean) }),
   /** K-1610: the provider reports one exec run or forwarded tool call on another machine. */
   Schema.Struct({ id: Id, type: Schema.Literal("audit"), provider: ProviderName, audit: LinkAudit }),
   /** K-707: the result of a `command` event. */
@@ -326,6 +330,8 @@ export const Answer = Schema.Union([
   Schema.Struct({ id: Id, type: Schema.Literal("audit") }),
   Schema.Struct({ id: Id, type: Schema.Literal("job-cancel") }),
   Schema.Struct({ id: Id, type: Schema.Literal("samples"), newest: Sample, history: Schema.Array(Sample) }),
+  /** K-630: null before the first check. */
+  Schema.Struct({ id: Id, type: Schema.Literal("health"), report: Schema.NullOr(HealthReport) }),
   /** K-1623: an event: the Access audiences of the provider's site hosts, on each change. */
   Schema.Struct({ type: Schema.Literal("access"), provider: Schema.String, access: ProviderAccess }),
   /** K-1609: an event: the cards of this provider on other machines that this machine reaches, on each change. */

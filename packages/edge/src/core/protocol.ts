@@ -17,7 +17,7 @@ import type {
 } from "./model.ts";
 import type { RepoGate } from "./repos.ts";
 import type { Proposal } from "./asks.ts";
-import type { ProviderCommand } from "@kitshn/local";
+import type { HealthReport, ProviderCommand } from "@kitshn/local";
 import type { ActionProgress } from "./progress.ts";
 
 /** K-1623: a provider card's address that something else serves, that kitshn takes over now, or took over. */
@@ -242,6 +242,8 @@ export interface MachineView {
   readonly orphanVolumes: ReadonlyArray<ProjectVolume>;
   /** K-619: the listening ports of the machine while it is online, for the site wizard. */
   readonly servers: ReadonlyArray<ServerReport>;
+  /** K-630: the last health check of the machine while it is online. */
+  readonly health: HealthReport | null;
   /** K-1608: the pushes of state that the machine has not applied yet; null when its daemon does not report it. */
   readonly queued: number | null;
   /** K-628: the update of its daemon to the release of the Worker; null when no update job of that release exists. */

@@ -1062,6 +1062,64 @@ pre.output.log-lines {
     color: var(--muted);
   }
 }
+/* K-631: the health grid of the Machines view. */
+.health {
+  margin-top: 16px;
+}
+.health .row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+.health-grid {
+  display: grid;
+  gap: 4px;
+  align-items: center;
+  margin-top: 8px;
+  overflow-x: auto;
+}
+.health-corner,
+.health-head {
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: var(--muted);
+  text-align: center;
+}
+.health-name {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.health-cell {
+  display: grid;
+  place-items: center;
+  height: 1.75rem;
+  font-weight: 800;
+  color: #000000;
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius);
+}
+.health-cell.ok {
+  background: var(--green);
+}
+.health-cell.bad {
+  background: var(--error);
+}
+.health-cell.unknown {
+  background: var(--surface);
+  color: var(--muted);
+}
+.health-cell.none {
+  border-style: dashed;
+  border-color: var(--muted);
+}
+.health-cell.self {
+  border-radius: 50%;
+}
 .table-view > input[type="search"] {
   width: 100%;
   margin-bottom: 8px;

@@ -1108,6 +1108,49 @@ const statusOf = async (answer: Promise<unknown>) => {
 const isRecordLike = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
+it("opens a health notification after two failed checks in a row, and closes it on recovery (K-631)", async () => {
+  const { stub } = await setup();
+  const health = (check: "signed" | "token", failures: number) =>
+    runInDurableObject(stub, (instance) =>
+      instance.webSocketMessage(
+        daemonSocket(check),
+        JSON.stringify({
+          type: "health",
+          report: {
+            at: 1,
+            providers: [],
+            links: [
+              {
+                provider: "t3",
+                machineId: "laptop",
+                status: failures > 0 ? 530 : 200,
+                ms: 4,
+                failures,
+                since: failures > 0 ? 1000 : null,
+                error: failures > 0 ? "answered 530" : null,
+              },
+            ],
+          },
+        }),
+      ),
+    );
+  const notifications = () =>
+    runInDurableObject(stub, (_, state) =>
+      state.storage.sql
+        .exec<{ key: string; state: string }>("SELECT key, state FROM notifications WHERE source = 'health'")
+        .toArray(),
+    );
+  // K-1708: a connection on the token alone reports no health.
+  await health("token", 2);
+  expect(await notifications()).toEqual([]);
+  await health("signed", 1);
+  expect(await notifications()).toEqual([]);
+  await health("signed", 2);
+  expect(await notifications()).toEqual([{ key: "vps:link:t3:laptop", state: "open" }]);
+  await health("signed", 0);
+  expect(await notifications()).toEqual([{ key: "vps:link:t3:laptop", state: "closed" }]);
+});
+
 it("opens one notification for a refused provider from a signed status, and closes it when one passes (K-704)", async () => {
   const { stub } = await setup();
   const status = (check: "signed" | "token", refusedProviders: Array<object>) =>

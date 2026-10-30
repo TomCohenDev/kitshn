@@ -355,7 +355,11 @@ export function cloneBytes(value: unknown): number {
 export const ATTACHMENT_BUDGET = 15_000;
 
 export function fitAttachment<
-  T extends { readonly servers?: ReadonlyArray<unknown>; readonly volumes?: ReadonlyArray<unknown> },
+  T extends {
+    readonly servers?: ReadonlyArray<unknown>;
+    readonly volumes?: ReadonlyArray<unknown>;
+    readonly health?: { readonly links: ReadonlyArray<unknown> };
+  },
 >(attachment: T): T {
   let fitted = attachment;
   while (cloneBytes(fitted) > ATTACHMENT_BUDGET) {
@@ -363,7 +367,10 @@ export function fitAttachment<
       fitted = { ...fitted, servers: fitted.servers.slice(0, -1) };
     else if (fitted.volumes && fitted.volumes.length > 0)
       fitted = { ...fitted, volumes: fitted.volumes.slice(0, -1) };
-    else throw new Error("fitAttachment: the attachment is too big without servers and volumes.");
+    // K-630: the link checks inform too; the map then shows the cut links as no link.
+    else if (fitted.health && fitted.health.links.length > 0)
+      fitted = { ...fitted, health: { ...fitted.health, links: fitted.health.links.slice(0, -1) } };
+    else throw new Error("fitAttachment: the attachment is too big without servers, volumes and links.");
   }
   return fitted;
 }

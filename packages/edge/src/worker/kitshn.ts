@@ -293,7 +293,10 @@ import {
 import { badgeState } from "../core/badge.ts";
 import { listedApps } from "../core/listing.ts";
 import { commandsFor, machineBusy, providerCards, providerPushes, reachOf } from "../core/providers.ts";
+import { healthCell, healthNotices } from "../core/health.ts";
 import {
+  HealthReport as HealthReportSchema,
+  type HealthReport,
   type LinkAudit,
   LinkAudit as LinkAuditSchema,
   type ProviderClient,
@@ -482,6 +485,8 @@ type Attachment =
       readonly volumes?: ReadonlyArray<ProjectVolume>;
       /** K-619: the listening ports of the machine; an older daemon sends none. */
       readonly servers?: ReadonlyArray<ServerReport>;
+      /** K-630: the last health check of this connection; an older daemon sends none. */
+      readonly health?: HealthReport;
     };
 
 /** K-1805: a Compose tail runs on the daemon; K-1807: a Worker tail is a Cloudflare tail of the script. */
@@ -497,6 +502,7 @@ const saveMachine = (socket: WebSocket, attachment: Extract<Attachment, { kind: 
   socket.serializeAttachment(fitAttachment(attachment));
 
 const decodeLinkAudit = Schema.decodeUnknownSync(LinkAuditSchema);
+const decodeHealth = Schema.decodeUnknownSync(HealthReportSchema);
 /** K-1610: how often the maps hear of new link events, and how many reports of one machine kitshn takes a minute. */
 const LINK_BROADCAST_MS = 10_000;
 const LINK_AUDITS_PER_MINUTE = 120;
@@ -1057,9 +1063,13 @@ export class Kitshn extends DurableObject<Env> {
                 ? settle
                   ? this.runRollbackProgress(source.id, row.progress, now)
                   : row.progress
-                : wake
-                  ? failProgress(row.progress, INTERRUPTED, now)
-                  : row.progress;
+                : source._tag === "health"
+                  ? now >= source.until
+                    ? failProgress(row.progress, "The daemon sent no health report within a minute.", now)
+                    : row.progress
+                  : wake
+                    ? failProgress(row.progress, INTERRUPTED, now)
+                    : row.progress;
       if (this.setProgress(cardId, { ...row, progress })) changed = true;
     }
     // The open jobs only after a new job came, so most map updates read no job rows.
@@ -3763,10 +3773,36 @@ export class Kitshn extends DurableObject<Env> {
       keyFailure: this.keyFailures.get(machine.id) ?? null,
       orphanVolumes: orphanVolumes(live?.volumes ?? [], this.state),
       servers: live?.servers ?? [],
+      health: live?.health ?? null,
       queued: this.queuedFor(machine, live?.status ?? null),
       // K-628: kept between the events that change it (K-627), so a view reads no job rows.
       update: daemonUpdate(this.rollout(), machine.id, this.env.KITSHN_VERSION),
     };
+  }
+
+  /**
+   * K-631: the cells of the health grid in the row and the column of one machine. It reads the socket attachments
+   * only, no rows (K-1715).
+   */
+  private healthOf(machineId: string) {
+    const machines = [...this.state.machines.values()].map((machine) => {
+      const socket = this.openSocket(machine.id);
+      const attachment = socket ? attachmentOf(socket) : null;
+      return {
+        machine,
+        online: socket !== null,
+        health: attachment?.kind === "machine" ? (attachment.health ?? null) : null,
+      };
+    });
+    const self = machines.find((view) => view.machine.id === machineId);
+    if (!self) return [];
+    const now = Date.now();
+    return machines.flatMap((other) => {
+      const name = (view: (typeof machines)[number]) => ({ id: view.machine.id, name: view.machine.name });
+      const outgoing = { from: name(self), to: name(other), ...healthCell(self, other.machine.id, now) };
+      if (other === self) return [outgoing];
+      return [outgoing, { from: name(other), to: name(self), ...healthCell(other, machineId, now) }];
+    });
   }
 
   /** The newest open socket of a machine that passed its check (K-1704), or null. */
@@ -4346,6 +4382,7 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/api/state" && request.method === "GET") return Response.json(this.snapshot(caller));
     if (path === "/api/sign-out" && request.method === "POST") return this.signOut(caller);
     if (path === "/api/sign-out/retry" && request.method === "POST") return this.retrySignOut(caller);
+    if (path === "/api/health/check" && request.method === "POST") return this.checkHealthNow(caller);
     if (path === "/api/machines" && request.method === "POST")
       return this.addMachine(caller, await request.json().catch(() => null), new URL(request.url).origin);
     if (path.startsWith("/api/desired/")) {
@@ -5123,6 +5160,23 @@ export class Kitshn extends DurableObject<Env> {
       } satisfies ServerToDaemon);
     } else if (message.type === "audit") {
       this.recordLinkEvent(machine, message.audit);
+    } else if (message.type === "health" && attachment.check === "signed") {
+      let report: HealthReport;
+      try {
+        // kitshn's own clock, so a machine clock that is off never makes a report look old.
+        report = { ...decodeHealth(message.report), at: Date.now() };
+      } catch (error) {
+        console.error(`kitshn refused the health report of ${machine.name}: ${String(error)}`);
+        return;
+      }
+      saveMachine(socket, { ...attachment, health: report });
+      this.notifyHealth(machine, report);
+      // K-631: "Check now" ends with this report.
+      if (this.progressRows().get(machine.id)?.source._tag === "health")
+        this.moveAction(machine.id, (progress) =>
+          progress.outcome.state === "running" ? finishProgress(progress, Date.now()) : progress,
+        );
+      this.broadcast();
     } else if (message.type === "desiredSet" && typeof message.kind === "string") {
       // K-709: the provider gets kitshn's own answer, also a refusal.
       // A failed write is an answer too, so the provider never waits for one that does not come.
@@ -5997,6 +6051,41 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-614: the sender of a command needs control on the machine card itself, not only on the admin. */
+  /**
+   * K-631: "Check now": each online machine that the caller controls checks its providers and links at once, with the
+   * progress sticker of K-538 on its card until its report comes.
+   */
+  private async checkHealthNow(caller: Caller) {
+    const now = Date.now();
+    const checking: Array<string> = [];
+    const skipped: Array<{ readonly machine: string; readonly reason: string }> = [];
+    for (const machine of this.state.machines.values()) {
+      if (!this.canControl(caller.visitor, machine.id)) continue;
+      const socket = this.openSocket(machine.id);
+      const attachment = socket ? attachmentOf(socket) : null;
+      if (!socket || attachment?.kind !== "machine" || attachment.check !== "signed") {
+        skipped.push({ machine: machine.name, reason: "offline or without a key" });
+        continue;
+      }
+      if (!attachment.status?.capabilities?.includes("health")) {
+        skipped.push({ machine: machine.name, reason: "its daemon has no health check; update it" });
+        continue;
+      }
+      send(socket, { type: "checkHealth" } satisfies ServerToDaemon);
+      this.startAction(
+        machine.id,
+        { _tag: "health", until: now + HEALTH_CHECK_WAIT_MS },
+        "Check now",
+        HEALTH_CHECK_STEPS,
+        now,
+      );
+      checking.push(machine.name);
+    }
+    this.broadcast();
+    await this.scheduleAlarm();
+    return Response.json({ checking, skipped });
+  }
+
   private canControl(visitor: Visitor, machineId: string) {
     const resource = this.state.resources.get(machineId);
     if (!resource) return false;
@@ -7238,6 +7327,10 @@ export class Kitshn extends DurableObject<Env> {
     // K-1124: the redirect step that waits tries again at its time; a finished step stores 0.
     const redirectRetry = Number(this.meta("redirects_retry_at") ?? 0);
     if (this.env.CLOUDFLARE_API_TOKEN && redirectRetry > now) next = Math.min(next, redirectRetry);
+    // K-631: a "Check now" that gets no report fails at its time.
+    for (const row of this.progressRows().values())
+      if (row.source._tag === "health" && row.progress.outcome.state === "running")
+        next = Math.min(next, Math.max(now, row.source.until));
     // K-406: a step of the alarm that threw tries again at its time.
     for (const failure of this.alarmSteps().values())
       if (failure.retryAt > now) next = Math.min(next, failure.retryAt);
@@ -9748,6 +9841,8 @@ export class Kitshn extends DurableObject<Env> {
         ...(machine ? { proposals: answerable, servers: this.machineView(machine).servers } : {}),
         // K-1610: the newest 50 calls from or to this machine.
         ...(machine ? { linkEvents: this.recentLinkEvents(machine.id) } : {}),
+        // K-631: the health cells from and to this machine, from the reports in the socket attachments.
+        ...(machine ? { health: this.healthOf(machine.id) } : {}),
         // K-819: with "may add apps", the waiting repos that the key may allow.
         repos: rights.includes("addsApps")
           ? this.sql<RepoRow>(
@@ -13873,6 +13968,28 @@ export class Kitshn extends DurableObject<Env> {
   }
 
   /** K-704: one `provider` notification per refused provider of the machine; it closes when a registration passes. */
+  /** K-631: opens the notification of each check that failed twice in a row, and closes the rest of this machine. */
+  private notifyHealth(machine: Machine, report: HealthReport) {
+    const others = new Map(
+      [...this.state.machines.values()].map((other) => [
+        other.id,
+        { name: other.name, online: this.openSocket(other.id) !== null },
+      ]),
+    );
+    const keys = new Set<string>();
+    for (const input of healthNotices(machine, report, others)) {
+      keys.add(input.key);
+      this.notify(input);
+    }
+    for (const notification of this.openNotifications.values())
+      if (
+        notification.source === "health" &&
+        notification.key.startsWith(`${machine.id}:`) &&
+        !keys.has(notification.key)
+      )
+        this.setNotificationState("health", notification.key, "closed");
+  }
+
   private notifyRefusals(machine: Machine, refusals: ReadonlyArray<ProviderRefusal>) {
     const keys = new Set<string>();
     for (const refusal of refusals) {
@@ -14859,7 +14976,9 @@ interface StoredProgress {
     | { readonly _tag: "give-back" }
     | { readonly _tag: "deploy"; readonly deployId: string }
     | { readonly _tag: "rollback"; readonly id: string }
-    | { readonly _tag: "restore" };
+    | { readonly _tag: "restore" }
+    /** K-631: "Check now" waits for the daemon's report until `until`. */
+    | { readonly _tag: "health"; readonly until: number };
   readonly progress: ActionProgress;
 }
 
@@ -14892,6 +15011,12 @@ const RESTORE_STEPS: ReadonlyArray<PlannedStep> = [
   { label: "Restart kitshn on the restored storage", expectedMs: 3_000 },
   { label: "Record the restore in History and set the job ids", expectedMs: 500 },
   { label: "Rotate the pass key", expectedMs: 1_000 },
+];
+
+/** K-631: a "Check now" fails when no report comes in this time; a link check gives up after 10 seconds (K-630). */
+const HEALTH_CHECK_WAIT_MS = 60_000;
+const HEALTH_CHECK_STEPS: ReadonlyArray<PlannedStep> = [
+  { label: "Check the providers and the links", expectedMs: 3_000 },
 ];
 
 const TAKE_ADDRESS_STEPS: ReadonlyArray<PlannedStep> = [

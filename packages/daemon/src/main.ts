@@ -28,10 +28,13 @@ import {
   ASK_ACTIONS,
   type Answer,
   type AskAction,
+  HEALTH_INTERVAL_MS,
+  type HealthReport,
   MAX_FORWARD_BYTES,
   type Request,
   WINDOW_ACTIONS,
 } from "@kitshn/local";
+import { linkPairs, nextReport, probeLink, providerChecks } from "./health.ts";
 import { composeFiles, composeRisks, envFileRisks, rawRisks, realpathOnDisk, sourceRisks } from "./guard.ts";
 import { type Notify, accessEnv, withAppEnv } from "./appEnv.ts";
 import { HELPER_IMAGE, backup, finishRestores, restore, unpauseMarked } from "./backup.ts";
@@ -334,6 +337,25 @@ async function statusCommand() {
         (offline) =>
           `offline  ${offline.provider} since ${new Date(offline.at).toISOString()}: ${offline.reason}`,
       ),
+    ].join("\n"),
+  );
+}
+
+/** K-630: the last health check of this machine, or a new one with `--now`. */
+async function healthCommand(now: boolean, json: boolean) {
+  const answer = await ask({ id: "1", type: "health", now });
+  if (answer === null) fail(notRunning());
+  if (answer.type !== "health") fail(`the daemon answered ${answer.type} to health.`);
+  const { report } = answer;
+  if (json) return console.log(JSON.stringify(report));
+  if (report === null) return console.log("No check ran yet. Run kitshn health --now.");
+  const line = (name: string, error: string | null, failures: number) =>
+    `${error === null ? "ok  " : "FAIL"}  ${name}${error === null ? "" : `: ${error} (${failures} in a row)`}`;
+  console.log(
+    [
+      `checked ${new Date(report.at).toISOString()}`,
+      ...report.providers.map((p) => line(`provider ${p.provider}`, p.error, p.failures)),
+      ...report.links.map((l) => line(`link ${l.provider} -> ${l.machineId}`, l.error, l.failures)),
     ].join("\n"),
   );
 }
@@ -1794,7 +1816,7 @@ function report() {
       // K-624: Windows has no Docker setup in v1, so the map refuses Compose, logs and backups there with a reason.
       capabilities:
         platform === "win32"
-          ? ["update", "update-gz", "provider", "access"]
+          ? ["update", "update-gz", "provider", "access", "health"]
           : [
               "update",
               "update-gz",
@@ -1810,6 +1832,8 @@ function report() {
               "applied",
               // K-1623: this daemon saves the Access audiences of its providers and gives them on.
               "access",
+              // K-630: this daemon checks its providers and links, and answers `checkHealth`.
+              "health",
               ...(doorState.problem === null ? ["doors"] : []),
             ],
       ...(keptBytes === undefined ? {} : { keptBytes }),
@@ -2386,6 +2410,9 @@ function connect(config: JoinSecrets) {
       void sendServers().catch((error: unknown) => log(`server scan failed: ${String(error)}`));
       void reportVolumes().catch((error: unknown) => log(`volume report failed: ${String(error)}`));
       ws.send(JSON.stringify({ type: "sample", sample: sample() } satisfies DaemonMessage));
+      // K-630: kitshn keeps a report per connection; an old one waits for the reach that kitshn pushes now.
+      if (lastHealth !== null && Date.now() - lastHealth.at < HEALTH_INTERVAL_MS) sendHealth(lastHealth);
+      else setTimeout(() => void checkHealth(), HEALTH_FIRST_MS);
     };
     ws.onmessage = (event) => {
       const text = String(event.data);
@@ -2409,6 +2436,8 @@ function connect(config: JoinSecrets) {
         accepted(`with the key ${message.fingerprint}`);
       } else if (message.type === "rotateKey") {
         void rotateKey(ws);
+      } else if (message.type === "checkHealth") {
+        void checkHealth();
       } else if (
         message.type === "grants" ||
         message.type === "desired" ||
@@ -2841,6 +2870,7 @@ async function runCommand() {
       socket.send(JSON.stringify({ type: "sample", sample: value } satisfies DaemonMessage));
   }, SAMPLE_MS);
   setInterval(pruneSamples, 24 * 60 * 60_000);
+  setInterval(() => void checkHealth(), HEALTH_INTERVAL_MS);
   setInterval(
     () => void checkSites().catch((error: unknown) => log(`site check failed: ${String(error)}`)),
     10_000,
@@ -2897,6 +2927,43 @@ const sharedLinkSocket = platform === "win32" ? "" : join(dirname(paths.sharedSo
 let sharedLinkServed = false;
 /** False when the link proxy did not start; the answer to `register` then names no socket. */
 let linkServed = false;
+
+/** K-630: the last check, in memory only, so a restart counts the failures in a row from 0 again. */
+let lastHealth: HealthReport | null = null;
+let healthRun: Promise<HealthReport> | null = null;
+/** K-630: the first check after a connection waits this long for the reach of kitshn. */
+const HEALTH_FIRST_MS = 30_000;
+
+function sendHealth(report: HealthReport) {
+  if (socket?.readyState === WebSocket.OPEN)
+    socket.send(JSON.stringify({ type: "health", report } satisfies DaemonMessage));
+}
+
+/** K-630: checks each provider, and each link of the reach once, at the same time; a second call joins the first. */
+function checkHealth(): Promise<HealthReport> {
+  healthRun ??= (async () => {
+    const reports = registry().reports();
+    const reachOf = (provider: string) => registry().reachOf(provider);
+    const token = joined ? { clientId: joined.clientId, clientSecret: joined.clientSecret } : null;
+    const links = await Promise.all(
+      linkPairs(
+        reports.map((report) => report.name),
+        reachOf,
+      ).map(async (pair) => ({
+        ...pair,
+        ...(linkServed || sharedLinkServed
+          ? await probeLink(reachOf, token, pair)
+          : { status: null, ms: 0, error: "the daemon serves no link proxy" }),
+      })),
+    );
+    lastHealth = nextReport(lastHealth, providerChecks(reports), links, Date.now());
+    sendHealth(lastHealth);
+    return lastHealth;
+  })().finally(() => {
+    healthRun = null;
+  });
+  return healthRun;
+}
 
 /** K-704: the providers of this machine, saved in `providers.json`. */
 const providersFile = () => join(paths.data, "providers.json");
@@ -3059,6 +3126,8 @@ async function answerLocal(request: Request, caller: Caller, emit: (event: Answe
   if (request.type === "samples") {
     return { id, type: "samples", newest: sample(), history: lastHour(recentSamples, Date.now()) };
   }
+  if (request.type === "health")
+    return { id, type: "health", report: request.now ? await checkHealth() : lastHealth };
   if (request.type === "job-cancel") {
     const ws = socket;
     if (ws === null || challenge === null)
@@ -3200,6 +3269,9 @@ switch (command) {
   case "status":
     await statusCommand();
     break;
+  case "health":
+    await healthCommand(args.includes("--now"), args.includes("--json"));
+    break;
   case "git-credential":
     await gitCredentialCommand(args[0]);
     break;
@@ -3270,6 +3342,7 @@ kitshn run                              run the daemon in the foreground
 kitshn rotate-key                       replace the machine key over the live connection (K-1705)
 kitshn rekey <code>                     make a new machine key with the key code of its panel (K-1706, K-1708)
 kitshn status                           the machine, its key, its connection to kitshn and its tunnel
+kitshn health [--now] [--json]          the last check of the providers and links of this machine (K-630)
 kitshn local-users list|add|remove <u>  who else may use the local socket, as the daemon user (K-701);
                                         add <u> --provider also lets it run a provider and its attester
 kitshn providers rebind <name> --to-user <u>

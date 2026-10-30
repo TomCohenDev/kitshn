@@ -5,6 +5,7 @@ import type {
   CardSettingValues,
   DesiredParts,
   GrantTables,
+  HealthReport,
   LinkAudit,
   ProviderReport,
   ProviderAccess,
@@ -295,7 +296,9 @@ export type DaemonMessage =
   /** K-1610: a provider of the machine reports one exec run or forwarded tool call on another machine. */
   | { readonly type: "audit"; readonly audit: LinkAudit }
   /** K-1608: the daemon saved the push with this key and hash and gave it to its provider. */
-  | { readonly type: "applied"; readonly key: string; readonly hash: string };
+  | { readonly type: "applied"; readonly key: string; readonly hash: string }
+  /** K-630: the check of its providers and links, every 10 minutes and after `checkHealth`. */
+  | { readonly type: "health"; readonly report: HealthReport };
 
 /** Messages from kitshn to a daemon. */
 export type ServerToDaemon =
@@ -309,6 +312,8 @@ export type ServerToDaemon =
   | { readonly type: "accepted"; readonly fingerprint: string }
   /** K-1705: "Rotate key" in the machine panel. */
   | { readonly type: "rotateKey" }
+  /** K-631: "Check now" in the Machines view; the daemon checks at once and sends `health`. */
+  | { readonly type: "checkHealth" }
   /** K-704: the name of the machine on the map, on each signed connection and after a rename. */
   | { readonly type: "name"; readonly name: string }
   /** K-704: the owner forgot this provider on the map; the daemon drops it unless a connection holds it. */

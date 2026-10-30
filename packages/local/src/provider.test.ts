@@ -177,7 +177,13 @@ describe("provider reports (K-704, K-705)", () => {
         request: { clients: [{ id: "t3code-fork" }] },
       },
     );
-    expect(readRequest(line(client("https://example.com/add?u={inviteUrl}")))).toMatchObject({ ok: true });
+    expect(readRequest(line(client("T3code+x.y://new?u={inviteUrl}")))).toMatchObject({ ok: true });
+    const install = (url: string) => [
+      { id: "t3code", name: "T3 Code", open: "t3code://x?u={inviteUrl}", install: [{ label: "Get", url }] },
+    ];
+    expect(readRequest(line(install("https://play.google.com/store")))).toMatchObject({ ok: true });
+    for (const url of ["http://play.google.com/", "https://evil/?u={inviteUrl}", "market://details"])
+      expect(readRequest(line(install(url))), url).toMatchObject({ ok: false });
     const many = Array.from({ length: 5 }, (_, index) => ({
       ...client("t3code://x?u={inviteUrl}")[0],
       id: `c${index}`,
@@ -185,6 +191,14 @@ describe("provider reports (K-704, K-705)", () => {
     expect(readRequest(line(many))).toMatchObject({ ok: false });
     for (const open of [
       "javascript:alert(1)//{inviteUrl}",
+      "https://example.com/add?u={inviteUrl}",
+      "intent://x#Intent;S.browser_fallback_url=https%3A%2F%2Fevil%2F%3Fu%3D{inviteUrl};end",
+      "x-safari-https://evil/?u={inviteUrl}",
+      "googlechromes://evil/?u={inviteUrl}",
+      "microsoft-edge:https://evil/?u={inviteUrl}",
+      "market://details?u={inviteUrl}",
+      "wss://evil/{inviteUrl}",
+      "1app://x/{inviteUrl}",
       "data:text/html,{inviteUrl}",
       "http://example.com/{inviteUrl}",
       "t3code://connections/new",

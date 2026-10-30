@@ -1,7 +1,6 @@
-import { useState } from "preact/hooks";
+import { useId, useRef, useState } from "preact/hooks";
 import { encode } from "uqr";
-import type { ProviderClient } from "@kitshn/local";
-import { openLink } from "../core/invite.ts";
+import { type InviteClient, openLink } from "../core/invite.ts";
 import { callApi } from "./store.ts";
 
 /** K-1601: a waiting invite of a phone or desktop app, as `POST /api/devices/invites` answers it. */
@@ -11,8 +10,10 @@ export interface DeviceInvite {
   readonly name: string;
   readonly link: string;
   readonly expiresAt: number;
-  /** K-720: the client apps that the providers declare; each gets its own QR code. */
-  readonly clients: ReadonlyArray<ProviderClient>;
+  /** K-720: the client apps that the providers declare, with their machines; each gets its own QR code. */
+  readonly clients: ReadonlyArray<InviteClient>;
+  /** K-720: every machine that declares clients declares the same ones. */
+  readonly agree: boolean;
 }
 
 /** The QR code of a text as one SVG path, with a quiet zone of 2 modules. It stays black on white in dark mode. */
@@ -38,9 +39,18 @@ export function InviteDialog(props: { invite: DeviceInvite; onClose: () => void 
   const { invite } = props;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // K-720: the first declared app by default; the last tab is the plain https link, for any other app.
-  const [tab, setTab] = useState(0);
+  // K-720: the last tab is the plain https link. The first app shows first only when the machines agree on the apps,
+  // so one machine cannot put its own app in front of the owner.
+  const [tab, setTab] = useState(invite.agree ? 0 : invite.clients.length);
   const client = invite.clients[tab];
+  const id = useId();
+  const tabs = useRef<HTMLDivElement>(null);
+  const labels = [...invite.clients.map((each) => each.name), "Link"];
+  const pick = (index: number) => {
+    const next = (index + labels.length) % labels.length;
+    setTab(next);
+    tabs.current?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next]?.focus();
+  };
   const qrText = client ? openLink(client.open, invite.link) : invite.link;
   const until = new Date(invite.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const cancel = async () => {
@@ -66,33 +76,53 @@ export function InviteDialog(props: { invite: DeviceInvite; onClose: () => void 
           </span>
           <b>{invite.name}</b>
         </div>
-        <div class="seg" role="tablist" aria-label="App">
-          {[...invite.clients.map((each) => each.name), "Link"].map((label, index) => (
-            <button
-              key={label}
-              type="button"
-              role="tab"
-              aria-pressed={tab === index}
-              aria-selected={tab === index}
-              data-tip={
-                index < invite.clients.length
-                  ? `A QR code that opens ${label} with this invite.`
-                  : "A QR code of the invite link. Its page offers each app, the link and the code."
-              }
-              onClick={() => setTab(index)}
-            >
-              {label}
-            </button>
-          ))}
+        <div
+          class="invite-tabs"
+          role="tablist"
+          aria-label="App"
+          ref={tabs}
+          onKeyDown={(event) => {
+            const step = { ArrowRight: tab + 1, ArrowLeft: tab - 1, Home: 0, End: labels.length - 1 }[
+              event.key
+            ];
+            if (step === undefined) return;
+            event.preventDefault();
+            pick(step);
+          }}
+        >
+          {labels.map((label, index) => {
+            const each = invite.clients[index];
+            return (
+              <button
+                key={each ? `${each.provider}/${each.id}/${each.machines.join(",")}` : "link"}
+                id={`${id}-tab-${index}`}
+                type="button"
+                role="tab"
+                aria-selected={tab === index}
+                aria-controls={`${id}-panel`}
+                tabIndex={tab === index ? 0 : -1}
+                data-tip={
+                  each
+                    ? `A QR code that opens ${label} with this invite. Declared by ${each.machines.join(", ")}.`
+                    : "A QR code of the invite link. Its page offers each app, the link and the code."
+                }
+                onClick={() => setTab(index)}
+              >
+                {label}
+              </button>
+            );
+          })}
         </div>
-        <p class="help">
-          {client
-            ? `Scan this with the phone camera to open ${client.name}, or open the link on the desktop.`
-            : "Scan this with the phone camera, or paste the link into the app's add server field."}{" "}
-          It works once, until {until}.
-        </p>
-        <div class="qr-box">
-          <QrCode text={qrText} label={`QR code of the invite of ${invite.name}`} />
+        <div role="tabpanel" id={`${id}-panel`} aria-labelledby={`${id}-tab-${tab}`}>
+          <p class="help">
+            {client
+              ? `Scan this with the phone camera to open ${client.name}. Declared by ${client.machines.join(", ")}.`
+              : "Scan this with the phone camera, or paste the link into the app's add server field."}{" "}
+            It works once, until {until}.
+          </p>
+          <div class="qr-box">
+            <QrCode text={qrText} label={`QR code of the invite of ${invite.name}`} />
+          </div>
         </div>
         <div class="secret">
           <code>{invite.link}</code>
@@ -106,9 +136,9 @@ export function InviteDialog(props: { invite: DeviceInvite; onClose: () => void 
           >
             Copy link
           </button>
-          {client?.install.map((link) => (
+          {client?.install.map((link, index) => (
             <a
-              key={link.url}
+              key={`${index}-${link.url}`}
               class="btn"
               href={link.url}
               target="_blank"

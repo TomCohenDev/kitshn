@@ -35,7 +35,19 @@ export default {
           name: "Pixel",
           link: `${origin}/join/device#code=${code}`,
           expiresAt: Date.now() + 15 * 60_000,
-          clients,
+          clients: [
+            ...clients.map((client) => ({ ...client, provider: "t3", machines: ["vps", "Mac"] })),
+            // A third app with a long name shows that the tabs wrap on a phone.
+            {
+              id: "other",
+              name: "Another remote desktop client with a long name",
+              open: "other://add?u={inviteUrl}",
+              install: [],
+              provider: "other",
+              machines: ["pc"],
+            },
+          ],
+          agree: false,
         },
       }),
     );

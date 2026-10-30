@@ -177,32 +177,70 @@ export type ProviderList = typeof ProviderList.Type;
 // The daemon, the Worker and Node all have the WHATWG `URL`; this package compiles without DOM or Node types.
 declare const URL: { canParse(url: string): boolean };
 
-/** K-720: schemes that a browser runs or reads itself, so an `open` link never uses them. */
-const BROWSER_SCHEMES = ["javascript", "data", "vbscript", "file", "blob", "about", "http"];
+/**
+ * K-720: schemes of the web and of browsers. An `open` link with one of them could hand the invite to a web site, so
+ * `open` takes only an app's own scheme. Exact names, then prefixes.
+ */
+const WEB_SCHEMES = [
+  "http",
+  "https",
+  "intent",
+  "javascript",
+  "data",
+  "vbscript",
+  "file",
+  "blob",
+  "about",
+  "ftp",
+  "ws",
+  "wss",
+  "chrome",
+  "firefox",
+  "market",
+];
+const WEB_SCHEME_PREFIXES = ["googlechrome", "x-safari-", "opera", "edge", "microsoft-edge"];
+
+/** K-720: a valid scheme name that only an app registers, never the web or a browser. */
+export function isAppScheme(scheme: string): boolean {
+  const name = scheme.toLowerCase();
+  return (
+    name !== "" &&
+    LOWER.includes(name[0]!) &&
+    only(`${LOWER}${DIGITS}+.-`)(name) &&
+    !WEB_SCHEMES.includes(name) &&
+    !WEB_SCHEME_PREFIXES.some((prefix) => name.startsWith(prefix))
+  );
+}
 
 /**
- * K-720: a client app of the provider, which takes a device invite (K-1601). `open` is a link with `{inviteUrl}`: kitshn
- * puts the encoded invite link there. It is https or the app's own scheme.
+ * K-720: a client app of the provider, which takes a device invite (K-1601). `open` is a link of the app's own scheme
+ * with `{inviteUrl}`: kitshn puts the encoded invite link there. Install links are https and never carry the code.
  */
 export const ProviderClient = Schema.Struct({
   id: SettingId,
   name: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(60)),
   open: Schema.String.check(
     Schema.isMaxLength(512),
-    Schema.makeFilter((open: string) => {
-      const scheme = open.slice(0, Math.max(0, open.indexOf(":"))).toLowerCase();
-      return (
+    Schema.makeFilter(
+      (open: string) =>
         (open.includes("{inviteUrl}") &&
           URL.canParse(open.replaceAll("{inviteUrl}", "x")) &&
-          scheme !== "" &&
-          only(`${LOWER}${DIGITS}+.-`)(scheme) &&
-          !BROWSER_SCHEMES.includes(scheme)) ||
-        "a link of https or the app's own scheme, with {inviteUrl}"
-      );
-    }),
+          isAppScheme(open.slice(0, Math.max(0, open.indexOf(":"))))) ||
+        "a link of the app's own scheme, with {inviteUrl}",
+    ),
   ),
   install: Schema.Array(
-    Schema.Struct({ label: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(40)), url: Link }),
+    Schema.Struct({
+      label: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(40)),
+      url: Schema.String.check(
+        Schema.isMaxLength(512),
+        Schema.makeFilter(
+          (url: string) =>
+            (url.startsWith("https://") && URL.canParse(url) && !url.includes("{inviteUrl}")) ||
+            "an https link",
+        ),
+      ),
+    }),
   ).check(Schema.isMaxLength(4)),
 });
 export type ProviderClient = typeof ProviderClient.Type;

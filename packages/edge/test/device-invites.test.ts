@@ -257,6 +257,24 @@ it("shows one open button per declared client app on the invite page, once per p
   await declare(sql, { clients: [fork, store] });
   const two = await page();
   expect(two.match(/Open in /g)).toHaveLength(2);
-  expect((await invite({ name: "Two" })).body).toMatchObject({ clients: [fork, store] });
+  expect((await invite({ name: "Two" })).body).toMatchObject({
+    clients: [
+      { ...fork, provider: "t3", machines: ["m0"] },
+      { ...store, provider: "t3", machines: ["m0"] },
+    ],
+    agree: true,
+  });
+  await declare(sql);
+});
+
+it("escapes a hostile client name and label on the invite page (K-720)", async () => {
+  const { sql } = await setup();
+  const hostile = '"><img src=x onerror=alert(1)>';
+  await declare(sql, {
+    clients: [{ ...fork, name: hostile, install: [{ label: hostile, url: "https://example.com/" }] }],
+  });
+  const page = await (await send("/join/device")).text();
+  expect(page).not.toContain("<img");
+  expect(page).toContain("&quot;&gt;&lt;img src=x onerror=alert(1)&gt;");
   await declare(sql);
 });

@@ -119,6 +119,7 @@ import {
   organize,
   organizeSummary,
 } from "../core/organize.ts";
+import { inviteClients } from "../core/invite.ts";
 import { placeInside } from "../core/place.ts";
 import { type ServerReport, parseSiteInput, serversOf } from "../core/sites.ts";
 import {
@@ -4053,7 +4054,7 @@ export class Kitshn extends DurableObject<Env> {
     if (path === "/internal/offline")
       return this.offlineInfo(new URL(request.url).searchParams.get("address") ?? "");
     if (path === "/internal/public-cards") return this.publicCards();
-    if (path === "/internal/invite-clients") return Response.json(this.inviteClients());
+    if (path === "/internal/invite-clients") return Response.json(this.inviteClients().clients);
     if (path === "/internal/badge") return this.badge(new URL(request.url).searchParams);
     if (path === "/internal/notify" && request.method === "POST") return this.appNotify(request);
     if (path === "/internal/import-status") return Response.json(this.importStatus());
@@ -7468,22 +7469,24 @@ export class Kitshn extends DurableObject<Env> {
       name,
       link: `https://${this.env.KITSHN_HOST}/join/device#code=${code}`,
       expiresAt,
-      clients: this.inviteClients(),
+      ...this.inviteClients(),
     });
   }
 
-  /**
-   * K-720: the client apps that the providers of all machines declare, once per provider and client id. Known limit:
-   * machines with different releases of one provider may declare different values, and the first machine in id order
-   * wins. Revisit when that shows a stale link.
-   */
-  private inviteClients(): Array<ProviderClient> {
-    const found = new Map<string, ProviderClient>();
-    for (const [, regs] of [...this.providerRegs].sort(([a], [b]) => a.localeCompare(b)))
-      for (const reg of regs)
-        for (const client of reg.clients ?? [])
-          if (!found.has(`${reg.name}/${client.id}`)) found.set(`${reg.name}/${client.id}`, client);
-    return [...found.values()];
+  /** K-720: the client apps that the providers of all machines declare, each with its machines (`inviteClients`). */
+  private inviteClients() {
+    const order = (id: string) => this.state.machines.get(id)?.order ?? Number.MAX_SAFE_INTEGER;
+    return inviteClients(
+      [...this.providerRegs]
+        .sort(([a], [b]) => order(a) - order(b) || a.localeCompare(b))
+        .flatMap(([machineId, regs]) =>
+          regs.map((reg) => ({
+            machine: this.state.machines.get(machineId)?.name ?? machineId,
+            provider: reg.name,
+            clients: reg.clients ?? [],
+          })),
+        ),
+    );
   }
 
   /**

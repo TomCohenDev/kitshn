@@ -49,6 +49,8 @@ export interface UpdateMarker {
   readonly starts: number;
   readonly state: "pending" | "rolled-back";
   readonly reason?: string;
+  /** How the new daemon last ended, from its exit log (K-622), so the rollback names it. */
+  readonly lastExit?: string;
 }
 
 export function parseMarker(value: unknown): UpdateMarker | null {
@@ -72,6 +74,7 @@ export function parseMarker(value: unknown): UpdateMarker | null {
     starts: typeof marker["starts"] === "number" ? marker["starts"] : 0,
     state: marker["state"],
     ...(typeof marker["reason"] === "string" ? { reason: marker["reason"] } : {}),
+    ...(typeof marker["lastExit"] === "string" ? { lastExit: marker["lastExit"] } : {}),
   };
 }
 
@@ -108,13 +111,14 @@ export type GateStep =
 
 export function gateStep(marker: UpdateMarker | null, version: string, now: number): GateStep {
   if (marker === null || marker.state !== "pending" || version !== marker.to) return { kind: "none" };
+  const ended = marker.lastExit ? ` It last ended: ${marker.lastExit}` : "";
   if (marker.starts >= UPDATE_MAX_STARTS)
     return {
       kind: "roll-back",
-      reason: `The new daemon started ${marker.starts} times without reaching kitshn.`,
+      reason: `The new daemon started ${marker.starts} times without reaching kitshn.${ended}`,
     };
   if (now >= marker.deadline)
-    return { kind: "roll-back", reason: "The new daemon did not reach kitshn within 5 minutes." };
+    return { kind: "roll-back", reason: `The new daemon did not reach kitshn within 5 minutes.${ended}` };
   return { kind: "count", marker: { ...marker, starts: marker.starts + 1 } };
 }
 
@@ -335,4 +339,10 @@ export async function runGate(
     return "start";
   }
   return "restart";
+}
+
+/** K-629: one line about how a daemon ended, for `lastExit`: the code and the first line of the reason. */
+export function exitText(code: number, reason: string): string {
+  const first = reason.trim().split("\n")[0]?.trim() ?? "";
+  return (first ? `exit code ${code}, ${first}` : `exit code ${code}`).slice(0, 300);
 }

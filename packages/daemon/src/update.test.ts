@@ -4,6 +4,7 @@ import {
   type InstallFiles,
   type UpdateMarker,
   dropStep,
+  exitText,
   gateStep,
   installUpdate,
   oldBinaries,
@@ -94,6 +95,18 @@ describe("the way back of an update (K-629)", () => {
     expect(gateStep({ ...marker, starts: 3 }, marker.to, 1)).toEqual({
       kind: "roll-back",
       reason: "The new daemon started 3 times without reaching kitshn.",
+    });
+  });
+
+  it("names how the new daemon last ended in its rollback, so the card shows why (K-622)", () => {
+    const lastExit = exitText(
+      1,
+      "Error: listen EACCES \\\\.\\pipe\\kitshn-ya\n    at listenLocal (main.ts:1:1)",
+    );
+    expect(lastExit).toBe("exit code 1, Error: listen EACCES \\\\.\\pipe\\kitshn-ya");
+    expect(gateStep({ ...marker, starts: 3, lastExit }, marker.to, 1)).toEqual({
+      kind: "roll-back",
+      reason: `The new daemon started 3 times without reaching kitshn. It last ended: ${lastExit}`,
     });
   });
 

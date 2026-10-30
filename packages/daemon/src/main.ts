@@ -120,6 +120,7 @@ import {
   type Platform,
   RELEASES,
   WINDOWS_CLOUDFLARED,
+  WINDOWS_TASKS,
   ownUid,
   windowsElevated,
   cloudflaredUrl,
@@ -1121,7 +1122,7 @@ async function installRelease(
     return failed(`The update failed: ${String(error)}`);
   }
   log(`updated ${VERSION} to ${version}; restarting`);
-  restartSoon(platform);
+  restartSoon(platform, log);
   return null;
 }
 
@@ -1222,7 +1223,7 @@ async function rollBackUpdate(marker: UpdateMarker, reason: string) {
     flushResults();
     return;
   }
-  restartSoon(platform);
+  restartSoon(platform, log);
 }
 
 /** K-629: after the gate of entry.ts: a new daemon waits for kitshn, the previous one reports why it is back. */
@@ -1240,6 +1241,30 @@ function checkUpdate() {
     return;
   }
   updateWatch = { marker, timer: deadlineTimer(marker) };
+}
+
+/**
+ * K-622: a task from an older release gets the triggers of this one, so no machine needs `kitshn service install`
+ * again. If registering the task again ends this run, its time trigger starts the daemon within 5 minutes. A failed
+ * registration removes the file, so the next start tries again.
+ */
+function refreshDaemonTask() {
+  const xml = serviceBytes(serviceFile(platform, process.execPath));
+  if (existsSync(paths.service) && readFileSync(paths.service).equals(xml)) return;
+  mkdirSync(dirname(paths.service), { recursive: true });
+  writeFileSync(paths.service, xml);
+  const made = spawnSync("schtasks", ["/Create", "/TN", WINDOWS_TASKS.daemon, "/XML", paths.service, "/F"], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (made.status === 0) {
+    log("the daemon task has the triggers of this release");
+    return;
+  }
+  rmSync(paths.service, { force: true });
+  log(
+    `the daemon task was not registered again (${made.error ? String(made.error) : `exit ${made.status}, ${(made.stdout + made.stderr).trim().slice(-300)}`})`,
+  );
 }
 
 /**
@@ -1885,7 +1910,7 @@ function runJob(
     return Promise.resolve({ ...outcome, exitCode: outcome.ok ? 0 : 1 });
   }
   if (command.kind === "restart") {
-    restartSoon(platform);
+    restartSoon(platform, log);
     return Promise.resolve({ ok: true, exitCode: 0, output: "restarting" });
   }
   // `$KITSHN` is this daemon's binary, so a job can run `"$KITSHN" expose …` (K-1104).
@@ -1909,7 +1934,8 @@ function report() {
       // K-624: Windows has no Docker setup in v1, so the map refuses Compose, logs and backups there with a reason.
       capabilities:
         platform === "win32"
-          ? ["update", "update-gz", "provider", "access", "health"]
+          ? // K-622: "task-restart": this daemon starts its task again from outside the task's run.
+            ["update", "update-gz", "provider", "access", "health", "task-restart"]
           : [
               "update",
               "update-gz",
@@ -2911,7 +2937,10 @@ async function runCommand() {
     );
   // First, so a second daemon stops before it touches the tunnel or the connection of the running one.
   const own = ownUid();
-  if (platform === "win32") removeOldBinaries();
+  if (platform === "win32") {
+    removeOldBinaries();
+    refreshDaemonTask();
+  }
   const socketOptions = {
     platform,
     // Read at each connection, so `kitshn local-users` needs no restart.

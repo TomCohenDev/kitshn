@@ -22,6 +22,7 @@ const OLD = "bbbbbbbbbbbb";
 const online = (version: string, connectedAt = 0): LiveStatus => ({
   version,
   capabilities: ["update"],
+  os: "linux 6.8.0",
   connectedAt,
 });
 const behind = (id: string, order: number, more: Partial<AutoUpdateMachine> = {}): AutoUpdateMachine => ({
@@ -59,7 +60,11 @@ describe("next automatic update (K-627)", () => {
     expect(nextAutoUpdate(NEW, false, failed, [behind("b", 2)], 0)).toBeNull();
     expect(nextAutoUpdate(NEWER, false, failed, [behind("b", 2)], 0)?.machineId).toBe("b");
   });
-  it("skips offline, unkeyed, source and NEWEST daemons, and a local Worker build", () => {
+  it("updates a Windows daemon that starts its task again (K-622)", () => {
+    const status = { ...online(OLD)!, os: "win32 10.0.26100", capabilities: ["update", "task-restart"] };
+    expect(nextAutoUpdate(NEW, false, NO_ROLLOUT, [behind("pc", 1, { status })], 0)?.machineId).toBe("pc");
+  });
+  it("skips offline, unkeyed, source and NEWEST daemons, old Windows daemons, and a local Worker build", () => {
     expect(
       nextAutoUpdate(
         NEW,
@@ -70,7 +75,9 @@ describe("next automatic update (K-627)", () => {
           behind("nokey", 1, { hasKey: false }),
           behind("dev", 1, { status: online("dev") }),
           behind("new", 1, { status: online(NEW) }),
-          behind("old", 1, { status: { version: OLD, connectedAt: 0 } }),
+          behind("old", 1, { status: { version: OLD, os: "linux 6.8.0", connectedAt: 0 } }),
+          // K-622: a Windows daemon that cannot start its task again after the swap.
+          behind("windows", 1, { status: { ...online(OLD)!, os: "win32 10.0.26100" } }),
         ],
         0,
       ),

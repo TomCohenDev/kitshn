@@ -8,6 +8,12 @@ import { type PeerDecision, peerUid, requestAllowed, requestSenders } from "./pe
 import { type Platform, ownUid } from "./service.ts";
 import { pipeServerProblem } from "./winpipe.ts";
 
+/**
+ * K-704: one counter for every listener of the daemon. The private and the shared socket give their closes to one
+ * handler, which takes the providers of that key offline, so a key must name one connection of the whole daemon.
+ */
+let lastConnection = 0;
+
 /** K-621: at most this many pipe connections at once, and a connection sends its first line within this time. */
 const PIPE_CONNECTIONS = 64;
 const PIPE_FIRST_LINE_MS = 30_000;
@@ -159,7 +165,6 @@ export async function listenLocal(
     socket.data?.writer.end();
   };
   const lastRefusal = new Map<number | null, number>();
-  let connections = 0;
   const answer = (socket: Bun.Socket<Connection | undefined>, { uid, key }: Connection, text: string) =>
     answerLine(options, (reply) => send(socket, reply), { uid, connection: key }, text);
   const server = Bun.listen<Connection | undefined>({
@@ -182,7 +187,7 @@ export async function listenLocal(
         if (!decision.accept) return refuse(decision.reason);
         socket.data = {
           uid: peer,
-          key: ++connections,
+          key: ++lastConnection,
           writer: new SocketWriter(socket),
           decoder: new TextDecoder(),
           buffer: "",
@@ -289,9 +294,8 @@ function lineReader(onLine: (text: string) => void, tooLong: () => void) {
  * refuse it, because they check the server's account first (`pipeRefusal`).
  */
 async function listenPipe(path: string, options: LocalOptions): Promise<{ readonly stop: () => void }> {
-  let connections = 0;
   const server = createServer((socket) => {
-    const key = ++connections;
+    const key = ++lastConnection;
     const send = (answer: Answer) => void socket.write(line(answer));
     // A connection that never sends a line holds a pipe instance for nothing, for example a read-only one.
     const quiet = setTimeout(() => socket.destroy(), PIPE_FIRST_LINE_MS);

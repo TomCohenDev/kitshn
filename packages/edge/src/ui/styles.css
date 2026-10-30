@@ -859,6 +859,8 @@ button.count {
   overflow: auto;
   overscroll-behavior: contain;
   padding: 8px;
+  /* A finger between cards scrolls the list; on a card, the map's drag scrolls it (Map.tsx). */
+  touch-action: pan-y;
 }
 /* Folded, the shelf shows only its count (K-509, K-528). */
 .tray.closed {
@@ -888,6 +890,11 @@ button.count {
   user-select: none;
   -webkit-user-select: none;
   cursor: grab;
+  touch-action: none;
+}
+/* The card follows the pointer on the map while its place in the tray stays. */
+.tray .card.dragging {
+  opacity: 0.4;
 }
 .toast {
   position: fixed;
@@ -1985,8 +1992,11 @@ pre.output {
   background: var(--surface);
   border-bottom: var(--bw) solid var(--border);
 }
-.overlay-head h2:focus {
+/* The panel puts the focus on its heading when it opens; the heading is no control, so it shows no ring. */
+.overlay-head h2:focus,
+.overlay-head h2:focus-visible {
   outline: none;
+  box-shadow: none;
 }
 .overlay-head h2 {
   flex: 1;
@@ -2762,4 +2772,49 @@ a > code {
 }
 .facts dd {
   margin: 0;
+}
+
+/* K-1722: a forwarded call shows its request on several lines. */
+code.shown {
+  white-space: pre-wrap;
+}
+
+/* The raw text behind a plain reason, such as the schema error of a refused provider. */
+details.raw > summary {
+  cursor: pointer;
+  font-weight: 700;
+  list-style: none;
+}
+details.raw > summary::-webkit-details-marker {
+  display: none;
+}
+details.raw > summary::before {
+  content: "▸ ";
+}
+details.raw[open] > summary::before {
+  content: "▾ ";
+}
+
+/* A group of radios, such as the GitHub way: its options wrap with room between them, under their label. */
+.right-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 10px 0;
+  padding: 0;
+  border: 0;
+}
+.right-mode > legend {
+  margin-bottom: 4px;
+  padding: 0;
+  text-transform: uppercase;
+  font-weight: 800;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+/* U16: a folded toolbar gives the title's room to its buttons; the browser tab names the page. */
+.bar.folded h1 {
+  display: none;
 }

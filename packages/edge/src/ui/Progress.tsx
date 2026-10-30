@@ -115,6 +115,8 @@ export function ProgressSticker(props: { progress: ActionProgress; panel: string
 export function ProgressRow(props: {
   cardId: string;
   progress: ActionProgress & { readonly canDismiss: boolean };
+  /** The next steps after a failure, such as "Try again", next to Dismiss. */
+  next?: ReadonlyArray<{ readonly label: string; readonly tip: string; readonly run: () => void }>;
   onToast: (text: string, error: boolean) => void;
 }) {
   const { progress } = props;
@@ -143,7 +145,6 @@ export function ProgressRow(props: {
           step {index + 1} of {progress.steps.length}
         </span>
       )}
-      {progress.outcome.state === "failed" ? <span class="muted">{progress.outcome.reason}</span> : null}
       {progress.retry ? <span class="muted">{retryText(progress.retry)}</span> : null}
       <ol class="progress-steps">
         {progress.steps.map((step, at) => {
@@ -169,10 +170,24 @@ export function ProgressRow(props: {
                       ? "→"
                       : "·"}{" "}
               {step.label}
+              {state === "failed" && progress.outcome.state === "failed" ? (
+                <p class="error">{progress.outcome.reason}</p>
+              ) : null}
             </li>
           );
         })}
       </ol>
+      {/* A failure after the last step has no step to stand under. */}
+      {progress.outcome.state === "failed" && index >= progress.steps.length ? (
+        <p class="error">{progress.outcome.reason}</p>
+      ) : null}
+      {failed
+        ? props.next?.map((each) => (
+            <button key={each.label} type="button" class="btn" data-tip={each.tip} onClick={each.run}>
+              {each.label}
+            </button>
+          ))
+        : null}
       {failed && progress.canDismiss ? (
         <button
           type="button"

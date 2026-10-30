@@ -1,3 +1,4 @@
+import type { ComponentChildren } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { type Change, type Edit, type ShareDiff, applyChanges, shareDiff } from "../core/changes.ts";
 import {
@@ -21,6 +22,7 @@ import { MachineRightStickers } from "./MachineRights.tsx";
 import { type KindInfo, LEVEL_COLORS, LEVEL_TILTS, MEMBER_ICONS, kindInfo } from "./kinds.ts";
 import { KeySticker, MachineLive, PresenceSticker, QueuedSticker } from "./Machines.tsx";
 import { type MenuTarget, untilText } from "./actions.ts";
+import { type DropTarget, landingPoints } from "./drop.ts";
 import type { DrawnWire } from "../core/organize.ts";
 import { USER_STACK, headAngle, stacksOf } from "../core/place.ts";
 import { parseSiteInput } from "../core/sites.ts";
@@ -45,6 +47,7 @@ import {
   type DrawnCard,
   steadyBox,
 } from "./layout.ts";
+import { whenText } from "./time.ts";
 
 export type { View };
 
@@ -52,6 +55,8 @@ export type Selection = { readonly cards: ReadonlySet<string>; readonly circle: 
 
 type Drag =
   | { readonly type: "pan"; readonly sx: number; readonly sy: number; readonly view: View }
+  /** A finger on a tray card scrolls the tray list, as a finger on the map pans it. */
+  | { readonly type: "scroll"; readonly list: HTMLElement; readonly sy: number; readonly top: number }
   | {
       readonly type: "cards";
       readonly start: Point;
@@ -147,12 +152,17 @@ export const ACCESS_TIPS = {
 } as const;
 
 interface Props {
-  /** K-1101: files dropped from the computer, with the map point under the pointer. */
-  onDropFiles: (files: Array<File>, at: Point) => void;
-  /** K-1129: folders dropped on the map, each a new folder site. */
-  onDropFolders: (folders: Array<FileSystemDirectoryEntry>, at: Point) => void;
-  /** Cards dragged from the tray (K-509), with the map point under the pointer. */
-  onDropCards: (ids: Array<string>, at: Point) => void;
+  /** K-1101: files dropped from the computer, with the map point under the pointer, or null over the tray. */
+  onDropFiles: (files: Array<File>, at: Point | null) => void;
+  /** K-1129: folders dropped on the map, each a new folder site; null over the tray. */
+  onDropFolders: (folders: Array<FileSystemDirectoryEntry>, at: Point | null) => void;
+  /**
+   * K-509, K-522: cards let go after a drag, from the map or from the tray, with the point of each and what is under
+   * the pointer. `dropPlan` (drop.ts) says what that does.
+   */
+  readonly onDrop: (moves: ReadonlyMap<string, Point>, target: DropTarget) => void;
+  /** K-509: the tray, drawn inside the map so that its cards take the map's drag; it gets the dragged card ids. */
+  readonly tray: ((dragging: ReadonlySet<string>) => ComponentChildren) | null;
   /** K-1131: a dropped address or port, such as `localhost:5565`, opens the site wizard with it. */
   onDropSite: (text: string) => void;
   readonly state: State;
@@ -182,9 +192,8 @@ interface Props {
   /** K-303: the pull request number of each preview card. */
   readonly pullRequests: Readonly<Record<string, number>>;
   readonly onToggleStack: (key: string) => void;
+  /** A circle that moved or changed size, with the cards it carries. */
   readonly onCommit: (edits: Array<Edit>, diffs: Array<ShareDiff>) => void;
-  /** K-522: cards dropped on another card become one stack with it. */
-  readonly onStackOnto: (ids: Array<string>, target: string) => void;
   /** K-523: opens the context menu of a target next to `anchor`, or closes it with null. */
   readonly onMenu: (menu: { readonly target: MenuTarget; readonly anchor: Rect } | null) => void;
 }
@@ -208,8 +217,11 @@ const STACK_GAP = 16;
 const MAX_PREVIEWS = 4;
 const PREVIEW_SCALE = 0.8;
 
-/** The drag data of tray cards: a JSON list of card ids. */
-export const TRAY_CARDS_TYPE = "application/x-kitshn-cards";
+/** Cards from the tray fan out from the pointer, so several never cover each other. */
+const fanOut = (at: Point, index: number): Point => ({
+  x: Math.round(at.x + (index % 2) * 30),
+  y: Math.round(at.y + index * 90),
+});
 const ZOOMED_OUT = 0.4;
 
 export function MapView(props: Props) {
@@ -226,8 +238,12 @@ export function MapView(props: Props) {
     readonly choose: () => void;
     readonly stack: string | null;
     readonly world: Point;
+    /** A tap on a tray card never zooms the map. */
+    readonly inTray: boolean;
   } | null>(null);
-  const [stackTarget, setStackTarget] = useState<string | null>(null);
+  /** What a drop of the dragged cards lands on now, for the hover feedback. */
+  const [hover, setHover] = useState<DropTarget | null>(null);
+  const stackTarget = hover?._tag === "card" ? hover.id : null;
   const [draft, setDraft] = useState<{ state: State; diffs: Array<ShareDiff>; pointer: Point } | null>(null);
   /** K-523: a right press or a touch that may open the context menu. */
   const hold = useRef<{ press: Press; readonly target: MenuTarget; timer: number | null } | null>(null);
@@ -272,16 +288,26 @@ export function MapView(props: Props) {
   const [cardHeights, setCardHeights] = useState<ReadonlyMap<string, number>>(new Map());
   const openKey = openIds.join(",");
 
-  /** The drawn card under the pointer that a drop stacks onto, from what is on screen (K-522). */
-  const stackTargetAt = (clientX: number, clientY: number, dragged: ReadonlySet<string>) => {
+  /**
+   * What a drop at this point lands on, from what is on screen: a drawn card to stack onto (K-522), the tray (K-509)
+   * or the map. `grabbed` is the card under the grab point, which a drop never stacks onto, so a nudge stays a move.
+   */
+  const dropTargetAt = (
+    clientX: number,
+    clientY: number,
+    dragged: ReadonlySet<string>,
+    grabbed: string | null,
+  ): DropTarget => {
     const top = document
       .elementsFromPoint(clientX, clientY)
       .find((element) => !dragged.has(element.closest<HTMLElement>("[data-card]")?.dataset["card"] ?? ""));
-    const id = top?.closest<HTMLElement>("[data-card]")?.dataset["card"];
-    if (!id) return null;
+    if (top?.closest(".tray")) return { _tag: "tray" };
+    if (top?.closest(".overlay-panel, header.bar")) return { _tag: "away" };
+    const id = top?.closest<HTMLElement>(".world [data-card]")?.dataset["card"];
+    if (!id || id === grabbed) return { _tag: "map" };
     // A stack by group (K-508) keeps its cards; a drop there moves instead.
     const stack = stackOf(id);
-    return stack && !stack[0].startsWith(USER_STACK) ? null : id;
+    return stack && !stack[0].startsWith(USER_STACK) ? { _tag: "map" } : { _tag: "card", id };
   };
 
   const preview = (changes: Array<Change>, pointer: Point) => {
@@ -337,6 +363,9 @@ export function MapView(props: Props) {
   const onPointerDown = (event: PointerEvent) => {
     const target = event.target as HTMLElement;
     const world = toWorld(event.clientX, event.clientY);
+    const inTray = target.closest(".tray") !== null;
+    // The tray's own controls, its list and its edge are not the map's; only its cards drag as map cards do.
+    if (inTray && !target.closest("[data-card]")) return;
     // A new press ends an older one, also a touch whose release never came.
     endPress();
     try {
@@ -357,7 +386,7 @@ export function MapView(props: Props) {
       if (both) {
         tap.current = null;
         props.onMenu(null);
-        setStackTarget(null);
+        setHover(null);
         setDraft(null);
         setDrag({ type: "pinch", from: both, view });
         return;
@@ -419,19 +448,33 @@ export function MapView(props: Props) {
           props.onSelect({ cards: whole ? new Set(ids) : new Set([id]), circle: null });
       };
       const origins = new Map<string, Point>();
-      for (const card of ids) origins.set(card, state.places.get(card) ?? world);
-      const under = stackTargetAt(event.clientX, event.clientY, ids);
+      let fresh = 0;
+      for (const card of ids) origins.set(card, state.places.get(card) ?? fanOut(world, fresh++));
+      const found = dropTargetAt(event.clientX, event.clientY, ids, null);
+      const under = found._tag === "card" ? found.id : null;
+      const carry = () => setDrag({ type: "cards", start: world, origins, clicked: id, under, moved: false });
       const start = () => {
         choose();
-        setDrag({ type: "cards", start: world, origins, clicked: id, under, moved: false });
+        carry();
       };
       // K-516, K-523: on touch, a long press opens the menu and starts the drag, so a swipe still pans; a tap
       // selects on release, so a pinch that starts on a card does not select it.
       if (event.pointerType === "touch") {
-        setDrag({ type: "pan", sx: event.clientX, sy: event.clientY, view });
+        const list = inTray ? target.closest<HTMLElement>(".tray-list") : null;
+        setDrag(
+          list
+            ? { type: "scroll", list, sy: event.clientY, top: list.scrollTop }
+            : { type: "pan", sx: event.clientX, sy: event.clientY, view },
+        );
         // K-521: a tap opens a closed stack; in an open one it only selects the card, so the stack stays open.
-        tap.current = { choose, stack: stack && !props.openStacks.has(stack[0]) ? stack[0] : null, world };
-        beginPress(event, start);
+        tap.current = {
+          choose,
+          stack: stack && !props.openStacks.has(stack[0]) ? stack[0] : null,
+          world,
+          inTray,
+        };
+        // A selection opens the sheet over half of a phone's map, so a tray card selects when it lands (App.tsx).
+        beginPress(event, inTray ? carry : start);
       } else start();
       return;
     }
@@ -465,6 +508,10 @@ export function MapView(props: Props) {
     }
     if (!drag) return;
     const world = toWorld(event.clientX, event.clientY);
+    if (drag.type === "scroll") {
+      drag.list.scrollTop = drag.top - (event.clientY - drag.sy);
+      return;
+    }
     if (drag.type === "pan") {
       props.onView({
         ...drag.view,
@@ -497,11 +544,12 @@ export function MapView(props: Props) {
         id,
         { x: Math.round(origin.x + dx), y: Math.round(origin.y + dy) },
       ]);
-      preview(placeChanges(moves), pointer);
-      const target = stackTargetAt(event.clientX, event.clientY, new Set(drag.origins.keys()));
+      preview(placeChanges(landingPoints(state, new Map(moves))), pointer);
+      const target = dropTargetAt(event.clientX, event.clientY, new Set(drag.origins.keys()), null);
+      const onGrabbed = target._tag === "card" && target.id === drag.under;
       // Once the pointer leaves the card it was grabbed over, that card is a target like any other.
-      if (target !== drag.under) drag.under = null;
-      setStackTarget(target === drag.under ? null : target);
+      if (!onGrabbed) drag.under = null;
+      setHover(onGrabbed ? { _tag: "map" } : target);
       return;
     }
     if (drag.type === "circle") {
@@ -541,7 +589,7 @@ export function MapView(props: Props) {
     // A touch on a card that neither moved nor held is a tap: it selects, and opens a stack as a click does.
     // Zoomed out, a card is a dot too small to read, so the tap first zooms to it under the finger.
     if (pending && press?.press.phase === "waiting") {
-      if (view.s < ZOOMED_OUT)
+      if (view.s < ZOOMED_OUT && !pending.inTray)
         props.onView({ x: event.clientX - pending.world.x, y: event.clientY - pending.world.y, s: 1 });
       else pending.choose();
       if (pending.stack) props.onToggleStack(pending.stack);
@@ -551,18 +599,23 @@ export function MapView(props: Props) {
       rightRelease.current = { panned: press.press.phase === "moved" };
     // A touch that opened the menu does not also open a stack.
     const held = press?.press.phase === "held";
-    // K-522: cards let go over another card stack with it instead of moving.
+    // K-509, K-522: cards from the map and from the tray drop the same way (drop.ts).
     if (drag?.type === "cards" && drag.moved) {
-      const dragged = new Set(drag.origins.keys());
-      const found = stackTargetAt(event.clientX, event.clientY, dragged);
-      const target = found === drag.under ? null : found;
-      setStackTarget(null);
-      if (target) {
-        props.onStackOnto([...dragged], target);
-        setDrag(null);
-        setDraft(null);
-        return;
-      }
+      const world = toWorld(event.clientX, event.clientY);
+      const moves = new Map(
+        [...drag.origins].map(([id, origin]): [string, Point] => [
+          id,
+          {
+            x: Math.round(origin.x + world.x - drag.start.x),
+            y: Math.round(origin.y + world.y - drag.start.y),
+          },
+        ]),
+      );
+      props.onDrop(moves, dropTargetAt(event.clientX, event.clientY, new Set(moves.keys()), drag.under));
+      setHover(null);
+      setDrag(null);
+      setDraft(null);
+      return;
     }
     if (drag?.type === "cards" && !drag.moved && !held) {
       const stack = stackOf(drag.clicked);
@@ -577,6 +630,8 @@ export function MapView(props: Props) {
   };
 
   const onWheel = (event: WheelEvent) => {
+    // The tray list scrolls on its own; the wheel there never moves the map.
+    if ((event.target as Element).closest(".tray")) return;
     event.preventDefault();
     if (event.ctrlKey || event.metaKey) {
       const world = toWorld(event.clientX, event.clientY);
@@ -674,12 +729,15 @@ export function MapView(props: Props) {
         fingers.current.delete(event.pointerId);
         endPress();
         rightRelease.current = null;
-        setStackTarget(null);
+        setHover(null);
         setDrag(null);
         setDraft(null);
       }}
       onWheel={onWheel}
       onContextMenu={(event) => {
+        // The tray's filter and head are not the map's; only its cards have the map's menu.
+        const inTray = (event.target as Element).closest(".tray");
+        if (inTray && !(event.target as Element).closest("[data-card]")) return;
         event.preventDefault();
         const press = hold.current;
         if (press) {
@@ -711,18 +769,13 @@ export function MapView(props: Props) {
       onDragOver={(event) => {
         const types = event.dataTransfer?.types ?? [];
         const site = types.includes("text/uri-list") || types.includes("text/plain");
-        if (!types.includes("Files") && !types.includes(TRAY_CARDS_TYPE) && !site) return;
+        if (!types.includes("Files") && !site) return;
         event.preventDefault();
         if (event.dataTransfer) event.dataTransfer.dropEffect = types.includes("Files") ? "copy" : "move";
       }}
       onDrop={(event) => {
-        const at = toWorld(event.clientX, event.clientY);
-        const cards = event.dataTransfer?.getData(TRAY_CARDS_TYPE);
-        if (cards) {
-          event.preventDefault();
-          props.onDropCards(JSON.parse(cards) as Array<string>, at);
-          return;
-        }
+        // K-509: files let go over the tray wait there, private.
+        const at = (event.target as Element).closest(".tray") ? null : toWorld(event.clientX, event.clientY);
         // The entries exist only while the drop event runs; a folder shows up in `files` too, as an empty file.
         const folders = [...(event.dataTransfer?.items ?? [])]
           .map((item) => item.webkitGetAsEntry())
@@ -882,6 +935,7 @@ export function MapView(props: Props) {
         })}
         {lens ? <ReachLayer state={shown} selected={lens} lines={lensLines} drawn={drawn} /> : null}
       </div>
+      {props.tray?.(draggedIds)}
       {drag?.type === "box" ? (
         <div
           class="box"
@@ -893,7 +947,19 @@ export function MapView(props: Props) {
           }}
         />
       ) : null}
-      {draft && stackTarget ? (
+      {draft && hover?._tag === "away" ? (
+        <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
+          <span>Not here: nothing changes</span>
+        </div>
+      ) : draft && hover?._tag === "tray" ? (
+        <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
+          {[...draggedIds].some((id) => state.places.has(id)) ? (
+            <span class="minus">To the tray: out of every circle, private</span>
+          ) : (
+            <span>Back to the tray: nothing changes</span>
+          )}
+        </div>
+      ) : draft && stackTarget ? (
         <div class="drop-label" style={{ left: px(draft.pointer.x), top: px(draft.pointer.y) }}>
           <span>
             Stack with{" "}
@@ -1064,7 +1130,8 @@ export function CardView(props: {
   /** `cardLayer`: its z-index on the map, or null for document order. */
   layer: number | null;
   state: State;
-  at: Point;
+  /** Its point on the map, or null in the tray, which lays it out. */
+  at: Point | null;
   selected: boolean;
   dragging: boolean;
   target: boolean;
@@ -1105,8 +1172,7 @@ export function CardView(props: {
       class={`card${props.selected ? " sel" : ""}${props.dragging ? " dragging" : ""}${props.target ? " stack-target" : ""}${props.flash ? " flash" : ""}${props.dim ? " dim" : ""}`}
       data-card={resource.id}
       style={{
-        left: px(props.at.x),
-        top: px(props.at.y),
+        ...(props.at === null ? {} : { left: px(props.at.x), top: px(props.at.y) }),
         ...(props.layer === null ? {} : { "--layer": props.layer }),
       }}
     >
@@ -1154,7 +1220,7 @@ export function CardView(props: {
         {props.downSince !== null ? (
           <span
             class="sticker state"
-            data-tip={`Down since ${new Date(props.downSince).toLocaleString()}: the uptime check of kitshn gets no good answer.`}
+            data-tip={`Down since ${whenText(props.downSince)}: the uptime check of kitshn gets no good answer.`}
           >
             down
           </span>
@@ -1164,7 +1230,7 @@ export function CardView(props: {
         <ItemIcon resource={resource} />
         {resource.name}
       </div>
-      <div class="sub">{resource.addresses[0] ?? resource.kind}</div>
+      <div class="sub">{resource.addresses[0] ?? kindInfo(resource).name}</div>
       {endsAt !== undefined ? (
         <div
           class="sub ends"
@@ -1209,6 +1275,40 @@ export function CardView(props: {
         <PeekFrame peek={peek} resource={resource} state={state} zone={props.zone} />
       )}
     </div>
+  );
+}
+
+/**
+ * K-509: a card in the tray, private until it lands on the map. It is the map's card, so it drags, drops and opens
+ * its menu (K-523) as one; only the tray lays it out.
+ */
+export function TrayCard(props: {
+  readonly resource: Resource;
+  readonly state: State;
+  readonly selected: boolean;
+  readonly dragging: boolean;
+  readonly access: AccessState | null;
+  readonly progress: ActionProgress | null;
+  readonly machine: MachineView | null;
+  readonly zone: string;
+  readonly onMenu: (anchor: Rect) => void;
+}) {
+  return (
+    <CardView
+      {...props}
+      layer={null}
+      at={null}
+      target={false}
+      flash={false}
+      count={null}
+      open={false}
+      downSince={null}
+      pullRequest={null}
+      preview={false}
+      peek={false}
+      now={0}
+      onClose={() => undefined}
+    />
   );
 }
 

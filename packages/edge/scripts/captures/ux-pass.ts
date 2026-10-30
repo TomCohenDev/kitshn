@@ -23,8 +23,12 @@ export default {
     );
     await shot("map");
     const tick3d = page.locator('[data-card="tick3d"]').first();
-    if (view.touch) await tick3d.tap();
-    else {
+    if (view.touch) {
+      // Zoomed out, the first tap only zooms to the dot; the second selects the card.
+      await tick3d.tap();
+      await page.waitForTimeout(300);
+      await tick3d.tap();
+    } else {
       await zoomAt(page, '[data-card="tick3d"]', -300);
       await tick3d.click();
     }

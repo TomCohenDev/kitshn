@@ -1,6 +1,8 @@
 import { useEffect, useState } from "preact/hooks";
 import type { Resource } from "../core/model.ts";
 import { callApi } from "./store.ts";
+import { whenText } from "./time.ts";
+import { WhyOff } from "./controls.tsx";
 
 /** K-821: the text that every rollback dialog and tip shows, so nobody expects their data back or a secret to stay. */
 export const ROLLBACK_DATA =
@@ -79,7 +81,7 @@ export function RollbackDialog(props: {
                 <div class="row">
                   <code>{short(choice.sha)}</code>{" "}
                   <span class="muted">
-                    {new Date(choice.at).toLocaleString()}
+                    {whenText(choice.at)}
                     {choice.run ? ` · run ${choice.run}` : ""}
                     {choice.note ? ` · ${choice.note}` : ""}
                   </span>
@@ -108,6 +110,7 @@ export function RollbackDialog(props: {
                     </button>
                   )}
                 </div>
+                {index === 0 ? null : <WhyOff reason={choice.why} />}
               </li>
             ))}
           </ul>
@@ -151,6 +154,7 @@ export function RollbackDialog(props: {
             >
               Roll back {steps.length} {steps.length === 1 ? "card" : "cards"}
             </button>
+            <WhyOff reason={blocked ? `${blocked.name}: ${blocked.why}` : null} />
           </>
         ) : null}
         <button type="button" class="btn" data-tip="Close without a rollback." onClick={props.onClose}>

@@ -844,7 +844,10 @@ export class Kitshn extends DurableObject<Env> {
    * runs as that person, so the person can undo it (K-1506). Known limit: in memory only; after a wake the end runs as
    * the machine.
    */
-  private siteAskers = new Map<number, { readonly siteId: string; readonly by: Actor; done: boolean }>();
+  private siteAskers = new Map<
+    number,
+    { readonly siteId: string; readonly by: Actor; readonly circle: string | null; done: boolean }
+  >();
   /** K-1716: false once `github_tokens` is known to be empty, so a broadcast reads no row of it. True after a wake. */
   private tokensLive = true;
   private accessWarnings: Array<string> = [];
@@ -5302,7 +5305,16 @@ export class Kitshn extends DurableObject<Env> {
       // K-1131: the asker of a wizard site counts only when its job made the site.
       const asker = taken ? this.siteAskers.get(message.id) : undefined;
       if (asker && result.ok === true) asker.done = true;
-      else if (asker) this.siteAskers.delete(message.id);
+      else if (asker) {
+        this.siteAskers.delete(message.id);
+        if (asker.circle !== null)
+          this.notifyNotShared(
+            asker.siteId,
+            attachment.machineId,
+            asker.circle,
+            "The machine refused the job; its output is in the machine panel.",
+          );
+      }
       // K-812: the source and params of a Compose deploy live only as long as its job.
       const [job] = taken
         ? this.sql<{ command: string; actor: string }>(
@@ -6179,6 +6191,9 @@ export class Kitshn extends DurableObject<Env> {
       return fail(400, `${name} belongs to kitshn itself. Pick another name.`);
     if (endsAt !== null && endsAt !== undefined && !(typeof endsAt === "number" && endsAt > Date.now()))
       return fail(400, "The end time must be in the future, or null for no end.");
+    const circle = typeof input["circle"] === "string" ? input["circle"] : null;
+    if (circle !== null && !this.state.circles.has(circle))
+      return fail(400, "That circle is gone. Pick another.");
     const address = `${name}.${this.env.KITSHN_ZONE}`;
     const card = [...this.state.resources.values()].find((resource) => resource.addresses.includes(address));
     const site = [...this.liveSites.values()].find((each) => each.address === address);
@@ -6192,8 +6207,8 @@ export class Kitshn extends DurableObject<Env> {
     const script = `"\${KITSHN:-$HOME/.local/bin/kitshn}" expose '${target}' --name '${name}' --new${input["dev"] === true ? " --dev" : ""}${typeof endsAt === "number" ? ` --ends-at ${Math.round(endsAt)}` : ""}`;
     const queued = this.addJob(caller, { machineId, command: { kind: "shell", script } });
     const { id } = (await queued.clone().json()) as { id?: number | null };
-    if (queued.ok && typeof id === "number" && typeof endsAt === "number")
-      this.siteAskers.set(id, { siteId: liveSiteId(machineId, name), by: caller.actor, done: false });
+    if (queued.ok && typeof id === "number" && (typeof endsAt === "number" || circle !== null))
+      this.siteAskers.set(id, { siteId: liveSiteId(machineId, name), by: caller.actor, circle, done: false });
     return queued;
   }
 
@@ -7016,6 +7031,7 @@ export class Kitshn extends DurableObject<Env> {
         continue;
       }
       const machine = this.state.machines.get(site.machineId);
+      let notShared: string | null = null;
       this.ctx.storage.transactionSync(() => {
         this.sql("UPDATE live_sites SET state = 'ok' WHERE id = ?", site.id);
         const card = this.state.resources.get(site.id);
@@ -7031,32 +7047,46 @@ export class Kitshn extends DurableObject<Env> {
           machineId: site.machineId,
           name: machine?.name ?? site.machineId,
         };
-        this.putResource(
-          card
-            ? // K-705: a provider reports the status of its own cards, and its site's address comes on now.
-              card.provider
-              ? withAddressInUse({ ...card, addresses: [site.address] }, false)
-              : { ...card, status: site.up ? "running" : "stopped" }
-            : {
-                id: site.id,
-                kind: "site.live",
-                name: site.name,
-                addresses: [site.address],
-                status: site.up ? "running" : "stopped",
-                group: null,
-                machine: site.machineId,
-              },
-        );
+        const shown: Resource = card
+          ? // K-705: a provider reports the status of its own cards, and its site's address comes on now.
+            card.provider
+            ? withAddressInUse({ ...card, addresses: [site.address] }, false)
+            : { ...card, status: site.up ? "running" : "stopped" }
+          : {
+              id: site.id,
+              kind: "site.live",
+              name: site.name,
+              addresses: [site.address],
+              status: site.up ? "running" : "stopped",
+              group: null,
+              machine: site.machineId,
+            };
+        this.putResource(shown);
+        // The card is not in `this.state` until this revision ends, and the rules must see it: a share of a card that
+        // they cannot see would pass "while paused, access only goes down" (K-1504).
+        const withCard: State = {
+          ...this.state,
+          resources: new Map(this.state.resources).set(site.id, shown),
+        };
         // K-212: a card that `kitshn expose --time` made starts with its end time.
         const ends: Array<Change> =
           endsAt !== undefined && endsAt > Date.now()
             ? [{ _tag: "cardEnd", id: site.id, before: null, after: endsAt }]
             : [];
-        const placed = circle !== undefined && machine ? this.livePlace(machine, site.id, circle) : [];
+        const wished = card ? null : (asked?.[1].circle ?? null);
+        const placed = wished
+          ? this.wizardPlace(site.id, wished, withCard)
+          : circle !== undefined && machine
+            ? this.livePlace(machine, site.id, circle, withCard)
+            : [];
+        if (wished && placed.length === 0) notShared = wished;
         this.persist([...ends, ...placed]);
         if (ends.length > 0)
           this.sql("UPDATE card_ends SET set_by = ? WHERE id = ?", JSON.stringify(by), site.id);
-        const into = placed.length > 0 ? ` in ${this.state.circles.get(circle ?? "")?.name ?? circle}` : "";
+        const into =
+          placed.length > 0
+            ? ` in ${this.state.circles.get(wished ?? circle ?? "")?.name ?? wished ?? circle}`
+            : "";
         this.insertRevision(
           { _tag: "kitshn", reason: `live site on ${machine?.name ?? site.machineId}` },
           `${machine?.name ?? site.machineId} exposed ${site.address}${into} (K-1104)${ends.length > 0 ? ` until ${endText(endsAt ?? 0)}` : ""}`,
@@ -7064,6 +7094,13 @@ export class Kitshn extends DurableObject<Env> {
           null,
         );
       });
+      if (notShared)
+        this.notifyNotShared(
+          site.id,
+          site.machineId,
+          notShared,
+          "No spot or a rule of the circle refused it. It waits in the tray, private.",
+        );
     }
     if (changed) {
       this.load();
@@ -7076,7 +7113,7 @@ export class Kitshn extends DurableObject<Env> {
    * K-1104, K-718: the place of a new live site card in the circle of `kitshn expose --circle`, by the rules of an
    * agent upload: only a circle where the machine has control. A refusal leaves the card in the tray (K-509).
    */
-  private livePlace(machine: Machine, id: string, circle: string): Array<Change> {
+  private livePlace(machine: Machine, id: string, circle: string, base: State): Array<Change> {
     const visitor = { email: null, clientId: machine.clientId, ip: null };
     const spot = agentUploadPlace(this.state, visitor, circle, false, Date.now());
     if (spot === null || typeof spot === "string") {
@@ -7085,13 +7122,51 @@ export class Kitshn extends DurableObject<Env> {
     }
     const changes: Array<Change> = [{ _tag: "place", id, before: null, after: spot }];
     try {
-      this.checked(changes);
+      this.checked(changes, base);
     } catch (error) {
       if (!(error instanceof RuleError)) throw error;
       console.warn(`kitshn left ${id} in the tray: ${error.message}`);
       return [];
     }
     return changes;
+  }
+
+  /**
+   * K-1131: the place of a new live site card in the circle that its wizard named. The owner chose it, so the rules of
+   * the map hold, not the rights of the machine. A refusal leaves the card in the tray (K-509).
+   */
+  private wizardPlace(id: string, circleId: string, base: State): Array<Change> {
+    const circle = base.circles.get(circleId);
+    // Clear of the cards there, so two sites of one circle do not land on one point.
+    const spot = circle
+      ? placeInside(base, { x: circle.x, y: circle.y }, new Set([circle.id]), [...base.places.values()])
+      : null;
+    if (!spot) return [];
+    const changes: Array<Change> = [{ _tag: "place", id, before: null, after: spot }];
+    try {
+      this.checked(changes, base);
+    } catch (error) {
+      if (!(error instanceof RuleError)) throw error;
+      return [];
+    }
+    return changes;
+  }
+
+  /** K-1131: the wizard said "Share with <circle>", and that did not happen, so the owner hears it. */
+  private notifyNotShared(siteId: string, machineId: string, circleId: string, why: string) {
+    const circle = this.state.circles.get(circleId)?.name ?? circleId;
+    this.notify({
+      source: "site",
+      key: siteId,
+      episode: String(Date.now()),
+      card: machineId,
+      recipients: { _tag: "owner" },
+      level: "warn",
+      priority: "normal",
+      title: `A live site was not shared with ${circle}`,
+      text: why,
+      actions: [],
+    });
   }
 
   /**

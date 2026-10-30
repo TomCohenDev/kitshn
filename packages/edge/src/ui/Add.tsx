@@ -2,7 +2,7 @@ import { deployWorkflow } from "kitshn/templates";
 import { useState } from "preact/hooks";
 import type { MachineView } from "../core/protocol.ts";
 import { RESERVED_SITE_NAMES } from "../core/library.ts";
-import type { Resource } from "../core/model.ts";
+import { type Circle, type Resource, isPublicCircle } from "../core/model.ts";
 import { type ServerReport, type SiteInput, parseSiteInput } from "../core/sites.ts";
 import { Radio, Switch } from "./controls.tsx";
 import { GameForm } from "./Games.tsx";
@@ -74,10 +74,17 @@ export function AddSite(props: {
   /** K-1131: the card whose address an https URL names, if any. */
   cardOf: (host: string) => Resource | null;
   onShowCard: (card: Resource) => void;
+  /** U18: the circles that a new live site may go to. */
+  circles: ReadonlyArray<Circle>;
+  /** K-210: asks before a new site goes into a public circle. */
+  onConfirmPublic: (circle: string) => Promise<boolean>;
   onClose: () => void;
   onDone: (text: string) => void;
 }) {
   const [kind, setKind] = useState<"live" | "static" | "game">("live");
+  /** U18: who opens the new site: null keeps it private in the tray. */
+  const [who, setWho] = useState<string | null>(null);
+  const whoCircle = props.circles.find((circle) => circle.id === who) ?? null;
   const online = props.machines.filter((view) => view.online);
   const [text, setText] = useState(props.initial);
   const input = parseSiteInput(text);
@@ -114,6 +121,7 @@ export function AddSite(props: {
               ? `${shownName}.${props.zone} is the card ${taken.name} already. Pick another name.`
               : null;
     if (problem) return setError(problem);
+    if (whoCircle && isPublicCircle(whoCircle) && !(await props.onConfirmPublic(whoCircle.name))) return;
     setBusy(true);
     const after = SITE_TIMES.find((each) => each.flag === time)?.ms ?? null;
     const result = await callApi<{ id: number }>("POST", "/api/sites/live", {
@@ -122,11 +130,18 @@ export function AddSite(props: {
       name: shownName,
       dev,
       endsAt: after === null ? null : Date.now() + after,
+      circle: whoCircle?.id ?? null,
     });
     setBusy(false);
     if ("error" in result) return setError(result.error);
+    const ends =
+      after === null
+        ? ""
+        : `, and leaves every circle after ${SITE_TIMES.find((each) => each.flag === time)?.label ?? ""}`;
     props.onDone(
-      `The machine shares ${shownName}.${props.zone} when its daemon picks it up. The card waits in the tray${after === null ? "" : `, and leaves every circle after ${SITE_TIMES.find((each) => each.flag === time)?.label ?? ""}`}.`,
+      whoCircle
+        ? `The machine shares ${shownName}.${props.zone} when its daemon picks it up. Its card then goes into ${whoCircle.name}${ends}.`
+        : `The machine shares ${shownName}.${props.zone} when its daemon picks it up. The card waits in the tray, private${ends}.`,
     );
     props.onClose();
   };
@@ -257,6 +272,33 @@ export function AddSite(props: {
             <div class="field-row">
               <span
                 class="label"
+                data-tip="Who: the circle that opens the site, or no one until you place its card."
+              >
+                Who
+              </span>
+              <div class="choices" role="radiogroup" aria-label="Who">
+                <Radio
+                  name="site-who"
+                  checked={who === null}
+                  label="Private"
+                  tip="Private: the card waits in the tray, and no one opens the site until you place it."
+                  onSelect={() => setWho(null)}
+                />
+                {props.circles.map((circle) => (
+                  <Radio
+                    key={circle.id}
+                    name="site-who"
+                    checked={who === circle.id}
+                    label={circle.name}
+                    tip={`${circle.name}: the card goes into this circle when it arrives, as a drag there would.`}
+                    onSelect={() => setWho(circle.id)}
+                  />
+                ))}
+              </div>
+            </div>
+            <div class="field-row">
+              <span
+                class="label"
                 data-tip="Time: at the end, the card leaves every circle for the tray (K-212)."
               >
                 Time
@@ -300,9 +342,13 @@ export function AddSite(props: {
               <button
                 class="btn primary"
                 disabled={busy || online.length === 0}
-                data-tip="Send the machine a job that shares the server. The card then waits in the tray, private."
+                data-tip={
+                  whoCircle
+                    ? `Send the machine a job that shares the server; its card then goes into ${whoCircle.name}.`
+                    : "Send the machine a job that shares the server. The card then waits in the tray, private."
+                }
               >
-                Share it
+                {whoCircle ? `Share with ${whoCircle.name}` : "Add to tray"}
               </button>
               <button
                 type="button"

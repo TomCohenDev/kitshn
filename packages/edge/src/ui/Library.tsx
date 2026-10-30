@@ -3,6 +3,7 @@ import type { LibraryItem } from "../core/library.ts";
 import { type State, circlesHolding } from "../core/model.ts";
 import { KINDS } from "./kinds.ts";
 import { callApi } from "./store.ts";
+import { whenText } from "./time.ts";
 
 const size = (bytes: number) =>
   bytes < 1024 * 1024
@@ -98,7 +99,7 @@ export function LibraryView(props: {
                 </td>
                 <td data-label="Thread">{item.thread ?? "–"}</td>
                 <td data-label="Machine">{item.machine ?? "–"}</td>
-                <td data-label="Added">{new Date(item.createdAt).toLocaleString()}</td>
+                <td data-label="Added">{whenText(item.createdAt)}</td>
                 <td data-label="Size">{size(item.size)}</td>
                 <td data-label="Shared with">
                   {circles.length > 0 ? (

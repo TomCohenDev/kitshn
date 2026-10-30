@@ -5,7 +5,8 @@ import { isRelease, restartsAfterUpdate } from "../core/autoUpdate.ts";
 import { type HealthCell, healthCell, healthProblems } from "../core/health.ts";
 import { ProgressSticker } from "./Progress.tsx";
 import { MACHINE_TIPS, untilText } from "./actions.ts";
-import { Switch } from "./controls.tsx";
+import { Switch, WhyOff } from "./controls.tsx";
+import { refusalText } from "./refusal.ts";
 import { callApi, useStore } from "./store.ts";
 
 /** "5 min", "3 h", "2 d": how long ago a time was (K-515). */
@@ -187,7 +188,7 @@ function MachineStickers(props: { view: MachineView }) {
           href={panel}
           onPointerDown={keepPress}
           data-tip={refused
-            .map((refusal) => `Provider ${refusal.provider} refused: ${refusal.reason}`)
+            .map((refusal) => refusalText(refusal.provider, machine.name, refusal.reason))
             .join(" · ")}
         >
           {refused.length === 1 ? "provider refused" : `${refused.length} providers refused`}
@@ -297,6 +298,12 @@ function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error
       "error" in result,
     );
   };
+  const rotateOff =
+    machine.key?.kind !== "public"
+      ? "Rotate key needs a machine key first: Make key code or Reset key gives one."
+      : !props.view.online
+        ? `Rotate key needs ${machine.name} online.`
+        : null;
   const reset = async () => {
     const result = await callApi<{ command: string; expiresAt: number }>("POST", `${path}/reset-key`, {});
     if ("error" in result) props.onToast(result.error, true);
@@ -317,8 +324,10 @@ function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error
         )}
         <button
           class="btn"
-          disabled={machine.key?.kind !== "public" || !props.view.online}
-          data-tip="Rotate key: the online machine makes a new key pair and sends its public half."
+          disabled={rotateOff !== null}
+          data-tip={
+            rotateOff ?? "Rotate key: the online machine makes a new key pair and sends its public half."
+          }
           onClick={() => void rotate()}
         >
           Rotate key
@@ -331,6 +340,7 @@ function MachineKeyRow(props: { view: MachineView; onToast: (text: string, error
           {machine.key === undefined ? "Make key code" : "Reset key"}
         </button>
       </div>
+      <WhyOff reason={rotateOff} />
       {keyFailure ? (
         <p class="muted">
           Failed check {ago(keyFailure.at)} ago: {keyFailure.reason}
@@ -539,9 +549,16 @@ export function MachinePanel(props: {
       <MachineKeyRow view={view} onToast={props.onToast} />
       {view.online
         ? (view.status?.refusedProviders ?? []).map((refusal) => (
-            <p key={refusal.provider} class="muted">
-              Provider {refusal.provider} refused for {ago(refusal.at)}: {refusal.reason}
-            </p>
+            <div key={refusal.provider} class="refusal">
+              <p class="error">
+                kitshn refuses the provider {refusal.provider} for {ago(refusal.at)}:{" "}
+                {refusalText(refusal.provider, view.machine.name, refusal.reason)}
+              </p>
+              <details class="raw">
+                <summary data-tip="The reason as the provider check wrote it.">Details</summary>
+                <code>{refusal.reason}</code>
+              </details>
+            </div>
           ))
         : null}
       {view.online

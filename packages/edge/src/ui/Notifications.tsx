@@ -1,12 +1,14 @@
 import { useEffect, useState } from "preact/hooks";
 import type { State } from "../core/model.ts";
-import { type Mute, type Notification, onBell } from "../core/notifications.ts";
+import { type Mute, type Notification, muted } from "../core/notifications.ts";
 import { Menu, MenuItem } from "./controls.tsx";
 import type { Rect } from "./popover.ts";
 import type { ProposalView } from "../core/protocol.ts";
 import { AskList } from "./Asks.tsx";
 import { PushSection } from "./Push.tsx";
 import { callApi } from "./store.ts";
+import { untilText } from "./actions.ts";
+import { whenText } from "./time.ts";
 
 const HOUR = 60 * 60_000;
 
@@ -116,7 +118,11 @@ export function NotificationsView(props: {
           key={notification.id}
           notification={notification}
           card={cardName(notification.card)}
-          shown={onBell(notification, list.mutes, now)}
+          // K-1905: info never counts on the bell, so a hidden row is only a muted or snoozed one.
+          shown={
+            !muted(notification, list.mutes, now) &&
+            !(notification.snoozedUntil !== null && notification.snoozedUntil > now)
+          }
           now={now}
           onPost={(path, body, done) => void post(path, body, done)}
           onMute={(anchor) => setMuting({ notification, anchor })}
@@ -129,7 +135,7 @@ export function NotificationsView(props: {
             <div key={`${mute.card}/${mute.source}`} class="row">
               <span>
                 {mute.source} of {cardName(mute.card)}
-                {mute.until ? ` until ${new Date(mute.until).toLocaleString()}` : " until you unmute"}
+                {mute.until ? ` ${untilText(mute.until)}` : " until you unmute"}
               </span>
               <button
                 class="btn"
@@ -175,13 +181,10 @@ export function NotificationRow(props: {
       <p>{props.notification.text}</p>
       <p class="muted">
         {props.notification.source}
-        {props.card ? ` · ${props.card}` : ""} · opened{" "}
-        {new Date(props.notification.openedAt).toLocaleString()}
-        {props.notification.closedAt
-          ? ` · closed ${new Date(props.notification.closedAt).toLocaleString()}`
-          : ""}
+        {props.card ? ` · ${props.card}` : ""} · opened {whenText(props.notification.openedAt, props.now)}
+        {props.notification.closedAt ? ` · closed ${whenText(props.notification.closedAt, props.now)}` : ""}
         {props.notification.snoozedUntil && props.notification.snoozedUntil > props.now
-          ? ` · snoozed until ${new Date(props.notification.snoozedUntil).toLocaleString()}`
+          ? ` · snoozed ${untilText(props.notification.snoozedUntil, props.now)}`
           : ""}
       </p>
       <div class="row">

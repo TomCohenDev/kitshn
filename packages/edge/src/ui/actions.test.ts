@@ -27,6 +27,7 @@ import {
   paletteArrow,
   paletteEnter,
   paletteEntries,
+  type PaletteEntry,
   reshareEdits,
 } from "./actions.ts";
 import { applyChanges, invert, resolveEdits } from "../core/changes.ts";
@@ -447,23 +448,31 @@ describe("Set address (K-1120)", () => {
   });
 });
 
+/** Every entry that runs, with the path through its second lists, such as "riffle · Share with…: Her". */
+const runnable = (entries: ReadonlyArray<PaletteEntry>): Array<string> =>
+  entries.flatMap((entry) =>
+    "items" in entry ? runnable(entry.items).map((label) => `${entry.label}: ${label}`) : [entry.label],
+  );
+
 describe("the palette", () => {
   it("has every action of every menu, so no action exists only in a menu", () => {
     const { handlers } = recorder();
     const ctx = context();
-    const palette = new Set(paletteEntries(ctx, handlers).map((entry) => entry.label));
+    const palette = runnable(paletteEntries(ctx, handlers));
     for (const id of ctx.state.resources.keys()) {
       const groups = actionsFor(ctx, handlers, { _tag: "card", id });
       // flatten leaves out refused actions, in the menu and in the palette alike.
-      for (const entry of flatten(groups ?? [], ""))
-        expect([...palette].some((label) => label.endsWith(entry.label))).toBe(true);
+      for (const label of runnable(flatten(groups ?? [], "")))
+        expect(palette.some((each) => each.endsWith(label))).toBe(true);
     }
-    // K-511: the words of "Share <card> with <circle>" find the entry.
-    expect(
-      [...palette].filter((label) =>
-        ["share", "riffle", "her"].every((word) => label.toLowerCase().includes(word)),
+    // K-511, U11: the words of "Share <card> with <circle>" find one entry per card, whose second list has Her.
+    const found = paletteEntries(ctx, handlers).filter((entry) =>
+      ["share", "riffle", "her"].every((word) =>
+        `${entry.label} ${entry.keywords ?? ""}`.toLowerCase().includes(word),
       ),
-    ).toEqual(["📦 riffle · Share with: Her"]);
+    );
+    expect(found.map((entry) => entry.label)).toEqual(["📦 riffle · Share with…"]);
+    expect(runnable(found)).toContain("📦 riffle · Share with…: Her");
   });
 });
 
@@ -476,9 +485,7 @@ describe("refused actions", () => {
       find(actionsFor(ctx, handlers, { _tag: "card", id: ADMIN_RESOURCE_ID }), "unshare"),
     );
     expect(unshare.find((item) => item.id === `unshare:${OWNER_CIRCLE_ID}`)?.refused).toMatch(/admin/);
-    expect(paletteEntries(ctx, handlers).map((entry) => entry.label)).not.toContain(
-      "🔐 kitshn admin · Unshare from: Owner",
-    );
+    expect(runnable(paletteEntries(ctx, handlers))).not.toContain("🔐 kitshn admin · Unshare from…: Owner");
     // A card in Everyone only cannot also be in Her: the two circles do not overlap.
     const loose = {
       ...ctx,

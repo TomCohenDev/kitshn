@@ -181,7 +181,7 @@ export function KindSticker(props: { resource: Resource; peek: Peek | null }) {
       data-tip={kind.help}
       style={{ "--tilt": kind.tilt, background: kind.color, color: kind.ink }}
     >
-      {props.resource.kind}
+      {kind.name}
       {peek?.offered ? (
         <button
           type="button"

@@ -419,20 +419,94 @@ export function askLocal(
   });
 }
 
+/** K-704: the bridge asks the daemon for its status this often, and ends when an answer misses a whole round. */
+const BRIDGE_HEARTBEAT_MS = 30_000;
+/** K-704: the id of the bridge's own heartbeat; its answers never reach the provider. */
+const HEARTBEAT_ID = "kitshn-provider-heartbeat";
+const NEWLINE = 10;
+
+/**
+ * K-704: how a bridge ended: the provider ended its input, or the daemon side closed, failed or stopped answering, so
+ * the provider must start the bridge again.
+ */
+export type BridgeEnd = "closed" | { readonly lost: string };
+
+/**
+ * K-704: one bridge between a provider and the daemon: whole lines both ways, a heartbeat between the provider's
+ * lines, and the answers to the heartbeat kept from the provider.
+ */
+function bridgeSession(
+  write: (bytes: Uint8Array) => void,
+  output: (bytes: Uint8Array) => void,
+  lost: (reason: string) => void,
+) {
+  let pending = new Uint8Array(0);
+  let midLine = false;
+  let waiting = false;
+  const heartbeat = new TextEncoder().encode(`${JSON.stringify({ id: HEARTBEAT_ID, type: "status" })}\n`);
+  const decoder = new TextDecoder();
+  const isHeartbeat = (line: Uint8Array) => {
+    const text = decoder.decode(line);
+    if (!text.includes(HEARTBEAT_ID)) return false;
+    try {
+      return (JSON.parse(text) as { id?: unknown }).id === HEARTBEAT_ID;
+    } catch {
+      return false;
+    }
+  };
+  const timer = setInterval(() => {
+    if (waiting) return lost("the daemon stopped answering its heartbeat");
+    // A heartbeat never goes into the middle of a provider's line; it waits for the next round.
+    if (midLine) return;
+    waiting = true;
+    write(heartbeat);
+  }, BRIDGE_HEARTBEAT_MS);
+  return {
+    fromProvider(chunk: Uint8Array) {
+      if (chunk.length === 0) return;
+      write(chunk);
+      midLine = chunk[chunk.length - 1] !== NEWLINE;
+    },
+    fromDaemon(chunk: Uint8Array) {
+      const joined = new Uint8Array(pending.length + chunk.length);
+      joined.set(pending);
+      joined.set(chunk, pending.length);
+      let start = 0;
+      for (let index = 0; index < joined.length; index++) {
+        if (joined[index] !== NEWLINE) continue;
+        const line = joined.subarray(start, index + 1);
+        if (isHeartbeat(line)) waiting = false;
+        else output(line);
+        start = index + 1;
+      }
+      pending = joined.slice(start);
+    },
+    stop: () => clearInterval(timer),
+  };
+}
+
 /**
  * K-704: `kitshn provider` joins stdin and stdout to one connection, line by line, so a provider needs no socket code.
- * It checks the peer as `askLocal` does before it sends anything, and ends when either side ends.
+ * It checks the peer as `askLocal` does before it sends anything. It ends when the provider ends its input, and as
+ * lost when the daemon side closes, fails or stops answering.
  */
 export function bridgeLocal(
   path: string,
   peer: { readonly platform: Platform; readonly daemonUid: number },
   input: AsyncIterable<Uint8Array>,
-  /** The bytes as they come: a character split across chunks stays whole for the reader. */
+  /** Whole lines as the daemon sends them. */
   output: (bytes: Uint8Array) => void,
-): Promise<LocalOutcome | "closed"> {
+): Promise<LocalOutcome | BridgeEnd> {
   if (peer.platform === "win32") return bridgePipe(path, input, output);
   let writer: SocketWriter | null = null;
   return new Promise((resolve, reject) => {
+    let session: ReturnType<typeof bridgeSession> | null = null;
+    let ended = false;
+    let raw: { end(): void } | null = null;
+    const finish = (end: BridgeEnd) => {
+      session?.stop();
+      resolve(end);
+    };
     Bun.connect({
       unix: path,
       socket: {
@@ -450,17 +524,32 @@ export function bridgeLocal(
           }
           const own = new SocketWriter(socket);
           writer = own;
+          raw = socket;
+          const current = bridgeSession(
+            (bytes) => own.write(bytes),
+            output,
+            (reason) => {
+              finish({ lost: reason });
+              socket.end();
+            },
+          );
+          session = current;
           void (async () => {
-            for await (const chunk of input) own.write(chunk);
+            for await (const chunk of input) current.fromProvider(chunk);
+            ended = true;
             own.end();
           })().catch(reject);
         },
         drain: () => writer?.drain(),
         data(_socket, chunk) {
-          output(chunk);
+          session?.fromDaemon(chunk);
         },
-        close: () => resolve("closed"),
-        error: (_socket, error) => reject(error),
+        close: () => finish(ended ? "closed" : { lost: "the daemon closed the connection" }),
+        error: (_socket, error) => {
+          session?.stop();
+          raw?.end();
+          reject(error);
+        },
       },
     }).catch((error: unknown) => {
       const code = (error as { code?: unknown }).code;
@@ -536,22 +625,36 @@ function bridgePipe(
   path: string,
   input: AsyncIterable<Uint8Array>,
   output: (bytes: Uint8Array) => void,
-): Promise<LocalOutcome | "closed"> {
+): Promise<LocalOutcome | BridgeEnd> {
   const refused = pipeRefusal(path);
   if (refused) return refused;
   return new Promise((resolve, reject) => {
+    let ended = false;
+    const finish = (end: BridgeEnd) => {
+      session.stop();
+      resolve(end);
+    };
     const socket = connect(path, () => {
       void (async () => {
-        for await (const chunk of input) socket.write(chunk);
+        for await (const chunk of input) session.fromProvider(chunk);
+        ended = true;
         socket.end();
       })().catch(reject);
     });
-    socket.on("data", (chunk: Buffer) => output(new Uint8Array(chunk)));
-    socket.on("close", () => resolve("closed"));
-    socket.on("error", (error: NodeJS.ErrnoException) =>
-      error.code === "ENOENT" || error.code === "ECONNREFUSED"
-        ? resolve({ kind: "not-running" })
-        : reject(error),
+    const session = bridgeSession(
+      (bytes) => socket.write(bytes),
+      output,
+      (reason) => {
+        finish({ lost: reason });
+        socket.destroy();
+      },
     );
+    socket.on("data", (chunk: Buffer) => session.fromDaemon(new Uint8Array(chunk)));
+    socket.on("close", () => finish(ended ? "closed" : { lost: "the daemon closed the connection" }));
+    socket.on("error", (error: NodeJS.ErrnoException) => {
+      session.stop();
+      if (error.code === "ENOENT" || error.code === "ECONNREFUSED") resolve({ kind: "not-running" });
+      else reject(error);
+    });
   });
 }

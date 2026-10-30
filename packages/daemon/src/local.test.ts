@@ -132,6 +132,32 @@ describe("local socket (K-701, K-702)", () => {
     ).rejects.toThrow(/kitshn sent nothing/);
   });
 
+  it("ends `kitshn provider` with an error when the daemon closes its connection, also while stdin stays open (K-704)", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "kitshn-local-")), "kitshn.sock");
+    // The test daemon closes the connection after the provider's first line, as a daemon that restarts while it runs.
+    const running = Promise.withResolvers<{ end(): void }>();
+    const server = Bun.listen({
+      unix: path,
+      socket: { data: (socket) => running.resolve(socket) },
+    });
+    const child = Bun.spawn(["bun", join(import.meta.dirname, "main.ts"), "provider"], {
+      env: { ...process.env, KITSHN_LOCAL_SOCKET: path, KITSHN_DAEMON_UID: String(own) },
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    try {
+      void child.stdin.write(`${JSON.stringify(status)}\n`);
+      void child.stdin.flush();
+      (await running.promise).end();
+      expect(await child.exited).toBe(1);
+      expect(await new Response(child.stderr).text()).toMatch(/the daemon closed the connection/);
+    } finally {
+      child.kill();
+      server.stop(true);
+    }
+  });
+
   it("reads the real peer user id of a client of the same user, and answers with the request id", async () => {
     using local = await daemon(() => ({ accept: true }));
     expect(statSync(local.path).mode & 0o777).toBe(0o600);
